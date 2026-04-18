@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Elvern Control
+Comment=Start, stop, restart, and inspect Elvern
+Exec=__PROJECT_ROOT__/scripts/elvern-control.sh menu
+TryExec=__PROJECT_ROOT__/scripts/elvern-control.sh
+Path=__PROJECT_ROOT__
+Icon=__ICON_PATH__
+Terminal=false
+StartupNotify=true
+Categories=Utility;AudioVideo;
+Keywords=media;movies;video;service;control;

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Elvern
+Comment=Start Elvern and open the private media app
+Exec=__PROJECT_ROOT__/scripts/elvern-start.sh --open-browser
+TryExec=__PROJECT_ROOT__/scripts/elvern-start.sh
+Path=__PROJECT_ROOT__
+Icon=__ICON_PATH__
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Network;
+Keywords=media;movies;video;tailscale;

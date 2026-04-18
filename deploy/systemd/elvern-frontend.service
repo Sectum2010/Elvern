@@ -1,0 +1,25 @@
+# Example unit file for reference only.
+# Replace paths and service account values for your deployment, or prefer
+# scripts/install-systemd.sh to generate environment-specific units.
+[Unit]
+Description=Elvern frontend PWA server
+After=network-online.target elvern-backend.service
+Wants=network-online.target elvern-backend.service
+
+[Service]
+Type=simple
+User=your-user
+Group=your-user
+WorkingDirectory=/opt/elvern/frontend
+EnvironmentFile=/opt/elvern/deploy/env/elvern.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/elvern/frontend/server.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

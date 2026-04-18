@@ -1,0 +1,24 @@
+# Example unit file for reference only.
+# Replace paths and service account values for your deployment, or prefer
+# scripts/install-systemd.sh to generate environment-specific units.
+[Unit]
+Description=Elvern backend API
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=your-user
+Group=your-user
+WorkingDirectory=/opt/elvern
+EnvironmentFile=/opt/elvern/deploy/env/elvern.env
+ExecStart=/opt/elvern/.venv/bin/uvicorn backend.app.main:app --host ${ELVERN_BIND_HOST} --port ${ELVERN_PORT}
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

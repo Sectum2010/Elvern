@@ -1,0 +1,45 @@
+# Private environment and local runtime config
+deploy/env/elvern.env
+
+# Local databases, logs, and runtime state
+backend/elvern.db
+backend/data/*.db
+backend/data/*.db*
+backend/data/*.sqlite*
+backend/data/*.log
+backend/data/assistant_uploads/
+backend/data/helper_releases/
+backend/data/transcodes/
+.runtime/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Desktop helper build outputs
+clients/desktop-vlc-opener/artifacts/
+clients/desktop-vlc-opener/**/bin/
+clients/desktop-vlc-opener/**/obj/
+
+# Editor / local agent state
+.vscode/
+.claude/
+.codex/
+.idea/
+
+# OS / shell junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo

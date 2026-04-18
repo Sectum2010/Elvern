@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+PAYLOAD_DIR="${APP_DIR}/app"
+SELF_CONTAINED_BIN="${PAYLOAD_DIR}/Elvern.VlcOpener"
+FRAMEWORK_DLL="${PAYLOAD_DIR}/Elvern.VlcOpener.dll"
+LOG_DIR="${HOME}/Library/Logs/ElvernVlcOpener"
+LOG_FILE="${LOG_DIR}/opener.log"
+
+mkdir -p "${LOG_DIR}"
+exec >>"${LOG_FILE}" 2>&1
+
+echo
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] macOS helper bridge invoked"
+echo "argc=$#"
+if [[ $# -gt 0 ]]; then
+  echo "arg1=$1"
+fi
+
+DOTNET_CMD=""
+DOTNET_ROOT_DIR=""
+declare -a CHECKED_DOTNET_PATHS=(
+  "/usr/local/share/dotnet/dotnet"
+  "/opt/homebrew/share/dotnet/dotnet"
+  "/usr/local/bin/dotnet"
+  "/opt/homebrew/bin/dotnet"
+)
+
+if [[ $# -lt 1 ]]; then
+  echo "No handoff URL argument was received by the helper bridge."
+  exit 1
+fi
+
+if [[ -x "${SELF_CONTAINED_BIN}" ]]; then
+  echo "Launching self-contained helper binary: ${SELF_CONTAINED_BIN}"
+  exec "${SELF_CONTAINED_BIN}" "$@"
+fi
+
+if [[ -f "${FRAMEWORK_DLL}" ]]; then
+  for candidate in "${CHECKED_DOTNET_PATHS[@]}"; do
+    if [[ -x "${candidate}" ]]; then
+      DOTNET_CMD="${candidate}"
+      case "${candidate}" in
+        /usr/local/share/dotnet/dotnet)
+          DOTNET_ROOT_DIR="/usr/local/share/dotnet"
+          ;;
+        /opt/homebrew/share/dotnet/dotnet)
+          DOTNET_ROOT_DIR="/opt/homebrew/share/dotnet"
+          ;;
+        /usr/local/bin/dotnet)
+          DOTNET_ROOT_DIR="/usr/local/share/dotnet"
+          ;;
+        /opt/homebrew/bin/dotnet)
+          DOTNET_ROOT_DIR="/opt/homebrew/share/dotnet"
+          ;;
+      esac
+      break
+    fi
+  done
+
+  if [[ -z "${DOTNET_CMD}" ]] && command -v dotnet >/dev/null 2>&1; then
+    DOTNET_CMD="$(command -v dotnet)"
+    case "${DOTNET_CMD}" in
+      */share/dotnet/dotnet)
+        DOTNET_ROOT_DIR="$(dirname "${DOTNET_CMD}")"
+        ;;
+      */bin/dotnet)
+        DOTNET_ROOT_DIR="$(cd "$(dirname "${DOTNET_CMD}")/.." && pwd)"
+        ;;
+      *)
+        DOTNET_ROOT_DIR="$(dirname "${DOTNET_CMD}")"
+        ;;
+    esac
+  fi
+
+  if [[ -z "${DOTNET_CMD}" ]]; then
+    echo "Elvern VLC Opener could not find dotnet."
+    printf 'Checked: %s\n' "${CHECKED_DOTNET_PATHS[@]}"
+    echo "Checked PATH lookup: dotnet"
+    exit 1
+  fi
+
+  if [[ -n "${DOTNET_ROOT_DIR}" ]]; then
+    export DOTNET_ROOT="${DOTNET_ROOT_DIR}"
+  fi
+
+  echo "Launching framework-dependent helper via: ${DOTNET_CMD}"
+  echo "DOTNET_ROOT=${DOTNET_ROOT:-}"
+  exec "${DOTNET_CMD}" "${FRAMEWORK_DLL}" "$@"
+fi
+
+echo "Missing Elvern VLC Opener payload."
+exit 1
