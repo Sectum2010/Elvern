@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import shutil
 import sqlite3
@@ -16,6 +17,11 @@ from urllib.parse import urlsplit
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..security import generate_session_token, hash_session_token
+from .desktop_helper_manifest_service import (
+    DesktopHelperManifestError,
+    get_desktop_helper_manifest_record_by_id,
+    list_desktop_helper_manifest_records,
+)
 
 
 RUNTIME_TO_PLATFORM = {
@@ -31,6 +37,7 @@ SUPPORTED_HELPER_PLATFORMS = frozenset({"windows", "mac", "linux"})
 RELEASE_NAME_PATTERN = re.compile(
     r"^elvern-vlc-opener-(?P<version>.+)-(?P<runtime>win-x64|osx-arm64|osx-x64)(?:\.zip)?$"
 )
+logger = logging.getLogger(__name__)
 
 
 def normalize_desktop_helper_platform(platform: str | None) -> str:
@@ -135,9 +142,15 @@ def build_desktop_helper_release_payloads(
 ) -> list[dict[str, object]]:
     normalized_platform = normalize_desktop_helper_platform(platform)
     recommended_runtime_id = determine_recommended_runtime_id(normalized_platform, helper_arch=helper_arch)
-    latest_by_runtime = _latest_release_by_runtime(
-        list_helper_releases(settings, platform=normalized_platform, channel=channel)
+    manifest_releases = _list_helper_releases_from_manifest(
+        settings,
+        platform=normalized_platform,
+        channel=channel,
     )
+    release_source = manifest_releases
+    if release_source is None:
+        release_source = list_helper_releases(settings, platform=normalized_platform, channel=channel)
+    latest_by_runtime = _latest_release_by_runtime(release_source)
     payloads: list[dict[str, object]] = []
     for runtime_id in PLATFORM_RUNTIME_ORDER.get(normalized_platform, ()):
         row = latest_by_runtime.get(runtime_id)
@@ -280,6 +293,72 @@ def get_desktop_helper_status(
 
 
 def get_helper_release_download_path(settings: Settings, release_id: int) -> dict[str, object]:
+    manifest_release = _get_helper_release_from_manifest(settings, release_id)
+    if manifest_release is not None:
+        return manifest_release
+
+    payload = _get_helper_release_row_by_id(settings, release_id)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Desktop helper release was not found",
+        )
+    file_path = (settings.helper_releases_dir / str(payload["relative_path"])).resolve()
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Desktop helper release file is missing from the server",
+        )
+    payload["file_path"] = file_path
+    return payload
+
+
+def _list_helper_releases_from_manifest(
+    settings: Settings,
+    *,
+    platform: str,
+    channel: str | None = None,
+) -> list[dict[str, object]] | None:
+    normalized_channel = _normalize_channel(channel) if channel else None
+    try:
+        manifest_releases = list_desktop_helper_manifest_records(
+            platform=platform,
+            channel=normalized_channel,
+        )
+    except DesktopHelperManifestError as exc:
+        logger.warning(
+            "Desktop helper manifest unavailable for release listing; falling back to DB catalog: %s",
+            exc,
+        )
+        return None
+    if not manifest_releases:
+        return None
+    _ensure_no_manifest_db_release_collisions(settings, manifest_releases)
+    return manifest_releases
+
+
+def _get_helper_release_from_manifest(
+    settings: Settings,
+    release_id: int,
+) -> dict[str, object] | None:
+    try:
+        manifest_release = get_desktop_helper_manifest_record_by_id(release_id)
+    except DesktopHelperManifestError as exc:
+        logger.warning(
+            "Desktop helper manifest unavailable for release download; falling back to DB catalog: %s",
+            exc,
+        )
+        return None
+    if manifest_release is None:
+        return None
+    _ensure_no_manifest_db_release_collisions(settings, [manifest_release])
+    return manifest_release
+
+
+def _get_helper_release_row_by_id(
+    settings: Settings,
+    release_id: int,
+) -> dict[str, object] | None:
     with get_connection(settings) as connection:
         row = connection.execute(
             """
@@ -302,20 +381,31 @@ def get_helper_release_download_path(settings: Settings, release_id: int) -> dic
             """,
             (release_id,),
         ).fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Desktop helper release was not found",
-        )
-    payload = dict(row)
-    file_path = (settings.helper_releases_dir / str(payload["relative_path"])).resolve()
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="Desktop helper release file is missing from the server",
-        )
-    payload["file_path"] = file_path
-    return payload
+    return dict(row) if row is not None else None
+
+
+def _ensure_no_manifest_db_release_collisions(
+    settings: Settings,
+    manifest_releases: Iterable[dict[str, object]],
+) -> None:
+    for manifest_release in manifest_releases:
+        db_release = _get_helper_release_row_by_id(settings, int(manifest_release["id"]))
+        if db_release is None:
+            continue
+        if _helper_release_identity_tuple(db_release) != _helper_release_identity_tuple(manifest_release):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Desktop helper manifest release ID collides with the DB helper catalog",
+            )
+
+
+def _helper_release_identity_tuple(release: dict[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(release["channel"]),
+        str(release["runtime_id"]),
+        str(release["version"]),
+        str(release["filename"]),
+    )
 
 
 def record_client_device_app_seen(

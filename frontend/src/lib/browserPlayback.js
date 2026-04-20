@@ -14,7 +14,7 @@ export function resolveBrowserPlaybackSessionRoot() {
   return isIOSMobileBrowser() ? "/api/mobile-playback" : "/api/browser-playback";
 }
 
-export function isRoute2SessionPayload(payload) {
+export function isHlsSessionPayload(payload) {
   return payload?.engine_mode === "route2";
 }
 
@@ -40,8 +40,8 @@ export function getSessionModeEstimateSeconds(payload) {
   return null;
 }
 
-export function buildRoute2ProbeSegmentUrl(payload) {
-  if (!isRoute2SessionPayload(payload) || !payload?.active_manifest_url) {
+export function buildHlsProbeSegmentUrl(payload) {
+  if (!isHlsSessionPayload(payload) || !payload?.active_manifest_url) {
     return "";
   }
   const segmentIndex = Number(payload?.manifest_end_segment);
@@ -55,6 +55,14 @@ export function buildRoute2ProbeSegmentUrl(payload) {
   }
   const separator = prefix.includes("?") ? "&" : "?";
   return `${prefix}segments/${segmentIndex}.m4s${separator}probe=${Date.now()}`;
+}
+
+export function isRoute2SessionPayload(payload) {
+  return isHlsSessionPayload(payload);
+}
+
+export function buildRoute2ProbeSegmentUrl(payload) {
+  return buildHlsProbeSegmentUrl(payload);
 }
 
 export function buildFullPlaybackReadyKey(payload) {

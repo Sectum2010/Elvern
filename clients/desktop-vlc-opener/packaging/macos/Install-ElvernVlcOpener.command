@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+METADATA_FILE="${SCRIPT_DIR}/../helper-release.env"
 APP_NAME="Elvern VLC Opener.app"
 SOURCE_APP="${SCRIPT_DIR}/${APP_NAME}"
 DEST_DIR="${HOME}/Applications"
@@ -16,6 +17,21 @@ DEST_PAYLOAD_DIR="${DEST_APP}/Contents/Resources/app"
 DEST_RUNNER="${DEST_APP}/Contents/Resources/run-helper.sh"
 INFO_PLIST="${DEST_APP}/Contents/Info.plist"
 DOTNET_FOUND=0
+
+if [[ ! -f "${METADATA_FILE}" ]]; then
+  echo "Missing helper packaging metadata: ${METADATA_FILE}."
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "${METADATA_FILE}"
+
+for required_key in HELPER_VERSION HELPER_CHANNEL DOTNET_RUNTIME_MAJOR DOTNET_RUNTIME_DISPLAY PACKAGE_NAME_PREFIX; do
+  if [[ -z "${!required_key:-}" ]]; then
+    echo "Missing ${required_key} in ${METADATA_FILE}."
+    exit 1
+  fi
+done
 
 for dotnet_candidate in \
   /usr/local/share/dotnet/dotnet \
@@ -80,10 +96,10 @@ if [[ -x "${PLISTBUDDY}" ]]; then
     "${PLISTBUDDY}" -c "Add :CFBundleName string Elvern VLC Opener" "${INFO_PLIST}"
   "${PLISTBUDDY}" -c "Set :CFBundleDisplayName Elvern VLC Opener" "${INFO_PLIST}" >/dev/null 2>&1 || \
     "${PLISTBUDDY}" -c "Add :CFBundleDisplayName string Elvern VLC Opener" "${INFO_PLIST}"
-  "${PLISTBUDDY}" -c "Set :CFBundleShortVersionString 0.8.0" "${INFO_PLIST}" >/dev/null 2>&1 || \
-    "${PLISTBUDDY}" -c "Add :CFBundleShortVersionString string 0.8.0" "${INFO_PLIST}"
-  "${PLISTBUDDY}" -c "Set :CFBundleVersion 0.8.0" "${INFO_PLIST}" >/dev/null 2>&1 || \
-    "${PLISTBUDDY}" -c "Add :CFBundleVersion string 0.8.0" "${INFO_PLIST}"
+  "${PLISTBUDDY}" -c "Set :CFBundleShortVersionString ${HELPER_VERSION}" "${INFO_PLIST}" >/dev/null 2>&1 || \
+    "${PLISTBUDDY}" -c "Add :CFBundleShortVersionString string ${HELPER_VERSION}" "${INFO_PLIST}"
+  "${PLISTBUDDY}" -c "Set :CFBundleVersion ${HELPER_VERSION}" "${INFO_PLIST}" >/dev/null 2>&1 || \
+    "${PLISTBUDDY}" -c "Add :CFBundleVersion string ${HELPER_VERSION}" "${INFO_PLIST}"
   "${PLISTBUDDY}" -c "Set :LSMinimumSystemVersion 12.0" "${INFO_PLIST}" >/dev/null 2>&1 || \
     "${PLISTBUDDY}" -c "Add :LSMinimumSystemVersion string 12.0" "${INFO_PLIST}"
   "${PLISTBUDDY}" -c "Delete :CFBundleURLTypes" "${INFO_PLIST}" >/dev/null 2>&1 || true
@@ -110,7 +126,7 @@ if [[ -f "${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener.dll" ]] && [[ ! -x
     echo "  /usr/local/bin/dotnet"
     echo "  /opt/homebrew/bin/dotnet"
     echo "  PATH lookup for dotnet"
-    echo "Install the .NET 8 runtime on this Mac before using Elvern VLC Opener."
+    echo "Install the ${DOTNET_RUNTIME_DISPLAY} on this Mac before using Elvern VLC Opener."
   fi
 fi
 

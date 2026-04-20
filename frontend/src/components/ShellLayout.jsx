@@ -3,15 +3,10 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
-  buildFullPlaybackReadyKey,
-  buildRoute2ProbeSegmentUrl,
-  getPlaybackMode,
-  resolveBrowserPlaybackSessionRoot,
-} from "../lib/browserPlayback";
-import {
   markLibraryReturnPending,
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
+import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
@@ -21,10 +16,7 @@ export function ShellLayout({ children }) {
   const navigate = useNavigate();
   const [floatingControlsPosition, setFloatingControlsPosition] = useState("bottom");
   const [accountExpanded, setAccountExpanded] = useState(false);
-  const [playbackReadyNotice, setPlaybackReadyNotice] = useState(null);
   const collapseTimerRef = useRef(0);
-  const fullProbeInFlightRef = useRef(false);
-  const announcedFullReadyKeysRef = useRef(new Set());
   const navigation = [
     { to: "/library", label: "Library" },
     { to: "/install", label: "Install" },
@@ -32,6 +24,14 @@ export function ShellLayout({ children }) {
     ...(user?.assistant_beta_enabled ? [{ to: "/assistant", label: "Assistant", state: { fromPath: location.pathname } }] : []),
     ...(user?.role === "admin" ? [{ to: "/admin", label: "Admin" }] : []),
   ];
+  const {
+    playbackReadyNotice,
+    dismissPlaybackReadyNotice,
+    openPlaybackReadyNotice,
+  } = usePlaybackReadyNotice({
+    pathname: location.pathname,
+    navigate,
+  });
   const isLibraryRootPage = location.pathname === "/library";
   const isLibrarySourcePage = location.pathname === "/library/local" || location.pathname === "/library/cloud";
 
@@ -123,121 +123,6 @@ export function ShellLayout({ children }) {
     }
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    let timerId = 0;
-    const sessionRoot = resolveBrowserPlaybackSessionRoot();
-
-    async function sendBackgroundFullProbe(sessionPayload) {
-      if (fullProbeInFlightRef.current) {
-        return;
-      }
-      const probeUrl = buildRoute2ProbeSegmentUrl(sessionPayload);
-      if (!probeUrl) {
-        return;
-      }
-      fullProbeInFlightRef.current = true;
-      const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-      try {
-        const response = await fetch(probeUrl, {
-          credentials: "include",
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          return;
-        }
-        const buffer = await response.arrayBuffer();
-        if (buffer.byteLength <= 0) {
-          return;
-        }
-        const finishedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-        const durationMs = Math.max(1, Math.round(finishedAt - startedAt));
-        await apiRequest(
-          sessionPayload.heartbeat_url || `${sessionRoot}/sessions/${sessionPayload.session_id}/heartbeat`,
-          {
-            method: "POST",
-            data: {
-              client_probe_bytes: buffer.byteLength,
-              client_probe_duration_ms: durationMs,
-              lifecycle_state: "attached",
-              playing: false,
-            },
-          },
-        );
-      } catch {
-        // Background Full probes are best-effort only.
-      } finally {
-        fullProbeInFlightRef.current = false;
-      }
-    }
-
-    async function pollActivePlayback() {
-      let nextDelayMs = 6000;
-      try {
-        const payload = await apiRequest(`${sessionRoot}/active`);
-        if (cancelled) {
-          return;
-        }
-        const isFullPlayback = getPlaybackMode(payload?.playback_mode) === "full";
-        const onMatchingDetailPage = Boolean(payload?.media_item_id) && location.pathname === `/library/${payload.media_item_id}`;
-
-        if (!payload || !isFullPlayback) {
-          setPlaybackReadyNotice(null);
-          nextDelayMs = 6000;
-        } else {
-          const readyKey = buildFullPlaybackReadyKey(payload);
-          if (!payload.mode_ready && !onMatchingDetailPage) {
-            await sendBackgroundFullProbe(payload);
-            nextDelayMs = 3000;
-          } else {
-            nextDelayMs = payload.mode_ready ? 5000 : 3000;
-          }
-          if (payload.mode_ready && readyKey && !announcedFullReadyKeysRef.current.has(readyKey) && !onMatchingDetailPage) {
-            announcedFullReadyKeysRef.current.add(readyKey);
-            setPlaybackReadyNotice({
-              key: readyKey,
-              itemId: payload.media_item_id,
-              text: "Full Playback Ready",
-            });
-            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-              const notification = new Notification("Full Playback Ready");
-              notification.onclick = () => {
-                window.focus();
-                navigate(`/library/${payload.media_item_id}`);
-                notification.close();
-              };
-            }
-          }
-          if (onMatchingDetailPage) {
-            setPlaybackReadyNotice((current) => (
-              current?.itemId === payload.media_item_id ? null : current
-            ));
-          }
-        }
-      } catch {
-        if (cancelled) {
-          return;
-        }
-        nextDelayMs = 6000;
-      }
-      if (!cancelled) {
-        timerId = window.setTimeout(() => {
-          pollActivePlayback().catch(() => {
-            // The next timeout will retry.
-          });
-        }, nextDelayMs);
-      }
-    }
-
-    pollActivePlayback().catch(() => {
-      // The retry loop above handles transient watcher failures.
-    });
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timerId);
-    };
-  }, [location.pathname, navigate]);
-
   return (
     <div
       className={[
@@ -262,10 +147,7 @@ export function ShellLayout({ children }) {
         <div className="playback-ready-bubble" role="status">
           <button
             className="playback-ready-bubble__action"
-            onClick={() => {
-              setPlaybackReadyNotice(null);
-              navigate(`/library/${playbackReadyNotice.itemId}`);
-            }}
+            onClick={openPlaybackReadyNotice}
             type="button"
           >
             {playbackReadyNotice.text}
@@ -273,7 +155,7 @@ export function ShellLayout({ children }) {
           <button
             aria-label="Dismiss playback ready notification"
             className="playback-ready-bubble__dismiss"
-            onClick={() => setPlaybackReadyNotice(null)}
+            onClick={dismissPlaybackReadyNotice}
             type="button"
           >
             Dismiss

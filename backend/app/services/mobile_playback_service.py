@@ -10,239 +10,118 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..media_stream import ensure_media_path_within_root
-from .cloud_library_service import refresh_cloud_media_item_metadata
-from .library_service import get_media_item_record
-from .native_playback_service import close_native_playback_session, create_native_playback_session
+from .mobile_playback_models import (
+    BACKGROUND_EXPANSION_FORWARD_SECONDS,
+    FRONTIER_WAIT_SECONDS,
+    MANIFEST_ADVANCE_MIN_GROWTH_SECONDS,
+    MANIFEST_ADVANCE_TRIGGER_SECONDS,
+    MOBILE_PROFILES,
+    PLAYBACK_COMMIT_RUNWAY_SECONDS,
+    READY_AFTER_TARGET_SECONDS,
+    ROUTE2_ATTACH_ACK_WARN_SECONDS,
+    ROUTE2_ATTACH_READY_SECONDS,
+    ROUTE2_DRAIN_IDLE_GRACE_SECONDS,
+    ROUTE2_DRAIN_MAX_SECONDS,
+    ROUTE2_ETA_DISPLAY_MAX_VOLATILITY_RATIO,
+    ROUTE2_ETA_DISPLAY_MIN_GROWTH_EVENTS,
+    ROUTE2_ETA_DISPLAY_MIN_OBSERVATION_SECONDS,
+    ROUTE2_ETA_DISPLAY_STICKY_OBSERVATION_SECONDS,
+    ROUTE2_FULL_GOODPUT_MIN_SAMPLE_COUNT,
+    ROUTE2_FULL_RESERVE_BASE_SECONDS,
+    ROUTE2_FULL_RESERVE_MAX_UNCERTAINTY_SECONDS,
+    ROUTE2_FULL_RESERVE_MAX_VOLATILITY_SECONDS,
+    ROUTE2_FULL_VOLATILITY_HORIZON_SECONDS,
+    ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS,
+    ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X,
+    ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS,
+    ROUTE2_RECOVERY_RESUME_RUNWAY_SECONDS,
+    ROUTE2_REPLACEMENT_RETRY_BACKOFF_SECONDS,
+    ROUTE2_STARTUP_MIN_RUNWAY_SECONDS,
+    ROUTE2_STARTUP_MIN_SUPPLY_RATE_X,
+    ROUTE2_STARTUP_PROJECTION_HORIZON_SECONDS,
+    ROUTE2_SUPPLY_RATE_FAST_EMA_ALPHA,
+    ROUTE2_SUPPLY_RATE_SLOW_EMA_ALPHA,
+    SEEK_PREROLL_SECONDS,
+    SEGMENT_DURATION_SECONDS,
+    STATUS_POLL_PREPARE_SECONDS,
+    TARGET_WINDOW_FORWARD_SECONDS,
+    TARGET_WINDOW_PREROLL_SECONDS,
+    WATCH_LOW_WATERMARK_SECONDS,
+    WATCH_REFILL_TARGET_SECONDS,
+    WATCH_STALLED_RECOVERY_RUNWAY_SECONDS,
+    BrowserPlaybackSession,
+    CacheState,
+    MobileClusterJob,
+    MobilePlaybackSession,
+    PlaybackEpoch,
+)
+from .mobile_playback_route2_metrics import (
+    _route2_client_goodput_locked as _route2_client_goodput_locked_impl,
+    _route2_effective_playhead_seconds_locked as _route2_effective_playhead_seconds_locked_impl,
+    _route2_position_in_epoch_locked as _route2_position_in_epoch_locked_impl,
+    _route2_recovery_target_locked as _route2_recovery_target_locked_impl,
+    _route2_runtime_supply_metrics_locked as _route2_runtime_supply_metrics_locked_impl,
+    _route2_server_byte_goodput_locked as _route2_server_byte_goodput_locked_impl,
+    _route2_supply_model_locked as _route2_supply_model_locked_impl,
+    _route2_supply_rate_x_locked as _route2_supply_rate_x_locked_impl,
+)
+from .mobile_playback_route2_samples import (
+    _record_route2_byte_sample_locked as _record_route2_byte_sample_locked_impl,
+    _record_route2_client_probe_sample_locked as _record_route2_client_probe_sample_locked_impl,
+    _record_route2_frontier_sample_locked as _record_route2_frontier_sample_locked_impl,
+    _route2_epoch_ready_end_seconds as _route2_epoch_ready_end_seconds_impl,
+)
+from .mobile_playback_route2_readiness import (
+    _ahead_runway_seconds as _ahead_runway_seconds_impl,
+    _playback_commit_is_ready as _playback_commit_is_ready_impl,
+    _stalled_recovery_needed as _stalled_recovery_needed_impl,
+    _starvation_risk as _starvation_risk_impl,
+    _target_is_ready as _target_is_ready_impl,
+    _watch_anchor_position as _watch_anchor_position_impl,
+)
+from .mobile_playback_route2_full_helpers import (
+    _parse_bitrate_bps as _parse_bitrate_bps_impl,
+    _route2_full_bootstrap_eta_locked as _route2_full_bootstrap_eta_locked_impl,
+    _route2_full_budget_metrics_locked as _route2_full_budget_metrics_locked_impl,
+    _route2_full_mode_requires_initial_attach_gate_locked as _route2_full_mode_requires_initial_attach_gate_locked_impl,
+    _route2_full_prepare_elapsed_seconds_locked as _route2_full_prepare_elapsed_seconds_locked_impl,
+    _route2_full_safe_calibration_ratio_locked as _route2_full_safe_calibration_ratio_locked_impl,
+    _route2_profile_floor_bytes_per_second as _route2_profile_floor_bytes_per_second_impl,
+    _route2_profile_floor_segment_bytes as _route2_profile_floor_segment_bytes_impl,
+)
+from .mobile_playback_route2_full_gate import (
+    _route2_display_prepare_eta_locked as _route2_display_prepare_eta_locked_impl,
+    _route2_full_mode_gate_locked as _route2_full_mode_gate_locked_impl,
+)
+from .mobile_playback_route2_gates import (
+    _route2_attach_gate_state_locked as _route2_attach_gate_state_locked_impl,
+    _route2_epoch_recovery_ready_locked as _route2_epoch_recovery_ready_locked_impl,
+    _route2_epoch_startup_attach_ready_locked as _route2_epoch_startup_attach_ready_locked_impl,
+)
+from .mobile_playback_route2_recovery import (
+    _route2_low_water_recovery_needed_locked as _route2_low_water_recovery_needed_locked_impl,
+)
+from .mobile_playback_route2_math import (
+    _conservative_goodput_locked as _conservative_goodput_locked_impl,
+    _ema_locked as _ema_locked_impl,
+    _harmonic_mean_locked as _harmonic_mean_locked_impl,
+    _percentile_locked as _percentile_locked_impl,
+    _route2_projected_runway_seconds_locked as _route2_projected_runway_seconds_locked_impl,
+    _route2_required_runway_seconds_locked as _route2_required_runway_seconds_locked_impl,
+)
+from .mobile_playback_source_service import (
+    _resolve_duration_seconds as _resolve_duration_seconds_impl,
+    _resolve_worker_source_input as _resolve_worker_source_input_impl,
+)
 
 
 logger = logging.getLogger(__name__)
-
-SEGMENT_DURATION_SECONDS = 2.0
-SEEK_PREROLL_SECONDS = 12.0
-TARGET_WINDOW_PREROLL_SECONDS = 6.0
-TARGET_WINDOW_FORWARD_SECONDS = 60.0
-BACKGROUND_EXPANSION_FORWARD_SECONDS = 600.0
-READY_AFTER_TARGET_SECONDS = 20.0
-PLAYBACK_COMMIT_RUNWAY_SECONDS = 20.0
-WATCH_LOW_WATERMARK_SECONDS = 18.0
-WATCH_REFILL_TARGET_SECONDS = 90.0
-WATCH_STALLED_RECOVERY_RUNWAY_SECONDS = 8.0
-FRONTIER_WAIT_SECONDS = 12.0
-STATUS_POLL_PREPARE_SECONDS = 1.0
-MANIFEST_ADVANCE_TRIGGER_SECONDS = 16.0
-MANIFEST_ADVANCE_MIN_GROWTH_SECONDS = 8.0
-ROUTE2_ATTACH_READY_SECONDS = 45.0
-ROUTE2_STARTUP_MIN_RUNWAY_SECONDS = 24.0
-ROUTE2_STARTUP_PROJECTION_HORIZON_SECONDS = 90.0
-ROUTE2_RECOVERY_RESUME_RUNWAY_SECONDS = 18.0
-ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS = 10.0
-ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS = 24.0
-ROUTE2_LOW_WATER_RUNWAY_SECONDS = 12.0
-ROUTE2_LOW_WATER_PROJECTION_HORIZON_SECONDS = 90.0
-ROUTE2_SUPPLY_RATE_WINDOW_SECONDS = 18.0
-ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS = 6.0
-ROUTE2_SUPPLY_RATE_FAST_EMA_ALPHA = 0.55
-ROUTE2_SUPPLY_RATE_SLOW_EMA_ALPHA = 0.25
-ROUTE2_STARTUP_MIN_SUPPLY_RATE_X = 1.05
-ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X = 1.02
-ROUTE2_LOW_WATER_SUSTAIN_SECONDS = 6.0
-ROUTE2_DRAIN_IDLE_GRACE_SECONDS = 12.0
-ROUTE2_DRAIN_MAX_SECONDS = 90.0
-ROUTE2_REPLACEMENT_RETRY_BACKOFF_SECONDS = 3.0
-ROUTE2_ATTACH_ACK_WARN_SECONDS = 6.0
-ROUTE2_ETA_DISPLAY_MIN_OBSERVATION_SECONDS = 10.0
-ROUTE2_ETA_DISPLAY_MIN_GROWTH_EVENTS = 3
-ROUTE2_ETA_DISPLAY_STICKY_OBSERVATION_SECONDS = 14.0
-ROUTE2_ETA_DISPLAY_MAX_VOLATILITY_RATIO = 0.95
-ROUTE2_ETA_DISPLAY_GRACE_SECONDS = 12.0
-ROUTE2_ETA_DISPLAY_MAX_UPWARD_STEP_SECONDS = 3.0
-ROUTE2_ETA_DISPLAY_MAX_UPWARD_RATIO = 0.18
-ROUTE2_ETA_DISPLAY_UPWARD_BLEND = 0.35
-ROUTE2_FULL_GOODPUT_WINDOW_SECONDS = 60.0
-ROUTE2_FULL_GOODPUT_MIN_SAMPLE_COUNT = 3
-ROUTE2_FULL_GOODPUT_MIN_OBSERVATION_SECONDS = 8.0
-ROUTE2_FULL_PREFLIGHT_TIMEOUT_SECONDS = 180.0
-ROUTE2_FULL_PROBE_MIN_DURATION_SECONDS = 0.15
-ROUTE2_FULL_PROBE_MAX_DURATION_SECONDS = 30.0
-ROUTE2_FULL_BOOTSTRAP_ESTIMATE_DELAY_SECONDS = 20.0
-ROUTE2_FULL_RESERVE_BASE_SECONDS = 20.0
-ROUTE2_FULL_RESERVE_MAX_VOLATILITY_SECONDS = 12.0
-ROUTE2_FULL_RESERVE_MAX_UNCERTAINTY_SECONDS = 10.0
-ROUTE2_FULL_VOLATILITY_HORIZON_SECONDS = 300.0
-
-
-@dataclass(frozen=True, slots=True)
-class MobileProfile:
-    key: str
-    max_width: int
-    max_height: int
-    level: str
-    crf: int
-    maxrate: str
-    bufsize: str
-
-
-MOBILE_PROFILES: dict[str, MobileProfile] = {
-    "mobile_1080p": MobileProfile(
-        key="mobile_1080p",
-        max_width=1920,
-        max_height=1080,
-        level="4.1",
-        crf=21,
-        maxrate="5500k",
-        bufsize="11000k",
-    ),
-    "mobile_2160p": MobileProfile(
-        key="mobile_2160p",
-        max_width=3840,
-        max_height=2160,
-        level="5.1",
-        crf=22,
-        maxrate="16000k",
-        bufsize="32000k",
-    ),
-}
-
-
-@dataclass(slots=True)
-class CacheState:
-    cache_key: str
-    cache_dir: Path
-    metadata_path: Path
-    init_path: Path
-    duration_seconds: float
-    profile: str
-    total_segments: int
-    source_fingerprint: str
-    cached_segments: set[int] = field(default_factory=set)
-    loaded: bool = False
-
-
-@dataclass(slots=True)
-class MobileClusterJob:
-    generation: int
-    phase: str
-    target_position_seconds: float
-    target_segment_index: int
-    prepare_start_segment: int
-    prepare_end_segment: int
-    prepare_start_seconds: float
-    prepare_end_seconds: float
-    output_dir: Path
-    manifest_path: Path
-    state: str = "preparing"
-    active_worker_id: str | None = None
-    created_at: str = field(default_factory=utcnow_iso)
-    superseded: bool = False
-    process: subprocess.Popen[str] | None = field(default=None, repr=False)
-
-
-@dataclass(slots=True)
-class PlaybackEpoch:
-    epoch_id: str
-    session_id: str
-    created_at: str
-    target_position_seconds: float
-    epoch_start_seconds: float
-    attach_position_seconds: float
-    epoch_dir: Path = field(repr=False)
-    staging_dir: Path = field(repr=False)
-    published_dir: Path = field(repr=False)
-    staging_manifest_path: Path = field(repr=False)
-    metadata_path: Path = field(repr=False)
-    frontier_path: Path = field(repr=False)
-    published_init_path: Path = field(repr=False)
-    state: str = "starting"
-    init_published: bool = False
-    published_segments: set[int] = field(default_factory=set, repr=False)
-    published_segment_bytes: dict[int, int] = field(default_factory=dict, repr=False)
-    published_init_bytes: int = 0
-    published_total_bytes: int = 0
-    contiguous_published_through_segment: int | None = None
-    transcoder_completed: bool = False
-    active_worker_id: str | None = None
-    last_published_at: str | None = None
-    last_error: str | None = None
-    stop_requested: bool = False
-    process: subprocess.Popen[str] | None = field(default=None, repr=False)
-    drain_started_at_ts: float | None = None
-    drain_target_attach_revision: int = 0
-    last_media_access_at_ts: float = field(default_factory=time.time)
-    frontier_samples: list[tuple[float, float]] = field(default_factory=list, repr=False)
-    byte_samples: list[tuple[float, int]] = field(default_factory=list, repr=False)
-    under_supply_started_at_ts: float | None = None
-    display_eta_seconds: float | None = None
-    display_eta_updated_at_ts: float = 0.0
-    display_eta_stable: bool = False
-
-
-@dataclass(slots=True)
-class BrowserPlaybackSession:
-    engine_mode: str = "legacy"
-    playback_mode: str = "lite"
-    state: str = "legacy"
-    attach_revision: int = 0
-    client_attach_revision: int = 0
-    attach_revision_issued_at_ts: float = 0.0
-    last_attach_warning_revision: int = 0
-    last_full_contract_violation_signature: str = ""
-    active_epoch_id: str | None = None
-    replacement_epoch_id: str | None = None
-    replacement_retry_not_before_ts: float = 0.0
-    full_preflight_state: str = "idle"
-    full_preflight_error: str | None = None
-    full_preflight_started_at_ts: float = 0.0
-    full_prepare_started_at_ts: float = 0.0
-    full_source_bin_bytes: list[int] = field(default_factory=list, repr=False)
-    client_probe_samples: list[tuple[float, int, float]] = field(default_factory=list, repr=False)
-    epochs: dict[str, PlaybackEpoch] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class MobilePlaybackSession:
-    session_id: str
-    user_id: int
-    media_item_id: int
-    profile: str
-    duration_seconds: float
-    cache_key: str
-    source_locator: str
-    source_input_kind: str
-    source_fingerprint: str
-    created_at: str
-    last_client_seen_at: str
-    last_media_access_at: str
-    state: str = "queued"
-    epoch: int = 1
-    target_position_seconds: float = 0.0
-    pending_target_seconds: float | None = None
-    manifest_start_segment: int | None = None
-    manifest_end_segment: int | None = None
-    ready_start_seconds: float = 0.0
-    ready_end_seconds: float = 0.0
-    last_stable_position_seconds: float = 0.0
-    committed_playhead_seconds: float = 0.0
-    actual_media_element_time_seconds: float = 0.0
-    playing_before_seek: bool = False
-    client_is_playing: bool = False
-    lifecycle_state: str = "attached"
-    stalled_recovery_requested: bool = False
-    last_refill_start_seconds: float | None = None
-    last_refill_end_seconds: float | None = None
-    last_error: str | None = None
-    worker_state: str = "idle"
-    queue_started_ts: float | None = None
-    expires_at_ts: float = 0.0
-    active_job: MobileClusterJob | None = None
-    browser_playback: BrowserPlaybackSession = field(default_factory=BrowserPlaybackSession)
 
 
 class MobilePlaybackManager:
@@ -318,7 +197,11 @@ class MobilePlaybackManager:
             if not source_locator:
                 raise ValueError("Experimental playback requires a valid cloud media source")
             source_input_kind = "url"
-        duration_seconds, item = self._resolve_duration_seconds(item, user_id=user_id)
+        duration_seconds, item = _resolve_duration_seconds_impl(
+            self.settings,
+            item,
+            user_id=user_id,
+        )
         if not duration_seconds or duration_seconds <= 0:
             raise ValueError("Experimental playback requires a known duration")
         source_fingerprint = self._source_fingerprint(item, source_locator)
@@ -1078,58 +961,24 @@ class MobilePlaybackManager:
         return False
 
     def _route2_full_preflight_cache_path(self, session: MobilePlaybackSession) -> Path:
-        return (
-            self._route2_root
-            / "preflight"
-            / f"{session.source_fingerprint}-{session.profile}.json"
+        return _route2_full_preflight_cache_path_impl(
+            self._route2_root,
+            session,
         )
 
     def _parse_bitrate_bps(self, value: str) -> int:
-        normalized = (value or "").strip().lower()
-        if not normalized:
-            return 0
-        multiplier = 1
-        if normalized.endswith("k"):
-            normalized = normalized[:-1]
-            multiplier = 1_000
-        elif normalized.endswith("m"):
-            normalized = normalized[:-1]
-            multiplier = 1_000_000
-        try:
-            return max(0, int(float(normalized) * multiplier))
-        except (TypeError, ValueError):
-            return 0
+        return _parse_bitrate_bps_impl(value)
 
     def _route2_profile_floor_bytes_per_second(self, profile_key: str) -> float:
-        profile = MOBILE_PROFILES[profile_key]
-        video_bps = self._parse_bitrate_bps(profile.maxrate)
-        audio_bps = 160_000
-        return max(1.0, (video_bps + audio_bps) / 8.0)
+        return _route2_profile_floor_bytes_per_second_impl(profile_key)
 
     def _route2_profile_floor_segment_bytes(self, profile_key: str) -> int:
-        return max(1, math.ceil(self._route2_profile_floor_bytes_per_second(profile_key) * SEGMENT_DURATION_SECONDS))
+        return _route2_profile_floor_segment_bytes_impl(profile_key)
 
     def _route2_full_preflight_source_input(self, session: MobilePlaybackSession) -> tuple[str, str | None, str | None]:
-        if session.source_input_kind == "path":
-            return session.source_locator, None, None
-        item = get_media_item_record(self.settings, item_id=session.media_item_id)
-        if item is None:
-            raise ValueError("Experimental playback media item is no longer available")
-        session_payload = create_native_playback_session(
+        return _route2_full_preflight_source_input_impl(
             self.settings,
-            user_id=session.user_id,
-            item=item,
-            auth_session_id=None,
-            user_agent="Elvern Route2 Full Playback Preflight",
-            source_ip=None,
-            client_name="Route2 Full Playback Preflight",
-        )
-        return (
-            self._rewrite_stream_url_for_server_localhost(
-                stream_url=str(session_payload["stream_url"])
-            ),
-            str(session_payload["session_id"]),
-            str(session_payload["access_token"]),
+            session,
         )
 
     def _route2_full_scan_packet_bins(
@@ -1139,157 +988,50 @@ class MobilePlaybackManager:
         select_stream: str,
         total_segments: int,
     ) -> list[int]:
-        command = [
-            str(self.settings.ffprobe_path),
-            "-v",
-            "error",
-            "-select_streams",
-            select_stream,
-            "-show_entries",
-            "packet=pts_time,size",
-            "-of",
-            "csv=p=0",
+        return _route2_full_scan_packet_bins_impl(
+            self.settings,
             source_input,
-        ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=ROUTE2_FULL_PREFLIGHT_TIMEOUT_SECONDS,
-            check=False,
+            select_stream=select_stream,
+            total_segments=total_segments,
         )
-        if completed.returncode != 0:
-            return [0] * total_segments
-        bins = [0] * total_segments
-        for line in (completed.stdout or "").splitlines():
-            parts = [token.strip() for token in line.split(",") if token.strip()]
-            if len(parts) < 2:
-                continue
-            try:
-                pts_seconds = float(parts[0])
-                packet_bytes = int(float(parts[1]))
-            except (TypeError, ValueError):
-                continue
-            if packet_bytes <= 0:
-                continue
-            segment_index = max(0, min(total_segments - 1, int(math.floor(max(pts_seconds, 0.0) / SEGMENT_DURATION_SECONDS))))
-            bins[segment_index] += packet_bytes
-        return bins
 
     def _build_route2_full_source_bin_bytes(self, session: MobilePlaybackSession) -> list[int]:
-        total_segments = max(1, math.ceil(session.duration_seconds / SEGMENT_DURATION_SECONDS))
-        source_input = ""
-        native_session_id = None
-        native_access_token = None
-        try:
-            source_input, native_session_id, native_access_token = self._route2_full_preflight_source_input(session)
-            video_bins = self._route2_full_scan_packet_bins(
-                source_input,
-                select_stream="v:0",
-                total_segments=total_segments,
-            )
-            audio_bins = self._route2_full_scan_packet_bins(
-                source_input,
-                select_stream="a:0",
-                total_segments=total_segments,
-            )
-        finally:
-            if native_session_id and native_access_token:
-                try:
-                    close_native_playback_session(
-                        self.settings,
-                        session_id=native_session_id,
-                        access_token=native_access_token,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-        combined_bins = [video_bins[index] + audio_bins[index] for index in range(total_segments)]
-        if any(combined_bins):
-            return combined_bins
-        average_segment_bytes = self._route2_profile_floor_segment_bytes(session.profile)
-        return [average_segment_bytes] * total_segments
+        return _build_route2_full_source_bin_bytes_impl(
+            self.settings,
+            session,
+            route2_full_preflight_source_input=self._route2_full_preflight_source_input,
+            route2_full_scan_packet_bins=self._route2_full_scan_packet_bins,
+            route2_profile_floor_segment_bytes=self._route2_profile_floor_segment_bytes,
+        )
 
     def _load_route2_full_preflight_cache_locked(self, session: MobilePlaybackSession) -> bool:
-        cache_path = self._route2_full_preflight_cache_path(session)
-        if not cache_path.exists():
-            return False
-        try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
-            source_bin_bytes = [max(0, int(value)) for value in payload.get("source_bin_bytes") or []]
-        except (OSError, ValueError, TypeError):
-            return False
-        expected_segments = max(1, math.ceil(session.duration_seconds / SEGMENT_DURATION_SECONDS))
-        if len(source_bin_bytes) != expected_segments:
-            return False
-        browser_session = session.browser_playback
-        browser_session.full_source_bin_bytes = source_bin_bytes
-        browser_session.full_preflight_state = "ready"
-        browser_session.full_preflight_error = None
-        browser_session.full_preflight_started_at_ts = 0.0
-        return True
+        return _load_route2_full_preflight_cache_locked_impl(
+            session,
+            route2_full_preflight_cache_path=self._route2_full_preflight_cache_path,
+        )
 
     def _ensure_route2_full_preflight_locked(self, session: MobilePlaybackSession) -> None:
-        browser_session = session.browser_playback
-        if browser_session.engine_mode != "route2" or browser_session.playback_mode != "full":
-            browser_session.full_preflight_state = "idle"
-            browser_session.full_preflight_error = None
-            browser_session.full_source_bin_bytes.clear()
-            return
-        if browser_session.full_source_bin_bytes:
-            browser_session.full_preflight_state = "ready"
-            browser_session.full_preflight_error = None
-            return
-        if self._load_route2_full_preflight_cache_locked(session):
-            return
-        if browser_session.full_preflight_state == "running":
-            return
-        browser_session.full_preflight_state = "running"
-        browser_session.full_preflight_started_at_ts = time.time()
-        browser_session.full_preflight_error = None
-        thread = threading.Thread(
-            target=self._run_route2_full_preflight_worker,
-            args=(session.session_id,),
-            daemon=True,
-            name=f"elvern-route2-full-preflight-{session.session_id[:8]}",
+        _ensure_route2_full_preflight_locked_impl(
+            session,
+            load_route2_full_preflight_cache_locked=self._load_route2_full_preflight_cache_locked,
+            run_route2_full_preflight_worker=self._run_route2_full_preflight_worker,
         )
-        thread.start()
 
     def _run_route2_full_preflight_worker(self, session_id: str) -> None:
-        with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None or session.browser_playback.engine_mode != "route2":
-                return
-        try:
-            source_bin_bytes = self._build_route2_full_source_bin_bytes(session)
-        except Exception as exc:  # noqa: BLE001
+        def get_route2_session_locked(active_session_id: str) -> MobilePlaybackSession | None:
             with self._lock:
-                active_session = self._sessions.get(session_id)
-                if active_session is None:
-                    return
-                browser_session = active_session.browser_playback
-                browser_session.full_preflight_state = "failed"
-                browser_session.full_preflight_error = str(exc) or "Full Playback preflight failed"
-            return
-        cache_path = self._route2_full_preflight_cache_path(session)
-        self._write_json_atomic(
-            cache_path,
-            {
-                "source_fingerprint": session.source_fingerprint,
-                "profile": session.profile,
-                "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
-                "source_bin_bytes": source_bin_bytes,
-                "updated_at": utcnow_iso(),
-            },
+                session = self._sessions.get(active_session_id)
+                if session is None or session.browser_playback.engine_mode != "route2":
+                    return None
+                return session
+
+        _run_route2_full_preflight_worker_impl(
+            session_id,
+            get_route2_session_locked=get_route2_session_locked,
+            build_route2_full_source_bin_bytes=self._build_route2_full_source_bin_bytes,
+            route2_full_preflight_cache_path=self._route2_full_preflight_cache_path,
+            write_json_atomic=self._write_json_atomic,
         )
-        with self._lock:
-            active_session = self._sessions.get(session_id)
-            if active_session is None:
-                return
-            browser_session = active_session.browser_playback
-            browser_session.full_source_bin_bytes = source_bin_bytes
-            browser_session.full_preflight_state = "ready"
-            browser_session.full_preflight_error = None
-            browser_session.full_preflight_started_at_ts = 0.0
 
     def _issue_route2_attach_revision_locked(
         self,
@@ -1437,11 +1179,9 @@ class MobilePlaybackManager:
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
     ) -> float:
-        if not epoch.init_published or epoch.contiguous_published_through_segment is None:
-            return 0.0
-        return min(
-            session.duration_seconds,
-            epoch.epoch_start_seconds + ((epoch.contiguous_published_through_segment + 1) * SEGMENT_DURATION_SECONDS),
+        return _route2_epoch_ready_end_seconds_impl(
+            session,
+            epoch,
         )
 
     def _record_route2_frontier_sample_locked(
@@ -1451,18 +1191,12 @@ class MobilePlaybackManager:
         *,
         now_ts: float | None = None,
     ) -> None:
-        now_ts = now_ts or time.time()
-        published_end_seconds = round(self._route2_epoch_ready_end_seconds(session, epoch), 3)
-        history = epoch.frontier_samples
-        if (
-            not history
-            or published_end_seconds > history[-1][1] + 0.001
-            or now_ts - history[-1][0] >= 1.0
-        ):
-            history.append((now_ts, published_end_seconds))
-        cutoff_ts = now_ts - ROUTE2_SUPPLY_RATE_WINDOW_SECONDS
-        while len(history) > 1 and history[0][0] < cutoff_ts:
-            history.pop(0)
+        return _record_route2_frontier_sample_locked_impl(
+            session,
+            epoch,
+            route2_epoch_ready_end_seconds_locked=self._route2_epoch_ready_end_seconds,
+            now_ts=now_ts,
+        )
 
     def _record_route2_byte_sample_locked(
         self,
@@ -1470,18 +1204,10 @@ class MobilePlaybackManager:
         *,
         now_ts: float | None = None,
     ) -> None:
-        now_ts = now_ts or time.time()
-        total_bytes = max(0, int(epoch.published_total_bytes))
-        history = epoch.byte_samples
-        if (
-            not history
-            or total_bytes > history[-1][1]
-            or now_ts - history[-1][0] >= 1.0
-        ):
-            history.append((now_ts, total_bytes))
-        cutoff_ts = now_ts - ROUTE2_FULL_GOODPUT_WINDOW_SECONDS
-        while len(history) > 1 and history[0][0] < cutoff_ts:
-            history.pop(0)
+        return _record_route2_byte_sample_locked_impl(
+            epoch,
+            now_ts=now_ts,
+        )
 
     def _record_route2_client_probe_sample_locked(
         self,
@@ -1491,44 +1217,18 @@ class MobilePlaybackManager:
         probe_duration_ms: int | None,
         now_ts: float | None = None,
     ) -> None:
-        if probe_bytes is None or probe_duration_ms is None:
-            return
-        duration_seconds = max(0.0, float(probe_duration_ms) / 1000.0)
-        if (
-            probe_bytes <= 0
-            or duration_seconds < ROUTE2_FULL_PROBE_MIN_DURATION_SECONDS
-            or duration_seconds > ROUTE2_FULL_PROBE_MAX_DURATION_SECONDS
-        ):
-            return
-        now_ts = now_ts or time.time()
-        browser_session = session.browser_playback
-        browser_session.client_probe_samples.append((now_ts, int(probe_bytes), duration_seconds))
-        cutoff_ts = now_ts - ROUTE2_FULL_GOODPUT_WINDOW_SECONDS
-        while (
-            len(browser_session.client_probe_samples) > 1
-            and browser_session.client_probe_samples[0][0] < cutoff_ts
-        ):
-            browser_session.client_probe_samples.pop(0)
+        return _record_route2_client_probe_sample_locked_impl(
+            session,
+            probe_bytes=probe_bytes,
+            probe_duration_ms=probe_duration_ms,
+            now_ts=now_ts,
+        )
 
     def _harmonic_mean_locked(self, values: list[float]) -> float:
-        positive_values = [value for value in values if value > 0.0]
-        if not positive_values:
-            return 0.0
-        inverse_sum = sum(1.0 / value for value in positive_values)
-        if inverse_sum <= 0.0:
-            return 0.0
-        return len(positive_values) / inverse_sum
+        return _harmonic_mean_locked_impl(values)
 
     def _percentile_locked(self, values: list[float], percentile: float) -> float:
-        if not values:
-            return 0.0
-        ordered = sorted(value for value in values if value > 0.0)
-        if not ordered:
-            return 0.0
-        if len(ordered) == 1:
-            return ordered[0]
-        rank = max(0, min(len(ordered) - 1, int(math.floor((len(ordered) - 1) * percentile))))
-        return ordered[rank]
+        return _percentile_locked_impl(values, percentile)
 
     def _conservative_goodput_locked(
         self,
@@ -1536,165 +1236,47 @@ class MobilePlaybackManager:
         *,
         observation_seconds: float,
     ) -> dict[str, float | int | bool]:
-        positive_rates = [rate for rate in rates if rate > 0.0]
-        if not positive_rates:
-            return {
-                "safe_rate": 0.0,
-                "harmonic_mean": 0.0,
-                "slow_ema": 0.0,
-                "p20": 0.0,
-                "median_rate": 0.0,
-                "sample_count": 0,
-                "observation_seconds": observation_seconds,
-                "confident": False,
-            }
-        harmonic_mean = self._harmonic_mean_locked(positive_rates)
-        slow_ema = self._ema_locked(positive_rates, alpha=ROUTE2_SUPPLY_RATE_SLOW_EMA_ALPHA)
-        p20 = self._percentile_locked(positive_rates, 0.20)
-        median_rate = max(0.0, float(statistics.median(positive_rates)))
-        safe_rate = min(rate for rate in (harmonic_mean, slow_ema, p20) if rate > 0.0)
-        sample_count = len(positive_rates)
-        confident = (
-            sample_count >= ROUTE2_FULL_GOODPUT_MIN_SAMPLE_COUNT
-            and observation_seconds >= ROUTE2_FULL_GOODPUT_MIN_OBSERVATION_SECONDS
-            and safe_rate > 0.0
+        return _conservative_goodput_locked_impl(
+            rates,
+            observation_seconds=observation_seconds,
         )
-        return {
-            "safe_rate": safe_rate,
-            "harmonic_mean": harmonic_mean,
-            "slow_ema": slow_ema,
-            "p20": p20,
-            "median_rate": median_rate,
-            "sample_count": sample_count,
-            "observation_seconds": observation_seconds,
-            "confident": confident,
-        }
 
     def _route2_server_byte_goodput_locked(
         self,
         epoch: PlaybackEpoch,
     ) -> dict[str, float | int | bool]:
-        history = epoch.byte_samples
-        if len(history) < 2:
-            return self._conservative_goodput_locked([], observation_seconds=0.0)
-        first_ts = history[0][0]
-        last_ts = history[-1][0]
-        observation_seconds = max(0.0, last_ts - first_ts)
-        interval_rates: list[float] = []
-        for (previous_ts, previous_bytes), (current_ts, current_bytes) in zip(history, history[1:]):
-            interval_seconds = max(0.0, current_ts - previous_ts)
-            interval_bytes = max(0, current_bytes - previous_bytes)
-            if interval_seconds < 0.25 or interval_bytes <= 0:
-                continue
-            interval_rates.append(interval_bytes / interval_seconds)
-        return self._conservative_goodput_locked(interval_rates, observation_seconds=observation_seconds)
+        return _route2_server_byte_goodput_locked_impl(
+            epoch,
+            conservative_goodput_locked=self._conservative_goodput_locked,
+        )
 
     def _route2_client_goodput_locked(
         self,
         session: MobilePlaybackSession,
     ) -> dict[str, float | int | bool]:
-        samples = session.browser_playback.client_probe_samples
-        if not samples:
-            return self._conservative_goodput_locked([], observation_seconds=0.0)
-        observation_seconds = max(0.0, samples[-1][0] - samples[0][0]) if len(samples) >= 2 else 0.0
-        rates = [
-            bytes_transferred / duration_seconds
-            for _ts, bytes_transferred, duration_seconds in samples
-            if bytes_transferred > 0 and duration_seconds >= ROUTE2_FULL_PROBE_MIN_DURATION_SECONDS
-        ]
-        return self._conservative_goodput_locked(rates, observation_seconds=observation_seconds)
+        return _route2_client_goodput_locked_impl(
+            session,
+            conservative_goodput_locked=self._conservative_goodput_locked,
+        )
 
     def _route2_supply_rate_x_locked(self, epoch: PlaybackEpoch) -> tuple[float, float]:
-        if len(epoch.frontier_samples) < 2:
-            return 0.0, 0.0
-        first_ts, first_end_seconds = epoch.frontier_samples[0]
-        last_ts, last_end_seconds = epoch.frontier_samples[-1]
-        observation_seconds = max(0.0, last_ts - first_ts)
-        if observation_seconds < 0.25:
-            return 0.0, observation_seconds
-        supply_rate_x = max(0.0, (last_end_seconds - first_end_seconds) / observation_seconds)
-        return supply_rate_x, observation_seconds
+        return _route2_supply_rate_x_locked_impl(epoch)
 
     def _ema_locked(self, values: list[float], *, alpha: float) -> float:
-        if not values:
-            return 0.0
-        ema_value = values[0]
-        for value in values[1:]:
-            ema_value = (alpha * value) + ((1.0 - alpha) * ema_value)
-        return max(0.0, ema_value)
+        return _ema_locked_impl(values, alpha=alpha)
 
     def _route2_supply_model_locked(self, epoch: PlaybackEpoch) -> dict[str, float | int | bool]:
-        overall_rate_x, observation_seconds = self._route2_supply_rate_x_locked(epoch)
-        positive_interval_rates: list[float] = []
-        history = epoch.frontier_samples
-        for (first_ts, first_end_seconds), (last_ts, last_end_seconds) in zip(history, history[1:]):
-            interval_seconds = max(0.0, last_ts - first_ts)
-            frontier_growth_seconds = max(0.0, last_end_seconds - first_end_seconds)
-            if interval_seconds < 0.25 or frontier_growth_seconds <= 0.001:
-                continue
-            positive_interval_rates.append(frontier_growth_seconds / interval_seconds)
-        if positive_interval_rates:
-            fast_ema_rate_x = self._ema_locked(
-                positive_interval_rates,
-                alpha=ROUTE2_SUPPLY_RATE_FAST_EMA_ALPHA,
-            )
-            slow_ema_rate_x = self._ema_locked(
-                positive_interval_rates,
-                alpha=ROUTE2_SUPPLY_RATE_SLOW_EMA_ALPHA,
-            )
-            median_rate_x = max(0.0, float(statistics.median(positive_interval_rates)))
-        else:
-            fast_ema_rate_x = overall_rate_x
-            slow_ema_rate_x = overall_rate_x
-            median_rate_x = overall_rate_x
-        rate_candidates = [rate for rate in (overall_rate_x, fast_ema_rate_x, slow_ema_rate_x, median_rate_x) if rate > 0.0]
-        effective_rate_x = min(rate_candidates) if rate_candidates else 0.0
-        volatility_ratio = (
-            (max(rate_candidates) - min(rate_candidates)) / max(max(rate_candidates), 0.001)
-            if len(rate_candidates) >= 2
-            else 0.0
-        )
-        positive_growth_events = len(positive_interval_rates)
-        display_confident = (
-            effective_rate_x > 0.0
-            and (
-                (
-                    observation_seconds >= ROUTE2_ETA_DISPLAY_MIN_OBSERVATION_SECONDS
-                    and positive_growth_events >= ROUTE2_ETA_DISPLAY_MIN_GROWTH_EVENTS
-                    and volatility_ratio <= ROUTE2_ETA_DISPLAY_MAX_VOLATILITY_RATIO
-                )
-                or (
-                    observation_seconds >= ROUTE2_ETA_DISPLAY_STICKY_OBSERVATION_SECONDS
-                    and positive_growth_events >= ROUTE2_ETA_DISPLAY_MIN_GROWTH_EVENTS + 1
-                )
-            )
-        )
-        return {
-            "effective_rate_x": effective_rate_x,
-            "overall_rate_x": overall_rate_x,
-            "fast_ema_rate_x": fast_ema_rate_x,
-            "slow_ema_rate_x": slow_ema_rate_x,
-            "median_rate_x": median_rate_x,
-            "observation_seconds": observation_seconds,
-            "positive_growth_events": positive_growth_events,
-            "volatility_ratio": volatility_ratio,
-            "display_confident": display_confident,
-        }
+        return _route2_supply_model_locked_impl(epoch)
 
     def _route2_effective_playhead_seconds_locked(
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
     ) -> float:
-        return self._clamp_time(
-            max(
-                epoch.attach_position_seconds,
-                session.target_position_seconds,
-                session.last_stable_position_seconds,
-                session.committed_playhead_seconds,
-                session.actual_media_element_time_seconds,
-            ),
-            session.duration_seconds,
+        return _route2_effective_playhead_seconds_locked_impl(
+            session,
+            epoch,
+            clamp_time=self._clamp_time,
         )
 
     def _route2_runtime_supply_metrics_locked(
@@ -1702,24 +1284,12 @@ class MobilePlaybackManager:
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
     ) -> tuple[float, float, float, float, float, bool, bool]:
-        published_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
-        effective_playhead_seconds = self._route2_effective_playhead_seconds_locked(session, epoch)
-        runway_seconds = max(0.0, published_end_seconds - effective_playhead_seconds)
-        supply_model = self._route2_supply_model_locked(epoch)
-        supply_rate_x = float(supply_model["effective_rate_x"])
-        observation_seconds = float(supply_model["observation_seconds"])
-        manifest_complete = published_end_seconds + 0.001 >= session.duration_seconds or epoch.transcoder_completed
-        refill_in_progress = not manifest_complete and bool(
-            epoch.active_worker_id or (epoch.process and epoch.process.poll() is None)
-        )
-        return (
-            published_end_seconds,
-            effective_playhead_seconds,
-            runway_seconds,
-            supply_rate_x,
-            observation_seconds,
-            manifest_complete,
-            refill_in_progress,
+        return _route2_runtime_supply_metrics_locked_impl(
+            session,
+            epoch,
+            route2_epoch_ready_end_seconds_locked=self._route2_epoch_ready_end_seconds,
+            route2_effective_playhead_seconds_locked=self._route2_effective_playhead_seconds_locked,
+            route2_supply_model_locked=self._route2_supply_model_locked,
         )
 
     def _route2_projected_runway_seconds_locked(
@@ -1730,7 +1300,12 @@ class MobilePlaybackManager:
         projection_horizon_seconds: float,
         demand_rate_x: float = 1.0,
     ) -> float:
-        return max(0.0, runway_seconds + ((supply_rate_x - demand_rate_x) * projection_horizon_seconds))
+        return _route2_projected_runway_seconds_locked_impl(
+            runway_seconds,
+            supply_rate_x,
+            projection_horizon_seconds=projection_horizon_seconds,
+            demand_rate_x=demand_rate_x,
+        )
 
     def _route2_required_runway_seconds_locked(
         self,
@@ -1740,11 +1315,12 @@ class MobilePlaybackManager:
         projection_horizon_seconds: float,
         supply_rate_x: float,
     ) -> float:
-        projected_requirement_seconds = max(
-            0.0,
-            projected_runway_target_seconds - ((supply_rate_x - 1.0) * projection_horizon_seconds),
+        return _route2_required_runway_seconds_locked_impl(
+            minimum_runway_seconds=minimum_runway_seconds,
+            projected_runway_target_seconds=projected_runway_target_seconds,
+            projection_horizon_seconds=projection_horizon_seconds,
+            supply_rate_x=supply_rate_x,
         )
-        return max(minimum_runway_seconds, projected_requirement_seconds)
 
     def _route2_attach_gate_state_locked(
         self,
@@ -1757,66 +1333,21 @@ class MobilePlaybackManager:
         minimum_supply_rate_x: float,
         reference_position_seconds: float | None = None,
     ) -> tuple[bool, float | None, float, float, float, bool]:
-        if not epoch.init_published or epoch.contiguous_published_through_segment is None:
-            return False, None, 0.0, 0.0, 0.0, False
-        ready_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
-        supply_model = self._route2_supply_model_locked(epoch)
-        (
-            published_end_seconds,
-            effective_playhead_seconds,
-            _runway_seconds,
-            _supply_rate_x,
-            _observation_seconds,
-            manifest_complete,
-            _refill_in_progress,
-        ) = self._route2_runtime_supply_metrics_locked(session, epoch)
-        supply_rate_x = float(supply_model["effective_rate_x"])
-        observation_seconds = float(supply_model["observation_seconds"])
-        display_confident = bool(supply_model["display_confident"])
-        reference_position_seconds = self._clamp_time(
-            reference_position_seconds if reference_position_seconds is not None else effective_playhead_seconds,
-            session.duration_seconds,
-        )
-        runway_seconds = max(0.0, published_end_seconds - reference_position_seconds)
-        projected_runway_seconds = self._route2_projected_runway_seconds_locked(
-            runway_seconds,
-            supply_rate_x,
-            projection_horizon_seconds=projection_horizon_seconds,
-        )
-        if not (epoch.epoch_start_seconds <= reference_position_seconds <= ready_end_seconds + 0.001):
-            return False, None, supply_rate_x, observation_seconds, projected_runway_seconds, display_confident
-        if manifest_complete:
-            return True, 0.0, supply_rate_x, observation_seconds, projected_runway_seconds, True
-        required_runway_seconds = self._route2_required_runway_seconds_locked(
+        return _route2_attach_gate_state_locked_impl(
+            session,
+            epoch,
             minimum_runway_seconds=minimum_runway_seconds,
             projected_runway_target_seconds=projected_runway_target_seconds,
             projection_horizon_seconds=projection_horizon_seconds,
-            supply_rate_x=supply_rate_x,
+            minimum_supply_rate_x=minimum_supply_rate_x,
+            reference_position_seconds=reference_position_seconds,
+            clamp_time=self._clamp_time,
+            route2_epoch_ready_end_seconds_locked=self._route2_epoch_ready_end_seconds,
+            route2_supply_model_locked=self._route2_supply_model_locked,
+            route2_runtime_supply_metrics_locked=self._route2_runtime_supply_metrics_locked,
+            route2_projected_runway_seconds_locked=self._route2_projected_runway_seconds_locked,
+            route2_required_runway_seconds_locked=self._route2_required_runway_seconds_locked,
         )
-        observation_ready = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
-        ready = (
-            observation_ready
-            and runway_seconds + 0.001 >= required_runway_seconds
-        )
-        if ready:
-            return True, 0.0, supply_rate_x, observation_seconds, projected_runway_seconds, True
-        if not observation_ready or supply_rate_x <= 0.001:
-            return False, None, supply_rate_x, observation_seconds, projected_runway_seconds, False
-        observation_deficit_seconds = max(0.0, ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS - observation_seconds)
-        published_end_deficit_seconds = max(
-            0.0,
-            min(session.duration_seconds, reference_position_seconds + required_runway_seconds) - published_end_seconds,
-        )
-        quantized_published_end_deficit_seconds = (
-            math.ceil(published_end_deficit_seconds / SEGMENT_DURATION_SECONDS) * SEGMENT_DURATION_SECONDS
-            if published_end_deficit_seconds > 0.001
-            else 0.0
-        )
-        estimate_seconds = max(
-            observation_deficit_seconds,
-            quantized_published_end_deficit_seconds / supply_rate_x,
-        )
-        return False, estimate_seconds, supply_rate_x, observation_seconds, projected_runway_seconds, display_confident
 
     def _route2_display_prepare_eta_locked(
         self,
@@ -1826,68 +1357,18 @@ class MobilePlaybackManager:
         now_ts: float | None = None,
         display_confident: bool = False,
     ) -> float | None:
-        now_ts = now_ts or time.time()
-        previous_display_eta_seconds = epoch.display_eta_seconds
-        previous_updated_at_ts = epoch.display_eta_updated_at_ts
-        if raw_eta_seconds is None:
-            if (
-                epoch.display_eta_stable
-                and previous_display_eta_seconds is not None
-                and previous_updated_at_ts > 0
-                and now_ts - previous_updated_at_ts <= ROUTE2_ETA_DISPLAY_GRACE_SECONDS
-            ):
-                continued_eta_seconds = max(0.0, previous_display_eta_seconds - (now_ts - previous_updated_at_ts))
-                epoch.display_eta_seconds = continued_eta_seconds
-                epoch.display_eta_updated_at_ts = now_ts
-                return continued_eta_seconds
-            epoch.display_eta_seconds = None
-            epoch.display_eta_updated_at_ts = now_ts
-            epoch.display_eta_stable = False
-            return None
-        if not epoch.display_eta_stable:
-            epoch.display_eta_updated_at_ts = now_ts
-            if not display_confident:
-                epoch.display_eta_seconds = None
-                return None
-            epoch.display_eta_seconds = max(0.0, raw_eta_seconds)
-            epoch.display_eta_stable = True
-            return epoch.display_eta_seconds
-        if previous_display_eta_seconds is None or previous_updated_at_ts <= 0:
-            epoch.display_eta_seconds = max(0.0, raw_eta_seconds)
-            epoch.display_eta_updated_at_ts = now_ts
-            epoch.display_eta_stable = True
-            return epoch.display_eta_seconds
-        elapsed_seconds = max(0.0, now_ts - previous_updated_at_ts)
-        predicted_downward_eta_seconds = max(0.0, previous_display_eta_seconds - elapsed_seconds)
-        if raw_eta_seconds <= predicted_downward_eta_seconds:
-            next_display_eta_seconds = raw_eta_seconds
-        else:
-            max_upward_step_seconds = max(
-                ROUTE2_ETA_DISPLAY_MAX_UPWARD_STEP_SECONDS,
-                previous_display_eta_seconds * ROUTE2_ETA_DISPLAY_MAX_UPWARD_RATIO,
-            )
-            upward_cap_eta_seconds = predicted_downward_eta_seconds + max_upward_step_seconds
-            blended_upward_eta_seconds = predicted_downward_eta_seconds + (
-                (raw_eta_seconds - predicted_downward_eta_seconds) * ROUTE2_ETA_DISPLAY_UPWARD_BLEND
-            )
-            next_display_eta_seconds = min(
-                raw_eta_seconds,
-                max(predicted_downward_eta_seconds, min(upward_cap_eta_seconds, blended_upward_eta_seconds)),
-            )
-        epoch.display_eta_seconds = max(0.0, next_display_eta_seconds)
-        epoch.display_eta_updated_at_ts = now_ts
-        epoch.display_eta_stable = True
-        return epoch.display_eta_seconds
+        return _route2_display_prepare_eta_locked_impl(
+            epoch,
+            raw_eta_seconds,
+            now_ts=now_ts,
+            display_confident=display_confident,
+        )
 
     def _route2_full_mode_requires_initial_attach_gate_locked(
         self,
         session: MobilePlaybackSession,
     ) -> bool:
-        browser_session = session.browser_playback
-        return (
-            browser_session.engine_mode == "route2"
-            and browser_session.playback_mode == "full"
-        )
+        return _route2_full_mode_requires_initial_attach_gate_locked_impl(session)
 
     def _route2_full_safe_calibration_ratio_locked(
         self,
@@ -1895,122 +1376,26 @@ class MobilePlaybackManager:
         epoch: PlaybackEpoch,
         source_bin_bytes: list[int],
     ) -> float:
-        source_total_bytes = max(1, sum(source_bin_bytes))
-        baseline_output_total_bytes = self._route2_profile_floor_bytes_per_second(session.profile) * session.duration_seconds
-        baseline_ratio = max(0.0001, baseline_output_total_bytes / source_total_bytes)
-        epoch_start_segment = self._segment_index_for_time(epoch.epoch_start_seconds)
-        observed_ratios: list[float] = []
-        for relative_index, actual_bytes in epoch.published_segment_bytes.items():
-            absolute_index = epoch_start_segment + relative_index
-            if absolute_index < 0 or absolute_index >= len(source_bin_bytes):
-                continue
-            source_bytes = max(source_bin_bytes[absolute_index], 1)
-            observed_ratios.append(actual_bytes / source_bytes)
-        if not observed_ratios:
-            return baseline_ratio
-        ratio_p80 = self._percentile_locked(observed_ratios, 0.80)
-        ratio_slow_ema = self._ema_locked(observed_ratios, alpha=ROUTE2_SUPPLY_RATE_SLOW_EMA_ALPHA)
-        ratio_median = max(0.0, float(statistics.median(observed_ratios)))
-        return max(baseline_ratio, ratio_p80, ratio_slow_ema, ratio_median)
+        return _route2_full_safe_calibration_ratio_locked_impl(
+            session,
+            epoch,
+            source_bin_bytes,
+            segment_index_for_time=self._segment_index_for_time,
+            percentile_locked=self._percentile_locked,
+            ema_locked=self._ema_locked,
+        )
 
     def _route2_full_budget_metrics_locked(
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
     ) -> dict[str, float | list[float] | int] | None:
-        browser_session = session.browser_playback
-        source_bin_bytes = browser_session.full_source_bin_bytes
-        if not source_bin_bytes:
-            return None
-        total_segments = max(1, math.ceil(session.duration_seconds / SEGMENT_DURATION_SECONDS))
-        epoch_start_segment = self._segment_index_for_time(epoch.epoch_start_seconds)
-        start_segment = self._segment_index_for_time(epoch.attach_position_seconds)
-        if start_segment >= total_segments:
-            start_segment = total_segments - 1
-        floor_segment_bytes = self._route2_profile_floor_segment_bytes(session.profile)
-        floor_bytes_per_second = self._route2_profile_floor_bytes_per_second(session.profile)
-        calibration_ratio = self._route2_full_safe_calibration_ratio_locked(session, epoch, source_bin_bytes)
-        frontier_segment = (
-            epoch_start_segment + epoch.contiguous_published_through_segment
-            if epoch.init_published and epoch.contiguous_published_through_segment is not None
-            else epoch_start_segment - 1
+        return _route2_full_budget_metrics_locked_impl(
+            session,
+            epoch,
+            segment_index_for_time=self._segment_index_for_time,
+            route2_full_safe_calibration_ratio_locked=self._route2_full_safe_calibration_ratio_locked,
         )
-
-        segment_budget_bytes: list[float] = []
-        deadline_seconds: list[float] = []
-        estimated_fraction_bytes = 0.0
-        remaining_total_bytes = 0.0
-        prepared_bytes = 0.0
-        for absolute_index in range(start_segment, total_segments):
-            relative_index = absolute_index - epoch_start_segment
-            actual_bytes = None
-            if (
-                epoch.contiguous_published_through_segment is not None
-                and 0 <= relative_index <= epoch.contiguous_published_through_segment
-            ):
-                actual_bytes = epoch.published_segment_bytes.get(relative_index)
-            if actual_bytes is None:
-                predicted_bytes = max(
-                    floor_segment_bytes,
-                    math.ceil(max(source_bin_bytes[absolute_index], 1) * calibration_ratio),
-                )
-                segment_bytes = float(predicted_bytes)
-                estimated_fraction_bytes += segment_bytes
-            else:
-                segment_bytes = float(actual_bytes)
-                if absolute_index <= frontier_segment:
-                    prepared_bytes += segment_bytes
-            remaining_total_bytes += segment_bytes
-            segment_budget_bytes.append(segment_bytes)
-            deadline_seconds.append((len(segment_budget_bytes)) * SEGMENT_DURATION_SECONDS)
-
-        if not segment_budget_bytes:
-            return None
-
-        horizon_segments = max(
-            1,
-            min(
-                len(segment_budget_bytes),
-                math.ceil(min(ROUTE2_FULL_VOLATILITY_HORIZON_SECONDS, max(session.duration_seconds - epoch.attach_position_seconds, 0.0)) / SEGMENT_DURATION_SECONDS),
-            ),
-        )
-        horizon_budget = segment_budget_bytes[:horizon_segments]
-        horizon_mean_bytes = statistics.mean(horizon_budget) if horizon_budget else 0.0
-        future_segment_cv = (
-            (statistics.pstdev(horizon_budget) / horizon_mean_bytes)
-            if horizon_budget and horizon_mean_bytes > 0.0
-            else 0.0
-        )
-        estimated_fraction_remaining = (
-            estimated_fraction_bytes / remaining_total_bytes
-            if remaining_total_bytes > 0.0
-            else 0.0
-        )
-        reference_rates = [segment_bytes / SEGMENT_DURATION_SECONDS for segment_bytes in horizon_budget if segment_bytes > 0.0]
-        predicted_rate_median = max(0.0, float(statistics.median(reference_rates))) if reference_rates else 0.0
-        reference_bytes_per_second = max(floor_bytes_per_second, predicted_rate_median)
-        reserve_seconds = (
-            ROUTE2_FULL_RESERVE_BASE_SECONDS
-            + min(ROUTE2_FULL_RESERVE_MAX_VOLATILITY_SECONDS, max(0.0, 8.0 * future_segment_cv))
-            + min(ROUTE2_FULL_RESERVE_MAX_UNCERTAINTY_SECONDS, max(0.0, 10.0 * estimated_fraction_remaining))
-        )
-        reserve_bytes = reserve_seconds * reference_bytes_per_second
-
-        cumulative_budget_bytes: list[float] = []
-        cumulative_bytes = 0.0
-        for segment_bytes in segment_budget_bytes:
-            cumulative_bytes += segment_bytes
-            cumulative_budget_bytes.append(cumulative_bytes)
-
-        return {
-            "prepared_bytes": prepared_bytes,
-            "cumulative_budget_bytes": cumulative_budget_bytes,
-            "deadline_seconds": deadline_seconds,
-            "reserve_bytes": reserve_bytes,
-            "estimated_fraction_remaining": estimated_fraction_remaining,
-            "future_segment_cv": future_segment_cv,
-            "reference_bytes_per_second": reference_bytes_per_second,
-        }
 
     def _route2_full_prepare_elapsed_seconds_locked(
         self,
@@ -2018,11 +1403,10 @@ class MobilePlaybackManager:
         *,
         now_ts: float | None = None,
     ) -> float:
-        started_at_ts = float(session.browser_playback.full_prepare_started_at_ts or 0.0)
-        if started_at_ts <= 0.0:
-            return 0.0
-        now_ts = now_ts or time.time()
-        return max(0.0, now_ts - started_at_ts)
+        return _route2_full_prepare_elapsed_seconds_locked_impl(
+            session,
+            now_ts=now_ts,
+        )
 
     def _route2_full_bootstrap_eta_locked(
         self,
@@ -2031,202 +1415,56 @@ class MobilePlaybackManager:
         *,
         now_ts: float | None = None,
     ) -> float | None:
-        now_ts = now_ts or time.time()
-        prepare_elapsed_seconds = self._route2_full_prepare_elapsed_seconds_locked(session, now_ts=now_ts)
-        if prepare_elapsed_seconds < ROUTE2_FULL_BOOTSTRAP_ESTIMATE_DELAY_SECONDS:
-            return None
-        published_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
-        prepared_media_seconds = max(0.0, published_end_seconds - epoch.attach_position_seconds)
-        if prepared_media_seconds <= 0.001:
-            return None
-        overall_prepare_rate_x = prepared_media_seconds / max(prepare_elapsed_seconds, 0.001)
-        supply_model = self._route2_supply_model_locked(epoch)
-        rate_candidates = [
-            overall_prepare_rate_x,
-            float(supply_model["overall_rate_x"]),
-            float(supply_model["slow_ema_rate_x"]),
-            float(supply_model["median_rate_x"]),
-        ]
-        positive_rate_candidates = [rate for rate in rate_candidates if rate > 0.0]
-        if not positive_rate_candidates:
-            return None
-        bootstrap_prepare_rate_x = min(positive_rate_candidates)
-        if bootstrap_prepare_rate_x <= 0.001:
-            return None
-        remaining_media_seconds = max(0.0, session.duration_seconds - epoch.attach_position_seconds - prepared_media_seconds)
-        if remaining_media_seconds <= 0.001:
-            return 0.0
-        return remaining_media_seconds / bootstrap_prepare_rate_x
+        return _route2_full_bootstrap_eta_locked_impl(
+            session,
+            epoch,
+            now_ts=now_ts,
+            route2_full_prepare_elapsed_seconds_locked=self._route2_full_prepare_elapsed_seconds_locked,
+            route2_epoch_ready_end_seconds=self._route2_epoch_ready_end_seconds,
+            route2_supply_model_locked=self._route2_supply_model_locked,
+        )
 
     def _route2_full_mode_gate_locked(
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
     ) -> dict[str, float | str | bool | None]:
-        browser_session = session.browser_playback
-        if browser_session.playback_mode != "full":
-            return {
-                "mode_state": "ready",
-                "mode_ready": True,
-                "mode_estimate_seconds": None,
-                "mode_estimate_source": "none",
-            }
-        if not self._route2_full_mode_requires_initial_attach_gate_locked(session):
-            return {
-                "mode_state": "ready",
-                "mode_ready": True,
-                "mode_estimate_seconds": None,
-                "mode_estimate_source": "none",
-            }
-        now_ts = time.time()
-        prepare_elapsed_seconds = self._route2_full_prepare_elapsed_seconds_locked(session, now_ts=now_ts)
-        self._ensure_route2_full_preflight_locked(session)
-        if browser_session.full_preflight_state != "ready" or not browser_session.full_source_bin_bytes:
-            bootstrap_eta_seconds = self._route2_full_bootstrap_eta_locked(session, epoch, now_ts=now_ts)
-            return {
-                "mode_state": "estimating" if bootstrap_eta_seconds is None else "preparing",
-                "mode_ready": False,
-                "mode_estimate_seconds": bootstrap_eta_seconds,
-                "mode_estimate_source": "bootstrap" if bootstrap_eta_seconds is not None else "none",
-            }
-        budget_metrics = self._route2_full_budget_metrics_locked(session, epoch)
-        if budget_metrics is None:
-            bootstrap_eta_seconds = self._route2_full_bootstrap_eta_locked(session, epoch, now_ts=now_ts)
-            return {
-                "mode_state": "estimating" if bootstrap_eta_seconds is None else "preparing",
-                "mode_ready": False,
-                "mode_estimate_seconds": bootstrap_eta_seconds,
-                "mode_estimate_source": "bootstrap" if bootstrap_eta_seconds is not None else "none",
-            }
-        server_goodput = self._route2_server_byte_goodput_locked(epoch)
-        client_goodput = self._route2_client_goodput_locked(session)
-        server_safe = float(server_goodput["safe_rate"])
-        client_safe = float(client_goodput["safe_rate"])
-        server_confident = bool(server_goodput["confident"]) and server_safe > 0.0
-        client_confident = bool(client_goodput["confident"]) and client_safe > 0.0
-        bootstrap_eta_seconds = self._route2_full_bootstrap_eta_locked(session, epoch, now_ts=now_ts)
-        if not server_confident:
-            return {
-                "mode_state": "estimating" if bootstrap_eta_seconds is None else "preparing",
-                "mode_ready": False,
-                "mode_estimate_seconds": bootstrap_eta_seconds,
-                "mode_estimate_source": "bootstrap" if bootstrap_eta_seconds is not None else "none",
-            }
-        estimate_safe_goodput = min(
-            server_safe,
-            client_safe if client_safe > 0.0 else server_safe,
+        return _route2_full_mode_gate_locked_impl(
+            session,
+            epoch,
+            route2_full_mode_requires_initial_attach_gate_locked=self._route2_full_mode_requires_initial_attach_gate_locked,
+            route2_full_prepare_elapsed_seconds_locked=self._route2_full_prepare_elapsed_seconds_locked,
+            ensure_route2_full_preflight_locked=self._ensure_route2_full_preflight_locked,
+            route2_full_bootstrap_eta_locked=self._route2_full_bootstrap_eta_locked,
+            route2_full_budget_metrics_locked=self._route2_full_budget_metrics_locked,
+            route2_server_byte_goodput_locked=self._route2_server_byte_goodput_locked,
+            route2_client_goodput_locked=self._route2_client_goodput_locked,
         )
-        if estimate_safe_goodput <= 0.0:
-            return {
-                "mode_state": "estimating" if bootstrap_eta_seconds is None else "preparing",
-                "mode_ready": False,
-                "mode_estimate_seconds": bootstrap_eta_seconds,
-                "mode_estimate_source": "bootstrap" if bootstrap_eta_seconds is not None else "none",
-            }
-        prepared_bytes = float(budget_metrics["prepared_bytes"])
-        reserve_bytes = float(budget_metrics["reserve_bytes"])
-        cumulative_budget_bytes = [float(value) for value in budget_metrics["cumulative_budget_bytes"]]
-        deadline_seconds = [float(value) for value in budget_metrics["deadline_seconds"]]
-        estimate_deficit_bytes = 0.0
-        for cumulative_required_bytes, deadline_seconds_value in zip(cumulative_budget_bytes, deadline_seconds):
-            covered_bytes = prepared_bytes + (estimate_safe_goodput * deadline_seconds_value)
-            estimate_deficit_bytes = max(
-                estimate_deficit_bytes,
-                (cumulative_required_bytes + reserve_bytes) - covered_bytes,
-            )
-        if client_confident and estimate_deficit_bytes <= 0.001:
-            return {
-                "mode_state": "ready",
-                "mode_ready": True,
-                "mode_estimate_seconds": 0.0,
-                "mode_estimate_source": "true",
-            }
-        if not client_confident:
-            if bootstrap_eta_seconds is not None:
-                return {
-                    "mode_state": "preparing",
-                    "mode_ready": False,
-                    "mode_estimate_seconds": bootstrap_eta_seconds,
-                    "mode_estimate_source": "bootstrap",
-                }
-            client_observation_seconds = float(client_goodput["observation_seconds"])
-            client_observation_deficit_seconds = max(
-                0.0,
-                ROUTE2_FULL_GOODPUT_MIN_OBSERVATION_SECONDS - client_observation_seconds,
-            )
-            if estimate_deficit_bytes <= 0.001:
-                return {
-                    "mode_state": "estimating" if client_observation_deficit_seconds > 0.0 else "preparing",
-                    "mode_ready": False,
-                    "mode_estimate_seconds": None,
-                    "mode_estimate_source": "none",
-                }
-            estimate_wait_seconds = max(
-                estimate_deficit_bytes / server_safe,
-                client_observation_deficit_seconds,
-            )
-        else:
-            estimate_wait_seconds = estimate_deficit_bytes / estimate_safe_goodput if estimate_deficit_bytes > 0.001 else 0.0
-        if prepare_elapsed_seconds < ROUTE2_FULL_BOOTSTRAP_ESTIMATE_DELAY_SECONDS:
-            return {
-                "mode_state": "estimating",
-                "mode_ready": False,
-                "mode_estimate_seconds": None,
-                "mode_estimate_source": "none",
-            }
-        return {
-            "mode_state": "preparing",
-            "mode_ready": False,
-            "mode_estimate_seconds": estimate_wait_seconds,
-            "mode_estimate_source": "true",
-        }
 
     def _route2_epoch_startup_attach_ready_locked(
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
     ) -> bool:
-        if self._route2_full_mode_requires_initial_attach_gate_locked(session):
-            return bool(self._route2_full_mode_gate_locked(session, epoch)["mode_ready"])
-        ready, _estimate_seconds, _supply_rate_x, _observation_seconds, _projected_runway_seconds, _display_confident = (
-            self._route2_attach_gate_state_locked(
-                session,
-                epoch,
-                minimum_runway_seconds=ROUTE2_STARTUP_MIN_RUNWAY_SECONDS,
-                projected_runway_target_seconds=ROUTE2_ATTACH_READY_SECONDS,
-                projection_horizon_seconds=ROUTE2_STARTUP_PROJECTION_HORIZON_SECONDS,
-                minimum_supply_rate_x=ROUTE2_STARTUP_MIN_SUPPLY_RATE_X,
-                reference_position_seconds=epoch.attach_position_seconds,
-            )
+        return _route2_epoch_startup_attach_ready_locked_impl(
+            session,
+            epoch,
+            route2_full_mode_requires_initial_attach_gate_locked=self._route2_full_mode_requires_initial_attach_gate_locked,
+            route2_full_mode_gate_locked=self._route2_full_mode_gate_locked,
+            route2_attach_gate_state_locked=self._route2_attach_gate_state_locked,
+            route2_epoch_ready_end_seconds_locked=self._route2_epoch_ready_end_seconds,
         )
-        if (
-            ready
-            and session.browser_playback.playback_mode == "lite"
-            and session.browser_playback.client_attach_revision == 0
-        ):
-            actual_startup_runway_seconds = max(
-                0.0,
-                self._route2_epoch_ready_end_seconds(session, epoch) - epoch.attach_position_seconds,
-            )
-            return actual_startup_runway_seconds + 0.001 >= ROUTE2_ATTACH_READY_SECONDS
-        return ready
 
     def _route2_epoch_recovery_ready_locked(
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
     ) -> bool:
-        ready, _estimate_seconds, _supply_rate_x, _observation_seconds, _projected_runway_seconds, _display_confident = (
-            self._route2_attach_gate_state_locked(
-                session,
-                epoch,
-                minimum_runway_seconds=ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS,
-                projected_runway_target_seconds=ROUTE2_RECOVERY_RESUME_RUNWAY_SECONDS,
-                projection_horizon_seconds=ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS,
-                minimum_supply_rate_x=ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X,
-            )
+        return _route2_epoch_recovery_ready_locked_impl(
+            session,
+            epoch,
+            route2_attach_gate_state_locked=self._route2_attach_gate_state_locked,
         )
-        return ready
 
     def _route2_low_water_recovery_needed_locked(
         self,
@@ -2235,55 +1473,13 @@ class MobilePlaybackManager:
         *,
         now_ts: float | None = None,
     ) -> tuple[float, float, bool, bool, bool]:
-        now_ts = now_ts or time.time()
-        browser_session = session.browser_playback
-        _, _, runway_seconds, supply_rate_x, observation_seconds, manifest_complete, refill_in_progress = (
-            self._route2_runtime_supply_metrics_locked(session, epoch)
+        return _route2_low_water_recovery_needed_locked_impl(
+            session,
+            epoch,
+            route2_runtime_supply_metrics_locked=self._route2_runtime_supply_metrics_locked,
+            route2_projected_runway_seconds_locked=self._route2_projected_runway_seconds_locked,
+            now_ts=now_ts,
         )
-        steady_playback_guarded = (
-            browser_session.attach_revision > 0
-            and browser_session.client_attach_revision >= browser_session.attach_revision
-            and session.lifecycle_state == "attached"
-            and session.pending_target_seconds is None
-            and session.client_is_playing
-        )
-        starvation_risk = False
-        stalled_recovery_needed = False
-        if not steady_playback_guarded or manifest_complete:
-            epoch.under_supply_started_at_ts = None
-            return runway_seconds, supply_rate_x, refill_in_progress, starvation_risk, stalled_recovery_needed
-        projected_runway_seconds = self._route2_projected_runway_seconds_locked(
-            runway_seconds,
-            supply_rate_x,
-            projection_horizon_seconds=ROUTE2_LOW_WATER_PROJECTION_HORIZON_SECONDS,
-        )
-        starvation_risk = (
-            runway_seconds <= ROUTE2_RECOVERY_RESUME_RUNWAY_SECONDS
-            and observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
-            and supply_rate_x < ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X
-        )
-        low_water_condition = (
-            projected_runway_seconds <= ROUTE2_LOW_WATER_RUNWAY_SECONDS
-            and observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
-            and supply_rate_x < ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X
-        )
-        if low_water_condition:
-            if epoch.under_supply_started_at_ts is None:
-                epoch.under_supply_started_at_ts = now_ts
-        elif (
-            runway_seconds >= ROUTE2_RECOVERY_RESUME_RUNWAY_SECONDS
-            or (
-                observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
-                and supply_rate_x >= ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X
-            )
-        ):
-            epoch.under_supply_started_at_ts = None
-        stalled_recovery_needed = (
-            starvation_risk
-            and epoch.under_supply_started_at_ts is not None
-            and now_ts - epoch.under_supply_started_at_ts >= ROUTE2_LOW_WATER_SUSTAIN_SECONDS
-        )
-        return runway_seconds, supply_rate_x, refill_in_progress, starvation_risk, stalled_recovery_needed
 
     def _route2_position_in_epoch_locked(
         self,
@@ -2291,16 +1487,11 @@ class MobilePlaybackManager:
         epoch: PlaybackEpoch,
         position_seconds: float,
     ) -> bool:
-        ready_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
-        required_end_seconds = min(
-            session.duration_seconds,
-            position_seconds + READY_AFTER_TARGET_SECONDS,
-        )
-        return (
-            epoch.init_published
-            and epoch.contiguous_published_through_segment is not None
-            and epoch.epoch_start_seconds <= position_seconds <= ready_end_seconds + 0.001
-            and ready_end_seconds + 0.001 >= required_end_seconds
+        return _route2_position_in_epoch_locked_impl(
+            session,
+            epoch,
+            position_seconds,
+            route2_epoch_ready_end_seconds_locked=self._route2_epoch_ready_end_seconds,
         )
 
     def _route2_recovery_target_locked(
@@ -2308,15 +1499,11 @@ class MobilePlaybackManager:
         session: MobilePlaybackSession,
         active_epoch: PlaybackEpoch | None = None,
     ) -> float:
-        if session.committed_playhead_seconds > 0:
-            return self._clamp_time(session.committed_playhead_seconds, session.duration_seconds)
-        if session.actual_media_element_time_seconds > 0:
-            return self._clamp_time(session.actual_media_element_time_seconds, session.duration_seconds)
-        if session.last_stable_position_seconds > 0:
-            return self._clamp_time(session.last_stable_position_seconds, session.duration_seconds)
-        if active_epoch is not None:
-            return self._clamp_time(active_epoch.attach_position_seconds, session.duration_seconds)
-        return self._clamp_time(session.target_position_seconds, session.duration_seconds)
+        return _route2_recovery_target_locked_impl(
+            session,
+            active_epoch,
+            clamp_time=self._clamp_time,
+        )
 
     def _terminate_route2_epoch_locked(self, epoch: PlaybackEpoch) -> None:
         epoch.stop_requested = True
@@ -2630,7 +1817,10 @@ class MobilePlaybackManager:
             "force_original_aspect_ratio=decrease"
         )
         keyframe_interval = int(SEGMENT_DURATION_SECONDS * 24)
-        source_input, source_input_kind = self._resolve_worker_source_input(session)
+        source_input, source_input_kind = _resolve_worker_source_input_impl(
+            self.settings,
+            session,
+        )
         command = [
             str(self.settings.ffmpeg_path),
             "-hide_banner",
@@ -3509,117 +2699,6 @@ class MobilePlaybackManager:
             return clamped
         return min(clamped, max(duration_seconds - 1.0, 0.0))
 
-    def _coerce_duration(self, value: object) -> float | None:
-        if value in {None, ""}:
-            return None
-        try:
-            return round(float(value), 2)
-        except (TypeError, ValueError):
-            return None
-
-    def _resolve_duration_seconds(
-        self,
-        item: dict[str, object],
-        *,
-        user_id: int,
-    ) -> tuple[float | None, dict[str, object]]:
-        duration_seconds = self._coerce_duration(item.get("duration_seconds"))
-        if duration_seconds and duration_seconds > 0:
-            return duration_seconds, item
-        if str(item.get("source_kind") or "local") != "cloud":
-            return duration_seconds, item
-        try:
-            refreshed_item = refresh_cloud_media_item_metadata(
-                self.settings,
-                item_id=int(item["id"]),
-            )
-        except Exception:  # noqa: BLE001
-            refreshed_item = None
-        if refreshed_item is not None:
-            item = refreshed_item
-            duration_seconds = self._coerce_duration(item.get("duration_seconds"))
-            if duration_seconds and duration_seconds > 0:
-                return duration_seconds, item
-        probed_duration = self._probe_cloud_stream_duration_seconds(item, user_id=user_id)
-        if probed_duration and probed_duration > 0:
-            item = self._persist_cloud_duration_seconds(
-                item_id=int(item["id"]),
-                duration_seconds=probed_duration,
-            )
-            return probed_duration, item
-        return duration_seconds, item
-
-    def _probe_cloud_stream_duration_seconds(
-        self,
-        item: dict[str, object],
-        *,
-        user_id: int,
-    ) -> float | None:
-        if not self.settings.ffprobe_path:
-            return None
-        session_payload = create_native_playback_session(
-            self.settings,
-            user_id=user_id,
-            item=item,
-            auth_session_id=None,
-            user_agent="Elvern Mobile Experimental Duration Probe",
-            source_ip=None,
-            client_name="Mobile Experimental Duration Probe",
-        )
-        stream_url = self._rewrite_stream_url_for_server_localhost(
-            stream_url=str(session_payload["stream_url"]),
-        )
-        try:
-            completed = subprocess.run(
-                [
-                    str(self.settings.ffprobe_path),
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    stream_url,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        finally:
-            try:
-                close_native_playback_session(
-                    self.settings,
-                    session_id=str(session_payload["session_id"]),
-                    access_token=str(session_payload["access_token"]),
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        if completed.returncode != 0:
-            return None
-        return self._coerce_duration((completed.stdout or "").strip())
-
-    def _persist_cloud_duration_seconds(self, *, item_id: int, duration_seconds: float) -> dict[str, object]:
-        now = utcnow_iso()
-        with get_connection(self.settings) as connection:
-            connection.execute(
-                """
-                UPDATE media_items
-                SET duration_seconds = ?,
-                    updated_at = ?,
-                    last_scanned_at = ?
-                WHERE id = ?
-                """,
-                (duration_seconds, now, now, item_id),
-            )
-            connection.commit()
-        item = get_media_item_record(self.settings, item_id=item_id)
-        if item is None:
-            raise ValueError("Experimental playback media item is no longer available")
-        return item
-
     def _touch_session_locked(self, session: MobilePlaybackSession, *, media_access: bool) -> None:
         now = utcnow_iso()
         session.last_client_seen_at = now
@@ -3734,50 +2813,34 @@ class MobilePlaybackManager:
         }
 
     def _target_is_ready(self, session: MobilePlaybackSession) -> bool:
-        if session.state == "failed":
-            return False
-        return (
-            session.ready_start_seconds <= session.target_position_seconds <= session.ready_end_seconds
-            and session.ready_end_seconds >= min(
-                session.target_position_seconds + READY_AFTER_TARGET_SECONDS,
-                session.duration_seconds,
-            )
-        )
+        return _target_is_ready_impl(session)
 
     def _playback_commit_is_ready(self, session: MobilePlaybackSession) -> bool:
-        if not self._target_is_ready(session):
-            return False
-        return session.ready_end_seconds >= min(
-            session.target_position_seconds + PLAYBACK_COMMIT_RUNWAY_SECONDS,
-            session.duration_seconds,
+        return _playback_commit_is_ready_impl(
+            session,
+            target_is_ready=self._target_is_ready,
         )
 
     def _watch_anchor_position(self, session: MobilePlaybackSession) -> float:
-        if session.pending_target_seconds is not None:
-            return session.target_position_seconds
-        if session.committed_playhead_seconds > 0:
-            return session.committed_playhead_seconds
-        if session.last_stable_position_seconds > 0:
-            return session.last_stable_position_seconds
-        return session.target_position_seconds
+        return _watch_anchor_position_impl(session)
 
     def _ahead_runway_seconds(self, session: MobilePlaybackSession) -> float:
-        anchor = self._watch_anchor_position(session)
-        return max(0.0, session.ready_end_seconds - anchor)
+        return _ahead_runway_seconds_impl(
+            session,
+            watch_anchor_position=self._watch_anchor_position,
+        )
 
     def _starvation_risk(self, session: MobilePlaybackSession) -> bool:
-        if session.pending_target_seconds is not None:
-            return False
-        return session.client_is_playing and self._ahead_runway_seconds(session) < WATCH_LOW_WATERMARK_SECONDS
+        return _starvation_risk_impl(
+            session,
+            ahead_runway_seconds=self._ahead_runway_seconds,
+        )
 
     def _stalled_recovery_needed(self, session: MobilePlaybackSession) -> bool:
-        if session.lifecycle_state in {"resuming", "recovering", "fatal"}:
-            return True
-        if session.stalled_recovery_requested:
-            return True
-        if session.pending_target_seconds is not None:
-            return False
-        return session.client_is_playing and self._ahead_runway_seconds(session) < WATCH_STALLED_RECOVERY_RUNWAY_SECONDS
+        return _stalled_recovery_needed_impl(
+            session,
+            ahead_runway_seconds=self._ahead_runway_seconds,
+        )
 
     def _combined_available_segments_locked(self, session: MobilePlaybackSession, cache_state: CacheState) -> set[int]:
         available = set(cache_state.cached_segments)
@@ -3999,7 +3062,10 @@ class MobilePlaybackManager:
             job.prepare_end_seconds - job.prepare_start_seconds,
         )
         keyframe_interval = int(SEGMENT_DURATION_SECONDS * 24)
-        source_input, source_input_kind = self._resolve_worker_source_input(session)
+        source_input, source_input_kind = _resolve_worker_source_input_impl(
+            self.settings,
+            session,
+        )
         command = [
             str(self.settings.ffmpeg_path),
             "-hide_banner",
@@ -4102,36 +3168,6 @@ class MobilePlaybackManager:
             ]
         )
         return command
-
-    def _resolve_worker_source_input(self, session: MobilePlaybackSession) -> tuple[str, str]:
-        if session.source_input_kind == "path":
-            return session.source_locator, "path"
-        item = get_media_item_record(self.settings, item_id=session.media_item_id)
-        if item is None:
-            raise ValueError("Experimental playback media item is no longer available")
-        session_payload = create_native_playback_session(
-            self.settings,
-            user_id=session.user_id,
-            item=item,
-            auth_session_id=None,
-            user_agent="Elvern Mobile Experimental Playback",
-            source_ip=None,
-            client_name="Mobile Experimental Cloud Transcode",
-        )
-        return self._rewrite_stream_url_for_server_localhost(
-            stream_url=str(session_payload["stream_url"])
-        ), "url"
-
-    def _rewrite_stream_url_for_server_localhost(self, *, stream_url: str) -> str:
-        parsed = urlsplit(stream_url)
-        if not parsed.scheme or not parsed.netloc:
-            return stream_url
-        host = self.settings.bind_host.strip()
-        if host in {"", "0.0.0.0", "::", "[::]"}:
-            host = "127.0.0.1"
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        return parsed._replace(netloc=f"{host}:{self.settings.port}").geturl()
 
     def _publish_job_outputs(self, session_id: str, generation: int) -> None:
         with self._lock:

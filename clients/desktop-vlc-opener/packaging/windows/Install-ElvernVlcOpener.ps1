@@ -3,6 +3,7 @@ param()
 $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$metadataPath = Join-Path (Split-Path -Parent $scriptRoot) "helper-release.env"
 $sourceAppRoot = Join-Path $scriptRoot "app"
 $sourceExe = Join-Path $sourceAppRoot "Elvern.VlcOpener.exe"
 $sourceDll = Join-Path $sourceAppRoot "Elvern.VlcOpener.dll"
@@ -14,6 +15,47 @@ $installedUninstall = Join-Path $installRoot "Uninstall-ElvernVlcOpener.ps1"
 $protocolKey = "Registry::HKEY_CURRENT_USER\Software\Classes\elvern-vlc"
 $commandKey = "$protocolKey\shell\open\command"
 $uninstallKey = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\ElvernVlcOpener"
+
+function Get-HelperReleaseMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        throw "Missing helper packaging metadata: $Path"
+    }
+
+    $metadata = @{}
+    foreach ($rawLine in Get-Content -Path $Path) {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) {
+            continue
+        }
+
+        $parts = $line -split "=", 2
+        if ($parts.Count -ne 2) {
+            continue
+        }
+
+        $key = $parts[0].Trim()
+        $value = $parts[1].Trim()
+        if ($value.Length -ge 2) {
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+        $metadata[$key] = $value
+    }
+
+    foreach ($requiredKey in @("HELPER_VERSION", "HELPER_CHANNEL", "DOTNET_RUNTIME_MAJOR", "DOTNET_RUNTIME_DISPLAY", "PACKAGE_NAME_PREFIX")) {
+        if (-not $metadata.ContainsKey($requiredKey) -or [string]::IsNullOrWhiteSpace($metadata[$requiredKey])) {
+            throw "Missing $requiredKey in $Path"
+        }
+    }
+
+    return $metadata
+}
 
 function Resolve-DotnetPath {
     $candidates = @()
@@ -38,6 +80,13 @@ function Resolve-DotnetPath {
     return $null
 }
 
+$helperMetadata = Get-HelperReleaseMetadata -Path $metadataPath
+$helperVersion = $helperMetadata["HELPER_VERSION"]
+$helperChannel = $helperMetadata["HELPER_CHANNEL"]
+$dotnetRuntimeMajor = $helperMetadata["DOTNET_RUNTIME_MAJOR"]
+$dotnetRuntimeDisplay = $helperMetadata["DOTNET_RUNTIME_DISPLAY"]
+$packageNamePrefix = $helperMetadata["PACKAGE_NAME_PREFIX"]
+
 if (-not (Test-Path $sourceAppRoot)) {
     throw "Missing app payload next to the installer."
 }
@@ -59,18 +108,18 @@ if (Test-Path $localUninstallScript) {
 }
 
 $protocolCommand = $null
-$version = "0.8.0"
+$version = $helperVersion
 
 if (Test-Path $installedExe) {
     $version = (Get-Item $installedExe).VersionInfo.ProductVersion
     if ([string]::IsNullOrWhiteSpace($version)) {
-        $version = "0.8.0"
+        $version = $helperVersion
     }
     $protocolCommand = "`"$installedExe`" `"%1`""
 } elseif (Test-Path $installedDll) {
     $dotnetPath = Resolve-DotnetPath
     if (-not $dotnetPath) {
-        throw "This package is framework-dependent. Install the .NET 8 runtime on this Windows machine and run the installer again."
+        throw "This package is framework-dependent. Install the $dotnetRuntimeDisplay on this Windows machine and run the installer again."
     }
     $protocolCommand = "`"$dotnetPath`" `"$installedDll`" `"%1`""
 } else {
