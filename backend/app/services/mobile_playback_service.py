@@ -107,6 +107,43 @@ from .mobile_playback_route2_gates import (
 from .mobile_playback_route2_recovery import (
     _route2_low_water_recovery_needed_locked as _route2_low_water_recovery_needed_locked_impl,
 )
+from .mobile_playback_route2_snapshot import (
+    _route2_snapshot_locked as _route2_snapshot_locked_impl,
+)
+from .mobile_playback_route2_epoch_access import (
+    _cleanup_route2_draining_epochs_locked as _cleanup_route2_draining_epochs_locked_impl,
+    _prepare_route2_epoch_access_locked as _prepare_route2_epoch_access_locked_impl,
+    _route2_epoch_is_draining_expired_locked as _route2_epoch_is_draining_expired_locked_impl,
+)
+from .mobile_playback_route2_epoch_artifacts import (
+    _contiguous_segment_frontier as _contiguous_segment_frontier_impl,
+    _rebuild_route2_published_frontier_locked as _rebuild_route2_published_frontier_locked_impl,
+    _route2_segment_destination as _route2_segment_destination_impl,
+    _write_json_atomic as _write_json_atomic_impl,
+    _write_route2_epoch_metadata_locked as _write_route2_epoch_metadata_locked_impl,
+    _write_route2_frontier_locked as _write_route2_frontier_locked_impl,
+)
+from .mobile_playback_route2_epoch_lifecycle import (
+    _build_route2_epoch_locked as _build_route2_epoch_locked_impl,
+    _discard_route2_epoch_locked as _discard_route2_epoch_locked_impl,
+    _ensure_route2_epoch_workspace_locked as _ensure_route2_epoch_workspace_locked_impl,
+    _initialize_route2_session_locked as _initialize_route2_session_locked_impl,
+    _terminate_route2_epoch_locked as _terminate_route2_epoch_locked_impl,
+)
+from .mobile_playback_route2_epoch_publication import (
+    _publish_route2_epoch_outputs_locked as _publish_route2_epoch_outputs_locked_impl,
+    _route2_publish_init_locked as _route2_publish_init_locked_impl,
+    _route2_publish_segment_locked as _route2_publish_segment_locked_impl,
+)
+from .mobile_playback_route2_preflight_service import (
+    _build_route2_full_source_bin_bytes as _build_route2_full_source_bin_bytes_impl,
+    _ensure_route2_full_preflight_locked as _ensure_route2_full_preflight_locked_impl,
+    _load_route2_full_preflight_cache_locked as _load_route2_full_preflight_cache_locked_impl,
+    _route2_full_preflight_cache_path as _route2_full_preflight_cache_path_impl,
+    _route2_full_preflight_source_input as _route2_full_preflight_source_input_impl,
+    _route2_full_scan_packet_bins as _route2_full_scan_packet_bins_impl,
+    _run_route2_full_preflight_worker as _run_route2_full_preflight_worker_impl,
+)
 from .mobile_playback_route2_math import (
     _conservative_goodput_locked as _conservative_goodput_locked_impl,
     _ema_locked as _ema_locked_impl,
@@ -821,49 +858,18 @@ class MobilePlaybackManager:
         )
 
     def _initialize_route2_session_locked(self, session: MobilePlaybackSession) -> None:
-        browser_session = session.browser_playback
-        browser_session.state = "starting"
-        browser_session.attach_revision = 0
-        browser_session.client_attach_revision = 0
-        browser_session.attach_revision_issued_at_ts = 0.0
-        browser_session.last_attach_warning_revision = 0
-        browser_session.replacement_epoch_id = None
-        browser_session.replacement_retry_not_before_ts = 0.0
-        browser_session.full_preflight_error = None
-        browser_session.full_prepare_started_at_ts = (
-            time.time() if browser_session.playback_mode == "full" else 0.0
+        _initialize_route2_session_locked_impl(
+            session,
+            build_route2_epoch_locked=self._build_route2_epoch_locked,
+            ensure_route2_epoch_workspace_locked=self._ensure_route2_epoch_workspace_locked,
+            ensure_route2_full_preflight_locked=self._ensure_route2_full_preflight_locked,
         )
-        browser_session.client_probe_samples.clear()
-        initial_epoch = self._build_route2_epoch_locked(session)
-        browser_session.active_epoch_id = initial_epoch.epoch_id
-        browser_session.epochs[initial_epoch.epoch_id] = initial_epoch
-        self._ensure_route2_epoch_workspace_locked(initial_epoch)
-        self._ensure_route2_full_preflight_locked(session)
-        session.worker_state = "idle"
-        session.pending_target_seconds = None
-        session.ready_start_seconds = 0.0
-        session.ready_end_seconds = 0.0
-        session.state = "preparing"
 
     def _build_route2_epoch_locked(self, session: MobilePlaybackSession) -> PlaybackEpoch:
-        epoch_id = uuid.uuid4().hex
-        epoch_dir = self._route2_root / "sessions" / session.session_id / "epochs" / epoch_id
-        target_position_seconds = self._clamp_time(session.target_position_seconds, session.duration_seconds)
-        epoch_start_seconds = max(0.0, round(target_position_seconds - 20.0, 2))
-        return PlaybackEpoch(
-            epoch_id=epoch_id,
-            session_id=session.session_id,
-            created_at=utcnow_iso(),
-            target_position_seconds=target_position_seconds,
-            epoch_start_seconds=epoch_start_seconds,
-            attach_position_seconds=target_position_seconds,
-            epoch_dir=epoch_dir,
-            staging_dir=epoch_dir / "staging",
-            published_dir=epoch_dir / "published",
-            staging_manifest_path=(epoch_dir / "staging" / "ffmpeg.m3u8"),
-            metadata_path=epoch_dir / "epoch.json",
-            frontier_path=(epoch_dir / "published" / "frontier.json"),
-            published_init_path=(epoch_dir / "published" / "init.mp4"),
+        return _build_route2_epoch_locked_impl(
+            self._route2_root,
+            session,
+            clamp_time=self._clamp_time,
         )
 
     def _log_route2_event(
@@ -1098,20 +1104,11 @@ class MobilePlaybackManager:
         *,
         now_ts: float | None = None,
     ) -> bool:
-        if epoch.state != "draining":
-            return False
-        if session.browser_playback.active_epoch_id == epoch.epoch_id:
-            return False
-        now_ts = now_ts or time.time()
-        drain_started_at_ts = epoch.drain_started_at_ts or now_ts
-        last_media_access_at_ts = epoch.last_media_access_at_ts or drain_started_at_ts
-        client_caught_up = (
-            epoch.drain_target_attach_revision > 0
-            and session.browser_playback.client_attach_revision >= epoch.drain_target_attach_revision
+        return _route2_epoch_is_draining_expired_locked_impl(
+            session,
+            epoch,
+            now_ts=now_ts,
         )
-        if client_caught_up and now_ts - last_media_access_at_ts >= ROUTE2_DRAIN_IDLE_GRACE_SECONDS:
-            return True
-        return now_ts - drain_started_at_ts >= ROUTE2_DRAIN_MAX_SECONDS
 
     def _cleanup_route2_draining_epochs_locked(
         self,
@@ -1119,22 +1116,13 @@ class MobilePlaybackManager:
         *,
         now_ts: float | None = None,
     ) -> None:
-        browser_session = session.browser_playback
-        now_ts = now_ts or time.time()
-        for epoch_id, epoch in list(browser_session.epochs.items()):
-            if epoch_id in {browser_session.active_epoch_id, browser_session.replacement_epoch_id}:
-                continue
-            if not self._route2_epoch_is_draining_expired_locked(session, epoch, now_ts=now_ts):
-                continue
-            self._log_route2_event(
-                "epoch_drain_expired",
-                session=session,
-                epoch=epoch,
-                drain_started_at_ts=epoch.drain_started_at_ts,
-                last_media_access_at_ts=epoch.last_media_access_at_ts,
-                drain_target_attach_revision=epoch.drain_target_attach_revision or None,
-            )
-            self._discard_route2_epoch_locked(session, epoch_id)
+        _cleanup_route2_draining_epochs_locked_impl(
+            session,
+            route2_epoch_is_draining_expired_locked=self._route2_epoch_is_draining_expired_locked,
+            log_route2_event=self._log_route2_event,
+            discard_route2_epoch_locked=self._discard_route2_epoch_locked,
+            now_ts=now_ts,
+        )
 
     def _prepare_route2_epoch_access_locked(
         self,
@@ -1143,36 +1131,14 @@ class MobilePlaybackManager:
         *,
         media_kind: str,
     ) -> None:
-        now_ts = time.time()
-        self._touch_session_locked(session, media_access=True)
-        self._cleanup_route2_draining_epochs_locked(session, now_ts=now_ts)
-        browser_session = session.browser_playback
-        if epoch.epoch_id == browser_session.active_epoch_id:
-            epoch.last_media_access_at_ts = now_ts
-            return
-        if epoch.state == "draining":
-            if self._route2_epoch_is_draining_expired_locked(session, epoch, now_ts=now_ts):
-                self._log_route2_event(
-                    "stale_epoch_request",
-                    session=session,
-                    epoch=epoch,
-                    level=logging.WARNING,
-                    media_kind=media_kind,
-                    reason="draining_epoch_expired",
-                )
-                self._discard_route2_epoch_locked(session, epoch.epoch_id)
-                raise FileNotFoundError("Route 2 epoch is no longer active")
-            epoch.last_media_access_at_ts = now_ts
-            return
-        self._log_route2_event(
-            "stale_epoch_request",
-            session=session,
-            epoch=epoch,
-            level=logging.WARNING,
+        _prepare_route2_epoch_access_locked_impl(
+            session,
+            epoch,
             media_kind=media_kind,
-            reason="inactive_epoch_request",
+            touch_session_locked=self._touch_session_locked,
+            log_route2_event=self._log_route2_event,
+            discard_route2_epoch_locked=self._discard_route2_epoch_locked,
         )
-        raise FileNotFoundError("Route 2 epoch is no longer active")
 
     def _route2_epoch_ready_end_seconds(
         self,
@@ -1506,37 +1472,21 @@ class MobilePlaybackManager:
         )
 
     def _terminate_route2_epoch_locked(self, epoch: PlaybackEpoch) -> None:
-        epoch.stop_requested = True
-        if epoch.active_worker_id:
-            self._workers.pop(epoch.active_worker_id, None)
-            epoch.active_worker_id = None
-        process = epoch.process
-        epoch.process = None
-        if not process or process.poll() is not None:
-            return
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        _terminate_route2_epoch_locked_impl(
+            epoch,
+            workers=self._workers,
+        )
 
     def _discard_route2_epoch_locked(
         self,
         session: MobilePlaybackSession,
         epoch_id: str,
     ) -> None:
-        browser_session = session.browser_playback
-        epoch = browser_session.epochs.get(epoch_id)
-        if epoch is None:
-            if browser_session.replacement_epoch_id == epoch_id:
-                browser_session.replacement_epoch_id = None
-            return
-        self._terminate_route2_epoch_locked(epoch)
-        if browser_session.replacement_epoch_id == epoch_id:
-            browser_session.replacement_epoch_id = None
-        browser_session.epochs.pop(epoch_id, None)
-        shutil.rmtree(epoch.epoch_dir, ignore_errors=True)
+        _discard_route2_epoch_locked_impl(
+            session,
+            epoch_id,
+            terminate_route2_epoch_locked=self._terminate_route2_epoch_locked,
+        )
 
     def _create_route2_replacement_epoch_locked(
         self,
@@ -1661,116 +1611,49 @@ class MobilePlaybackManager:
             session.queue_started_ts = None
 
     def _ensure_route2_epoch_workspace_locked(self, epoch: PlaybackEpoch) -> None:
-        epoch.epoch_dir.mkdir(parents=True, exist_ok=True)
-        epoch.staging_dir.mkdir(parents=True, exist_ok=True)
-        epoch.published_dir.mkdir(parents=True, exist_ok=True)
-        self._rebuild_route2_published_frontier_locked(epoch)
-        self._write_route2_epoch_metadata_locked(epoch)
+        _ensure_route2_epoch_workspace_locked_impl(
+            epoch,
+            rebuild_route2_published_frontier_locked=self._rebuild_route2_published_frontier_locked,
+            write_route2_epoch_metadata_locked=self._write_route2_epoch_metadata_locked,
+        )
 
     def _write_route2_epoch_metadata_locked(self, epoch: PlaybackEpoch) -> None:
-        self._write_json_atomic(
-            epoch.metadata_path,
-            {
-                "epoch_id": epoch.epoch_id,
-                "session_id": epoch.session_id,
-                "created_at": epoch.created_at,
-                "state": epoch.state,
-                "target_position_seconds": round(epoch.target_position_seconds, 2),
-                "epoch_start_seconds": round(epoch.epoch_start_seconds, 2),
-                "attach_position_seconds": round(epoch.attach_position_seconds, 2),
-                "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
-                "staging_dir": str(epoch.staging_dir),
-                "published_dir": str(epoch.published_dir),
-                "published_total_bytes": epoch.published_total_bytes,
-                "transcoder_completed": epoch.transcoder_completed,
-                "active_worker_id": epoch.active_worker_id,
-                "drain_started_at_ts": epoch.drain_started_at_ts,
-                "drain_target_attach_revision": epoch.drain_target_attach_revision,
-                "last_media_access_at_ts": epoch.last_media_access_at_ts,
-                "last_error": epoch.last_error,
-                "updated_at": utcnow_iso(),
-            },
+        _write_route2_epoch_metadata_locked_impl(
+            epoch,
+            write_json_atomic=self._write_json_atomic,
         )
 
     def _write_route2_frontier_locked(self, epoch: PlaybackEpoch) -> None:
-        published_end_seconds = 0.0
-        if epoch.init_published and epoch.contiguous_published_through_segment is not None:
-            published_end_seconds = epoch.epoch_start_seconds + (
-                (epoch.contiguous_published_through_segment + 1) * SEGMENT_DURATION_SECONDS
-            )
-        self._write_json_atomic(
-            epoch.frontier_path,
-            {
-                "epoch_id": epoch.epoch_id,
-                "state": epoch.state,
-                "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
-                "init_published": epoch.init_published,
-                "published_ranges": self._compress_ranges(epoch.published_segments),
-                "contiguous_published_through_segment": epoch.contiguous_published_through_segment,
-                "published_total_bytes": epoch.published_total_bytes,
-                "published_ready_start_seconds": round(epoch.epoch_start_seconds, 2)
-                if epoch.init_published and epoch.contiguous_published_through_segment is not None
-                else 0.0,
-                "published_ready_end_seconds": round(published_end_seconds, 2),
-                "transcoder_completed": epoch.transcoder_completed,
-                "last_published_at": epoch.last_published_at,
-                "last_error": epoch.last_error,
-                "updated_at": utcnow_iso(),
-            },
+        _write_route2_frontier_locked_impl(
+            epoch,
+            write_json_atomic=self._write_json_atomic,
+            compress_ranges=self._compress_ranges,
         )
 
     def _write_json_atomic(self, destination: Path, payload: dict[str, object]) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
-        temporary_path.write_text(
-            json.dumps(payload, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
-        temporary_path.replace(destination)
+        _write_json_atomic_impl(destination, payload)
 
     def _rebuild_route2_published_frontier_locked(self, epoch: PlaybackEpoch) -> None:
-        epoch.published_dir.mkdir(parents=True, exist_ok=True)
-        epoch.init_published = epoch.published_init_path.exists()
-        epoch.published_init_bytes = epoch.published_init_path.stat().st_size if epoch.init_published else 0
-        published_segments: set[int] = set()
-        published_segment_bytes: dict[int, int] = {}
-        for child in epoch.published_dir.glob("segment_*.m4s"):
-            token = child.stem.removeprefix("segment_")
-            try:
-                segment_index = int(token)
-            except ValueError:
-                continue
-            published_segments.add(segment_index)
-            published_segment_bytes[segment_index] = child.stat().st_size
-        epoch.published_segments = published_segments
-        epoch.published_segment_bytes = published_segment_bytes
-        epoch.published_total_bytes = epoch.published_init_bytes + sum(published_segment_bytes.values())
-        epoch.contiguous_published_through_segment = self._contiguous_segment_frontier(published_segments) if epoch.init_published else None
-        if epoch.init_published or epoch.published_segments:
-            epoch.last_published_at = utcnow_iso()
-        self._record_route2_byte_sample_locked(epoch)
-        self._write_route2_frontier_locked(epoch)
+        _rebuild_route2_published_frontier_locked_impl(
+            epoch,
+            contiguous_segment_frontier=self._contiguous_segment_frontier,
+            record_route2_byte_sample_locked=self._record_route2_byte_sample_locked,
+            write_route2_frontier_locked=self._write_route2_frontier_locked,
+        )
 
     def _contiguous_segment_frontier(self, published_segments: set[int]) -> int | None:
-        if 0 not in published_segments:
-            return None
-        frontier = 0
-        while frontier + 1 in published_segments:
-            frontier += 1
-        return frontier
+        return _contiguous_segment_frontier_impl(published_segments)
 
     def _route2_segment_destination(self, epoch: PlaybackEpoch, segment_index: int) -> Path:
-        return epoch.published_dir / f"segment_{segment_index:06d}.m4s"
+        return _route2_segment_destination_impl(epoch, segment_index)
 
     def _route2_publish_init_locked(self, epoch: PlaybackEpoch, staged_init_path: Path) -> Path:
-        epoch.published_dir.mkdir(parents=True, exist_ok=True)
-        if not staged_init_path.exists():
-            raise FileNotFoundError("Route 2 staged init segment is missing")
-        if not epoch.published_init_path.exists():
-            staged_init_path.replace(epoch.published_init_path)
-        self._rebuild_route2_published_frontier_locked(epoch)
-        self._write_route2_epoch_metadata_locked(epoch)
-        return epoch.published_init_path
+        return _route2_publish_init_locked_impl(
+            epoch,
+            staged_init_path,
+            rebuild_route2_published_frontier_locked=self._rebuild_route2_published_frontier_locked,
+            write_route2_epoch_metadata_locked=self._write_route2_epoch_metadata_locked,
+        )
 
     def _route2_publish_segment_locked(
         self,
@@ -1778,31 +1661,21 @@ class MobilePlaybackManager:
         segment_index: int,
         staged_segment_path: Path,
     ) -> Path:
-        if segment_index < 0:
-            raise ValueError("Route 2 segment index must be non-negative")
-        if not staged_segment_path.exists():
-            raise FileNotFoundError("Route 2 staged segment is missing")
-        destination = self._route2_segment_destination(epoch, segment_index)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if not destination.exists():
-            staged_segment_path.replace(destination)
-        self._rebuild_route2_published_frontier_locked(epoch)
-        self._write_route2_epoch_metadata_locked(epoch)
-        return destination
+        return _route2_publish_segment_locked_impl(
+            epoch,
+            segment_index,
+            staged_segment_path,
+            route2_segment_destination=self._route2_segment_destination,
+            rebuild_route2_published_frontier_locked=self._rebuild_route2_published_frontier_locked,
+            write_route2_epoch_metadata_locked=self._write_route2_epoch_metadata_locked,
+        )
 
     def _publish_route2_epoch_outputs_locked(self, epoch: PlaybackEpoch) -> None:
-        init_candidate = epoch.staging_dir / "init.mp4"
-        if init_candidate.exists() and not epoch.init_published:
-            self._route2_publish_init_locked(epoch, init_candidate)
-        for child in sorted(epoch.staging_dir.glob("segment_*.m4s")):
-            token = child.stem.removeprefix("segment_")
-            try:
-                segment_index = int(token)
-            except ValueError:
-                continue
-            if segment_index in epoch.published_segments:
-                continue
-            self._route2_publish_segment_locked(epoch, segment_index, child)
+        _publish_route2_epoch_outputs_locked_impl(
+            epoch,
+            route2_publish_init_locked=self._route2_publish_init_locked,
+            route2_publish_segment_locked=self._route2_publish_segment_locked,
+        )
 
     def _build_route2_epoch_ffmpeg_command(
         self,
@@ -2059,200 +1932,19 @@ class MobilePlaybackManager:
             self._refresh_route2_session_authority_locked(session)
 
     def _route2_snapshot_locked(self, session: MobilePlaybackSession) -> dict[str, object]:
-        now_ts = time.time()
-        browser_session = session.browser_playback
-        active_epoch = (
-            browser_session.epochs.get(browser_session.active_epoch_id)
-            if browser_session.active_epoch_id
-            else None
+        return _route2_snapshot_locked_impl(
+            session,
+            route2_attach_gate_state_locked=self._route2_attach_gate_state_locked,
+            route2_display_prepare_eta_locked=self._route2_display_prepare_eta_locked,
+            route2_epoch_recovery_ready_locked=self._route2_epoch_recovery_ready_locked,
+            route2_epoch_startup_attach_ready_locked=self._route2_epoch_startup_attach_ready_locked,
+            guard_route2_full_attach_boundary_locked=self._guard_route2_full_attach_boundary_locked,
+            route2_epoch_ready_end_seconds=self._route2_epoch_ready_end_seconds,
+            route2_low_water_recovery_needed_locked=self._route2_low_water_recovery_needed_locked,
+            route2_full_mode_gate_locked=self._route2_full_mode_gate_locked,
+            route2_position_in_epoch_locked=self._route2_position_in_epoch_locked,
+            segment_index_for_time=self._segment_index_for_time,
         )
-        replacement_epoch = (
-            browser_session.epochs.get(browser_session.replacement_epoch_id)
-            if browser_session.replacement_epoch_id
-            else None
-        )
-        active_manifest_url = None
-        attach_position_seconds = round(session.target_position_seconds, 2)
-        attach_ready = False
-        ahead_runway_seconds = 0.0
-        supply_rate_x = 0.0
-        supply_observation_seconds = 0.0
-        prepare_estimate_seconds = None
-        mode_estimate_seconds = None
-        mode_estimate_source = "none"
-        mode_state = "preparing"
-        mode_ready = False
-        refill_in_progress = False
-        starvation_risk = False
-        stalled_recovery_needed = False
-        if active_epoch is not None:
-            active_manifest_url = f"/api/mobile-playback/epochs/{active_epoch.epoch_id}/index.m3u8"
-            attach_position_seconds = round(active_epoch.attach_position_seconds, 2)
-        ready_start_seconds = 0.0
-        ready_end_seconds = 0.0
-        cache_ranges: list[list[float]] = []
-        manifest_end_segment = 0
-        controller_epoch = replacement_epoch if replacement_epoch is not None else active_epoch
-        recovery_gate = replacement_epoch is None and session.lifecycle_state in {"resuming", "recovering"}
-        if controller_epoch and controller_epoch.init_published and controller_epoch.contiguous_published_through_segment is not None:
-            (
-                _controller_attach_ready,
-                raw_prepare_estimate_seconds,
-                supply_rate_x,
-                supply_observation_seconds,
-                _projected_runway_seconds,
-                display_confident,
-            ) = self._route2_attach_gate_state_locked(
-                session,
-                controller_epoch,
-                minimum_runway_seconds=(
-                    ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS if recovery_gate else ROUTE2_STARTUP_MIN_RUNWAY_SECONDS
-                ),
-                projected_runway_target_seconds=(
-                    ROUTE2_RECOVERY_RESUME_RUNWAY_SECONDS if recovery_gate else ROUTE2_ATTACH_READY_SECONDS
-                ),
-                projection_horizon_seconds=(
-                    ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS if recovery_gate else ROUTE2_STARTUP_PROJECTION_HORIZON_SECONDS
-                ),
-                minimum_supply_rate_x=(
-                    ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X if recovery_gate else ROUTE2_STARTUP_MIN_SUPPLY_RATE_X
-                ),
-                reference_position_seconds=None if recovery_gate else controller_epoch.attach_position_seconds,
-            )
-            prepare_estimate_seconds = self._route2_display_prepare_eta_locked(
-                controller_epoch,
-                raw_prepare_estimate_seconds,
-                now_ts=now_ts,
-                display_confident=display_confident,
-            )
-        if active_epoch and active_epoch.init_published and active_epoch.contiguous_published_through_segment is not None:
-            recovery_attach_ready = self._route2_epoch_recovery_ready_locked(session, active_epoch)
-            startup_attach_ready = self._route2_epoch_startup_attach_ready_locked(session, active_epoch)
-            attach_ready = (
-                recovery_attach_ready if session.lifecycle_state in {"resuming", "recovering"} else startup_attach_ready
-            ) and browser_session.attach_revision > 0
-            attach_ready = self._guard_route2_full_attach_boundary_locked(
-                session,
-                active_epoch,
-                attach_eligible=attach_ready,
-                guard_path="route2_snapshot_attach_ready",
-            )
-            ready_start_seconds = round(active_epoch.epoch_start_seconds, 2)
-            ready_end_seconds = round(self._route2_epoch_ready_end_seconds(session, active_epoch), 2)
-            manifest_end_segment = active_epoch.contiguous_published_through_segment
-            cache_ranges = [[ready_start_seconds, ready_end_seconds]]
-            (
-                ahead_runway_seconds,
-                _supply_rate_x,
-                refill_in_progress,
-                starvation_risk,
-                stalled_recovery_needed,
-            ) = self._route2_low_water_recovery_needed_locked(session, active_epoch)
-            if replacement_epoch is None:
-                supply_rate_x = _supply_rate_x
-        if browser_session.playback_mode == "full" and controller_epoch is not None:
-            full_mode_gate = self._route2_full_mode_gate_locked(session, controller_epoch)
-            mode_state = str(full_mode_gate["mode_state"])
-            mode_ready = bool(full_mode_gate["mode_ready"])
-            mode_estimate_source = str(full_mode_gate.get("mode_estimate_source") or "none")
-            mode_estimate_seconds = (
-                round(float(full_mode_gate["mode_estimate_seconds"]), 2)
-                if full_mode_gate["mode_estimate_seconds"] is not None
-                else None
-            )
-            prepare_estimate_seconds = mode_estimate_seconds
-        else:
-            mode_ready = attach_ready
-            mode_estimate_seconds = round(prepare_estimate_seconds, 2) if prepare_estimate_seconds is not None else None
-            mode_estimate_source = "true" if mode_estimate_seconds is not None else "none"
-            if mode_ready:
-                mode_state = "ready"
-            elif mode_estimate_seconds is None:
-                mode_state = "estimating"
-            else:
-                mode_state = "preparing"
-        can_play_from_target = (
-            active_epoch is not None
-            and self._route2_position_in_epoch_locked(session, active_epoch, session.target_position_seconds)
-            and session.pending_target_seconds is None
-        )
-        return {
-            "session_id": session.session_id,
-            "media_item_id": session.media_item_id,
-            "epoch": session.epoch,
-            "manifest_revision": (
-                f"route2:{browser_session.attach_revision}:{active_epoch.epoch_id}"
-                if active_epoch is not None
-                else f"route2:{browser_session.attach_revision}:none"
-            ),
-            "state": session.state,
-            "profile": session.profile,
-            "duration_seconds": round(session.duration_seconds, 2),
-            "target_position_seconds": round(session.target_position_seconds, 2),
-            "ready_start_seconds": ready_start_seconds,
-            "ready_end_seconds": ready_end_seconds,
-            "can_play_from_target": can_play_from_target,
-            "manifest_url": (
-                active_manifest_url
-                if active_manifest_url
-                else f"/api/mobile-playback/sessions/{session.session_id}/index.m3u8"
-            ),
-            "status_url": f"/api/mobile-playback/sessions/{session.session_id}",
-            "seek_url": f"/api/mobile-playback/sessions/{session.session_id}/seek",
-            "heartbeat_url": f"/api/mobile-playback/sessions/{session.session_id}/heartbeat",
-            "stop_url": f"/api/mobile-playback/sessions/{session.session_id}/stop",
-            "manifest_start_segment": 0,
-            "manifest_end_segment": manifest_end_segment,
-            "manifest_start_seconds": ready_start_seconds,
-            "manifest_end_seconds": ready_end_seconds,
-            "last_error": session.last_error,
-            "worker_state": session.worker_state,
-            "pending_target_seconds": round(session.pending_target_seconds, 2)
-            if session.pending_target_seconds is not None
-            else None,
-            "last_stable_position_seconds": round(session.last_stable_position_seconds, 2),
-            "playing_before_seek": session.playing_before_seek,
-            "target_segment_index": self._segment_index_for_time(session.target_position_seconds),
-            "target_cluster_ready": False,
-            "target_window_ready": False,
-            "playback_commit_ready": False,
-            "cache_ranges": cache_ranges,
-            "committed_playhead_seconds": round(session.committed_playhead_seconds, 2),
-            "actual_media_element_time_seconds": round(session.actual_media_element_time_seconds, 2),
-            "ahead_runway_seconds": round(ahead_runway_seconds, 2),
-            "supply_rate_x": round(supply_rate_x, 3),
-            "supply_observation_seconds": round(supply_observation_seconds, 2),
-            "prepare_estimate_seconds": round(prepare_estimate_seconds, 2)
-            if prepare_estimate_seconds is not None
-            else None,
-            "refill_in_progress": refill_in_progress,
-            "last_refill_start_seconds": None,
-            "last_refill_end_seconds": None,
-            "starvation_risk": starvation_risk,
-            "stalled_recovery_needed": stalled_recovery_needed,
-            "lifecycle_state": session.lifecycle_state,
-            "status_poll_seconds": (
-                STATUS_POLL_PREPARE_SECONDS
-                if browser_session.replacement_epoch_id or not attach_ready or browser_session.client_attach_revision < browser_session.attach_revision
-                else 3.0
-            ),
-            "engine_mode": browser_session.engine_mode,
-            "playback_mode": browser_session.playback_mode,
-            "mode_state": mode_state,
-            "mode_ready": mode_ready,
-            "mode_estimate_seconds": mode_estimate_seconds,
-            "mode_estimate_source": mode_estimate_source,
-            "session_state": browser_session.state,
-            "attach_revision": browser_session.attach_revision,
-            "client_attach_revision": browser_session.client_attach_revision,
-            "active_epoch_id": browser_session.active_epoch_id,
-            "replacement_epoch_id": browser_session.replacement_epoch_id,
-            "active_manifest_url": active_manifest_url,
-            "attach_position_seconds": attach_position_seconds,
-            "attach_ready": attach_ready,
-            "browser_session_state": browser_session.state,
-            "active_epoch_state": active_epoch.state if active_epoch is not None else None,
-        }
 
     def _refresh_route2_session_authority_locked(self, session: MobilePlaybackSession) -> None:
         now_ts = time.time()

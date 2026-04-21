@@ -17,8 +17,6 @@ import {
 } from "./browserSessionClient";
 
 const SESSION_MANIFEST_REFRESH_RUNWAY_SECONDS = 12;
-const HLS_ATTACH_RETRY_MS = 2500;
-const ROUTE2_ATTACH_RETRY_MS = HLS_ATTACH_RETRY_MS;
 
 function buildSessionManifestUrl(url, manifestRevision) {
   const separator = url.includes("?") ? "&" : "?";
@@ -583,10 +581,7 @@ export function useOptimizedPlaybackSession({
       || mobileAttachedManifestRevisionRef.current !== authorityRevision
       || mobileAttachedEpochRef.current !== nextIdentity
       || route2LastAttachAttemptRevisionRef.current !== authorityRevisionNumber
-      || Date.now() - route2LastAttachAttemptAtRef.current > HLS_ATTACH_RETRY_MS
       || mobilePendingAttachRevisionRef.current > authorityRevisionNumber
-      || Number(payload.client_attach_revision || 0) < authorityRevisionNumber
-      || mobileAttachedManifestEndRef.current < resolveAttachedManifestEndSeconds(payload) - 0.5
     );
   }
 

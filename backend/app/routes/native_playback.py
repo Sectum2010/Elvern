@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from time import monotonic
 from urllib.parse import urlencode, urlsplit, urlunsplit
+from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse, Response
@@ -162,12 +164,29 @@ def _emit_native_stream_debug_log(
     rejected_by: str | None = None,
     detail: str | None = None,
     validation_context: dict[str, object] | None = None,
+    stream_context: dict[str, object] | None = None,
+    phase: str = "open",
+    request_id: str | None = None,
+    elapsed_ms: float | None = None,
+    bytes_sent: int | None = None,
 ) -> None:
     if not _should_log_native_stream_debug(request):
         return
     payload = {
         "event": "native_playback_stream_debug",
+        "phase": phase,
+        "request_id": request_id,
         "session_id": session_id,
+        "item_id": (stream_context or {}).get("item_id"),
+        "source_kind": (stream_context or {}).get("source_kind"),
+        "stream_path_class": (stream_context or {}).get("stream_path_class"),
+        "client_name": (stream_context or {}).get("client_name"),
+        "container": (stream_context or {}).get("container"),
+        "video_codec": (stream_context or {}).get("video_codec"),
+        "audio_codec": (stream_context or {}).get("audio_codec"),
+        "file_size": (stream_context or {}).get("file_size"),
+        "duration_seconds": (stream_context or {}).get("duration_seconds"),
+        "original_filename": (stream_context or {}).get("original_filename"),
         "method": request.method,
         "path": request.url.path,
         "query": request.url.query,
@@ -181,8 +200,66 @@ def _emit_native_stream_debug_log(
         "rejected_by": rejected_by,
         "detail": detail,
         "validation_context": validation_context or {},
+        "elapsed_ms": elapsed_ms,
+        "bytes_sent": bytes_sent,
     }
     logger.info("Native playback stream debug %s", json.dumps(payload, ensure_ascii=True, sort_keys=True))
+
+
+def _native_stream_debug_headers(stream_response) -> dict[str, str | None]:
+    return {
+        "accept-ranges": stream_response.headers.get("accept-ranges"),
+        "content-length": stream_response.headers.get("content-length"),
+        "content-range": stream_response.headers.get("content-range"),
+        "content-type": stream_response.headers.get("content-type"),
+        "transfer-encoding": stream_response.headers.get("transfer-encoding"),
+    }
+
+
+def _native_stream_context(stream_response) -> dict[str, object]:
+    context = getattr(stream_response, "_elvern_native_stream_context", None)
+    return dict(context) if isinstance(context, dict) else {}
+
+
+def _wrap_native_stream_debug_iterator(
+    body_iterator,
+    *,
+    request: Request,
+    session_id: str,
+    range_header: str | None,
+    status_code: int,
+    response_headers: dict[str, str | None],
+    stream_context: dict[str, object],
+    request_id: str,
+    started_at: float,
+):
+    async def wrapped():
+        bytes_sent = 0
+        stream_error = None
+        try:
+            async for chunk in body_iterator:
+                bytes_sent += len(chunk)
+                yield chunk
+        except Exception as exc:  # noqa: BLE001
+            stream_error = str(exc)
+            raise
+        finally:
+            _emit_native_stream_debug_log(
+                request,
+                session_id=session_id,
+                range_header=range_header,
+                token_validation="accepted",
+                status_code=status_code,
+                response_headers=response_headers,
+                detail=stream_error,
+                stream_context=stream_context,
+                phase="complete",
+                request_id=request_id,
+                elapsed_ms=round((monotonic() - started_at) * 1000, 1),
+                bytes_sent=bytes_sent,
+            )
+
+    return wrapped()
 
 
 @router.post("/{item_id}/session", response_model=NativePlaybackSessionResponse)
@@ -516,6 +593,8 @@ def native_playback_session_stream(
     authorization: str | None = Header(default=None, alias="Authorization"),
     range_header: str | None = Header(default=None, alias="Range"),
 ):
+    request_id = uuid4().hex[:12]
+    started_at = monotonic()
     try:
         access_token = _resolve_access_token(token, authorization)
     except HTTPException as exc:
@@ -527,6 +606,9 @@ def native_playback_session_stream(
             status_code=exc.status_code,
             rejected_by="access_token_resolver",
             detail=str(exc.detail),
+            phase="reject",
+            request_id=request_id,
+            elapsed_ms=round((monotonic() - started_at) * 1000, 1),
         )
         raise
 
@@ -557,6 +639,9 @@ def native_playback_session_stream(
             rejected_by=rejected_by,
             detail=str(exc.detail),
             validation_context=rejection_context,
+            phase="reject",
+            request_id=request_id,
+            elapsed_ms=round((monotonic() - started_at) * 1000, 1),
         )
         raise
     except Exception as exc:  # noqa: BLE001
@@ -568,16 +653,14 @@ def native_playback_session_stream(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             rejected_by="unexpected_stream_failure",
             detail=str(exc),
+            phase="reject",
+            request_id=request_id,
+            elapsed_ms=round((monotonic() - started_at) * 1000, 1),
         )
         raise
 
-    debug_headers = {
-        "accept-ranges": stream_response.headers.get("accept-ranges"),
-        "content-length": stream_response.headers.get("content-length"),
-        "content-range": stream_response.headers.get("content-range"),
-        "content-type": stream_response.headers.get("content-type"),
-        "transfer-encoding": stream_response.headers.get("transfer-encoding"),
-    }
+    debug_headers = _native_stream_debug_headers(stream_response)
+    stream_context = _native_stream_context(stream_response)
     _emit_native_stream_debug_log(
         request,
         session_id=session_id,
@@ -585,6 +668,10 @@ def native_playback_session_stream(
         token_validation="accepted",
         status_code=stream_response.status_code,
         response_headers=debug_headers,
+        stream_context=stream_context,
+        phase="open",
+        request_id=request_id,
+        elapsed_ms=round((monotonic() - started_at) * 1000, 1),
     )
     if request.method == "HEAD":
         return Response(
@@ -592,4 +679,15 @@ def native_playback_session_stream(
             headers=dict(stream_response.headers),
             media_type=stream_response.media_type,
         )
+    stream_response.body_iterator = _wrap_native_stream_debug_iterator(
+        stream_response.body_iterator,
+        request=request,
+        session_id=session_id,
+        range_header=range_header,
+        status_code=stream_response.status_code,
+        response_headers=debug_headers,
+        stream_context=stream_context,
+        request_id=request_id,
+        started_at=started_at,
+    )
     return stream_response

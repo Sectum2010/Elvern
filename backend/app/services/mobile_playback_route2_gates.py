@@ -127,7 +127,11 @@ def _route2_epoch_startup_attach_ready_locked(
             0.0,
             route2_epoch_ready_end_seconds_locked(session, epoch) - epoch.attach_position_seconds,
         )
-        return actual_startup_runway_seconds + 0.001 >= ROUTE2_ATTACH_READY_SECONDS
+        required_startup_runway_seconds = min(
+            ROUTE2_ATTACH_READY_SECONDS,
+            max(0.0, session.duration_seconds - epoch.attach_position_seconds),
+        )
+        return actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds
     return ready
 
 

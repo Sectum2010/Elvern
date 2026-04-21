@@ -151,6 +151,13 @@ def _route2_full_mode_gate_locked(
     reserve_bytes = float(budget_metrics["reserve_bytes"])
     cumulative_budget_bytes = [float(value) for value in budget_metrics["cumulative_budget_bytes"]]
     deadline_seconds = [float(value) for value in budget_metrics["deadline_seconds"]]
+    if cumulative_budget_bytes and prepared_bytes + 0.001 >= cumulative_budget_bytes[-1]:
+        return {
+            "mode_state": "ready",
+            "mode_ready": True,
+            "mode_estimate_seconds": 0.0,
+            "mode_estimate_source": "true",
+        }
     estimate_deficit_bytes = 0.0
     for cumulative_required_bytes, deadline_seconds_value in zip(cumulative_budget_bytes, deadline_seconds):
         covered_bytes = prepared_bytes + (estimate_safe_goodput * deadline_seconds_value)

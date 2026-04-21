@@ -251,6 +251,16 @@ def _should_ensure_ios_vlc_cloud_duration(client_name: object, item: dict[str, o
     return _coerce_duration_seconds(item.get("duration_seconds")) is None
 
 
+def _content_disposition_inline_filename(value: object) -> str | None:
+    filename = str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not filename:
+        return None
+    filename = filename.replace("\r", "").replace("\n", "")
+    filename = filename.encode("latin-1", "replace").decode("latin-1")
+    filename = filename.replace("\\", "\\\\").replace('"', '\\"')
+    return f'inline; filename="{filename}"'
+
+
 def _ensure_ios_vlc_cloud_duration(
     settings: Settings,
     *,
@@ -614,6 +624,7 @@ def build_native_stream_response(
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
     if isinstance(target, dict):
+        stream_path_class = "local_file"
         file_path = ensure_media_path_within_root(Path(str(target["file_path"])), settings)
         response = build_stream_response(
             str(file_path),
@@ -622,7 +633,29 @@ def build_native_stream_response(
             stream_validator=stream_validator,
         )
     else:
+        stream_path_class = "cloud_proxy"
         response = target
+    if _normalize_native_playback_mode(row.get("client_name")) == "infuse_external":
+        content_disposition = _content_disposition_inline_filename(row.get("original_filename"))
+        if content_disposition:
+            response.headers["Content-Disposition"] = content_disposition
+    setattr(
+        response,
+        "_elvern_native_stream_context",
+        {
+            "session_id": session_id,
+            "item_id": int(row["media_item_id"]),
+            "client_name": row.get("client_name"),
+            "source_kind": str(row.get("source_kind") or "local"),
+            "stream_path_class": stream_path_class,
+            "file_size": row.get("file_size"),
+            "duration_seconds": row.get("duration_seconds"),
+            "container": row.get("container"),
+            "video_codec": row.get("video_codec"),
+            "audio_codec": row.get("audio_codec"),
+            "original_filename": row.get("original_filename"),
+        },
+    )
     if record_activity:
         _record_external_stream_activity(
             settings,

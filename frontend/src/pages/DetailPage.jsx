@@ -50,6 +50,9 @@ const IMPORTANT_PLAYBACK_REASON_KEYWORDS = [
   "sign in",
   "disabled",
 ];
+const NATIVE_TRANSPORT_DEBUG_STORAGE_KEY = "elvern_native_transport_debug";
+const DEBUG_FLAG_ENABLED_VALUES = new Set(["1", "true", "yes", "on"]);
+const DEBUG_FLAG_DISABLED_VALUES = new Set(["0", "false", "no", "off"]);
 
 
 function detectDesktopPlatform() {
@@ -140,6 +143,27 @@ function normalizeIosTransportDebug(payload) {
     primaryTargetKind: primaryTargetKind || "unknown",
     reasonCode: reasonCode || "unknown",
   };
+}
+
+function isIosTransportDebugEnabled(search = "") {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const params = new URLSearchParams(search || window.location.search || "");
+  const queryValue = params.get("transport_debug") || params.get("native_transport_debug");
+  const normalizedQueryValue = (queryValue || "").trim().toLowerCase();
+  if (DEBUG_FLAG_ENABLED_VALUES.has(normalizedQueryValue)) {
+    return true;
+  }
+  if (DEBUG_FLAG_DISABLED_VALUES.has(normalizedQueryValue)) {
+    return false;
+  }
+  try {
+    const storedValue = (window.localStorage.getItem(NATIVE_TRANSPORT_DEBUG_STORAGE_KEY) || "").trim().toLowerCase();
+    return DEBUG_FLAG_ENABLED_VALUES.has(storedValue);
+  } catch {
+    return false;
+  }
 }
 
 function formatTimeRange(startSeconds, endSeconds) {
@@ -299,6 +323,7 @@ export function DetailPage() {
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const desktopPlatform = detectDesktopPlatform();
   const iosMobile = isIOSMobileBrowser();
+  const showIosTransportDebug = iosTransportDebug && isIosTransportDebugEnabled(location.search);
   const localDevLoopback = isLocalDevelopmentLoopback(desktopPlatform);
   const desktopDeviceId = useMemo(() => getOrCreateDeviceId(), []);
   const isAdmin = user?.role === "admin";
@@ -1505,7 +1530,7 @@ export function DetailPage() {
           {hiddenActionMessage ? <p className="page-note">{hiddenActionMessage}</p> : null}
           {iosAppLaunchError ? <p className="form-error">{iosAppLaunchError}</p> : null}
           {iosAppLaunchMessage ? <p className="page-note">{iosAppLaunchMessage}</p> : null}
-          {iosTransportDebug ? (
+          {showIosTransportDebug ? (
             <div className="native-handoff-debug" role="status">
               <p className="native-handoff-debug__title">Temporary transport debug</p>
               <div className="native-handoff-debug__grid">
