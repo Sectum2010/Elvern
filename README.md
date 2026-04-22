@@ -24,6 +24,25 @@ Normal deployment model:
 - one matching private backend API origin for desktop helper handoff
 - installed VLC as the primary desktop playback plane
 
+## Project Status
+
+Elvern is an early public self-hosted project focused on private family media playback over a private network, with VLC-first desktop playback as the main day-to-day path.
+
+Today, the repo is most practical for people who are comfortable editing an env file and running either the Ubuntu/systemd setup path or the first-pass all-in-one Docker path. Core playback, auth, admin, scanning, and helper handoff are present, but the project should still be treated as actively iterating rather than as a polished drop-in appliance.
+
+## Roadmap
+
+- Near term: Docker polish, README/docs cleanup, more backend test and CI coverage, install ergonomics, and clearer desktop helper setup guidance.
+- Later, if the current direction keeps proving useful: signed helper packaging, better playback diagnostics, backup and restore guidance, and deployment hardening for self-hosted users.
+
+See `docs/ROADMAP.md` for the slightly more detailed version.
+
+## Non-goals
+
+- Elvern is not a public streaming platform or internet-facing media-sharing service.
+- It is not intended for piracy, scraped content redistribution, or anonymous access.
+- It is not trying to replace every Plex or Jellyfin feature; the focus is a smaller private control plane for family media playback and VLC-first workflows.
+
 ## Repo Layout
 
 ```text
@@ -54,7 +73,7 @@ Then:
 For a first-pass self-hosted container deployment, Elvern now includes a simple all-in-one Docker path that keeps the current backend plus production-frontend split intact.
 
 1. Create `deploy/env/elvern.env` from `deploy/env/.env.example`
-2. Set the usual `ELVERN_*` values there for admin credentials, session secret, and private origins. For a plain-HTTP first run, set `ELVERN_PUBLIC_APP_ORIGIN="http://<host>:4173"`, `ELVERN_BACKEND_ORIGIN="http://<host>:8000"`, and `ELVERN_COOKIE_SECURE="false"`
+2. Set the usual `ELVERN_*` values there for admin credentials, session secret, and private origins. For a plain HTTP first run, set `ELVERN_PUBLIC_APP_ORIGIN="http://<host>:4173"`, `ELVERN_BACKEND_ORIGIN="http://<host>:8000"`, and `ELVERN_COOKIE_SECURE="false"`. Replace `<host>` with your Docker host's IP address or hostname.
 3. Edit the media bind mount in `docker-compose.yml` or export `ELVERN_DOCKER_MEDIA_PATH`
 4. Launch with:
 
@@ -101,6 +120,7 @@ Admin workflow:
 
 For the full flow and advanced options, follow:
 
+- `docs/ROADMAP.md`
 - `docs/setup.md`
 - `docs/docker.md`
 - `docs/architecture.md`

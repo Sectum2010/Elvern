@@ -27,11 +27,13 @@ Edit `deploy/env/elvern.env` and set the usual Elvern values:
 - `ELVERN_COOKIE_SECURE`
 - playback and library mapping values that match your clients
 
-For the simplest plain-HTTP first run, use:
+For the simplest plain HTTP first run, use:
 
 - `ELVERN_PUBLIC_APP_ORIGIN="http://<host>:4173"`
 - `ELVERN_BACKEND_ORIGIN="http://<host>:8000"`
 - `ELVERN_COOKIE_SECURE="false"`
+
+Replace `<host>` with your Docker host's IP address or hostname.
 
 If you publish Elvern over real HTTPS later, switch `ELVERN_COOKIE_SECURE` back to `"true"` and update the two origins to the real private URLs clients use.
 
