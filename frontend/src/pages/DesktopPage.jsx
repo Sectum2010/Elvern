@@ -126,7 +126,7 @@ function stateCopy(state) {
     case "release_unavailable":
       return "Installer package unavailable";
     default:
-      return "Install state unknown";
+      return "Not verified yet";
   }
 }
 
@@ -267,8 +267,59 @@ function desktopVlcStatus(status, platform) {
   }
   return {
     label: "Install state unknown",
-    copy: "Install state unknown",
+    copy: platform === "linux"
+      ? "Run the host check below to confirm whether Elvern can see VLC on this Linux machine."
+      : "Run the helper test below. Elvern only knows local VLC state after the client-side helper calls back from this device.",
   };
+}
+
+function desktopHelperSummaryCopy(platform, status) {
+  if (platform === "linux") {
+    return "Linux same-host Open in VLC uses the VLC binary on the Elvern host. No client-side helper install is required for the supported Linux baseline.";
+  }
+  if (status?.state === "release_unavailable") {
+    return "Windows and macOS use the client-side Elvern VLC Opener for Open in VLC, but this server does not currently expose an imported helper package for this platform.";
+  }
+  if (status?.state === "up_to_date") {
+    return "This device has already reported back through the desktop helper. Use the test below any time Open in VLC feels stale or misconfigured.";
+  }
+  if (status?.state === "update_available") {
+    return "A helper was seen from this device before, but Elvern now has a newer package available for this platform.";
+  }
+  return "Windows and macOS use the client-side Elvern VLC Opener for Open in VLC. Server install does not register the protocol handler on this device.";
+}
+
+function desktopHelperTestButtonLabel(platform) {
+  return platform === "linux" ? "Check VLC on this host" : "Test desktop helper";
+}
+
+function desktopHelperTestCopy(platform) {
+  if (platform === "linux") {
+    return "This is a host-side VLC lookup only. It does not install or register anything.";
+  }
+  return "Test desktop helper opens a short-lived elvern-vlc:// verify link and waits briefly for the helper to call back to Elvern.";
+}
+
+function desktopHelperFeedbackForStatus(platform, status) {
+  if (!status) {
+    return "";
+  }
+  if (platform === "linux") {
+    if (status.vlc_detection_state === "installed") {
+      return "Elvern confirmed VLC on this Linux host.";
+    }
+    if (status.vlc_detection_state === "not_detected") {
+      return "Elvern refreshed the Linux host check, but VLC was not detected.";
+    }
+    return "Elvern refreshed the Linux host VLC check.";
+  }
+  if (status.vlc_detection_state === "installed") {
+    return "The desktop helper called back to Elvern and reported VLC on this device.";
+  }
+  if (status.vlc_detection_state === "not_detected") {
+    return "The desktop helper called back to Elvern, but it reported that VLC was not detected on this device.";
+  }
+  return "The desktop helper called back to Elvern, but local VLC detection is still unavailable.";
 }
 
 function buildRecommendedApps(platform, iosStoreRegion) {
@@ -449,6 +500,7 @@ export function InstallPage() {
   const [loading, setLoading] = useState(isDesktop);
   const [appCheckPendingKey, setAppCheckPendingKey] = useState("");
   const [desktopVerifyPending, setDesktopVerifyPending] = useState(false);
+  const [desktopVerifyFeedback, setDesktopVerifyFeedback] = useState("");
   const [requiredPanelExpanded, setRequiredPanelExpanded] = useState(false);
   const [mobileAppStatus, setMobileAppStatus] = useState(() => ({
     "ios-vlc": readMobileAppStatus("ios-vlc"),
@@ -507,6 +559,29 @@ export function InstallPage() {
   const requiredSection = useMemo(() => buildRequiredSection(platform, status), [platform, status]);
   const showRequiredSection = !requiredSection.empty;
   const recommendedApps = useMemo(() => buildRecommendedApps(platform, iosStoreRegion), [iosStoreRegion, platform]);
+  const helperSetupNotes = useMemo(() => {
+    if (!isDesktop) {
+      return [];
+    }
+    if (platform === "linux") {
+      return [
+        "Linux same-host Open in VLC uses the host-side VLC binary, not a client-side protocol handler.",
+        "Use the check below to confirm whether Elvern can see VLC on this Linux machine.",
+      ];
+    }
+
+    const notes = [
+      "Helper install is client-side. Server install does not register the protocol handler on this device.",
+      status?.latest_releases?.length
+        ? "Download the package that matches this desktop, run its installer or registration step, then come back here and use Test desktop helper."
+        : "This server does not currently expose a helper download for this platform, so this page can only show the expected client-side readiness state.",
+      "The test is heuristic. If nothing opens or this page never updates, the protocol handler is probably missing, misregistered, or blocked by the browser.",
+    ];
+    if (status?.vlc_detection_state === "not_detected") {
+      notes.push("The helper has reached Elvern before, but local VLC was not detected on this device.");
+    }
+    return notes;
+  }, [isDesktop, platform, status]);
   const desktopVlc = useMemo(
     () => (isDesktop ? desktopVlcStatus(status, platform) : null),
     [isDesktop, platform, status],
@@ -556,6 +631,7 @@ export function InstallPage() {
     }
     setDesktopVerifyPending(true);
     setError("");
+    setDesktopVerifyFeedback("");
     const previousCheckedAt = status?.vlc_detection_checked_at || "";
     const previousState = status?.vlc_detection_state || "";
     try {
@@ -568,14 +644,22 @@ export function InstallPage() {
       });
       if (payload.status) {
         setStatus(payload.status);
+        setDesktopVerifyFeedback(desktopHelperFeedbackForStatus(platform, payload.status));
         return;
       }
       if (!payload.protocol_url) {
-        await loadDesktopStatus({ showLoading: false });
+        const refreshed = await loadDesktopStatus({ showLoading: false });
+        if (refreshed) {
+          setDesktopVerifyFeedback(desktopHelperFeedbackForStatus(platform, refreshed));
+        }
         return;
       }
+      setDesktopVerifyFeedback(
+        "Trying the client-side helper now. If nothing opens and this page does not update, the protocol handler is probably not installed or not registered on this device.",
+      );
       window.location.assign(payload.protocol_url);
       const deadline = Date.now() + 8000;
+      let callbackSeen = false;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 900));
         const refreshed = await loadDesktopStatus({ showLoading: false });
@@ -586,8 +670,15 @@ export function InstallPage() {
           (refreshed.vlc_detection_checked_at || "") !== previousCheckedAt
           || (refreshed.vlc_detection_state || "") !== previousState
         ) {
+          callbackSeen = true;
+          setDesktopVerifyFeedback(desktopHelperFeedbackForStatus(platform, refreshed));
           break;
         }
+      }
+      if (!callbackSeen) {
+        setDesktopVerifyFeedback(
+          "No helper check-back reached Elvern yet. If nothing opened, install or re-register the helper on this device and try again.",
+        );
       }
     } catch (requestError) {
       setError(requestError.message || "Failed to verify VLC");
@@ -601,7 +692,7 @@ export function InstallPage() {
       <div className="section-header">
         <div>
           <p className="eyebrow">Install</p>
-          <h1>Install apps for this device</h1>
+          <h1>Install apps and helper for this device</h1>
           <p className="page-subnote">
             Detected platform: {platformLabel(platform)}
           </p>
@@ -609,6 +700,27 @@ export function InstallPage() {
       </div>
 
       {error ? <p className="form-error">{error}</p> : null}
+
+      {isDesktop ? (
+        <section className="page-section">
+          <article className="settings-card install-section-card settings-card--wide">
+            <div className="install-section-card__header">
+              <h2>Desktop helper setup</h2>
+              <p className="page-subnote">
+                {desktopHelperSummaryCopy(platform, status)}
+              </p>
+            </div>
+            <div className="desktop-playback-notes">
+              {helperSetupNotes.map((note) => (
+                <p className="page-subnote" key={note}>
+                  {note}
+                </p>
+              ))}
+            </div>
+            {desktopVerifyFeedback ? <p className="page-note">{desktopVerifyFeedback}</p> : null}
+          </article>
+        </section>
+      ) : null}
 
       {showRequiredSection ? (
         <section className="page-section">
@@ -619,7 +731,7 @@ export function InstallPage() {
           >
             <summary className="settings-disclosure__summary">
               <div className="settings-disclosure__header">
-                <span className="settings-disclosure__title">Required</span>
+                <span className="settings-disclosure__title">Desktop helper</span>
                 {requiredSection.description ? (
                   <span className="settings-disclosure__copy">{requiredSection.description}</span>
                 ) : null}
@@ -654,6 +766,10 @@ export function InstallPage() {
                         <span>Device ID</span>
                         <strong>{status.device_id || deviceId || "Unknown"}</strong>
                       </div>
+                      <div className="status-row">
+                        <span>Runtime</span>
+                        <strong>{status.dotnet_runtime_required || "Unknown"}</strong>
+                      </div>
                     </>
                   ) : null}
                   {requiredSection.recommendedRelease ? (
@@ -667,6 +783,29 @@ export function InstallPage() {
                       <p className="page-subnote">
                         {releaseLabel(requiredSection.recommendedRelease)} · Version {requiredSection.recommendedRelease.version} · {formatBytes(requiredSection.recommendedRelease.size_bytes)}
                       </p>
+                    </div>
+                  ) : null}
+                  {status?.latest_releases?.length > 1 ? (
+                    <div className="install-card__notes">
+                      <p className="page-subnote">Available downloads</p>
+                      <div className="desktop-helper-list">
+                        {status.latest_releases.map((release) => (
+                          <article className="desktop-helper-release" key={release.id}>
+                            <div className="desktop-helper-release__meta">
+                              <h3>{releaseLabel(release)}{release.recommended ? " (Recommended)" : ""}</h3>
+                              <p className="page-subnote">
+                                Version {release.version} · {formatBytes(release.size_bytes)} · {release.dotnet_runtime_required}
+                              </p>
+                            </div>
+                            <a
+                              className="ghost-button ghost-button--inline desktop-helper-release__download"
+                              href={release.download_url}
+                            >
+                              Download
+                            </a>
+                          </article>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
                   {status?.notes?.length ? (
@@ -689,9 +828,11 @@ export function InstallPage() {
         <section className="page-section">
           <div className="section-header section-header--compact">
             <div>
-              <h2>Recommended</h2>
+              <h2>VLC readiness</h2>
               <p className="page-subnote">
-                Desktop VLC check and download for this device.
+                {platform === "linux"
+                  ? "Check whether Elvern can see VLC on this Linux host."
+                  : "Check whether the client-side helper can call back and whether VLC was detected on this device."}
               </p>
             </div>
           </div>
@@ -716,7 +857,7 @@ export function InstallPage() {
                     onClick={handleDesktopVlcVerify}
                     type="button"
                   >
-                    {desktopVerifyPending ? "Verifying..." : "Verify"}
+                    {desktopVerifyPending ? "Checking..." : desktopHelperTestButtonLabel(platform)}
                   </button>
                   <a
                     className="ghost-button ghost-button--inline"
@@ -725,6 +866,9 @@ export function InstallPage() {
                     Download
                   </a>
                 </div>
+                <p className="page-subnote">
+                  {desktopHelperTestCopy(platform)}
+                </p>
                 <p className="page-subnote">
                   Last checked: {formatLastChecked(status?.vlc_detection_checked_at)}
                 </p>

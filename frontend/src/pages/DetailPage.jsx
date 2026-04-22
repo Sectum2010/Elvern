@@ -1599,6 +1599,18 @@ export function DetailPage() {
               ))}
             </div>
           ) : null}
+          {desktopPlayback?.open_method === "protocol_helper" ? (
+            <div className="native-handoff">
+              <p className="native-handoff__label">
+                This desktop uses the client-side Elvern VLC Opener for Open in VLC. Server install does not register it on this device. If clicking Open in VLC does nothing or fails silently, open Install to download or update the helper, test the protocol handler, and check whether VLC was detected here.
+              </p>
+              <div className="player-actions">
+                <Link className="ghost-button" to="/install">
+                  Open Helper Setup
+                </Link>
+              </div>
+            </div>
+          ) : null}
           {desktopPlayback && !desktopPlayback.open_supported && !desktopPlayback.handoff_supported ? (
             <div className="native-handoff">
               <p className="native-handoff__label">
