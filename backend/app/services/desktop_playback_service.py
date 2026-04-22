@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ipaddress
-import json
 import logging
 import os
 import pwd
@@ -10,7 +9,6 @@ import socket
 import subprocess
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -20,13 +18,13 @@ from fastapi.responses import Response
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..media_stream import ensure_media_path_within_root
-from ..progress import save_progress
-from ..security import generate_session_token, hash_session_token
 from .cloud_library_service import refresh_cloud_media_item_metadata
 from .cloud_library_service import ensure_cloud_media_item_provider_access
-from .desktop_helper_service import (
-    record_client_device_app_seen,
-    record_helper_resolution,
+from .desktop_playback_handoff_service import (
+    cleanup_desktop_vlc_handoffs as _cleanup_desktop_vlc_handoffs,
+    create_desktop_vlc_handoff as _create_desktop_vlc_handoff_record,
+    record_desktop_vlc_handoff_started as _record_desktop_vlc_handoff_started,
+    resolve_desktop_vlc_handoff as _resolve_desktop_vlc_handoff,
 )
 from .desktop_playback_protocol_service import (
     _desktop_backend_origin,
@@ -34,12 +32,9 @@ from .desktop_playback_protocol_service import (
     _public_app_origin,
     _rewrite_stream_url_for_linux_same_host,
     build_playlist_filename,
-    build_vlc_helper_protocol_url,
-    build_vlc_helper_started_url,
     build_vlc_launch_command,
     build_vlc_location_uri,
     build_xspf_playlist,
-    infer_target_kind,
     map_media_path_for_platform,
 )
 from .library_service import get_media_item_record
@@ -54,7 +49,6 @@ from .native_playback_service import (
 logger = logging.getLogger(__name__)
 
 SUPPORTED_DESKTOP_PLATFORMS = {"linux", "windows", "mac"}
-DIRECT_EXTERNAL_PROGRESS_SECONDS = 1.0
 DIRECT_VLC_PROGRESS_POLL_SECONDS = 5.0
 DIRECT_VLC_PROGRESS_SOCKET_TIMEOUT_SECONDS = 10.0
 DIRECT_VLC_RC_QUERY_TIMEOUT_SECONDS = 2.0
@@ -252,20 +246,6 @@ def infer_same_host_request(
         return True
 
     return parsed_client_ip.compressed in _local_server_ip_candidates(settings)
-
-
-def cleanup_desktop_vlc_handoffs(settings: Settings) -> None:
-    now = utcnow_iso()
-    with get_connection(settings) as connection:
-        connection.execute(
-            """
-            DELETE FROM desktop_vlc_handoffs
-            WHERE expires_at <= ?
-               OR revoked_at IS NOT NULL
-            """,
-            (now,),
-        )
-        connection.commit()
 
 
 def _local_server_ip_candidates(settings: Settings) -> set[str]:
@@ -622,7 +602,7 @@ def create_desktop_vlc_handoff(
             user_id=user_id,
             item_id=int(item["id"]),
         )
-    cleanup_desktop_vlc_handoffs(settings)
+    _cleanup_desktop_vlc_handoffs(settings)
     resolved_file = _resolve_local_media_file(settings, item)
     mapped_target = map_media_path_for_platform(settings, resolved_file, platform) if resolved_file else None
 
@@ -645,103 +625,19 @@ def create_desktop_vlc_handoff(
         )
         strategy = "backend_url"
         resolved_target = str(session_payload["stream_url"])
-
-    handoff_id = generate_session_token()
-    access_token = generate_session_token()
-    access_token_hash = hash_session_token(access_token, settings.session_secret)
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=settings.playback_token_ttl_seconds)
-    now_iso = now.isoformat()
-    expires_at_iso = expires_at.isoformat()
-    resume_seconds = float(item.get("resume_position_seconds") or 0)
-
-    if device_id:
-        record_client_device_app_seen(
-            settings,
-            device_id=device_id,
-            user_id=user_id,
-            browser_platform=platform,
-            browser_user_agent=user_agent,
-            ip_address=source_ip,
-        )
-
-    with get_connection(settings) as connection:
-        connection.execute(
-            """
-            INSERT INTO desktop_vlc_handoffs (
-                handoff_id,
-                access_token_hash,
-                auth_session_id,
-                user_id,
-                media_item_id,
-                platform,
-                strategy,
-                resolved_target,
-                resume_seconds,
-                created_at,
-                expires_at,
-                device_id,
-                user_agent,
-                source_ip
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                handoff_id,
-                access_token_hash,
-                auth_session_id,
-                user_id,
-                int(item["id"]),
-                platform,
-                strategy,
-                resolved_target,
-                resume_seconds,
-                now_iso,
-                expires_at_iso,
-                device_id,
-                user_agent,
-                source_ip,
-            ),
-        )
-        connection.commit()
-
-    logger.info(
-        "Created VLC helper handoff item=%s user=%s platform=%s strategy=%s expires_at=%s",
-        item["id"],
-        user_id,
-        platform,
-        strategy,
-        expires_at_iso,
+    return _create_desktop_vlc_handoff_record(
+        settings,
+        user_id=user_id,
+        item=item,
+        platform=platform,
+        device_id=device_id,
+        auth_session_id=auth_session_id,
+        user_agent=user_agent,
+        source_ip=source_ip,
+        strategy=strategy,
+        resolved_target=resolved_target,
+        backend_origin=backend_origin,
     )
-    logger.info(
-        "Desktop VLC handoff debug %s",
-        json.dumps(
-            {
-                "event": "desktop_vlc_handoff_created",
-                "handoff_id": handoff_id,
-                "platform": platform,
-                "strategy": strategy,
-                "helper_protocol": settings.vlc_helper_protocol,
-                "resolved_target": resolved_target,
-                "backend_origin": backend_origin,
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-        ),
-    )
-    return {
-        "handoff_id": handoff_id,
-        "helper_protocol": settings.vlc_helper_protocol,
-        "protocol_url": build_vlc_helper_protocol_url(
-            settings,
-            backend_origin=backend_origin,
-            handoff_id=handoff_id,
-            access_token=access_token,
-        ),
-        "playlist_url": f"/api/desktop-playback/{int(item['id'])}/playlist?platform={platform}",
-        "expires_at": expires_at_iso,
-        "strategy": strategy,
-        "message": "Launching installed VLC through the Elvern desktop opener helper.",
-    }
 
 
 def build_linux_gui_launch_environment() -> tuple[dict[str, str], dict[str, str | None], list[str]]:
@@ -1015,67 +911,18 @@ def resolve_desktop_vlc_handoff(
     helper_vlc_detection_path: str | None = None,
     source_ip: str | None = None,
 ) -> dict[str, object]:
-    row = _require_desktop_vlc_handoff(
+    return _resolve_desktop_vlc_handoff(
         settings,
         handoff_id=handoff_id,
         access_token=access_token,
-    )
-    record_helper_resolution(
-        settings,
-        handoff_id=handoff_id,
-        device_id=str(row["device_id"]) if row.get("device_id") else None,
-        user_id=int(row["user_id"]),
         helper_version=helper_version,
         helper_platform=helper_platform,
         helper_arch=helper_arch,
         helper_vlc_detection_state=helper_vlc_detection_state,
         helper_vlc_detection_path=helper_vlc_detection_path,
         source_ip=source_ip,
+        backend_origin=_desktop_backend_origin(settings),
     )
-    target = str(row["resolved_target"])
-    backend_origin = _desktop_backend_origin(settings)
-    logger.info(
-        "Desktop VLC handoff debug %s",
-        json.dumps(
-            {
-                "event": "desktop_vlc_handoff_resolved",
-                "handoff_id": row["handoff_id"],
-                "platform": row["platform"],
-                "strategy": row["strategy"],
-                "target_kind": infer_target_kind(target),
-                "target": target,
-                "helper_version": helper_version,
-                "helper_platform": helper_platform,
-                "helper_arch": helper_arch,
-                "helper_vlc_detection_state": helper_vlc_detection_state,
-                "helper_vlc_detection_path": helper_vlc_detection_path,
-                "source_ip": source_ip,
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-        ),
-    )
-    return {
-        "handoff_id": row["handoff_id"],
-        "title": row["title"],
-        "media_id": int(row["media_item_id"]),
-        "platform": row["platform"],
-        "strategy": row["strategy"],
-        "target_kind": infer_target_kind(target),
-        "target": target,
-        "started_url": (
-            build_vlc_helper_started_url(
-                backend_origin=backend_origin,
-                handoff_id=handoff_id,
-                access_token=access_token,
-            )
-            if row["strategy"] == "direct_path" and backend_origin
-            else None
-        ),
-        "resume_seconds": float(row["resume_seconds"] or 0),
-        "expires_at": row["expires_at"],
-        "session_api_version": 1,
-    }
 
 
 def record_desktop_vlc_handoff_started(
@@ -1084,27 +931,11 @@ def record_desktop_vlc_handoff_started(
     handoff_id: str,
     access_token: str,
 ) -> dict[str, object]:
-    row = _require_desktop_vlc_handoff(
+    return _record_desktop_vlc_handoff_started(
         settings,
         handoff_id=handoff_id,
         access_token=access_token,
     )
-    if row["strategy"] != "direct_path":
-        return {
-            "recorded": False,
-            "message": "This handoff uses a backend stream URL and records watch progress from actual stream activity.",
-        }
-    _record_verified_external_launch_progress(
-        settings,
-        user_id=int(row["user_id"]),
-        media_item_id=int(row["media_item_id"]),
-        resume_seconds=float(row["resume_seconds"] or 0),
-        duration_seconds=row.get("duration_seconds"),
-    )
-    return {
-        "recorded": True,
-        "message": "Confirmed VLC launch recorded for Continue Watching.",
-    }
 
 
 def build_vlc_playlist_response(
@@ -1189,78 +1020,6 @@ def get_desktop_playback_status(settings: Settings) -> dict[str, object]:
         "windows_library_root": settings.library_root_windows,
         "mac_library_root": settings.library_root_mac,
     }
-
-
-def _require_desktop_vlc_handoff(
-    settings: Settings,
-    *,
-    handoff_id: str,
-    access_token: str,
-) -> dict[str, object]:
-    cleanup_desktop_vlc_handoffs(settings)
-    token_hash = hash_session_token(access_token, settings.session_secret)
-    now = utcnow_iso()
-    with get_connection(settings) as connection:
-        row = connection.execute(
-            """
-            SELECT
-                h.handoff_id,
-                h.media_item_id,
-                h.platform,
-                h.strategy,
-                h.resolved_target,
-                h.resume_seconds,
-                h.expires_at,
-                h.device_id,
-                h.user_id,
-                m.title,
-                m.duration_seconds,
-                u.enabled
-            FROM desktop_vlc_handoffs h
-            JOIN media_items m ON m.id = h.media_item_id
-            JOIN users u ON u.id = h.user_id
-            WHERE h.handoff_id = ?
-              AND h.access_token_hash = ?
-              AND h.expires_at > ?
-              AND h.revoked_at IS NULL
-              AND u.enabled = 1
-            LIMIT 1
-            """,
-            (handoff_id, token_hash, now),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Desktop VLC handoff is invalid or has expired",
-        )
-    return dict(row)
-
-
-def _record_verified_external_launch_progress(
-    settings: Settings,
-    *,
-    user_id: int,
-    media_item_id: int,
-    resume_seconds: float,
-    duration_seconds: object,
-) -> None:
-    target_position = max(float(resume_seconds or 0.0), 0.0) + DIRECT_EXTERNAL_PROGRESS_SECONDS
-    resolved_duration = None
-    try:
-        if duration_seconds is not None:
-            resolved_duration = float(duration_seconds)
-    except (TypeError, ValueError):
-        resolved_duration = None
-    if resolved_duration is not None:
-        target_position = min(target_position, resolved_duration)
-    save_progress(
-        settings,
-        user_id=user_id,
-        media_item_id=media_item_id,
-        position_seconds=target_position,
-        duration_seconds=resolved_duration,
-        completed=False,
-    )
 
 
 def _reserve_linux_vlc_rc_port() -> int:
