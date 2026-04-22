@@ -49,6 +49,34 @@ Then:
 3. Generate an admin password hash with `.venv/bin/python -m backend.app.cli hash-password "your-password"`
 4. Launch Elvern with `./scripts/elvern-start.sh --open-browser` or the installed desktop launcher
 
+## Docker Quick Start
+
+For a first-pass self-hosted container deployment, Elvern now includes a simple all-in-one Docker path that keeps the current backend plus production-frontend split intact.
+
+1. Create `deploy/env/elvern.env` from `deploy/env/.env.example`
+2. Set the usual `ELVERN_*` values there for admin credentials, session secret, and private origins. For a plain-HTTP first run, set `ELVERN_PUBLIC_APP_ORIGIN="http://<host>:4173"`, `ELVERN_BACKEND_ORIGIN="http://<host>:8000"`, and `ELVERN_COOKIE_SECURE="false"`
+3. Edit the media bind mount in `docker-compose.yml` or export `ELVERN_DOCKER_MEDIA_PATH`
+4. Launch with:
+
+```bash
+cd "$ELVERN_ROOT"
+docker compose up --build
+```
+
+The default Docker ports are:
+
+- frontend app: `http://<host>:4173`
+- backend API: `http://<host>:8000`
+
+Docker-specific notes:
+
+- the container includes `ffmpeg` and `ffprobe`
+- the desktop VLC helper remains client-side and is not part of the server container
+- database and transcode/cache data persist under `./docker-data/data`
+- your mounted media library is exposed inside the container at `/media`
+
+See `docs/docker.md` for the full Docker setup notes.
+
 Normal desktop playback flow:
 
 1. Browse your library in Elvern.
@@ -74,6 +102,7 @@ Admin workflow:
 For the full flow and advanced options, follow:
 
 - `docs/setup.md`
+- `docs/docker.md`
 - `docs/architecture.md`
 - `docs/operations.md`
 - `clients/desktop-vlc-opener/README.md`

@@ -1,0 +1,27 @@
+services:
+  elvern:
+    build:
+      context: .
+    container_name: elvern
+    restart: unless-stopped
+    env_file:
+      - ./deploy/env/elvern.env
+    environment:
+      ELVERN_BIND_HOST: 0.0.0.0
+      ELVERN_PORT: 8000
+      ELVERN_FRONTEND_HOST: 0.0.0.0
+      ELVERN_FRONTEND_PORT: 4173
+      ELVERN_MEDIA_ROOT: /media
+      ELVERN_DB_PATH: /data/elvern.db
+      ELVERN_TRANSCODE_DIR: /data/transcodes
+      ELVERN_HELPER_RELEASES_DIR: /data/helper_releases
+      ELVERN_FFMPEG_PATH: /usr/bin/ffmpeg
+      ELVERN_FFPROBE_PATH: /usr/bin/ffprobe
+    ports:
+      - "4173:4173"
+      - "8000:8000"
+    volumes:
+      # Persistent Elvern state: SQLite DB, transcodes, and helper metadata.
+      - ./docker-data/data:/data
+      # Replace the default path or export ELVERN_DOCKER_MEDIA_PATH before launch.
+      - ${ELVERN_DOCKER_MEDIA_PATH:-/srv/media/movies}:/media:ro
