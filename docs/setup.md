@@ -2,9 +2,34 @@
 
 These commands assume the project lives at `$ELVERN_ROOT` on your Linux host, for example `/opt/elvern`.
 
-## 1. Recommended one-time Ubuntu setup
+Use this guide for the server-side Linux host path. If you want the all-in-one container path instead, use `docs/docker.md`.
 
-Run the one-time setup script:
+## 1. Recommended Linux host install
+
+Use `./install.sh` as the primary friendly entrypoint for the current Ubuntu/Linux host flow:
+
+```bash
+cd "$ELVERN_ROOT"
+./install.sh
+```
+
+Useful follow-ups:
+
+- `./install.sh --help` shows unattended and advanced flags.
+- `./install.sh --install-packages --enable-now` is a common Ubuntu/systemd first run.
+- `./install.sh --unattended ...` is available when you want explicit flag-driven setup.
+
+What `install.sh` does at a high level:
+
+- bootstraps `deploy/env/elvern.env` from `deploy/env/.env.example` when needed
+- prompts for or accepts the main runtime values
+- reuses the existing `scripts/setup-ubuntu.sh` and `scripts/install-systemd.sh` flows
+- supports both interactive and unattended usage
+- stays Linux-host oriented; desktop helper installation on playback clients remains a separate step
+
+### Lower-level manual Ubuntu/systemd path
+
+If you want the older script-first path directly, or you are troubleshooting below `install.sh`, use:
 
 ```bash
 cd "$ELVERN_ROOT"
@@ -30,7 +55,7 @@ cd "$ELVERN_ROOT"
 
 ## 2. Edit the runtime env file
 
-If `deploy/env/elvern.env` does not exist yet, the setup script creates it from `deploy/env/.env.example`.
+If `deploy/env/elvern.env` does not exist yet, `./install.sh` creates it from `deploy/env/.env.example`. The lower-level setup script can also create it.
 
 Edit `deploy/env/elvern.env` and set:
 
@@ -49,6 +74,8 @@ Edit `deploy/env/elvern.env` and set:
 - confirm `ELVERN_LIBRARY_ROOT_LINUX`
 - set `ELVERN_LIBRARY_ROOT_WINDOWS` and `ELVERN_LIBRARY_ROOT_MAC` when you want mapped direct-source VLC playback on those platforms
 - for real cross-platform use, do not leave the standard app/helper origins on loopback values
+
+Desktop helper installation still happens separately on each playback client. The server-side Linux install flow does not register or install Windows/macOS/Linux client helpers for you.
 
 If you are testing only over explicit local-development loopback before setting up the real DGX private origin, temporarily set:
 

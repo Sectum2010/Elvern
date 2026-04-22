@@ -54,14 +54,32 @@ scripts/      bootstrap and rescan helpers
 docs/         setup, architecture, and operations guides
 ```
 
-## Quick Start
+## Linux Host Quick Start
+
+For the friendly Linux host path, start here:
+
+```bash
+cd "$ELVERN_ROOT"
+./install.sh
+```
+
+Useful follow-ups:
+
+- `./install.sh --help` shows unattended and advanced flags.
+- `install.sh` bootstraps `deploy/env/elvern.env` from the example when needed, reuses the existing setup/systemd scripts, and supports both interactive and unattended Linux-host installs.
+- Desktop helper installation remains a separate client-side step on each Linux, Windows, or macOS playback machine.
+
+If you prefer the lower-level Ubuntu/systemd path directly, keep using:
 
 ```bash
 cd "$ELVERN_ROOT"
 ./scripts/setup-ubuntu.sh --install-packages
+./scripts/install-systemd.sh --scope system --enable-now
 ```
 
-Then:
+For the full Linux host flow and the manual path details, see `docs/setup.md`.
+
+Then, after the server install path you choose:
 
 1. Edit `deploy/env/elvern.env`
 2. For private-network testing, set `ELVERN_PUBLIC_APP_ORIGIN="https://example.tailnet.ts.net"` and `ELVERN_BACKEND_ORIGIN="http://example-private-host:8000"`, then replace those later with your real private hostname/origin pair
