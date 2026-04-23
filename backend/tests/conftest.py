@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.auth import ensure_admin_user
-from backend.app.config import refresh_settings
+from backend.app.config import get_settings, refresh_settings
 from backend.app.db import init_db
 
 
@@ -94,18 +94,20 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("ELVERN_MEDIA_ROOT", str(media_root))
     monkeypatch.setenv("ELVERN_DB_PATH", str(db_path))
     monkeypatch.setenv("ELVERN_ADMIN_USERNAME", "admin")
+    monkeypatch.delenv("ELVERN_ADMIN_PASSWORD_HASH", raising=False)
     monkeypatch.setenv("ELVERN_ADMIN_BOOTSTRAP_PASSWORD", "test-admin-password")
     monkeypatch.setenv("ELVERN_SESSION_SECRET", "test-session-secret-value-with-32-chars")
     monkeypatch.setenv("ELVERN_COOKIE_SECURE", "false")
     monkeypatch.setenv("ELVERN_SCAN_ON_STARTUP", "false")
     monkeypatch.setenv("ELVERN_TRANSCODE_ENABLED", "false")
     monkeypatch.setenv("ELVERN_BROWSER_PLAYBACK_ROUTE2_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_LIBRARY_ROOT_LINUX", str(media_root))
     monkeypatch.setenv("ELVERN_HELPER_RELEASES_DIR", str(helper_releases_dir))
     monkeypatch.setenv("ELVERN_TRANSCODE_DIR", str(transcode_dir))
 
     settings = refresh_settings()
     yield settings
-    refresh_settings()
+    get_settings.cache_clear()
 
 
 @pytest.fixture()

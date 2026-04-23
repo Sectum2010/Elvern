@@ -6,10 +6,12 @@ import re
 from ..media_scan import infer_title_and_year
 from .app_settings_service import get_poster_reference_location_payload
 from .library_movie_identity_service import _edition_label
+from .media_title_parser import parse_media_title
 from .title_normalization import (
     apostrophe_title_variants,
     clean_title_for_matching,
     normalize_title_key,
+    resolve_poster_match_identity,
     resolve_title_metadata,
 )
 from ..config import Settings
@@ -24,31 +26,23 @@ def _poster_directory(
     return Path(str(payload["effective_value"]))
 
 
-def _poster_candidate_names(title: object, year: object, original_filename: object) -> list[str]:
-    if year in {None, ""}:
-        return []
-    try:
-        normalized_year = int(year)
-    except (TypeError, ValueError):
+def _poster_candidate_names(*, title: object, year: object, original_filename: object) -> list[str]:
+    # Poster matching intentionally uses the dedicated poster identity, not the
+    # UI-cleaned display title.
+    poster_identity = resolve_poster_match_identity(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    candidate_title = str(poster_identity["title"] or "").strip()
+    normalized_year = poster_identity["year"]
+    if not candidate_title or normalized_year is None:
         return []
 
     title_variants: list[str] = []
-    resolved_metadata = resolve_title_metadata(
-        title=title,
-        year=normalized_year,
-        original_filename=original_filename,
-    )
-    candidate_title = resolved_metadata["base_title"] or clean_title_for_matching(title, normalized_year)
-    if candidate_title:
-        for variant in apostrophe_title_variants(candidate_title):
-            if variant not in title_variants:
-                title_variants.append(variant)
-    if not title_variants:
-        fallback_title = clean_title_for_matching(original_filename, normalized_year)
-        if fallback_title:
-            for variant in apostrophe_title_variants(fallback_title):
-                if variant not in title_variants:
-                    title_variants.append(variant)
+    for variant in apostrophe_title_variants(candidate_title):
+        if variant not in title_variants:
+            title_variants.append(variant)
 
     candidates: list[str] = []
     for candidate_title in title_variants:
@@ -68,7 +62,7 @@ def _normalize_cloud_title_and_year(
     year: object,
     original_filename: object,
     source_kind: object,
-) -> tuple[str, int | None, dict[str, str | None]]:
+) -> tuple[str, int | None, dict[str, object]]:
     raw_title = str(title or "").strip()
     try:
         resolved_year = int(year) if year not in {None, ""} else None
@@ -81,7 +75,9 @@ def _normalize_cloud_title_and_year(
             year=resolved_year,
             original_filename=original_filename,
         )
-        return raw_title or str(title or ""), resolved_year, metadata
+        display_title = str(metadata.get("display_title") or metadata.get("base_title") or raw_title or str(title or "")).strip()
+        parsed_year = _coerce_optional_int(metadata.get("parsed_year"))
+        return display_title, parsed_year if parsed_year is not None else resolved_year, metadata
 
     inferred_title = None
     inferred_year = None
@@ -97,14 +93,45 @@ def _normalize_cloud_title_and_year(
         original_filename=original_filename,
     )
     display_title = (
-        metadata["base_title"]
+        metadata.get("display_title")
+        or metadata["base_title"]
         or clean_title_for_matching(original_filename, resolved_year)
         or clean_title_for_matching(title, resolved_year)
         or inferred_title
         or raw_title
         or str(original_filename or "Cloud title")
     )
-    return display_title, resolved_year, metadata
+    parsed_year = _coerce_optional_int(metadata.get("parsed_year"))
+    return display_title, parsed_year if parsed_year is not None else resolved_year, metadata
+
+
+def _coerce_optional_int(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parsed_title_payload(*, title: object, year: object, original_filename: object) -> dict[str, object]:
+    parsed = parse_media_title(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    display_title = str(parsed["display_title"] or "").strip() or str(title or original_filename or "Untitled").strip() or "Untitled"
+    return {
+        "display_title": display_title,
+        "base_title": display_title,
+        "edition_identity": str(parsed["edition_identity"] or "standard"),
+        "parsed_year": parsed["parsed_year"],
+        "title_source": str(parsed["title_source"] or "fallback"),
+        "parse_confidence": str(parsed["parse_confidence"] or "low"),
+        "warnings": [str(value) for value in parsed["warnings"]],
+        "parser_version": str(parsed.get("parser_version") or ""),
+        "suspicious_output": bool(parsed.get("suspicious_output")),
+    }
 
 
 def _resolve_poster_path(
@@ -119,13 +146,11 @@ def _resolve_poster_path(
     resolved_poster_dir = poster_dir or _poster_directory(settings)
     if not resolved_poster_dir.exists():
         return None
-    display_title, display_year, _metadata = _normalize_cloud_title_and_year(
+    candidate_names = _poster_candidate_names(
         title=title,
         year=year,
         original_filename=original_filename,
-        source_kind=source_kind,
     )
-    candidate_names = _poster_candidate_names(display_title, display_year, original_filename)
     for candidate_name in candidate_names:
         candidate_path = resolved_poster_dir / candidate_name
         if candidate_path.is_file():
@@ -189,6 +214,11 @@ def _serialize_media_item(
     poster_dir: Path | None = None,
 ) -> dict[str, object]:
     source_kind = str(_row_value(row, "source_kind", "local") or "local")
+    parsed_title = _parsed_title_payload(
+        title=row["title"],
+        year=row["year"],
+        original_filename=row["original_filename"],
+    )
     display_title, display_year, metadata = _normalize_cloud_title_and_year(
         title=row["title"],
         year=row["year"],
@@ -198,6 +228,7 @@ def _serialize_media_item(
     return {
         "id": row["id"],
         "title": display_title,
+        "parsed_title": parsed_title,
         "original_filename": row["original_filename"],
         "source_kind": source_kind,
         "source_label": _source_label_for_row(row),

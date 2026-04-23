@@ -207,7 +207,7 @@ def test_local_scan_backfills_existing_rows_and_binds_new_rows_to_shared_source(
     assert len(rows) == 2
     assert int(rows[0]["id"]) == existing_media_item_id
     assert int(rows[0]["library_source_id"]) == int(shared_source_row["id"])
-    assert str(rows[1]["title"]) == "Spider-Man Homecoming"
+    assert str(rows[1]["title"]) == "Spider-Man.Homecoming.2017"
     assert int(rows[1]["library_source_id"]) == int(shared_source_row["id"])
 
 

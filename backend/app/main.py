@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .auth import build_login_rate_limiter, ensure_admin_user
-from .config import get_settings
+from .config import refresh_settings
 from .db import init_db
 from .routes.admin import router as admin_router
 from .routes.admin_assistant import router as admin_assistant_router
@@ -44,7 +44,7 @@ def configure_logging(level: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = get_settings()
+    settings = refresh_settings()
     configure_logging(settings.log_level)
     init_db(settings)
     ensure_admin_user(settings)

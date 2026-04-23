@@ -118,6 +118,31 @@ def test_desktop_resolution_prefers_linux_same_host_direct_path_when_available(i
     assert resolution["used_backend_fallback"] is False
 
 
+def test_desktop_resolution_same_host_linux_uses_actual_local_file_not_configured_library_root(initialized_settings) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=104,
+        relative_name="movies/linux-direct-real-path.mp4",
+    )
+    settings = replace(
+        initialized_settings,
+        vlc_path_linux="/usr/bin/vlc",
+        library_root_linux="/home/sectum/Videos/Movies",
+    )
+
+    resolution = build_desktop_playback_resolution(
+        settings,
+        item=item,
+        platform="linux",
+        same_host=True,
+    )
+
+    assert resolution["strategy"] == "direct_path"
+    assert resolution["vlc_target"] == item["file_path"]
+    assert resolution["same_host_launch"] is True
+    assert resolution["used_backend_fallback"] is False
+
+
 def test_desktop_resolution_prefers_mapped_windows_path_before_backend_fallback(initialized_settings) -> None:
     item = _make_local_item(
         initialized_settings,

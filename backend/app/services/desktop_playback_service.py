@@ -386,14 +386,28 @@ def build_desktop_playback_resolution(
     same_host: bool,
 ) -> dict[str, object]:
     resolved_file = _resolve_local_media_file(settings, item)
-    mapped_target = map_media_path_for_platform(settings, resolved_file, platform) if resolved_file else None
+    linux_same_host_direct_target = (
+        str(resolved_file)
+        if platform == "linux" and same_host and resolved_file is not None
+        else None
+    )
+    mapped_target = (
+        map_media_path_for_platform(settings, resolved_file, platform)
+        if resolved_file and linux_same_host_direct_target is None
+        else None
+    )
     resume_seconds = float(item.get("resume_position_seconds") or 0)
     playlist_url = f"/api/desktop-playback/{int(item['id'])}/playlist?platform={platform}"
     handoff_supported = _desktop_helper_supported(settings)
     notes: list[str] = []
     vlc_available_on_linux_host = platform == "linux" and same_host and bool(settings.vlc_path_linux)
 
-    if mapped_target is not None:
+    if linux_same_host_direct_target is not None:
+        strategy = "direct_path"
+        vlc_target = linux_same_host_direct_target
+        used_backend_fallback = False
+        notes.append("Installed VLC will use the actual local file path on this Linux host.")
+    elif mapped_target is not None:
         strategy = "direct_path"
         vlc_target = mapped_target
         used_backend_fallback = False
@@ -409,8 +423,8 @@ def build_desktop_playback_resolution(
         and (
             (
                 strategy == "direct_path"
-                and mapped_target is not None
-                and Path(mapped_target).exists()
+                and resolved_file is not None
+                and resolved_file.exists()
             )
             or (not _is_local_media_item(item))
         )
@@ -428,8 +442,14 @@ def build_desktop_playback_resolution(
         open_method = "download_playlist"
         notes.append("Desktop helper handoff is unavailable until a real DGX app/backend origin is configured.")
 
-    if platform == "linux" and strategy == "direct_path" and same_host and mapped_target and not Path(mapped_target).exists():
-        notes.append("The configured Linux VLC source path does not currently exist on disk; check ELVERN_LIBRARY_ROOT_LINUX.")
+    if (
+        platform == "linux"
+        and strategy == "direct_path"
+        and same_host
+        and resolved_file is not None
+        and not resolved_file.exists()
+    ):
+        notes.append("The local media file does not currently exist on disk.")
     elif not resolved_file:
         notes.append("Cloud libraries use a secure backend stream fallback for desktop VLC in this phase.")
     elif platform == "windows" and not settings.library_root_windows:
@@ -486,22 +506,11 @@ def launch_vlc_for_item(
     tracked_progress_session: dict[str, str] | None = None
     rc_host_port = _reserve_linux_vlc_rc_port()
     if resolved_file is not None:
-        target = map_media_path_for_platform(settings, resolved_file, "linux")
-        if not target:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="No Linux direct source path is configured for VLC launch",
-            )
-        target_path = Path(target)
-        if not target_path.is_absolute():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="The resolved Linux VLC target must be an absolute local path.",
-            )
+        target_path = resolved_file.resolve()
         if not target_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="The resolved Linux VLC target does not exist on disk. Check ELVERN_LIBRARY_ROOT_LINUX.",
+                detail="The local media file does not exist on disk.",
             )
         launch_target = str(target_path)
         tracked_progress_session = create_native_playback_session(

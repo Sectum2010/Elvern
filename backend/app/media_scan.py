@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import subprocess
 from pathlib import Path
 
@@ -13,27 +12,21 @@ from .services.local_library_source_service import (
     ensure_current_shared_local_source_binding,
     get_effective_shared_local_library_path,
 )
+from .services.media_title_parser import parse_media_title
 
 
 logger = logging.getLogger(__name__)
-YEAR_PATTERN = re.compile(r"(19|20)\d{2}")
 LOCAL_LIBRARY_FRESHNESS_SNAPSHOT_VERSION = 1
 
 
 def infer_title_and_year(filename_stem: str) -> tuple[str, int | None]:
-    normalized = re.sub(r"[._]+", " ", filename_stem)
-    normalized = re.sub(r"\s+", " ", normalized).strip(" -_")
-    year_match = None
-    for match in YEAR_PATTERN.finditer(normalized):
-        year_match = match
-    year = int(year_match.group(0)) if year_match else None
-    if year_match:
-        title = (normalized[: year_match.start()] + normalized[year_match.end() :]).strip(
-            " -_()[]"
-        )
-    else:
-        title = normalized
-    return title or filename_stem, year
+    parsed = parse_media_title(
+        title=None,
+        year=None,
+        original_filename=filename_stem,
+    )
+    resolved_title = str(parsed["display_title"] or "").strip() or filename_stem
+    return resolved_title, parsed["parsed_year"]
 
 
 def _inside_media_root(candidate: Path, media_root: Path) -> bool:
@@ -278,7 +271,11 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     continue
 
                 metadata = extract_media_metadata(resolved, settings)
-                title, year = infer_title_and_year(resolved.stem)
+                # Preserve the source-provided title stem in storage. Clean display titles
+                # stay derived at read time so parser changes do not destructively rewrite
+                # the raw library title truth.
+                title = resolved.stem
+                _, year = infer_title_and_year(resolved.stem)
                 now = utcnow_iso()
                 connection.execute(
                     """

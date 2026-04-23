@@ -1,0 +1,254 @@
+[
+  {
+    "name": "one_piece_tmdb_remux_blocks",
+    "title": null,
+    "original_filename": "One Piece Stampede () [tmdbid-568012] - [Remux-1080p][TrueHD].mkv",
+    "year": null,
+    "expected_display_title": "One Piece Stampede",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "interstellar_heavy_metadata_suffix",
+    "title": null,
+    "original_filename": "Interstellar.2014.UHD.BluRay.2160p.DTS-HD.MA.5.1.HEVC.REMUX-FraMeSToR.mkv",
+    "year": null,
+    "expected_display_title": "Interstellar",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2014
+  },
+  {
+    "name": "spider_man_hyphen_and_resolution",
+    "title": null,
+    "original_filename": "Spider-Man.2002.1080p.BluRay.Remux.TrueHD.mkv",
+    "year": null,
+    "expected_display_title": "Spider-Man",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2002
+  },
+  {
+    "name": "oceans_eleven_apostrophe_and_metadata",
+    "title": null,
+    "original_filename": "Ocean's Eleven [imdb-tt0240772] [2160p UHD BluRay REMUX] [TrueHD Atmos 7.1].mkv",
+    "year": null,
+    "expected_display_title": "Ocean's Eleven",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "blade_runner_final_cut",
+    "title": null,
+    "original_filename": "Blade.Runner.Final.Cut.2007.1080p.BluRay.mkv",
+    "year": null,
+    "expected_display_title": "Blade Runner",
+    "expected_edition_identity": "final cut",
+    "expected_parsed_year": 2007
+  },
+  {
+    "name": "alien_directors_cut",
+    "title": null,
+    "original_filename": "Alien.Directors.Cut.1979.2160p.UHD.BluRay.REMUX.mkv",
+    "year": null,
+    "expected_display_title": "Alien",
+    "expected_edition_identity": "director's cut",
+    "expected_parsed_year": 1979
+  },
+  {
+    "name": "rocky_ii_roman_numeral",
+    "title": null,
+    "original_filename": "Rocky.II.1979.1080p.BluRay.x264.mkv",
+    "year": null,
+    "expected_display_title": "Rocky II",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 1979
+  },
+  {
+    "name": "rocky_iii_roman_numeral",
+    "title": null,
+    "original_filename": "Rocky.III.1982.1080p.BluRay.x264.mkv",
+    "year": null,
+    "expected_display_title": "Rocky III",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 1982
+  },
+  {
+    "name": "birdman_parenthetical_title_preserved",
+    "title": null,
+    "original_filename": "Birdman (Or The Unexpected Virtue of Ignorance) (2014) [1080p].mkv",
+    "year": null,
+    "expected_display_title": "Birdman (Or The Unexpected Virtue of Ignorance)",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2014
+  },
+  {
+    "name": "harry_potter_part_one_preserved",
+    "title": null,
+    "original_filename": "Harry Potter and the Deathly Hallows Part 1 1080p BluRay x264.mkv",
+    "year": null,
+    "expected_display_title": "Harry Potter and the Deathly Hallows Part 1",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "harry_potter_part_two_preserved",
+    "title": null,
+    "original_filename": "Harry Potter and the Deathly Hallows Part 2 1080p BluRay x264.mkv",
+    "year": null,
+    "expected_display_title": "Harry Potter and the Deathly Hallows Part 2",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "menu_year_and_language_before_metadata_cut",
+    "title": null,
+    "original_filename": "The.Menu.2022.iTA-ENG.WEBDL.2160p.HEVC.HDR.x265-CYBER.mkv",
+    "year": 2022,
+    "expected_display_title": "The Menu",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2022
+  },
+  {
+    "name": "one_piece_film_red_tmdb_webdl",
+    "title": null,
+    "original_filename": "One.Piece.Film.Red.[tmdbid-900667].[WEB-DL].[DDP5.1].mkv",
+    "year": null,
+    "expected_display_title": "One Piece Film Red",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "blade_runner_2049_number_preserved",
+    "title": null,
+    "original_filename": "Blade Runner 2049.2017.2160p.UHD.BluRay.REMUX.mkv",
+    "year": null,
+    "expected_display_title": "Blade Runner 2049",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2017
+  },
+  {
+    "name": "title_number_1917_preserved",
+    "title": null,
+    "original_filename": "1917.2019.1080p.BluRay.x264.mkv",
+    "year": null,
+    "expected_display_title": "1917",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2019
+  },
+  {
+    "name": "title_number_300_preserved",
+    "title": null,
+    "original_filename": "300.2006.1080p.BluRay.x264.mkv",
+    "year": null,
+    "expected_display_title": "300",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2006
+  },
+  {
+    "name": "one_piece_strong_world_dense_suffix",
+    "title": null,
+    "original_filename": "One Piece Film Strong World 1080p BluRay DDP 5 1 10bit H 265-iVy.mkv",
+    "year": null,
+    "expected_display_title": "One Piece Film Strong World",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "one_piece_straw_hat_chase_dense_suffix",
+    "title": null,
+    "original_filename": "One Piece 3D Straw Hat Chase 1080p BluRay DDP 5 1 10bit H 265-iVy.mkv",
+    "year": null,
+    "expected_display_title": "One Piece 3D Straw Hat Chase",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "one_piece_gold_dense_suffix_with_language_tags",
+    "title": null,
+    "original_filename": "One Piece Gold-II Film DTS ITA GIA 1080p BluRay x264-BLUWORLD.mkv",
+    "year": null,
+    "expected_display_title": "One Piece Gold-II Film",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "one_piece_stampede_dash_garbage",
+    "title": null,
+    "original_filename": "One Piece Stampede - psychic.mkv",
+    "year": null,
+    "expected_display_title": "One Piece Stampede",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null
+  },
+  {
+    "name": "lotr_extended_edition",
+    "title": null,
+    "original_filename": "The.Lord.of.the.Rings.The.Return.of.the.King.2003.Extended.Edition.2160p.mkv",
+    "year": null,
+    "expected_display_title": "The Lord of the Rings The Return of the King",
+    "expected_edition_identity": "extended",
+    "expected_parsed_year": 2003
+  },
+  {
+    "name": "prefer_clean_title_punctuation_when_matching_filename",
+    "title": "Ocean's Eleven",
+    "original_filename": "Oceans.Eleven.2001.1080p.BluRay.Remux.mkv",
+    "year": 2001,
+    "expected_display_title": "Ocean's Eleven",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2001
+  },
+  {
+    "name": "avatar_live_row_dirty_title_rejected_in_favor_of_cleaner_filename",
+    "title": "Avatar  UHD 4K BluRay 2160p ReMux HEVC HDR10 TrueHD 7 1 Atmos - MgB",
+    "original_filename": "Avatar 2009 UHD 4K BluRay 2160p ReMux HEVC HDR10 TrueHD 7.1 Atmos - MgB.mkv",
+    "year": 2009,
+    "expected_display_title": "Avatar",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2009
+  },
+  {
+    "name": "zootopia_live_row_dirty_title_rejected_in_favor_of_cleaner_filename",
+    "title": "Zootopia  UHD BluRay 2160p TrueHD Atmos 7 1 HEVC REMUX-FraMeSToR",
+    "original_filename": "Zootopia.2016.UHD.BluRay.2160p.TrueHD.Atmos.7.1.HEVC.REMUX-FraMeSToR.mkv",
+    "year": 2016,
+    "expected_display_title": "Zootopia",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2016
+  },
+  {
+    "name": "how_to_train_your_dragon_two_live_row_number_preserved",
+    "title": "How to Train Your Dragon 2  2160p UHD BluRay REMUX HDR HEVC DTS-X-EPSiLON",
+    "original_filename": "How.to.Train.Your.Dragon.2.2014.2160p.UHD.BluRay.REMUX.HDR.HEVC.DTS-X-EPSiLON.mkv",
+    "year": 2014,
+    "expected_display_title": "How to Train Your Dragon 2",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2014
+  },
+  {
+    "name": "wizard_of_oz_live_row_year_recovered_from_filename",
+    "title": "The Wizard of Oz  4K UHD 2160p REMUX DV DTS-HD MA 5 1 Dual PTBR-BrRemux",
+    "original_filename": "The.Wizard.of.Oz.1939.4K.UHD.2160p.REMUX.DV.DTS-HD.MA.5.1.Dual.PTBR-BrRemux.mkv",
+    "year": null,
+    "expected_display_title": "The Wizard of Oz",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 1939
+  },
+  {
+    "name": "godfather_release_group_suffix_after_year_cut",
+    "title": "the godfather  4k-kc",
+    "original_filename": "the.godfather.1972 4k-kc.mkv",
+    "year": 1972,
+    "expected_display_title": "the godfather",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 1972
+  },
+  {
+    "name": "one_piece_bracketed_audio_block_and_dash_junk_removed",
+    "title": "One Piece Stampede - [TrueHD 5 1] -psychic",
+    "original_filename": "One Piece Stampede (2019) [tmdbid-568012] - [Remux-1080p][TrueHD 5.1][h264]-psychic.mkv",
+    "year": 2019,
+    "expected_display_title": "One Piece Stampede",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 2019
+  }
+]

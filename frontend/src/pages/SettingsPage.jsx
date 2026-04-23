@@ -854,6 +854,16 @@ export function SettingsPage() {
     return payload;
   }
 
+  function buildCloudRefreshWarning(successMessage, requestError) {
+    const refreshMessage = typeof requestError?.message === "string"
+      ? requestError.message.trim()
+      : "";
+    if (refreshMessage) {
+      return `${successMessage} Cloud libraries could not refresh automatically: ${refreshMessage}`;
+    }
+    return `${successMessage} Cloud libraries could not refresh automatically.`;
+  }
+
   async function refreshGoogleDriveSetup() {
     if (user?.role !== "admin") {
       return null;
@@ -888,12 +898,15 @@ export function SettingsPage() {
         client_id: payload.client_id || "",
         client_secret: payload.client_secret || "",
       });
-      await refreshCloudLibraries();
-      setMessage(
-        payload.configuration_state === "ready"
-          ? "Google Drive setup saved. You can connect Google Drive below."
-          : "Google Drive setup saved.",
-      );
+      const successMessage = payload.configuration_state === "ready"
+        ? "Google Drive setup saved. You can connect Google Drive below."
+        : "Google Drive setup saved.";
+      try {
+        await refreshCloudLibraries();
+        setMessage(successMessage);
+      } catch (refreshError) {
+        setMessage(buildCloudRefreshWarning(successMessage, refreshError));
+      }
     } catch (requestError) {
       setError(requestError.message || "Failed to save Google Drive setup");
     } finally {
@@ -959,12 +972,18 @@ export function SettingsPage() {
       }));
       if (isShared) {
         setSharedLibraryDraft({ resource_type: "folder", resource_id: "" });
-        setMessage("Shared library added from Google Drive.");
       } else {
         setMyLibraryDraft({ resource_type: "folder", resource_id: "" });
-        setMessage("Google Drive library added.");
       }
-      await refreshCloudLibraries();
+      const successMessage = isShared
+        ? "Shared library added from Google Drive."
+        : "Google Drive library added.";
+      try {
+        await refreshCloudLibraries();
+        setMessage(successMessage);
+      } catch (refreshError) {
+        setMessage(buildCloudRefreshWarning(successMessage, refreshError));
+      }
     } catch (requestError) {
       if (
         typeof window !== "undefined"
@@ -1669,7 +1688,7 @@ export function SettingsPage() {
                   <input
                     disabled={loading || sharedMediaLibraryReferenceSaving}
                     onChange={(event) => setSharedMediaLibraryReferenceInput(event.target.value)}
-                    placeholder={sharedMediaLibraryReference.default_value || "/srv/media/movies"}
+                    placeholder={sharedMediaLibraryReference.default_value || ""}
                     type="text"
                     value={sharedMediaLibraryReferenceInput}
                   />
@@ -1690,8 +1709,8 @@ export function SettingsPage() {
                   </button>
                 </div>
               </label>
-              <StatusRow label="Using now" value={sharedMediaLibraryReference.effective_value || "Unknown"} />
-              <StatusRow label="Bootstrap path" value={sharedMediaLibraryReference.default_value || "Unknown"} />
+              <StatusRow label="Current path" value={sharedMediaLibraryReference.effective_value || "Unknown"} />
+              <StatusRow label="Default path" value={sharedMediaLibraryReference.default_value || "Unknown"} />
               <div className="desktop-playback-notes">
                 {(sharedMediaLibraryReference.validation_rules || []).map((rule) => (
                   <p className="page-subnote" key={rule}>
@@ -1747,7 +1766,7 @@ export function SettingsPage() {
                     autoCorrect="off"
                     disabled={loading || posterReferenceSaving}
                     onChange={(event) => setPosterReferenceInput(event.target.value)}
-                    placeholder={posterReference.default_value || "/path/to/Posters"}
+                    placeholder={posterReference.default_value || ""}
                     spellCheck="false"
                     type="text"
                     value={posterReferenceInput}
@@ -1769,8 +1788,8 @@ export function SettingsPage() {
                   </button>
                 </div>
               </label>
-              <StatusRow label="Effective location" value={posterReference.effective_value || "Unknown"} />
-              <StatusRow label="Default location" value={posterReference.default_value || "Unknown"} />
+              <StatusRow label="Current path" value={posterReference.effective_value || "Unknown"} />
+              <StatusRow label="Default path" value={posterReference.default_value || "Unknown"} />
               <div className="desktop-playback-notes">
                 {(posterReference.validation_rules || []).map((rule) => (
                   <p className="page-subnote" key={rule}>

@@ -397,10 +397,10 @@ def refresh_cloud_media_item_metadata(
 
 def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, row: dict[str, object]) -> None:
     name = str(row.get("name") or row.get("id") or "Google Drive file")
+    # Keep the source-provided title stem in storage. UI display title and poster
+    # identity stay derived so parser changes remain non-destructive.
     title = Path(name).stem or name
-    inferred_title, inferred_year = infer_title_and_year(Path(name).stem or name)
-    if inferred_title:
-        title = inferred_title
+    _display_title, inferred_year = infer_title_and_year(Path(name).stem or name)
     external_media_id = str(row["id"])
     cloud_mime_type = str(row.get("mimeType") or "")
     cloud_resource_key = str(row.get("resourceKey") or "").strip() or None

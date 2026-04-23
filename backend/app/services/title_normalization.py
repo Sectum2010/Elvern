@@ -3,52 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from .media_title_parser import (
+    extract_edition_identity_anywhere as extract_edition_identity_anywhere_from_parser,
+    parse_media_title,
+)
 
-TITLE_NOISE_TOKENS = {
-    "2160p",
-    "1080p",
-    "720p",
-    "480p",
-    "uhd",
-    "hdr",
-    "hdr10",
-    "dv",
-    "dovi",
-    "sdr",
-    "bluray",
-    "blu-ray",
-    "bdrip",
-    "brrip",
-    "webrip",
-    "webdl",
-    "web-dl",
-    "remux",
-    "x264",
-    "x265",
-    "h264",
-    "h265",
-    "hevc",
-    "avc",
-    "truehd",
-    "atmos",
-    "dts",
-    "aac",
-    "ac3",
-    "ddp",
-    "dd5",
-    "ma",
-    "proper",
-    "repack",
-    "imax",
-    "criterion",
-    "hybrid",
-    "multi",
-    "subbed",
-    "dubbed",
-    "10bit",
-    "8bit",
-}
-YEAR_TOKEN_TEMPLATE = r"(?<!\d){year}(?!\d)"
 ARTICLE_TOKENS = {"the", "a", "an"}
 ROMAN_TO_ARABIC = {
     "i": "1",
@@ -62,32 +21,6 @@ ROMAN_TO_ARABIC = {
     "ix": "9",
     "x": "10",
 }
-EDITION_SUFFIX_PATTERNS = (
-    ("roadshow", re.compile(r"(?:^|\s)(roadshow(?:\s+version)?)$", re.IGNORECASE)),
-    ("director's cut", re.compile(r"(?:^|\s)((?:director'?s|directors)\s+cut|dc)$", re.IGNORECASE)),
-    ("theatrical", re.compile(r"(?:^|\s)(theatrical(?:\s+cut|\s+version)?)$", re.IGNORECASE)),
-    ("extended", re.compile(r"(?:^|\s)(extended(?:\s+cut|\s+edition)?)$", re.IGNORECASE)),
-    ("final cut", re.compile(r"(?:^|\s)(final\s+cut)$", re.IGNORECASE)),
-    ("ultimate cut", re.compile(r"(?:^|\s)(ultimate\s+cut)$", re.IGNORECASE)),
-    ("special edition", re.compile(r"(?:^|\s)(special\s+edition)$", re.IGNORECASE)),
-    ("collector's edition", re.compile(r"(?:^|\s)(collector'?s\s+edition)$", re.IGNORECASE)),
-    ("anniversary edition", re.compile(r"(?:^|\s)(anniversary\s+edition)$", re.IGNORECASE)),
-    ("unrated", re.compile(r"(?:^|\s)(unrated)$", re.IGNORECASE)),
-)
-EDITION_ANYWHERE_PATTERNS = (
-    ("roadshow", re.compile(r"\broadshow(?:\s+version)?\b", re.IGNORECASE)),
-    ("director's cut", re.compile(r"\b(?:director'?s|directors)\s+cut\b", re.IGNORECASE)),
-    ("theatrical", re.compile(r"\btheatrical(?:\s+cut|\s+version)?\b", re.IGNORECASE)),
-    ("extended", re.compile(r"\bextended(?:\s+cut|\s+edition)?\b", re.IGNORECASE)),
-    ("final cut", re.compile(r"\bfinal\s+cut\b", re.IGNORECASE)),
-    ("ultimate cut", re.compile(r"\bultimate\s+cut\b", re.IGNORECASE)),
-    ("special edition", re.compile(r"\bspecial\s+edition\b", re.IGNORECASE)),
-    ("collector's edition", re.compile(r"\bcollector'?s\s+edition\b", re.IGNORECASE)),
-    ("anniversary edition", re.compile(r"\banniversary\s+edition\b", re.IGNORECASE)),
-    ("unrated", re.compile(r"\bunrated\b", re.IGNORECASE)),
-)
-
-
 def collapse_spaces(value: str) -> str:
     return " ".join(value.split())
 
@@ -154,82 +87,43 @@ def tokenize_search_text(value: str, *, drop_leading_articles: bool = False) -> 
             tokens.append(canonical)
     return tokens
 
-
-def strip_trailing_noise_tokens(value: str) -> str:
-    tokens = value.split()
-    while tokens:
-        token = tokens[-1].strip("()[]{}.,-_/:").lower()
-        if (
-            token in TITLE_NOISE_TOKENS
-            or re.fullmatch(r"\d{3,4}p", token)
-            or re.fullmatch(r"[xh]\.?26[45]", token)
-            or re.fullmatch(r"\d\.\d", token)
-        ):
-            tokens.pop()
-            continue
-        break
-    return " ".join(tokens).strip(" -_")
-
-
 def clean_title_for_matching(value: object, year: object) -> str | None:
-    if not value:
-        return None
-    normalized = normalize_title_source(str(value))
-    if not normalized:
-        return None
-
-    year_value: int | None = None
-    if year not in {None, ""}:
-        try:
-            year_value = int(year)
-        except (TypeError, ValueError):
-            year_value = None
-
-    if year_value is not None:
-        year_pattern = re.compile(YEAR_TOKEN_TEMPLATE.format(year=year_value))
-        matches = list(year_pattern.finditer(normalized))
-        if matches:
-            normalized = normalized[: matches[-1].start()].strip(" -_()[]")
-
-    normalized = strip_trailing_noise_tokens(normalized)
-    normalized = collapse_spaces(normalized)
-    return normalized or None
+    parsed = parse_media_title(title=None, year=year, original_filename=value)
+    display_title = str(parsed["display_title"] or "").strip()
+    return display_title or None
 
 
 def split_title_and_edition(cleaned_title: str) -> tuple[str, str]:
-    working = collapse_spaces(cleaned_title)
-    edition_markers: list[str] = []
-    while working:
-        matched = False
-        for edition_key, pattern in EDITION_SUFFIX_PATTERNS:
-            match = pattern.search(working)
-            if not match:
-                continue
-            if edition_key not in edition_markers:
-                edition_markers.insert(0, edition_key)
-            working = working[: match.start()].strip(" -_/:,")
-            matched = True
-            break
-        if not matched:
-            break
-    base_title = collapse_spaces(working) or collapse_spaces(cleaned_title)
-    edition_identity = "|".join(edition_markers) if edition_markers else "standard"
-    return base_title, edition_identity
+    parsed = parse_media_title(title=cleaned_title, year=None, original_filename=None)
+    return (
+        str(parsed["base_title"] or cleaned_title or "").strip(),
+        str(parsed["edition_identity"] or "standard"),
+    )
 
 
-def extract_title_metadata(value: object, year: object) -> dict[str, str | None]:
-    cleaned_title = clean_title_for_matching(value, year)
+def extract_title_metadata(value: object, year: object) -> dict[str, object]:
+    parsed = parse_media_title(title=None, year=year, original_filename=value)
+    cleaned_title = str(parsed["display_title"] or "").strip()
     if not cleaned_title:
         return {
             "cleaned_title": None,
             "base_title": None,
             "edition_identity": "standard",
+            "display_title": None,
+            "parsed_year": None,
+            "title_source": None,
+            "parse_confidence": "low",
+            "warnings": [],
         }
-    base_title, edition_identity = split_title_and_edition(cleaned_title)
     return {
         "cleaned_title": cleaned_title,
-        "base_title": base_title,
-        "edition_identity": edition_identity,
+        "base_title": str(parsed["base_title"] or cleaned_title),
+        "edition_identity": str(parsed["edition_identity"] or "standard"),
+        "display_title": cleaned_title,
+        "parsed_year": str(parsed["parsed_year"]) if parsed["parsed_year"] is not None else None,
+        "title_source": str(parsed["title_source"] or ""),
+        "parse_confidence": str(parsed["parse_confidence"] or "low"),
+        "warnings": [str(value) for value in parsed["warnings"]],
     }
 
 
@@ -238,34 +132,75 @@ def resolve_title_metadata(
     title: object,
     year: object,
     original_filename: object,
-) -> dict[str, str | None]:
-    resolved_variants: list[dict[str, str | None]] = []
-    for source_value in (original_filename, title):
-        metadata = extract_title_metadata(source_value, year)
-        if metadata["base_title"]:
-            resolved_variants.append(metadata)
-    if not resolved_variants:
+) -> dict[str, object]:
+    parsed = parse_media_title(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    display_title = str(parsed["display_title"] or "").strip()
+    base_title = str(parsed["base_title"] or display_title).strip()
+    if not base_title:
         return {
             "cleaned_title": None,
             "base_title": None,
             "edition_identity": "standard",
+            "display_title": None,
+            "parsed_year": None,
+            "title_source": None,
+            "parse_confidence": "low",
+            "warnings": [],
         }
-    for metadata in resolved_variants:
-        if metadata["edition_identity"] != "standard":
-            return metadata
-    return min(
-        resolved_variants,
-        key=lambda metadata: len(str(metadata["cleaned_title"] or metadata["base_title"] or "")),
+    return {
+        "cleaned_title": display_title or base_title,
+        "base_title": base_title,
+        "edition_identity": str(parsed["edition_identity"] or "standard"),
+        "display_title": display_title or base_title,
+        "poster_match_title": str(parsed.get("poster_match_title") or base_title),
+        "poster_match_year": str(parsed["poster_match_year"]) if parsed.get("poster_match_year") is not None else None,
+        "poster_match_source": str(parsed.get("poster_match_source") or parsed["title_source"] or ""),
+        "poster_match_identity": dict(parsed.get("poster_match_identity") or {}),
+        "parsed_year": str(parsed["parsed_year"]) if parsed["parsed_year"] is not None else None,
+        "title_source": str(parsed["title_source"] or ""),
+        "parse_confidence": str(parsed["parse_confidence"] or "low"),
+        "warnings": [str(value) for value in parsed["warnings"]],
+        "parser_version": str(parsed.get("parser_version") or ""),
+        "suspicious_output": bool(parsed.get("suspicious_output")),
+    }
+
+
+def resolve_poster_match_identity(
+    *,
+    title: object,
+    year: object,
+    original_filename: object,
+) -> dict[str, object]:
+    parsed = parse_media_title(
+        title=title,
+        year=year,
+        original_filename=original_filename,
     )
+    poster_identity = dict(parsed.get("poster_match_identity") or {})
+    poster_match_title = str(poster_identity.get("title") or parsed.get("poster_match_title") or "").strip()
+    poster_match_year = poster_identity.get("year", parsed.get("poster_match_year"))
+    return {
+        "title": poster_match_title or None,
+        "year": int(poster_match_year) if poster_match_year not in {None, ""} else None,
+        "source": str(
+            poster_identity.get("source")
+            or parsed.get("poster_match_source")
+            or parsed["title_source"]
+            or ""
+        ),
+        "parse_confidence": str(parsed["parse_confidence"] or "low"),
+        "warnings": [str(value) for value in parsed["warnings"]],
+        "parser_version": str(parsed.get("parser_version") or ""),
+        "suspicious_output": bool(parsed.get("suspicious_output")),
+    }
 
 
 def extract_edition_identity_anywhere(*values: object) -> str:
-    markers: list[str] = []
-    normalized_sources = [normalize_title_source(str(value or "")) for value in values if value]
-    for edition_key, pattern in EDITION_ANYWHERE_PATTERNS:
-        if any(pattern.search(source) for source in normalized_sources):
-            markers.append(edition_key)
-    return "|".join(markers) if markers else "standard"
+    return extract_edition_identity_anywhere_from_parser(*values)
 
 
 def apostrophe_title_variants(value: str) -> list[str]:
@@ -308,6 +243,7 @@ def build_search_index(
     metadata = resolve_title_metadata(title=title, year=year, original_filename=original_filename)
     phrases: list[str] = []
     for value in (
+        metadata.get("display_title"),
         metadata["base_title"],
         metadata["cleaned_title"],
         clean_title_for_matching(original_filename, year),

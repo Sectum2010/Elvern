@@ -41,9 +41,22 @@ class SubtitleTrackResponse(BaseModel):
     disposition_default: bool = False
 
 
+class ParsedTitleResponse(BaseModel):
+    display_title: str
+    base_title: str
+    edition_identity: str = "standard"
+    parsed_year: int | None = None
+    title_source: str = "fallback"
+    parse_confidence: Literal["high", "medium", "low"] = "low"
+    warnings: list[str] = Field(default_factory=list)
+    parser_version: str = ""
+    suspicious_output: bool = False
+
+
 class LibraryItemSummary(BaseModel):
     id: int
     title: str
+    parsed_title: ParsedTitleResponse
     original_filename: str
     source_kind: Literal["local", "cloud"] = "local"
     source_label: Literal["DGX", "Cloud"] = "DGX"

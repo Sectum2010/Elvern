@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+import backend.app.main as main_module
+from backend.app.auth import ensure_admin_user
+from backend.app.config import get_settings, refresh_settings
 from backend.app.db import get_connection, utcnow_iso
+from backend.app.db import init_db
 from backend.app.media_scan import scan_media_library
+from backend.app.security import hash_password
 from backend.app.services.desktop_playback_service import resolve_same_host_request
+from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
+from backend.tests.conftest import (
+    DummyAdminEventHub,
+    DummyMobilePlaybackManager,
+    DummyScanService,
+    DummyTranscodeManager,
+)
 
 
 def _login(client, *, username: str, password: str) -> None:
@@ -61,6 +76,477 @@ def test_auth_login_me_logout_smoke(client, admin_credentials) -> None:
     assert after_logout.status_code == 401
 
 
+def test_test_settings_fixture_clears_live_auth_hash_and_linux_library_root(monkeypatch, request) -> None:
+    monkeypatch.setenv("ELVERN_ADMIN_PASSWORD_HASH", hash_password("wrong-live-password"))
+    monkeypatch.setenv("ELVERN_LIBRARY_ROOT_LINUX", "/home/sectum/Videos/Movies")
+
+    initialized_settings = request.getfixturevalue("initialized_settings")
+    client = request.getfixturevalue("client")
+    admin_credentials = request.getfixturevalue("admin_credentials")
+
+    assert initialized_settings.admin_password_hash is None
+    assert initialized_settings.library_root_linux == str(initialized_settings.media_root)
+
+    response = client.post("/api/auth/login", json=admin_credentials)
+    assert response.status_code == 200
+    assert response.json()["user"]["username"] == admin_credentials["username"]
+
+
+def test_app_startup_refreshes_settings_instead_of_using_stale_cached_settings(monkeypatch, tmp_path) -> None:
+    media_root_a = tmp_path / "media-a"
+    media_root_a.mkdir()
+    db_path_a = tmp_path / "backend" / "data" / "a.db"
+    helper_releases_dir = tmp_path / "backend" / "data" / "helper_releases"
+    transcode_dir = tmp_path / "backend" / "data" / "transcodes"
+
+    monkeypatch.setenv("ELVERN_MEDIA_ROOT", str(media_root_a))
+    monkeypatch.setenv("ELVERN_DB_PATH", str(db_path_a))
+    monkeypatch.setenv("ELVERN_ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ELVERN_ADMIN_BOOTSTRAP_PASSWORD", "password-a-123456789012345678901234")
+    monkeypatch.setenv("ELVERN_SESSION_SECRET", "session-secret-a-12345678901234567890")
+    monkeypatch.setenv("ELVERN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("ELVERN_SCAN_ON_STARTUP", "false")
+    monkeypatch.setenv("ELVERN_TRANSCODE_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_BROWSER_PLAYBACK_ROUTE2_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_HELPER_RELEASES_DIR", str(helper_releases_dir))
+    monkeypatch.setenv("ELVERN_TRANSCODE_DIR", str(transcode_dir))
+    settings_a = refresh_settings()
+    init_db(settings_a)
+    ensure_admin_user(settings_a)
+
+    media_root_b = tmp_path / "media-b"
+    media_root_b.mkdir()
+    db_path_b = tmp_path / "backend" / "data" / "b.db"
+    monkeypatch.setenv("ELVERN_MEDIA_ROOT", str(media_root_b))
+    monkeypatch.setenv("ELVERN_DB_PATH", str(db_path_b))
+    monkeypatch.setenv("ELVERN_ADMIN_BOOTSTRAP_PASSWORD", "password-b-123456789012345678901234")
+    monkeypatch.setenv("ELVERN_SESSION_SECRET", "session-secret-b-12345678901234567890")
+    settings_b = refresh_settings()
+    init_db(settings_b)
+    ensure_admin_user(settings_b)
+
+    monkeypatch.setenv("ELVERN_MEDIA_ROOT", str(media_root_a))
+    monkeypatch.setenv("ELVERN_DB_PATH", str(db_path_a))
+    monkeypatch.setenv("ELVERN_ADMIN_BOOTSTRAP_PASSWORD", "password-a-123456789012345678901234")
+    monkeypatch.setenv("ELVERN_SESSION_SECRET", "session-secret-a-12345678901234567890")
+    stale_settings = refresh_settings()
+    assert stale_settings.media_root == media_root_a.resolve()
+    assert get_settings().media_root == media_root_a.resolve()
+
+    monkeypatch.setenv("ELVERN_MEDIA_ROOT", str(media_root_b))
+    monkeypatch.setenv("ELVERN_DB_PATH", str(db_path_b))
+    monkeypatch.setenv("ELVERN_ADMIN_BOOTSTRAP_PASSWORD", "password-b-123456789012345678901234")
+    monkeypatch.setenv("ELVERN_SESSION_SECRET", "session-secret-b-12345678901234567890")
+
+    importlib.reload(main_module)
+    monkeypatch.setattr(main_module, "ScanService", DummyScanService)
+    monkeypatch.setattr(main_module, "TranscodeManager", DummyTranscodeManager)
+    monkeypatch.setattr(main_module, "MobilePlaybackManager", DummyMobilePlaybackManager)
+    monkeypatch.setattr(main_module, "admin_event_hub", DummyAdminEventHub())
+
+    with TestClient(main_module.app) as client:
+        assert client.app.state.settings.media_root == media_root_b.resolve()
+        assert client.app.state.settings.db_path == db_path_b
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "password-b-123456789012345678901234"},
+        )
+        assert response.status_code == 200
+        assert response.json()["user"]["username"] == "admin"
+
+
+def test_library_payload_uses_backend_parsed_title_for_garbage_filename(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        shared_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', NULL, ?, ?, ?)
+            """,
+            (
+                "One Piece Stampede () [tmdbid-568012] - [Remux-1080p][TrueHD]",
+                "One Piece Stampede () [tmdbid-568012] - [Remux-1080p][TrueHD].mkv",
+                str(Path(initialized_settings.media_root) / "One Piece Stampede () [tmdbid-568012] - [Remux-1080p][TrueHD].mkv"),
+                int(shared_source_id),
+                1,
+                1.0,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 1
+    item = response.json()["items"][0]
+    assert item["title"] == "One Piece Stampede"
+    assert item["parsed_title"]["display_title"] == "One Piece Stampede"
+    assert item["parsed_title"]["base_title"] == "One Piece Stampede"
+    assert item["parsed_title"]["edition_identity"] == "standard"
+    assert item["parsed_title"]["parsed_year"] is None
+
+
+def test_library_payload_preserves_meaningful_title_numbers_and_parts(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    now = utcnow_iso()
+    harry_part_1_filename = "Harry.Potter.and.the.Deathly.Hallows.Part.1.2010.4K.UHD.2160p.REMUX.DV.DTS-HD.MA.7.1.Dual.PTBR-BrRemux.mkv"
+    harry_part_2_filename = "Harry.Potter.and.the.Deathly.Hallows.Part.2.2011.4K.UHD.2160p.REMUX.DV.DTS-HD.MA.7.1.Dual.PTBR-BrRemux.mkv"
+    blade_filename = "Blade Runner 2049.2017.2160p.UHD.BluRay.REMUX.mkv"
+    with get_connection(initialized_settings) as connection:
+        shared_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', ?, ?, ?, ?)
+            """,
+            (
+                "Harry Potter and the Deathly Hallows Part",
+                harry_part_1_filename,
+                str(Path(initialized_settings.media_root) / harry_part_1_filename),
+                int(shared_source_id),
+                1,
+                1.0,
+                2010,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', ?, ?, ?, ?)
+            """,
+            (
+                "Harry Potter and the Deathly Hallows Part",
+                harry_part_2_filename,
+                str(Path(initialized_settings.media_root) / harry_part_2_filename),
+                int(shared_source_id),
+                1,
+                1.0,
+                2011,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', NULL, ?, ?, ?)
+            """,
+            (
+                "Blade Runner 2049.2017.2160p.UHD.BluRay.REMUX",
+                blade_filename,
+                str(Path(initialized_settings.media_root) / blade_filename),
+                int(shared_source_id),
+                1,
+                1.0,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    items_by_filename = {
+        item["original_filename"]: item
+        for item in response.json()["items"]
+    }
+    assert items_by_filename[harry_part_1_filename]["title"] == "Harry Potter and the Deathly Hallows Part 1"
+    assert items_by_filename[harry_part_1_filename]["parsed_title"]["display_title"] == "Harry Potter and the Deathly Hallows Part 1"
+    assert items_by_filename[harry_part_1_filename]["parsed_title"]["title_source"] == "original_filename"
+    assert items_by_filename[harry_part_2_filename]["title"] == "Harry Potter and the Deathly Hallows Part 2"
+    assert items_by_filename[harry_part_2_filename]["parsed_title"]["display_title"] == "Harry Potter and the Deathly Hallows Part 2"
+    assert items_by_filename[harry_part_2_filename]["parsed_title"]["title_source"] == "original_filename"
+    assert items_by_filename[blade_filename]["title"] == "Blade Runner 2049"
+    assert items_by_filename[blade_filename]["parsed_title"]["display_title"] == "Blade Runner 2049"
+    assert items_by_filename[blade_filename]["parsed_title"]["parsed_year"] == 2017
+
+
+def test_scan_preserves_raw_title_truth_while_library_uses_derived_display_title(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    filename = "Interstellar.2014.UHD.BluRay.2160p.DTS-HD.MA.5.1.HEVC.REMUX-FraMeSToR.mkv"
+    media_file = Path(initialized_settings.media_root) / filename
+    media_file.write_bytes(b"fake-video")
+
+    scan_result = scan_media_library(initialized_settings, reason="test_scan_preserves_raw_title_truth")
+    assert scan_result["files_seen"] == 1
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT title, original_filename, year
+            FROM media_items
+            WHERE original_filename = ?
+            LIMIT 1
+            """,
+            (filename,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["title"] == "Interstellar.2014.UHD.BluRay.2160p.DTS-HD.MA.5.1.HEVC.REMUX-FraMeSToR"
+    assert row["original_filename"] == filename
+    assert row["year"] == 2014
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 1
+    item = response.json()["items"][0]
+    assert item["title"] == "Interstellar"
+    assert item["parsed_title"]["display_title"] == "Interstellar"
+    assert item["parsed_title"]["title_source"] == "original_filename"
+    assert item["parsed_title"]["parser_version"]
+    assert item["parsed_title"]["suspicious_output"] is False
+
+
+def test_poster_lookup_uses_raw_title_identity_not_cleaned_display_path(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    poster_dir = Path(initialized_settings.media_root) / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    poster_path = poster_dir / "Harry Potter and the Deathly Hallows Part 1 (2010).jpg"
+    poster_path.write_bytes(b"fake-jpg")
+
+    now = utcnow_iso()
+    original_filename = "Harry.Potter.and.the.Deathly.Hallows.Part.1.2010.4K.UHD.2160p.REMUX.DV.DTS-HD.MA.7.1.Dual.PTBR-BrRemux.mkv"
+    with get_connection(initialized_settings) as connection:
+        shared_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', ?, ?, ?, ?)
+            """,
+            (
+                "Harry Potter and the Deathly Hallows Part",
+                original_filename,
+                str(Path(initialized_settings.media_root) / original_filename),
+                int(shared_source_id),
+                1,
+                1.0,
+                2010,
+                now,
+                now,
+                now,
+            ),
+        )
+        item_id = int(cursor.lastrowid)
+        connection.commit()
+
+    library_response = client.get("/api/library")
+    assert library_response.status_code == 200
+    item = next(
+        candidate
+        for candidate in library_response.json()["items"]
+        if candidate["id"] == item_id
+    )
+    assert item["title"] == "Harry Potter and the Deathly Hallows Part 1"
+    assert item["parsed_title"]["title_source"] == "original_filename"
+    assert item["poster_url"] == f"/api/library/item/{item_id}/poster"
+
+    poster_response = client.get(f"/api/library/item/{item_id}/poster")
+    assert poster_response.status_code == 200
+    assert poster_response.content == b"fake-jpg"
+
+
+def test_library_route_handles_dirty_stored_titles_without_internal_server_error(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        shared_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', ?, ?, ?, ?)
+            """,
+            (
+                "Avatar  UHD 4K BluRay 2160p ReMux HEVC HDR10 TrueHD 7 1 Atmos - MgB",
+                "Avatar 2009 UHD 4K BluRay 2160p ReMux HEVC HDR10 TrueHD 7.1 Atmos - MgB.mkv",
+                str(Path(initialized_settings.media_root) / "Avatar 2009 UHD 4K BluRay 2160p ReMux HEVC HDR10 TrueHD 7.1 Atmos - MgB.mkv"),
+                int(shared_source_id),
+                1,
+                1.0,
+                2009,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 1
+    item = response.json()["items"][0]
+    assert item["title"] == "Avatar"
+    assert item["parsed_title"]["display_title"] == "Avatar"
+    assert item["parsed_title"]["parsed_year"] == 2009
+
+
 def test_admin_media_library_reference_smoke(client, admin_credentials) -> None:
     _login(
         client,
@@ -76,7 +562,7 @@ def test_admin_media_library_reference_smoke(client, admin_credentials) -> None:
         "effective_value": str(initial_path),
         "default_value": str(initial_path),
         "validation_rules": [
-            f"Leave blank to reset to the bootstrap shared local path: {initial_path}",
+            f"Leave blank to reset to the default shared local path: {initial_path}",
             "This is the real shared local library path currently used by Elvern for the shared local library.",
             "Use an absolute Linux directory path that already exists on this host.",
         ],
@@ -95,10 +581,58 @@ def test_admin_media_library_reference_smoke(client, admin_credentials) -> None:
         "effective_value": str(replacement_path),
         "default_value": str(initial_path),
         "validation_rules": [
-            f"Leave blank to reset to the bootstrap shared local path: {initial_path}",
+            f"Leave blank to reset to the default shared local path: {initial_path}",
             "This is the real shared local library path currently used by Elvern for the shared local library.",
             "Use an absolute Linux directory path that already exists on this host.",
         ],
+    }
+
+
+def test_admin_google_drive_setup_save_smoke(client, admin_credentials) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    update_response = client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": "secret123",
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["https_origin"] == "https://example.com"
+    assert update_response.json()["client_id"] == "example.apps.googleusercontent.com"
+    assert update_response.json()["client_secret"] == "secret123"
+    assert update_response.json()["configuration_state"] == "ready"
+    assert update_response.json()["missing_fields"] == []
+
+    cloud_response = client.get("/api/cloud-libraries")
+    assert cloud_response.status_code == 200
+    assert cloud_response.json()["google"]["enabled"] is True
+
+
+def test_admin_google_drive_setup_validation_surfaces_specific_error(client, admin_credentials) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    invalid_response = client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": "bad secret",
+        },
+    )
+    assert invalid_response.status_code == 400
+    assert invalid_response.json() == {
+        "detail": "Google OAuth Client Secret must not contain spaces.",
     }
 
 

@@ -32,6 +32,7 @@ from .library_movie_identity_service import (
 )
 from .library_presentation_service import (
     _poster_directory,
+    _parsed_title_payload,
     _resolve_poster_path,
     _row_value,
     _serialize_media_item,
@@ -500,7 +501,17 @@ def get_media_item_record(settings: Settings, *, item_id: int) -> dict[str, obje
         ).fetchone()
         if row is None:
             return None
-        return dict(row)
+        payload = dict(row)
+        parsed_title = _parsed_title_payload(
+            title=row["title"],
+            year=row["year"],
+            original_filename=row["original_filename"],
+        )
+        payload["parsed_title"] = parsed_title
+        payload["title"] = parsed_title["display_title"]
+        if parsed_title["parsed_year"] is not None:
+            payload["year"] = parsed_title["parsed_year"]
+        return payload
 
 
 def list_last_scan(settings: Settings) -> dict[str, object] | None:

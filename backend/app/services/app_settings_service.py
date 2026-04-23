@@ -340,7 +340,7 @@ def update_google_drive_setup(
 
 def media_library_reference_validation_rules(settings: Settings) -> list[str]:
     return [
-        f"Leave blank to reset to the bootstrap shared local path: {normalize_media_library_reference_default_path(settings=settings)['default_value']}",
+        f"Leave blank to reset to the default shared local path: {normalize_media_library_reference_default_path(settings=settings)['default_value']}",
         "This is the real shared local library path currently used by Elvern for the shared local library.",
         "Use an absolute Linux directory path that already exists on this host.",
     ]
