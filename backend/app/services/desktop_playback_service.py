@@ -224,31 +224,94 @@ def infer_desktop_platform(user_agent: str | None, requested_platform: str | Non
     return "linux"
 
 
+def resolve_same_host_request(
+    settings: Settings,
+    *,
+    platform: str,
+    client_ip: str | None,
+    request_host: str | None = None,
+    explicit_same_host: bool = False,
+) -> dict[str, object]:
+    if platform != "linux":
+        return {
+            "same_host": False,
+            "detection_source": "platform_not_linux",
+            "reason": "Same-host direct playback is only considered for Linux clients.",
+        }
+
+    if explicit_same_host:
+        return {
+            "same_host": True,
+            "detection_source": "explicit_same_host_hint",
+            "reason": "Frontend provided an explicit same-host hint.",
+        }
+
+    if not client_ip:
+        return {
+            "same_host": False,
+            "detection_source": "client_ip_missing",
+            "reason": "Client IP was unavailable for same-host detection.",
+        }
+
+    normalized_client_ip = _normalize_ip_literal(client_ip)
+    if not normalized_client_ip:
+        return {
+            "same_host": False,
+            "detection_source": "client_ip_invalid",
+            "reason": "Client IP could not be normalized for same-host detection.",
+        }
+
+    try:
+        parsed_client_ip = ipaddress.ip_address(normalized_client_ip)
+    except ValueError:
+        return {
+            "same_host": False,
+            "detection_source": "client_ip_invalid",
+            "reason": "Client IP was not a valid address literal.",
+        }
+
+    if parsed_client_ip.is_loopback:
+        return {
+            "same_host": True,
+            "detection_source": "loopback_client_ip",
+            "reason": "Loopback client IP confirms same-host Linux access.",
+        }
+
+    candidates = _local_server_ip_candidates(settings, request_host=request_host)
+    if parsed_client_ip.compressed in candidates:
+        return {
+            "same_host": True,
+            "detection_source": "local_server_ip_match",
+            "reason": "Client IP matched a resolved local server address.",
+        }
+
+    return {
+        "same_host": False,
+        "detection_source": "client_ip_not_local",
+        "reason": "Client IP did not match any resolved local server address.",
+    }
+
+
 def infer_same_host_request(
     settings: Settings,
     *,
     platform: str,
     client_ip: str | None,
+    request_host: str | None = None,
+    explicit_same_host: bool = False,
 ) -> bool:
-    if platform != "linux" or not client_ip:
-        return False
-
-    normalized_client_ip = _normalize_ip_literal(client_ip)
-    if not normalized_client_ip:
-        return False
-
-    try:
-        parsed_client_ip = ipaddress.ip_address(normalized_client_ip)
-    except ValueError:
-        return False
-
-    if parsed_client_ip.is_loopback:
-        return True
-
-    return parsed_client_ip.compressed in _local_server_ip_candidates(settings)
+    return bool(
+        resolve_same_host_request(
+            settings,
+            platform=platform,
+            client_ip=client_ip,
+            request_host=request_host,
+            explicit_same_host=explicit_same_host,
+        )["same_host"]
+    )
 
 
-def _local_server_ip_candidates(settings: Settings) -> set[str]:
+def _local_server_ip_candidates(settings: Settings, *, request_host: str | None = None) -> set[str]:
     candidates: set[str] = set()
 
     for host in (settings.bind_host, settings.frontend_host):
@@ -267,6 +330,9 @@ def _local_server_ip_candidates(settings: Settings) -> set[str]:
     fqdn = socket.getfqdn().strip()
     if fqdn:
         candidates.update(_resolve_host_ips(fqdn))
+
+    if request_host:
+        candidates.update(_resolve_host_ips(request_host))
 
     return candidates
 

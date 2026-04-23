@@ -6,7 +6,7 @@ Elvern is a private, self-hosted home media web app scaffold for family use over
 - React + Vite frontend with PWA installability basics
 - SQLite database
 - Recursive local media scanning with `ffprobe`
-- Automatic direct-play vs HLS fallback playback handling
+- Built-in browser playback with direct-play vs HLS handling
 - Desktop-first VLC handoff with one canonical private DGX server URL for all desktop clients
 - Config-driven Linux / Windows / macOS path mapping for VLC targets
 - Distributable `elvern-vlc://` desktop opener bundles for installed VLC on Windows/macOS
@@ -120,6 +120,10 @@ Normal desktop playback flow:
 2. Click `Open in VLC`.
 3. On Linux, Windows, or macOS, use the same DGX Elvern URL in the browser.
 4. After one-time helper registration, Elvern launches installed VLC on that client with the mapped direct source when configured.
+
+`Open in VLC` is preferred on strong home, local, or stable Wi-Fi conditions because it best preserves original quality, subtitle handling, audio-track selection, and local-player behavior.
+
+For weaker or less stable connections, browser playback remains a first-class path. `Lite Playback` is Elvern's quick-start browser mode and is intended to begin once roughly the first 45 seconds are ready. `Full Playback` is intended to wait for a larger browser-ready threshold aimed at smoother full-movie playback.
 
 Windows/macOS client helper packaging:
 

@@ -82,6 +82,7 @@ def login(payload: AuthLoginRequest, request: Request, response: Response) -> Au
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+    request.app.state.scan_service.maybe_refresh_local_library(trigger="login")
     set_session_cookie(response, settings, token)
     log_audit_event(
         settings,
@@ -126,7 +127,8 @@ def logout(request: Request, response: Response, user: AuthenticatedUser = Curre
 
 
 @router.get("/me", response_model=AuthUserEnvelope)
-def me(user: AuthenticatedUser = CurrentUser) -> AuthUserEnvelope:
+def me(request: Request, user: AuthenticatedUser = CurrentUser) -> AuthUserEnvelope:
+    request.app.state.scan_service.maybe_refresh_local_library(trigger="session")
     return AuthUserEnvelope(
         user={
             "id": user.id,

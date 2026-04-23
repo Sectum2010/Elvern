@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
+import subprocess
 from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -9,8 +12,17 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
+from ..media_scan import scan_media_library
+from .local_library_source_service import (
+    get_effective_shared_local_library_path,
+    ensure_shared_local_library_source,
+    purge_shared_local_media_items,
+    shared_local_library_bootstrap_path,
+    update_shared_local_library_path,
+)
 
 
+MEDIA_LIBRARY_REFERENCE_KEY = "media_library_reference"
 POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
 GOOGLE_OAUTH_CLIENT_ID_KEY = "google_oauth_client_id"
 GOOGLE_OAUTH_CLIENT_SECRET_KEY = "google_oauth_client_secret"
@@ -18,7 +30,7 @@ GOOGLE_DRIVE_HTTPS_ORIGIN_KEY = "google_drive_https_origin"
 
 
 def _poster_reference_default_path(settings: Settings) -> Path:
-    return (settings.media_root / "Posters").resolve()
+    return (get_effective_shared_local_library_path(settings) / "Posters").resolve()
 
 
 def get_global_app_setting(
@@ -326,6 +338,120 @@ def update_google_drive_setup(
         return get_google_drive_setup_payload(settings, user_id=user_id, connection=connection)
 
 
+def media_library_reference_validation_rules(settings: Settings) -> list[str]:
+    return [
+        f"Leave blank to reset to the bootstrap shared local path: {normalize_media_library_reference_default_path(settings=settings)['default_value']}",
+        "This is the real shared local library path currently used by Elvern for the shared local library.",
+        "Use an absolute Linux directory path that already exists on this host.",
+    ]
+
+
+def normalize_media_library_reference_default_path(*, settings: Settings | None = None) -> dict[str, str]:
+    if settings is None:
+        raise ValueError("settings is required")
+    default_path = str(shared_local_library_bootstrap_path(settings))
+    return {
+        "default_value": default_path,
+        "effective_value": default_path,
+    }
+
+
+def validate_media_library_reference(*, value: str | None) -> str | None:
+    normalized = " ".join(str(value or "").split())
+    if not normalized:
+        return None
+    return normalized
+
+
+def get_media_library_reference_payload(
+    settings: Settings,
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> dict[str, object]:
+    default_payload = normalize_media_library_reference_default_path(settings=settings)
+    effective_value = str(
+        get_effective_shared_local_library_path(settings, connection=connection)
+    )
+    return {
+        "configured_value": effective_value,
+        "effective_value": effective_value,
+        "default_value": default_payload["default_value"],
+        "validation_rules": media_library_reference_validation_rules(settings),
+    }
+
+
+def update_media_library_reference(settings: Settings, *, value: str | None) -> dict[str, object]:
+    with get_connection(settings) as connection:
+        update_shared_local_library_path(
+            settings,
+            value=value,
+            connection=connection,
+        )
+        shared_source_id = ensure_shared_local_library_source(
+            settings,
+            connection=connection,
+        )
+        purge_shared_local_media_items(
+            connection,
+            shared_source_id=shared_source_id,
+        )
+        connection.commit()
+
+    scan_media_library(settings, reason="shared_local_path_update")
+    set_global_app_setting(settings, key=MEDIA_LIBRARY_REFERENCE_KEY, value=None)
+    return get_media_library_reference_payload(settings)
+
+
+def browse_local_directories(
+    settings: Settings,
+    *,
+    path: str | None,
+) -> dict[str, object]:
+    browse_dir = _resolve_browse_directory(settings, value=path)
+    parent_path = None if browse_dir.parent == browse_dir else str(browse_dir.parent)
+    directories: list[dict[str, str]] = []
+    try:
+        entries = sorted(browse_dir.iterdir(), key=lambda entry: entry.name.lower())
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not read that directory on the Elvern host.",
+        ) from exc
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        directories.append(
+            {
+                "name": entry.name or str(entry),
+                "path": str(entry.resolve()),
+            }
+        )
+    return {
+        "current_path": str(browse_dir),
+        "parent_path": parent_path,
+        "directories": directories,
+    }
+
+
+def pick_local_directory(
+    settings: Settings,
+    *,
+    path: str | None,
+    title: str | None,
+) -> str | None:
+    browse_dir = _resolve_browse_directory(settings, value=path)
+    selected_path = _run_native_directory_picker(
+        start_directory=browse_dir,
+        title=str(title or "").strip() or "Select directory",
+    )
+    if not selected_path:
+        return None
+    return _normalize_existing_local_directory(selected_path)
+
+
 def poster_reference_location_validation_rules(settings: Settings) -> list[str]:
     return [
         f"Leave blank to use the default Linux poster directory: {poster_reference_default(settings)['default_value']}",
@@ -425,3 +551,278 @@ def update_poster_reference_location(settings: Settings, *, value: str | None) -
         value=normalized_value,
     )
     return get_poster_reference_location_payload(settings)
+
+
+def _parse_local_directory_candidate(candidate: str) -> Path:
+    parsed = urlsplit(candidate)
+    if parsed.scheme:
+        if parsed.scheme.lower() != "file":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Directory browse only supports local Linux paths or file:// URIs.",
+            )
+        if parsed.netloc and parsed.netloc.lower() not in {"", "localhost"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Directory browse only supports local directories on the Elvern host.",
+            )
+        return Path(unquote(parsed.path or "")).expanduser()
+    return Path(candidate).expanduser()
+
+
+def _resolve_browse_directory(settings: Settings, *, value: str | None) -> Path:
+    candidate = str(value or "").strip()
+    if candidate:
+        browse_path = _parse_local_directory_candidate(candidate)
+        if not browse_path.is_absolute():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Directory browse needs an absolute Linux path or file:// URI.",
+            )
+        resolved = browse_path.resolve(strict=False)
+    else:
+        resolved = get_effective_shared_local_library_path(settings).resolve()
+
+    current = resolved
+    while True:
+        if current.exists():
+            browse_dir = current if current.is_dir() else current.parent
+            break
+        if current.parent == current:
+            browse_dir = Path("/").resolve()
+            break
+        current = current.parent
+
+    if not browse_dir.exists() or not browse_dir.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Directory browse could not find a readable local directory on this host.",
+        )
+    if not os.access(browse_dir, os.R_OK | os.X_OK):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Directory browse could not read that directory on the Elvern host.",
+        )
+    return browse_dir
+
+
+def _normalize_existing_local_directory(value: str | Path) -> str:
+    candidate_path = _parse_local_directory_candidate(str(value))
+    if not candidate_path.is_absolute():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected host directory was not an absolute Linux path.",
+        )
+    normalized_path = candidate_path.resolve()
+    if not normalized_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected host directory no longer exists.",
+        )
+    if not normalized_path.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected host path is not a directory.",
+        )
+    if not os.access(normalized_path, os.R_OK | os.X_OK):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected host directory is not readable.",
+        )
+    return str(normalized_path)
+
+
+def get_native_local_directory_picker_capability() -> dict[str, object]:
+    from .desktop_playback_service import build_linux_gui_launch_environment
+
+    launch_env, env_summary, env_diagnostics = build_linux_gui_launch_environment()
+    display_available = bool(launch_env.get("DISPLAY"))
+    wayland_available = bool(launch_env.get("WAYLAND_DISPLAY"))
+    dbus_session_available = bool(launch_env.get("DBUS_SESSION_BUS_ADDRESS"))
+    gui_session_available = display_available or wayland_available
+    backend = _native_directory_picker_backend()
+
+    if not gui_session_available:
+        return {
+            "native_picker_supported": False,
+            "picker_backend": None,
+            "gui_session_available": False,
+            "display_available": display_available,
+            "wayland_available": wayland_available,
+            "dbus_session_available": dbus_session_available,
+            "missing_dependency": "gui_session",
+            "reason": "Elvern could not resolve an active Linux graphical session that the backend can use for the host directory picker.",
+            "env_summary": env_summary,
+            "env_diagnostics": env_diagnostics,
+        }
+
+    if backend:
+        return {
+            "native_picker_supported": True,
+            "picker_backend": backend,
+            "gui_session_available": gui_session_available,
+            "display_available": display_available,
+            "wayland_available": wayland_available,
+            "dbus_session_available": dbus_session_available,
+            "missing_dependency": None,
+            "reason": None,
+            "env_summary": env_summary,
+            "env_diagnostics": env_diagnostics,
+        }
+
+    return {
+        "native_picker_supported": False,
+        "picker_backend": None,
+        "gui_session_available": gui_session_available,
+        "display_available": display_available,
+        "wayland_available": wayland_available,
+        "dbus_session_available": dbus_session_available,
+        "missing_dependency": "native_picker_backend",
+        "reason": "No supported host directory picker is installed. Install zenity, qarma, or kdialog on the Elvern host.",
+        "env_summary": env_summary,
+        "env_diagnostics": env_diagnostics,
+    }
+
+
+def _native_directory_picker_backend() -> str | None:
+    if shutil.which("zenity"):
+        return "zenity"
+    if shutil.which("qarma"):
+        return "qarma"
+    if shutil.which("kdialog"):
+        return "kdialog"
+    return None
+
+
+def _native_directory_picker_command_candidates(start_directory: Path) -> list[list[str]]:
+    normalized_start = str(start_directory.resolve())
+    start_with_trailing_slash = normalized_start if normalized_start.endswith("/") else f"{normalized_start}/"
+    command_candidates: list[list[str]] = []
+    if shutil.which("zenity"):
+        command_candidates.append(
+            [
+                "zenity",
+                "--file-selection",
+                "--directory",
+                f"--filename={start_with_trailing_slash}",
+            ]
+        )
+    if shutil.which("qarma"):
+        command_candidates.append(
+            [
+                "qarma",
+                "--file-selection",
+                "--directory",
+                f"--filename={start_with_trailing_slash}",
+            ]
+        )
+    if shutil.which("kdialog"):
+        command_candidates.append(
+            [
+                "kdialog",
+                "--getexistingdirectory",
+                normalized_start,
+            ]
+        )
+    return command_candidates
+
+
+def _run_native_directory_picker(*, start_directory: Path, title: str) -> str | None:
+    from .desktop_playback_service import build_linux_gui_launch_environment
+
+    capability = get_native_local_directory_picker_capability()
+    if not capability["native_picker_supported"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(capability["reason"] or "Failed to open the host directory picker."),
+        )
+    launch_env, _env_summary, _env_diagnostics = build_linux_gui_launch_environment()
+
+    command_candidates: list[list[str]] = []
+    for command in _native_directory_picker_command_candidates(start_directory):
+        if command[0] in {"zenity", "qarma"}:
+            command_candidates.append([*command, f"--title={title}"])
+        elif command[0] == "kdialog":
+            command_candidates.append([*command, "--title", title])
+        else:
+            command_candidates.append(command)
+
+    last_error_detail = "Failed to open the host directory picker."
+    for command in command_candidates:
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+                env=launch_env,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+        if completed.returncode == 0:
+            selected_path = str(completed.stdout or "").strip()
+            return selected_path or None
+        if completed.returncode in {1, 130}:
+            return None
+        stderr = str(completed.stderr or "").strip()
+        if stderr:
+            last_error_detail = stderr
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=last_error_detail,
+    )
+
+
+def try_pick_local_directory(
+    settings: Settings,
+    *,
+    path: str | None,
+    title: str | None,
+) -> dict[str, object]:
+    capability = get_native_local_directory_picker_capability()
+    picker_backend = str(capability.get("picker_backend") or "") or None
+    if not capability["native_picker_supported"]:
+        return {
+            "status": "unavailable",
+            "selected_path": None,
+            "reason": capability.get("reason"),
+            "picker_backend": picker_backend,
+        }
+    try:
+        selected_path = pick_local_directory(
+            settings,
+            path=path,
+            title=title,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Failed to open the host directory picker."
+        return {
+            "status": "unavailable",
+            "selected_path": None,
+            "reason": detail,
+            "picker_backend": picker_backend,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "selected_path": None,
+            "reason": str(exc) or "Failed to open the host directory picker.",
+            "picker_backend": picker_backend,
+        }
+    if not selected_path:
+        return {
+            "status": "cancelled",
+            "selected_path": None,
+            "reason": None,
+            "picker_backend": picker_backend,
+        }
+    return {
+        "status": "selected",
+        "selected_path": selected_path,
+        "reason": None,
+        "picker_backend": picker_backend,
+    }

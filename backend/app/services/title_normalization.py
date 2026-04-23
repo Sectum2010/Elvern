@@ -131,6 +131,11 @@ def normalize_search_text(value: str, *, drop_leading_articles: bool = False) ->
     return normalized
 
 
+def compact_search_text(value: str, *, drop_leading_articles: bool = False) -> str:
+    normalized = normalize_search_text(value, drop_leading_articles=drop_leading_articles)
+    return normalized.replace(" ", "")
+
+
 def normalize_search_token(token: str) -> str:
     normalized = normalize_search_text(token)
     if not normalized:
@@ -320,11 +325,21 @@ def build_search_index(
     for phrase in normalized_phrases:
         search_tokens.update(tokenize_search_text(phrase))
 
+    compact_phrases: list[str] = []
+    for phrase in phrases:
+        if not phrase:
+            continue
+        for drop_leading_articles in (False, True):
+            compact = compact_search_text(phrase, drop_leading_articles=drop_leading_articles)
+            if compact and compact not in compact_phrases:
+                compact_phrases.append(compact)
+
     return {
         "base_title": metadata["base_title"],
         "cleaned_title": metadata["cleaned_title"],
         "edition_identity": metadata["edition_identity"],
         "normalized_phrases": [phrase for phrase in normalized_phrases if phrase],
+        "compact_phrases": compact_phrases,
         "search_tokens": search_tokens,
         "search_aliases": build_search_aliases(*phrases),
     }
@@ -332,6 +347,15 @@ def build_search_index(
 
 def build_query_terms(query: str) -> list[str]:
     return tokenize_search_text(query, drop_leading_articles=True)
+
+
+def build_query_compact_forms(query: str) -> list[str]:
+    compact_forms: list[str] = []
+    for drop_leading_articles in (False, True):
+        compact = compact_search_text(query, drop_leading_articles=drop_leading_articles)
+        if compact and compact not in compact_forms:
+            compact_forms.append(compact)
+    return compact_forms
 
 
 def match_search_query(
@@ -345,16 +369,30 @@ def match_search_query(
 
     normalized_query = normalize_search_text(query, drop_leading_articles=True)
     normalized_phrases = list(search_index["normalized_phrases"])
+    compact_phrases = list(search_index.get("compact_phrases", []))
     search_tokens = set(search_index["search_tokens"])
     search_aliases = set(search_index["search_aliases"])
     search_blob = " ".join(normalized_phrases)
     base_phrase = normalized_phrases[0] if normalized_phrases else ""
+    base_compact = compact_phrases[0] if compact_phrases else ""
+
+    query_compact_forms = build_query_compact_forms(query)
 
     score = 0
     if normalized_query and base_phrase and normalized_query in base_phrase:
         score += 100
     elif normalized_query and normalized_query in search_blob:
         score += 60
+
+    for compact_query in query_compact_forms:
+        if len(compact_query) < 4:
+            continue
+        if base_compact and compact_query in base_compact:
+            score += 90
+            break
+        if any(compact_query in phrase for phrase in compact_phrases):
+            score += 50
+            break
 
     for term in query_terms:
         if term in search_aliases:
@@ -363,6 +401,13 @@ def match_search_query(
         if term in search_tokens:
             score += 12 if term in base_phrase.split() else 8
             continue
+        if len(term) >= 4 and compact_phrases:
+            if base_compact and term in base_compact:
+                score += 10
+                continue
+            if any(term in phrase for phrase in compact_phrases):
+                score += 6
+                continue
         if len(term) >= 3 and term in search_blob:
             score += 4
             continue

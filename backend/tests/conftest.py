@@ -34,6 +34,13 @@ class DummyScanService:
         state["message"] = "scan skipped in tests"
         return state
 
+    def maybe_refresh_local_library(self, *, trigger: str) -> dict[str, object]:
+        return {
+            "checked": True,
+            "scan_enqueued": False,
+            "message": f"scan refresh skipped in tests ({trigger})",
+        }
+
 
 class DummyTranscodeManager:
     def __init__(self, settings) -> None:

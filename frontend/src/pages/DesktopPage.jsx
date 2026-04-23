@@ -558,6 +558,7 @@ export function InstallPage() {
 
   const requiredSection = useMemo(() => buildRequiredSection(platform, status), [platform, status]);
   const showRequiredSection = !requiredSection.empty;
+  const showHelperSetupSection = isDesktop && platform !== "linux";
   const recommendedApps = useMemo(() => buildRecommendedApps(platform, iosStoreRegion), [iosStoreRegion, platform]);
   const helperSetupNotes = useMemo(() => {
     if (!isDesktop) {
@@ -692,7 +693,7 @@ export function InstallPage() {
       <div className="section-header">
         <div>
           <p className="eyebrow">Install</p>
-          <h1>Install apps and helper for this device</h1>
+          <h1>{platform === "linux" ? "Install apps for this device" : "Install apps and helper for this device"}</h1>
           <p className="page-subnote">
             Detected platform: {platformLabel(platform)}
           </p>
@@ -701,7 +702,7 @@ export function InstallPage() {
 
       {error ? <p className="form-error">{error}</p> : null}
 
-      {isDesktop ? (
+      {showHelperSetupSection ? (
         <section className="page-section">
           <article className="settings-card install-section-card settings-card--wide">
             <div className="install-section-card__header">

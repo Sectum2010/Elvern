@@ -5,7 +5,7 @@
 Elvern now has two practical playback paths:
 
 - installed VLC on desktop as the preferred playback plane
-- browser playback for convenience and fallback only
+- browser playback as the first-class path for weaker or less stable connections
 
 The backend remains the control plane. The browser app still handles auth, library browsing, search, detail pages, progress summaries, and browser playback. Desktop playback now prefers handing off to the user’s installed VLC app instead of relying on the older embedded-player experiment.
 
@@ -29,8 +29,10 @@ The result is a desktop-first VLC model:
 
 - Elvern controls browsing, metadata, and resume/progress
 - installed VLC handles the actual movie playback experience
-- browser playback remains secondary
+- browser playback remains a first-class path for weaker or less stable connections
 - Linux, Windows, and macOS all target the same private DGX Elvern server URL
+
+In the current v1.0 product language, `Lite Playback` is the quicker browser path and is intended to begin once roughly the first 45 seconds are ready. `Full Playback` is intended to wait for a larger browser-ready threshold aimed at smoother whole-movie browser playback.
 
 ## Core pieces
 

@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { formatBytes, formatDuration } from "../lib/format";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getQualityRank } from "../lib/qualityRank";
 import { buildLibraryReturnState, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
@@ -27,6 +26,8 @@ export function MediaCard({ item, backgroundPlaybackActive = false }) {
   const showPoster = Boolean(item.poster_url) && !posterFailed;
   const qualityRank = getQualityRank(item);
   const tooltipId = `quality-rank-tooltip-${item.id}`;
+  const storageKind = (item.source_kind || "local") === "cloud" ? "cloud" : "local";
+  const storageLabel = storageKind === "cloud" ? "Cloud" : "Local";
   const detailPath = `/library/${item.id}`;
   const detailState = buildLibraryReturnState({
     listPath: location.pathname,
@@ -90,18 +91,10 @@ export function MediaCard({ item, backgroundPlaybackActive = false }) {
       <div className="media-card__body">
         <div className="media-card__copy">
           <Link className="media-card__title-link" onClick={handleOpenDetail} state={detailState} to={detailPath}>
-            <div className="media-card__title-row">
-              <h3 className="media-card__title">{displayTitle}</h3>
-              <span className={`media-card__source-badge media-card__source-badge--${(item.source_kind || "local") === "cloud" ? "cloud" : "dgx"}`}>
-                {item.source_label || ((item.source_kind || "local") === "cloud" ? "Cloud" : "DGX")}
-              </span>
-            </div>
+            <h3 className="media-card__title">{displayTitle}</h3>
           </Link>
         </div>
-        <div className="media-card__meta">
-          <span>{formatDuration(item.duration_seconds)}</span>
-          <span>{formatBytes(item.file_size)}</span>
-          {item.year ? <span>{item.year}</span> : null}
+        <div className="media-card__badges">
           <div
             className="media-card__rank-shell"
             onMouseEnter={openRankTooltip}
@@ -126,6 +119,9 @@ export function MediaCard({ item, backgroundPlaybackActive = false }) {
               {qualityRank.tooltip}
             </div>
           </div>
+          <span className={`media-card__storage-badge media-card__storage-badge--${storageKind}`}>
+            {storageLabel}
+          </span>
         </div>
       </div>
     </article>

@@ -191,6 +191,7 @@ TABLE_STATEMENTS = (
         resource_type TEXT NOT NULL,
         resource_id TEXT NOT NULL,
         display_name TEXT NOT NULL,
+        local_path TEXT,
         is_shared INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -673,6 +674,7 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "client_devices", "helper_vlc_detection_state", "TEXT")
     _ensure_column(connection, "client_devices", "helper_vlc_detection_path", "TEXT")
     _ensure_column(connection, "client_devices", "helper_vlc_detection_checked_at", "TEXT")
+    _ensure_column(connection, "library_sources", "local_path", "TEXT")
     _ensure_column(connection, "assistant_change_records", "request_id", "INTEGER")
 
     _backfill_playback_watch_history(connection)

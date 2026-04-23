@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from .config import Settings
+from .services.local_library_source_service import get_effective_shared_local_library_path
 
 
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)")
@@ -16,7 +17,7 @@ RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)")
 
 def ensure_media_path_within_root(file_path: Path, settings: Settings) -> Path:
     resolved = file_path.resolve()
-    media_root = settings.media_root.resolve()
+    media_root = get_effective_shared_local_library_path(settings).resolve()
     try:
         resolved.relative_to(media_root)
     except ValueError as exc:

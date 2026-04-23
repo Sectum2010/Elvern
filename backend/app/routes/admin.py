@@ -22,6 +22,12 @@ from ..schemas import (
     GoogleDriveSetupResponse,
     GoogleDriveSetupUpdateRequest,
     HiddenMovieListResponse,
+    LocalDirectoryBrowseResponse,
+    LocalDirectoryPickerCapabilityResponse,
+    LocalDirectoryPickRequest,
+    LocalDirectoryPickResponse,
+    MediaLibraryReferenceResponse,
+    MediaLibraryReferenceUpdateRequest,
     MessageResponse,
     PosterReferenceLocationResponse,
     PosterReferenceLocationUpdateRequest,
@@ -40,10 +46,16 @@ from ..services.admin_service import (
 )
 from ..services.app_settings_service import (
     get_google_drive_setup_payload,
+    get_media_library_reference_payload,
     get_poster_reference_location_payload,
+    browse_local_directories,
+    get_native_local_directory_picker_capability,
+    try_pick_local_directory,
     update_google_drive_setup,
+    update_media_library_reference,
     update_poster_reference_location,
 )
+from ..services.desktop_playback_service import resolve_same_host_request
 from ..services.library_service import (
     hide_media_item_globally,
     list_globally_hidden_media_items,
@@ -227,6 +239,128 @@ def admin_audit_log(
 def admin_global_hidden_items(request: Request, user=CurrentAdmin) -> HiddenMovieListResponse:
     del user
     return HiddenMovieListResponse(items=list_globally_hidden_media_items(request.app.state.settings))
+
+
+@router.get("/media-library-reference", response_model=MediaLibraryReferenceResponse)
+def admin_get_media_library_reference(
+    request: Request,
+    user=CurrentAdmin,
+) -> MediaLibraryReferenceResponse:
+    del user
+    return MediaLibraryReferenceResponse(
+        **get_media_library_reference_payload(request.app.state.settings)
+    )
+
+
+@router.get("/local-directories", response_model=LocalDirectoryBrowseResponse)
+def admin_browse_local_directories(
+    request: Request,
+    path: str = Query(default=""),
+    user=CurrentAdmin,
+) -> LocalDirectoryBrowseResponse:
+    del user
+    return LocalDirectoryBrowseResponse(
+        **browse_local_directories(request.app.state.settings, path=path)
+    )
+
+
+@router.get("/local-directory-picker/capability", response_model=LocalDirectoryPickerCapabilityResponse)
+def admin_local_directory_picker_capability(
+    request: Request,
+    platform: str = Query(default=""),
+    same_host_hint: bool = Query(default=False),
+    user=CurrentAdmin,
+) -> LocalDirectoryPickerCapabilityResponse:
+    del user
+    same_host_context = resolve_same_host_request(
+        request.app.state.settings,
+        platform=str(platform or "").strip().lower(),
+        client_ip=resolve_client_ip(request),
+        request_host=request.url.hostname,
+        explicit_same_host=bool(same_host_hint),
+    )
+    same_host_linux = bool(same_host_context["same_host"])
+    if not same_host_linux:
+        return LocalDirectoryPickerCapabilityResponse(
+            native_picker_supported=False,
+            same_host_linux=False,
+            same_host_detection_source=str(same_host_context["detection_source"]),
+            same_host_reason=str(same_host_context["reason"]),
+            reason="Native host picker is only used for same-host Linux admin sessions.",
+        )
+    capability = get_native_local_directory_picker_capability()
+    return LocalDirectoryPickerCapabilityResponse(
+        native_picker_supported=bool(capability["native_picker_supported"]),
+        same_host_linux=True,
+        same_host_detection_source=str(same_host_context["detection_source"]),
+        same_host_reason=str(same_host_context["reason"]),
+        picker_backend=str(capability["picker_backend"]) if capability.get("picker_backend") else None,
+        gui_session_available=bool(capability["gui_session_available"]),
+        display_available=bool(capability["display_available"]),
+        wayland_available=bool(capability["wayland_available"]),
+        dbus_session_available=bool(capability["dbus_session_available"]),
+        missing_dependency=str(capability["missing_dependency"]) if capability.get("missing_dependency") else None,
+        reason=str(capability["reason"]) if capability["reason"] else None,
+    )
+
+
+@router.post("/local-directory-picker", response_model=LocalDirectoryPickResponse)
+def admin_pick_local_directory(
+    payload: LocalDirectoryPickRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> LocalDirectoryPickResponse:
+    del user
+    same_host_context = resolve_same_host_request(
+        request.app.state.settings,
+        platform=str(payload.platform or "").strip().lower(),
+        client_ip=resolve_client_ip(request),
+        request_host=request.url.hostname,
+        explicit_same_host=bool(payload.same_host_hint),
+    )
+    if not same_host_context["same_host"]:
+        return LocalDirectoryPickResponse(
+            status="unavailable",
+            selected_path=None,
+            reason="Native host picker is only used for same-host Linux admin sessions.",
+            picker_backend=None,
+        )
+    result = try_pick_local_directory(
+        request.app.state.settings,
+        path=payload.path,
+        title=payload.title,
+    )
+    return LocalDirectoryPickResponse(**result)
+
+
+@router.put("/media-library-reference", response_model=MediaLibraryReferenceResponse)
+def admin_update_media_library_reference(
+    payload: MediaLibraryReferenceUpdateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> MediaLibraryReferenceResponse:
+    updated = update_media_library_reference(
+        request.app.state.settings,
+        value=payload.value,
+    )
+    log_audit_event(
+        request.app.state.settings,
+        action="admin.settings.media_library_reference",
+        outcome="success",
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        session_id=user.session_id,
+        target_type="app_setting",
+        target_id="media_library_reference",
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={
+            "configured_value": updated["configured_value"],
+            "effective_value": updated["effective_value"],
+        },
+    )
+    return MediaLibraryReferenceResponse(**updated)
 
 
 @router.get("/poster-reference-location", response_model=PosterReferenceLocationResponse)

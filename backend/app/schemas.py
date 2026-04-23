@@ -92,12 +92,66 @@ class UserSettingsResponse(BaseModel):
     hide_duplicate_movies: bool = True
     hide_recently_added: bool = False
     floating_controls_position: Literal["bottom", "top"] = "bottom"
+    media_library_reference_private_value: str | None = None
+    media_library_reference_shared_default_value: str = ""
+    media_library_reference_effective_value: str = ""
 
 
 class UserSettingsUpdateRequest(BaseModel):
     hide_duplicate_movies: bool | None = None
     hide_recently_added: bool | None = None
     floating_controls_position: Literal["bottom", "top"] | None = None
+    media_library_reference_private_value: str | None = None
+
+
+class MediaLibraryReferenceUpdateRequest(BaseModel):
+    value: str = ""
+
+
+class MediaLibraryReferenceResponse(BaseModel):
+    configured_value: str | None = None
+    effective_value: str
+    default_value: str
+    validation_rules: list[str] = Field(default_factory=list)
+
+
+class LocalDirectoryBrowseEntryResponse(BaseModel):
+    name: str
+    path: str
+
+
+class LocalDirectoryBrowseResponse(BaseModel):
+    current_path: str
+    parent_path: str | None = None
+    directories: list[LocalDirectoryBrowseEntryResponse] = Field(default_factory=list)
+
+
+class LocalDirectoryPickRequest(BaseModel):
+    path: str = ""
+    title: str = "Select directory"
+    platform: str = ""
+    same_host_hint: bool = False
+
+
+class LocalDirectoryPickerCapabilityResponse(BaseModel):
+    native_picker_supported: bool = False
+    same_host_linux: bool = False
+    same_host_detection_source: str | None = None
+    same_host_reason: str | None = None
+    picker_backend: str | None = None
+    gui_session_available: bool = False
+    display_available: bool = False
+    wayland_available: bool = False
+    dbus_session_available: bool = False
+    missing_dependency: str | None = None
+    reason: str | None = None
+
+
+class LocalDirectoryPickResponse(BaseModel):
+    status: Literal["selected", "cancelled", "unavailable", "error"] = "cancelled"
+    selected_path: str | None = None
+    reason: str | None = None
+    picker_backend: str | None = None
 
 
 class PosterReferenceLocationUpdateRequest(BaseModel):

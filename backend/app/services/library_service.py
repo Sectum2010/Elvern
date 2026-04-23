@@ -41,6 +41,7 @@ from .title_normalization import (
     match_search_query,
 )
 from .user_settings_service import get_user_settings
+from .local_library_source_service import ensure_current_shared_local_source_binding
 from ..config import Settings
 from ..db import get_connection
 
@@ -98,7 +99,10 @@ def _base_query() -> str:
             ON p.media_item_id = m.id
            AND p.user_id = ?
         WHERE (
-            COALESCE(m.source_kind, 'local') = 'local'
+            (
+                COALESCE(m.source_kind, 'local') = 'local'
+                AND m.library_source_id = ?
+            )
             OR (
                 s.id IS NOT NULL
                 AND hs.id IS NULL
@@ -114,10 +118,14 @@ def _base_query() -> str:
 def list_library(settings: Settings, *, user_id: int) -> dict[str, object]:
     user_settings = get_user_settings(settings, user_id=user_id)
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         poster_dir = _poster_directory(settings, connection=connection)
         all_rows = connection.execute(
             _base_query() + " ORDER BY lower(m.title) ASC",
-            (user_id, user_id, user_id),
+            (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
         continue_rows = connection.execute(
             _base_query()
@@ -129,7 +137,7 @@ def list_library(settings: Settings, *, user_id: int) -> dict[str, object]:
                 )
               ORDER BY p.updated_at DESC
               """,
-            (user_id, user_id, user_id),
+            (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
         watch_history_rows = connection.execute(
             """
@@ -161,7 +169,7 @@ def list_library(settings: Settings, *, user_id: int) -> dict[str, object]:
               ORDER BY datetime(m.last_scanned_at) DESC
               LIMIT 12
               """,
-            (user_id, user_id, user_id),
+            (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
         globally_hidden_media_item_ids = _load_globally_hidden_media_item_ids(connection)
         globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
@@ -266,10 +274,14 @@ def search_library(settings: Settings, *, user_id: int, query: str) -> dict[str,
             "total_items": 0,
         }
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         poster_dir = _poster_directory(settings, connection=connection)
         rows = connection.execute(
             _base_query() + " ORDER BY lower(m.title) ASC",
-            (user_id, user_id, user_id),
+            (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
     scored_rows: list[tuple[int, object]] = []
     for row in rows:
@@ -319,6 +331,10 @@ def get_media_item_detail(
     allow_globally_hidden: bool = False,
 ) -> dict[str, object] | None:
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         poster_dir = _poster_directory(settings, connection=connection)
         row = connection.execute(
             _base_query()
@@ -326,7 +342,7 @@ def get_media_item_detail(
               AND m.id = ?
               LIMIT 1
               """,
-            (user_id, user_id, user_id, item_id),
+            (user_id, user_id, shared_local_source_id, user_id, item_id),
         ).fetchone()
         if row is None:
             return None
@@ -401,6 +417,10 @@ def get_media_item_poster_path(
     allow_globally_hidden: bool = False,
 ) -> Path | None:
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         poster_dir = _poster_directory(settings, connection=connection)
         row = connection.execute(
             _base_query()
@@ -408,7 +428,7 @@ def get_media_item_poster_path(
               AND m.id = ?
               LIMIT 1
               """,
-            (user_id, user_id, user_id, item_id),
+            (user_id, user_id, shared_local_source_id, user_id, item_id),
         ).fetchone()
         global_hidden_row = connection.execute(
             """

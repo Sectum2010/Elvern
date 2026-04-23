@@ -7,10 +7,11 @@ from xml.sax.saxutils import escape
 from fastapi import HTTPException, status
 
 from ..config import Settings
+from .local_library_source_service import get_effective_shared_local_library_path
 
 
 def map_media_path_for_platform(settings: Settings, resolved_file: Path, platform: str) -> str | None:
-    media_root = settings.media_root.resolve()
+    media_root = get_effective_shared_local_library_path(settings).resolve()
     try:
         relative_parts = resolved_file.relative_to(media_root).parts
     except ValueError as exc:

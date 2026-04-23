@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -8,10 +9,15 @@ from pathlib import Path
 
 from .config import Settings
 from .db import get_connection, preserve_hidden_movie_keys_for_media_item, utcnow_iso
+from .services.local_library_source_service import (
+    ensure_current_shared_local_source_binding,
+    get_effective_shared_local_library_path,
+)
 
 
 logger = logging.getLogger(__name__)
 YEAR_PATTERN = re.compile(r"(19|20)\d{2}")
+LOCAL_LIBRARY_FRESHNESS_SNAPSHOT_VERSION = 1
 
 
 def infer_title_and_year(filename_stem: str) -> tuple[str, int | None]:
@@ -158,14 +164,79 @@ def extract_media_metadata(file_path: Path, settings: Settings) -> dict[str, obj
     }
 
 
+def build_local_library_freshness_snapshot(settings: Settings) -> dict[str, object]:
+    media_root = get_effective_shared_local_library_path(settings).resolve()
+    snapshot: dict[str, object] = {
+        "version": LOCAL_LIBRARY_FRESHNESS_SNAPSHOT_VERSION,
+        "media_root": str(media_root),
+        "snapshot_state": "unknown",
+        "root_identity": None,
+        "top_level_count": 0,
+        "top_level_fingerprint": None,
+    }
+
+    if not media_root.exists():
+        snapshot["snapshot_state"] = "missing"
+        return snapshot
+
+    try:
+        root_stat = media_root.stat()
+        top_level_entries: list[dict[str, object]] = []
+        for entry in sorted(media_root.iterdir(), key=lambda candidate: candidate.name.lower()):
+            try:
+                entry_stat = entry.stat()
+            except OSError:
+                snapshot["snapshot_state"] = "error"
+                return snapshot
+            if entry.is_dir():
+                entry_kind = "dir"
+                entry_size = 0
+            elif entry.is_file():
+                entry_kind = "file"
+                entry_size = int(entry_stat.st_size)
+            else:
+                entry_kind = "other"
+                entry_size = 0
+            top_level_entries.append(
+                {
+                    "name": entry.name,
+                    "kind": entry_kind,
+                    "mtime_ns": int(entry_stat.st_mtime_ns),
+                    "size": entry_size,
+                }
+            )
+    except OSError:
+        snapshot["snapshot_state"] = "error"
+        return snapshot
+
+    encoded_entries = json.dumps(
+        top_level_entries,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    snapshot["snapshot_state"] = "ready"
+    snapshot["root_identity"] = {
+        "st_dev": int(root_stat.st_dev),
+        "st_ino": int(root_stat.st_ino),
+    }
+    snapshot["top_level_count"] = len(top_level_entries)
+    snapshot["top_level_fingerprint"] = hashlib.sha256(encoded_entries).hexdigest()
+    return snapshot
+
+
 def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
-    media_root = settings.media_root.resolve()
+    media_root = get_effective_shared_local_library_path(settings).resolve()
     started_at = utcnow_iso()
     files_seen = 0
     files_changed = 0
     files_removed = 0
 
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         cursor = connection.execute(
             """
             INSERT INTO scan_jobs (started_at, status, reason, message)
@@ -216,6 +287,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                         original_filename,
                         file_path,
                         source_kind,
+                        library_source_id,
                         file_size,
                         file_mtime,
                         duration_seconds,
@@ -228,11 +300,12 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                         created_at,
                         updated_at,
                         last_scanned_at
-                    ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_path) DO UPDATE SET
                         title = excluded.title,
                         original_filename = excluded.original_filename,
                         source_kind = 'local',
+                        library_source_id = excluded.library_source_id,
                         file_size = excluded.file_size,
                         file_mtime = excluded.file_mtime,
                         duration_seconds = excluded.duration_seconds,
@@ -249,6 +322,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                         title,
                         resolved.name,
                         file_path,
+                        shared_local_source_id,
                         stat.st_size,
                         stat.st_mtime,
                         metadata["duration_seconds"],

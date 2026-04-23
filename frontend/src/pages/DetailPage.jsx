@@ -313,6 +313,8 @@ export function DetailPage() {
   const [iosTransportDebug, setIosTransportDebug] = useState(null);
   const [browserResumeModalOpen, setBrowserResumeModalOpen] = useState(false);
   const [browserStopModalOpen, setBrowserStopModalOpen] = useState(false);
+  const [infoModalOpen, setInfoModalOpen] = useState(false);
+  const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [hiddenActionPending, setHiddenActionPending] = useState(false);
   const [hiddenActionMessage, setHiddenActionMessage] = useState("");
@@ -554,6 +556,54 @@ export function DetailPage() {
   }, [itemId]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function loadMediaLibraryReferenceInfo() {
+      if (!user) {
+        if (!cancelled) {
+          setMediaLibraryReferenceInfo(null);
+        }
+        return;
+      }
+
+      try {
+        if (user.role === "admin") {
+          const payload = await apiRequest("/api/admin/media-library-reference");
+          if (!cancelled) {
+            setMediaLibraryReferenceInfo({
+              sharedDefault: payload.effective_value || payload.default_value || "Not set",
+              privateValue: null,
+              effectiveValue: payload.effective_value || payload.default_value || "Not set",
+            });
+          }
+          return;
+        }
+
+        const payload = await apiRequest("/api/user-settings");
+        if (!cancelled) {
+          setMediaLibraryReferenceInfo({
+            sharedDefault: payload.media_library_reference_shared_default_value || "Not set",
+            privateValue: payload.media_library_reference_private_value || null,
+            effectiveValue:
+              payload.media_library_reference_effective_value
+              || payload.media_library_reference_shared_default_value
+              || "Not set",
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setMediaLibraryReferenceInfo(null);
+        }
+      }
+    }
+
+    loadMediaLibraryReferenceInfo();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
     if (!providerReconnectResult) {
       return;
     }
@@ -616,6 +666,7 @@ export function DetailPage() {
       setVlcLaunchError("");
       setBrowserResumeModalOpen(false);
       setBrowserStopModalOpen(false);
+      setInfoModalOpen(false);
       try {
         const itemPayload = await apiRequest(`/api/library/item/${itemId}`);
         if (cancelled) {
@@ -684,6 +735,23 @@ export function DetailPage() {
       resetMobilePlaybackState();
     };
   }, [desktopPlatform, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
+
+  useEffect(() => {
+    if (!infoModalOpen || typeof window === "undefined") {
+      return undefined;
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        setInfoModalOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [infoModalOpen]);
 
   function requestStopBrowserPlayback() {
     setBrowserResumeModalOpen(false);
@@ -953,7 +1021,7 @@ export function DetailPage() {
       setIosAppLaunchMessage(
         targetApp === "infuse"
           ? "Trying to open Infuse with a short-lived Elvern playback URL. Infuse may require Infuse Pro for some formats, and if it cannot continue the handoff Elvern will bring you back here with the fallback URL still ready."
-          : "Trying to open VLC with a short-lived original playback URL. This works best on fast home or local networks. Large remux or original files may pause remotely, so use Lite Playback or Full Playback on slower school or WAN connections.",
+          : "Trying to open VLC for original-quality playback with a short-lived Elvern URL. This works best on strong home or local Wi-Fi. For weaker or less stable connections, use Lite Playback or Full Playback in the browser.",
       );
       window.location.assign(launchUrl);
     } catch (requestError) {
@@ -1190,6 +1258,19 @@ export function DetailPage() {
     );
   }
 
+  const subtitleTracks = Array.isArray(item.subtitles) ? item.subtitles : [];
+  const detailSourceLabel = item.source_label || (item.source_kind === "cloud" ? "Cloud" : "DGX");
+  const sourceDescription = item.source_kind === "cloud"
+    ? (item.library_source_name
+      ? `Google Drive source: ${item.library_source_name}`
+      : "Streamed from Google Drive")
+    : "Stored under the configured private media root";
+  const sharedMediaLibraryReference = mediaLibraryReferenceInfo?.sharedDefault || "Loading...";
+  const myPrivateMediaLibraryReference = mediaLibraryReferenceInfo
+    ? (mediaLibraryReferenceInfo.privateValue || "Not set")
+    : "Loading...";
+  const effectiveMediaLibraryReference = mediaLibraryReferenceInfo?.effectiveValue || "Loading...";
+
   const showIosExternalApps = iosMobile;
   const showInlinePlayer = !mobileSession || Boolean(streamSource && mobilePlayerCanPlay);
   const showMobileWarmupShell =
@@ -1392,6 +1473,140 @@ export function DetailPage() {
           </div>
         </div>
       ) : null}
+      {infoModalOpen ? (
+        <div
+          aria-labelledby="detail-info-modal-title"
+          aria-modal="true"
+          className="browser-resume-modal"
+          role="dialog"
+        >
+          <div
+            aria-hidden="true"
+            className="browser-resume-modal__backdrop"
+            onClick={() => setInfoModalOpen(false)}
+          />
+          <div className="browser-resume-modal__card detail-info-modal__card">
+            <div className="detail-info-modal__header">
+              <div className="detail-info-modal__copy">
+                <p className="eyebrow detail-info-modal__eyebrow">Info</p>
+                <h2 className="detail-info-modal__title" id="detail-info-modal-title">{detailTitle}</h2>
+              </div>
+              <button
+                className="ghost-button ghost-button--inline detail-info-modal__close"
+                onClick={() => setInfoModalOpen(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="detail-info-modal__body">
+              <div className="detail-grid detail-grid--modal">
+                <div className="detail-block">
+                  <h2>Playback</h2>
+                  <div className="detail-list">
+                    <span>{formatDuration(item.duration_seconds)}</span>
+                    <span>{formatBytes(item.file_size)}</span>
+                    {resumePosition > 0 ? <span>Resume at {formatDuration(resumePosition)}</span> : null}
+                    {playback?.mode === "hls" ? <span>Automatic HLS fallback</span> : null}
+                  </div>
+                </div>
+
+                <div className="detail-block">
+                  <h2>Video</h2>
+                  <div className="detail-list">
+                    <span>
+                      {item.width && item.height
+                        ? `${item.width} x ${item.height}`
+                        : "Unknown resolution"}
+                    </span>
+                    <span>{item.video_codec || "Unknown video codec"}</span>
+                    <span>{item.container || "Unknown container"}</span>
+                  </div>
+                </div>
+
+                <div className="detail-block">
+                  <h2>Audio & subtitles</h2>
+                  <div className="detail-list">
+                    <span>{item.audio_codec || "Unknown audio codec"}</span>
+                    <span>
+                      {subtitleTracks.length > 0
+                        ? `${subtitleTracks.length} subtitle track(s) indexed`
+                        : "No subtitle tracks indexed"}
+                    </span>
+                  </div>
+                  {subtitleTracks.length > 0 ? (
+                    <div className="detail-subtitle-list">
+                      {subtitleTracks.map((subtitle, index) => {
+                        const subtitleLabel = [
+                          subtitle.language || null,
+                          subtitle.title || null,
+                          subtitle.codec || null,
+                          subtitle.disposition_default ? "Default" : null,
+                        ].filter(Boolean).join(" · ");
+                        return (
+                          <span className="status-pill" key={subtitle.id || `${subtitleLabel}-${index}`}>
+                            {subtitleLabel || "Subtitle track"}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="detail-block">
+                  <h2>Source file</h2>
+                  <div className="detail-source-group">
+                    <div className="detail-list">
+                      <span>{detailSourceLabel}</span>
+                    </div>
+                    <p className="detail-path">{item.original_filename}</p>
+                    <p className="page-subnote">{sourceDescription}</p>
+                  </div>
+                </div>
+
+                <div className="detail-block">
+                  <h2>Media Library Reference</h2>
+                  {isAdmin ? (
+                    <div className="detail-reference-group">
+                      <div className="detail-reference-group__item">
+                        <div className="detail-list">
+                          <span>Shared default</span>
+                        </div>
+                        <p className="detail-path">{sharedMediaLibraryReference}</p>
+                      </div>
+                      <p className="page-subnote">
+                        This is the default reference used unless a user sets a private override.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="detail-reference-group">
+                      <div className="detail-reference-group__item">
+                        <div className="detail-list">
+                          <span>Shared default</span>
+                        </div>
+                        <p className="detail-path">{sharedMediaLibraryReference}</p>
+                      </div>
+                      <div className="detail-reference-group__item">
+                        <div className="detail-list">
+                          <span>My private reference</span>
+                        </div>
+                        <p className="detail-path">{myPrivateMediaLibraryReference}</p>
+                      </div>
+                      <div className="detail-reference-group__item">
+                        <div className="detail-list">
+                          <span>Using now</span>
+                        </div>
+                        <p className="detail-path">{effectiveMediaLibraryReference}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="section-header">
         <div>
@@ -1428,7 +1643,7 @@ export function DetailPage() {
               >
                 {vlcLaunchPending
                   ? "Opening VLC..."
-                  : "Open in VLC (Fastest)"}
+                  : "Open in VLC"}
               </button>
             ) : null}
             {showIosExternalApps ? (
@@ -1457,7 +1672,7 @@ export function DetailPage() {
                 >
                   {iosAppLaunchPending && iosAppTarget === "VLC"
                     ? "Opening VLC..."
-                    : "Open in VLC (Fastest)"}
+                    : "Open in VLC"}
                 </button>
                 <button
                   className="ghost-button ghost-button--subtle"
@@ -1491,24 +1706,6 @@ export function DetailPage() {
                 </button>
               </>
             ) : null}
-            {isAdmin ? (
-              <button
-                className="ghost-button ghost-button--danger"
-                disabled={hideActionsDisabled}
-                onClick={handleHideMovieForEveryone}
-                type="button"
-              >
-                {globalHiddenActionPending ? "Hiding globally..." : "Hide for everyone"}
-              </button>
-            ) : null}
-            <button
-              className="ghost-button ghost-button--subtle"
-              disabled={hideActionsDisabled}
-              onClick={handleHideMovie}
-              type="button"
-            >
-              {hiddenActionPending ? "Hiding..." : "Hide for me"}
-            </button>
           </div>
           {showMobilePreparingPlaceholder ? (
             <div className="playback-pending-indicator" role="status">
@@ -1599,7 +1796,7 @@ export function DetailPage() {
               ))}
             </div>
           ) : null}
-          {desktopPlayback?.open_method === "protocol_helper" ? (
+          {desktopPlayback?.open_method === "protocol_helper" && !desktopPlayback?.same_host_launch ? (
             <div className="native-handoff">
               <p className="native-handoff__label">
                 This desktop uses the client-side Elvern VLC Opener for Open in VLC. Server install does not register it on this device. If clicking Open in VLC does nothing or fails silently, open Install to download or update the helper, test the protocol handler, and check whether VLC was detected here.
@@ -1666,57 +1863,34 @@ export function DetailPage() {
           </div>
         ) : null}
 
-        <div className="detail-grid">
-          <div className="detail-block">
-            <h2>Playback</h2>
-            <div className="detail-list">
-              <span>{formatDuration(item.duration_seconds)}</span>
-              <span>{formatBytes(item.file_size)}</span>
-              {resumePosition > 0 ? <span>Resume at {formatDuration(resumePosition)}</span> : null}
-            </div>
-          </div>
-
-          <div className="detail-block">
-            <h2>Video</h2>
-            <div className="detail-list">
-              <span>
-                {item.width && item.height
-                  ? `${item.width} x ${item.height}`
-                  : "Unknown resolution"}
-              </span>
-              <span>{item.video_codec || "Unknown video codec"}</span>
-              <span>{item.container || "Unknown container"}</span>
-            </div>
-          </div>
-
-          <div className="detail-block">
-            <h2>Audio & subtitles</h2>
-            <div className="detail-list">
-              <span>{item.audio_codec || "Unknown audio codec"}</span>
-              <span>
-                {item.subtitles.length > 0
-                  ? `${item.subtitles.length} subtitle track(s) indexed`
-                  : "No subtitle tracks indexed"}
-              </span>
-              {playback?.mode === "hls" ? <span>Automatic HLS fallback</span> : null}
-            </div>
-          </div>
-
-          <div className="detail-block">
-            <h2>Source file</h2>
-            <div className="detail-list">
-              <span>{item.source_label || (item.source_kind === "cloud" ? "Cloud" : "DGX")}</span>
-              <span>{item.original_filename}</span>
-              <span>
-                {item.source_kind === "cloud"
-                  ? (item.library_source_name
-                    ? `Google Drive source: ${item.library_source_name}`
-                    : "Streamed from Google Drive")
-                  : "Stored under the configured private media root"}
-              </span>
-            </div>
-          </div>
+        <div className="detail-secondary-actions">
+          <button
+            className="ghost-button"
+            onClick={() => setInfoModalOpen(true)}
+            type="button"
+          >
+            Info
+          </button>
+          {isAdmin ? (
+            <button
+              className="ghost-button ghost-button--danger"
+              disabled={hideActionsDisabled}
+              onClick={handleHideMovieForEveryone}
+              type="button"
+            >
+              {globalHiddenActionPending ? "Hiding globally..." : "Hide for everyone"}
+            </button>
+          ) : null}
+          <button
+            className="ghost-button ghost-button--subtle"
+            disabled={hideActionsDisabled}
+            onClick={handleHideMovie}
+            type="button"
+          >
+            {hiddenActionPending ? "Hiding..." : "Hide for me"}
+          </button>
         </div>
+
       </div>
     </section>
   );

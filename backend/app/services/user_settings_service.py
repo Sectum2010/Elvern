@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .app_settings_service import get_media_library_reference_payload, validate_media_library_reference
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 
@@ -7,16 +8,28 @@ from ..db import get_connection, utcnow_iso
 HIDE_DUPLICATE_MOVIES_KEY = "hide_duplicate_movies"
 HIDE_RECENTLY_ADDED_KEY = "hide_recently_added"
 FLOATING_CONTROLS_POSITION_KEY = "floating_controls_position"
+MEDIA_LIBRARY_REFERENCE_PRIVATE_KEY = "media_library_reference_private"
 FLOATING_CONTROLS_POSITIONS = {"bottom", "top"}
 
 
-def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | str]:
+def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | str | None]:
+    media_library_reference_payload: dict[str, object]
     values = {
         HIDE_DUPLICATE_MOVIES_KEY: True,
         HIDE_RECENTLY_ADDED_KEY: False,
         FLOATING_CONTROLS_POSITION_KEY: "bottom",
+        "media_library_reference_private_value": None,
+        "media_library_reference_shared_default_value": "",
+        "media_library_reference_effective_value": "",
     }
     with get_connection(settings) as connection:
+        media_library_reference_payload = get_media_library_reference_payload(settings, connection=connection)
+        values["media_library_reference_shared_default_value"] = str(
+            media_library_reference_payload["effective_value"]
+        )
+        values["media_library_reference_effective_value"] = str(
+            media_library_reference_payload["effective_value"]
+        )
         rows = connection.execute(
             """
             SELECT key, value
@@ -32,6 +45,11 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
             values[HIDE_RECENTLY_ADDED_KEY] = row["value"] == "1"
         if row["key"] == FLOATING_CONTROLS_POSITION_KEY and row["value"] in FLOATING_CONTROLS_POSITIONS:
             values[FLOATING_CONTROLS_POSITION_KEY] = row["value"]
+        if row["key"] == MEDIA_LIBRARY_REFERENCE_PRIVATE_KEY:
+            private_value = validate_media_library_reference(value=row["value"])
+            values["media_library_reference_private_value"] = private_value
+            if private_value:
+                values["media_library_reference_effective_value"] = private_value
     return values
 
 
@@ -42,16 +60,19 @@ def update_user_settings(
     hide_duplicate_movies: bool | None = None,
     hide_recently_added: bool | None = None,
     floating_controls_position: str | None = None,
-) -> dict[str, bool | str]:
+    media_library_reference_private_value: str | None = None,
+) -> dict[str, bool | str | None]:
     if (
         hide_duplicate_movies is None
         and hide_recently_added is None
         and floating_controls_position is None
+        and media_library_reference_private_value is None
     ):
         return get_user_settings(settings, user_id=user_id)
 
     now = utcnow_iso()
     updates: list[tuple[str, str]] = []
+    deletes: list[str] = []
     if hide_duplicate_movies is not None:
         updates.append((HIDE_DUPLICATE_MOVIES_KEY, "1" if hide_duplicate_movies else "0"))
     if hide_recently_added is not None:
@@ -61,7 +82,23 @@ def update_user_settings(
         if normalized_position not in FLOATING_CONTROLS_POSITIONS:
             normalized_position = "bottom"
         updates.append((FLOATING_CONTROLS_POSITION_KEY, normalized_position))
+    if media_library_reference_private_value is not None:
+        normalized_media_library_reference = validate_media_library_reference(
+            value=media_library_reference_private_value,
+        )
+        if normalized_media_library_reference is None:
+            deletes.append(MEDIA_LIBRARY_REFERENCE_PRIVATE_KEY)
+        else:
+            updates.append((MEDIA_LIBRARY_REFERENCE_PRIVATE_KEY, normalized_media_library_reference))
     with get_connection(settings) as connection:
+        for key in deletes:
+            connection.execute(
+                """
+                DELETE FROM user_settings
+                WHERE user_id = ? AND key = ?
+                """,
+                (user_id, key),
+            )
         for key, value in updates:
             connection.execute(
                 """

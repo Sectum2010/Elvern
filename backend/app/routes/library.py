@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 
 @router.get("", response_model=LibraryListResponse)
 def get_library(request: Request, user=CurrentUser) -> LibraryListResponse:
+    request.app.state.scan_service.maybe_refresh_local_library(trigger="library")
     payload = list_library(request.app.state.settings, user_id=user.id)
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
     return LibraryListResponse(**payload)

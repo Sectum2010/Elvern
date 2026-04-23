@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 from ..config import Settings
 from ..db import get_connection
+from .local_library_source_service import get_effective_shared_local_library_path
 
 
 def get_scan_job_summary(settings: Settings) -> dict[str, object] | None:
@@ -44,13 +45,14 @@ def get_system_status(
         user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     public_app_origin = _public_app_origin(settings)
     backend_api_origin = _backend_api_origin(settings)
+    shared_media_root = get_effective_shared_local_library_path(settings)
     return {
         "app_name": settings.app_name,
         "status": "ok",
         "public_app_origin": public_app_origin,
         "backend_api_origin": backend_api_origin,
-        "media_root": str(settings.media_root),
-        "media_root_exists": settings.media_root.exists(),
+        "media_root": str(shared_media_root),
+        "media_root_exists": shared_media_root.exists(),
         "db_path": str(settings.db_path),
         "ffprobe_available": bool(settings.ffprobe_path),
         "total_media_items": media_count,

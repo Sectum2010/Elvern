@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
+from .local_library_source_service import ensure_current_shared_local_source_binding
 from .google_drive_service import (
     build_google_drive_provider_auth_required_detail,
     fetch_drive_file_resource_key,
@@ -21,6 +22,10 @@ def resolve_media_stream_target(
     get_access_token_by_account_id: Callable[..., str],
 ) -> dict[str, object] | None:
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         row = connection.execute(
             """
             SELECT
@@ -44,7 +49,10 @@ def resolve_media_stream_target(
              AND h.user_id = ?
             WHERE m.id = ?
               AND (
-                COALESCE(m.source_kind, 'local') = 'local'
+                (
+                    COALESCE(m.source_kind, 'local') = 'local'
+                    AND m.library_source_id = ?
+                )
                 OR (
                     s.id IS NOT NULL
                 AND h.id IS NULL
@@ -56,7 +64,7 @@ def resolve_media_stream_target(
               )
             LIMIT 1
             """,
-            (user_id, item_id, user_id),
+            (user_id, item_id, shared_local_source_id, user_id),
         ).fetchone()
         if row is None:
             return None
@@ -186,6 +194,10 @@ def _load_cloud_media_item_provider_context(
     item_id: int,
 ) -> dict[str, object] | None:
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         row = connection.execute(
             """
             SELECT
@@ -204,7 +216,10 @@ def _load_cloud_media_item_provider_context(
              AND h.user_id = ?
             WHERE m.id = ?
               AND (
-                COALESCE(m.source_kind, 'local') = 'local'
+                (
+                    COALESCE(m.source_kind, 'local') = 'local'
+                    AND m.library_source_id = ?
+                )
                 OR (
                     s.id IS NOT NULL
                 AND h.id IS NULL
@@ -216,7 +231,7 @@ def _load_cloud_media_item_provider_context(
               )
             LIMIT 1
             """,
-            (user_id, item_id, user_id),
+            (user_id, item_id, shared_local_source_id, user_id),
         ).fetchone()
     return dict(row) if row is not None else None
 

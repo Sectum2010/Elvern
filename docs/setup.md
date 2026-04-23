@@ -156,7 +156,9 @@ Desktop playback is now VLC-first:
 - the helper resolves the mapped direct source path when configured and launches installed VLC directly
 - if no desktop path mapping exists yet, Elvern falls back to a short-lived backend URL, still through the helper
 - VLC playlists remain as a secondary manual fallback, not the daily-use path
-- browser playback remains built in as convenience mode only
+- browser playback remains built in as the first-class path for weaker or less stable connections
+- `Lite Playback` is the quick-start browser mode and is intended to begin once roughly the first 45 seconds are ready
+- `Full Playback` is intended to wait for a larger browser-ready threshold aimed at smoother full-movie playback
 
 Relevant env knobs:
 
@@ -290,8 +292,8 @@ After signing in:
 7. Confirm VLC starts near the saved resume point when one exists.
 8. On a Windows or macOS desktop that has the helper registered, confirm `Open in VLC` launches installed VLC without a manual copy/paste step.
 9. If the platform mapping is intentionally left unset, confirm the helper still opens installed VLC using the short-lived backend URL fallback.
-10. Open a direct-play-safe MP4 and confirm browser playback still works as fallback.
-11. Open an incompatible file such as an MKV and confirm browser fallback still works when you choose it.
+10. Open a direct-play-safe MP4 and confirm browser playback still works when you choose `Lite Playback` or `Full Playback`.
+11. Open an incompatible file such as an MKV and confirm browser playback still reaches a usable browser session when you choose `Lite Playback` or `Full Playback`.
 12. Create a second user from `Admin`, sign in as that user, and confirm progress/continue-watching are separate.
 13. Pause, leave the page, reopen the movie, and confirm Elvern still shows the saved resume point for the signed-in user.
 

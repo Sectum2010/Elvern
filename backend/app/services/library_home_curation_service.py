@@ -9,6 +9,7 @@ from .library_presentation_service import (
     _row_value,
     _serialize_media_item,
 )
+from .local_library_source_service import get_effective_shared_local_library_path
 from .title_normalization import clean_title_for_matching, collapse_spaces, normalize_title_key
 from ..config import Settings
 
@@ -162,7 +163,7 @@ def _series_folder_key(settings: Settings, row, *, include_cloud: bool = False) 
         return None
     try:
         resolved_file = Path(file_path).resolve()
-        media_root = settings.media_root.resolve()
+        media_root = get_effective_shared_local_library_path(settings).resolve()
     except OSError:
         return None
     if media_root not in resolved_file.parents:

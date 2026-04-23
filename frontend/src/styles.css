@@ -742,7 +742,9 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .media-card {
-  --media-card-body-height: 10.6rem;
+  --media-card-body-height: 8rem;
+  --media-card-title-line-height: 1.28;
+  --media-card-title-lines: 3;
   display: grid;
   gap: 0;
   grid-template-rows: auto var(--media-card-body-height);
@@ -847,22 +849,20 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .media-card__body {
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: 0.75rem;
+  align-content: start;
+  gap: 0.7rem;
   height: var(--media-card-body-height);
   padding: 0.9rem 0.95rem 0.95rem;
 }
 
 .media-card__copy {
   min-height: 0;
-  display: grid;
-  align-content: start;
-  gap: 0.45rem;
+  max-block-size: calc(1em * var(--media-card-title-line-height) * var(--media-card-title-lines) + 0.2rem);
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(143, 182, 218, 0.28) transparent;
-  padding-right: 0.2rem;
+  padding-right: 0.25rem;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -889,30 +889,20 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   min-width: 0;
 }
 
-.media-card__title-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.55rem;
-  min-width: 0;
-}
-
 .media-card__title {
   margin: 0;
-  font-size: 1rem;
-  line-height: 1.3;
-  min-width: 0;
-  flex: 1 1 auto;
+  font-size: 1.02rem;
+  font-weight: 650;
+  line-height: var(--media-card-title-line-height);
   display: block;
   overflow: visible;
   white-space: normal;
-  overflow-wrap: break-word;
-  word-break: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   hyphens: auto;
 }
 
-.media-card__source-badge {
-  flex: 0 0 auto;
+.media-card__storage-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -925,12 +915,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.media-card__source-badge--dgx {
+.media-card__storage-badge--local {
   background: rgba(143, 182, 218, 0.14);
   color: #cfe6fb;
 }
 
-.media-card__source-badge--cloud {
+.media-card__storage-badge--cloud {
   background: rgba(236, 202, 112, 0.16);
   color: #fde7a8;
   border-color: rgba(236, 202, 112, 0.28);
@@ -950,7 +940,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   word-break: break-word;
 }
 
-.media-card__meta,
+.media-card__badges,
 .detail-list {
   display: flex;
   flex-wrap: wrap;
@@ -958,7 +948,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   align-items: center;
 }
 
-.media-card__meta span,
+.media-card__storage-badge,
 .media-card__rank,
 .detail-list span {
   display: inline-flex;
@@ -990,6 +980,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.page-section--detail .section-header > .ghost-button--inline {
+  text-align: center;
 }
 
 .media-card__rank-shell {
@@ -1310,6 +1304,14 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.75rem;
 }
 
+.detail-secondary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.95rem;
+  padding-top: 0.35rem;
+}
+
 .playback-pending-indicator {
   display: flex;
   align-items: flex-start;
@@ -1573,6 +1575,25 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   padding: 0.85rem 0.95rem;
   background: rgba(11, 17, 24, 0.92);
   color: #f4f8fb;
+}
+
+.settings-path-picker__row {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.settings-path-picker__row input {
+  margin-top: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-path-picker__button {
+  flex: 0 0 auto;
+  inline-size: 2.8rem;
+  padding-inline: 0;
+  font-size: 1.15rem;
 }
 
 .admin-intro-card,
@@ -2564,6 +2585,176 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.75rem;
 }
 
+.settings-directory-picker__card {
+  width: min(100%, 36rem);
+  max-height: min(82vh, 42rem);
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.settings-directory-picker__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 1.15rem 1.25rem 0.95rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(15, 20, 31, 0.995), rgba(20, 27, 39, 0.985));
+}
+
+.settings-directory-picker__copy {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.settings-directory-picker__copy h2 {
+  margin: 0;
+}
+
+.settings-directory-picker__body {
+  display: grid;
+  gap: 0.95rem;
+  padding: 1rem 1.25rem 1.25rem;
+  overflow-y: auto;
+}
+
+.settings-directory-picker__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.settings-directory-picker__list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.settings-directory-picker__entry {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  padding: 0.8rem 0.95rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(152, 176, 201, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  text-align: left;
+}
+
+.settings-directory-picker__entry-icon {
+  flex: 0 0 auto;
+}
+
+.settings-directory-picker__entry-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.detail-info-modal__card {
+  width: min(100%, 46rem);
+  max-height: min(82vh, 44rem);
+  padding: 0;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0;
+}
+
+.detail-info-modal__header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 1.15rem 1.25rem 0.95rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(15, 20, 31, 0.995), rgba(20, 27, 39, 0.985));
+}
+
+.detail-info-modal__copy {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.detail-info-modal__eyebrow {
+  margin: 0;
+}
+
+.detail-info-modal__copy h2 {
+  margin: 0;
+}
+
+.detail-info-modal__title {
+  margin: 0;
+}
+
+.detail-info-modal__close {
+  justify-self: end;
+  align-self: start;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.detail-info-modal__body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(143, 182, 218, 0.28) transparent;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.detail-grid--modal {
+  margin-top: 0;
+  gap: 0.95rem;
+}
+
+.detail-grid--modal .detail-block {
+  gap: 0.45rem;
+  align-content: start;
+}
+
+.detail-grid--modal .detail-list {
+  gap: 0.45rem;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.detail-subtitle-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.detail-source-group {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.detail-reference-group {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.detail-reference-group__item {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.detail-reference-group__item .page-subnote {
+  margin-top: 0;
+}
+
+html[data-device-shell="iphone"] .detail-info-modal__header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
 .assistant-attachment-fallback-link {
   width: 100%;
   min-height: 6.5rem;
@@ -2654,8 +2845,11 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .detail-path {
   display: inline-block;
+  margin: 0;
   max-width: 100%;
   word-break: break-word;
+  color: #e7eff7;
+  font-size: 0.92rem;
 }
 
 .status-row {

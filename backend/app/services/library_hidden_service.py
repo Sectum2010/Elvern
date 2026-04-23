@@ -8,6 +8,7 @@ from .library_movie_identity_service import (
     _quality_sort_key,
     _row_hidden_movie_key,
 )
+from .local_library_source_service import ensure_current_shared_local_source_binding
 from .library_presentation_service import _poster_directory, _poster_url_for_row
 from .title_normalization import resolve_title_metadata
 from ..config import Settings
@@ -168,6 +169,10 @@ def list_hidden_media_items(
     utc_iso_to_epoch_seconds,
 ) -> list[dict[str, object]]:
     with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
         poster_dir = _poster_directory(settings, connection=connection)
         globally_hidden_media_item_ids = _load_globally_hidden_media_item_ids(connection)
         globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
@@ -210,7 +215,10 @@ def list_hidden_media_items(
                AND p.user_id = ?
             WHERE h.user_id = ?
               AND (
-                    COALESCE(m.source_kind, 'local') = 'local'
+                    (
+                        COALESCE(m.source_kind, 'local') = 'local'
+                        AND m.library_source_id = ?
+                    )
                     OR (
                         s.id IS NOT NULL
                         AND hs.id IS NULL
@@ -222,11 +230,11 @@ def list_hidden_media_items(
                 )
             ORDER BY datetime(h.hidden_at) DESC, lower(m.title) ASC
             """,
-            (user_id, user_id, user_id, user_id),
+            (user_id, user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
         visible_candidate_rows = connection.execute(
             base_query_sql + " ORDER BY lower(m.title) ASC",
-            (user_id, user_id, user_id),
+            (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
 
     payload: list[dict[str, object]] = []

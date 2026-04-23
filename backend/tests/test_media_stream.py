@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend.app.media_stream import ensure_media_path_within_root
+from backend.app.services.local_library_source_service import update_shared_local_library_path
 
 
 def test_media_root_allows_real_files_inside_root(initialized_settings) -> None:
@@ -42,3 +43,16 @@ def test_media_root_blocks_symlink_escape(initialized_settings, tmp_path) -> Non
 
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail == "Media path escapes configured media root"
+
+
+def test_media_root_uses_live_shared_local_library_path(initialized_settings, tmp_path) -> None:
+    replacement_root = tmp_path / "shared-library"
+    replacement_root.mkdir()
+    update_shared_local_library_path(initialized_settings, value=str(replacement_root))
+
+    media_file = replacement_root / "clip.mp4"
+    media_file.write_bytes(b"test payload")
+
+    resolved = ensure_media_path_within_root(media_file, initialized_settings)
+
+    assert resolved == media_file.resolve()

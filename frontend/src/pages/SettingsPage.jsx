@@ -42,6 +42,47 @@ function validatePosterReferenceLocationInput(value) {
 }
 
 
+function detectSettingsBrowsePlatform() {
+  if (typeof navigator === "undefined") {
+    return "linux";
+  }
+  const agent = (navigator.userAgent || "").toLowerCase();
+  const platform = (navigator.platform || "").toLowerCase();
+  const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
+  const iPadDesktopClassAgent =
+    maxTouchPoints > 1 && (agent.includes("macintosh") || platform.includes("mac"));
+
+  if (agent.includes("iphone") || agent.includes("ipod")) {
+    return "iphone";
+  }
+  if (agent.includes("ipad") || iPadDesktopClassAgent) {
+    return "ipad";
+  }
+  if (agent.includes("android")) {
+    return "android";
+  }
+  if (agent.includes("windows")) {
+    return "windows";
+  }
+  if (agent.includes("macintosh") || (agent.includes("mac os x") && !agent.includes("iphone") && !agent.includes("ipad"))) {
+    return "mac";
+  }
+  if (agent.includes("linux") || platform.includes("linux") || agent.includes("x11")) {
+    return "linux";
+  }
+  return "linux";
+}
+
+
+function isSettingsLocalDevelopmentLoopback(platform) {
+  if (typeof window === "undefined" || platform !== "linux") {
+    return false;
+  }
+  const host = (window.location.hostname || "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1";
+}
+
+
 function formatCloudTimestamp(value) {
   if (!value) {
     return "Never";
@@ -98,6 +139,99 @@ function SettingsAccordionSection({ title, description, badge, isOpen, onToggle,
 }
 
 
+function DirectoryPickerModal({
+  open,
+  title,
+  loading,
+  error,
+  currentPath,
+  parentPath,
+  directories,
+  onNavigate,
+  onUseCurrent,
+  onClose,
+}) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-labelledby="settings-directory-picker-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="browser-resume-modal__backdrop"
+        onClick={onClose}
+      />
+      <div className="browser-resume-modal__card settings-directory-picker__card">
+        <div className="settings-directory-picker__header">
+          <div className="settings-directory-picker__copy">
+            <p className="eyebrow">Browse</p>
+            <h2 id="settings-directory-picker-title">{title}</h2>
+          </div>
+          <button
+            className="ghost-button ghost-button--inline"
+            onClick={onClose}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="settings-directory-picker__body">
+          {error ? <p className="form-error">{error}</p> : null}
+          <div className="status-row">
+            <span>Current directory</span>
+            <strong>{currentPath || "Loading..."}</strong>
+          </div>
+          <div className="settings-directory-picker__actions">
+            <button
+              className="ghost-button"
+              disabled={loading || !parentPath}
+              onClick={() => onNavigate(parentPath)}
+              type="button"
+            >
+              Up one folder
+            </button>
+            <button
+              className="primary-button"
+              disabled={loading || !currentPath}
+              onClick={onUseCurrent}
+              type="button"
+            >
+              Use this folder
+            </button>
+          </div>
+          <div className="settings-directory-picker__list">
+            {loading ? <p className="page-note">Loading directories…</p> : null}
+            {!loading && directories.length === 0 ? (
+              <p className="page-subnote">No child directories here.</p>
+            ) : null}
+            {!loading
+              ? directories.map((directory) => (
+                  <button
+                    className="settings-directory-picker__entry"
+                    key={directory.path}
+                    onClick={() => onNavigate(directory.path)}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="settings-directory-picker__entry-icon">📁</span>
+                    <span className="settings-directory-picker__entry-name">{directory.name}</span>
+                  </button>
+                ))
+              : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export function SettingsPage() {
   const { user } = useAuth();
   const location = useLocation();
@@ -105,6 +239,9 @@ export function SettingsPage() {
     hide_duplicate_movies: true,
     hide_recently_added: false,
     floating_controls_position: "bottom",
+    media_library_reference_private_value: null,
+    media_library_reference_shared_default_value: "",
+    media_library_reference_effective_value: "",
   });
   const [hiddenItems, setHiddenItems] = useState([]);
   const [globalHiddenItems, setGlobalHiddenItems] = useState([]);
@@ -114,6 +251,14 @@ export function SettingsPage() {
   const [restoringGlobalItemId, setRestoringGlobalItemId] = useState(null);
   const [movingToGlobalItemId, setMovingToGlobalItemId] = useState(null);
   const [movingToPersonalItemId, setMovingToPersonalItemId] = useState(null);
+  const [sharedMediaLibraryReference, setSharedMediaLibraryReference] = useState({
+    configured_value: null,
+    effective_value: "",
+    default_value: "",
+    validation_rules: [],
+  });
+  const [sharedMediaLibraryReferenceInput, setSharedMediaLibraryReferenceInput] = useState("");
+  const [sharedMediaLibraryReferenceSaving, setSharedMediaLibraryReferenceSaving] = useState(false);
   const [posterReference, setPosterReference] = useState({
     configured_value: null,
     effective_value: "",
@@ -170,8 +315,24 @@ export function SettingsPage() {
     myLibraries: false,
     sharedLibraries: false,
     googleDriveSetup: false,
+    mediaLibraryReference: false,
     posterReference: false,
   });
+  const [directoryPicker, setDirectoryPicker] = useState({
+    open: false,
+    target: "shared-library",
+    title: "",
+    loading: false,
+    error: "",
+    current_path: "",
+    parent_path: null,
+    directories: [],
+  });
+  const [directoryPickerFallback, setDirectoryPickerFallback] = useState({
+    target: "",
+    reason: "",
+  });
+  const [nativePickerPendingTarget, setNativePickerPendingTarget] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -180,12 +341,23 @@ export function SettingsPage() {
       setLoading(true);
       setError("");
       try {
-        const [settingsPayload, hiddenPayload, globalHiddenPayload, posterPayload, cloudPayload, googleSetupPayload] = await Promise.all([
+        const [
+          settingsPayload,
+          hiddenPayload,
+          globalHiddenPayload,
+          mediaLibraryReferencePayload,
+          posterPayload,
+          cloudPayload,
+          googleSetupPayload,
+        ] = await Promise.all([
           apiRequest("/api/user-settings"),
           apiRequest("/api/user-hidden-items"),
           user?.role === "admin"
             ? apiRequest("/api/admin/global-hidden-items")
             : Promise.resolve({ items: [] }),
+          user?.role === "admin"
+            ? apiRequest("/api/admin/media-library-reference")
+            : Promise.resolve(null),
           user?.role === "admin"
             ? apiRequest("/api/admin/poster-reference-location")
             : Promise.resolve(null),
@@ -199,6 +371,12 @@ export function SettingsPage() {
           setHiddenItems(hiddenPayload.items || []);
           setGlobalHiddenItems(globalHiddenPayload.items || []);
           setCloudLibraries(cloudPayload);
+          if (user?.role === "admin" && mediaLibraryReferencePayload) {
+            setSharedMediaLibraryReference(mediaLibraryReferencePayload);
+            setSharedMediaLibraryReferenceInput(
+              mediaLibraryReferencePayload.configured_value || mediaLibraryReferencePayload.default_value || "",
+            );
+          }
           if (user?.role === "admin" && posterPayload) {
             setPosterReference(posterPayload);
             setPosterReferenceInput(posterPayload.configured_value || posterPayload.default_value || "");
@@ -231,6 +409,13 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (user?.role !== "admin") {
+      setSharedMediaLibraryReference({
+        configured_value: null,
+        effective_value: "",
+        default_value: "",
+        validation_rules: [],
+      });
+      setSharedMediaLibraryReferenceInput("");
       setPosterReference({
         configured_value: null,
         effective_value: "",
@@ -260,6 +445,7 @@ export function SettingsPage() {
         client_id: "",
         client_secret: "",
       });
+    } else {
     }
   }, [user?.role]);
 
@@ -500,6 +686,168 @@ export function SettingsPage() {
     }
   }
 
+  async function handleSharedMediaLibraryReferenceSave(event) {
+    event.preventDefault();
+    setSharedMediaLibraryReferenceSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await apiRequest("/api/admin/media-library-reference", {
+        method: "PUT",
+        data: { value: sharedMediaLibraryReferenceInput },
+      });
+      setSharedMediaLibraryReference(payload);
+      setSharedMediaLibraryReferenceInput(payload.configured_value || payload.default_value || "");
+      setMessage("Shared local library path saved.");
+    } catch (requestError) {
+      setError(requestError.message || "Failed to save shared local library path");
+    } finally {
+      setSharedMediaLibraryReferenceSaving(false);
+    }
+  }
+
+  async function loadDirectoryPicker(target, path) {
+    setDirectoryPicker((current) => ({
+      ...current,
+      open: true,
+      target,
+      title: target === "poster-reference" ? "Browse poster directories" : "Browse shared local library directories",
+      loading: true,
+      error: "",
+    }));
+    try {
+      const params = new URLSearchParams();
+      if (path) {
+        params.set("path", path);
+      }
+      const payload = await apiRequest(`/api/admin/local-directories?${params.toString()}`);
+      setDirectoryPicker((current) => ({
+        ...current,
+        open: true,
+        target,
+        title: target === "poster-reference" ? "Browse poster directories" : "Browse shared local library directories",
+        loading: false,
+        error: "",
+        current_path: payload.current_path || "",
+        parent_path: payload.parent_path || null,
+        directories: Array.isArray(payload.directories) ? payload.directories : [],
+      }));
+    } catch (requestError) {
+      setDirectoryPicker((current) => ({
+        ...current,
+        open: true,
+        target,
+        title: target === "poster-reference" ? "Browse poster directories" : "Browse shared local library directories",
+        loading: false,
+        error: requestError.message || "Failed to browse server directories",
+      }));
+    }
+  }
+
+  async function handleOpenDirectoryPicker(target) {
+    const platform = detectSettingsBrowsePlatform();
+    const sameHostHint = isSettingsLocalDevelopmentLoopback(platform);
+    const initialPath = target === "poster-reference"
+      ? posterReferenceInput || posterReference.effective_value || posterReference.default_value || ""
+      : sharedMediaLibraryReferenceInput
+        || sharedMediaLibraryReference.effective_value
+        || sharedMediaLibraryReference.default_value
+        || "";
+    setError("");
+    setMessage("");
+    setDirectoryPickerFallback({ target: "", reason: "" });
+    if (platform !== "linux") {
+      await loadDirectoryPicker(target, initialPath);
+      return;
+    }
+    try {
+      const params = new URLSearchParams({
+        platform,
+        same_host_hint: sameHostHint ? "1" : "0",
+      });
+      const capability = await apiRequest(`/api/admin/local-directory-picker/capability?${params.toString()}`);
+      if (!capability?.same_host_linux) {
+        await loadDirectoryPicker(target, initialPath);
+        return;
+      }
+      if (!capability?.native_picker_supported) {
+        setDirectoryPickerFallback({
+          target,
+          reason: capability?.reason || capability?.same_host_reason || "Native host picker is unavailable for this Linux same-host session.",
+        });
+        return;
+      }
+      setNativePickerPendingTarget(target);
+      const payload = await apiRequest("/api/admin/local-directory-picker", {
+        method: "POST",
+        data: {
+          path: initialPath,
+          title: target === "poster-reference"
+            ? "Select poster directory"
+            : "Select shared local library directory",
+          platform,
+          same_host_hint: sameHostHint,
+        },
+      });
+      if (payload?.status === "selected" && payload?.selected_path) {
+        if (target === "poster-reference") {
+          setPosterReferenceInput(payload.selected_path);
+        } else {
+          setSharedMediaLibraryReferenceInput(payload.selected_path);
+        }
+        setDirectoryPickerFallback({ target: "", reason: "" });
+        return;
+      }
+      if (payload?.status === "cancelled") {
+        setDirectoryPickerFallback({ target: "", reason: "" });
+        return;
+      }
+      setDirectoryPickerFallback({
+        target,
+        reason: payload?.reason || "Failed to open the host directory picker.",
+      });
+    } catch (requestError) {
+      setDirectoryPickerFallback({
+        target,
+        reason: requestError?.message || "Failed to determine Linux same-host native picker availability.",
+      });
+    } finally {
+      setNativePickerPendingTarget("");
+    }
+  }
+
+  async function handleOpenServerDirectoryBrowser(target) {
+    const initialPath = target === "poster-reference"
+      ? posterReferenceInput || posterReference.effective_value || posterReference.default_value || ""
+      : sharedMediaLibraryReferenceInput
+        || sharedMediaLibraryReference.effective_value
+        || sharedMediaLibraryReference.default_value
+        || "";
+    setDirectoryPickerFallback({ target: "", reason: "" });
+    await loadDirectoryPicker(target, initialPath);
+  }
+
+  function handleCloseDirectoryPicker() {
+    setDirectoryPicker((current) => ({
+      ...current,
+      open: false,
+      loading: false,
+      error: "",
+    }));
+  }
+
+  function handleUseDirectoryPickerCurrent() {
+    if (!directoryPicker.current_path) {
+      return;
+    }
+    if (directoryPicker.target === "poster-reference") {
+      setPosterReferenceInput(directoryPicker.current_path);
+    } else {
+      setSharedMediaLibraryReferenceInput(directoryPicker.current_path);
+    }
+    handleCloseDirectoryPicker();
+  }
+
   async function refreshCloudLibraries() {
     const payload = await apiRequest("/api/cloud-libraries");
     setCloudLibraries(payload);
@@ -702,6 +1050,19 @@ export function SettingsPage() {
 
   return (
     <section className="page-section">
+      <DirectoryPickerModal
+        currentPath={directoryPicker.current_path}
+        directories={directoryPicker.directories}
+        error={directoryPicker.error}
+        loading={directoryPicker.loading}
+        onClose={handleCloseDirectoryPicker}
+        onNavigate={(path) => loadDirectoryPicker(directoryPicker.target, path)}
+        onUseCurrent={handleUseDirectoryPickerCurrent}
+        open={directoryPicker.open}
+        parentPath={directoryPicker.parent_path}
+        title={directoryPicker.title}
+      />
+
       <div className="section-header">
         <div>
           <p className="eyebrow">Settings</p>
@@ -1296,6 +1657,82 @@ export function SettingsPage() {
 
         {user?.role === "admin" ? (
           <SettingsAccordionSection
+            description="Admin-only real shared local library path. This is the live shared local library path Elvern currently uses."
+            isOpen={openSections.mediaLibraryReference}
+            onToggle={() => toggleSection("mediaLibraryReference")}
+            title="Shared local library path"
+          >
+            <form className="admin-form" onSubmit={handleSharedMediaLibraryReferenceSave}>
+              <label>
+                Shared local library path
+                <div className="settings-path-picker__row">
+                  <input
+                    disabled={loading || sharedMediaLibraryReferenceSaving}
+                    onChange={(event) => setSharedMediaLibraryReferenceInput(event.target.value)}
+                    placeholder={sharedMediaLibraryReference.default_value || "/srv/media/movies"}
+                    type="text"
+                    value={sharedMediaLibraryReferenceInput}
+                  />
+                  <button
+                    aria-label="Browse shared local library directories on the Elvern host"
+                    className="ghost-button ghost-button--inline settings-path-picker__button"
+                    disabled={
+                      loading
+                      || sharedMediaLibraryReferenceSaving
+                      || (directoryPicker.loading && directoryPicker.target === "shared-library")
+                      || nativePickerPendingTarget === "shared-library"
+                    }
+                    onClick={() => handleOpenDirectoryPicker("shared-library")}
+                    title="Browse shared local library directories on the Elvern host"
+                    type="button"
+                  >
+                    <span aria-hidden="true">📁</span>
+                  </button>
+                </div>
+              </label>
+              <StatusRow label="Using now" value={sharedMediaLibraryReference.effective_value || "Unknown"} />
+              <StatusRow label="Bootstrap path" value={sharedMediaLibraryReference.default_value || "Unknown"} />
+              <div className="desktop-playback-notes">
+                {(sharedMediaLibraryReference.validation_rules || []).map((rule) => (
+                  <p className="page-subnote" key={rule}>
+                    {rule}
+                  </p>
+                ))}
+              </div>
+              {nativePickerPendingTarget === "shared-library" ? (
+                <div className="desktop-playback-notes">
+                  <p className="page-note">Opening folder picker…</p>
+                </div>
+              ) : null}
+              {directoryPickerFallback.target === "shared-library" && directoryPickerFallback.reason ? (
+                <div className="desktop-playback-notes">
+                  <p className="form-error">{directoryPickerFallback.reason}</p>
+                  <div className="player-actions">
+                    <button
+                      className="ghost-button"
+                      onClick={() => handleOpenServerDirectoryBrowser("shared-library")}
+                      type="button"
+                    >
+                      Browse server directories instead
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              <div className="player-actions">
+                <button
+                  className="primary-button"
+                  disabled={loading || sharedMediaLibraryReferenceSaving}
+                  type="submit"
+                >
+                  {sharedMediaLibraryReferenceSaving ? "Saving..." : "Save shared local library path"}
+                </button>
+              </div>
+            </form>
+          </SettingsAccordionSection>
+        ) : null}
+
+        {user?.role === "admin" ? (
+          <SettingsAccordionSection
             description="Global admin-only poster directory for every user. Leave this at the current Linux default unless you need Elvern to scan a different mounted poster folder."
             isOpen={openSections.posterReference}
             onToggle={() => toggleSection("posterReference")}
@@ -1304,16 +1741,33 @@ export function SettingsPage() {
             <form className="admin-form" onSubmit={handlePosterReferenceSave}>
               <label>
                 Poster directory
-                <input
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  disabled={loading || posterReferenceSaving}
-                  onChange={(event) => setPosterReferenceInput(event.target.value)}
-                  placeholder={posterReference.default_value || "/path/to/Posters"}
-                  spellCheck="false"
-                  type="text"
-                  value={posterReferenceInput}
-                />
+                <div className="settings-path-picker__row">
+                  <input
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    disabled={loading || posterReferenceSaving}
+                    onChange={(event) => setPosterReferenceInput(event.target.value)}
+                    placeholder={posterReference.default_value || "/path/to/Posters"}
+                    spellCheck="false"
+                    type="text"
+                    value={posterReferenceInput}
+                  />
+                  <button
+                    aria-label="Browse poster directories on the Elvern host"
+                    className="ghost-button ghost-button--inline settings-path-picker__button"
+                    disabled={
+                      loading
+                      || posterReferenceSaving
+                      || (directoryPicker.loading && directoryPicker.target === "poster-reference")
+                      || nativePickerPendingTarget === "poster-reference"
+                    }
+                    onClick={() => handleOpenDirectoryPicker("poster-reference")}
+                    title="Browse poster directories on the Elvern host"
+                    type="button"
+                  >
+                    <span aria-hidden="true">📁</span>
+                  </button>
+                </div>
               </label>
               <StatusRow label="Effective location" value={posterReference.effective_value || "Unknown"} />
               <StatusRow label="Default location" value={posterReference.default_value || "Unknown"} />
@@ -1324,6 +1778,25 @@ export function SettingsPage() {
                   </p>
                 ))}
               </div>
+              {nativePickerPendingTarget === "poster-reference" ? (
+                <div className="desktop-playback-notes">
+                  <p className="page-note">Opening folder picker…</p>
+                </div>
+              ) : null}
+              {directoryPickerFallback.target === "poster-reference" && directoryPickerFallback.reason ? (
+                <div className="desktop-playback-notes">
+                  <p className="form-error">{directoryPickerFallback.reason}</p>
+                  <div className="player-actions">
+                    <button
+                      className="ghost-button"
+                      onClick={() => handleOpenServerDirectoryBrowser("poster-reference")}
+                      type="button"
+                    >
+                      Browse server directories instead
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <div className="player-actions">
                 <button
                   className="primary-button"

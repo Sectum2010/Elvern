@@ -19,9 +19,9 @@ from ..services.desktop_playback_service import (
     build_vlc_playlist_response,
     create_desktop_vlc_handoff,
     infer_desktop_platform,
-    infer_same_host_request,
     launch_vlc_for_item,
     record_desktop_vlc_handoff_started,
+    resolve_same_host_request,
     resolve_desktop_vlc_handoff,
 )
 from ..services.library_service import get_media_item_detail
@@ -44,11 +44,14 @@ def desktop_playback_resolve(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
     resolved_platform = infer_desktop_platform(request.headers.get("user-agent"), platform)
     client_ip = resolve_client_ip(request)
-    same_host_detected = bool(same_host) or infer_same_host_request(
+    same_host_context = resolve_same_host_request(
         settings,
         platform=resolved_platform,
         client_ip=client_ip,
+        request_host=request.url.hostname,
+        explicit_same_host=bool(same_host),
     )
+    same_host_detected = bool(same_host_context["same_host"])
     payload = build_desktop_playback_resolution(
         settings,
         item=item,
@@ -74,12 +77,14 @@ def desktop_playback_open(
         payload.platform if payload else None,
     )
     client_ip = resolve_client_ip(request)
-    same_host_detected = bool(payload.same_host) if payload else False
-    same_host_detected = same_host_detected or infer_same_host_request(
+    same_host_context = resolve_same_host_request(
         settings,
         platform=resolved_platform,
         client_ip=client_ip,
+        request_host=request.url.hostname,
+        explicit_same_host=bool(payload.same_host) if payload else False,
     )
+    same_host_detected = bool(same_host_context["same_host"])
     if resolved_platform != "linux":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

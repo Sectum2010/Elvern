@@ -189,12 +189,18 @@ With current Tailscale Serve syntax, `tailscale serve --bg 4173` publishes the l
 
 ## Playback Behavior
 
-Elvern is now desktop-VLC-first and browser-second, with one private Elvern server URL for every desktop client:
+Elvern now has two main playback paths, with one private Elvern server URL for every desktop client:
 
 - desktop Linux: `Open in VLC` launches installed VLC on that Linux client through the same DGX private server URL
 - desktop Windows/macOS: `Open in VLC` uses the lightweight `elvern-vlc://` helper to launch installed VLC with the mapped direct source when configured
 - desktop Windows/macOS fallback: if no direct mapping exists, the helper can still open installed VLC with a short-lived backend URL
-- browser playback stays available as convenience mode and HLS fallback
+- browser playback remains a first-class path for weaker or less stable connections
+
+In current product language:
+
+- `Open in VLC` is preferred on strong home, local, or stable Wi-Fi conditions because it best preserves original quality, subtitle handling, audio-track selection, and local-player behavior
+- `Lite Playback` is the quick-start browser mode and is intended to begin once roughly the first 45 seconds are ready
+- `Full Playback` is intended to wait for a larger browser-ready threshold aimed at smoother full-movie playback
 
 Typical direct-play case:
 

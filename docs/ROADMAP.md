@@ -9,7 +9,7 @@ Elvern is currently centered on a private, self-hosted family media stack with:
 - a FastAPI backend plus React frontend
 - cookie-based auth and basic family-user administration
 - local media scanning with `ffprobe`
-- browser playback for convenience and fallback
+- browser playback plus caching as the first-class weak-network path
 - VLC-first desktop playback as the primary high-quality path
 - Ubuntu/systemd automation and a first-pass all-in-one Docker deployment path
 
@@ -27,7 +27,7 @@ Likely next improvements:
 Possible later work, if the current direction continues to prove useful:
 
 - signed or more polished helper packaging for desktop clients
-- better playback diagnostics for desktop handoff, browser fallback, and route selection
+- better playback diagnostics for desktop handoff, browser playback readiness, and route selection
 - backup and restore documentation for SQLite data and persistent app state
 - more deployment hardening guidance for private self-hosted environments
 
