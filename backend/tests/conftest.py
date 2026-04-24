@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -83,6 +84,15 @@ class DummyAdminEventHub:
         return None
 
 
+@pytest.fixture(autouse=True)
+def isolated_elvern_env(monkeypatch):
+    get_settings.cache_clear()
+    for key in [key for key in os.environ if key.startswith("ELVERN_")]:
+        monkeypatch.delenv(key, raising=False)
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture()
 def test_settings(tmp_path, monkeypatch):
     media_root = tmp_path / "media"
@@ -101,13 +111,14 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("ELVERN_SCAN_ON_STARTUP", "false")
     monkeypatch.setenv("ELVERN_TRANSCODE_ENABLED", "false")
     monkeypatch.setenv("ELVERN_BROWSER_PLAYBACK_ROUTE2_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_PUBLIC_APP_ORIGIN", "")
+    monkeypatch.setenv("ELVERN_BACKEND_ORIGIN", "")
     monkeypatch.setenv("ELVERN_LIBRARY_ROOT_LINUX", str(media_root))
     monkeypatch.setenv("ELVERN_HELPER_RELEASES_DIR", str(helper_releases_dir))
     monkeypatch.setenv("ELVERN_TRANSCODE_DIR", str(transcode_dir))
 
     settings = refresh_settings()
     yield settings
-    get_settings.cache_clear()
 
 
 @pytest.fixture()

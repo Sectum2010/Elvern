@@ -180,6 +180,45 @@
     "expected_parsed_year": null
   },
   {
+    "name": "pattern_a_truehd_bracket_plus_lowercase_group_removed",
+    "title": null,
+    "original_filename": "One Piece Stampede - [TrueHD 5 1]-psychic.mkv",
+    "year": null,
+    "expected_display_title": "One Piece Stampede",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null,
+    "expected_warning_markers": [
+      "metadata_bracket_suffix_removed",
+      "dash_release_group_suffix_removed"
+    ]
+  },
+  {
+    "name": "pattern_a_dts_hd_bracket_plus_mixed_case_group_removed",
+    "title": null,
+    "original_filename": "Movie Title - [DTS HD MA 7 1]-FraMeSToR.mkv",
+    "year": null,
+    "expected_display_title": "Movie Title",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null,
+    "expected_warning_markers": [
+      "metadata_bracket_suffix_removed",
+      "technical_suffix_density_cut"
+    ]
+  },
+  {
+    "name": "pattern_a_aac_bracket_plus_release_group_removed",
+    "title": null,
+    "original_filename": "Movie Title - [AAC 2 0]-QxR.mkv",
+    "year": null,
+    "expected_display_title": "Movie Title",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": null,
+    "expected_warning_markers": [
+      "metadata_bracket_suffix_removed",
+      "dash_release_group_suffix_removed"
+    ]
+  },
+  {
     "name": "lotr_extended_edition",
     "title": null,
     "original_filename": "The.Lord.of.the.Rings.The.Return.of.the.King.2003.Extended.Edition.2160p.mkv",
@@ -238,9 +277,45 @@
     "title": "the godfather  4k-kc",
     "original_filename": "the.godfather.1972 4k-kc.mkv",
     "year": 1972,
-    "expected_display_title": "the godfather",
+    "expected_display_title": "The Godfather",
+    "expected_base_title": "the godfather",
+    "expected_poster_match_title": "the godfather",
     "expected_edition_identity": "standard",
-    "expected_parsed_year": 1972
+    "expected_parsed_year": 1972,
+    "expected_warning_markers": [
+      "standalone_release_year_cut",
+      "technical_suffix_density_cut"
+    ]
+  },
+  {
+    "name": "pattern_b_release_year_plus_resolution_group_removed",
+    "title": null,
+    "original_filename": "the godfather 1972 1080p-bluworld.mkv",
+    "year": 1972,
+    "expected_display_title": "The Godfather",
+    "expected_base_title": "the godfather",
+    "expected_poster_match_title": "the godfather",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 1972,
+    "expected_warning_markers": [
+      "standalone_release_year_cut",
+      "technical_suffix_density_cut"
+    ]
+  },
+  {
+    "name": "pattern_b_release_year_plus_remux_group_removed",
+    "title": null,
+    "original_filename": "the godfather 1972 remux-framestor.mkv",
+    "year": 1972,
+    "expected_display_title": "The Godfather",
+    "expected_base_title": "the godfather",
+    "expected_poster_match_title": "the godfather",
+    "expected_edition_identity": "standard",
+    "expected_parsed_year": 1972,
+    "expected_warning_markers": [
+      "standalone_release_year_cut",
+      "technical_suffix_density_cut"
+    ]
   },
   {
     "name": "one_piece_bracketed_audio_block_and_dash_junk_removed",

@@ -10,7 +10,26 @@ EMPTY_BRACKET_PATTERN = re.compile(r"\(\s*\)|\[\s*\]|\{\s*\}")
 BRACKET_GROUP_PATTERN = re.compile(r"(\(|\[|\{)([^()\[\]{}]*)(\)|\]|\})")
 RIGHT_SIDE_SPLIT_PATTERN = re.compile(r"\s+-\s*")
 ROMAN_NUMERAL_PATTERN = re.compile(r"^(?:ii|iii|iv|v|vi|vii|viii|ix|x)$", re.IGNORECASE)
-TITLE_PARSER_VERSION = "movie-title-pipeline-2026-04-23"
+TITLE_PARSER_VERSION = "movie-title-pipeline-2026-04-23-pattern-hardening"
+SMART_CASE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "but",
+    "by",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+SMART_CASE_CONTRACTION_SUFFIXES = {"d", "ll", "m", "re", "s", "t", "ve"}
 
 METADATA_TOKENS = {
     "2160p",
@@ -199,8 +218,9 @@ def parse_media_title(
         stored_title_candidate["edition_identity"],
     )
     bare_movie_title = str(chosen["base_title"] or "").strip()
-    display_title = bare_movie_title or str(chosen["fallback_display_title"] or "").strip() or "Untitled"
-    poster_match_title = bare_movie_title or str(chosen["fallback_display_title"] or "").strip() or None
+    raw_derived_title = bare_movie_title or str(chosen["fallback_display_title"] or "").strip()
+    display_title = _smart_case_display_title(raw_derived_title) or "Untitled"
+    poster_match_title = raw_derived_title or None
     warnings = _dedupe_strings(
         [
             *chosen["warnings"],
@@ -221,7 +241,7 @@ def parse_media_title(
 
     return {
         "display_title": display_title,
-        "base_title": display_title,
+        "base_title": raw_derived_title or display_title,
         "edition_identity": edition_identity,
         "parsed_year": parsed_year,
         "poster_match_title": poster_match_title,
@@ -279,6 +299,7 @@ def _parse_title_candidate(
     working = prepared
     signal_score = 0
     parsed_year = year_hint
+    removed_metadata_bracket_suffix = False
 
     if EMPTY_BRACKET_PATTERN.search(working):
         working = EMPTY_BRACKET_PATTERN.sub(" ", working)
@@ -307,11 +328,13 @@ def _parse_title_candidate(
             signal_score += 1
             return " "
         if classification["kind"] in {"metadata", "id"}:
+            removed_metadata_bracket_suffix = True
             warnings.append(
                 "metadata_id_block_removed"
                 if classification["kind"] == "id"
                 else "metadata_block_removed"
             )
+            warnings.append("metadata_bracket_suffix_removed")
             signal_score += 2 if classification["kind"] == "id" else 1
             return " "
         return f"{match.group(1)}{content}{match.group(3)}"
@@ -327,14 +350,24 @@ def _parse_title_candidate(
         classification = _classify_segment(cleaned_segment)
         if index > 0 and classification["kind"] in {"metadata", "id", "edition", "year"}:
             edition_markers.extend(classification["edition_markers"])
-            warnings.append(
-                "metadata_segment_removed"
-                if classification["kind"] in {"metadata", "id"}
-                else "edition_segment_extracted"
-            )
+            if classification["kind"] in {"metadata", "id"}:
+                warnings.append("metadata_segment_removed")
+                warnings.append("technical_suffix_density_cut")
+            elif classification["kind"] == "year":
+                warnings.append("standalone_release_year_cut")
+            else:
+                warnings.append("edition_segment_extracted")
             signal_score += 2 if classification["kind"] == "id" else 1
             if classification["kind"] == "year" and parsed_year is None:
                 parsed_year = _coerce_year(cleaned_segment)
+            continue
+        if (
+            index > 0
+            and removed_metadata_bracket_suffix
+            and _looks_like_dash_suffix_junk_segment(cleaned_segment)
+        ):
+            warnings.append("dash_release_group_suffix_removed")
+            signal_score += 1
             continue
         kept_segments.append(cleaned_segment)
     working = " - ".join(kept_segments)
@@ -345,6 +378,7 @@ def _parse_title_candidate(
             edition_markers.extend(suffix_hints["edition_markers"])
             if parsed_year is None and suffix_hints["parsed_year"] is not None:
                 parsed_year = suffix_hints["parsed_year"]
+            warnings.extend([str(marker) for marker in suffix_hints.get("rule_markers") or []])
             warnings.append("metadata_suffix_removed")
             signal_score += 2
 
@@ -737,26 +771,48 @@ def _classify_segment(value: str) -> dict[str, object]:
 def _cut_non_title_suffix(value: str) -> tuple[str, bool, dict[str, object]]:
     working = collapse_spaces(value).strip(" -")
     if not working:
-        return working, False, {"edition_markers": [], "parsed_year": None}
+        return working, False, {"edition_markers": [], "parsed_year": None, "rule_markers": []}
+
+    removed_suffix_fragments: list[str] = []
+    rule_markers: list[str] = []
+    cut_any = False
 
     if " - " in working:
         left, right = working.split(" - ", 1)
         right_classification = _classify_segment(right)
         if right_classification["kind"] in {"metadata", "id", "edition", "year"}:
-            return left.strip(" -"), True, _suffix_parse_hints(right)
-        right_words = right.split()
-        if right_words and len(right_words) <= 3 and all(word.islower() for word in right_words if word.isalpha()):
-            return left.strip(" -"), True, _suffix_parse_hints(right)
+            removed_suffix_fragments.append(right)
+            cut_any = True
+            if right_classification["kind"] == "year":
+                rule_markers.append("standalone_release_year_cut")
+            elif right_classification["kind"] == "edition":
+                rule_markers.append("edition_segment_extracted")
+            else:
+                rule_markers.append("technical_suffix_density_cut")
+            working = left.strip(" -")
+        elif _looks_like_dash_suffix_junk_segment(right):
+            removed_suffix_fragments.append(right)
+            rule_markers.append("dash_release_group_suffix_removed")
+            cut_any = True
+            working = left.strip(" -")
 
     tokens = working.split()
-    boundary = _metadata_suffix_boundary(tokens)
-    if boundary is None:
-        return working, False, {"edition_markers": [], "parsed_year": None}
-    suffix = " ".join(tokens[boundary:])
-    return " ".join(tokens[:boundary]).strip(" -"), True, _suffix_parse_hints(suffix)
+    boundary_info = _metadata_suffix_boundary(tokens)
+    if boundary_info is not None:
+        boundary, boundary_markers = boundary_info
+        removed_suffix_fragments.append(" ".join(tokens[boundary:]))
+        rule_markers.extend(boundary_markers)
+        working = " ".join(tokens[:boundary]).strip(" -")
+        cut_any = True
+
+    if not cut_any:
+        return working, False, {"edition_markers": [], "parsed_year": None, "rule_markers": []}
+
+    suffix = " ".join(fragment for fragment in removed_suffix_fragments if fragment)
+    return working, True, _suffix_parse_hints(suffix, *rule_markers)
 
 
-def _metadata_suffix_boundary(tokens: list[str]) -> int | None:
+def _metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None:
     for index in range(len(tokens)):
         suffix_tokens = tokens[index:]
         current = _canonical_metadata_token(tokens[index])
@@ -764,22 +820,22 @@ def _metadata_suffix_boundary(tokens: list[str]) -> int | None:
             continue
         suffix_metrics = _suffix_metadata_metrics(suffix_tokens)
         if _starts_edition_suffix(tokens, index):
-            return index
+            return index, ["edition_segment_extracted"]
         if (
             _is_standalone_year(current)
             and suffix_metrics["metadata_hits"] >= 1
             and (suffix_metrics["strong_hits"] >= 1 or suffix_metrics["release_group_hits"] >= 1)
             and _looks_like_release_year_boundary(tokens, index)
         ):
-            return index
+            return index, ["standalone_release_year_cut", "technical_suffix_density_cut"]
         if _is_metadata_boundary_token(tokens[index], current):
             if suffix_metrics["strong_hits"] >= 1 and suffix_metrics["metadata_hits"] >= 2:
-                return index
+                return index, ["technical_suffix_density_cut"]
         if current in {"ita", "eng", "jpn", "ger", "fra", "spa", "ita", "itaeng", "multi"}:
             if suffix_metrics["strong_hits"] >= 1:
-                return index
+                return index, ["technical_suffix_density_cut"]
         if current in {"proper", "repack", "internal", "limited"}:
-            return index
+            return index, ["technical_suffix_density_cut"]
     return None
 
 
@@ -823,7 +879,7 @@ def _suffix_metadata_metrics(tokens: list[str]) -> dict[str, int]:
     }
 
 
-def _suffix_parse_hints(value: str) -> dict[str, object]:
+def _suffix_parse_hints(value: str, *rule_markers: str) -> dict[str, object]:
     working = collapse_spaces(value)
     edition_markers = _segment_edition_markers(working)
     year_matches = list(YEAR_PATTERN.finditer(working))
@@ -831,6 +887,7 @@ def _suffix_parse_hints(value: str) -> dict[str, object]:
     return {
         "edition_markers": edition_markers,
         "parsed_year": parsed_year,
+        "rule_markers": _dedupe_strings([str(marker) for marker in rule_markers if marker]),
     }
 
 
@@ -871,6 +928,37 @@ def _looks_like_release_group_token(token: str) -> bool:
         ):
             return True
     return False
+
+
+def _looks_like_bare_release_group_token(token: str) -> bool:
+    raw = str(token or "").strip(" -")
+    if not raw or not re.fullmatch(r"[A-Za-z0-9]+", raw):
+        return False
+    if raw.isdigit() or not (2 <= len(raw) <= 16):
+        return False
+    upper_count = sum(1 for char in raw if char.isupper())
+    lower_count = sum(1 for char in raw if char.islower())
+    if upper_count >= 2:
+        return True
+    if upper_count >= 1 and lower_count >= 1 and not (raw[0].isupper() and raw[1:].islower()):
+        return True
+    return False
+
+
+def _looks_like_dash_suffix_junk_segment(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -")
+    if not cleaned:
+        return False
+    words = cleaned.split()
+    if len(words) > 3:
+        return False
+    if len(words) == 1:
+        word = words[0]
+        if _looks_like_bare_release_group_token(word):
+            return True
+        if word.isalpha() and word.islower():
+            return True
+    return all(word.isalpha() and word.islower() for word in words)
 
 
 def _classification_tokens(value: str) -> list[str]:
@@ -987,6 +1075,101 @@ def _strip_metadata_tokens_from_edges(value: str) -> str:
     while tokens and _token_is_metadata(_canonical_metadata_token(tokens[0])):
         tokens.pop(0)
     return " ".join(tokens)
+
+
+def _smart_case_display_title(value: str) -> str:
+    working = collapse_spaces(value).strip()
+    if not working or not _needs_display_smart_casing(working):
+        return working
+
+    words = working.split()
+    smart_cased_words: list[str] = []
+    for index, word in enumerate(words):
+        smart_cased_words.append(
+            _smart_case_word(
+                word,
+                is_first=index == 0,
+                is_last=index == len(words) - 1,
+            )
+        )
+    return " ".join(smart_cased_words)
+
+
+def _needs_display_smart_casing(value: str) -> bool:
+    letters = [char for char in str(value or "") if char.isalpha()]
+    if not letters:
+        return False
+    has_lower = any(char.islower() for char in letters)
+    has_upper = any(char.isupper() for char in letters)
+    return not (has_lower and has_upper)
+
+
+def _smart_case_word(word: str, *, is_first: bool, is_last: bool) -> str:
+    match = re.fullmatch(r"([^A-Za-z0-9]*)(.*?)([^A-Za-z0-9]*)", word)
+    if not match:
+        return word
+    prefix, core, suffix = match.groups()
+    if not core or not any(char.isalpha() for char in core):
+        return word
+
+    is_segment_first = is_first or any(char in prefix for char in "([{")
+    is_segment_last = is_last or any(char in suffix for char in ")]}")
+    if core.lower() in SMART_CASE_STOPWORDS and not is_segment_first and not is_segment_last:
+        return f"{prefix}{core.lower()}{suffix}"
+    return f"{prefix}{_smart_case_compound_token(core)}{suffix}"
+
+
+def _smart_case_compound_token(token: str) -> str:
+    pieces = re.split(r"(-)", token)
+    smart_cased_pieces: list[str] = []
+    for piece in pieces:
+        if piece == "-":
+            smart_cased_pieces.append(piece)
+            continue
+        smart_cased_pieces.append(_smart_case_apostrophe_token(piece))
+    return "".join(smart_cased_pieces)
+
+
+def _smart_case_apostrophe_token(token: str) -> str:
+    pieces = re.split(r"([’'])", token)
+    smart_cased_pieces: list[str] = []
+    segment_index = 0
+    for piece in pieces:
+        if piece in {"'", "’"}:
+            smart_cased_pieces.append(piece)
+            continue
+        if not piece:
+            continue
+        smart_cased_pieces.append(
+            _smart_case_fragment(
+                piece,
+                lower_contraction=segment_index > 0,
+            )
+        )
+        segment_index += 1
+    return "".join(smart_cased_pieces)
+
+
+def _smart_case_fragment(value: str, *, lower_contraction: bool) -> str:
+    normalized = value.lower()
+    if ROMAN_NUMERAL_PATTERN.fullmatch(normalized):
+        return normalized.upper()
+    if normalized.isdigit():
+        return normalized
+    if lower_contraction and normalized in SMART_CASE_CONTRACTION_SUFFIXES:
+        return normalized
+    if any(char.isdigit() for char in normalized) and any(char.isalpha() for char in normalized):
+        return "".join(char.upper() if char.isalpha() else char for char in normalized)
+
+    first_alpha_found = False
+    transformed: list[str] = []
+    for char in normalized:
+        if char.isalpha() and not first_alpha_found:
+            transformed.append(char.upper())
+            first_alpha_found = True
+        else:
+            transformed.append(char)
+    return "".join(transformed)
 
 
 def _cleanup_title_text(value: str) -> str:

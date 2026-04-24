@@ -76,9 +76,11 @@ def test_auth_login_me_logout_smoke(client, admin_credentials) -> None:
     assert after_logout.status_code == 401
 
 
-def test_test_settings_fixture_clears_live_auth_hash_and_linux_library_root(monkeypatch, request) -> None:
+def test_test_settings_fixture_clears_live_auth_hash_linux_root_and_origin_overrides(monkeypatch, request) -> None:
     monkeypatch.setenv("ELVERN_ADMIN_PASSWORD_HASH", hash_password("wrong-live-password"))
     monkeypatch.setenv("ELVERN_LIBRARY_ROOT_LINUX", "/home/sectum/Videos/Movies")
+    monkeypatch.setenv("ELVERN_PUBLIC_APP_ORIGIN", "https://spark-e245.taila5aa7b.ts.net")
+    monkeypatch.setenv("ELVERN_BACKEND_ORIGIN", "https://spark-e245.taila5aa7b.ts.net")
 
     initialized_settings = request.getfixturevalue("initialized_settings")
     client = request.getfixturevalue("client")
@@ -86,6 +88,8 @@ def test_test_settings_fixture_clears_live_auth_hash_and_linux_library_root(monk
 
     assert initialized_settings.admin_password_hash is None
     assert initialized_settings.library_root_linux == str(initialized_settings.media_root)
+    assert initialized_settings.public_app_origin == ""
+    assert initialized_settings.backend_origin == ""
 
     response = client.post("/api/auth/login", json=admin_credentials)
     assert response.status_code == 200
@@ -360,6 +364,71 @@ def test_library_payload_preserves_meaningful_title_numbers_and_parts(
     assert items_by_filename[blade_filename]["title"] == "Blade Runner 2049"
     assert items_by_filename[blade_filename]["parsed_title"]["display_title"] == "Blade Runner 2049"
     assert items_by_filename[blade_filename]["parsed_title"]["parsed_year"] == 2017
+
+
+def test_library_payload_smart_cases_display_title_without_touching_raw_base_title(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    now = utcnow_iso()
+    filename = "the godfather 1972 4k-kc.mkv"
+    with get_connection(initialized_settings) as connection:
+        shared_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', ?, ?, ?, ?)
+            """,
+            (
+                "the godfather  4k-kc",
+                filename,
+                str(Path(initialized_settings.media_root) / filename),
+                int(shared_source_id),
+                1,
+                1.0,
+                1972,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 1
+    item = response.json()["items"][0]
+    assert item["title"] == "The Godfather"
+    assert item["parsed_title"]["display_title"] == "The Godfather"
+    assert item["parsed_title"]["base_title"] == "the godfather"
+    assert item["parsed_title"]["parsed_year"] == 1972
 
 
 def test_scan_preserves_raw_title_truth_while_library_uses_derived_display_title(

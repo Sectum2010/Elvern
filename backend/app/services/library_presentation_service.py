@@ -121,9 +121,10 @@ def _parsed_title_payload(*, title: object, year: object, original_filename: obj
         original_filename=original_filename,
     )
     display_title = str(parsed["display_title"] or "").strip() or str(title or original_filename or "Untitled").strip() or "Untitled"
+    base_title = str(parsed.get("base_title") or "").strip() or display_title
     return {
         "display_title": display_title,
-        "base_title": display_title,
+        "base_title": base_title,
         "edition_identity": str(parsed["edition_identity"] or "standard"),
         "parsed_year": parsed["parsed_year"],
         "title_source": str(parsed["title_source"] or "fallback"),

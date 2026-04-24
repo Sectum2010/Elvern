@@ -19,6 +19,7 @@ from backend.app.services.title_normalization import (
 
 FIXTURE_PATH = Path(__file__).with_name("fixtures") / "media_title_parser_cases.json"
 FIXTURE_CASES = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+CASES_BY_NAME = {case["name"]: case for case in FIXTURE_CASES}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EDITION_PHRASE_MAP = {
     "director's cut": ["director", "cut"],
@@ -37,7 +38,10 @@ def test_parse_media_title_regressions(case) -> None:
     )
 
     assert parsed["display_title"] == case["expected_display_title"]
-    assert parsed["base_title"] == case["expected_display_title"]
+    assert parsed["base_title"] == case.get(
+        "expected_base_title",
+        case.get("expected_poster_match_title", case["expected_display_title"]),
+    )
     assert parsed["edition_identity"] == case["expected_edition_identity"]
     assert parsed["parsed_year"] == case["expected_parsed_year"]
     assert parsed["poster_match_title"] == case.get("expected_poster_match_title", case["expected_display_title"])
@@ -51,6 +55,8 @@ def test_parse_media_title_regressions(case) -> None:
     assert isinstance(parsed["warnings"], list)
     assert parsed["parser_version"] == TITLE_PARSER_VERSION
     assert parsed["suspicious_output"] is False
+    for marker in case.get("expected_warning_markers", []):
+        assert marker in parsed["warnings"]
     if case["expected_parsed_year"] is not None:
         assert str(case["expected_parsed_year"]) not in parsed["display_title"]
     for phrase in EDITION_PHRASE_MAP.get(case["expected_edition_identity"], []):
@@ -179,6 +185,118 @@ def test_title_normalization_wrappers_use_backend_parser() -> None:
     assert poster_identity["source"] == "original_filename"
 
 
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        "blade_runner_2049_number_preserved",
+        "title_number_1917_preserved",
+        "rocky_ii_roman_numeral",
+        "harry_potter_part_one_preserved",
+        "harry_potter_part_two_preserved",
+        "one_piece_straw_hat_chase_dense_suffix",
+    ],
+)
+def test_meaningful_title_numbers_remain_protected(case_name: str) -> None:
+    case = CASES_BY_NAME[case_name]
+    parsed = parse_media_title(
+        title=case["title"],
+        original_filename=case["original_filename"],
+        year=case["year"],
+    )
+
+    assert parsed["display_title"] == case["expected_display_title"]
+    assert "display_title_lost_meaningful_number_token" not in parsed["warnings"]
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("title", "original_filename", "year", "expected_display_title", "expected_poster_title"),
+    [
+        (
+            None,
+            "the godfather 1972 4k-kc.mkv",
+            1972,
+            "The Godfather",
+            "the godfather",
+        ),
+        (
+            None,
+            "harry potter and the deathly hallows part 1 1080p bluray x264.mkv",
+            None,
+            "Harry Potter and the Deathly Hallows Part 1",
+            "harry potter and the deathly hallows part 1",
+        ),
+        (
+            None,
+            "harry potter and the deathly hallows part 2 1080p bluray x264.mkv",
+            None,
+            "Harry Potter and the Deathly Hallows Part 2",
+            "harry potter and the deathly hallows part 2",
+        ),
+        (
+            None,
+            "rocky ii.1979.1080p.bluray.x264.mkv",
+            None,
+            "Rocky II",
+            "rocky ii",
+        ),
+        (
+            None,
+            "rocky iii.1982.1080p.bluray.x264.mkv",
+            None,
+            "Rocky III",
+            "rocky iii",
+        ),
+        (
+            None,
+            "blade runner 2049.2017.2160p.uhd.bluray.remux.mkv",
+            None,
+            "Blade Runner 2049",
+            "blade runner 2049",
+        ),
+        (
+            "ocean's eleven",
+            "ocean's eleven [imdb-tt0240772] [2160p uhd bluray remux] [truehd atmos 7.1].mkv",
+            None,
+            "Ocean's Eleven",
+            "ocean's eleven",
+        ),
+        (
+            None,
+            "spider-man.2002.1080p.bluray.remux.truehd.mkv",
+            None,
+            "Spider-Man",
+            "spider-man",
+        ),
+    ],
+)
+def test_display_title_smart_cases_lowercase_inputs_without_changing_poster_identity(
+    title: str | None,
+    original_filename: str,
+    year: int | None,
+    expected_display_title: str,
+    expected_poster_title: str,
+) -> None:
+    parsed = parse_media_title(
+        title=title,
+        original_filename=original_filename,
+        year=year,
+    )
+    poster_identity = resolve_poster_match_identity(
+        title=title,
+        original_filename=original_filename,
+        year=year,
+    )
+
+    assert parsed["display_title"] == expected_display_title
+    assert parsed["base_title"] == expected_poster_title
+    assert parsed["poster_match_title"] == expected_poster_title
+    assert parsed["poster_match_identity"]["title"] == expected_poster_title
+    assert poster_identity["title"] == expected_poster_title
+    if any(char.isupper() for char in expected_display_title):
+        assert parsed["display_title"] != parsed["poster_match_identity"]["title"]
+
+
 def test_suspicious_output_is_flagged_for_hopeless_metadata_only_input() -> None:
     parsed = parse_media_title(
         title=None,
@@ -265,6 +383,72 @@ def test_title_diagnostics_script_snapshot_output_is_stable(
                 now,
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', ?, ?, ?, ?)
+            """,
+            (
+                "One Piece Stampede - [TrueHD 5 1]-psychic",
+                "One Piece Stampede - [TrueHD 5 1]-psychic.mkv",
+                str(initialized_settings.media_root / "One Piece Stampede - [TrueHD 5 1]-psychic.mkv"),
+                1,
+                1.0,
+                None,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, NULL, NULL, NULL, NULL, NULL, 'mkv', ?, ?, ?, ?)
+            """,
+            (
+                "the godfather  4k-kc",
+                "the godfather 1972 4k-kc.mkv",
+                str(initialized_settings.media_root / "the godfather 1972 4k-kc.mkv"),
+                1,
+                1.0,
+                1972,
+                now,
+                now,
+                now,
+            ),
+        )
         connection.commit()
 
     env = os.environ.copy()
@@ -338,3 +522,17 @@ def test_title_diagnostics_script_snapshot_output_is_stable(
         "title": "Blade Runner 2049",
         "year": 2017,
     }
+    assert rows_by_filename["One Piece Stampede - [TrueHD 5 1]-psychic.mkv"]["display_title"] == "One Piece Stampede"
+    assert "metadata_bracket_suffix_removed" in rows_by_filename[
+        "One Piece Stampede - [TrueHD 5 1]-psychic.mkv"
+    ]["warnings"]
+    assert "dash_release_group_suffix_removed" in rows_by_filename[
+        "One Piece Stampede - [TrueHD 5 1]-psychic.mkv"
+    ]["warnings"]
+    assert rows_by_filename["the godfather 1972 4k-kc.mkv"]["display_title"] == "The Godfather"
+    assert rows_by_filename["the godfather 1972 4k-kc.mkv"]["poster_match_identity"] == {
+        "title": "the godfather",
+        "year": 1972,
+    }
+    assert "standalone_release_year_cut" in rows_by_filename["the godfather 1972 4k-kc.mkv"]["warnings"]
+    assert "technical_suffix_density_cut" in rows_by_filename["the godfather 1972 4k-kc.mkv"]["warnings"]
