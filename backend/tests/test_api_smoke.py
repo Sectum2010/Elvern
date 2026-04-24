@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import backend.app.main as main_module
@@ -970,6 +971,181 @@ def test_poster_reference_location_switch_refreshes_poster_without_media_rescan(
     assert poster_response.status_code == 200
     assert poster_response.content == b"alternate-poster"
     assert poster_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
+
+
+@pytest.mark.parametrize(
+    ("movie_filename", "poster_filename", "expected_title"),
+    [
+        (
+            "Harry.Potter.and.the.Deathly.Hallows.Part.1.2010.4K.UHD.2160p.REMUX.DV.DTS-HD.MA.7.1.Dual.PTBR-BrRemux.mkv",
+            "Harry Potter and the Deathly Hallows_ Part I (2010).png",
+            "Harry Potter and the Deathly Hallows Part 1",
+        ),
+        (
+            "Harry.Potter.and.the.Deathly.Hallows.Part.2.2011.4K.UHD.2160p.REMUX.DV.DTS-HD.MA.7.1.Dual.PTBR-BrRemux.mkv",
+            "Harry Potter and the Deathly Hallows_ Part II (2011).png",
+            "Harry Potter and the Deathly Hallows Part 2",
+        ),
+    ],
+)
+def test_poster_lookup_matches_roman_numeral_part_variants_in_live_style_files(
+    client,
+    admin_credentials,
+    initialized_settings,
+    movie_filename: str,
+    poster_filename: str,
+    expected_title: str,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    (media_root / movie_filename).write_bytes(b"movie-bytes")
+    (poster_dir / poster_filename).write_bytes(b"poster-bytes")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 1
+    item = response.json()["items"][0]
+    assert item["title"] == expected_title
+    assert item["poster_url"] is not None
+
+    poster_response = client.get(item["poster_url"])
+    assert poster_response.status_code == 200
+    assert poster_response.content == b"poster-bytes"
+
+
+@pytest.mark.parametrize(
+    ("movie_title", "original_filename", "poster_filename", "expected_title"),
+    [
+        (
+            "Rocky II",
+            "Rocky.II.1979.1080p.BluRay.x264.mkv",
+            "Rocky 2 (1979).png",
+            "Rocky II",
+        ),
+        (
+            "Ocean's Eleven",
+            "Oceans.Eleven.2001.1080p.BluRay.Remux.TrueHD.mkv",
+            "Oceans Eleven (2001).png",
+            "Ocean's Eleven",
+        ),
+        (
+            "Pirates of the Caribbean: The Curse of the Black Pearl",
+            "Pirates.of.the.Caribbean.The.Curse.of.the.Black.Pearl.2003.1080p.BluRay.x264.mkv",
+            "Pirates of the Caribbean - The Curse of the Black Pearl (2003).png",
+            "Pirates of the Caribbean: The Curse of the Black Pearl",
+        ),
+    ],
+)
+def test_poster_lookup_matches_safe_equivalence_family_patterns(
+    client,
+    admin_credentials,
+    initialized_settings,
+    movie_title: str,
+    original_filename: str,
+    poster_filename: str,
+    expected_title: str,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    movie_path = media_root / original_filename
+    movie_path.write_bytes(b"movie-bytes")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE media_items
+            SET title = ?
+            WHERE original_filename = ?
+            """,
+            (movie_title, original_filename),
+        )
+        connection.commit()
+
+    (poster_dir / poster_filename).write_bytes(b"poster-bytes")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    item = next(row for row in response.json()["items"] if row["original_filename"] == original_filename)
+    assert item["title"] == expected_title
+    assert item["poster_url"] is not None
+    poster_response = client.get(item["poster_url"])
+    assert poster_response.status_code == 200
+    assert poster_response.content == b"poster-bytes"
+
+
+def test_poster_lookup_unique_yearless_fallback_is_safe_and_deterministic(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    movie_filename = "Interstellar.2014.UHD.BluRay.2160p.DTS-HD.MA.5.1.HEVC.REMUX-FraMeSToR.mkv"
+    (media_root / movie_filename).write_bytes(b"movie-bytes")
+    (poster_dir / "Interstellar.png").write_bytes(b"poster-bytes")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["title"] == "Interstellar"
+    assert item["poster_url"] is not None
+    poster_response = client.get(item["poster_url"])
+    assert poster_response.status_code == 200
+    assert poster_response.content == b"poster-bytes"
+
+
+def test_poster_lookup_does_not_guess_across_title_typos(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    movie_filename = "Forest.Gump.1994.1080p.BluRay.x264.DTS-ETRG.mkv"
+    (media_root / movie_filename).write_bytes(b"movie-bytes")
+    (poster_dir / "Forrest Gump (1994).png").write_bytes(b"poster-bytes")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["title"] == "Forest Gump"
+    assert item["poster_url"] is None
 
 
 def test_cloud_rename_updates_one_row_in_place_without_duplicate_visibility(

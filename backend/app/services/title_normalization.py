@@ -21,6 +21,9 @@ ROMAN_TO_ARABIC = {
     "ix": "9",
     "x": "10",
 }
+ARABIC_TO_ROMAN = {value: key.upper() for key, value in ROMAN_TO_ARABIC.items()}
+
+
 def collapse_spaces(value: str) -> str:
     return " ".join(value.split())
 
@@ -86,6 +89,139 @@ def tokenize_search_text(value: str, *, drop_leading_articles: bool = False) -> 
         if canonical:
             tokens.append(canonical)
     return tokens
+
+
+def normalize_poster_title_key(value: str) -> str:
+    return " ".join(tokenize_search_text(value, drop_leading_articles=True))
+
+
+def _roman_part_variants(value: str) -> list[str]:
+    variants: list[str] = []
+    normalized = collapse_spaces(value)
+    if not normalized:
+        return variants
+
+    def _append(candidate: str) -> None:
+        collapsed = collapse_spaces(candidate)
+        if collapsed and collapsed not in variants:
+            variants.append(collapsed)
+
+    _append(normalized)
+    for arabic, roman in sorted(ARABIC_TO_ROMAN.items(), key=lambda entry: int(entry[0])):
+        _append(re.sub(rf"(?i)\bpart\s+{arabic}\b", f"Part {roman}", normalized))
+        _append(re.sub(rf"(?i)\bpart\s+{roman}\b", f"Part {arabic}", normalized))
+        _append(re.sub(rf"(?i)\b{roman}\b", arabic, normalized))
+        _append(re.sub(rf"(?i)\b{arabic}\b", roman, normalized))
+    return variants
+
+
+def _ampersand_variants(value: str) -> list[str]:
+    variants: list[str] = []
+    normalized = collapse_spaces(value)
+    if not normalized:
+        return variants
+
+    def _append(candidate: str) -> None:
+        collapsed = collapse_spaces(candidate)
+        if collapsed and collapsed not in variants:
+            variants.append(collapsed)
+
+    _append(normalized)
+    if "&" in normalized:
+        _append(normalized.replace("&", "and"))
+    if re.search(r"(?i)\band\b", normalized):
+        _append(re.sub(r"(?i)\band\b", "&", normalized))
+    return variants
+
+
+def poster_equivalent_title_variants(value: str) -> list[str]:
+    variants: list[str] = []
+
+    def _append(candidate: str) -> None:
+        collapsed = collapse_spaces(candidate)
+        if collapsed and collapsed not in variants:
+            variants.append(collapsed)
+
+    for apostrophe_variant in apostrophe_title_variants(value):
+        _append(apostrophe_variant)
+
+    queue = list(variants)
+    for variant in queue:
+        for ampersand_variant in _ampersand_variants(variant):
+            _append(ampersand_variant)
+
+    queue = list(variants)
+    for variant in queue:
+        for roman_variant in _roman_part_variants(variant):
+            _append(roman_variant)
+
+    return variants
+
+
+def build_poster_candidate_family(
+    *,
+    title: object,
+    year: object,
+    original_filename: object,
+) -> dict[str, object]:
+    parsed = parse_media_title(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    normalized_year = parsed.get("poster_match_year")
+
+    candidate_titles: list[str] = []
+
+    def _append_title(candidate: object) -> None:
+        normalized = collapse_spaces(str(candidate or "").strip())
+        if normalized and normalized not in candidate_titles:
+            candidate_titles.append(normalized)
+
+    def _append_from_parsed(parsed_result: dict[str, object]) -> None:
+        if bool(parsed_result.get("suspicious_output")):
+            return
+        _append_title((parsed_result.get("poster_match_identity") or {}).get("title"))
+        _append_title(parsed_result.get("poster_match_title"))
+
+    _append_from_parsed(parsed)
+
+    if original_filename not in {None, ""}:
+        parsed_from_filename = parse_media_title(
+            title=None,
+            year=year,
+            original_filename=original_filename,
+        )
+        _append_from_parsed(parsed_from_filename)
+        if normalized_year in {None, ""}:
+            normalized_year = parsed_from_filename.get("poster_match_year")
+
+    if title not in {None, ""}:
+        parsed_from_title = parse_media_title(
+            title=title,
+            year=year,
+            original_filename=None,
+        )
+        _append_from_parsed(parsed_from_title)
+        if normalized_year in {None, ""}:
+            normalized_year = parsed_from_title.get("poster_match_year")
+
+    family_titles: list[str] = []
+    for candidate_title in candidate_titles:
+        for variant in poster_equivalent_title_variants(candidate_title):
+            if variant not in family_titles:
+                family_titles.append(variant)
+
+    key_family = {
+        normalize_poster_title_key(candidate_title)
+        for candidate_title in family_titles
+        if normalize_poster_title_key(candidate_title)
+    }
+    return {
+        "titles": family_titles,
+        "title_keys": sorted(key_family),
+        "year": int(normalized_year) if normalized_year not in {None, ""} else None,
+    }
 
 def clean_title_for_matching(value: object, year: object) -> str | None:
     parsed = parse_media_title(title=None, year=year, original_filename=value)

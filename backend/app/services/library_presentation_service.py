@@ -10,8 +10,9 @@ from .library_movie_identity_service import _edition_label
 from .media_title_parser import parse_media_title
 from .title_normalization import (
     apostrophe_title_variants,
+    build_poster_candidate_family,
     clean_title_for_matching,
-    normalize_title_key,
+    normalize_poster_title_key,
     resolve_poster_match_identity,
     resolve_title_metadata,
 )
@@ -28,33 +29,111 @@ def _poster_directory(
 
 
 def _poster_candidate_names(*, title: object, year: object, original_filename: object) -> list[str]:
-    # Poster matching intentionally uses the dedicated poster identity, not the
-    # UI-cleaned display title.
-    poster_identity = resolve_poster_match_identity(
+    # Poster matching intentionally uses a small family of parser-derived safe
+    # equivalence titles, not the UI-cleaned display title.
+    poster_family = build_poster_candidate_family(
         title=title,
         year=year,
         original_filename=original_filename,
     )
-    candidate_title = str(poster_identity["title"] or "").strip()
-    normalized_year = poster_identity["year"]
-    if not candidate_title or normalized_year is None:
+    normalized_year = poster_family["year"]
+    if normalized_year is None:
         return []
 
-    title_variants: list[str] = []
-    for variant in apostrophe_title_variants(candidate_title):
-        if variant not in title_variants:
-            title_variants.append(variant)
-
     candidates: list[str] = []
-    for candidate_title in title_variants:
+    for candidate_title in poster_family["titles"]:
         if not candidate_title:
             continue
-        base_name = f"{candidate_title} ({normalized_year})"
-        for extension in (".jpg", ".png"):
-            candidate = f"{base_name}{extension}"
-            if candidate not in candidates:
-                candidates.append(candidate)
+        for apostrophe_variant in apostrophe_title_variants(candidate_title):
+            base_name = f"{apostrophe_variant} ({normalized_year})"
+            for extension in (".jpg", ".png"):
+                candidate = f"{base_name}{extension}"
+                if candidate not in candidates:
+                    candidates.append(candidate)
     return candidates
+
+
+def _poster_yearful_key_family(*, title: object, year: object, original_filename: object) -> tuple[set[str], int | None]:
+    poster_family = build_poster_candidate_family(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    normalized_year = poster_family["year"]
+    if normalized_year is None:
+        return set(), None
+    return (
+        {
+            f"{title_key}|{normalized_year}"
+            for title_key in poster_family["title_keys"]
+            if title_key
+        },
+        normalized_year,
+    )
+
+
+def _poster_yearless_key_family(*, title: object, year: object, original_filename: object) -> set[str]:
+    poster_family = build_poster_candidate_family(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    return {str(title_key) for title_key in poster_family["title_keys"] if title_key}
+
+
+def _poster_filename_key(stem: str) -> tuple[str | None, int | None]:
+    match = re.fullmatch(r"(.+)\s+\((\d{4})\)", stem)
+    if not match:
+        return None, None
+    return normalize_poster_title_key(match.group(1)), int(match.group(2))
+
+
+def _resolve_unique_yearless_poster_match(*, poster_dir: Path, title: object, year: object, original_filename: object) -> Path | None:
+    candidate_title_keys = _poster_yearless_key_family(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    if not candidate_title_keys:
+        return None
+
+    matches: list[Path] = []
+    for poster_path in sorted(poster_dir.iterdir(), key=lambda candidate: candidate.name.lower()):
+        if not poster_path.is_file():
+            continue
+        if poster_path.suffix.lower() not in {".jpg", ".png"}:
+            continue
+        if re.fullmatch(r".+\s+\(\d{4}\)", poster_path.stem):
+            continue
+        poster_key = normalize_poster_title_key(poster_path.stem)
+        if poster_key in candidate_title_keys:
+            matches.append(poster_path)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _resolve_normalized_yearful_poster_match(*, poster_dir: Path, title: object, year: object, original_filename: object) -> Path | None:
+    candidate_keys, normalized_year = _poster_yearful_key_family(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    if not candidate_keys or normalized_year is None:
+        return None
+
+    for poster_path in sorted(poster_dir.iterdir(), key=lambda candidate: candidate.name.lower()):
+        if not poster_path.is_file():
+            continue
+        if poster_path.suffix.lower() not in {".jpg", ".png"}:
+            continue
+        title_key, poster_year = _poster_filename_key(poster_path.stem)
+        if title_key is None or poster_year is None:
+            continue
+        poster_key = f"{title_key}|{poster_year}"
+        if poster_key in candidate_keys:
+            return poster_path
+    return None
 
 
 def _normalize_cloud_title_and_year(
@@ -158,29 +237,21 @@ def _resolve_poster_path(
         if candidate_path.is_file():
             return candidate_path
 
-    candidate_keys = set()
-    for candidate_name in candidate_names:
-        candidate_stem = Path(candidate_name).stem
-        match = re.fullmatch(r"(.+)\s+\((\d{4})\)", candidate_stem)
-        if not match:
-            continue
-        candidate_keys.add(f"{normalize_title_key(match.group(1))}|{match.group(2)}")
+    normalized_yearful = _resolve_normalized_yearful_poster_match(
+        poster_dir=resolved_poster_dir,
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    if normalized_yearful is not None:
+        return normalized_yearful
 
-    if not candidate_keys:
-        return None
-
-    for poster_path in resolved_poster_dir.iterdir():
-        if not poster_path.is_file():
-            continue
-        if poster_path.suffix.lower() not in {".jpg", ".png"}:
-            continue
-        match = re.fullmatch(r"(.+)\s+\((\d{4})\)", poster_path.stem)
-        if not match:
-            continue
-        poster_key = f"{normalize_title_key(match.group(1))}|{match.group(2)}"
-        if poster_key in candidate_keys:
-            return poster_path
-    return None
+    return _resolve_unique_yearless_poster_match(
+        poster_dir=resolved_poster_dir,
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
 
 
 def _poster_cache_token(*, poster_path: Path, poster_dir: Path) -> str:
