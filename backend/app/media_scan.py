@@ -19,6 +19,34 @@ logger = logging.getLogger(__name__)
 LOCAL_LIBRARY_FRESHNESS_SNAPSHOT_VERSION = 1
 
 
+def _coerce_scan_year(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _preserve_known_year(*, inferred_year: int | None, existing_year: object) -> int | None:
+    if inferred_year is not None:
+        return inferred_year
+    return _coerce_scan_year(existing_year)
+
+
+def _local_file_signature(*, file_size: object, file_mtime: object, filename: object) -> tuple[int, float, str]:
+    try:
+        normalized_size = int(file_size or 0)
+    except (TypeError, ValueError):
+        normalized_size = 0
+    try:
+        normalized_mtime = round(float(file_mtime or 0.0), 6)
+    except (TypeError, ValueError):
+        normalized_mtime = 0.0
+    suffix = Path(str(filename or "")).suffix.lower()
+    return normalized_size, normalized_mtime, suffix
+
+
 def infer_title_and_year(filename_stem: str) -> tuple[str, int | None]:
     parsed = parse_media_title(
         title=None,
@@ -239,16 +267,8 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
         )
         job_id = cursor.lastrowid
         try:
-            existing_rows = connection.execute(
-                """
-                SELECT id, file_path, file_size, file_mtime
-                FROM media_items
-                WHERE COALESCE(source_kind, 'local') = 'local'
-                """
-            ).fetchall()
-            existing_by_path = {row["file_path"]: row for row in existing_rows}
-            seen_paths: set[str] = set()
-
+            current_files: list[tuple[Path, object]] = []
+            current_paths: set[str] = set()
             for candidate in media_root.rglob("*"):
                 if not candidate.is_file():
                     continue
@@ -259,10 +279,50 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     logger.warning("Skipping out-of-root media path %s", resolved)
                     continue
                 stat = resolved.stat()
+                current_files.append((resolved, stat))
+                current_paths.add(str(resolved))
+
+            existing_rows = connection.execute(
+                """
+                SELECT id, file_path, original_filename, file_size, file_mtime, year
+                FROM media_items
+                WHERE COALESCE(source_kind, 'local') = 'local'
+                """
+            ).fetchall()
+            existing_by_path = {row["file_path"]: row for row in existing_rows}
+            missing_existing_by_signature: dict[tuple[int, float, str], list] = {}
+            for row in existing_rows:
+                if row["file_path"] in current_paths:
+                    continue
+                signature = _local_file_signature(
+                    file_size=row["file_size"],
+                    file_mtime=row["file_mtime"],
+                    filename=row["original_filename"],
+                )
+                missing_existing_by_signature.setdefault(signature, []).append(row)
+            seen_paths: set[str] = set()
+            rename_matched_existing_ids: set[int] = set()
+
+            for resolved, stat in current_files:
                 file_path = str(resolved)
                 seen_paths.add(file_path)
                 files_seen += 1
                 existing = existing_by_path.get(file_path)
+                rename_target = None
+                if existing is None:
+                    signature = _local_file_signature(
+                        file_size=stat.st_size,
+                        file_mtime=stat.st_mtime,
+                        filename=resolved.name,
+                    )
+                    candidates = [
+                        row
+                        for row in missing_existing_by_signature.get(signature, [])
+                        if int(row["id"]) not in rename_matched_existing_ids
+                    ]
+                    if len(candidates) == 1:
+                        rename_target = candidates[0]
+                        rename_matched_existing_ids.add(int(rename_target["id"]))
                 if (
                     existing
                     and existing["file_size"] == stat.st_size
@@ -275,73 +335,130 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                 # stay derived at read time so parser changes do not destructively rewrite
                 # the raw library title truth.
                 title = resolved.stem
-                _, year = infer_title_and_year(resolved.stem)
-                now = utcnow_iso()
-                connection.execute(
-                    """
-                    INSERT INTO media_items (
-                        title,
-                        original_filename,
-                        file_path,
-                        source_kind,
-                        library_source_id,
-                        file_size,
-                        file_mtime,
-                        duration_seconds,
-                        width,
-                        height,
-                        video_codec,
-                        audio_codec,
-                        container,
-                        year,
-                        created_at,
-                        updated_at,
-                        last_scanned_at
-                    ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(file_path) DO UPDATE SET
-                        title = excluded.title,
-                        original_filename = excluded.original_filename,
-                        source_kind = 'local',
-                        library_source_id = excluded.library_source_id,
-                        file_size = excluded.file_size,
-                        file_mtime = excluded.file_mtime,
-                        duration_seconds = excluded.duration_seconds,
-                        width = excluded.width,
-                        height = excluded.height,
-                        video_codec = excluded.video_codec,
-                        audio_codec = excluded.audio_codec,
-                        container = excluded.container,
-                        year = excluded.year,
-                        updated_at = excluded.updated_at,
-                        last_scanned_at = excluded.last_scanned_at
-                    """,
-                    (
-                        title,
-                        resolved.name,
-                        file_path,
-                        shared_local_source_id,
-                        stat.st_size,
-                        stat.st_mtime,
-                        metadata["duration_seconds"],
-                        metadata["width"],
-                        metadata["height"],
-                        metadata["video_codec"],
-                        metadata["audio_codec"],
-                        metadata["container"],
-                        year,
-                        now,
-                        now,
-                        now,
-                    ),
+                _, inferred_year = infer_title_and_year(resolved.stem)
+                existing_year = None
+                if existing is not None:
+                    existing_year = existing["year"]
+                elif rename_target is not None:
+                    existing_year = rename_target["year"]
+                preserved_year = _preserve_known_year(
+                    inferred_year=inferred_year,
+                    existing_year=existing_year,
                 )
-                media_item = connection.execute(
-                    "SELECT id FROM media_items WHERE file_path = ?",
-                    (file_path,),
-                ).fetchone()
-                if media_item:
+                now = utcnow_iso()
+                media_item_id: int | None = None
+                if rename_target is not None:
+                    # Keep the same media row when a local rename is strongly detectable.
+                    # This preserves progress/history/poster/year continuity instead of
+                    # turning a rename into delete+insert.
+                    media_item_id = int(rename_target["id"])
+                    connection.execute(
+                        """
+                        UPDATE media_items
+                        SET title = ?,
+                            original_filename = ?,
+                            file_path = ?,
+                            source_kind = 'local',
+                            library_source_id = ?,
+                            file_size = ?,
+                            file_mtime = ?,
+                            duration_seconds = ?,
+                            width = ?,
+                            height = ?,
+                            video_codec = ?,
+                            audio_codec = ?,
+                            container = ?,
+                            year = ?,
+                            updated_at = ?,
+                            last_scanned_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            title,
+                            resolved.name,
+                            file_path,
+                            shared_local_source_id,
+                            stat.st_size,
+                            stat.st_mtime,
+                            metadata["duration_seconds"],
+                            metadata["width"],
+                            metadata["height"],
+                            metadata["video_codec"],
+                            metadata["audio_codec"],
+                            metadata["container"],
+                            preserved_year,
+                            now,
+                            now,
+                            media_item_id,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO media_items (
+                            title,
+                            original_filename,
+                            file_path,
+                            source_kind,
+                            library_source_id,
+                            file_size,
+                            file_mtime,
+                            duration_seconds,
+                            width,
+                            height,
+                            video_codec,
+                            audio_codec,
+                            container,
+                            year,
+                            created_at,
+                            updated_at,
+                            last_scanned_at
+                        ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(file_path) DO UPDATE SET
+                            title = excluded.title,
+                            original_filename = excluded.original_filename,
+                            source_kind = 'local',
+                            library_source_id = excluded.library_source_id,
+                            file_size = excluded.file_size,
+                            file_mtime = excluded.file_mtime,
+                            duration_seconds = excluded.duration_seconds,
+                            width = excluded.width,
+                            height = excluded.height,
+                            video_codec = excluded.video_codec,
+                            audio_codec = excluded.audio_codec,
+                            container = excluded.container,
+                            year = excluded.year,
+                            updated_at = excluded.updated_at,
+                            last_scanned_at = excluded.last_scanned_at
+                        """,
+                        (
+                            title,
+                            resolved.name,
+                            file_path,
+                            shared_local_source_id,
+                            stat.st_size,
+                            stat.st_mtime,
+                            metadata["duration_seconds"],
+                            metadata["width"],
+                            metadata["height"],
+                            metadata["video_codec"],
+                            metadata["audio_codec"],
+                            metadata["container"],
+                            preserved_year,
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
+                    media_item = connection.execute(
+                        "SELECT id FROM media_items WHERE file_path = ?",
+                        (file_path,),
+                    ).fetchone()
+                    media_item_id = int(media_item["id"]) if media_item else None
+                if media_item_id is not None:
                     connection.execute(
                         "DELETE FROM subtitle_tracks WHERE media_item_id = ?",
-                        (media_item["id"],),
+                        (media_item_id,),
                     )
                     for subtitle in metadata["subtitles"]:
                         connection.execute(
@@ -355,7 +472,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                             ) VALUES (?, ?, ?, ?, ?)
                             """,
                             (
-                                media_item["id"],
+                                media_item_id,
                                 subtitle["language"],
                                 subtitle["title"],
                                 subtitle["codec"],
@@ -365,7 +482,9 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                 files_changed += 1
 
             removable_rows = [
-                row for row in existing_rows if row["file_path"] not in seen_paths
+                row
+                for row in existing_rows
+                if row["file_path"] not in seen_paths and int(row["id"]) not in rename_matched_existing_ids
             ]
             for row in removable_rows:
                 preserve_hidden_movie_keys_for_media_item(

@@ -23,6 +23,15 @@ from .library_service import get_media_item_record
 logger = logging.getLogger(__name__)
 
 
+def _coerce_preserved_year(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def sync_visible_google_drive_sources(
     settings: Settings,
     *,
@@ -429,6 +438,76 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
     modified_at = _parse_google_modified_time(row.get("modifiedTime"))
     now = utcnow_iso()
     virtual_path = build_cloud_virtual_path(resource_id=resource_id, file_id=external_media_id, filename=name)
+    existing_rows = connection.execute(
+        """
+        SELECT id, year
+        FROM media_items
+        WHERE COALESCE(source_kind, 'local') = 'cloud'
+          AND library_source_id = ?
+          AND external_media_id = ?
+        ORDER BY id ASC
+        """,
+        (source_id, external_media_id),
+    ).fetchall()
+    existing_row = existing_rows[0] if existing_rows else None
+    resolved_year = inferred_year if inferred_year is not None else _coerce_preserved_year(
+        existing_row["year"] if existing_row is not None else None
+    )
+    container = Path(name).suffix.lower().lstrip(".") or None
+
+    if existing_row is not None:
+        connection.execute(
+            """
+            UPDATE media_items
+            SET title = ?,
+                original_filename = ?,
+                file_path = ?,
+                source_kind = 'cloud',
+                library_source_id = ?,
+                external_media_id = ?,
+                cloud_mime_type = ?,
+                cloud_resource_key = ?,
+                series_folder_key = ?,
+                series_folder_name = ?,
+                file_size = CASE WHEN ? > 0 THEN ? ELSE file_size END,
+                file_mtime = ?,
+                duration_seconds = COALESCE(?, duration_seconds),
+                width = COALESCE(?, width),
+                height = COALESCE(?, height),
+                container = COALESCE(?, container),
+                year = ?,
+                updated_at = ?,
+                last_scanned_at = ?
+            WHERE id = ?
+            """,
+            (
+                title,
+                name,
+                virtual_path,
+                source_id,
+                external_media_id,
+                cloud_mime_type,
+                cloud_resource_key,
+                series_folder_key,
+                series_folder_name,
+                file_size,
+                file_size,
+                modified_at,
+                duration_seconds,
+                width,
+                height,
+                container,
+                resolved_year,
+                now,
+                now,
+                int(existing_row["id"]),
+            ),
+        )
+        duplicate_ids = [int(candidate["id"]) for candidate in existing_rows[1:]]
+        for duplicate_id in duplicate_ids:
+            connection.execute("DELETE FROM media_items WHERE id = ?", (duplicate_id,))
+        return
+
     connection.execute(
         """
         INSERT INTO media_items (
@@ -471,6 +550,7 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
             width = excluded.width,
             height = excluded.height,
             container = excluded.container,
+            year = COALESCE(excluded.year, media_items.year),
             updated_at = excluded.updated_at,
             last_scanned_at = excluded.last_scanned_at
         """,
@@ -489,8 +569,8 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
             duration_seconds,
             width,
             height,
-            Path(name).suffix.lower().lstrip(".") or None,
-            inferred_year,
+            container,
+            resolved_year,
             now,
             now,
             now,

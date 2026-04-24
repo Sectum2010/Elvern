@@ -12,6 +12,7 @@ from backend.app.db import get_connection, utcnow_iso
 from backend.app.db import init_db
 from backend.app.media_scan import scan_media_library
 from backend.app.security import hash_password
+from backend.app.services import cloud_source_sync_service
 from backend.app.services.desktop_playback_service import resolve_same_host_request
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
 from backend.tests.conftest import (
@@ -43,6 +44,79 @@ def _create_standard_user_via_admin(client, *, username: str, password: str) -> 
         },
     )
     assert response.status_code == 200
+
+
+def _insert_google_drive_source(settings) -> int:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        account_cursor = connection.execute(
+            """
+            INSERT INTO google_drive_accounts (
+                user_id,
+                google_account_id,
+                email,
+                display_name,
+                refresh_token,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "google-account-1", "admin@example.com", "Admin", "refresh-token", now, now),
+        )
+        source_cursor = connection.execute(
+            """
+            INSERT INTO library_sources (
+                owner_user_id,
+                provider,
+                google_drive_account_id,
+                resource_type,
+                resource_id,
+                display_name,
+                is_shared,
+                created_at,
+                updated_at
+            ) VALUES (?, 'google_drive', ?, 'folder', ?, ?, 1, ?, ?)
+            """,
+            (1, int(account_cursor.lastrowid), "folder-123", "Movies", now, now),
+        )
+        connection.commit()
+        return int(source_cursor.lastrowid)
+
+
+def _build_fake_google_drive_video_row(*, file_id: str, name: str) -> dict[str, object]:
+    return {
+        "id": file_id,
+        "name": name,
+        "mimeType": "video/mp4",
+        "size": "1048576",
+        "modifiedTime": "2024-01-01T00:00:00Z",
+        "videoMediaMetadata": {
+            "width": 1920,
+            "height": 1080,
+            "durationMillis": "1000",
+        },
+    }
+
+
+def _sync_fake_google_drive_source(monkeypatch, settings, *, source_id: int, rows: list[dict[str, object]]) -> None:
+    monkeypatch.setattr(cloud_source_sync_service, "google_drive_enabled", lambda _settings: True)
+    monkeypatch.setattr(
+        cloud_source_sync_service,
+        "fetch_drive_resource_metadata",
+        lambda *args, **kwargs: {"resource_id": "folder-123", "display_name": "Movies"},
+    )
+    monkeypatch.setattr(
+        cloud_source_sync_service,
+        "list_drive_media_files",
+        lambda *args, **kwargs: rows,
+    )
+    cloud_source_sync_service._sync_google_drive_library_source(
+        settings,
+        source_id=source_id,
+        raise_on_error=True,
+        provider="google_drive",
+        get_access_token_by_account_id=lambda *args, **kwargs: "test-access-token",
+    )
 
 
 def test_health_endpoint_smoke(client) -> None:
@@ -546,11 +620,344 @@ def test_poster_lookup_uses_raw_title_identity_not_cleaned_display_path(
     )
     assert item["title"] == "Harry Potter and the Deathly Hallows Part 1"
     assert item["parsed_title"]["title_source"] == "original_filename"
-    assert item["poster_url"] == f"/api/library/item/{item_id}/poster"
+    assert item["poster_url"].startswith(f"/api/library/item/{item_id}/poster?v=")
 
-    poster_response = client.get(f"/api/library/item/{item_id}/poster")
+    poster_response = client.get(item["poster_url"])
     assert poster_response.status_code == 200
     assert poster_response.content == b"fake-jpg"
+    assert poster_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
+
+
+def test_local_file_rename_updates_title_truth_after_rescan(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    original_filename = "Movie.Alpha.2014.1080p.BluRay.x264.mkv"
+    original_path = media_root / original_filename
+    original_path.write_bytes(b"movie-alpha")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    before = client.get("/api/library")
+    assert before.status_code == 200
+    assert before.json()["total_items"] == 1
+    before_item = before.json()["items"][0]
+    before_id = int(before_item["id"])
+    assert before_item["title"] == "Movie Alpha"
+    assert before_item["year"] == 2014
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO playback_progress (
+                user_id,
+                media_item_id,
+                position_seconds,
+                duration_seconds,
+                watch_seconds_total,
+                completed,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, ?)
+            """,
+            (1, before_id, 321.0, 1200.0, 321.0, now),
+        )
+        connection.commit()
+
+    original_path.rename(media_root / "Movie.Bravo.1080p.BluRay.x264.mkv")
+    scan_media_library(initialized_settings, reason="manual")
+
+    after = client.get("/api/library")
+    assert after.status_code == 200
+    assert after.json()["total_items"] == 1
+    after_item = after.json()["items"][0]
+    assert after_item["id"] == before_id
+    assert after_item["title"] == "Movie Bravo"
+    assert after_item["original_filename"] == "Movie.Bravo.1080p.BluRay.x264.mkv"
+    assert after_item["year"] == 2014
+    assert after_item["progress_seconds"] == 321.0
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, title, original_filename, year
+            FROM media_items
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [
+        (
+            before_id,
+            "Movie.Bravo.1080p.BluRay.x264",
+            "Movie.Bravo.1080p.BluRay.x264.mkv",
+            2014,
+        ),
+    ]
+
+
+def test_local_rename_collision_does_not_get_swallowed_by_duplicate_filter(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    stable_filename = "The.Godfather.1972.REMUX-FraMeSToR.mkv"
+    renamed_source_filename = "The.Godfather.Coda.1972.4k-kc.mkv"
+    renamed_collision_filename = "the godfather 1972 4k-kc.mkv"
+    (media_root / stable_filename).write_bytes(b"stable-cut")
+    source_path = media_root / renamed_source_filename
+    source_path.write_bytes(b"coda-cut")
+
+    scan_media_library(initialized_settings, reason="manual")
+    before = client.get("/api/library")
+    assert before.status_code == 200
+    assert before.json()["total_items"] == 2
+
+    source_path.rename(media_root / renamed_collision_filename)
+    scan_media_library(initialized_settings, reason="manual")
+
+    after = client.get("/api/library")
+    assert after.status_code == 200
+    assert after.json()["total_items"] == 2
+    assert sum(1 for item in after.json()["items"] if item["title"] == "The Godfather") == 2
+    assert sorted(item["original_filename"] for item in after.json()["items"]) == sorted(
+        [stable_filename, renamed_collision_filename]
+    )
+
+
+def test_sequence_sensitive_rename_keeps_distinct_movies_visible_after_rescan(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    part_one_filename = "Harry.Potter.and.the.Deathly.Hallows.Part.1.2010.1080p.BluRay.x264.mkv"
+    part_two_filename = "Harry.Potter.and.the.Deathly.Hallows.Part.2.2011.1080p.BluRay.x264.mkv"
+    renamed_part_one_filename = "Harry.Potter.and.the.Deathly.Hallows.Part.One.2010.1080p.BluRay.x264.mkv"
+    (media_root / part_one_filename).write_bytes(b"part-one")
+    (media_root / part_two_filename).write_bytes(b"part-two")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    (media_root / part_one_filename).rename(media_root / renamed_part_one_filename)
+    scan_media_library(initialized_settings, reason="manual")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 2
+    titles = sorted(item["title"] for item in response.json()["items"])
+    assert titles == [
+        "Harry Potter and the Deathly Hallows Part 2",
+        "Harry Potter and the Deathly Hallows Part One",
+    ]
+
+
+def test_renamed_movie_and_renamed_poster_rematch_after_rescan(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+
+    original_movie_filename = "The.Godfather.1972.4k-kc.mkv"
+    renamed_movie_filename = "The.Godfather.Coda.1972.4k-kc.mkv"
+    original_movie_path = media_root / original_movie_filename
+    original_movie_path.write_bytes(b"godfather-original")
+
+    original_poster_path = poster_dir / "The Godfather (1972).jpg"
+    original_poster_path.write_bytes(b"poster-original")
+
+    scan_media_library(initialized_settings, reason="manual")
+    before = client.get("/api/library")
+    assert before.status_code == 200
+    assert before.json()["total_items"] == 1
+    before_item = before.json()["items"][0]
+    before_item_id = int(before_item["id"])
+    before_poster_url = before_item["poster_url"]
+    assert before_item["title"] == "The Godfather"
+    assert before_poster_url is not None
+    assert client.get(before_poster_url).content == b"poster-original"
+
+    original_movie_path.rename(media_root / renamed_movie_filename)
+    renamed_poster_path = poster_dir / "The Godfather Coda (1972).jpg"
+    original_poster_path.rename(renamed_poster_path)
+    renamed_poster_path.write_bytes(b"poster-renamed")
+
+    scan_media_library(initialized_settings, reason="manual")
+    after = client.get("/api/library")
+    assert after.status_code == 200
+    assert after.json()["total_items"] == 1
+    after_item = next(
+        item for item in after.json()["items"] if item["original_filename"] == renamed_movie_filename
+    )
+    assert int(after_item["id"]) == before_item_id
+    assert after_item["title"] == "The Godfather Coda"
+    assert after_item["poster_url"] is not None
+    assert after_item["poster_url"] != before_poster_url
+
+    poster_response = client.get(after_item["poster_url"])
+    assert poster_response.status_code == 200
+    assert poster_response.content == b"poster-renamed"
+    assert poster_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
+
+
+def test_poster_reference_location_switch_refreshes_poster_without_media_rescan(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    default_poster_dir = media_root / "Posters"
+    default_poster_dir.mkdir(parents=True, exist_ok=True)
+    alternate_poster_dir = tmp_path / "alternate-posters"
+    alternate_poster_dir.mkdir()
+
+    movie_filename = "Interstellar.2014.UHD.BluRay.2160p.DTS-HD.MA.5.1.HEVC.REMUX-FraMeSToR.mkv"
+    (media_root / movie_filename).write_bytes(b"interstellar")
+    (default_poster_dir / "Interstellar (2014).jpg").write_bytes(b"default-poster")
+    (alternate_poster_dir / "Interstellar (2014).jpg").write_bytes(b"alternate-poster")
+
+    scan_media_library(initialized_settings, reason="manual")
+    before = client.get("/api/library")
+    assert before.status_code == 200
+    assert before.json()["total_items"] == 1
+    before_item = before.json()["items"][0]
+    before_poster_url = before_item["poster_url"]
+    assert before_poster_url is not None
+    assert client.get(before_poster_url).content == b"default-poster"
+
+    update_response = client.put(
+        "/api/admin/poster-reference-location",
+        json={"value": str(alternate_poster_dir)},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["effective_value"] == str(alternate_poster_dir.resolve())
+
+    after = client.get("/api/library")
+    assert after.status_code == 200
+    assert after.json()["total_items"] == 1
+    after_item = after.json()["items"][0]
+    assert after_item["poster_url"] is not None
+    assert after_item["poster_url"] != before_poster_url
+
+    poster_response = client.get(after_item["poster_url"])
+    assert poster_response.status_code == 200
+    assert poster_response.content == b"alternate-poster"
+    assert poster_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
+
+
+def test_cloud_rename_updates_one_row_in_place_without_duplicate_visibility(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    poster_dir = Path(initialized_settings.media_root) / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    source_id = _insert_google_drive_source(initialized_settings)
+
+    _sync_fake_google_drive_source(
+        monkeypatch,
+        initialized_settings,
+        source_id=source_id,
+        rows=[_build_fake_google_drive_video_row(file_id="file-1", name="The Intouchables (2011).mp4")],
+    )
+
+    before_poster_path = poster_dir / "The Intouchables (2011).jpg"
+    before_poster_path.write_bytes(b"cloud-poster-before")
+
+    before = client.get("/api/library")
+    assert before.status_code == 200
+    assert before.json()["total_items"] == 1
+    before_item = before.json()["items"][0]
+    before_item_id = int(before_item["id"])
+    assert before_item["title"] == "The Intouchables"
+    assert before_item["poster_url"] is not None
+    assert client.get(before_item["poster_url"]).content == b"cloud-poster-before"
+
+    renamed_poster_path = poster_dir / "Untouchables (2011).jpg"
+    before_poster_path.rename(renamed_poster_path)
+    renamed_poster_path.write_bytes(b"cloud-poster-after")
+
+    _sync_fake_google_drive_source(
+        monkeypatch,
+        initialized_settings,
+        source_id=source_id,
+        rows=[_build_fake_google_drive_video_row(file_id="file-1", name="Untouchables (2011).mp4")],
+    )
+
+    after = client.get("/api/library")
+    assert after.status_code == 200
+    assert after.json()["total_items"] == 1
+    after_item = after.json()["items"][0]
+    assert int(after_item["id"]) == before_item_id
+    assert after_item["title"] == "Untouchables"
+    assert after_item["original_filename"] == "Untouchables (2011).mp4"
+    assert after_item["poster_url"] is not None
+    assert after_item["poster_url"] != before_item["poster_url"]
+    assert client.get(after_item["poster_url"]).content == b"cloud-poster-after"
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, title, original_filename, file_path, external_media_id, year
+            FROM media_items
+            WHERE COALESCE(source_kind, 'local') = 'cloud'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [
+        (
+            before_item_id,
+            "Untouchables (2011)",
+            "Untouchables (2011).mp4",
+            "gdrive://folder-123/file-1/Untouchables (2011).mp4",
+            "file-1",
+            2011,
+        ),
+    ]
 
 
 def test_library_route_handles_dirty_stored_titles_without_internal_server_error(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from .title_normalization import (
     extract_edition_identity_anywhere,
     normalize_title_key,
+    normalize_title_source,
     resolve_title_metadata,
 )
 from .user_settings_service import get_user_settings
@@ -109,15 +110,48 @@ def _quality_sort_key(row) -> tuple[int, int, int, int, int]:
     )
 
 
+def _row_source_kind(row) -> str:
+    if hasattr(row, "keys") and "source_kind" in row.keys():
+        return str(row["source_kind"] or "local")
+    if isinstance(row, dict):
+        return str(row.get("source_kind") or "local")
+    return "local"
+
+
+def _local_original_filename_signature(original_filename: object) -> str | None:
+    raw = str(original_filename or "").strip()
+    if not raw:
+        return None
+    normalized = normalize_title_key(normalize_title_source(raw))
+    return normalized or None
+
+
 def _dedupe_group_key(row) -> str | None:
-    base_title, edition_identity = _resolve_base_title_and_edition(
+    metadata = resolve_title_metadata(
         title=row["title"],
         year=row["year"],
         original_filename=row["original_filename"],
     )
-    if not base_title or row["year"] in {None, ""}:
+    identity_title = str(
+        (metadata.get("poster_match_identity") or {}).get("title")
+        or metadata.get("poster_match_title")
+        or metadata.get("base_title")
+        or ""
+    ).strip()
+    edition_identity = str(metadata.get("edition_identity") or "standard")
+    if not identity_title or row["year"] in {None, ""}:
         return None
-    return f"{normalize_title_key(base_title)}|{int(row['year'])}|{edition_identity}"
+    base_key = f"{normalize_title_key(identity_title)}|{int(row['year'])}|{edition_identity}"
+
+    # Be deliberately conservative for local files: if two different filenames
+    # merely clean down to the same movie title/year, showing both is safer than
+    # silently swallowing one after a rename.
+    if _row_source_kind(row) == "local":
+        filename_signature = _local_original_filename_signature(row["original_filename"])
+        if not filename_signature:
+            return None
+        return f"local|{base_key}|{filename_signature}"
+    return base_key
 
 
 def _movie_identity_payload(

@@ -56,7 +56,10 @@ def get_item_poster(item_id: int, request: Request, user=CurrentUser):
     )
     if poster_path is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster not found")
-    return FileResponse(poster_path)
+    return FileResponse(
+        poster_path,
+        headers={"Cache-Control": "private, no-cache, max-age=0, must-revalidate"},
+    )
 
 
 @router.post("/rescan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)

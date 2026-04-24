@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 
@@ -182,17 +183,36 @@ def _resolve_poster_path(
     return None
 
 
+def _poster_cache_token(*, poster_path: Path, poster_dir: Path) -> str:
+    try:
+        stat = poster_path.stat()
+    except OSError:
+        return "missing"
+    token_source = "|".join(
+        [
+            str(poster_dir.resolve()),
+            str(poster_path.resolve()),
+            str(int(stat.st_mtime_ns)),
+            str(int(stat.st_size)),
+        ]
+    )
+    return hashlib.sha1(token_source.encode("utf-8")).hexdigest()[:16]
+
+
 def _poster_url_for_row(settings: Settings, row, *, poster_dir: Path | None = None) -> str | None:
-    if _resolve_poster_path(
+    resolved_poster_dir = poster_dir or _poster_directory(settings)
+    poster_path = _resolve_poster_path(
         settings,
-        poster_dir=poster_dir,
+        poster_dir=resolved_poster_dir,
         title=row["title"],
         year=row["year"],
         original_filename=row["original_filename"],
         source_kind=_row_value(row, "source_kind", "local"),
-    ) is None:
+    )
+    if poster_path is None:
         return None
-    return f"/api/library/item/{int(row['id'])}/poster"
+    token = _poster_cache_token(poster_path=poster_path, poster_dir=resolved_poster_dir)
+    return f"/api/library/item/{int(row['id'])}/poster?v={token}"
 
 
 def _source_label_for_row(row) -> str:
