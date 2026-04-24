@@ -13,6 +13,7 @@ from .title_normalization import (
     build_poster_candidate_family,
     clean_title_for_matching,
     normalize_poster_title_key,
+    poster_singular_plural_title_keys_equivalent,
     resolve_poster_match_identity,
     resolve_title_metadata,
 )
@@ -136,6 +137,49 @@ def _resolve_normalized_yearful_poster_match(*, poster_dir: Path, title: object,
     return None
 
 
+def _resolve_unique_singular_plural_yearful_poster_match(
+    *,
+    poster_dir: Path,
+    title: object,
+    year: object,
+    original_filename: object,
+) -> Path | None:
+    candidate_keys, normalized_year = _poster_yearful_key_family(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    if not candidate_keys or normalized_year is None:
+        return None
+
+    candidate_title_keys = {
+        str(candidate_key).rsplit("|", 1)[0]
+        for candidate_key in candidate_keys
+        if "|" in str(candidate_key)
+    }
+    if not candidate_title_keys:
+        return None
+
+    matches: list[Path] = []
+    for poster_path in sorted(poster_dir.iterdir(), key=lambda candidate: candidate.name.lower()):
+        if not poster_path.is_file():
+            continue
+        if poster_path.suffix.lower() not in {".jpg", ".png"}:
+            continue
+        title_key, poster_year = _poster_filename_key(poster_path.stem)
+        if title_key is None or poster_year != normalized_year:
+            continue
+        if any(
+            poster_singular_plural_title_keys_equivalent(candidate_title_key, title_key)
+            for candidate_title_key in candidate_title_keys
+        ):
+            matches.append(poster_path)
+
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def _normalize_cloud_title_and_year(
     *,
     title: object,
@@ -245,6 +289,15 @@ def _resolve_poster_path(
     )
     if normalized_yearful is not None:
         return normalized_yearful
+
+    singular_plural_yearful = _resolve_unique_singular_plural_yearful_poster_match(
+        poster_dir=resolved_poster_dir,
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    if singular_plural_yearful is not None:
+        return singular_plural_yearful
 
     return _resolve_unique_yearless_poster_match(
         poster_dir=resolved_poster_dir,

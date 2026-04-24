@@ -1091,6 +1091,92 @@ def test_poster_lookup_matches_safe_equivalence_family_patterns(
     assert poster_response.content == b"poster-bytes"
 
 
+def test_poster_lookup_matches_safe_singular_plural_variant_when_year_matches(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    movie_filename = "Untouchables.2011.1080p.NF.WEB-DL.DD+5.1.x264-Telly.mkv"
+    (media_root / movie_filename).write_bytes(b"movie-bytes")
+    (poster_dir / "Untouchable (2011).png").write_bytes(b"poster-bytes")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["title"] == "Untouchables"
+    assert item["poster_url"] is not None
+
+    poster_response = client.get(item["poster_url"])
+    assert poster_response.status_code == 200
+    assert poster_response.content == b"poster-bytes"
+
+
+def test_poster_lookup_singular_plural_stage_requires_unique_yearful_candidate(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    movie_filename = "Untouchables.2011.1080p.NF.WEB-DL.DD+5.1.x264-Telly.mkv"
+    (media_root / movie_filename).write_bytes(b"movie-bytes")
+    (poster_dir / "Untouchable (2011).jpg").write_bytes(b"poster-jpg")
+    (poster_dir / "Untouchable (2011).png").write_bytes(b"poster-png")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["title"] == "Untouchables"
+    assert item["poster_url"] is None
+
+
+def test_poster_lookup_singular_plural_stage_does_not_cross_part_identity(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    movie_filename = "Untouchables.Part.2.2011.1080p.NF.WEB-DL.DD+5.1.x264-Telly.mkv"
+    (media_root / movie_filename).write_bytes(b"movie-bytes")
+    (poster_dir / "Untouchable Part 1 (2011).png").write_bytes(b"poster-bytes")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["title"] == "Untouchables Part 2"
+    assert item["poster_url"] is None
+
+
 def test_poster_lookup_unique_yearless_fallback_is_safe_and_deterministic(
     client,
     admin_credentials,

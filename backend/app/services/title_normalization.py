@@ -158,6 +158,58 @@ def poster_equivalent_title_variants(value: str) -> list[str]:
     return variants
 
 
+def _is_safe_simple_plural_pair(singular: str, plural: str) -> bool:
+    if not singular or not plural or singular == plural:
+        return False
+    if singular.isdigit() or plural.isdigit():
+        return False
+    if singular == "part" or plural == "part":
+        return False
+
+    if plural == f"{singular}s":
+        if len(singular) < 4 or singular.endswith("s") or plural.endswith("ss"):
+            return False
+        if singular.endswith("ie"):
+            return True
+        if singular.endswith("e"):
+            return len(singular) >= 2 and singular[-2] in "bcdfghjklmnpqrstvwxyz"
+        return singular[-1] in "bcdfghjklmnpqrstvwxyz"
+
+    if (
+        singular.endswith("y")
+        and len(singular) >= 3
+        and singular[-2] not in "aeiou"
+        and plural == f"{singular[:-1]}ies"
+    ):
+        return True
+
+    if plural == f"{singular}es" and singular.endswith(("s", "x", "z", "ch", "sh", "o")):
+        return len(singular) >= 3
+
+    return False
+
+
+def poster_singular_plural_title_keys_equivalent(left_key: str, right_key: str) -> bool:
+    left_tokens = [token for token in collapse_spaces(left_key).split() if token]
+    right_tokens = [token for token in collapse_spaces(right_key).split() if token]
+    if not left_tokens or len(left_tokens) != len(right_tokens):
+        return False
+
+    differing_pairs = [
+        (left_token, right_token)
+        for left_token, right_token in zip(left_tokens, right_tokens)
+        if left_token != right_token
+    ]
+    if len(differing_pairs) != 1:
+        return False
+
+    left_token, right_token = differing_pairs[0]
+    return _is_safe_simple_plural_pair(left_token, right_token) or _is_safe_simple_plural_pair(
+        right_token,
+        left_token,
+    )
+
+
 def build_poster_candidate_family(
     *,
     title: object,
