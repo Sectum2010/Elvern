@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import sqlite3
 
 from .services.title_normalization import (
@@ -137,6 +138,142 @@ def preserve_hidden_movie_keys_for_media_item(
     return {
         "user_hidden_restored": user_hidden_restored,
         "global_hidden_restored": global_hidden_restored,
+    }
+
+
+def _parse_hidden_timestamp(value: object) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed
+
+
+def prune_recreated_local_hidden_movie_keys(
+    connection: sqlite3.Connection,
+    *,
+    shared_local_source_id: int,
+) -> dict[str, int]:
+    local_rows = connection.execute(
+        """
+        SELECT id, title, year, original_filename, created_at
+        FROM media_items
+        WHERE COALESCE(source_kind, 'local') = 'local'
+          AND library_source_id = ?
+        """,
+        (shared_local_source_id,),
+    ).fetchall()
+    local_candidates_by_key: dict[str, list[sqlite3.Row]] = {}
+    for row in local_rows:
+        movie_key, _display_title, normalized_year, _edition_identity = _build_hidden_movie_key(
+            title=row["title"],
+            year=row["year"],
+            original_filename=row["original_filename"],
+        )
+        if not movie_key or normalized_year is None:
+            continue
+        local_candidates_by_key.setdefault(movie_key, []).append(row)
+
+    backing_global_keys: set[str] = set()
+    global_backing_rows = connection.execute(
+        """
+        SELECT m.title, m.year, m.original_filename
+        FROM global_hidden_media_items h
+        JOIN media_items m
+          ON m.id = h.media_item_id
+        """
+    ).fetchall()
+    for row in global_backing_rows:
+        movie_key, _display_title, normalized_year, _edition_identity = _build_hidden_movie_key(
+            title=row["title"],
+            year=row["year"],
+            original_filename=row["original_filename"],
+        )
+        if movie_key and normalized_year is not None:
+            backing_global_keys.add(movie_key)
+
+    backing_user_keys: dict[int, set[str]] = {}
+    user_backing_rows = connection.execute(
+        """
+        SELECT h.user_id, m.title, m.year, m.original_filename
+        FROM user_hidden_media_items h
+        JOIN media_items m
+          ON m.id = h.media_item_id
+        """
+    ).fetchall()
+    for row in user_backing_rows:
+        movie_key, _display_title, normalized_year, _edition_identity = _build_hidden_movie_key(
+            title=row["title"],
+            year=row["year"],
+            original_filename=row["original_filename"],
+        )
+        if movie_key and normalized_year is not None:
+            backing_user_keys.setdefault(int(row["user_id"]), set()).add(movie_key)
+
+    pruned_global = 0
+    global_hidden_rows = connection.execute(
+        """
+        SELECT movie_key, hidden_at
+        FROM global_hidden_movie_keys
+        """
+    ).fetchall()
+    for row in global_hidden_rows:
+        movie_key = str(row["movie_key"] or "").strip()
+        if not movie_key or movie_key in backing_global_keys:
+            continue
+        candidates = local_candidates_by_key.get(movie_key, [])
+        if len(candidates) != 1:
+            continue
+        created_at = _parse_hidden_timestamp(candidates[0]["created_at"])
+        hidden_at = _parse_hidden_timestamp(row["hidden_at"])
+        if created_at is None or hidden_at is None or created_at <= hidden_at:
+            continue
+        connection.execute(
+            "DELETE FROM global_hidden_movie_keys WHERE movie_key = ?",
+            (movie_key,),
+        )
+        pruned_global += 1
+
+    pruned_user = 0
+    user_hidden_rows = connection.execute(
+        """
+        SELECT user_id, movie_key, hidden_at
+        FROM user_hidden_movie_keys
+        """
+    ).fetchall()
+    for row in user_hidden_rows:
+        user_id = int(row["user_id"])
+        movie_key = str(row["movie_key"] or "").strip()
+        if not movie_key or movie_key in backing_user_keys.get(user_id, set()):
+            continue
+        candidates = local_candidates_by_key.get(movie_key, [])
+        if len(candidates) != 1:
+            continue
+        created_at = _parse_hidden_timestamp(candidates[0]["created_at"])
+        hidden_at = _parse_hidden_timestamp(row["hidden_at"])
+        if created_at is None or hidden_at is None or created_at <= hidden_at:
+            continue
+        connection.execute(
+            "DELETE FROM user_hidden_movie_keys WHERE user_id = ? AND movie_key = ?",
+            (user_id, movie_key),
+        )
+        pruned_user += 1
+
+    return {
+        "global_hidden_movie_keys_pruned": pruned_global,
+        "user_hidden_movie_keys_pruned": pruned_user,
     }
 
 

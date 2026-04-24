@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from backend.app.db import get_connection, utcnow_iso
+from backend.app.services.library_movie_identity_service import _dedupe_group_key
 from backend.app.services.media_title_parser import TITLE_PARSER_VERSION, parse_media_title
 from backend.app.services.title_normalization import (
     clean_title_for_matching,
@@ -183,6 +184,72 @@ def test_title_normalization_wrappers_use_backend_parser() -> None:
     assert poster_identity["title"] == "One Piece Stampede"
     assert poster_identity["year"] is None
     assert poster_identity["source"] == "original_filename"
+
+
+def test_colon_subtitle_identity_is_preserved_for_display_and_poster_matching() -> None:
+    filename = "Pirates of the Caribbean: The Curse of the Black Pearl.2003.1080p.BluRay.x264.mkv"
+
+    parsed = parse_media_title(
+        title=None,
+        original_filename=filename,
+        year=None,
+    )
+    poster_identity = resolve_poster_match_identity(
+        title=None,
+        original_filename=filename,
+        year=None,
+    )
+
+    assert parsed["display_title"] == "Pirates of the Caribbean: The Curse of the Black Pearl"
+    assert parsed["poster_match_identity"] == {
+        "title": "Pirates of the Caribbean: The Curse of the Black Pearl",
+        "year": 2003,
+        "source": "original_filename",
+    }
+    assert poster_identity == {
+        "title": "Pirates of the Caribbean: The Curse of the Black Pearl",
+        "year": 2003,
+        "source": "original_filename",
+        "parse_confidence": "high",
+        "warnings": [
+            "standalone_release_year_cut",
+            "technical_suffix_density_cut",
+            "metadata_suffix_removed",
+        ],
+        "parser_version": TITLE_PARSER_VERSION,
+        "suspicious_output": False,
+    }
+
+
+def test_cloud_dedupe_identity_keeps_distinct_colon_subtitles_separate() -> None:
+    alpha_row = {
+        "id": 1,
+        "title": "Movie Franchise: Alpha",
+        "original_filename": "Movie Franchise: Alpha (2010).mp4",
+        "year": 2010,
+        "source_kind": "cloud",
+        "file_size": 100,
+        "width": 1920,
+        "height": 1080,
+        "audio_codec": None,
+        "video_codec": None,
+        "container": "mp4",
+    }
+    beta_row = {
+        "id": 2,
+        "title": "Movie Franchise: Beta",
+        "original_filename": "Movie Franchise: Beta (2010).mp4",
+        "year": 2010,
+        "source_kind": "cloud",
+        "file_size": 100,
+        "width": 1920,
+        "height": 1080,
+        "audio_codec": None,
+        "video_codec": None,
+        "container": "mp4",
+    }
+
+    assert _dedupe_group_key(alpha_row) != _dedupe_group_key(beta_row)
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from backend.app.security import hash_password
 from backend.app.services import cloud_source_sync_service
 from backend.app.services.desktop_playback_service import resolve_same_host_request
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
+from backend.app.services.library_movie_identity_service import _row_hidden_movie_key
 from backend.tests.conftest import (
     DummyAdminEventHub,
     DummyMobilePlaybackManager,
@@ -829,6 +830,96 @@ def test_renamed_movie_and_renamed_poster_rematch_after_rescan(
     assert poster_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
 
 
+def test_manual_rescan_heals_stale_hidden_movie_keys_for_recreated_local_rows(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    media_root = Path(initialized_settings.media_root)
+    poster_dir = media_root / "Posters"
+    poster_dir.mkdir(parents=True, exist_ok=True)
+    movie_filename = "Harry.Potter.and.the.Philosopher's.Stone.2001.1080p.BluRay.x264.mkv"
+    movie_path = media_root / movie_filename
+    movie_path.write_bytes(b"philosophers-stone")
+    (poster_dir / "Harry Potter and the Philosopher's Stone (2001).jpg").write_bytes(b"poster-bytes")
+
+    scan_media_library(initialized_settings, reason="manual")
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id, title, year, original_filename
+            FROM media_items
+            WHERE original_filename = ?
+            LIMIT 1
+            """,
+            (movie_filename,),
+        ).fetchone()
+        assert row is not None
+        movie_key = _row_hidden_movie_key(row)
+        assert movie_key is not None
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO global_hidden_movie_keys (
+                movie_key,
+                display_title,
+                year,
+                edition_identity,
+                hidden_by_user_id,
+                hidden_at
+            ) VALUES (?, ?, ?, 'standard', 1, '2026-03-28 00:01:05')
+            """,
+            (movie_key, "Harry Potter and the Philosopher's Stone", 2001),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO user_hidden_movie_keys (
+                user_id,
+                movie_key,
+                display_title,
+                year,
+                edition_identity,
+                hidden_at
+            ) VALUES (1, ?, ?, ?, 'standard', '2026-03-28 00:01:05')
+            """,
+            (movie_key, "Harry Potter and the Philosopher's Stone", 2001),
+        )
+        connection.commit()
+
+    hidden_response = client.get("/api/library")
+    assert hidden_response.status_code == 200
+    assert hidden_response.json()["total_items"] == 0
+
+    repair_result = scan_media_library(initialized_settings, reason="manual")
+    assert repair_result["hidden_movie_keys_pruned"] == 2
+
+    healed_response = client.get("/api/library")
+    assert healed_response.status_code == 200
+    assert healed_response.json()["total_items"] == 1
+    item = healed_response.json()["items"][0]
+    assert item["title"] == "Harry Potter and the Philosopher's Stone"
+    assert item["poster_url"] is not None
+    assert client.get(item["poster_url"]).content == b"poster-bytes"
+
+    with get_connection(initialized_settings) as connection:
+        hidden_rows = connection.execute(
+            "SELECT COUNT(*) AS count FROM global_hidden_movie_keys WHERE movie_key = ?",
+            (movie_key,),
+        ).fetchone()
+        assert int(hidden_rows["count"]) == 0
+        user_hidden_rows = connection.execute(
+            "SELECT COUNT(*) AS count FROM user_hidden_movie_keys WHERE movie_key = ? AND user_id = 1",
+            (movie_key,),
+        ).fetchone()
+        assert int(user_hidden_rows["count"]) == 0
+
+
 def test_poster_reference_location_switch_refreshes_poster_without_media_rescan(
     client,
     admin_credentials,
@@ -958,6 +1049,185 @@ def test_cloud_rename_updates_one_row_in_place_without_duplicate_visibility(
             2011,
         ),
     ]
+
+
+def test_cloud_sync_collapses_existing_duplicate_rows_for_same_external_media_id(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    source_id = _insert_google_drive_source(initialized_settings)
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        canonical_cursor = connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                external_media_id,
+                cloud_mime_type,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'cloud', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "The Intouchables (2011)",
+                "The Intouchables (2011).mp4",
+                "gdrive://folder-123/file-1/The Intouchables (2011).mp4",
+                source_id,
+                "file-1",
+                "video/mp4",
+                1048576,
+                1704067200.0,
+                1000.0,
+                1920,
+                1080,
+                "mp4",
+                2011,
+                now,
+                now,
+                now,
+            ),
+        )
+        canonical_id = int(canonical_cursor.lastrowid)
+        duplicate_cursor = connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                external_media_id,
+                cloud_mime_type,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'cloud', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Untouchables (2011)",
+                "Untouchables (2011).mp4",
+                "gdrive://folder-123/file-1/Untouchables (2011).mp4",
+                source_id,
+                "file-1",
+                "video/mp4",
+                1048576,
+                1704067200.0,
+                1000.0,
+                1920,
+                1080,
+                "mp4",
+                2011,
+                now,
+                now,
+                now,
+            ),
+        )
+        duplicate_id = int(duplicate_cursor.lastrowid)
+        connection.execute(
+            """
+            INSERT INTO playback_progress (
+                user_id,
+                media_item_id,
+                position_seconds,
+                duration_seconds,
+                watch_seconds_total,
+                completed,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, duplicate_id, 654.0, 1000.0, 654.0, 0, "2026-04-23T10:00:00+00:00"),
+        )
+        connection.execute(
+            """
+            INSERT INTO playback_watch_events (
+                user_id,
+                media_item_id,
+                watched_seconds,
+                recorded_at_epoch
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (1, duplicate_id, 321.0, 1713866400),
+        )
+        connection.commit()
+
+    _sync_fake_google_drive_source(
+        monkeypatch,
+        initialized_settings,
+        source_id=source_id,
+        rows=[_build_fake_google_drive_video_row(file_id="file-1", name="Untouchables (2011).mp4")],
+    )
+
+    response = client.get("/api/library")
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 1
+    item = response.json()["items"][0]
+    assert int(item["id"]) == canonical_id
+    assert item["title"] == "Untouchables"
+    assert item["progress_seconds"] == 654.0
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, title, original_filename, file_path, external_media_id
+            FROM media_items
+            WHERE COALESCE(source_kind, 'local') = 'cloud'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            (
+                canonical_id,
+                "Untouchables (2011)",
+                "Untouchables (2011).mp4",
+                "gdrive://folder-123/file-1/Untouchables (2011).mp4",
+                "file-1",
+            ),
+        ]
+        progress_row = connection.execute(
+            """
+            SELECT media_item_id, position_seconds, watch_seconds_total
+            FROM playback_progress
+            WHERE user_id = 1
+            LIMIT 1
+            """
+        ).fetchone()
+        assert tuple(progress_row) == (canonical_id, 654.0, 654.0)
+        watch_event_row = connection.execute(
+            """
+            SELECT media_item_id, watched_seconds
+            FROM playback_watch_events
+            WHERE user_id = 1
+            LIMIT 1
+            """
+        ).fetchone()
+        assert tuple(watch_event_row) == (canonical_id, 321.0)
 
 
 def test_library_route_handles_dirty_stored_titles_without_internal_server_error(

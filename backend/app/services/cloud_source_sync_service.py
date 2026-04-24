@@ -404,6 +404,287 @@ def refresh_cloud_media_item_metadata(
     return get_media_item_record(settings, item_id=item_id)
 
 
+def _parse_recorded_timestamp(value: object) -> float:
+    if not value:
+        return 0.0
+    raw = str(value).strip()
+    if not raw:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.timestamp()
+
+
+def _merge_playback_progress_rows(connection, *, canonical_id: int, duplicate_ids: list[int]) -> None:
+    if not duplicate_ids:
+        return
+    placeholders = ",".join("?" for _ in [canonical_id, *duplicate_ids])
+    rows = connection.execute(
+        f"""
+        SELECT id, user_id, media_item_id, position_seconds, duration_seconds, watch_seconds_total, completed, updated_at
+        FROM playback_progress
+        WHERE media_item_id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        (canonical_id, *duplicate_ids),
+    ).fetchall()
+    rows_by_user: dict[int, list] = {}
+    for row in rows:
+        rows_by_user.setdefault(int(row["user_id"]), []).append(row)
+
+    for user_rows in rows_by_user.values():
+        latest_row = max(
+            user_rows,
+            key=lambda row: (_parse_recorded_timestamp(row["updated_at"]), int(row["id"])),
+        )
+        merged_duration = next(
+            (
+                float(row["duration_seconds"])
+                for row in user_rows
+                if row["duration_seconds"] is not None
+            ),
+            None,
+        )
+        merged_watch_total = max(float(row["watch_seconds_total"] or 0.0) for row in user_rows)
+        merged_completed = 1 if any(int(row["completed"] or 0) for row in user_rows) else 0
+        canonical_row = next(
+            (row for row in user_rows if int(row["media_item_id"]) == canonical_id),
+            None,
+        )
+        if canonical_row is None:
+            canonical_row = user_rows[0]
+            connection.execute(
+                """
+                UPDATE playback_progress
+                SET media_item_id = ?,
+                    position_seconds = ?,
+                    duration_seconds = ?,
+                    watch_seconds_total = ?,
+                    completed = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    canonical_id,
+                    float(latest_row["position_seconds"] or 0.0),
+                    merged_duration,
+                    merged_watch_total,
+                    merged_completed,
+                    str(latest_row["updated_at"] or utcnow_iso()),
+                    int(canonical_row["id"]),
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE playback_progress
+                SET position_seconds = ?,
+                    duration_seconds = ?,
+                    watch_seconds_total = ?,
+                    completed = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    float(latest_row["position_seconds"] or 0.0),
+                    merged_duration,
+                    merged_watch_total,
+                    merged_completed,
+                    str(latest_row["updated_at"] or utcnow_iso()),
+                    int(canonical_row["id"]),
+                ),
+            )
+
+        for row in user_rows:
+            if int(row["id"]) == int(canonical_row["id"]):
+                continue
+            connection.execute(
+                "DELETE FROM playback_progress WHERE id = ?",
+                (int(row["id"]),),
+            )
+
+
+def _merge_user_hidden_rows(connection, *, canonical_id: int, duplicate_ids: list[int]) -> None:
+    if not duplicate_ids:
+        return
+    placeholders = ",".join("?" for _ in [canonical_id, *duplicate_ids])
+    rows = connection.execute(
+        f"""
+        SELECT id, user_id, media_item_id, hidden_at
+        FROM user_hidden_media_items
+        WHERE media_item_id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        (canonical_id, *duplicate_ids),
+    ).fetchall()
+    rows_by_user: dict[int, list] = {}
+    for row in rows:
+        rows_by_user.setdefault(int(row["user_id"]), []).append(row)
+
+    for user_rows in rows_by_user.values():
+        earliest_row = min(
+            user_rows,
+            key=lambda row: (_parse_recorded_timestamp(row["hidden_at"]), int(row["id"])),
+        )
+        canonical_row = next(
+            (row for row in user_rows if int(row["media_item_id"]) == canonical_id),
+            None,
+        )
+        if canonical_row is None:
+            canonical_row = user_rows[0]
+            connection.execute(
+                """
+                UPDATE user_hidden_media_items
+                SET media_item_id = ?, hidden_at = ?
+                WHERE id = ?
+                """,
+                (
+                    canonical_id,
+                    str(earliest_row["hidden_at"]),
+                    int(canonical_row["id"]),
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE user_hidden_media_items
+                SET hidden_at = ?
+                WHERE id = ?
+                """,
+                (str(earliest_row["hidden_at"]), int(canonical_row["id"])),
+            )
+
+        for row in user_rows:
+            if int(row["id"]) == int(canonical_row["id"]):
+                continue
+            connection.execute(
+                "DELETE FROM user_hidden_media_items WHERE id = ?",
+                (int(row["id"]),),
+            )
+
+
+def _merge_global_hidden_rows(connection, *, canonical_id: int, duplicate_ids: list[int]) -> None:
+    if not duplicate_ids:
+        return
+    placeholders = ",".join("?" for _ in [canonical_id, *duplicate_ids])
+    rows = connection.execute(
+        f"""
+        SELECT id, media_item_id, hidden_by_user_id, hidden_at
+        FROM global_hidden_media_items
+        WHERE media_item_id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        (canonical_id, *duplicate_ids),
+    ).fetchall()
+    if not rows:
+        return
+    earliest_row = min(
+        rows,
+        key=lambda row: (_parse_recorded_timestamp(row["hidden_at"]), int(row["id"])),
+    )
+    canonical_row = next(
+        (row for row in rows if int(row["media_item_id"]) == canonical_id),
+        None,
+    )
+    if canonical_row is None:
+        canonical_row = rows[0]
+        connection.execute(
+            """
+            UPDATE global_hidden_media_items
+            SET media_item_id = ?, hidden_by_user_id = ?, hidden_at = ?
+            WHERE id = ?
+            """,
+            (
+                canonical_id,
+                int(earliest_row["hidden_by_user_id"]),
+                str(earliest_row["hidden_at"]),
+                int(canonical_row["id"]),
+            ),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE global_hidden_media_items
+            SET hidden_by_user_id = ?, hidden_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(earliest_row["hidden_by_user_id"]),
+                str(earliest_row["hidden_at"]),
+                int(canonical_row["id"]),
+            ),
+        )
+
+    for row in rows:
+        if int(row["id"]) == int(canonical_row["id"]):
+            continue
+        connection.execute(
+            "DELETE FROM global_hidden_media_items WHERE id = ?",
+            (int(row["id"]),),
+        )
+
+
+def _reassign_media_item_rows(
+    connection,
+    *,
+    canonical_id: int,
+    duplicate_ids: list[int],
+    table_name: str,
+) -> None:
+    if not duplicate_ids:
+        return
+    placeholders = ",".join("?" for _ in duplicate_ids)
+    connection.execute(
+        f"UPDATE {table_name} SET media_item_id = ? WHERE media_item_id IN ({placeholders})",
+        (canonical_id, *duplicate_ids),
+    )
+
+
+def _collapse_duplicate_cloud_media_rows(connection, *, canonical_id: int, duplicate_ids: list[int]) -> None:
+    if not duplicate_ids:
+        return
+    _merge_playback_progress_rows(
+        connection,
+        canonical_id=canonical_id,
+        duplicate_ids=duplicate_ids,
+    )
+    _merge_user_hidden_rows(
+        connection,
+        canonical_id=canonical_id,
+        duplicate_ids=duplicate_ids,
+    )
+    _merge_global_hidden_rows(
+        connection,
+        canonical_id=canonical_id,
+        duplicate_ids=duplicate_ids,
+    )
+    for table_name in (
+        "playback_watch_events",
+        "playback_tracking_events",
+        "subtitle_tracks",
+        "native_playback_sessions",
+        "desktop_vlc_handoffs",
+        "audit_logs",
+    ):
+        _reassign_media_item_rows(
+            connection,
+            canonical_id=canonical_id,
+            duplicate_ids=duplicate_ids,
+            table_name=table_name,
+        )
+    for duplicate_id in duplicate_ids:
+        connection.execute("DELETE FROM media_items WHERE id = ?", (duplicate_id,))
+
+
 def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, row: dict[str, object]) -> None:
     name = str(row.get("name") or row.get("id") or "Google Drive file")
     # Keep the source-provided title stem in storage. UI display title and poster
@@ -440,7 +721,7 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
     virtual_path = build_cloud_virtual_path(resource_id=resource_id, file_id=external_media_id, filename=name)
     existing_rows = connection.execute(
         """
-        SELECT id, year
+        SELECT id, year, file_path
         FROM media_items
         WHERE COALESCE(source_kind, 'local') = 'cloud'
           AND library_source_id = ?
@@ -456,6 +737,12 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
     container = Path(name).suffix.lower().lstrip(".") or None
 
     if existing_row is not None:
+        duplicate_ids = [int(candidate["id"]) for candidate in existing_rows[1:]]
+        _collapse_duplicate_cloud_media_rows(
+            connection,
+            canonical_id=int(existing_row["id"]),
+            duplicate_ids=duplicate_ids,
+        )
         connection.execute(
             """
             UPDATE media_items
@@ -503,9 +790,6 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
                 int(existing_row["id"]),
             ),
         )
-        duplicate_ids = [int(candidate["id"]) for candidate in existing_rows[1:]]
-        for duplicate_id in duplicate_ids:
-            connection.execute("DELETE FROM media_items WHERE id = ?", (duplicate_id,))
         return
 
     connection.execute(

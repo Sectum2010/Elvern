@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import Settings
 from .db import get_connection, preserve_hidden_movie_keys_for_media_item, utcnow_iso
+from .db_hidden_movie_keys import prune_recreated_local_hidden_movie_keys
 from .services.local_library_source_service import (
     ensure_current_shared_local_source_binding,
     get_effective_shared_local_library_path,
@@ -252,6 +253,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
     files_seen = 0
     files_changed = 0
     files_removed = 0
+    hidden_movie_keys_pruned = 0
 
     with get_connection(settings) as connection:
         shared_local_source_id = ensure_current_shared_local_source_binding(
@@ -497,6 +499,16 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                 )
                 files_removed += 1
 
+            prune_summary = prune_recreated_local_hidden_movie_keys(
+                connection,
+                shared_local_source_id=shared_local_source_id,
+            )
+            hidden_movie_keys_pruned = int(
+                prune_summary.get("global_hidden_movie_keys_pruned", 0)
+            ) + int(
+                prune_summary.get("user_hidden_movie_keys_pruned", 0)
+            )
+
             finished_at = utcnow_iso()
             connection.execute(
                 """
@@ -535,10 +547,11 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
             raise
 
     logger.info(
-        "Media scan complete: seen=%s changed=%s removed=%s",
+        "Media scan complete: seen=%s changed=%s removed=%s hidden_movie_keys_pruned=%s",
         files_seen,
         files_changed,
         files_removed,
+        hidden_movie_keys_pruned,
     )
     return {
         "job_id": job_id,
@@ -549,5 +562,6 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
         "files_seen": files_seen,
         "files_changed": files_changed,
         "files_removed": files_removed,
+        "hidden_movie_keys_pruned": hidden_movie_keys_pruned,
         "message": "Scan completed",
     }
