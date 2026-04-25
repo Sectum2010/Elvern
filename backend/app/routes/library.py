@@ -14,6 +14,7 @@ from ..services.library_service import (
     list_library,
     search_library,
 )
+from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
 from ..services.audit_service import log_audit_event
 
 
@@ -91,7 +92,11 @@ def get_item(item_id: int, request: Request, user=CurrentUser) -> MediaItemDetai
 
 
 @router.get("/item/{item_id}/poster")
-def get_item_poster(item_id: int, request: Request, user=CurrentUser):
+def get_item_poster(item_id: int, request: Request, user=CurrentUser, variant: str = "original"):
+    normalized_variant = (variant or "original").strip().lower() or "original"
+    if normalized_variant not in {"original", "card"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported poster variant")
+
     poster_path = get_media_item_poster_path(
         request.app.state.settings,
         user_id=user.id,
@@ -100,9 +105,19 @@ def get_item_poster(item_id: int, request: Request, user=CurrentUser):
     )
     if poster_path is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster not found")
+
+    response_path = poster_path
+    cache_control = "private, no-cache, max-age=0, must-revalidate"
+    if normalized_variant == "card":
+        response_path = get_or_create_card_poster_display_cache(
+            request.app.state.settings,
+            poster_path,
+        )
+        cache_control = "private, max-age=604800, immutable"
+
     return FileResponse(
-        poster_path,
-        headers={"Cache-Control": "private, no-cache, max-age=0, must-revalidate"},
+        response_path,
+        headers={"Cache-Control": cache_control},
     )
 
 

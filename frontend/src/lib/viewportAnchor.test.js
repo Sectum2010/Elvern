@@ -16,6 +16,7 @@ import {
 
 function createElement({
   mediaItemId = null,
+  instanceKey = null,
   seriesRailKey = null,
   rectTop = 0,
   rectLeft = 0,
@@ -44,6 +45,9 @@ function createElement({
       if (name === "data-library-item-id") {
         return mediaItemId === null ? null : String(mediaItemId);
       }
+      if (name === "data-library-card-instance-key") {
+        return instanceKey === null ? null : String(instanceKey);
+      }
       if (name === "data-series-rail-key") {
         return seriesRailKey === null ? null : String(seriesRailKey);
       }
@@ -59,6 +63,12 @@ function createProbeDocument(probeMap) {
       return probeMap.get(key) || null;
     },
     querySelector(selector) {
+      const instanceMatch = selector.match(/^\[data-library-card-instance-key="(.+)"\]$/);
+      if (instanceMatch) {
+        return Array.from(probeMap.values()).find(
+          (node) => node?.getAttribute?.("data-library-card-instance-key") === instanceMatch[1],
+        ) || null;
+      }
       const itemMatch = selector.match(/^\[data-library-item-id="(.+)"\]$/);
       if (itemMatch) {
         return Array.from(probeMap.values()).find(
@@ -82,6 +92,7 @@ function createProbeDocument(probeMap) {
 test("center anchor tracker returns the primary center media item", () => {
   const centerNode = createElement({
     mediaItemId: "41",
+    instanceKey: "other-movies:41",
     rectTop: 220,
     rectLeft: 120,
     rectHeight: 140,
@@ -110,12 +121,14 @@ test("center anchor tracker returns the primary center media item", () => {
 
   assert.equal(anchor?.anchorType, VIEWPORT_ANCHOR_MEDIA_ITEM);
   assert.equal(anchor?.itemId, "41");
+  assert.equal(anchor?.instanceKey, "other-movies:41");
   assert.equal(anchor?.sampleKey, "center");
 });
 
 test("fallback sample point finds a media item when the center point misses", () => {
   const upperNode = createElement({
     mediaItemId: "52",
+    instanceKey: "other-movies:52",
     rectTop: 140,
     rectLeft: 90,
     rectHeight: 140,
@@ -143,12 +156,14 @@ test("fallback sample point finds a media item when the center point misses", ()
   });
 
   assert.equal(anchor?.itemId, "52");
+  assert.equal(anchor?.instanceKey, "other-movies:52");
   assert.equal(anchor?.sampleKey, "upper");
 });
 
 test("media item anchor is preferred over a series rail at the same sample point", () => {
   const node = createElement({
     mediaItemId: "88",
+    instanceKey: "continue-watching:88",
     seriesRailKey: "rail-a",
     rectTop: 260,
     rectLeft: 110,
@@ -178,11 +193,13 @@ test("media item anchor is preferred over a series rail at the same sample point
 
   assert.equal(anchor?.anchorType, VIEWPORT_ANCHOR_MEDIA_ITEM);
   assert.equal(anchor?.itemId, "88");
+  assert.equal(anchor?.instanceKey, "continue-watching:88");
 });
 
-test("frozen stable anchor is preferred over orientation-time capture", () => {
+test("frozen stable anchor is preferred over orientation-time capture and exact instance wins", () => {
   const frozenAnchor = buildMediaItemAnchor({
-    itemId: "stable",
+    itemId: "77",
+    instanceKey: "other-movies:77",
     rectTop: 220,
     rectLeft: 40,
     rectHeight: 140,
@@ -193,7 +210,8 @@ test("frozen stable anchor is preferred over orientation-time capture", () => {
     orientation: "portrait",
   });
   const fallbackAnchor = buildMediaItemAnchor({
-    itemId: "fallback",
+    itemId: "77",
+    instanceKey: "continue-watching:77",
     rectTop: 300,
     rectLeft: 180,
     rectHeight: 140,
@@ -203,8 +221,8 @@ test("frozen stable anchor is preferred over orientation-time capture", () => {
     scrollY: 1500,
     orientation: "landscape",
   });
-  const stableNode = createElement({ mediaItemId: "stable", rectTop: 120 });
-  const fallbackNode = createElement({ mediaItemId: "fallback", rectTop: 240 });
+  const stableNode = createElement({ mediaItemId: "77", instanceKey: "other-movies:77", rectTop: 120 });
+  const fallbackNode = createElement({ mediaItemId: "77", instanceKey: "continue-watching:77", rectTop: 240 });
   const doc = createProbeDocument(new Map([
     ["1:1", stableNode],
     ["2:2", fallbackNode],
@@ -217,8 +235,41 @@ test("frozen stable anchor is preferred over orientation-time capture", () => {
   });
 
   assert.equal(result.source, "frozen");
-  assert.equal(result.anchor?.itemId, "stable");
+  assert.equal(result.anchor?.instanceKey, "other-movies:77");
   assert.equal(result.targetNode, stableNode);
+});
+
+test("restore falls back carefully to item id only when exact instance is missing", () => {
+  const frozenAnchor = buildMediaItemAnchor({
+    itemId: "77",
+    instanceKey: "other-movies:77",
+    rectTop: 220,
+    rectLeft: 40,
+    rectHeight: 140,
+    rectWidth: 96,
+    viewportHeight: 800,
+    viewportWidth: 390,
+    scrollY: 1500,
+    orientation: "portrait",
+  });
+  const fallbackByItemNode = createElement({
+    mediaItemId: "77",
+    instanceKey: "continue-watching:77",
+    rectTop: 140,
+  });
+  const doc = createProbeDocument(new Map([
+    ["2:2", fallbackByItemNode],
+  ]));
+
+  const result = selectPreferredOrientationRestoreTarget({
+    frozenAnchor,
+    fallbackAnchors: [],
+    doc,
+  });
+
+  assert.equal(result.source, "frozen");
+  assert.equal(result.anchor?.instanceKey, "other-movies:77");
+  assert.equal(result.targetNode, fallbackByItemNode);
 });
 
 test("direct restore computes the scroll target from item id anchor ratio", () => {

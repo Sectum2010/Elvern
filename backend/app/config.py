@@ -115,6 +115,10 @@ class Settings:
     transcode_enabled: bool
     transcode_dir: Path
     transcode_ttl_minutes: int
+    poster_display_cache_enabled: bool
+    poster_display_cache_dir: Path
+    poster_card_cache_max_width: int
+    poster_card_cache_jpeg_quality: int
     max_concurrent_transcodes: int
     max_concurrent_mobile_workers: int
     mobile_queue_timeout_seconds: int
@@ -187,6 +191,13 @@ def load_settings() -> Settings:
         transcode_enabled=_get_bool("ELVERN_TRANSCODE_ENABLED", True),
         transcode_dir=transcode_dir,
         transcode_ttl_minutes=_get_int("ELVERN_TRANSCODE_TTL_MINUTES", 60),
+        poster_display_cache_enabled=_get_bool("ELVERN_POSTER_DISPLAY_CACHE_ENABLED", True),
+        poster_display_cache_dir=_get_path(
+            "ELVERN_POSTER_DISPLAY_CACHE_DIR",
+            PROJECT_ROOT / "backend" / "data" / "poster_display_cache",
+        ),
+        poster_card_cache_max_width=_get_int("ELVERN_POSTER_CARD_CACHE_MAX_WIDTH", 1400),
+        poster_card_cache_jpeg_quality=_get_int("ELVERN_POSTER_CARD_CACHE_JPEG_QUALITY", 97),
         max_concurrent_transcodes=_get_int("ELVERN_MAX_CONCURRENT_TRANSCODES", 1),
         max_concurrent_mobile_workers=_get_int("ELVERN_MAX_CONCURRENT_MOBILE_WORKERS", 2),
         mobile_queue_timeout_seconds=_get_int("ELVERN_MOBILE_QUEUE_TIMEOUT_SECONDS", 12),
@@ -260,6 +271,10 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError(
             "Set ELVERN_ADMIN_PASSWORD_HASH or ELVERN_ADMIN_BOOTSTRAP_PASSWORD"
         )
+    if settings.poster_card_cache_max_width < 400 or settings.poster_card_cache_max_width > 4096:
+        raise ConfigError("ELVERN_POSTER_CARD_CACHE_MAX_WIDTH must be between 400 and 4096")
+    if settings.poster_card_cache_jpeg_quality < 85 or settings.poster_card_cache_jpeg_quality > 100:
+        raise ConfigError("ELVERN_POSTER_CARD_CACHE_JPEG_QUALITY must be between 85 and 100")
     if settings.native_playback_session_minutes < 1:
         raise ConfigError("ELVERN_NATIVE_PLAYBACK_SESSION_MINUTES must be at least 1")
     if settings.playback_token_ttl_seconds < 30:

@@ -38,6 +38,7 @@ export function SeriesRail({
   enableTouchReleaseAssist = false,
   activeBrowserPlaybackItemId = null,
   smartPosterLoadingEnabled = false,
+  sectionKey = null,
 }) {
   const viewportRef = useRef(null);
   const dragStateRef = useRef(null);
@@ -514,6 +515,7 @@ export function SeriesRail({
             <div className="series-rail__slide" key={item.id}>
               <MediaCard
                 backgroundPlaybackActive={activeBrowserPlaybackItemId === item.id}
+                cardInstanceKey={`${sectionKey || `series:${rail.key}`}:${item.id}`}
                 item={item}
                 smartPosterLoadingEnabled={smartPosterLoadingEnabled}
               />

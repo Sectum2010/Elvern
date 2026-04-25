@@ -32,7 +32,6 @@ import {
   computeRestoreVerificationCorrection,
   formatViewportAnchorDebug,
   formatViewportAnchorCandidateListDebug,
-  findViewportAnchorTarget,
   getOrientationRestoreRefinementDelayMs,
   getViewportMeasurement,
   isRestoreAttemptStale,
@@ -47,12 +46,14 @@ function MediaGrid({
   items,
   activeBrowserPlaybackItemId = null,
   smartPosterLoadingEnabled = false,
+  sectionKey = "library",
 }) {
   return (
     <div className="media-grid">
       {items.map((item) => (
         <MediaCard
           backgroundPlaybackActive={activeBrowserPlaybackItemId === item.id}
+          cardInstanceKey={`${sectionKey}:${item.id}`}
           item={item}
           key={item.id}
           smartPosterLoadingEnabled={smartPosterLoadingEnabled}
@@ -932,6 +933,7 @@ export function LibraryPage() {
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={library.items}
+              sectionKey="search-results"
               smartPosterLoadingEnabled
             />
           </div>
@@ -953,6 +955,7 @@ export function LibraryPage() {
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                 items={visibleContinueWatchingItems}
+                sectionKey="continue-watching"
                 smartPosterLoadingEnabled
               />
             </section>
@@ -971,6 +974,7 @@ export function LibraryPage() {
                     desktopSlots={block.slots < 6 ? block.slots : null}
                     enableTouchReleaseAssist
                     rail={block.rail}
+                    sectionKey={`series:${block.rail.key}`}
                     smartPosterLoadingEnabled
                   />
                 </div>
@@ -986,6 +990,7 @@ export function LibraryPage() {
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                 items={library.recently_added}
+                sectionKey="recently-added"
                 smartPosterLoadingEnabled
               />
             </section>
@@ -999,6 +1004,7 @@ export function LibraryPage() {
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={visibleLibraryGridItems}
+              sectionKey="other-movies"
               smartPosterLoadingEnabled
             />
             ) : (

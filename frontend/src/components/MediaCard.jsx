@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { getMovieCardTitle } from "../lib/movieTitles";
+import { getCardPosterUrl } from "../lib/posterUrls";
 import { getQualityRank } from "../lib/qualityRank";
 import { buildLibraryReturnState, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
 import {
@@ -30,6 +31,7 @@ export function MediaCard({
   item,
   backgroundPlaybackActive = false,
   smartPosterLoadingEnabled = false,
+  cardInstanceKey = null,
 }) {
   const location = useLocation();
   const displayTitle = getMovieCardTitle(item);
@@ -43,11 +45,19 @@ export function MediaCard({
     () => `poster-${item.id}-${posterInstanceId}`,
     [item.id, posterInstanceId],
   );
-  const smartPosterSchedulerEnabled = (
+  const mobileCardPosterVariantEnabled = (
     smartPosterLoadingEnabled
     && Boolean(item.poster_url)
-    && !posterFailed
     && isSmartPosterLoadingSupported()
+  );
+  const resolvedPosterUrl = useMemo(
+    () => (mobileCardPosterVariantEnabled ? getCardPosterUrl(item.poster_url) : item.poster_url),
+    [item.poster_url, mobileCardPosterVariantEnabled],
+  );
+  const smartPosterSchedulerEnabled = (
+    mobileCardPosterVariantEnabled
+    && Boolean(resolvedPosterUrl)
+    && !posterFailed
   );
   const [smartPosterSnapshot, setSmartPosterSnapshot] = useState(() => (
     smartPosterSchedulerEnabled
@@ -57,7 +67,7 @@ export function MediaCard({
   const smartPosterMode = smartPosterSchedulerEnabled
     ? (smartPosterSnapshot?.mode || "defer")
     : POSTER_MODE_ATTACH;
-  const showPoster = Boolean(item.poster_url)
+  const showPoster = Boolean(resolvedPosterUrl)
     && !posterFailed
     && (!smartPosterSchedulerEnabled || smartPosterMode === POSTER_MODE_ATTACH);
   const qualityRank = getQualityRank(item);
@@ -112,15 +122,19 @@ export function MediaCard({
     registerSmartPosterCard({
       id: smartPosterCardId,
       node: posterRef.current,
-      posterUrl: item.poster_url,
+      posterUrl: resolvedPosterUrl,
     });
     return () => {
       unregisterSmartPosterCard(smartPosterCardId);
     };
-  }, [item.poster_url, smartPosterCardId, smartPosterSchedulerEnabled]);
+  }, [resolvedPosterUrl, smartPosterCardId, smartPosterSchedulerEnabled]);
 
   return (
-    <article className="media-card" data-library-item-id={item.id}>
+    <article
+      className="media-card"
+      data-library-item-id={item.id}
+      data-library-card-instance-key={cardInstanceKey || undefined}
+    >
       <Link className="media-card__poster-link" onClick={handleOpenDetail} state={detailState} to={detailPath}>
         <div className="media-card__poster" aria-hidden="true" ref={posterRef}>
           {backgroundPlaybackActive ? (
@@ -146,7 +160,7 @@ export function MediaCard({
                   markSmartPosterCardLoaded(smartPosterCardId);
                 }
               }}
-              src={item.poster_url}
+              src={resolvedPosterUrl}
             />
           ) : (
             <div

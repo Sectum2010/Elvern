@@ -9,6 +9,7 @@ backend/data/*.sqlite*
 backend/data/*.log
 backend/data/assistant_uploads/
 backend/data/backups/
+backend/data/poster_display_cache/
 backend/data/helper_releases/
 backend/data/transcodes/
 .runtime/

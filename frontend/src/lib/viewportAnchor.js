@@ -54,7 +54,7 @@ function safeSelectorValue(value) {
 function dedupeAnchors(anchors) {
   const seen = new Set();
   return anchors.filter((anchor) => {
-    const dedupeKey = `${anchor.anchorType}:${anchor.itemId || anchor.railKey || anchor.sampleKey || "unknown"}`;
+    const dedupeKey = `${anchor.anchorType}:${anchor.instanceKey || anchor.itemId || anchor.railKey || anchor.sampleKey || "unknown"}`;
     if (seen.has(dedupeKey)) {
       return false;
     }
@@ -140,6 +140,7 @@ function buildBaseAnchor({
 
 export function buildMediaItemAnchor({
   itemId,
+  instanceKey = null,
   rectTop,
   rectLeft = 0,
   rectHeight = 0,
@@ -179,6 +180,7 @@ export function buildMediaItemAnchor({
   return {
     ...baseAnchor,
     itemId: String(itemId),
+    instanceKey: instanceKey ? String(instanceKey) : null,
   };
 }
 
@@ -228,6 +230,7 @@ export function buildSeriesRailAnchor({
 
 export function chooseViewportAnchor({
   mediaItemId = null,
+  mediaInstanceKey = null,
   mediaRectTop = null,
   mediaRectLeft = 0,
   seriesRailKey = null,
@@ -244,6 +247,7 @@ export function chooseViewportAnchor({
 } = {}) {
   const mediaAnchor = buildMediaItemAnchor({
     itemId: mediaItemId,
+    instanceKey: mediaInstanceKey,
     rectTop: mediaRectTop,
     rectLeft: mediaRectLeft,
     viewportHeight,
@@ -278,7 +282,7 @@ export function getViewportAnchorId(anchor) {
     return null;
   }
   if (anchor.anchorType === VIEWPORT_ANCHOR_MEDIA_ITEM) {
-    return anchor.itemId || null;
+    return anchor.instanceKey || anchor.itemId || null;
   }
   return anchor.railKey || null;
 }
@@ -444,6 +448,7 @@ function anchorFromProbeNode({
     const rect = mediaNode.getBoundingClientRect();
     return buildMediaItemAnchor({
       itemId: mediaNode.getAttribute("data-library-item-id"),
+      instanceKey: mediaNode.getAttribute("data-library-card-instance-key"),
       rectTop: rect.top,
       rectLeft: rect.left,
       rectHeight: rect.height,
@@ -504,6 +509,7 @@ export function captureCenterMovieAnchor({
     const rect = mediaNode.getBoundingClientRect();
     return buildMediaItemAnchor({
       itemId: mediaNode.getAttribute("data-library-item-id"),
+      instanceKey: mediaNode.getAttribute("data-library-card-instance-key"),
       rectTop: rect.top,
       rectLeft: rect.left,
       rectHeight: rect.height,
@@ -609,6 +615,14 @@ export function findViewportAnchorTarget(anchor, {
     return null;
   }
   if (anchor.anchorType === VIEWPORT_ANCHOR_MEDIA_ITEM && anchor.itemId) {
+    if (anchor.instanceKey) {
+      const exactNode = doc.querySelector(
+        `[data-library-card-instance-key="${safeSelectorValue(anchor.instanceKey)}"]`,
+      );
+      if (exactNode) {
+        return exactNode;
+      }
+    }
     return doc.querySelector(`[data-library-item-id="${safeSelectorValue(anchor.itemId)}"]`);
   }
   if (anchor.anchorType === VIEWPORT_ANCHOR_SERIES_RAIL && anchor.railKey) {
