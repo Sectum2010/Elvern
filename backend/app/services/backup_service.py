@@ -13,6 +13,7 @@ from ..config import PROJECT_ROOT, Settings
 
 
 BACKUP_FORMAT_VERSION = 1
+RESTORE_PLAN_FORMAT_VERSION = 1
 BACKUP_WARNING = "This backup may contain secrets. Do not commit or share it."
 
 
@@ -40,6 +41,29 @@ def _resolve_backups_dir(backups_dir: str | Path | None) -> Path:
     if backups_dir is None:
         return _backup_root().resolve()
     return Path(backups_dir).expanduser().resolve()
+
+
+def get_backups_dir_path(
+    settings: Settings,
+    backups_dir: str | Path | None = None,
+) -> str:
+    del settings
+    return str(_resolve_backups_dir(backups_dir))
+
+
+def _allocate_default_checkpoint_dir(created_at: datetime) -> Path:
+    backups_dir = _resolve_backups_dir(None)
+    base_name = f"elvern-backup-{_timestamp_for_directory(created_at)}"
+    candidate = (backups_dir / base_name).resolve()
+    if not candidate.exists():
+        return candidate
+
+    suffix = 2
+    while True:
+        candidate = (backups_dir / f"{base_name}-{suffix}").resolve()
+        if not candidate.exists():
+            return candidate
+        suffix += 1
 
 
 def _set_private_permissions(path: Path, *, is_dir: bool) -> None:
@@ -184,6 +208,26 @@ def _load_manifest_if_present(checkpoint_dir: Path) -> dict[str, object] | None:
     return payload
 
 
+def _resolve_checkpoint_dir(path: str | Path) -> Path:
+    requested_path = Path(path).expanduser().resolve()
+    return requested_path if requested_path.is_dir() else requested_path.parent
+
+
+def _safe_resolved_path(path: Path) -> str:
+    return str(path.expanduser().resolve())
+
+
+def _collect_inspection_errors(inspection: dict[str, object]) -> list[str]:
+    errors = list(str(value) for value in inspection.get("errors") or [])
+    if inspection.get("missing_files"):
+        errors.append(
+            "Missing files: " + ", ".join(str(value) for value in inspection["missing_files"])
+        )
+    if inspection.get("hash_mismatches"):
+        errors.append("Hash mismatches detected")
+    return errors
+
+
 def _write_manifest(manifest_path: Path, payload: dict[str, object]) -> None:
     _ensure_private_dir(manifest_path.parent)
     manifest_path.write_text(
@@ -211,7 +255,7 @@ def create_backup_checkpoint(
     checkpoint_dir = (
         Path(output_dir).expanduser().resolve()
         if output_dir is not None
-        else (_resolve_backups_dir(None) / f"elvern-backup-{_timestamp_for_directory(created_at)}").resolve()
+        else _allocate_default_checkpoint_dir(created_at)
     )
     if checkpoint_dir.exists():
         raise FileExistsError(f"Backup checkpoint already exists: {checkpoint_dir}")
@@ -292,8 +336,7 @@ def create_backup_checkpoint(
 
 
 def inspect_backup_checkpoint(path: str | Path) -> dict[str, object]:
-    requested_path = Path(path).expanduser().resolve()
-    checkpoint_dir = requested_path if requested_path.is_dir() else requested_path.parent
+    checkpoint_dir = _resolve_checkpoint_dir(path)
     manifest_path = checkpoint_dir / "manifest.json"
 
     errors: list[str] = []
@@ -321,7 +364,11 @@ def inspect_backup_checkpoint(path: str | Path) -> dict[str, object]:
             missing_files.append(db_snapshot_filename)
             db_integrity_check_result = "missing"
         else:
-            db_integrity_check_result = _sqlite_integrity_check(db_snapshot_path)
+            try:
+                db_integrity_check_result = _sqlite_integrity_check(db_snapshot_path)
+            except sqlite3.Error as exc:
+                errors.append(f"SQLite integrity_check failed for {db_snapshot_filename}: {exc}")
+                db_integrity_check_result = f"error: {exc}"
 
         for entry in manifest_payload.get("files") or []:
             relative_path = str((entry or {}).get("relative_path") or "")
@@ -368,6 +415,190 @@ def inspect_backup_checkpoint(path: str | Path) -> dict[str, object]:
     }
 
 
+def resolve_backup_checkpoint_path(
+    settings: Settings,
+    checkpoint_id: str,
+    *,
+    backups_dir: str | Path | None = None,
+) -> Path:
+    del settings
+    normalized_id = str(checkpoint_id or "").strip()
+    if not normalized_id:
+        raise ValueError("Checkpoint id is required.")
+    if normalized_id in {".", ".."}:
+        raise ValueError("Checkpoint id must be a checkpoint directory name.")
+    if "/" in normalized_id or "\\" in normalized_id:
+        raise ValueError("Checkpoint id must not contain path separators.")
+    if Path(normalized_id).name != normalized_id:
+        raise ValueError("Checkpoint id must be a directory basename only.")
+
+    resolved_backups_dir = _resolve_backups_dir(backups_dir)
+    candidate = (resolved_backups_dir / normalized_id).resolve()
+    try:
+        candidate.relative_to(resolved_backups_dir)
+    except ValueError as exc:
+        raise ValueError("Checkpoint id must resolve under the backup directory.") from exc
+
+    if not candidate.is_dir() or not (candidate / "manifest.json").is_file():
+        raise FileNotFoundError(f"Unknown checkpoint: {normalized_id}")
+    return candidate
+
+
+def summarize_backup_checkpoint(path: str | Path) -> dict[str, object]:
+    checkpoint_dir = _resolve_checkpoint_dir(path)
+    inspection = inspect_backup_checkpoint(checkpoint_dir)
+    manifest = inspection.get("manifest") or {}
+    total_size_bytes, file_count = _directory_file_stats(checkpoint_dir)
+    errors = _collect_inspection_errors(inspection)
+    return {
+        "checkpoint_id": checkpoint_dir.name,
+        "path": str(checkpoint_dir),
+        "created_at_utc": manifest.get("created_at_utc"),
+        "backup_format_version": manifest.get("backup_format_version"),
+        "backup_trigger": manifest.get("backup_trigger"),
+        "auto_checkpoint": bool(manifest.get("auto_checkpoint") is True),
+        "contains_secrets": bool(manifest.get("contains_secrets")),
+        "db_integrity_check_result": inspection.get("db_integrity_check_result"),
+        "total_size_bytes": total_size_bytes,
+        "file_count": file_count,
+        "git_commit": manifest.get("git_commit"),
+        "git_dirty": manifest.get("git_dirty"),
+        "inspect_valid": bool(inspection.get("valid")),
+        "inspect_error": "; ".join(errors) if errors else None,
+    }
+
+
+def build_restore_dry_run_plan(
+    settings: Settings,
+    checkpoint_path: str | Path,
+) -> dict[str, object]:
+    inspection = inspect_backup_checkpoint(checkpoint_path)
+    checkpoint_dir = Path(str(inspection["backup_path"]))
+    manifest = inspection.get("manifest") or {}
+
+    source_metadata = {
+        "source_db_path": manifest.get("source_db_path"),
+        "source_project_root": manifest.get("project_root"),
+        "source_public_app_origin": manifest.get("public_app_origin") or "",
+        "source_backend_origin": manifest.get("backend_origin") or "",
+        "source_media_root_path": manifest.get("media_root_path"),
+        "source_transcode_dir": manifest.get("transcode_dir"),
+    }
+    current_metadata = {
+        "current_db_path": _safe_resolved_path(settings.db_path),
+        "current_project_root": _safe_resolved_path(PROJECT_ROOT),
+        "current_public_app_origin": settings.public_app_origin,
+        "current_backend_origin": settings.backend_origin,
+        "current_media_root_path": _safe_resolved_path(settings.media_root),
+        "current_transcode_dir": _safe_resolved_path(settings.transcode_dir),
+    }
+    comparison = {
+        "same_project_root": source_metadata["source_project_root"] == current_metadata["current_project_root"],
+        "same_db_path": source_metadata["source_db_path"] == current_metadata["current_db_path"],
+        "same_public_app_origin": source_metadata["source_public_app_origin"] == current_metadata["current_public_app_origin"],
+        "same_backend_origin": source_metadata["source_backend_origin"] == current_metadata["current_backend_origin"],
+        "same_media_root_path": source_metadata["source_media_root_path"] == current_metadata["current_media_root_path"],
+    }
+
+    restore_scope = {
+        "db_snapshot_available": bool(inspection.get("db_snapshot_exists")),
+        "env_snapshot_available": (checkpoint_dir / "deploy" / "env" / "elvern.env").is_file(),
+        "helper_releases_available": (checkpoint_dir / "backend" / "data" / "helper_releases").exists(),
+        "assistant_uploads_available": (checkpoint_dir / "backend" / "data" / "assistant_uploads").exists(),
+        "media_files_included": False,
+        "poster_files_included": False,
+        "transcodes_included": False,
+    }
+
+    blocking_errors: list[str] = []
+    blocking_errors.extend(str(value) for value in inspection.get("errors") or [])
+    if inspection.get("missing_files"):
+        blocking_errors.append(
+            "Missing checkpoint files: " + ", ".join(str(value) for value in inspection["missing_files"])
+        )
+    if inspection.get("hash_mismatches"):
+        mismatched_paths = [
+            str(entry.get("relative_path") or "")
+            for entry in inspection.get("hash_mismatches") or []
+            if str(entry.get("relative_path") or "")
+        ]
+        blocking_errors.append(
+            "Checkpoint file hash mismatches: " + ", ".join(mismatched_paths)
+        )
+    if inspection.get("db_integrity_check_result") != "ok":
+        blocking_errors.append(
+            f"Backup database integrity_check result is {inspection.get('db_integrity_check_result')!r}"
+        )
+
+    warnings: list[str] = []
+    if not comparison["same_project_root"]:
+        warnings.append("Checkpoint project_root differs from the current project root.")
+    if not comparison["same_db_path"]:
+        warnings.append("Checkpoint source_db_path differs from the current live db_path.")
+    if not comparison["same_public_app_origin"]:
+        warnings.append("Checkpoint public_app_origin differs from the current live public_app_origin.")
+    if not comparison["same_backend_origin"]:
+        warnings.append("Checkpoint backend_origin differs from the current live backend_origin.")
+    if not comparison["same_media_root_path"]:
+        warnings.append("Checkpoint media_root_path differs from the current live media_root_path.")
+    if not restore_scope["env_snapshot_available"]:
+        warnings.append("Checkpoint does not include deploy/env/elvern.env.")
+    if not restore_scope["helper_releases_available"]:
+        warnings.append("Checkpoint does not include backend/data/helper_releases.")
+    if not restore_scope["assistant_uploads_available"]:
+        warnings.append("Checkpoint does not include backend/data/assistant_uploads.")
+
+    checkpoint_valid = bool(inspection.get("valid")) and not blocking_errors
+
+    return {
+        "restore_plan_format_version": RESTORE_PLAN_FORMAT_VERSION,
+        "checkpoint_id": inspection["checkpoint_id"],
+        "checkpoint_path": inspection["backup_path"],
+        "checkpoint_created_at_utc": manifest.get("created_at_utc"),
+        "checkpoint_valid": checkpoint_valid,
+        "blocking_errors": blocking_errors,
+        "warnings": warnings,
+        "contains_secrets": bool(manifest.get("contains_secrets")),
+        "warning": BACKUP_WARNING if bool(manifest.get("contains_secrets")) else None,
+        "backup_trigger": manifest.get("backup_trigger"),
+        "auto_checkpoint": bool(manifest.get("auto_checkpoint") is True),
+        "source_metadata": source_metadata,
+        "current_metadata": current_metadata,
+        "comparison": comparison,
+        "restore_scope": restore_scope,
+        "not_included": [
+            "media library files",
+            "poster library files",
+            "transcodes/cache",
+            "virtualenv",
+            "frontend node_modules/dist",
+            "logs",
+        ],
+        "required_pre_restore_steps": [
+            "Stop backend and frontend services before any manual recovery work.",
+            "Create a fresh safety backup checkpoint of the current live state.",
+            "Verify the target runtime paths before touching db/env/helper/upload files.",
+            "Confirm secrets handling before moving any checkpoint files.",
+        ],
+        "manual_restore_outline": [
+            "Review this plan and resolve any blocking_errors first.",
+            "Stop Elvern services and make a fresh safety backup of the current live state.",
+            "Decide which checkpoint components you intend to recover: db snapshot, env snapshot, helper releases, assistant uploads.",
+            "Verify the target live paths and secret-handling requirements before replacing any runtime files.",
+            "Perform any recovery manually using the verified checkpoint files only after explicit operator confirmation.",
+            "Start Elvern again and verify login, library state, and settings after the manual recovery.",
+        ],
+        "verification": {
+            "manifest_exists": bool(inspection.get("manifest_exists")),
+            "db_snapshot_exists": bool(inspection.get("db_snapshot_exists")),
+            "db_integrity_check_result": inspection.get("db_integrity_check_result"),
+            "files_verified": inspection.get("files_verified"),
+            "missing_files": list(inspection.get("missing_files") or []),
+            "hash_mismatches": list(inspection.get("hash_mismatches") or []),
+        },
+    }
+
+
 def list_backup_checkpoints(
     settings: Settings,
     backups_dir: str | Path | None = None,
@@ -385,34 +616,7 @@ def list_backup_checkpoints(
     ):
         if not (checkpoint_dir / "manifest.json").is_file():
             continue
-        inspection = inspect_backup_checkpoint(checkpoint_dir)
-        manifest = inspection.get("manifest") or {}
-        total_size_bytes, file_count = _directory_file_stats(checkpoint_dir)
-        errors = list(inspection.get("errors") or [])
-        if inspection.get("missing_files"):
-            errors.append(
-                "Missing files: " + ", ".join(str(value) for value in inspection["missing_files"])
-            )
-        if inspection.get("hash_mismatches"):
-            errors.append("Hash mismatches detected")
-        entries.append(
-            {
-                "checkpoint_id": checkpoint_dir.name,
-                "path": str(checkpoint_dir),
-                "created_at_utc": manifest.get("created_at_utc"),
-                "backup_format_version": manifest.get("backup_format_version"),
-                "backup_trigger": manifest.get("backup_trigger"),
-                "auto_checkpoint": bool(manifest.get("auto_checkpoint") is True),
-                "contains_secrets": bool(manifest.get("contains_secrets")),
-                "db_integrity_check_result": inspection.get("db_integrity_check_result"),
-                "total_size_bytes": total_size_bytes,
-                "file_count": file_count,
-                "git_commit": manifest.get("git_commit"),
-                "git_dirty": manifest.get("git_dirty"),
-                "inspect_valid": bool(inspection.get("valid")),
-                "inspect_error": "; ".join(errors) if errors else None,
-            }
-        )
+        entries.append(summarize_backup_checkpoint(checkpoint_dir))
 
     entries.sort(
         key=lambda entry: (

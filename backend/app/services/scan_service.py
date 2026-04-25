@@ -9,7 +9,6 @@ from ..config import Settings
 from ..db import utcnow_iso
 from ..media_scan import build_local_library_freshness_snapshot, scan_media_library
 from .app_settings_service import get_global_app_setting, set_global_app_setting
-from .cloud_library_service import sync_all_google_drive_sources
 
 
 logger = logging.getLogger(__name__)
@@ -225,14 +224,6 @@ class ScanService:
                 )
             except Exception:
                 logger.exception("Failed to store local library freshness snapshot after scan")
-            if reason == "manual":
-                cloud_summary = sync_all_google_drive_sources(self.settings)
-                sources_synced = int(cloud_summary.get("sources_synced", 0))
-                media_rows_written = int(cloud_summary.get("media_rows_written", 0))
-                result["message"] = (
-                    f"Scan completed. Cloud sources synced: {sources_synced}. "
-                    f"Cloud media rows refreshed: {media_rows_written}."
-                )
         except Exception as exc:
             logger.exception("Media scan failed")
             self._update_state(

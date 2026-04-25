@@ -7,6 +7,7 @@ from ..auth import CurrentUser, resolve_client_ip
 from ..progress import refresh_recent_tracking
 from ..schemas import LibraryListResponse, MediaItemDetail, ScanResponse
 from ..services.backup_service import create_backup_checkpoint, prune_backup_checkpoints
+from ..services.cloud_library_service import sync_all_google_drive_sources
 from ..services.library_service import (
     get_media_item_detail,
     get_media_item_poster_path,
@@ -17,6 +18,48 @@ from ..services.audit_service import log_audit_event
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+
+def _recent_refresh_message(refresh_summary: dict[str, object]) -> str:
+    if refresh_summary["rebuilt_items"] or refresh_summary["inserted_items"]:
+        return "Recent Watched refreshed."
+    return "Recent Watched is already current."
+
+
+def _cloud_sync_message(cloud_summary: dict[str, object]) -> str:
+    message = str(cloud_summary.get("message") or "").strip()
+    if message:
+        return message
+    return "Cloud refresh status updated."
+
+
+def _local_scan_message(state: dict[str, object]) -> str:
+    if state["running"]:
+        return "Local scan started."
+    return str(state.get("message") or "Local scan state updated.")
+
+
+def _rescan_message(
+    refresh_summary: dict[str, object],
+    cloud_summary: dict[str, object],
+    state: dict[str, object],
+) -> str:
+    cloud_status = str(cloud_summary.get("status") or "disabled")
+    if cloud_status in {"failed", "partial_failure"}:
+        parts = [
+            _local_scan_message(state),
+            _cloud_sync_message(cloud_summary),
+        ]
+        if refresh_summary["rebuilt_items"] or refresh_summary["inserted_items"]:
+            parts.append(_recent_refresh_message(refresh_summary))
+        return " ".join(part for part in parts if part)
+    return " ".join(
+        [
+            _recent_refresh_message(refresh_summary),
+            _cloud_sync_message(cloud_summary),
+            _local_scan_message(state),
+        ]
+    )
 
 
 @router.get("", response_model=LibraryListResponse)
@@ -92,8 +135,13 @@ def rescan(request: Request, user=CurrentUser) -> ScanResponse:
             message=message,
             running=False,
             job_id=None,
+            cloud_sync=None,
         )
 
+    auto_backup_status = "created"
+    auto_backup_error = None
+    auto_checkpoint = None
+    prune_summary = None
     try:
         auto_checkpoint = create_backup_checkpoint(
             request.app.state.settings,
@@ -109,16 +157,32 @@ def rescan(request: Request, user=CurrentUser) -> ScanResponse:
             },
         )
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Backup checkpoint failed; rescan was not started.",
-        ) from exc
+        auto_backup_status = "failed"
+        auto_backup_error = str(exc)
+    else:
+        try:
+            prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
+        except Exception:
+            prune_summary = None
 
-    prune_summary = None
+    cloud_sync_error = None
     try:
-        prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
-    except Exception:
-        prune_summary = None
+        cloud_sync = sync_all_google_drive_sources(request.app.state.settings)
+    except Exception as exc:
+        cloud_sync_error = str(exc)
+        cloud_sync = {
+            "status": "failed",
+            "provider_auth_required": False,
+            "reconnect_required": False,
+            "message": "Cloud refresh failed. Cloud library was not refreshed and may be stale.",
+            "sources_total": 0,
+            "sources_synced": 0,
+            "sources_failed": 0,
+            "media_rows_written": 0,
+            "errors": [cloud_sync_error],
+            "stale_state_warning": "Cloud library was not refreshed and may be stale until the next successful sync.",
+            "source_results": [],
+        }
 
     state = request.app.state.scan_service.enqueue_scan(reason="manual")
     log_audit_event(
@@ -135,19 +199,26 @@ def rescan(request: Request, user=CurrentUser) -> ScanResponse:
             "running": bool(state["running"]),
             "job_id": state.get("job_id"),
             "recent_refresh": refresh_summary,
-            "auto_backup_checkpoint_id": auto_checkpoint.get("checkpoint_id"),
-            "auto_backup_path": auto_checkpoint.get("backup_path"),
-            "auto_backup_created_at_utc": auto_checkpoint.get("created_at_utc"),
+            "auto_backup_status": auto_backup_status,
+            "auto_backup_checkpoint_id": auto_checkpoint.get("checkpoint_id") if auto_checkpoint else None,
+            "auto_backup_path": auto_checkpoint.get("backup_path") if auto_checkpoint else None,
+            "auto_backup_created_at_utc": auto_checkpoint.get("created_at_utc") if auto_checkpoint else None,
+            "auto_backup_error": auto_backup_error,
             "auto_backup_prune_summary": prune_summary,
+            "cloud_sync": cloud_sync,
+            "cloud_sync_status": cloud_sync.get("status"),
+            "cloud_sync_error": cloud_sync_error or next(
+                (str(value) for value in cloud_sync.get("errors") or [] if str(value).strip()),
+                None,
+            ),
         },
     )
-    message = (
-        "Recent Watched refreshed. Scan started"
-        if state["running"]
-        else str(state.get("message") or "Scan state updated")
-    )
+    message = _rescan_message(refresh_summary, cloud_sync, state)
+    if auto_backup_status == "failed":
+        message = f"{message}. Backup checkpoint failed; rescan started anyway."
     return ScanResponse(
         message=message,
         running=bool(state["running"]),
         job_id=state.get("job_id"),
+        cloud_sync=cloud_sync,
     )

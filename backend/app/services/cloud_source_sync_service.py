@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +13,7 @@ from ..config import Settings
 from ..db import get_connection, preserve_hidden_movie_keys_for_media_item, utcnow_iso
 from ..media_scan import infer_title_and_year
 from .google_drive_service import (
+    PROVIDER_AUTH_REQUIRED_CODE,
     build_cloud_virtual_path,
     fetch_drive_file_metadata,
     fetch_drive_resource_metadata,
@@ -96,38 +99,200 @@ def _should_resync_source(row) -> bool:
     return False
 
 
+def _cloud_sync_error_message(detail: object) -> str:
+    parsed_detail = _parse_cloud_sync_error_detail(detail)
+    if parsed_detail is not None:
+        return str(
+            parsed_detail.get("message")
+            or parsed_detail.get("title")
+            or parsed_detail.get("detail")
+            or "Google Drive sync failed."
+        )
+    return str(detail or "Google Drive sync failed.")
+
+
+def _parse_cloud_sync_error_detail(detail: object) -> dict[str, object] | None:
+    if isinstance(detail, dict):
+        return detail
+    if detail in {None, ""}:
+        return None
+    text = str(detail).strip()
+    if not text:
+        return None
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            parsed = parser(text)
+        except (TypeError, ValueError, SyntaxError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {"message": text}
+
+
+def _cloud_sync_error_flags(detail: object) -> dict[str, object]:
+    parsed_detail = _parse_cloud_sync_error_detail(detail)
+    provider_auth_required = bool(
+        parsed_detail
+        and str(parsed_detail.get("code") or "").strip() == PROVIDER_AUTH_REQUIRED_CODE
+    )
+    reconnect_required = bool(provider_auth_required or (parsed_detail and parsed_detail.get("reauth_required")))
+    return {
+        "provider_auth_required": provider_auth_required,
+        "reconnect_required": reconnect_required,
+        "error_message": _cloud_sync_error_message(detail),
+    }
+
+
+def _cloud_sync_status_message(summary: dict[str, object]) -> str:
+    status = str(summary.get("status") or "disabled")
+    provider_auth_required = bool(summary.get("provider_auth_required"))
+    reconnect_required = bool(summary.get("reconnect_required"))
+    sources_synced = int(summary.get("sources_synced") or 0)
+    sources_failed = int(summary.get("sources_failed") or 0)
+    media_rows_written = int(summary.get("media_rows_written") or 0)
+
+    if status == "disabled":
+        return "Google Drive sync is disabled on this server."
+    if provider_auth_required or reconnect_required:
+        return "Google Drive reconnect is required. Cloud library was not refreshed and may be stale."
+    if status == "success":
+        total_sources = int(summary.get("sources_total") or 0)
+        if total_sources <= 0:
+            return "No cloud library sources are configured."
+        return (
+            f"Cloud refresh completed: {sources_synced} source(s) synced, "
+            f"{media_rows_written} media row(s) refreshed."
+        )
+    if status == "partial_failure":
+        return (
+            f"Cloud refresh completed with warnings: {sources_synced} source(s) synced, "
+            f"{sources_failed} failed, {media_rows_written} media row(s) refreshed. "
+            "Cloud items from failed sources may be stale."
+        )
+    return (
+        f"Cloud refresh failed: {sources_failed} source(s) failed, "
+        f"{media_rows_written} media row(s) refreshed. Cloud library was not refreshed and may be stale."
+    )
+
+
+def _cloud_sync_stale_warning(summary: dict[str, object]) -> str | None:
+    status = str(summary.get("status") or "disabled")
+    if status not in {"failed", "partial_failure"}:
+        return None
+    if bool(summary.get("provider_auth_required")) or bool(summary.get("reconnect_required")):
+        return "Cloud library was not refreshed and may be stale until Google Drive reconnects and the next sync succeeds."
+    return "Cloud items from failed sources may be stale until the next successful sync."
+
+
+def _finalize_cloud_sync_summary(summary: dict[str, object]) -> dict[str, object]:
+    if int(summary["sources_failed"]) and int(summary["sources_synced"]):
+        summary["status"] = "partial_failure"
+    elif int(summary["sources_failed"]):
+        summary["status"] = "failed"
+    else:
+        summary["status"] = "success"
+    summary["message"] = _cloud_sync_status_message(summary)
+    summary["stale_state_warning"] = _cloud_sync_stale_warning(summary)
+    return summary
+
+
 def sync_all_google_drive_sources(
     settings: Settings,
     *,
     provider: str,
     get_access_token_by_account_id: Callable[..., str],
-) -> dict[str, int]:
+) -> dict[str, object]:
+    if not google_drive_enabled(settings):
+        return {
+            "status": "disabled",
+            "provider_auth_required": False,
+            "reconnect_required": False,
+            "message": "Google Drive sync is disabled on this server.",
+            "sources_total": 0,
+            "sources_synced": 0,
+            "sources_failed": 0,
+            "media_rows_written": 0,
+            "errors": [],
+            "stale_state_warning": None,
+            "source_results": [],
+        }
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
-            SELECT id
+            SELECT id, display_name
             FROM library_sources
             WHERE provider = ?
             ORDER BY id ASC
             """,
             (provider,),
         ).fetchall()
-    sources_synced = 0
-    media_rows_written = 0
-    for row in rows:
-        source_count = _sync_google_drive_library_source(
-            settings,
-            source_id=int(row["id"]),
-            raise_on_error=True,
-            provider=provider,
-            get_access_token_by_account_id=get_access_token_by_account_id,
-        )
-        sources_synced += 1
-        media_rows_written += source_count
-    return {
-        "sources_synced": sources_synced,
-        "media_rows_written": media_rows_written,
+    summary: dict[str, object] = {
+        "status": "success",
+        "provider_auth_required": False,
+        "reconnect_required": False,
+        "message": "",
+        "sources_total": len(rows),
+        "sources_synced": 0,
+        "sources_failed": 0,
+        "media_rows_written": 0,
+        "errors": [],
+        "stale_state_warning": None,
+        "source_results": [],
     }
+    if not rows:
+        return _finalize_cloud_sync_summary(summary)
+    for row in rows:
+        source_id = int(row["id"])
+        source_label = str(row["display_name"] or f"source:{source_id}")
+        try:
+            source_count = _sync_google_drive_library_source(
+                settings,
+                source_id=source_id,
+                raise_on_error=True,
+                provider=provider,
+                get_access_token_by_account_id=get_access_token_by_account_id,
+            )
+        except HTTPException as exc:
+            error_flags = _cloud_sync_error_flags(exc.detail)
+            summary["sources_failed"] = int(summary["sources_failed"]) + 1
+            summary["provider_auth_required"] = bool(summary["provider_auth_required"]) or bool(
+                error_flags["provider_auth_required"]
+            )
+            summary["reconnect_required"] = bool(summary["reconnect_required"]) or bool(
+                error_flags["reconnect_required"]
+            )
+            cast_errors = list(summary["errors"])
+            cast_errors.append(str(error_flags["error_message"]))
+            summary["errors"] = cast_errors
+            cast_results = list(summary["source_results"])
+            cast_results.append(
+                {
+                    "source_id": source_id,
+                    "display_name": source_label,
+                    "status": "failed",
+                    "provider_auth_required": bool(error_flags["provider_auth_required"]),
+                    "reconnect_required": bool(error_flags["reconnect_required"]),
+                    "media_rows_written": 0,
+                    "error": str(error_flags["error_message"]),
+                }
+            )
+            summary["source_results"] = cast_results
+            continue
+        summary["sources_synced"] = int(summary["sources_synced"]) + 1
+        summary["media_rows_written"] = int(summary["media_rows_written"]) + int(source_count)
+        cast_results = list(summary["source_results"])
+        cast_results.append(
+            {
+                "source_id": source_id,
+                "display_name": source_label,
+                "status": "synced",
+                "media_rows_written": int(source_count),
+                "error": None,
+            }
+        )
+        summary["source_results"] = cast_results
+
+    return _finalize_cloud_sync_summary(summary)
 
 
 def sync_google_drive_library_source(

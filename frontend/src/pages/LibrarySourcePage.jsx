@@ -14,7 +14,11 @@ import {
 import { packSeriesRailRows } from "../lib/seriesRails";
 
 
-function MediaGrid({ items, activeBrowserPlaybackItemId = null }) {
+function MediaGrid({
+  items,
+  activeBrowserPlaybackItemId = null,
+  smartPosterLoadingEnabled = false,
+}) {
   return (
     <div className="media-grid">
       {items.map((item) => (
@@ -22,6 +26,7 @@ function MediaGrid({ items, activeBrowserPlaybackItemId = null }) {
           backgroundPlaybackActive={activeBrowserPlaybackItemId === item.id}
           item={item}
           key={item.id}
+          smartPosterLoadingEnabled={smartPosterLoadingEnabled}
         />
       ))}
     </div>
@@ -269,6 +274,7 @@ export function LibrarySourcePage({ sourceKind }) {
                       activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                       desktopSlots={block.slots < 6 ? block.slots : null}
                       rail={block.rail}
+                      smartPosterLoadingEnabled
                     />
                   </div>
                 ))}
@@ -282,6 +288,7 @@ export function LibrarySourcePage({ sourceKind }) {
                 <MediaGrid
                   activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                   items={filteredItems}
+                  smartPosterLoadingEnabled
                 />
               </section>
             ) : null}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 from typing import Callable, Literal
 
 from fastapi import HTTPException, status
@@ -7,7 +9,159 @@ from fastapi import HTTPException, status
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..models import AuthenticatedUser
-from .google_drive_service import fetch_drive_resource_metadata, google_drive_enabled
+from .google_drive_service import (
+    PROVIDER_AUTH_REQUIRED_CODE,
+    fetch_drive_resource_metadata,
+    google_drive_enabled,
+)
+
+
+def _parse_cloud_source_error_detail(value: object) -> dict[str, object] | None:
+    if isinstance(value, dict):
+        return value
+    if value in {None, ""}:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            parsed = parser(text)
+        except (TypeError, ValueError, SyntaxError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {"message": text}
+
+
+def _cloud_source_status_fields(last_error: object) -> dict[str, object]:
+    detail = _parse_cloud_source_error_detail(last_error)
+    if detail is None:
+        return {
+            "sync_status": "never_synced",
+            "provider_auth_required": False,
+            "reconnect_required": False,
+            "status_message": None,
+            "stale_state_warning": None,
+            "last_error_message": None,
+        }
+
+    provider_auth_required = str(detail.get("code") or "").strip() == PROVIDER_AUTH_REQUIRED_CODE
+    reconnect_required = bool(provider_auth_required or detail.get("reauth_required"))
+    if reconnect_required:
+        return {
+            "sync_status": "reconnect_required",
+            "provider_auth_required": provider_auth_required,
+            "reconnect_required": reconnect_required,
+            "status_message": "Reconnect Google Drive.",
+            "stale_state_warning": (
+                "Cloud library was not refreshed and may be stale until Google Drive reconnects and the next sync succeeds."
+            ),
+            "last_error_message": str(
+                detail.get("message")
+                or detail.get("title")
+                or detail.get("detail")
+                or "Reconnect Google Drive to continue this action."
+            ),
+        }
+
+    message = str(
+        detail.get("message")
+        or detail.get("title")
+        or detail.get("detail")
+        or "Cloud sync failed."
+    ).strip()
+    return {
+        "sync_status": "error",
+        "provider_auth_required": provider_auth_required,
+        "reconnect_required": reconnect_required,
+        "status_message": message or "Cloud sync failed.",
+        "stale_state_warning": "Cloud items from this source may be stale until the next successful sync.",
+        "last_error_message": message or "Cloud sync failed.",
+    }
+
+
+def _normalize_cloud_source_status(*, last_synced_at: object, last_error: object) -> dict[str, object]:
+    status_fields = _cloud_source_status_fields(last_error)
+    if status_fields["sync_status"] == "never_synced":
+        if last_synced_at:
+            return {
+                **status_fields,
+                "sync_status": "current",
+            }
+        return status_fields
+
+    if status_fields["sync_status"] == "error" and last_synced_at:
+        return {
+            **status_fields,
+            "sync_status": "stale",
+            "status_message": status_fields["status_message"] or "Cloud sync failed.",
+        }
+    return status_fields
+
+
+def _build_google_connection_status(
+    *,
+    enabled: bool,
+    connected: bool,
+    account_row,
+    visible_sources: list[dict[str, object]],
+) -> dict[str, object]:
+    if not enabled:
+        return {
+            "connection_status": "not_configured",
+            "provider_auth_required": False,
+            "reconnect_required": False,
+            "stale_state_warning": None,
+            "status_message": "Google Drive OAuth setup is not configured on this server.",
+        }
+    if any(bool(source.get("reconnect_required")) for source in visible_sources):
+        return {
+            "connection_status": "reconnect_required",
+            "provider_auth_required": any(bool(source.get("provider_auth_required")) for source in visible_sources),
+            "reconnect_required": True,
+            "stale_state_warning": (
+                "Cloud library was not refreshed and may be stale until Google Drive reconnects and the next sync succeeds."
+            ),
+            "status_message": "Reconnect Google Drive. Cloud library may be stale until you reconnect.",
+        }
+
+    if not connected:
+        return {
+            "connection_status": "not_connected",
+            "provider_auth_required": False,
+            "reconnect_required": False,
+            "stale_state_warning": None,
+            "status_message": "Connect Google Drive to add or refresh cloud libraries.",
+        }
+
+    stale_sources = [source for source in visible_sources if source.get("sync_status") == "stale"]
+    error_sources = [source for source in visible_sources if source.get("sync_status") == "error"]
+    if stale_sources or error_sources:
+        return {
+            "connection_status": "error",
+            "provider_auth_required": False,
+            "reconnect_required": False,
+            "stale_state_warning": "One or more cloud libraries may be stale until the next successful sync.",
+            "status_message": "One or more Google Drive sources failed to refresh. Cloud library may be stale.",
+        }
+
+    account_label = None
+    if account_row is not None:
+        account_label = str(account_row["display_name"] or account_row["email"] or "").strip() or None
+    if visible_sources:
+        message = "Google Drive account connected. Cloud libraries are ready to refresh."
+    else:
+        message = "Google Drive account connected. Add a Drive folder or shared drive to start syncing cloud movies."
+    if account_label:
+        message = f"{message} Connected as {account_label}."
+    return {
+        "connection_status": "connected",
+        "provider_auth_required": False,
+        "reconnect_required": False,
+        "stale_state_warning": None,
+        "status_message": message,
+    }
 
 
 def get_cloud_libraries_payload(
@@ -77,7 +231,12 @@ def get_cloud_libraries_payload(
 
     my_libraries: list[dict[str, object]] = []
     shared_libraries: list[dict[str, object]] = []
+    visible_sources: list[dict[str, object]] = []
     for row in rows:
+        status_fields = _normalize_cloud_source_status(
+            last_synced_at=row["last_synced_at"],
+            last_error=row["last_error"],
+        )
         payload = {
             "id": int(row["id"]),
             "provider": provider,
@@ -93,11 +252,26 @@ def get_cloud_libraries_payload(
             "created_at": str(row["created_at"]),
             "last_synced_at": row["last_synced_at"],
             "last_error": row["last_error"],
+            "sync_status": str(status_fields["sync_status"]),
+            "provider_auth_required": bool(status_fields["provider_auth_required"]),
+            "reconnect_required": bool(status_fields["reconnect_required"]),
+            "status_message": status_fields["status_message"],
+            "stale_state_warning": status_fields["stale_state_warning"],
+            "last_error_message": status_fields["last_error_message"],
         }
+        if not bool(row["hidden_for_user"]):
+            visible_sources.append(payload)
         if bool(row["is_shared"]):
             shared_libraries.append(payload)
         else:
             my_libraries.append(payload)
+
+    google_status = _build_google_connection_status(
+        enabled=google_drive_enabled(settings),
+        connected=account_row is not None,
+        account_row=account_row,
+        visible_sources=visible_sources,
+    )
 
     return {
         "google": {
@@ -105,6 +279,11 @@ def get_cloud_libraries_payload(
             "connected": account_row is not None,
             "account_email": str(account_row["email"]) if account_row and account_row["email"] else None,
             "account_name": str(account_row["display_name"]) if account_row and account_row["display_name"] else None,
+            "connection_status": google_status["connection_status"],
+            "reconnect_required": bool(google_status["reconnect_required"]),
+            "provider_auth_required": bool(google_status["provider_auth_required"]),
+            "stale_state_warning": google_status["stale_state_warning"],
+            "status_message": str(google_status["status_message"]),
         },
         "my_libraries": my_libraries,
         "shared_libraries": shared_libraries,

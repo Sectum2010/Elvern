@@ -823,6 +823,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
     linear-gradient(0deg, rgba(11, 17, 24, 0.84), rgba(11, 17, 24, 0.2));
 }
 
+.media-card__poster-fallback--deferred {
+  background:
+    linear-gradient(160deg, rgba(143, 182, 218, 0.16), rgba(72, 98, 124, 0.08)),
+    linear-gradient(0deg, rgba(11, 17, 24, 0.94), rgba(11, 17, 24, 0.56));
+}
+
 .media-card__poster-fallback span {
   font-size: 3rem;
   font-weight: 700;
@@ -1730,6 +1736,69 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .admin-activity-grid {
   display: grid;
   gap: 1rem;
+}
+
+.admin-recovery-section {
+  padding-bottom: 1rem;
+}
+
+.admin-recovery-grid {
+  align-items: start;
+}
+
+.admin-recovery-card {
+  min-width: 0;
+  align-self: start;
+}
+
+.admin-recovery-side-stack {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.admin-recovery__toolbar,
+.admin-recovery__list-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.admin-recovery__checkpoint-card,
+.admin-recovery__result-card,
+.admin-recovery__warning-card {
+  height: auto;
+  align-self: start;
+}
+
+.admin-recovery__checkpoint-card {
+  gap: 0.9rem;
+}
+
+.admin-recovery__checkpoint-card--selected {
+  border-color: rgba(245, 151, 193, 0.46);
+  background: linear-gradient(180deg, rgba(61, 25, 42, 0.62) 0%, rgba(17, 12, 21, 0.86) 100%);
+  box-shadow: 0 14px 28px rgba(52, 13, 31, 0.18);
+}
+
+.admin-recovery__selection-note {
+  display: grid;
+  gap: 0.12rem;
+  padding: 0.8rem 0.9rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(152, 176, 201, 0.16);
+  background: rgba(9, 14, 20, 0.68);
+}
+
+.admin-recovery__mono {
+  font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .admin-inline-form {
@@ -2983,6 +3052,17 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   .admin-activity-card {
     min-height: 100%;
   }
+
+  .admin-recovery-grid {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+    align-items: start;
+  }
+
+  .admin-recovery-card,
+  .admin-recovery-side-stack {
+    min-height: auto;
+    align-self: start;
+  }
 }
 
 @media (min-width: 1280px) {
@@ -3150,6 +3230,10 @@ html[data-device-shell="iphone"] .admin-list__row,
 html[data-device-shell="iphone"] .hidden-movie-row {
   grid-template-columns: 1fr;
   align-items: start;
+}
+
+html[data-device-shell="iphone"] .admin-recovery-section {
+  padding-bottom: calc(2rem + env(safe-area-inset-bottom, 0px));
 }
 
 @media (orientation: landscape) {

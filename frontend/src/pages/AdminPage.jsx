@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LoadingView } from "../components/LoadingView";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
+import { formatCompletedRescanWarning, formatRescanBannerText, hasCloudSyncWarning } from "../lib/cloudSyncStatus";
 import { formatDate } from "../lib/format";
 
 
@@ -18,10 +19,19 @@ const ADMIN_STREAM_RELEVANT_EVENTS = [
   "user_enabled",
 ];
 const ADMIN_SECTION_AUTO_COLLAPSE_MS = 15_000;
+const RECOVERY_CHECKPOINT_LIMIT = 4;
+const RECOVERY_WARNING_LIMIT = 4;
+const RECOVERY_TRIGGER_LABELS = {
+  auto_before_shared_local_path_update: "Auto · Shared local path update",
+  auto_before_admin_rescan: "Auto · Admin rescan",
+  manual_admin_ui: "Manual · Admin UI",
+  manual_cli: "Manual · CLI",
+};
 const ADMIN_SECTIONS = [
   { key: "panel", label: "Admin Panel", icon: "panel" },
   { key: "security", label: "Security", icon: "security" },
   { key: "logs", label: "Logs", icon: "logs" },
+  { key: "recovery", label: "Recovery", icon: "recovery" },
   { key: "assistant", label: "Assistant (Beta)", icon: "assistant" },
 ];
 
@@ -66,6 +76,49 @@ function InlineFeedback({ feedback }) {
 }
 
 
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const decimals = unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+
+function formatRecoveryCheckpointTime(value) {
+  if (!value) {
+    return "Unknown time";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  }).format(new Date(value));
+}
+
+
+function formatRecoveryTriggerLabel(trigger) {
+  if (typeof trigger !== "string" || !trigger.trim()) {
+    return "Unknown trigger";
+  }
+  return RECOVERY_TRIGGER_LABELS[trigger] || trigger;
+}
+
+
+function formatRecoveryCheckpointId(checkpointId) {
+  if (typeof checkpointId !== "string" || !checkpointId.trim()) {
+    return "ID unavailable";
+  }
+  return checkpointId.length > 18 ? `...${checkpointId.slice(-12)}` : checkpointId;
+}
+
+
 function UserStatusIndicator({ color, label }) {
   return (
     <span className="user-status-pill" title={label}>
@@ -98,6 +151,16 @@ function AdminSectionIcon({ name }) {
       </svg>
     );
   }
+  if (name === "recovery") {
+    return (
+      <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
+        <path d="M8 7a7 7 0 0 1 11 2" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+        <path d="M19 5v4h-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+        <path d="M16 17a7 7 0 0 1-11-2" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+        <path d="M5 19v-4h4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+      </svg>
+    );
+  }
   return (
     <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
       <path d="M4 5h7v6H4zM13 5h7v6h-7zM4 13h7v6H4zM13 13h7v6h-7z" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
@@ -116,8 +179,21 @@ export function AdminPage() {
   const [auditPayload, setAuditPayload] = useState([]);
   const [loading, setLoading] = useState(true);
   const [banner, setBanner] = useState(null);
+  const [recoveryFeedback, setRecoveryFeedback] = useState(null);
   const [rescanPending, setRescanPending] = useState(false);
   const [createPending, setCreatePending] = useState(false);
+  const [createBackupPending, setCreateBackupPending] = useState(false);
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
+  const [recoveryLoaded, setRecoveryLoaded] = useState(false);
+  const [backupsDirectory, setBackupsDirectory] = useState("");
+  const [backupsPayload, setBackupsPayload] = useState([]);
+  const [selectedCheckpointId, setSelectedCheckpointId] = useState("");
+  const [inspectPending, setInspectPending] = useState(false);
+  const [inspectPayload, setInspectPayload] = useState(null);
+  const [restorePlanPending, setRestorePlanPending] = useState(false);
+  const [restorePlanPayload, setRestorePlanPayload] = useState(null);
+  const [showAllRecoveryCheckpoints, setShowAllRecoveryCheckpoints] = useState(false);
+  const [showAllRecoveryWarnings, setShowAllRecoveryWarnings] = useState(false);
   const [userActionPending, setUserActionPending] = useState(null);
   const [sessionActionPending, setSessionActionPending] = useState(null);
   const [showAllSessions, setShowAllSessions] = useState(false);
@@ -147,6 +223,7 @@ export function AdminPage() {
     password: "",
     role: "standard_user",
   });
+  const cloudSyncWarningRef = useRef("");
   const scanRunningRef = useRef(false);
   const adminStreamRef = useRef(null);
   const adminStreamReconnectTimerRef = useRef(null);
@@ -188,9 +265,12 @@ export function AdminPage() {
         apiRequest("/api/admin/audit?limit=100"),
       ]);
       if (scanRunningRef.current && !status.scan.running) {
+        const completionText = cloudSyncWarningRef.current
+          ? formatCompletedRescanWarning(cloudSyncWarningRef.current)
+          : (status.last_scan?.message || "Library scan completed.");
         setBanner({
-          tone: "success",
-          text: status.last_scan?.message || "Library scan completed.",
+          tone: cloudSyncWarningRef.current ? "error" : "success",
+          text: completionText,
         });
       }
       scanRunningRef.current = Boolean(status.scan.running);
@@ -206,6 +286,40 @@ export function AdminPage() {
     } finally {
       if (!silent) {
         setLoading(false);
+      }
+    }
+  }
+
+  async function loadRecoveryData({ silent = false, preserveFeedback = false, preferredCheckpointId = "" } = {}) {
+    if (!silent) {
+      setRecoveryLoading(true);
+    }
+    if (!preserveFeedback) {
+      setRecoveryFeedback(null);
+    }
+    try {
+      const payload = await apiRequest("/api/admin/backups");
+      const checkpoints = Array.isArray(payload.checkpoints) ? payload.checkpoints : [];
+      setBackupsDirectory(typeof payload.backups_dir === "string" ? payload.backups_dir : "");
+      setBackupsPayload(checkpoints);
+      setRecoveryLoaded(true);
+      setSelectedCheckpointId((current) => {
+        if (preferredCheckpointId && checkpoints.some((entry) => entry.checkpoint_id === preferredCheckpointId)) {
+          return preferredCheckpointId;
+        }
+        if (current && checkpoints.some((entry) => entry.checkpoint_id === current)) {
+          return current;
+        }
+        return checkpoints[0]?.checkpoint_id || "";
+      });
+    } catch (requestError) {
+      setRecoveryFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to load backup checkpoints.",
+      });
+    } finally {
+      if (!silent) {
+        setRecoveryLoading(false);
       }
     }
   }
@@ -241,6 +355,13 @@ export function AdminPage() {
   useEffect(() => {
     loadAdminData();
   }, []);
+
+  useEffect(() => {
+    if (activeSection !== "recovery" || recoveryLoaded || recoveryLoading) {
+      return;
+    }
+    loadRecoveryData();
+  }, [activeSection, recoveryLoaded, recoveryLoading]);
 
   useEffect(() => () => {
     if (typeof window !== "undefined" && sectionCollapseTimerRef.current) {
@@ -360,7 +481,14 @@ export function AdminPage() {
     setBanner(null);
     try {
       const payload = await apiRequest("/api/library/rescan", { method: "POST" });
-      setBanner({ tone: "success", text: payload.message || "Library scan started." });
+      const nextCloudSyncWarning = hasCloudSyncWarning(payload.cloud_sync)
+        ? String(payload.cloud_sync?.message || "").trim()
+        : "";
+      cloudSyncWarningRef.current = nextCloudSyncWarning;
+      setBanner({
+        tone: nextCloudSyncWarning ? "error" : "success",
+        text: formatRescanBannerText(payload),
+      });
       scanRunningRef.current = Boolean(payload.running);
       await loadAdminData({ silent: true });
     } catch (requestError) {
@@ -370,6 +498,89 @@ export function AdminPage() {
       });
     } finally {
       setRescanPending(false);
+    }
+  }
+
+  function handleCheckpointSelection(checkpointId) {
+    setSelectedCheckpointId(checkpointId);
+    setInspectPayload(null);
+    setRestorePlanPayload(null);
+    setShowAllRecoveryWarnings(false);
+  }
+
+  async function handleCreateBackupNow() {
+    if (createBackupPending) {
+      return;
+    }
+    setCreateBackupPending(true);
+    setRecoveryFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/backups", { method: "POST" });
+      const checkpoint = payload.checkpoint || {};
+      const checkpointId = checkpoint.checkpoint_id || "";
+      setInspectPayload(null);
+      setRestorePlanPayload(null);
+      await loadRecoveryData({
+        silent: true,
+        preserveFeedback: true,
+        preferredCheckpointId: checkpointId,
+      });
+      setRecoveryFeedback({
+        tone: "success",
+        text: [
+          payload.message || "Backup checkpoint created.",
+          checkpointId ? `Checkpoint: ${checkpointId}.` : "",
+          checkpoint.path ? `Path: ${checkpoint.path}.` : "",
+          checkpoint.created_at_utc ? `Created: ${checkpoint.created_at_utc}.` : "",
+          payload.warning || "",
+        ].filter(Boolean).join(" "),
+      });
+    } catch (requestError) {
+      setRecoveryFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to create backup checkpoint.",
+      });
+    } finally {
+      setCreateBackupPending(false);
+    }
+  }
+
+  async function handleInspectCheckpoint() {
+    if (!selectedCheckpointId || inspectPending) {
+      return;
+    }
+    setInspectPending(true);
+    setRecoveryFeedback(null);
+    try {
+      const payload = await apiRequest(`/api/admin/backups/${encodeURIComponent(selectedCheckpointId)}/inspect`);
+      setInspectPayload(payload);
+    } catch (requestError) {
+      setRecoveryFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to inspect checkpoint.",
+      });
+    } finally {
+      setInspectPending(false);
+    }
+  }
+
+  async function handleGenerateRestorePlan() {
+    if (!selectedCheckpointId || restorePlanPending) {
+      return;
+    }
+    setRestorePlanPending(true);
+    setRecoveryFeedback(null);
+    setShowAllRecoveryWarnings(false);
+    try {
+      const payload = await apiRequest(`/api/admin/backups/${encodeURIComponent(selectedCheckpointId)}/restore-plan`);
+      setRestorePlanPayload(payload);
+    } catch (requestError) {
+      setRecoveryFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to build recovery preview.",
+      });
+    } finally {
+      setRestorePlanPending(false);
     }
   }
 
@@ -585,12 +796,35 @@ export function AdminPage() {
     }
   }
 
+  const visibleSessions = showAllSessions ? sessionsPayload : sessionsPayload.slice(0, 8);
+  const visibleAuditEvents = showAllAudit ? auditPayload : auditPayload.slice(0, 10);
+  const recentBackupWarnings = useMemo(
+    () =>
+      auditPayload.filter((event) => event?.details?.auto_backup_status === "failed").slice(0, 6),
+    [auditPayload],
+  );
+  const selectedCheckpoint = useMemo(
+    () => backupsPayload.find((entry) => entry.checkpoint_id === selectedCheckpointId) || null,
+    [backupsPayload, selectedCheckpointId],
+  );
+  const visibleRecoveryCheckpoints = showAllRecoveryCheckpoints
+    ? backupsPayload
+    : backupsPayload.slice(0, RECOVERY_CHECKPOINT_LIMIT);
+  const recoveryCheckpointSummary = backupsPayload.length > 0
+    ? (
+      showAllRecoveryCheckpoints || backupsPayload.length <= RECOVERY_CHECKPOINT_LIMIT
+        ? `Showing all ${backupsPayload.length} checkpoints.`
+        : `Showing ${visibleRecoveryCheckpoints.length} of ${backupsPayload.length} checkpoints.`
+    )
+    : "";
+  const restorePlanWarnings = Array.isArray(restorePlanPayload?.warnings) ? restorePlanPayload.warnings : [];
+  const visibleRestorePlanWarnings = showAllRecoveryWarnings
+    ? restorePlanWarnings
+    : restorePlanWarnings.slice(0, RECOVERY_WARNING_LIMIT);
+
   if (loading && !statusPayload) {
     return <LoadingView label="Loading admin tools..." />;
   }
-
-  const visibleSessions = showAllSessions ? sessionsPayload : sessionsPayload.slice(0, 8);
-  const visibleAuditEvents = showAllAudit ? auditPayload : auditPayload.slice(0, 10);
 
   function clearSectionCollapseTimer() {
     if (typeof window === "undefined" || !sectionCollapseTimerRef.current) {
@@ -1091,6 +1325,336 @@ export function AdminPage() {
     </div>
   );
 
+  const recoverySection = (
+    <div className="admin-section-stack admin-recovery-section">
+      <section className="settings-card settings-card--wide">
+        <p className="eyebrow">Admin-only</p>
+        <h2>Backup &amp; Recovery</h2>
+        <p className="page-subnote">
+          Backups protect Elvern runtime state. They do not include movie files, poster libraries, or playback/transcode cache.
+        </p>
+        <p className="form-error">
+          Backups may contain secrets. Treat checkpoint folders as private.
+        </p>
+        <div className="admin-list__actions">
+          <button
+            className="primary-button"
+            disabled={createBackupPending}
+            onClick={handleCreateBackupNow}
+            type="button"
+          >
+            {createBackupPending ? "Creating backup..." : "Create backup now"}
+          </button>
+          <button
+            className="ghost-button"
+            disabled={recoveryLoading}
+            onClick={() => loadRecoveryData()}
+            type="button"
+          >
+            {recoveryLoading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+        <FeedbackBanner banner={recoveryFeedback} />
+      </section>
+
+      <div className="admin-activity-grid admin-recovery-grid">
+        <section className="settings-card admin-activity-card admin-recovery-card">
+          <div className="settings-inline-header">
+            <div>
+              <h2>Recent checkpoints</h2>
+              <p className="page-subnote">
+                Select a checkpoint, then inspect it or preview recovery. Automatic checkpoints are best-effort and stay server-local in this stage.
+              </p>
+            </div>
+          </div>
+          {backupsPayload.length > 0 ? (
+            <div className="admin-recovery__toolbar">
+              <p className="page-subnote">{recoveryCheckpointSummary}</p>
+              {backupsPayload.length > RECOVERY_CHECKPOINT_LIMIT ? (
+                <button
+                  className="ghost-button ghost-button--inline"
+                  onClick={() => setShowAllRecoveryCheckpoints((current) => !current)}
+                  type="button"
+                >
+                  {showAllRecoveryCheckpoints ? "Show less" : "Show all"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="admin-list admin-list--dense">
+            {backupsPayload.length > 0 ? (
+              visibleRecoveryCheckpoints.map((checkpoint) => {
+                const selected = checkpoint.checkpoint_id === selectedCheckpointId;
+                return (
+                  <div
+                    className={selected
+                      ? "admin-list__row admin-list__row--card admin-recovery__checkpoint-card admin-recovery__checkpoint-card--selected"
+                      : "admin-list__row admin-list__row--card admin-recovery__checkpoint-card"}
+                    key={checkpoint.checkpoint_id}
+                  >
+                    <div>
+                      <strong>{formatRecoveryTriggerLabel(checkpoint.backup_trigger)}</strong>
+                      <p className="page-subnote">
+                        {formatRecoveryCheckpointTime(checkpoint.created_at_utc)} · {checkpoint.auto_checkpoint ? "Automatic checkpoint" : "Manual checkpoint"}
+                      </p>
+                      <p className="page-subnote admin-recovery__mono" title={checkpoint.checkpoint_id}>
+                        ID {formatRecoveryCheckpointId(checkpoint.checkpoint_id)}
+                      </p>
+                      <p className="page-subnote">
+                        {checkpoint.contains_secrets ? "Contains secrets" : "No secrets flagged"} · DB integrity {checkpoint.db_integrity_check_result || "unknown"} · {formatBytes(checkpoint.total_size_bytes)} · {checkpoint.file_count} files
+                      </p>
+                      <p className="page-subnote">
+                        Inspect {checkpoint.inspect_valid ? "valid" : "invalid"}{checkpoint.inspect_error ? ` · ${checkpoint.inspect_error}` : ""}
+                      </p>
+                    </div>
+                    <div className="admin-list__actions">
+                      <button
+                        className={selected ? "primary-button" : "ghost-button"}
+                        onClick={() => handleCheckpointSelection(checkpoint.checkpoint_id)}
+                        type="button"
+                      >
+                        {selected ? "Selected" : "Select"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <p className="page-subnote">
+                {recoveryLoading ? "Loading checkpoints..." : "No checkpoints found yet."}
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section className="settings-card admin-activity-card admin-recovery-card admin-recovery-card--result">
+          <div className="settings-inline-header">
+            <div>
+              <h2>Inspect checkpoint</h2>
+              <p className="page-subnote">
+                Compact checkpoint validation only. No manifest secrets or raw database contents are shown here.
+              </p>
+            </div>
+            <button
+              className="ghost-button ghost-button--inline"
+              disabled={!selectedCheckpointId || inspectPending}
+              onClick={handleInspectCheckpoint}
+              type="button"
+            >
+              {inspectPending ? "Inspecting..." : "Inspect"}
+            </button>
+          </div>
+          {selectedCheckpoint ? (
+            <div className="admin-recovery__selection-note">
+              <p className="page-subnote">
+                Selected checkpoint: {formatRecoveryTriggerLabel(selectedCheckpoint.backup_trigger)} · {formatRecoveryCheckpointTime(selectedCheckpoint.created_at_utc)}
+              </p>
+              <p className="page-subnote admin-recovery__mono" title={selectedCheckpoint.checkpoint_id}>
+                ID {selectedCheckpoint.checkpoint_id}
+              </p>
+            </div>
+          ) : (
+            <p className="page-subnote">Select a checkpoint first.</p>
+          )}
+          {inspectPayload ? (
+            <div className="admin-list">
+              <div className="admin-list__row admin-list__row--card admin-recovery__result-card">
+                <div>
+                  <strong>{inspectPayload.valid ? "Checkpoint valid" : "Checkpoint invalid"}</strong>
+                  <p className="page-subnote">
+                    DB integrity {inspectPayload.db_integrity_check_result || "unknown"} · {formatBytes(inspectPayload.total_size_bytes)} · {inspectPayload.file_count} files · {inspectPayload.files_verified} verified
+                  </p>
+                  {inspectPayload.warning ? <p className="page-subnote">{inspectPayload.warning}</p> : null}
+                  {inspectPayload.errors?.length > 0 ? (
+                    <ul className="page-subnote">
+                      {inspectPayload.errors.map((error) => (
+                        <li key={error}>{error}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {inspectPayload.missing_files?.length > 0 ? (
+                    <>
+                      <p className="page-subnote">Missing files:</p>
+                      <ul className="page-subnote">
+                        {inspectPayload.missing_files.map((entry) => (
+                          <li key={entry}>{entry}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                  {inspectPayload.hash_mismatches?.length > 0 ? (
+                    <>
+                      <p className="page-subnote">Hash mismatches:</p>
+                      <ul className="page-subnote">
+                        {inspectPayload.hash_mismatches.map((entry) => (
+                          <li key={entry.relative_path}>{entry.relative_path}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </section>
+      </div>
+
+      <div className="admin-activity-grid admin-recovery-grid">
+        <section className="settings-card admin-activity-card admin-recovery-card admin-recovery-card--result">
+          <div className="settings-inline-header">
+            <div>
+              <h2>Recovery preview</h2>
+              <p className="page-subnote">
+                This only checks what this checkpoint could recover. It does not restore or change anything.
+              </p>
+            </div>
+            <button
+              className="ghost-button ghost-button--inline"
+              disabled={!selectedCheckpointId || restorePlanPending}
+              onClick={handleGenerateRestorePlan}
+              type="button"
+            >
+              {restorePlanPending ? "Previewing..." : "Preview recovery"}
+            </button>
+          </div>
+          {selectedCheckpoint ? (
+            <div className="admin-recovery__selection-note">
+              <p className="page-subnote">
+                Selected checkpoint: {formatRecoveryTriggerLabel(selectedCheckpoint.backup_trigger)} · {formatRecoveryCheckpointTime(selectedCheckpoint.created_at_utc)}
+              </p>
+              <p className="page-subnote admin-recovery__mono" title={selectedCheckpoint.checkpoint_id}>
+                ID {selectedCheckpoint.checkpoint_id}
+              </p>
+            </div>
+          ) : (
+            <p className="page-subnote">Select a checkpoint first.</p>
+          )}
+          {restorePlanPayload ? (
+            <div className="admin-list">
+              <div className="admin-list__row admin-list__row--card admin-recovery__result-card">
+                <div>
+                  <strong>{restorePlanPayload.checkpoint_valid ? "Recovery preview ready" : "Recovery preview has blocking errors"}</strong>
+                  <p className="page-subnote">
+                    {formatRecoveryTriggerLabel(restorePlanPayload.backup_trigger)} · {restorePlanPayload.contains_secrets ? "Contains secrets" : "No secrets flagged"}
+                  </p>
+                  {restorePlanPayload.blocking_errors?.length > 0 ? (
+                    <>
+                      <p className="form-error">Blocking errors:</p>
+                      <ul className="page-subnote">
+                        {restorePlanPayload.blocking_errors.map((entry) => (
+                          <li key={entry}>{entry}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                  {restorePlanWarnings.length > 0 ? (
+                    <>
+                      <div className="admin-recovery__list-header">
+                        <p className="page-subnote">Warnings:</p>
+                        {restorePlanWarnings.length > RECOVERY_WARNING_LIMIT ? (
+                          <button
+                            className="ghost-button ghost-button--inline"
+                            onClick={() => setShowAllRecoveryWarnings((current) => !current)}
+                            type="button"
+                          >
+                            {showAllRecoveryWarnings ? "Show fewer warnings" : "Show all warnings"}
+                          </button>
+                        ) : null}
+                      </div>
+                      <ul className="page-subnote">
+                        {visibleRestorePlanWarnings.map((entry) => (
+                          <li key={entry}>{entry}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                  <p className="page-subnote">
+                    Scope: DB snapshot {restorePlanPayload.restore_scope?.db_snapshot_available ? "available" : "missing"} · env {restorePlanPayload.restore_scope?.env_snapshot_available ? "available" : "missing"} · helper releases {restorePlanPayload.restore_scope?.helper_releases_available ? "available" : "missing"} · assistant uploads {restorePlanPayload.restore_scope?.assistant_uploads_available ? "available" : "missing"}
+                  </p>
+                  <p className="page-subnote">
+                    Current vs backup: project root {restorePlanPayload.comparison?.same_project_root ? "same" : "different"} · DB path {restorePlanPayload.comparison?.same_db_path ? "same" : "different"} · public origin {restorePlanPayload.comparison?.same_public_app_origin ? "same" : "different"} · backend origin {restorePlanPayload.comparison?.same_backend_origin ? "same" : "different"} · media root {restorePlanPayload.comparison?.same_media_root_path ? "same" : "different"}
+                  </p>
+                  {restorePlanPayload.not_included?.length > 0 ? (
+                    <>
+                      <p className="page-subnote">Not included:</p>
+                      <ul className="page-subnote">
+                        {restorePlanPayload.not_included.map((entry) => (
+                          <li key={entry}>{entry}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                  {restorePlanPayload.required_pre_restore_steps?.length > 0 ? (
+                    <>
+                      <p className="page-subnote">Required pre-restore steps:</p>
+                      <ul className="page-subnote">
+                        {restorePlanPayload.required_pre_restore_steps.map((entry) => (
+                          <li key={entry}>{entry}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : null}
+                  {restorePlanPayload.manual_restore_outline?.length > 0 ? (
+                    <>
+                      <p className="page-subnote">Manual restore outline:</p>
+                      <ol className="page-subnote">
+                        {restorePlanPayload.manual_restore_outline.map((entry) => (
+                          <li key={entry}>{entry}</li>
+                        ))}
+                      </ol>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="page-subnote">Preview recovery to compare the checkpoint against the current live environment.</p>
+          )}
+        </section>
+
+        <div className="admin-recovery-side-stack">
+          <section className="settings-card admin-activity-card admin-recovery-card">
+            <h2>Off-host protection</h2>
+            <p className="page-subnote">
+              Server-local checkpoints protect against bad scans, bad settings changes, and app mistakes. They do not protect against drive failure.
+            </p>
+            <p className="page-subnote">
+              Copy checkpoint folders from <strong>{backupsDirectory || "backend/data/backups/"}</strong> to an external drive, NAS, or secure storage for off-host protection.
+            </p>
+            {selectedCheckpoint?.path ? (
+              <p className="page-subnote">
+                Selected checkpoint path: <strong>{selectedCheckpoint.path}</strong>
+              </p>
+            ) : null}
+          </section>
+
+          <section className="settings-card admin-activity-card admin-recovery-card">
+            <h2>Recent backup warnings</h2>
+            {recentBackupWarnings.length > 0 ? (
+              <div className="admin-list">
+                {recentBackupWarnings.map((event) => (
+                  <div className="admin-list__row admin-list__row--card admin-recovery__warning-card" key={event.id}>
+                    <div>
+                      <strong>{event.action}</strong>
+                      <p className="page-subnote">
+                        {formatDate(event.created_at)} · {event.username || "unknown user"}
+                      </p>
+                      <p className="page-subnote">
+                        {event.details?.auto_backup_error || "Backup warning recorded in the audit log."}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="page-subnote">No recent backup warnings are visible in the loaded audit log.</p>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <section className="page-section">
       <div className="admin-nav-card" aria-label="Admin sections">
@@ -1145,6 +1709,8 @@ export function AdminPage() {
           {activeSection === "security" ? securitySection : null}
 
           {activeSection === "logs" ? logsSection : null}
+
+          {activeSection === "recovery" ? recoverySection : null}
 
           {activeSection === "assistant" ? (
             <section className="settings-card admin-assistant-placeholder">

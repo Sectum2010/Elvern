@@ -1,3 +1,6 @@
+import { apiRequest } from "./api.js";
+
+
 const PROVIDER_AUTH_INTENT_KEY = "elvern:provider-auth-intent";
 const PROVIDER_AUTH_INTENT_MAX_AGE_MS = 30 * 60 * 1000;
 
@@ -79,4 +82,27 @@ export function clearProviderAuthIntent() {
   } catch {
     // Ignore sessionStorage cleanup failures.
   }
+}
+
+
+export function shouldGuardGoogleDriveAction({ itemSourceKind, reconnectRequired }) {
+  return (itemSourceKind || "local") === "cloud" && reconnectRequired === true;
+}
+
+
+export async function startGoogleDriveReconnect({ returnPath } = {}) {
+  const requestData = returnPath
+    ? { return_path: returnPath }
+    : undefined;
+  const payload = await apiRequest("/api/cloud-libraries/google/connect", {
+    method: "POST",
+    data: requestData,
+  });
+  if (!payload?.authorization_url) {
+    throw new Error("Google Drive reconnect did not return an authorization URL.");
+  }
+  if (typeof window !== "undefined") {
+    window.location.assign(payload.authorization_url);
+  }
+  return payload;
 }

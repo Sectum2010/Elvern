@@ -2,6 +2,11 @@ import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
+import {
+  formatGoogleConnectionHealthLabel,
+  formatGoogleDriveSetupLabel,
+} from "../lib/cloudSyncStatus";
+import { startGoogleDriveReconnect } from "../lib/providerAuth";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
@@ -271,8 +276,13 @@ export function SettingsPage() {
     google: {
       enabled: false,
       connected: false,
+      connection_status: "not_configured",
+      reconnect_required: false,
+      provider_auth_required: false,
       account_email: null,
       account_name: null,
+      stale_state_warning: null,
+      status_message: "",
     },
     my_libraries: [],
     shared_libraries: [],
@@ -333,6 +343,24 @@ export function SettingsPage() {
     reason: "",
   });
   const [nativePickerPendingTarget, setNativePickerPendingTarget] = useState("");
+  const visibleCloudSources = [
+    ...(cloudLibraries.my_libraries || []),
+    ...(cloudLibraries.shared_libraries || []),
+  ].filter((source) => !source?.hidden_for_user);
+  const cloudReconnectRequired = Boolean(cloudLibraries.google?.reconnect_required);
+  const googleSetupBadgeLabel = formatGoogleDriveSetupLabel(
+    googleDriveSetup.configuration_state,
+    googleDriveSetup.configuration_label,
+  );
+  const visibleCloudSourceHealthLabel = visibleCloudSources.length === 0
+    ? "No sources"
+    : visibleCloudSources.some((source) => source?.sync_status === "reconnect_required")
+      ? "Reconnect required"
+      : visibleCloudSources.some((source) => source?.sync_status === "stale" || source?.sync_status === "error")
+        ? "Stale or error"
+        : visibleCloudSources.some((source) => source?.sync_status === "never_synced")
+          ? "Never synced"
+          : "Current";
 
   useEffect(() => {
     let active = true;
@@ -933,10 +961,7 @@ export function SettingsPage() {
     setError("");
     setMessage("");
     try {
-      const payload = await apiRequest("/api/cloud-libraries/google/connect", {
-        method: "POST",
-      });
-      window.location.assign(payload.authorization_url);
+      await startGoogleDriveReconnect();
     } catch (requestError) {
       setError(requestError.message || "Failed to start Google Drive sign-in");
       setCloudBusyKey("");
@@ -1179,9 +1204,10 @@ export function SettingsPage() {
                 <div className="cloud-connection-card__copy">
                   <strong>Google Drive</strong>
                   <small>
-                    {cloudLibraries.google.connected
-                      ? `Connected as ${cloudLibraries.google.account_name || cloudLibraries.google.account_email || "Google account"}`
-                      : "Connect your Google account to add Drive folders or shared drives."}
+                    {cloudLibraries.google.status_message
+                      || (cloudLibraries.google.connected
+                        ? `Connected as ${cloudLibraries.google.account_name || cloudLibraries.google.account_email || "Google account"}`
+                        : "Connect your Google account to add Drive folders or shared drives.")}
                   </small>
                 </div>
                 <button
@@ -1192,11 +1218,18 @@ export function SettingsPage() {
                 >
                   {cloudBusyKey === "google-connect"
                     ? "Connecting..."
-                    : cloudLibraries.google.connected
+                    : cloudLibraries.google.reconnect_required
+                      ? "Reconnect Google Drive"
+                      : cloudLibraries.google.connected
                       ? "Reconnect Google Drive"
                       : "Connect Google Drive"}
                 </button>
               </div>
+              {cloudReconnectRequired ? (
+                <p className="form-error">
+                  Reconnect Google Drive. Cloud libraries were not refreshed and may be stale until the next successful sync.
+                </p>
+              ) : null}
 
               {cloudLibraries.google.connected ? (
                 <form
@@ -1263,7 +1296,8 @@ export function SettingsPage() {
                           <span>Cloud</span>
                           <span>Last synced {formatCloudTimestamp(source.last_synced_at)}</span>
                         </div>
-                        {source.last_error ? <p className="form-error">{source.last_error}</p> : null}
+                        {source.status_message ? <p className="form-error">{source.status_message}</p> : null}
+                        {source.stale_state_warning ? <p className="page-subnote">{source.stale_state_warning}</p> : null}
                       </div>
                       {user?.role === "admin" ? (
                         <div className="cloud-source-row__actions">
@@ -1361,7 +1395,8 @@ export function SettingsPage() {
                         {source.owner_username ? <span>Shared by {source.owner_username}</span> : null}
                         <span>Last synced {formatCloudTimestamp(source.last_synced_at)}</span>
                       </div>
-                      {source.last_error ? <p className="form-error">{source.last_error}</p> : null}
+                      {source.status_message ? <p className="form-error">{source.status_message}</p> : null}
+                      {source.stale_state_warning ? <p className="page-subnote">{source.stale_state_warning}</p> : null}
                     </div>
                     <div className="cloud-source-row__actions">
                       {user?.role === "admin" && source.owner_username === user.username ? (
@@ -1396,27 +1431,27 @@ export function SettingsPage() {
 
         {user?.role === "admin" ? (
           <SettingsAccordionSection
-            badge={googleDriveSetup.configuration_label}
+            badge={googleSetupBadgeLabel}
             description="Configure a real HTTPS Google OAuth origin for this Elvern server here. Once saved, your My Libraries and Shared Libraries sections can connect to Google Drive without editing env files manually."
             isOpen={openSections.googleDriveSetup}
             onToggle={() => toggleSection("googleDriveSetup")}
-            title="Google Drive Setup"
+            title="Google Drive OAuth Setup"
           >
             <div className="cloud-libraries-stack">
               <div className="cloud-connection-card google-drive-setup-card">
                 <div className="cloud-connection-card__copy">
-                  <strong>Configuration</strong>
+                  <strong>OAuth configuration</strong>
                   <small>{googleDriveSetup.status_message}</small>
                 </div>
                 <div className="google-drive-setup-status-grid">
-                  <StatusRow label="State" value={googleDriveSetup.configuration_label} />
+                  <StatusRow label="OAuth setup" value={googleSetupBadgeLabel} />
                   <StatusRow
-                    label="Connection"
-                    value={
-                      googleDriveSetup.connected
-                        ? `Connected${googleDriveSetup.account_name || googleDriveSetup.account_email ? ` as ${googleDriveSetup.account_name || googleDriveSetup.account_email}` : ""}`
-                        : "Not connected"
-                    }
+                    label="Account health"
+                    value={formatGoogleConnectionHealthLabel(cloudLibraries.google)}
+                  />
+                  <StatusRow
+                    label="Source health"
+                    value={visibleCloudSourceHealthLabel}
                   />
                   <StatusRow
                     label="HTTPS origin"
@@ -1431,6 +1466,14 @@ export function SettingsPage() {
                     value={googleDriveSetup.missing_fields.includes("client_secret") ? "Missing" : "Configured"}
                   />
                 </div>
+                {cloudLibraries.google.status_message ? (
+                  <p className={cloudReconnectRequired ? "form-error" : "page-subnote"}>
+                    {cloudLibraries.google.status_message}
+                  </p>
+                ) : null}
+                {cloudLibraries.google.stale_state_warning ? (
+                  <p className="page-subnote">{cloudLibraries.google.stale_state_warning}</p>
+                ) : null}
               </div>
 
               <form className="cloud-source-form" onSubmit={handleGoogleDriveSetupSave}>

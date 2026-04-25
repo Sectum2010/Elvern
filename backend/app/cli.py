@@ -10,6 +10,7 @@ from .db import init_db
 from .media_scan import scan_media_library
 from .security import hash_password
 from .services.backup_service import (
+    build_restore_dry_run_plan,
     create_backup_checkpoint,
     inspect_backup_checkpoint,
     list_backup_checkpoints,
@@ -100,6 +101,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Number of newest automatic checkpoints to retain.",
     )
+
+    backup_restore_plan_parser = subparsers.add_parser(
+        "backup-restore-plan",
+        help="Build a dry-run recovery plan for a backup checkpoint",
+    )
+    backup_restore_plan_parser.add_argument(
+        "path",
+        help="Checkpoint directory or manifest path to inspect for recovery planning",
+    )
     return parser
 
 
@@ -128,6 +138,11 @@ def main() -> None:
             keep_auto=args.keep_auto,
             backups_dir=args.output_dir,
         )
+        print(json.dumps(payload, indent=2))
+        return
+
+    if args.command == "backup-restore-plan":
+        payload = build_restore_dry_run_plan(settings, args.path)
         print(json.dumps(payload, indent=2))
         return
 

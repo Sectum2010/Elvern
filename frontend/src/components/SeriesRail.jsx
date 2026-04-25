@@ -37,6 +37,7 @@ export function SeriesRail({
   desktopSlots = null,
   enableTouchReleaseAssist = false,
   activeBrowserPlaybackItemId = null,
+  smartPosterLoadingEnabled = false,
 }) {
   const viewportRef = useRef(null);
   const dragStateRef = useRef(null);
@@ -514,6 +515,7 @@ export function SeriesRail({
               <MediaCard
                 backgroundPlaybackActive={activeBrowserPlaybackItemId === item.id}
                 item={item}
+                smartPosterLoadingEnabled={smartPosterLoadingEnabled}
               />
             </div>
           ))}

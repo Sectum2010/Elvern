@@ -106,7 +106,7 @@ def _sync_visible_google_drive_sources(settings: Settings, *, user_id: int) -> N
     )
 
 
-def sync_all_google_drive_sources(settings: Settings) -> dict[str, int]:
+def sync_all_google_drive_sources(settings: Settings) -> dict[str, object]:
     return _sync_all_google_drive_sources_impl(
         settings,
         provider=GOOGLE_DRIVE_PROVIDER,

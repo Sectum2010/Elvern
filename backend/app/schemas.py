@@ -27,10 +27,24 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class CloudSyncStatusResponse(BaseModel):
+    status: Literal["success", "partial_failure", "failed", "disabled"] = "disabled"
+    provider_auth_required: bool = False
+    reconnect_required: bool = False
+    message: str = ""
+    sources_total: int = 0
+    sources_synced: int = 0
+    sources_failed: int = 0
+    media_rows_written: int = 0
+    errors: list[str] = Field(default_factory=list)
+    stale_state_warning: str | None = None
+
+
 class ScanResponse(BaseModel):
     message: str
     running: bool
     job_id: int | None = None
+    cloud_sync: CloudSyncStatusResponse | None = None
 
 
 class SubtitleTrackResponse(BaseModel):
@@ -126,6 +140,125 @@ class MediaLibraryReferenceResponse(BaseModel):
     effective_value: str
     default_value: str
     validation_rules: list[str] = Field(default_factory=list)
+
+
+class BackupCheckpointSummaryResponse(BaseModel):
+    checkpoint_id: str
+    path: str
+    created_at_utc: str | None = None
+    backup_format_version: int | None = None
+    backup_trigger: str | None = None
+    auto_checkpoint: bool = False
+    contains_secrets: bool = False
+    db_integrity_check_result: str | None = None
+    total_size_bytes: int = 0
+    file_count: int = 0
+    git_commit: str | None = None
+    git_dirty: bool | None = None
+    inspect_valid: bool = False
+    inspect_error: str | None = None
+
+
+class BackupCheckpointListResponse(BaseModel):
+    backups_dir: str
+    checkpoints: list[BackupCheckpointSummaryResponse] = Field(default_factory=list)
+
+
+class BackupCheckpointCreateResponse(BaseModel):
+    message: str
+    warning: str | None = None
+    checkpoint: BackupCheckpointSummaryResponse
+
+
+class BackupCheckpointHashMismatchResponse(BaseModel):
+    relative_path: str
+    expected_sha256: str
+    actual_sha256: str
+
+
+class BackupCheckpointInspectResponse(BaseModel):
+    checkpoint_id: str
+    path: str
+    created_at_utc: str | None = None
+    backup_trigger: str | None = None
+    auto_checkpoint: bool = False
+    contains_secrets: bool = False
+    warning: str | None = None
+    valid: bool = False
+    db_integrity_check_result: str | None = None
+    total_size_bytes: int = 0
+    file_count: int = 0
+    files_verified: int = 0
+    missing_files: list[str] = Field(default_factory=list)
+    hash_mismatches: list[BackupCheckpointHashMismatchResponse] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class BackupRestorePlanMetadataResponse(BaseModel):
+    source_db_path: str | None = None
+    source_project_root: str | None = None
+    source_public_app_origin: str | None = None
+    source_backend_origin: str | None = None
+    source_media_root_path: str | None = None
+    source_transcode_dir: str | None = None
+
+
+class BackupRestorePlanCurrentMetadataResponse(BaseModel):
+    current_db_path: str
+    current_project_root: str
+    current_public_app_origin: str
+    current_backend_origin: str
+    current_media_root_path: str
+    current_transcode_dir: str
+
+
+class BackupRestorePlanComparisonResponse(BaseModel):
+    same_project_root: bool = False
+    same_db_path: bool = False
+    same_public_app_origin: bool = False
+    same_backend_origin: bool = False
+    same_media_root_path: bool = False
+
+
+class BackupRestorePlanScopeResponse(BaseModel):
+    db_snapshot_available: bool = False
+    env_snapshot_available: bool = False
+    helper_releases_available: bool = False
+    assistant_uploads_available: bool = False
+    media_files_included: bool = False
+    poster_files_included: bool = False
+    transcodes_included: bool = False
+
+
+class BackupRestorePlanVerificationResponse(BaseModel):
+    manifest_exists: bool = False
+    db_snapshot_exists: bool = False
+    db_integrity_check_result: str | None = None
+    files_verified: int = 0
+    missing_files: list[str] = Field(default_factory=list)
+    hash_mismatches: list[BackupCheckpointHashMismatchResponse] = Field(default_factory=list)
+
+
+class BackupRestorePlanResponse(BaseModel):
+    restore_plan_format_version: int
+    checkpoint_id: str
+    checkpoint_path: str
+    checkpoint_created_at_utc: str | None = None
+    checkpoint_valid: bool = False
+    blocking_errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    contains_secrets: bool = False
+    warning: str | None = None
+    backup_trigger: str | None = None
+    auto_checkpoint: bool = False
+    source_metadata: BackupRestorePlanMetadataResponse
+    current_metadata: BackupRestorePlanCurrentMetadataResponse
+    comparison: BackupRestorePlanComparisonResponse
+    restore_scope: BackupRestorePlanScopeResponse
+    not_included: list[str] = Field(default_factory=list)
+    required_pre_restore_steps: list[str] = Field(default_factory=list)
+    manual_restore_outline: list[str] = Field(default_factory=list)
+    verification: BackupRestorePlanVerificationResponse
 
 
 class LocalDirectoryBrowseEntryResponse(BaseModel):
@@ -227,6 +360,11 @@ class GoogleDriveConnectionResponse(BaseModel):
     connected: bool = False
     account_email: str | None = None
     account_name: str | None = None
+    connection_status: Literal["not_configured", "not_connected", "connected", "reconnect_required", "error"] = "not_configured"
+    reconnect_required: bool = False
+    provider_auth_required: bool = False
+    stale_state_warning: str | None = None
+    status_message: str = ""
 
 
 class CloudLibrarySourceSummary(BaseModel):
@@ -244,6 +382,12 @@ class CloudLibrarySourceSummary(BaseModel):
     created_at: str
     last_synced_at: str | None = None
     last_error: str | None = None
+    sync_status: Literal["never_synced", "current", "stale", "reconnect_required", "error"] = "never_synced"
+    provider_auth_required: bool = False
+    reconnect_required: bool = False
+    status_message: str | None = None
+    stale_state_warning: str | None = None
+    last_error_message: str | None = None
 
 
 class CloudLibrariesResponse(BaseModel):

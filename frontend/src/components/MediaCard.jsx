@@ -1,8 +1,18 @@
-import { useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getQualityRank } from "../lib/qualityRank";
 import { buildLibraryReturnState, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
+import {
+  getSmartPosterCardSnapshot,
+  isSmartPosterLoadingSupported,
+  markSmartPosterCardError,
+  markSmartPosterCardLoaded,
+  POSTER_MODE_ATTACH,
+  registerSmartPosterCard,
+  subscribeSmartPosterCard,
+  unregisterSmartPosterCard,
+} from "../lib/smartPosterLoading";
 
 
 function getProgressPercent(item) {
@@ -16,14 +26,40 @@ function getProgressPercent(item) {
 }
 
 
-export function MediaCard({ item, backgroundPlaybackActive = false }) {
+export function MediaCard({
+  item,
+  backgroundPlaybackActive = false,
+  smartPosterLoadingEnabled = false,
+}) {
   const location = useLocation();
   const displayTitle = getMovieCardTitle(item);
   const progressPercent = getProgressPercent(item);
   const monogram = displayTitle.trim().charAt(0).toUpperCase() || "E";
   const [posterFailed, setPosterFailed] = useState(false);
   const [rankTooltipOpen, setRankTooltipOpen] = useState(false);
-  const showPoster = Boolean(item.poster_url) && !posterFailed;
+  const posterRef = useRef(null);
+  const posterInstanceId = useId();
+  const smartPosterCardId = useMemo(
+    () => `poster-${item.id}-${posterInstanceId}`,
+    [item.id, posterInstanceId],
+  );
+  const smartPosterSchedulerEnabled = (
+    smartPosterLoadingEnabled
+    && Boolean(item.poster_url)
+    && !posterFailed
+    && isSmartPosterLoadingSupported()
+  );
+  const [smartPosterSnapshot, setSmartPosterSnapshot] = useState(() => (
+    smartPosterSchedulerEnabled
+      ? getSmartPosterCardSnapshot(smartPosterCardId)
+      : null
+  ));
+  const smartPosterMode = smartPosterSchedulerEnabled
+    ? (smartPosterSnapshot?.mode || "defer")
+    : POSTER_MODE_ATTACH;
+  const showPoster = Boolean(item.poster_url)
+    && !posterFailed
+    && (!smartPosterSchedulerEnabled || smartPosterMode === POSTER_MODE_ATTACH);
   const qualityRank = getQualityRank(item);
   const tooltipId = `quality-rank-tooltip-${item.id}`;
   const storageKind = (item.source_kind || "local") === "cloud" ? "cloud" : "local";
@@ -58,10 +94,35 @@ export function MediaCard({ item, backgroundPlaybackActive = false }) {
     setRankTooltipOpen((current) => !current);
   }
 
+  useEffect(() => {
+    if (!smartPosterSchedulerEnabled) {
+      setSmartPosterSnapshot(null);
+      return undefined;
+    }
+    setSmartPosterSnapshot(getSmartPosterCardSnapshot(smartPosterCardId));
+    return subscribeSmartPosterCard(smartPosterCardId, () => {
+      setSmartPosterSnapshot(getSmartPosterCardSnapshot(smartPosterCardId));
+    });
+  }, [smartPosterCardId, smartPosterSchedulerEnabled]);
+
+  useEffect(() => {
+    if (!smartPosterSchedulerEnabled || !posterRef.current) {
+      return undefined;
+    }
+    registerSmartPosterCard({
+      id: smartPosterCardId,
+      node: posterRef.current,
+      posterUrl: item.poster_url,
+    });
+    return () => {
+      unregisterSmartPosterCard(smartPosterCardId);
+    };
+  }, [item.poster_url, smartPosterCardId, smartPosterSchedulerEnabled]);
+
   return (
     <article className="media-card" data-library-item-id={item.id}>
       <Link className="media-card__poster-link" onClick={handleOpenDetail} state={detailState} to={detailPath}>
-        <div className="media-card__poster" aria-hidden="true">
+        <div className="media-card__poster" aria-hidden="true" ref={posterRef}>
           {backgroundPlaybackActive ? (
             <div
               className="media-card__background-playback-indicator"
@@ -72,12 +133,30 @@ export function MediaCard({ item, backgroundPlaybackActive = false }) {
             <img
               alt=""
               className="media-card__poster-image"
-              loading="lazy"
-              onError={() => setPosterFailed(true)}
+              decoding="async"
+              loading={smartPosterSchedulerEnabled ? "eager" : "lazy"}
+              onError={() => {
+                if (smartPosterSchedulerEnabled) {
+                  markSmartPosterCardError(smartPosterCardId);
+                }
+                setPosterFailed(true);
+              }}
+              onLoad={() => {
+                if (smartPosterSchedulerEnabled) {
+                  markSmartPosterCardLoaded(smartPosterCardId);
+                }
+              }}
               src={item.poster_url}
             />
           ) : (
-            <div className="media-card__poster-fallback">
+            <div
+              className={[
+                "media-card__poster-fallback",
+                smartPosterSchedulerEnabled && !posterFailed
+                  ? "media-card__poster-fallback--deferred"
+                  : "",
+              ].filter(Boolean).join(" ")}
+            >
               <span>{monogram}</span>
             </div>
           )}

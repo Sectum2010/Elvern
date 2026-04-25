@@ -12,6 +12,10 @@ from ..schemas import (
     AdminPasswordUpdateRequest,
     AdminSessionListResponse,
     AdminSelfDeleteRequest,
+    BackupCheckpointCreateResponse,
+    BackupCheckpointInspectResponse,
+    BackupCheckpointListResponse,
+    BackupRestorePlanResponse,
     AdminUserCreateRequest,
     AdminUserListResponse,
     AdminUserResponse,
@@ -55,7 +59,16 @@ from ..services.app_settings_service import (
     update_media_library_reference,
     update_poster_reference_location,
 )
-from ..services.backup_service import create_backup_checkpoint, prune_backup_checkpoints
+from ..services.backup_service import (
+    build_restore_dry_run_plan,
+    create_backup_checkpoint,
+    get_backups_dir_path,
+    inspect_backup_checkpoint,
+    list_backup_checkpoints,
+    prune_backup_checkpoints,
+    resolve_backup_checkpoint_path,
+    summarize_backup_checkpoint,
+)
 from ..services.desktop_playback_service import resolve_same_host_request
 from ..services.library_service import (
     hide_media_item_globally,
@@ -66,6 +79,15 @@ from ..services.local_library_source_service import validate_shared_local_librar
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _resolve_admin_checkpoint_path(settings, checkpoint_id: str):
+    try:
+        return resolve_backup_checkpoint_path(settings, checkpoint_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/users", response_model=AdminUserListResponse)
@@ -237,6 +259,97 @@ def admin_audit_log(
     return AuditLogListResponse(events=list_audit_log(request.app.state.settings, limit=limit))
 
 
+@router.get("/backups", response_model=BackupCheckpointListResponse)
+def admin_list_backups(request: Request, user=CurrentAdmin) -> BackupCheckpointListResponse:
+    del user
+    return BackupCheckpointListResponse(
+        backups_dir=get_backups_dir_path(request.app.state.settings),
+        checkpoints=list_backup_checkpoints(request.app.state.settings),
+    )
+
+
+@router.post("/backups", response_model=BackupCheckpointCreateResponse)
+def admin_create_backup(request: Request, user=CurrentAdmin) -> BackupCheckpointCreateResponse:
+    created = create_backup_checkpoint(
+        request.app.state.settings,
+        backup_trigger="manual_admin_ui",
+        auto_checkpoint=False,
+        reason="admin_ui",
+        initiated_by_user_id=user.id,
+        initiated_by_username=user.username,
+        operation_context={
+            "route": "/api/admin/backups",
+            "action": "admin.backup.create",
+        },
+    )
+    summary = summarize_backup_checkpoint(created["backup_path"])
+    log_audit_event(
+        request.app.state.settings,
+        action="admin.backup.create",
+        outcome="success",
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        session_id=user.session_id,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={
+            "checkpoint_id": summary["checkpoint_id"],
+            "path": summary["path"],
+            "created_at_utc": summary["created_at_utc"],
+            "backup_trigger": summary["backup_trigger"],
+        },
+    )
+    return BackupCheckpointCreateResponse(
+        message="Backup checkpoint created.",
+        warning=str(created.get("warning") or ""),
+        checkpoint=summary,
+    )
+
+
+@router.get("/backups/{checkpoint_id}/inspect", response_model=BackupCheckpointInspectResponse)
+def admin_inspect_backup(
+    checkpoint_id: str,
+    request: Request,
+    user=CurrentAdmin,
+) -> BackupCheckpointInspectResponse:
+    del user
+    checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    inspection = inspect_backup_checkpoint(checkpoint_path)
+    summary = summarize_backup_checkpoint(checkpoint_path)
+    manifest = inspection.get("manifest") or {}
+    return BackupCheckpointInspectResponse(
+        checkpoint_id=summary["checkpoint_id"],
+        path=summary["path"],
+        created_at_utc=summary["created_at_utc"],
+        backup_trigger=summary["backup_trigger"],
+        auto_checkpoint=summary["auto_checkpoint"],
+        contains_secrets=summary["contains_secrets"],
+        warning=str(inspection.get("warning") or "") or None,
+        valid=bool(inspection.get("valid")),
+        db_integrity_check_result=summary["db_integrity_check_result"],
+        total_size_bytes=summary["total_size_bytes"],
+        file_count=summary["file_count"],
+        files_verified=int(inspection.get("files_verified") or 0),
+        missing_files=list(inspection.get("missing_files") or []),
+        hash_mismatches=list(inspection.get("hash_mismatches") or []),
+        errors=list(inspection.get("errors") or []),
+    )
+
+
+@router.get("/backups/{checkpoint_id}/restore-plan", response_model=BackupRestorePlanResponse)
+def admin_backup_restore_plan(
+    checkpoint_id: str,
+    request: Request,
+    user=CurrentAdmin,
+) -> BackupRestorePlanResponse:
+    del user
+    checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    return BackupRestorePlanResponse(
+        **build_restore_dry_run_plan(request.app.state.settings, checkpoint_path)
+    )
+
+
 @router.get("/global-hidden-items", response_model=HiddenMovieListResponse)
 def admin_global_hidden_items(request: Request, user=CurrentAdmin) -> HiddenMovieListResponse:
     del user
@@ -343,6 +456,10 @@ def admin_update_media_library_reference(
 ) -> MediaLibraryReferenceResponse:
     validate_shared_local_library_path(request.app.state.settings, value=payload.value)
     existing_payload = get_media_library_reference_payload(request.app.state.settings)
+    auto_backup_status = "created"
+    auto_backup_error = None
+    auto_checkpoint = None
+    prune_summary = None
     try:
         auto_checkpoint = create_backup_checkpoint(
             request.app.state.settings,
@@ -358,16 +475,13 @@ def admin_update_media_library_reference(
             },
         )
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Backup checkpoint failed; shared local library path was not updated.",
-        ) from exc
-
-    prune_summary = None
-    try:
-        prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
-    except Exception:
-        prune_summary = None
+        auto_backup_status = "failed"
+        auto_backup_error = str(exc)
+    else:
+        try:
+            prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
+        except Exception:
+            prune_summary = None
 
     updated = update_media_library_reference(
         request.app.state.settings,
@@ -388,9 +502,11 @@ def admin_update_media_library_reference(
         details={
             "configured_value": updated["configured_value"],
             "effective_value": updated["effective_value"],
-            "auto_backup_checkpoint_id": auto_checkpoint.get("checkpoint_id"),
-            "auto_backup_path": auto_checkpoint.get("backup_path"),
-            "auto_backup_created_at_utc": auto_checkpoint.get("created_at_utc"),
+            "auto_backup_status": auto_backup_status,
+            "auto_backup_checkpoint_id": auto_checkpoint.get("checkpoint_id") if auto_checkpoint else None,
+            "auto_backup_path": auto_checkpoint.get("backup_path") if auto_checkpoint else None,
+            "auto_backup_created_at_utc": auto_checkpoint.get("created_at_utc") if auto_checkpoint else None,
+            "auto_backup_error": auto_backup_error,
             "auto_backup_prune_summary": prune_summary,
         },
     )

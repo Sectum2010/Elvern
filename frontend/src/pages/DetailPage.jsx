@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { LoadingView } from "../components/LoadingView";
+import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
 import { apiRequest } from "../lib/api";
 import {
   getSessionModeEstimateSeconds,
@@ -17,11 +18,14 @@ import {
   rememberLibraryReturnTarget,
 } from "../lib/libraryNavigation";
 import { getMovieCardTitle } from "../lib/movieTitles";
+import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
   clearProviderAuthIntent,
   getProviderAuthRequirement,
   readProviderAuthIntent,
   saveProviderAuthIntent,
+  shouldGuardGoogleDriveAction,
+  startGoogleDriveReconnect,
 } from "../lib/providerAuth";
 
 
@@ -53,6 +57,25 @@ const IMPORTANT_PLAYBACK_REASON_KEYWORDS = [
 const NATIVE_TRANSPORT_DEBUG_STORAGE_KEY = "elvern_native_transport_debug";
 const DEBUG_FLAG_ENABLED_VALUES = new Set(["1", "true", "yes", "on"]);
 const DEBUG_FLAG_DISABLED_VALUES = new Set(["0", "false", "no", "off"]);
+const PROVIDER_ACTION_BROWSER_LITE = "browser_playback_lite";
+const PROVIDER_ACTION_BROWSER_FULL = "browser_playback_full";
+const PROVIDER_ACTION_DESKTOP_VLC = "desktop_vlc_handoff";
+const PROVIDER_ACTION_IOS_VLC = "ios_external_vlc_handoff";
+const PROVIDER_ACTION_IOS_INFUSE = "ios_external_infuse_handoff";
+const PROVIDER_RECONNECT_CONTINUE_LABEL = "Continue anyway";
+const EMPTY_CLOUD_LIBRARIES = {
+  google: {
+    enabled: false,
+    connected: false,
+    connection_status: "not_configured",
+    reconnect_required: false,
+    provider_auth_required: false,
+    stale_state_warning: null,
+    status_message: "",
+  },
+  my_libraries: [],
+  shared_libraries: [],
+};
 
 
 function detectDesktopPlatform() {
@@ -285,6 +308,7 @@ export function DetailPage() {
   const { itemId } = useParams();
   const location = useLocation();
   const { user } = useAuth();
+  const providerReconnectContinuationRef = useRef(null);
   const [item, setItem] = useState(null);
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState("");
@@ -303,7 +327,10 @@ export function DetailPage() {
     allowReconnect: true,
     requiresAdmin: false,
     errorMessage: "",
+    secondaryLabel: "Close",
   });
+  const [cloudLibraries, setCloudLibraries] = useState(EMPTY_CLOUD_LIBRARIES);
+  const [cloudLibrariesLoaded, setCloudLibrariesLoaded] = useState(false);
   const [iosAppLaunchPending, setIosAppLaunchPending] = useState(false);
   const [iosAppLaunchMessage, setIosAppLaunchMessage] = useState("");
   const [iosAppLaunchError, setIosAppLaunchError] = useState("");
@@ -408,6 +435,7 @@ export function DetailPage() {
   }
 
   function closeProviderReconnectModal() {
+    providerReconnectContinuationRef.current = null;
     clearProviderAuthIntent();
     setProviderReconnectModal({
       open: false,
@@ -418,11 +446,21 @@ export function DetailPage() {
       allowReconnect: true,
       requiresAdmin: false,
       errorMessage: "",
+      secondaryLabel: "Close",
     });
     setProviderReconnectPending(false);
   }
 
-  function openProviderReconnectModal(requirement, actionType, errorMessage = "") {
+  function openProviderReconnectModal(
+    requirement,
+    actionType,
+    {
+      errorMessage = "",
+      secondaryLabel = "Close",
+      onSecondaryAction = null,
+    } = {},
+  ) {
+    providerReconnectContinuationRef.current = onSecondaryAction;
     setProviderReconnectModal({
       open: true,
       provider: requirement.provider,
@@ -432,7 +470,101 @@ export function DetailPage() {
       allowReconnect: requirement.allowReconnect !== false,
       requiresAdmin: requirement.requiresAdmin === true,
       errorMessage,
+      secondaryLabel,
     });
+  }
+
+  async function loadCloudLibrariesHealth({ signal } = {}) {
+    try {
+      const payload = await apiRequest("/api/cloud-libraries", { signal });
+      setCloudLibraries(payload);
+      setCloudLibrariesLoaded(true);
+      return payload;
+    } catch (requestError) {
+      if (requestError?.name === "AbortError") {
+        return null;
+      }
+      return null;
+    }
+  }
+
+  async function maybeGuardCloudProviderAction({ actionType, onContinue }) {
+    if (!item) {
+      return false;
+    }
+    let nextCloudLibraries = cloudLibraries;
+    if (!cloudLibrariesLoaded) {
+      const refreshed = await loadCloudLibrariesHealth();
+      if (refreshed) {
+        nextCloudLibraries = refreshed;
+      }
+    }
+    if (
+      !shouldGuardGoogleDriveAction({
+        itemSourceKind: item.source_kind,
+        reconnectRequired: isCloudReconnectRequired(nextCloudLibraries),
+      })
+    ) {
+      return false;
+    }
+    const prompt = getCloudReconnectPrompt(nextCloudLibraries) || {
+      title: "Reconnect Google Drive",
+      message: "Google Drive reconnect is required. Cloud movies may be stale until you reconnect.",
+    };
+    openProviderReconnectModal(
+      {
+        provider: "google_drive",
+        title: prompt.title,
+        message: prompt.message,
+        allowReconnect: true,
+      },
+      actionType,
+      {
+        secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
+        onSecondaryAction: onContinue,
+      },
+    );
+    return true;
+  }
+
+  function retrySavedProviderAction(actionType) {
+    switch (actionType) {
+      case PROVIDER_ACTION_BROWSER_LITE:
+        clearPlaybackError();
+        setError("");
+        void beginBrowserPlaybackFlow("lite", { skipReconnectGuard: true });
+        return true;
+      case PROVIDER_ACTION_BROWSER_FULL:
+        clearPlaybackError();
+        setError("");
+        void beginBrowserPlaybackFlow("full", { skipReconnectGuard: true });
+        return true;
+      case PROVIDER_ACTION_DESKTOP_VLC:
+        setVlcLaunchError("");
+        setVlcLaunchMessage("Google Drive reconnected. Retrying VLC handoff.");
+        void handleOpenInVlc({ isProviderRetry: true, skipReconnectGuard: true });
+        return true;
+      case PROVIDER_ACTION_IOS_VLC:
+        setIosAppLaunchError("");
+        setIosAppLaunchMessage("Google Drive reconnected. Retrying VLC handoff.");
+        void handleOpenInIosExternalApp("vlc", { skipReconnectGuard: true });
+        return true;
+      case PROVIDER_ACTION_IOS_INFUSE:
+        setIosAppLaunchError("");
+        setIosAppLaunchMessage("Google Drive reconnected. Retrying Infuse handoff.");
+        void handleOpenInIosExternalApp("infuse", { skipReconnectGuard: true });
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  function handleProviderReconnectSecondaryAction() {
+    const continuation = providerReconnectContinuationRef.current;
+    closeProviderReconnectModal();
+    if (continuation) {
+      void continuation();
+    }
   }
 
   function resetIosExternalAppState() {
@@ -604,6 +736,20 @@ export function DetailPage() {
   }, [user?.id, user?.role]);
 
   useEffect(() => {
+    if (!item || (item.source_kind || "local") !== "cloud") {
+      setCloudLibraries(EMPTY_CLOUD_LIBRARIES);
+      setCloudLibrariesLoaded(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setCloudLibrariesLoaded(false);
+    void loadCloudLibrariesHealth({ signal: controller.signal });
+    return () => {
+      controller.abort();
+    };
+  }, [item?.id, item?.source_kind]);
+
+  useEffect(() => {
     if (!providerReconnectResult) {
       return;
     }
@@ -617,6 +763,7 @@ export function DetailPage() {
       setProviderReconnectResult(null);
       return;
     }
+    const actionType = String(pendingIntent.actionType || "");
     if (providerReconnectResult.status !== "connected") {
       setProviderReconnectPending(false);
       openProviderReconnectModal(
@@ -625,23 +772,27 @@ export function DetailPage() {
           title: "Google Drive connection expired",
           message: "Reconnect Google Drive to continue this action.",
         },
-        String(pendingIntent.actionType || ""),
-        providerReconnectResult.message || "Google Drive reconnect was cancelled or failed.",
+        actionType,
+        {
+          errorMessage: providerReconnectResult.message || "Google Drive reconnect was cancelled or failed.",
+          secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
+          onSecondaryAction: () => retrySavedProviderAction(actionType),
+        },
       );
       setProviderReconnectResult(null);
       return;
     }
-    if (!item || !desktopPlayback) {
+    if (
+      !item
+      || (actionType === PROVIDER_ACTION_DESKTOP_VLC && !desktopPlayback)
+    ) {
       return;
     }
     clearProviderAuthIntent();
     closeProviderReconnectModal();
+    void loadCloudLibrariesHealth();
     setProviderReconnectResult(null);
-    if (pendingIntent.actionType === "desktop_vlc_handoff") {
-      setVlcLaunchError("");
-      setVlcLaunchMessage("Google Drive reconnected. Retrying VLC handoff.");
-      void handleOpenInVlc({ isProviderRetry: true });
-    }
+    retrySavedProviderAction(actionType);
   }, [desktopPlayback, item, itemId, providerReconnectResult]);
 
   useEffect(() => {
@@ -763,7 +914,20 @@ export function DetailPage() {
     await stopCurrentBrowserPlaybackSession();
   }
 
-  function beginBrowserPlaybackFlow(playbackMode = "lite") {
+  async function beginBrowserPlaybackFlow(playbackMode = "lite", { skipReconnectGuard = false } = {}) {
+    const actionType =
+      playbackMode === "full"
+        ? PROVIDER_ACTION_BROWSER_FULL
+        : PROVIDER_ACTION_BROWSER_LITE;
+    if (!skipReconnectGuard) {
+      const blocked = await maybeGuardCloudProviderAction({
+        actionType,
+        onContinue: () => beginBrowserPlaybackFlow(playbackMode, { skipReconnectGuard: true }),
+      });
+      if (blocked) {
+        return;
+      }
+    }
     setPlaybackModeIntentValue(playbackMode);
     clearPlaybackError();
     clearOptimizedPlaybackPending();
@@ -786,11 +950,11 @@ export function DetailPage() {
   }
 
   function handleStartLitePlayback() {
-    beginBrowserPlaybackFlow("lite");
+    void beginBrowserPlaybackFlow("lite");
   }
 
   function handleStartFullPlayback() {
-    beginBrowserPlaybackFlow("full");
+    void beginBrowserPlaybackFlow("full");
   }
 
   function handleResumeBrowserPlayback() {
@@ -823,19 +987,13 @@ export function DetailPage() {
     const returnPath = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
     saveProviderAuthIntent({
       provider: "google_drive",
-      actionType: providerReconnectModal.actionType || "desktop_vlc_handoff",
+      actionType: providerReconnectModal.actionType || PROVIDER_ACTION_DESKTOP_VLC,
       mediaItemId: Number(item.id),
       platform: desktopPlayback?.platform || desktopPlatform || null,
       returnPath,
     });
     try {
-      const payload = await apiRequest("/api/cloud-libraries/google/connect", {
-        method: "POST",
-        data: {
-          return_path: returnPath,
-        },
-      });
-      window.location.assign(payload.authorization_url);
+      await startGoogleDriveReconnect({ returnPath });
     } catch (requestError) {
       setProviderReconnectPending(false);
       setProviderReconnectModal((current) => ({
@@ -846,9 +1004,25 @@ export function DetailPage() {
   }
 
   async function handleOpenInVlc(options = {}) {
-    const { isProviderRetry = false } = options;
+    const {
+      isProviderRetry = false,
+      skipReconnectGuard = false,
+      suppressProviderAuthModal = false,
+    } = options;
     if (!item) {
       return;
+    }
+    if (!skipReconnectGuard) {
+      const blocked = await maybeGuardCloudProviderAction({
+        actionType: PROVIDER_ACTION_DESKTOP_VLC,
+        onContinue: () => handleOpenInVlc({
+          skipReconnectGuard: true,
+          suppressProviderAuthModal: true,
+        }),
+      });
+      if (blocked) {
+        return;
+      }
     }
     if (!desktopPlayback) {
       setVlcLaunchError("Desktop VLC playback details are still loading.");
@@ -900,9 +1074,25 @@ export function DetailPage() {
     } catch (requestError) {
       const providerAuthRequirement = getProviderAuthRequirement(requestError);
       if (providerAuthRequirement) {
+        if (suppressProviderAuthModal) {
+          setVlcLaunchError(providerAuthRequirement.message || requestError.message || "Google Drive reconnect is required.");
+          setVlcLaunchMessage("");
+          if (hadBrowserPlaybackSession && !isProviderRetry) {
+            restoreActiveBrowserPlaybackSession().catch(() => {
+              // Preserve the reconnect-required error if browser playback cannot be restored.
+            });
+          }
+          return;
+        }
         setVlcLaunchError("");
         setVlcLaunchMessage("");
-        openProviderReconnectModal(providerAuthRequirement, "desktop_vlc_handoff");
+        openProviderReconnectModal(providerAuthRequirement, PROVIDER_ACTION_DESKTOP_VLC, {
+          secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
+          onSecondaryAction: () => handleOpenInVlc({
+            skipReconnectGuard: true,
+            suppressProviderAuthModal: true,
+          }),
+        });
         return;
       }
       setVlcLaunchError(requestError.message || "Failed to open VLC");
@@ -959,9 +1149,31 @@ export function DetailPage() {
     }
   }
 
-  async function handleOpenInIosExternalApp(targetApp) {
+  async function handleOpenInIosExternalApp(
+    targetApp,
+    {
+      skipReconnectGuard = false,
+      suppressProviderAuthModal = false,
+    } = {},
+  ) {
     if (!item) {
       return;
+    }
+    const actionType =
+      targetApp === "infuse"
+        ? PROVIDER_ACTION_IOS_INFUSE
+        : PROVIDER_ACTION_IOS_VLC;
+    if (!skipReconnectGuard) {
+      const blocked = await maybeGuardCloudProviderAction({
+        actionType,
+        onContinue: () => handleOpenInIosExternalApp(targetApp, {
+          skipReconnectGuard: true,
+          suppressProviderAuthModal: true,
+        }),
+      });
+      if (blocked) {
+        return;
+      }
     }
     const appLabel = targetApp === "infuse" ? "Infuse" : "VLC";
     prepareForExternalPlayerHandoff();
@@ -1025,10 +1237,28 @@ export function DetailPage() {
       );
       window.location.assign(launchUrl);
     } catch (requestError) {
+      const providerAuthRequirement = getProviderAuthRequirement(requestError);
       if (targetApp === "infuse") {
         clearIosExternalAppLaunchState({ itemId, app: "infuse" });
       }
       setIosTransportDebug(null);
+      if (providerAuthRequirement) {
+        if (suppressProviderAuthModal) {
+          setIosAppLaunchError(providerAuthRequirement.message || requestError.message || `Failed to open ${appLabel}`);
+          setIosAppLaunchMessage("");
+          return;
+        }
+        setIosAppLaunchError("");
+        setIosAppLaunchMessage("");
+        openProviderReconnectModal(providerAuthRequirement, actionType, {
+          secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
+          onSecondaryAction: () => handleOpenInIosExternalApp(targetApp, {
+            skipReconnectGuard: true,
+            suppressProviderAuthModal: true,
+          }),
+        });
+        return;
+      }
       setIosAppLaunchError(requestError.message || `Failed to open ${appLabel}`);
     } finally {
       setIosAppLaunchPending(false);
@@ -1353,58 +1583,19 @@ export function DetailPage() {
 
   return (
     <section className="page-section page-section--detail">
-      {providerReconnectModal.open ? (
-        <div
-          aria-labelledby="provider-reconnect-modal-title"
-          aria-modal="true"
-          className="browser-resume-modal"
-          role="dialog"
-        >
-          <div
-            aria-hidden="true"
-            className="browser-resume-modal__backdrop"
-            onClick={providerReconnectPending ? undefined : closeProviderReconnectModal}
-          />
-          <div className="browser-resume-modal__card">
-            <p className="eyebrow">Provider connection</p>
-            <h2 id="provider-reconnect-modal-title">{providerReconnectModal.title}</h2>
-            <p className="page-subnote">{providerReconnectModal.message}</p>
-            {providerReconnectModal.errorMessage ? (
-              <p className="form-error">{providerReconnectModal.errorMessage}</p>
-            ) : null}
-            <div className="browser-resume-modal__actions">
-              {providerReconnectModal.allowReconnect ? (
-                <>
-                  <button
-                    className="primary-button"
-                    disabled={providerReconnectPending}
-                    onClick={handleProviderReconnect}
-                    type="button"
-                  >
-                    {providerReconnectPending ? "Reconnecting..." : "Reconnect"}
-                  </button>
-                  <button
-                    className="ghost-button"
-                    disabled={providerReconnectPending}
-                    onClick={closeProviderReconnectModal}
-                    type="button"
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <button
-                  className="ghost-button"
-                  onClick={closeProviderReconnectModal}
-                  type="button"
-                >
-                  OK
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <ProviderReconnectModal
+        allowReconnect={providerReconnectModal.allowReconnect}
+        errorMessage={providerReconnectModal.errorMessage}
+        message={providerReconnectModal.message}
+        onClose={closeProviderReconnectModal}
+        onReconnect={handleProviderReconnect}
+        onSecondary={handleProviderReconnectSecondaryAction}
+        open={providerReconnectModal.open}
+        reconnectLabel="Reconnect Google Drive"
+        reconnectPending={providerReconnectPending}
+        secondaryLabel={providerReconnectModal.secondaryLabel}
+        title={providerReconnectModal.title}
+      />
       {browserResumeModalOpen ? (
         <div
           aria-labelledby="browser-resume-modal-title"

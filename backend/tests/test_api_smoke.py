@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import backend.app.main as main_module
@@ -15,6 +17,7 @@ from backend.app.media_scan import scan_media_library
 from backend.app.security import hash_password
 from backend.app.services import cloud_source_sync_service
 from backend.app.services.desktop_playback_service import resolve_same_host_request
+from backend.app.services.google_drive_service import build_google_drive_provider_auth_required_detail
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
 from backend.app.services.library_movie_identity_service import _row_hidden_movie_key
 from backend.tests.conftest import (
@@ -119,6 +122,61 @@ def _sync_fake_google_drive_source(monkeypatch, settings, *, source_id: int, row
         provider="google_drive",
         get_access_token_by_account_id=lambda *args, **kwargs: "test-access-token",
     )
+
+
+def _insert_cloud_media_row(
+    settings,
+    *,
+    source_id: int,
+    external_media_id: str,
+    title: str,
+    original_filename: str,
+) -> int:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                external_media_id,
+                cloud_mime_type,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'cloud', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                title,
+                original_filename,
+                f"gdrive://folder-123/{external_media_id}/{original_filename}",
+                source_id,
+                external_media_id,
+                "video/mp4",
+                1048576,
+                1704067200.0,
+                1000.0,
+                1920,
+                1080,
+                "mp4",
+                2011,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
 
 
 def test_health_endpoint_smoke(client) -> None:
@@ -1492,6 +1550,108 @@ def test_cloud_sync_collapses_existing_duplicate_rows_for_same_external_media_id
         assert tuple(watch_event_row) == (canonical_id, 321.0)
 
 
+def test_cloud_sync_deletes_rows_missing_from_successful_drive_listing(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    source_id = _insert_google_drive_source(initialized_settings)
+    _insert_cloud_media_row(
+        initialized_settings,
+        source_id=source_id,
+        external_media_id="file-a",
+        title="Movie A",
+        original_filename="Movie A (2011).mp4",
+    )
+    stale_row_id = _insert_cloud_media_row(
+        initialized_settings,
+        source_id=source_id,
+        external_media_id="file-b",
+        title="Movie B",
+        original_filename="Movie B (2011).mp4",
+    )
+
+    _sync_fake_google_drive_source(
+        monkeypatch,
+        initialized_settings,
+        source_id=source_id,
+        rows=[_build_fake_google_drive_video_row(file_id="file-a", name="Movie A (2011).mp4")],
+    )
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, external_media_id
+            FROM media_items
+            WHERE COALESCE(source_kind, 'local') = 'cloud'
+              AND library_source_id = ?
+            ORDER BY external_media_id ASC
+            """,
+            (source_id,),
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [(rows[0]["id"], "file-a")]
+    assert all(int(row["id"]) != stale_row_id for row in rows)
+
+
+def test_cloud_sync_auth_failure_keeps_existing_rows_and_marks_source_error(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    source_id = _insert_google_drive_source(initialized_settings)
+    preserved_row_id = _insert_cloud_media_row(
+        initialized_settings,
+        source_id=source_id,
+        external_media_id="file-b",
+        title="Movie B",
+        original_filename="Movie B (2011).mp4",
+    )
+
+    def _raise_provider_auth_required(*args, **kwargs):
+        raise HTTPException(
+            status_code=409,
+            detail=build_google_drive_provider_auth_required_detail(reason="token_expired_or_revoked"),
+        )
+
+    monkeypatch.setattr(cloud_source_sync_service, "google_drive_enabled", lambda _settings: True)
+    summary = cloud_source_sync_service.sync_all_google_drive_sources(
+        initialized_settings,
+        provider="google_drive",
+        get_access_token_by_account_id=_raise_provider_auth_required,
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["provider_auth_required"] is True
+    assert summary["reconnect_required"] is True
+    assert summary["message"] == "Google Drive reconnect is required. Cloud library was not refreshed and may be stale."
+    assert summary["stale_state_warning"] == (
+        "Cloud library was not refreshed and may be stale until Google Drive reconnects and the next sync succeeds."
+    )
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id
+            FROM media_items
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (preserved_row_id,),
+        ).fetchone()
+        source_row = connection.execute(
+            """
+            SELECT last_error
+            FROM library_sources
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (source_id,),
+        ).fetchone()
+
+    assert row is not None
+    assert source_row is not None
+    assert "provider_auth_required" in str(source_row["last_error"] or "")
+
+
 def test_library_route_handles_dirty_stored_titles_without_internal_server_error(
     client,
     admin_credentials,
@@ -1621,6 +1781,76 @@ def test_admin_google_drive_setup_save_smoke(client, admin_credentials) -> None:
     cloud_response = client.get("/api/cloud-libraries")
     assert cloud_response.status_code == 200
     assert cloud_response.json()["google"]["enabled"] is True
+    assert cloud_response.json()["google"]["connection_status"] == "not_connected"
+    assert cloud_response.json()["google"]["reconnect_required"] is False
+
+
+def test_cloud_libraries_distinguish_oauth_ready_from_reconnect_required_source_health(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    update_response = client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": "secret123",
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["configuration_state"] == "ready"
+
+    source_id = _insert_google_drive_source(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE library_sources
+            SET last_synced_at = ?, last_error = ?
+            WHERE id = ?
+            """,
+            (
+                utcnow_iso(),
+                json.dumps(build_google_drive_provider_auth_required_detail(reason="token_expired_or_revoked")),
+                source_id,
+            ),
+        )
+        connection.commit()
+
+    setup_response = client.get("/api/admin/google-drive-setup")
+    assert setup_response.status_code == 200
+    assert setup_response.json()["configuration_state"] == "ready"
+    assert setup_response.json()["configuration_label"] == "Ready"
+
+    cloud_response = client.get("/api/cloud-libraries")
+    assert cloud_response.status_code == 200
+    payload = cloud_response.json()
+    assert payload["google"]["enabled"] is True
+    assert payload["google"]["connected"] is True
+    assert payload["google"]["connection_status"] == "reconnect_required"
+    assert payload["google"]["reconnect_required"] is True
+    assert payload["google"]["provider_auth_required"] is True
+    assert payload["google"]["status_message"] == "Reconnect Google Drive. Cloud library may be stale until you reconnect."
+    assert payload["google"]["stale_state_warning"] == (
+        "Cloud library was not refreshed and may be stale until Google Drive reconnects and the next sync succeeds."
+    )
+    assert len(payload["shared_libraries"]) == 1
+    source_payload = payload["shared_libraries"][0]
+    assert source_payload["sync_status"] == "reconnect_required"
+    assert source_payload["reconnect_required"] is True
+    assert source_payload["provider_auth_required"] is True
+    assert source_payload["stale_state_warning"] == (
+        "Cloud library was not refreshed and may be stale until Google Drive reconnects and the next sync succeeds."
+    )
+    assert source_payload["last_error_message"] == "Reconnect Google Drive to continue this action."
+    assert "refresh_token" not in cloud_response.text
+    assert "access_token" not in cloud_response.text
 
 
 def test_admin_google_drive_setup_validation_surfaces_specific_error(client, admin_credentials) -> None:
