@@ -55,12 +55,14 @@ from ..services.app_settings_service import (
     update_media_library_reference,
     update_poster_reference_location,
 )
+from ..services.backup_service import create_backup_checkpoint, prune_backup_checkpoints
 from ..services.desktop_playback_service import resolve_same_host_request
 from ..services.library_service import (
     hide_media_item_globally,
     list_globally_hidden_media_items,
     show_media_item_globally,
 )
+from ..services.local_library_source_service import validate_shared_local_library_path
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -339,6 +341,34 @@ def admin_update_media_library_reference(
     request: Request,
     user=CurrentAdmin,
 ) -> MediaLibraryReferenceResponse:
+    validate_shared_local_library_path(request.app.state.settings, value=payload.value)
+    existing_payload = get_media_library_reference_payload(request.app.state.settings)
+    try:
+        auto_checkpoint = create_backup_checkpoint(
+            request.app.state.settings,
+            backup_trigger="auto_before_shared_local_path_update",
+            auto_checkpoint=True,
+            reason="shared_local_path_update",
+            initiated_by_user_id=user.id,
+            initiated_by_username=user.username,
+            operation_context={
+                "action": "admin.settings.media_library_reference",
+                "existing_effective_path": existing_payload["effective_value"],
+                "requested_value": payload.value,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Backup checkpoint failed; shared local library path was not updated.",
+        ) from exc
+
+    prune_summary = None
+    try:
+        prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
+    except Exception:
+        prune_summary = None
+
     updated = update_media_library_reference(
         request.app.state.settings,
         value=payload.value,
@@ -358,6 +388,10 @@ def admin_update_media_library_reference(
         details={
             "configured_value": updated["configured_value"],
             "effective_value": updated["effective_value"],
+            "auto_backup_checkpoint_id": auto_checkpoint.get("checkpoint_id"),
+            "auto_backup_path": auto_checkpoint.get("backup_path"),
+            "auto_backup_created_at_utc": auto_checkpoint.get("created_at_utc"),
+            "auto_backup_prune_summary": prune_summary,
         },
     )
     return MediaLibraryReferenceResponse(**updated)

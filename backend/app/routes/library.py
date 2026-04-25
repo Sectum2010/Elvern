@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from ..auth import CurrentUser, resolve_client_ip
 from ..progress import refresh_recent_tracking
 from ..schemas import LibraryListResponse, MediaItemDetail, ScanResponse
+from ..services.backup_service import create_backup_checkpoint, prune_backup_checkpoints
 from ..services.library_service import (
     get_media_item_detail,
     get_media_item_poster_path,
@@ -93,6 +94,32 @@ def rescan(request: Request, user=CurrentUser) -> ScanResponse:
             job_id=None,
         )
 
+    try:
+        auto_checkpoint = create_backup_checkpoint(
+            request.app.state.settings,
+            backup_trigger="auto_before_admin_rescan",
+            auto_checkpoint=True,
+            reason="manual",
+            initiated_by_user_id=user.id,
+            initiated_by_username=user.username,
+            operation_context={
+                "route": "/api/library/rescan",
+                "action": "admin.library.rescan",
+                "reason": "manual",
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Backup checkpoint failed; rescan was not started.",
+        ) from exc
+
+    prune_summary = None
+    try:
+        prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
+    except Exception:
+        prune_summary = None
+
     state = request.app.state.scan_service.enqueue_scan(reason="manual")
     log_audit_event(
         request.app.state.settings,
@@ -108,6 +135,10 @@ def rescan(request: Request, user=CurrentUser) -> ScanResponse:
             "running": bool(state["running"]),
             "job_id": state.get("job_id"),
             "recent_refresh": refresh_summary,
+            "auto_backup_checkpoint_id": auto_checkpoint.get("checkpoint_id"),
+            "auto_backup_path": auto_checkpoint.get("backup_path"),
+            "auto_backup_created_at_utc": auto_checkpoint.get("created_at_utc"),
+            "auto_backup_prune_summary": prune_summary,
         },
     )
     message = (

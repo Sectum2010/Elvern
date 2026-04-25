@@ -8,6 +8,7 @@ backend/data/*.db*
 backend/data/*.sqlite*
 backend/data/*.log
 backend/data/assistant_uploads/
+backend/data/backups/
 backend/data/helper_releases/
 backend/data/transcodes/
 .runtime/
