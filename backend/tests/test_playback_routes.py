@@ -138,6 +138,47 @@ def _create_media_item_record(
     }
 
 
+def _set_shared_progress(
+    settings,
+    *,
+    user_id: int,
+    item_id: int,
+    position_seconds: float,
+    duration_seconds: float = 120.0,
+    completed: bool = False,
+) -> None:
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO playback_progress (
+                user_id,
+                media_item_id,
+                position_seconds,
+                duration_seconds,
+                watch_seconds_total,
+                completed,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, media_item_id) DO UPDATE SET
+                position_seconds = excluded.position_seconds,
+                duration_seconds = excluded.duration_seconds,
+                watch_seconds_total = excluded.watch_seconds_total,
+                completed = excluded.completed,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                item_id,
+                position_seconds,
+                duration_seconds,
+                round(position_seconds, 2),
+                int(completed),
+                utcnow_iso(),
+            ),
+        )
+        connection.commit()
+
+
 @pytest.mark.parametrize(
     ("target_app", "expected_scheme", "expected_path", "expects_callbacks"),
     [
@@ -277,6 +318,111 @@ def test_native_playback_session_route_decouples_ios_external_player_auth_sessio
     assert session_row is not None
     assert session_row["auth_session_id"] is None
     assert str(session_row["client_name"]).lower().startswith(expected_prefix)
+
+
+def test_native_playback_session_route_uses_shared_progress_for_ios_vlc_resume_seconds(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="native-session/ios-vlc-shared-progress.mp4",
+    )
+    _set_shared_progress(
+        initialized_settings,
+        user_id=1,
+        item_id=int(item["id"]),
+        position_seconds=2640.0,
+    )
+
+    create_response = client.post(
+        f"/api/native-playback/{item['id']}/session",
+        headers={"user-agent": IOS_SAFARI_USER_AGENT},
+        json={
+            "client_name": "Elvern iOS VLC Handoff",
+            "external_player": "vlc",
+        },
+    )
+
+    assert create_response.status_code == 200
+    created_session = create_response.json()
+    assert created_session["resume_seconds"] == 2640.0
+
+    with get_connection(initialized_settings) as connection:
+        session_row = connection.execute(
+            """
+            SELECT last_position_seconds, last_duration_seconds
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (created_session["session_id"],),
+        ).fetchone()
+        progress_row = connection.execute(
+            """
+            SELECT position_seconds, duration_seconds, completed
+            FROM playback_progress
+            WHERE user_id = ? AND media_item_id = ?
+            LIMIT 1
+            """,
+            (1, int(item["id"])),
+        ).fetchone()
+
+    assert session_row is not None
+    assert float(session_row["last_position_seconds"] or 0.0) == 2640.0
+    assert progress_row is not None
+    assert float(progress_row["position_seconds"] or 0.0) == 2640.0
+    assert bool(progress_row["completed"]) is False
+
+
+def test_native_playback_session_route_ignores_other_users_progress_for_ios_vlc_resume(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+    created_user = _create_standard_user(initialized_settings, username="ios-vlc-other-user")
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="native-session/ios-vlc-other-user.mp4",
+    )
+    _set_shared_progress(
+        initialized_settings,
+        user_id=1,
+        item_id=int(item["id"]),
+        position_seconds=600.0,
+    )
+    _set_shared_progress(
+        initialized_settings,
+        user_id=int(created_user["id"]),
+        item_id=int(item["id"]),
+        position_seconds=1800.0,
+    )
+
+    create_response = client.post(
+        f"/api/native-playback/{item['id']}/session",
+        headers={"user-agent": IOS_SAFARI_USER_AGENT},
+        json={
+            "client_name": "Elvern iOS VLC Handoff",
+            "external_player": "vlc",
+        },
+    )
+
+    assert create_response.status_code == 200
+    created_session = create_response.json()
+    assert created_session["resume_seconds"] == 600.0
 
 
 def test_desktop_playback_route_returns_linux_same_host_direct_path(initialized_settings, client, admin_credentials) -> None:

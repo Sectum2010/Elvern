@@ -142,6 +142,10 @@ def test_ios_external_launch_url_contract_for_infuse_and_vlc() -> None:
     assert vlc_params["url"] == [stream_url]
     assert "x-success" not in vlc_params
     assert "x-error" not in vlc_params
+    assert "resume" not in vlc_params
+    assert "start" not in vlc_params
+    assert "position" not in vlc_params
+    assert "time" not in vlc_params
 
 
 def test_native_playback_session_client_name_preserves_player_hint_for_ios_external_routes() -> None:

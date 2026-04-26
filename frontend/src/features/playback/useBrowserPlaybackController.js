@@ -9,6 +9,7 @@ import {
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "../../lib/browserPlaybackTimeline";
+import { resolveBrowserPlaybackResumePosition } from "../../lib/browserPlaybackResume";
 import { formatDuration } from "../../lib/format";
 import {
   fetchPlaybackDecision,
@@ -204,7 +205,7 @@ export function useBrowserPlaybackController({
       return 0;
     }
     return progress.position_seconds || item?.resume_position_seconds || 0;
-  }, [item, progress]);
+  }, [item?.resume_position_seconds, progress]);
 
   const fullDuration = useMemo(() => {
     if (mobileSession?.duration_seconds && mobileSession.duration_seconds > 0) {
@@ -233,14 +234,13 @@ export function useBrowserPlaybackController({
   ]);
 
   const resumableStartPosition = useMemo(() => {
-    if (!resumePosition) {
-      return 0;
-    }
-    if (fullDuration > 0 && resumePosition >= fullDuration - COMPLETION_GRACE_SECONDS) {
-      return 0;
-    }
-    return resumePosition;
-  }, [fullDuration, resumePosition]);
+    return resolveBrowserPlaybackResumePosition({
+      progressPayload: progress,
+      fallbackResumePositionSeconds: item?.resume_position_seconds || 0,
+      durationSeconds: fullDuration,
+      completionGraceSeconds: COMPLETION_GRACE_SECONDS,
+    });
+  }, [fullDuration, item?.resume_position_seconds, progress]);
 
   const availableDuration = useMemo(() => {
     if (mobileSession) {

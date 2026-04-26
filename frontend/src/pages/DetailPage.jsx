@@ -18,6 +18,7 @@ import {
   rememberLibraryReturnTarget,
 } from "../lib/libraryNavigation";
 import { resolveBrowserPlaybackPlayerViewState } from "../lib/browserPlaybackPlayerState";
+import { resolveAuthoritativeBrowserPlaybackResumePosition } from "../lib/browserPlaybackResume";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
@@ -345,6 +346,7 @@ export function DetailPage() {
   const [iosAppTarget, setIosAppTarget] = useState("");
   const [iosTransportDebug, setIosTransportDebug] = useState(null);
   const [browserResumeModalOpen, setBrowserResumeModalOpen] = useState(false);
+  const [browserResumePromptPosition, setBrowserResumePromptPosition] = useState(0);
   const [browserStopModalOpen, setBrowserStopModalOpen] = useState(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
@@ -823,6 +825,7 @@ export function DetailPage() {
       setVlcLaunchMessage("");
       setVlcLaunchError("");
       setBrowserResumeModalOpen(false);
+      setBrowserResumePromptPosition(0);
       setBrowserStopModalOpen(false);
       setInfoModalOpen(false);
       try {
@@ -913,12 +916,25 @@ export function DetailPage() {
 
   function requestStopBrowserPlayback() {
     setBrowserResumeModalOpen(false);
+    setBrowserResumePromptPosition(0);
     setBrowserStopModalOpen(true);
   }
 
   async function confirmStopBrowserPlayback() {
     setBrowserStopModalOpen(false);
     await stopCurrentBrowserPlaybackSession();
+  }
+
+  async function resolveLatestBrowserResumeStartPosition() {
+    if (!item) {
+      return resumableStartPosition;
+    }
+    const progressPayload = await apiRequest(`/api/progress/${item.id}`);
+    setProgress(progressPayload);
+    return resolveAuthoritativeBrowserPlaybackResumePosition({
+      progressPayload,
+      durationSeconds: fullDuration || item?.duration_seconds || progressPayload?.duration_seconds || 0,
+    });
   }
 
   async function beginBrowserPlaybackFlow(playbackMode = "lite", { skipReconnectGuard = false } = {}) {
@@ -947,10 +963,18 @@ export function DetailPage() {
       playExistingBrowserSource();
       return;
     }
-    if (resumableStartPosition > 0) {
+    let latestResumeStartPosition = resumableStartPosition;
+    try {
+      latestResumeStartPosition = await resolveLatestBrowserResumeStartPosition();
+    } catch (requestError) {
+      console.error("Failed to refresh latest playback progress before browser start", requestError);
+    }
+    if (latestResumeStartPosition > 0) {
+      setBrowserResumePromptPosition(latestResumeStartPosition);
       setBrowserResumeModalOpen(true);
       return;
     }
+    setBrowserResumePromptPosition(0);
     setBrowserResumeModalOpen(false);
     setBrowserStopModalOpen(false);
     void startBrowserPlaybackFrom(0, playbackMode);
@@ -965,14 +989,19 @@ export function DetailPage() {
   }
 
   function handleResumeBrowserPlayback() {
+    const nextResumeStartPosition = browserResumePromptPosition > 0
+      ? browserResumePromptPosition
+      : resumableStartPosition;
     setBrowserResumeModalOpen(false);
+    setBrowserResumePromptPosition(0);
     setBrowserStopModalOpen(false);
     resetIosExternalAppState();
-    void startBrowserPlaybackFrom(resumableStartPosition, playbackModeIntent);
+    void startBrowserPlaybackFrom(nextResumeStartPosition, playbackModeIntent);
   }
 
   function handleStartBrowserPlaybackFromBeginning() {
     setBrowserResumeModalOpen(false);
+    setBrowserResumePromptPosition(0);
     setBrowserStopModalOpen(false);
     resetIosExternalAppState();
     void startBrowserPlaybackFrom(0, playbackModeIntent);
@@ -1566,6 +1595,9 @@ export function DetailPage() {
       ? "status-pill"
       : "status-pill status-pill--live";
   const preparedDurationLabel = availableDuration > 0 ? formatDuration(availableDuration) : "0:00";
+  const effectiveBrowserResumePromptPosition = browserResumePromptPosition > 0
+    ? browserResumePromptPosition
+    : resumableStartPosition;
   const mobileCacheRangesLabel =
     mobileSession?.cache_ranges?.length
       ? mobileSession.cache_ranges
@@ -1634,7 +1666,7 @@ export function DetailPage() {
                 onClick={handleResumeBrowserPlayback}
                 type="button"
               >
-                Resume at {formatDuration(resumableStartPosition)}
+                Resume at {formatDuration(effectiveBrowserResumePromptPosition)}
               </button>
               <button
                 className="ghost-button"
