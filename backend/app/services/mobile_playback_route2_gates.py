@@ -3,8 +3,9 @@ from __future__ import annotations
 import math
 
 from .mobile_playback_models import (
-    READY_AFTER_TARGET_SECONDS,
     ROUTE2_ATTACH_READY_SECONDS,
+    ROUTE2_LITE_FAST_START_RUNWAY_SECONDS,
+    ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X,
     ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS,
@@ -13,6 +14,8 @@ from .mobile_playback_models import (
     ROUTE2_STARTUP_MIN_SUPPLY_RATE_X,
     ROUTE2_STARTUP_PROJECTION_HORIZON_SECONDS,
     ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS,
+    ROUTE2_SUPPLY_SURPLUS_MIN_OBSERVATION_SECONDS,
+    ROUTE2_SUPPLY_SURPLUS_MIN_RATE_X,
     SEGMENT_DURATION_SECONDS,
     MobilePlaybackSession,
     PlaybackEpoch,
@@ -97,7 +100,87 @@ def _route2_attach_gate_state_locked(
     return False, estimate_seconds, supply_rate_x, observation_seconds, projected_runway_seconds, display_confident
 
 
-def _route2_epoch_startup_attach_ready_locked(
+def _route2_supply_surplus_locked(
+    *,
+    supply_rate_x: float,
+    observation_seconds: float,
+) -> bool:
+    return (
+        observation_seconds + 0.001 >= ROUTE2_SUPPLY_SURPLUS_MIN_OBSERVATION_SECONDS
+        and supply_rate_x + 0.001 >= ROUTE2_SUPPLY_SURPLUS_MIN_RATE_X
+    )
+
+
+def _route2_lite_initial_startup_gate_locked(
+    session: MobilePlaybackSession,
+    epoch: PlaybackEpoch,
+    *,
+    route2_attach_gate_state_locked,
+    route2_epoch_ready_end_seconds_locked,
+) -> dict[str, float | str | bool | None]:
+    if not epoch.init_published or epoch.contiguous_published_through_segment is None:
+        return {
+            "ready": False,
+            "estimate_seconds": None,
+            "supply_rate_x": 0.0,
+            "supply_observation_seconds": 0.0,
+            "required_startup_runway_seconds": min(
+                ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+                max(0.0, session.duration_seconds - epoch.attach_position_seconds),
+            ),
+            "actual_startup_runway_seconds": 0.0,
+            "gate_reason": "lite_slow_supply_unknown_or_deficit",
+        }
+    (
+        _generic_ready,
+        _generic_estimate_seconds,
+        supply_rate_x,
+        observation_seconds,
+        _projected_runway_seconds,
+        _display_confident,
+    ) = route2_attach_gate_state_locked(
+        session,
+        epoch,
+        minimum_runway_seconds=ROUTE2_STARTUP_MIN_RUNWAY_SECONDS,
+        projected_runway_target_seconds=ROUTE2_ATTACH_READY_SECONDS,
+        projection_horizon_seconds=ROUTE2_STARTUP_PROJECTION_HORIZON_SECONDS,
+        minimum_supply_rate_x=ROUTE2_STARTUP_MIN_SUPPLY_RATE_X,
+        reference_position_seconds=epoch.attach_position_seconds,
+    )
+    supply_surplus = _route2_supply_surplus_locked(
+        supply_rate_x=supply_rate_x,
+        observation_seconds=observation_seconds,
+    )
+    required_startup_runway_seconds = min(
+        ROUTE2_LITE_FAST_START_RUNWAY_SECONDS if supply_surplus else ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+        max(0.0, session.duration_seconds - epoch.attach_position_seconds),
+    )
+    actual_startup_runway_seconds = max(
+        0.0,
+        route2_epoch_ready_end_seconds_locked(session, epoch) - epoch.attach_position_seconds,
+    )
+    ready = actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds
+    estimate_seconds = 0.0 if ready else None
+    if not ready and supply_rate_x > 0.001:
+        runway_deficit_seconds = max(0.0, required_startup_runway_seconds - actual_startup_runway_seconds)
+        quantized_runway_deficit_seconds = (
+            math.ceil(runway_deficit_seconds / SEGMENT_DURATION_SECONDS) * SEGMENT_DURATION_SECONDS
+            if runway_deficit_seconds > 0.001
+            else 0.0
+        )
+        estimate_seconds = quantized_runway_deficit_seconds / supply_rate_x
+    return {
+        "ready": ready,
+        "estimate_seconds": estimate_seconds,
+        "supply_rate_x": supply_rate_x,
+        "supply_observation_seconds": observation_seconds,
+        "required_startup_runway_seconds": required_startup_runway_seconds,
+        "actual_startup_runway_seconds": actual_startup_runway_seconds,
+        "gate_reason": "lite_fast_supply_surplus" if supply_surplus else "lite_slow_supply_unknown_or_deficit",
+    }
+
+
+def _route2_epoch_startup_attach_gate_locked(
     session: MobilePlaybackSession,
     epoch: PlaybackEpoch,
     *,
@@ -105,22 +188,27 @@ def _route2_epoch_startup_attach_ready_locked(
     route2_full_mode_gate_locked,
     route2_attach_gate_state_locked,
     route2_epoch_ready_end_seconds_locked,
-) -> bool:
+) -> dict[str, float | str | bool | None]:
     if route2_full_mode_requires_initial_attach_gate_locked(session):
-        return bool(route2_full_mode_gate_locked(session, epoch)["mode_ready"])
+        full_mode_gate = route2_full_mode_gate_locked(session, epoch)
+        return {
+            "ready": bool(full_mode_gate["mode_ready"]),
+            "estimate_seconds": full_mode_gate.get("mode_estimate_seconds"),
+            "supply_rate_x": float(full_mode_gate.get("supply_rate_x") or 0.0),
+            "supply_observation_seconds": float(full_mode_gate.get("supply_observation_seconds") or 0.0),
+            "required_startup_runway_seconds": full_mode_gate.get("required_startup_runway_seconds"),
+            "actual_startup_runway_seconds": full_mode_gate.get("actual_startup_runway_seconds"),
+            "effective_goodput_ratio": full_mode_gate.get("effective_goodput_ratio"),
+            "gate_reason": str(full_mode_gate.get("gate_reason") or "full_mode_gate"),
+        }
     if session.browser_playback.playback_mode == "lite" and session.browser_playback.client_attach_revision == 0:
-        if not epoch.init_published or epoch.contiguous_published_through_segment is None:
-            return False
-        actual_startup_runway_seconds = max(
-            0.0,
-            route2_epoch_ready_end_seconds_locked(session, epoch) - epoch.attach_position_seconds,
+        return _route2_lite_initial_startup_gate_locked(
+            session,
+            epoch,
+            route2_attach_gate_state_locked=route2_attach_gate_state_locked,
+            route2_epoch_ready_end_seconds_locked=route2_epoch_ready_end_seconds_locked,
         )
-        required_startup_runway_seconds = min(
-            READY_AFTER_TARGET_SECONDS,
-            max(0.0, session.duration_seconds - epoch.attach_position_seconds),
-        )
-        return actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds
-    ready, _estimate_seconds, _supply_rate_x, _observation_seconds, _projected_runway_seconds, _display_confident = (
+    ready, estimate_seconds, supply_rate_x, observation_seconds, _projected_runway_seconds, _display_confident = (
         route2_attach_gate_state_locked(
             session,
             epoch,
@@ -131,7 +219,44 @@ def _route2_epoch_startup_attach_ready_locked(
             reference_position_seconds=epoch.attach_position_seconds,
         )
     )
-    return ready
+    actual_startup_runway_seconds = (
+        max(0.0, route2_epoch_ready_end_seconds_locked(session, epoch) - epoch.attach_position_seconds)
+        if epoch.init_published and epoch.contiguous_published_through_segment is not None
+        else 0.0
+    )
+    return {
+        "ready": ready,
+        "estimate_seconds": estimate_seconds,
+        "supply_rate_x": supply_rate_x,
+        "supply_observation_seconds": observation_seconds,
+        "required_startup_runway_seconds": min(
+            ROUTE2_ATTACH_READY_SECONDS,
+            max(0.0, session.duration_seconds - epoch.attach_position_seconds),
+        ),
+        "actual_startup_runway_seconds": actual_startup_runway_seconds,
+        "gate_reason": "startup_projected_runway",
+    }
+
+
+def _route2_epoch_startup_attach_ready_locked(
+    session: MobilePlaybackSession,
+    epoch: PlaybackEpoch,
+    *,
+    route2_full_mode_requires_initial_attach_gate_locked,
+    route2_full_mode_gate_locked,
+    route2_attach_gate_state_locked,
+    route2_epoch_ready_end_seconds_locked,
+) -> bool:
+    return bool(
+        _route2_epoch_startup_attach_gate_locked(
+            session,
+            epoch,
+            route2_full_mode_requires_initial_attach_gate_locked=route2_full_mode_requires_initial_attach_gate_locked,
+            route2_full_mode_gate_locked=route2_full_mode_gate_locked,
+            route2_attach_gate_state_locked=route2_attach_gate_state_locked,
+            route2_epoch_ready_end_seconds_locked=route2_epoch_ready_end_seconds_locked,
+        )["ready"]
+    )
 
 
 def _route2_epoch_recovery_ready_locked(

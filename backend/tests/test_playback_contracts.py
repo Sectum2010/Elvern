@@ -17,7 +17,11 @@ from backend.app.services.mobile_playback_models import (
     PlaybackEpoch,
 )
 from backend.app.services.mobile_playback_service import MobilePlaybackManager
-from backend.app.services.mobile_playback_route2_gates import _route2_epoch_startup_attach_ready_locked
+from backend.app.services.mobile_playback_route2_full_gate import _route2_full_mode_gate_locked
+from backend.app.services.mobile_playback_route2_gates import (
+    _route2_epoch_startup_attach_gate_locked,
+    _route2_epoch_startup_attach_ready_locked,
+)
 from backend.app.services.playback_service import build_playback_decision
 
 
@@ -200,23 +204,26 @@ def test_route2_lite_initial_attach_ready_uses_target_window_instead_of_projecte
     session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
     epoch = _make_route2_epoch()
 
-    ready = _route2_epoch_startup_attach_ready_locked(
+    gate = _route2_epoch_startup_attach_gate_locked(
         session,
         epoch,
         route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
         route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
-        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 54.0, 0.72, 16.8, 6.0, True),
-        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 26.0,
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.08, 6.0, 16.8, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 20.0,
     )
 
-    assert ready is True
+    assert gate["ready"] is True
+    assert gate["required_startup_runway_seconds"] == 15.0
+    assert gate["actual_startup_runway_seconds"] == 15.0
+    assert gate["gate_reason"] == "lite_fast_supply_surplus"
 
 
 def test_route2_lite_initial_attach_still_waits_for_minimum_target_window() -> None:
     session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
     epoch = _make_route2_epoch()
 
-    ready = _route2_epoch_startup_attach_ready_locked(
+    gate = _route2_epoch_startup_attach_gate_locked(
         session,
         epoch,
         route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
@@ -225,7 +232,28 @@ def test_route2_lite_initial_attach_still_waits_for_minimum_target_window() -> N
         route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 24.0,
     )
 
-    assert ready is False
+    assert gate["ready"] is False
+    assert gate["required_startup_runway_seconds"] == 45.0
+    assert gate["actual_startup_runway_seconds"] == 19.0
+    assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
+
+
+def test_route2_lite_initial_attach_with_insufficient_observation_requires_slow_runway() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+
+    gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 54.0, 1.4, 5.5, 16.8, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 50.0,
+    )
+
+    assert gate["ready"] is True
+    assert gate["required_startup_runway_seconds"] == 45.0
+    assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
 
 
 def test_route2_lite_reattach_keeps_existing_projected_runway_gate() -> None:
@@ -242,6 +270,148 @@ def test_route2_lite_reattach_keeps_existing_projected_runway_gate() -> None:
     )
 
     assert ready is False
+
+
+def _make_full_gate_session() -> MobilePlaybackSession:
+    session = _make_route2_session(playback_mode="full", client_attach_revision=0)
+    session.browser_playback.full_preflight_state = "ready"
+    session.browser_playback.full_source_bin_bytes = [500_000] * 3600
+    return session
+
+
+def _make_full_budget_metrics(
+    *,
+    prepared_bytes: float,
+    cumulative_budget_bytes: list[float] | None = None,
+    reserve_bytes: float = 0.0,
+    reference_bytes_per_second: float = 100.0,
+) -> dict[str, float | list[float] | int]:
+    return {
+        "prepared_bytes": prepared_bytes,
+        "cumulative_budget_bytes": cumulative_budget_bytes or [50_000.0, 120_000.0, 250_000.0],
+        "deadline_seconds": [60.0, 120.0, 180.0],
+        "reserve_bytes": reserve_bytes,
+        "estimated_fraction_remaining": 0.0,
+        "future_segment_cv": 0.0,
+        "reference_bytes_per_second": reference_bytes_per_second,
+    }
+
+
+def test_route2_full_initial_attach_supply_surplus_waits_until_120_seconds() -> None:
+    session = _make_full_gate_session()
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: True,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 34.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: _make_full_budget_metrics(prepared_bytes=10_000.0),
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 124.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 1.2, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is False
+    assert gate["required_startup_runway_seconds"] == 120.0
+    assert gate["actual_startup_runway_seconds"] == 119.0
+    assert gate["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert gate["gate_reason"] == "full_fast_start_waiting_for_runway"
+
+
+def test_route2_full_initial_attach_supply_surplus_starts_at_120_seconds() -> None:
+    session = _make_full_gate_session()
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: True,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 34.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: _make_full_budget_metrics(prepared_bytes=10_000.0),
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 125.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 1.2, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is True
+    assert gate["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert gate["gate_reason"] == "full_fast_start_supply_surplus"
+
+
+def test_route2_full_initial_attach_supply_deficit_stays_conservative() -> None:
+    session = _make_full_gate_session()
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: True,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 34.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: _make_full_budget_metrics(prepared_bytes=10_000.0),
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 125.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 0.9, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is False
+    assert gate["gate_reason"] == "full_bootstrap_server_unknown"
+
+
+def test_route2_full_existing_budget_complete_condition_still_returns_ready() -> None:
+    session = _make_full_gate_session()
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: True,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 34.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: _make_full_budget_metrics(
+            prepared_bytes=260_000.0,
+            cumulative_budget_bytes=[50_000.0, 120_000.0, 250_000.0],
+        ),
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 40.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 0.8, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is True
+    assert gate["gate_reason"] == "full_budget_complete"
+
+
+def test_route2_full_gate_not_required_stays_ready_for_noninitial_attach() -> None:
+    session = _make_full_gate_session()
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 34.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: _make_full_budget_metrics(prepared_bytes=10_000.0),
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 40.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 0.8, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is True
+    assert gate["gate_reason"] == "full_gate_not_required"
 
 
 def test_route2_epoch_ffmpeg_command_keeps_resumed_media_timeline_local(initialized_settings, monkeypatch) -> None:

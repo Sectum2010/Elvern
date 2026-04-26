@@ -22,7 +22,7 @@ def _route2_snapshot_locked(
     route2_attach_gate_state_locked,
     route2_display_prepare_eta_locked,
     route2_epoch_recovery_ready_locked,
-    route2_epoch_startup_attach_ready_locked,
+    route2_epoch_startup_attach_gate_locked,
     guard_route2_full_attach_boundary_locked,
     route2_epoch_ready_end_seconds,
     route2_low_water_recovery_needed_locked,
@@ -56,6 +56,10 @@ def _route2_snapshot_locked(
     refill_in_progress = False
     starvation_risk = False
     stalled_recovery_needed = False
+    required_startup_runway_seconds = None
+    actual_startup_runway_seconds = None
+    effective_goodput_ratio = None
+    gate_reason = "none"
     if active_epoch is not None:
         active_manifest_url = f"/api/mobile-playback/epochs/{active_epoch.epoch_id}/index.m3u8"
         attach_position_seconds = round(active_epoch.attach_position_seconds, 2)
@@ -98,7 +102,8 @@ def _route2_snapshot_locked(
         )
     if active_epoch and active_epoch.init_published and active_epoch.contiguous_published_through_segment is not None:
         recovery_attach_ready = route2_epoch_recovery_ready_locked(session, active_epoch)
-        startup_attach_ready = route2_epoch_startup_attach_ready_locked(session, active_epoch)
+        startup_gate = route2_epoch_startup_attach_gate_locked(session, active_epoch)
+        startup_attach_ready = bool(startup_gate["ready"])
         attach_ready = (
             recovery_attach_ready if session.lifecycle_state in {"resuming", "recovering"} else startup_attach_ready
         ) and browser_session.attach_revision > 0
@@ -112,6 +117,17 @@ def _route2_snapshot_locked(
         ready_end_seconds = round(route2_epoch_ready_end_seconds(session, active_epoch), 2)
         manifest_end_segment = active_epoch.contiguous_published_through_segment
         cache_ranges = [[ready_start_seconds, ready_end_seconds]]
+        if session.lifecycle_state not in {"resuming", "recovering"}:
+            required_startup_runway_seconds = startup_gate.get("required_startup_runway_seconds")
+            actual_startup_runway_seconds = startup_gate.get("actual_startup_runway_seconds")
+            effective_goodput_ratio = startup_gate.get("effective_goodput_ratio")
+            gate_reason = str(startup_gate.get("gate_reason") or "none")
+            if (
+                browser_session.playback_mode == "lite"
+                and browser_session.client_attach_revision == 0
+                and startup_gate.get("estimate_seconds") is not None
+            ):
+                prepare_estimate_seconds = float(startup_gate["estimate_seconds"])
         (
             ahead_runway_seconds,
             _supply_rate_x,
@@ -131,6 +147,10 @@ def _route2_snapshot_locked(
             if full_mode_gate["mode_estimate_seconds"] is not None
             else None
         )
+        required_startup_runway_seconds = full_mode_gate.get("required_startup_runway_seconds")
+        actual_startup_runway_seconds = full_mode_gate.get("actual_startup_runway_seconds")
+        effective_goodput_ratio = full_mode_gate.get("effective_goodput_ratio")
+        gate_reason = str(full_mode_gate.get("gate_reason") or gate_reason)
         prepare_estimate_seconds = mode_estimate_seconds
     else:
         mode_ready = attach_ready
@@ -193,6 +213,16 @@ def _route2_snapshot_locked(
         "ahead_runway_seconds": round(ahead_runway_seconds, 2),
         "supply_rate_x": round(supply_rate_x, 3),
         "supply_observation_seconds": round(supply_observation_seconds, 2),
+        "required_startup_runway_seconds": round(float(required_startup_runway_seconds), 2)
+        if required_startup_runway_seconds is not None
+        else None,
+        "actual_startup_runway_seconds": round(float(actual_startup_runway_seconds), 2)
+        if actual_startup_runway_seconds is not None
+        else None,
+        "effective_goodput_ratio": round(float(effective_goodput_ratio), 3)
+        if effective_goodput_ratio is not None
+        else None,
+        "gate_reason": gate_reason,
         "prepare_estimate_seconds": round(prepare_estimate_seconds, 2)
         if prepare_estimate_seconds is not None
         else None,

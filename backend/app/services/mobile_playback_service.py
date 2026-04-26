@@ -102,7 +102,7 @@ from .mobile_playback_route2_full_gate import (
 from .mobile_playback_route2_gates import (
     _route2_attach_gate_state_locked as _route2_attach_gate_state_locked_impl,
     _route2_epoch_recovery_ready_locked as _route2_epoch_recovery_ready_locked_impl,
-    _route2_epoch_startup_attach_ready_locked as _route2_epoch_startup_attach_ready_locked_impl,
+    _route2_epoch_startup_attach_gate_locked as _route2_epoch_startup_attach_gate_locked_impl,
 )
 from .mobile_playback_route2_recovery import (
     _route2_low_water_recovery_needed_locked as _route2_low_water_recovery_needed_locked_impl,
@@ -1405,14 +1405,16 @@ class MobilePlaybackManager:
             route2_full_budget_metrics_locked=self._route2_full_budget_metrics_locked,
             route2_server_byte_goodput_locked=self._route2_server_byte_goodput_locked,
             route2_client_goodput_locked=self._route2_client_goodput_locked,
+            route2_epoch_ready_end_seconds=self._route2_epoch_ready_end_seconds,
+            route2_supply_model_locked=self._route2_supply_model_locked,
         )
 
-    def _route2_epoch_startup_attach_ready_locked(
+    def _route2_epoch_startup_attach_gate_locked(
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
-    ) -> bool:
-        return _route2_epoch_startup_attach_ready_locked_impl(
+    ) -> dict[str, float | str | bool | None]:
+        return _route2_epoch_startup_attach_gate_locked_impl(
             session,
             epoch,
             route2_full_mode_requires_initial_attach_gate_locked=self._route2_full_mode_requires_initial_attach_gate_locked,
@@ -1420,6 +1422,13 @@ class MobilePlaybackManager:
             route2_attach_gate_state_locked=self._route2_attach_gate_state_locked,
             route2_epoch_ready_end_seconds_locked=self._route2_epoch_ready_end_seconds,
         )
+
+    def _route2_epoch_startup_attach_ready_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> bool:
+        return bool(self._route2_epoch_startup_attach_gate_locked(session, epoch)["ready"])
 
     def _route2_epoch_recovery_ready_locked(
         self,
@@ -1937,7 +1946,7 @@ class MobilePlaybackManager:
             route2_attach_gate_state_locked=self._route2_attach_gate_state_locked,
             route2_display_prepare_eta_locked=self._route2_display_prepare_eta_locked,
             route2_epoch_recovery_ready_locked=self._route2_epoch_recovery_ready_locked,
-            route2_epoch_startup_attach_ready_locked=self._route2_epoch_startup_attach_ready_locked,
+            route2_epoch_startup_attach_gate_locked=self._route2_epoch_startup_attach_gate_locked,
             guard_route2_full_attach_boundary_locked=self._guard_route2_full_attach_boundary_locked,
             route2_epoch_ready_end_seconds=self._route2_epoch_ready_end_seconds,
             route2_low_water_recovery_needed_locked=self._route2_low_water_recovery_needed_locked,
