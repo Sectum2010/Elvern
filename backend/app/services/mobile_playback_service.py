@@ -153,12 +153,35 @@ from .mobile_playback_route2_math import (
     _route2_required_runway_seconds_locked as _route2_required_runway_seconds_locked_impl,
 )
 from .mobile_playback_source_service import (
+    _probe_worker_source_input_error as _probe_worker_source_input_error_impl,
     _resolve_duration_seconds as _resolve_duration_seconds_impl,
     _resolve_worker_source_input as _resolve_worker_source_input_impl,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+def _read_text_tail(path: Path, *, max_lines: int = 100) -> str | None:
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = [line.rstrip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        return None
+    return "\n".join(lines[-max_lines:])
+
+
+def _is_non_retryable_cloud_source_error(error: str | None) -> bool:
+    normalized = str(error or "").strip().lower()
+    if not normalized:
+        return False
+    return (
+        "download quota" in normalized
+        or "quota exceeded" in normalized
+        or "downloadquotaexceeded" in normalized
+    )
 
 
 class MobilePlaybackManager:
@@ -1839,6 +1862,7 @@ class MobilePlaybackManager:
                 self._write_route2_epoch_metadata_locked(epoch)
                 self._refresh_route2_session_authority_locked(session)
                 return
+            stderr_path = epoch.epoch_dir / "ffmpeg.stderr.log"
         logger.info(
             "Starting Browser Playback Route 2 epoch session=%s epoch=%s target=%.2f command=%s",
             session_id,
@@ -1846,14 +1870,18 @@ class MobilePlaybackManager:
             epoch.attach_position_seconds,
             " ".join(command),
         )
+        stderr_stream = None
         try:
+            stderr_stream = stderr_path.open("w", encoding="utf-8", errors="replace")
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=stderr_stream,
                 text=True,
             )
         except OSError as exc:
+            if stderr_stream is not None:
+                stderr_stream.close()
             with self._lock:
                 self._workers.pop(worker_id, None)
                 session = self._sessions.get(session_id)
@@ -1875,6 +1903,9 @@ class MobilePlaybackManager:
                 self._write_route2_epoch_metadata_locked(epoch)
                 self._refresh_route2_session_authority_locked(session)
             return
+        finally:
+            if stderr_stream is not None:
+                stderr_stream.close()
 
         with self._lock:
             session = self._sessions.get(session_id)
@@ -1898,6 +1929,19 @@ class MobilePlaybackManager:
 
         self._publish_route2_epoch_outputs(session_id, epoch_id)
         return_code = process.wait()
+        stderr_tail = _read_text_tail(stderr_path)
+        source_input = None
+        source_input_kind = None
+        try:
+            input_index = command.index("-i") + 1
+        except (ValueError, IndexError):
+            input_index = -1
+        if input_index > 0 and input_index < len(command):
+            source_input = command[input_index]
+            source_input_kind = "url" if source_input.startswith(("http://", "https://")) else "path"
+        source_input_error = None
+        if return_code != 0 and source_input_kind == "url" and source_input:
+            source_input_error = _probe_worker_source_input_error_impl(source_input)
         with self._lock:
             self._workers.pop(worker_id, None)
             session = self._sessions.get(session_id)
@@ -1916,8 +1960,12 @@ class MobilePlaybackManager:
             if return_code != 0:
                 epoch.state = "failed"
                 epoch.last_error = (
-                    "Browser Playback Route 2 epoch transcoder failed "
-                    f"(ffmpeg exited with code {return_code})"
+                    str(source_input_error).strip()
+                    if source_input_error
+                    else (
+                        "Browser Playback Route 2 epoch transcoder failed "
+                        f"(ffmpeg exited with code {return_code})"
+                    )
                 )
                 self._log_route2_event(
                     "epoch_worker_failed",
@@ -1926,6 +1974,7 @@ class MobilePlaybackManager:
                     level=logging.ERROR,
                     return_code=return_code,
                     error=epoch.last_error,
+                    stderr_tail=stderr_tail,
                 )
                 self._write_route2_epoch_metadata_locked(epoch)
                 self._refresh_route2_session_authority_locked(session)
@@ -1989,6 +2038,20 @@ class MobilePlaybackManager:
             if replacement_epoch.state == "failed":
                 failed_error = replacement_epoch.last_error
                 failed_epoch_id = replacement_epoch.epoch_id
+                if _is_non_retryable_cloud_source_error(failed_error):
+                    self._log_route2_event(
+                        "replacement_epoch_non_retryable_source_failure",
+                        session=session,
+                        epoch=replacement_epoch,
+                        level=logging.ERROR,
+                        error=failed_error,
+                    )
+                    self._discard_route2_epoch_locked(session, failed_epoch_id)
+                    browser_session.state = "failed"
+                    session.state = "failed"
+                    session.last_error = failed_error or "Browser Playback Route 2 replacement epoch failed"
+                    self._write_route2_epoch_metadata_locked(active_epoch)
+                    return
                 self._log_route2_event(
                     "replacement_epoch_failed_before_promotion",
                     session=session,
@@ -2020,6 +2083,18 @@ class MobilePlaybackManager:
                 reason="active_epoch_failure",
             )
             self._write_route2_epoch_metadata_locked(active_epoch)
+            if _is_non_retryable_cloud_source_error(active_epoch.last_error):
+                browser_session.state = "failed"
+                session.state = "failed"
+                session.last_error = active_epoch.last_error
+                self._log_route2_event(
+                    "active_epoch_non_retryable_source_failure",
+                    session=session,
+                    epoch=active_epoch,
+                    level=logging.ERROR,
+                    error=session.last_error,
+                )
+                return
             if replacement_epoch is None and now_ts >= browser_session.replacement_retry_not_before_ts:
                 replacement_epoch = self._create_route2_replacement_epoch_locked(
                     session,
@@ -2033,6 +2108,11 @@ class MobilePlaybackManager:
             and active_epoch.state == "draining"
             and now_ts >= browser_session.replacement_retry_not_before_ts
         ):
+            if _is_non_retryable_cloud_source_error(session.last_error or active_epoch.last_error):
+                browser_session.state = "failed"
+                session.state = "failed"
+                session.last_error = session.last_error or active_epoch.last_error
+                return
             replacement_epoch = self._create_route2_replacement_epoch_locked(
                 session,
                 target_position_seconds=self._route2_recovery_target_locked(session, active_epoch),

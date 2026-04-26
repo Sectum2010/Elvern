@@ -165,6 +165,46 @@ def _google_provider_auth_reason_from_error(
     return None
 
 
+def _parse_google_drive_http_error(
+    exc: HTTPError,
+    *,
+    default_detail: str,
+) -> tuple[str, str | None]:
+    detail = default_detail
+    provider_auth_reason = None
+    try:
+        payload = json.loads(exc.read().decode("utf-8"))
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            detail = str(error.get("message") or detail)
+            provider_auth_reason = _google_provider_auth_reason_from_error(
+                error_code=error.get("status") or error.get("code"),
+                error_description=error.get("message"),
+            )
+        elif isinstance(error, str):
+            detail = error
+            provider_auth_reason = _google_provider_auth_reason_from_error(
+                error_code=error,
+                error_description=payload.get("error_description") if isinstance(payload, dict) else None,
+            )
+    except Exception:
+        pass
+    return detail, provider_auth_reason
+
+
+def _stream_error_headers(
+    *,
+    detail: str,
+    provider_auth_reason: str | None = None,
+) -> dict[str, str]:
+    headers = {
+        "X-Elvern-Stream-Error-Detail": detail,
+    }
+    if provider_auth_reason:
+        headers["X-Elvern-Provider-Reason"] = provider_auth_reason
+    return headers
+
+
 def get_google_token_expiry_iso(expires_in: object) -> str | None:
     try:
         seconds = max(int(float(expires_in or 0)), 0)
@@ -307,15 +347,25 @@ def proxy_google_drive_file_response(
     try:
         upstream = urlopen(request, timeout=30)
     except HTTPError as exc:
-        detail = "Cloud media file could not be streamed."
-        if exc.code == 404:
-            detail = "Cloud media file not found."
-        elif exc.code == 401:
+        detail, provider_auth_reason = _parse_google_drive_http_error(
+            exc,
+            default_detail="Cloud media file could not be streamed.",
+        )
+        if exc.code == 401 or provider_auth_reason:
             _raise_google_drive_provider_auth_required(
-                reason="reauth_required",
+                reason=provider_auth_reason or "reauth_required",
                 message="Reconnect Google Drive to continue this action.",
             )
-        raise HTTPException(status_code=exc.code, detail=detail) from exc
+        if exc.code == 404 and detail == "Cloud media file could not be streamed.":
+            detail = "Cloud media file not found."
+        raise HTTPException(
+            status_code=exc.code,
+            detail=detail,
+            headers=_stream_error_headers(
+                detail=detail,
+                provider_auth_reason=provider_auth_reason,
+            ),
+        ) from exc
     except URLError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -545,41 +595,15 @@ def _get_json(
         with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        detail = "Google Drive request failed."
-        try:
-            payload = json.loads(exc.read().decode("utf-8"))
-            error = payload.get("error")
-            if isinstance(error, dict):
-                detail = str(error.get("message") or detail)
-                provider_auth_reason = _google_provider_auth_reason_from_error(
-                    error_code=error.get("status") or error.get("code"),
-                    error_description=error.get("message"),
-                )
-                if exc.code == 401 or provider_auth_reason:
-                    _raise_google_drive_provider_auth_required(
-                        reason=provider_auth_reason or "reauth_required",
-                        message="Reconnect Google Drive to continue this action.",
-                    )
-            elif isinstance(error, str):
-                detail = error
-                provider_auth_reason = _google_provider_auth_reason_from_error(
-                    error_code=error,
-                    error_description=payload.get("error_description"),
-                )
-                if exc.code == 401 or provider_auth_reason:
-                    _raise_google_drive_provider_auth_required(
-                        reason=provider_auth_reason or "reauth_required",
-                        message="Reconnect Google Drive to continue this action.",
-                    )
-        except HTTPException:
-            raise
-        except Exception:
-            pass
+        detail, provider_auth_reason = _parse_google_drive_http_error(
+            exc,
+            default_detail="Google Drive request failed.",
+        )
         if exc.code == 404:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
-        if exc.code == 401:
+        if exc.code == 401 or provider_auth_reason:
             _raise_google_drive_provider_auth_required(
-                reason="reauth_required",
+                reason=provider_auth_reason or "reauth_required",
                 message="Reconnect Google Drive to continue this action.",
             )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc

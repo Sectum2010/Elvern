@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
+from urllib.error import HTTPError
+from urllib.request import Request
 
 from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
@@ -11,18 +13,22 @@ from backend.app.services.native_playback_service import (
 from backend.app.routes.native_playback import _build_ios_external_launch_url
 from backend.app.db import utcnow_iso
 from backend.app.services.desktop_playback_service import build_desktop_playback_resolution
+from backend.app.services.google_drive_service import proxy_google_drive_file_response
 from backend.app.services.mobile_playback_models import (
     BrowserPlaybackSession,
     MobilePlaybackSession,
     PlaybackEpoch,
 )
+from backend.app.services.mobile_playback_source_service import _probe_worker_source_input_error
 from backend.app.services.mobile_playback_service import MobilePlaybackManager
 from backend.app.services.mobile_playback_route2_full_gate import _route2_full_mode_gate_locked
+from backend.app.services.mobile_playback_route2_preflight_service import _ensure_route2_full_preflight_locked
 from backend.app.services.mobile_playback_route2_gates import (
     _route2_epoch_startup_attach_gate_locked,
     _route2_epoch_startup_attach_ready_locked,
 )
 from backend.app.services.playback_service import build_playback_decision
+from fastapi import HTTPException
 
 
 class StubTranscodeManager:
@@ -432,6 +438,158 @@ def test_route2_epoch_ffmpeg_command_keeps_resumed_media_timeline_local(initiali
     offset_index = command.index("-output_ts_offset")
     assert command[offset_index + 1] == "0.000"
     assert command[command.index("-ss") + 1] == "3307.200"
+
+
+def test_google_drive_stream_proxy_preserves_provider_error_detail(monkeypatch) -> None:
+    request = Request("https://www.googleapis.com/drive/v3/files/demo?alt=media")
+    payload = (
+        b'{'
+        b'"error":{"code":403,"message":"The download quota for this file has been exceeded.",'
+        b'"errors":[{"reason":"downloadQuotaExceeded"}]}}'
+    )
+
+    def _raise_http_error(_request, timeout=30):
+        raise HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=None,
+        )
+
+    error = HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
+    monkeypatch.setattr(error, "read", lambda: payload)
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
+
+    try:
+        proxy_google_drive_file_response(
+            "token",
+            file_id="demo",
+            filename="inside-out.mkv",
+            resource_key=None,
+            range_header=None,
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert exc.detail == "The download quota for this file has been exceeded."
+        assert exc.headers["X-Elvern-Stream-Error-Detail"] == "The download quota for this file has been exceeded."
+    else:
+        raise AssertionError("Expected proxy_google_drive_file_response to raise HTTPException")
+
+
+def test_probe_worker_source_input_error_uses_head_and_stream_error_headers(monkeypatch) -> None:
+    request = Request("http://127.0.0.1:8000/api/native-playback/session/demo/stream?token=secret")
+    seen: dict[str, str] = {}
+
+    def _raise_http_error(http_request, timeout=15):
+        seen["method"] = http_request.get_method()
+        error = HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            hdrs={"X-Elvern-Stream-Error-Detail": "The download quota for this file has been exceeded."},
+            fp=None,
+        )
+        raise error
+
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_source_service.urlopen",
+        _raise_http_error,
+    )
+
+    detail = _probe_worker_source_input_error(request.full_url)
+
+    assert seen["method"] == "HEAD"
+    assert detail == "The download quota for this file has been exceeded."
+
+
+def test_google_drive_stream_proxy_forwards_range_header(monkeypatch) -> None:
+    seen: dict[str, str | None] = {}
+
+    class _FakeResponse:
+        status = 206
+        headers = {
+            "Content-Length": "1",
+            "Content-Range": "bytes 0-0/1",
+            "Content-Type": "video/mp4",
+            "Accept-Ranges": "bytes",
+        }
+
+        def read(self, _size=-1):
+            return b""
+
+    def _open(request, timeout=30):
+        seen["range"] = request.headers.get("Range")
+        return _FakeResponse()
+
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+
+    response = proxy_google_drive_file_response(
+        "token",
+        file_id="demo",
+        filename="demo.mp4",
+        resource_key=None,
+        range_header="bytes=0-0",
+    )
+
+    assert seen["range"] == "bytes=0-0"
+    assert response.status_code == 206
+
+
+def test_lite_route2_does_not_start_full_preflight_worker(monkeypatch) -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    called: list[str] = []
+
+    _ensure_route2_full_preflight_locked(
+        session,
+        load_route2_full_preflight_cache_locked=lambda _session: called.append("load") or False,
+        run_route2_full_preflight_worker=lambda _session_id: called.append("run"),
+    )
+
+    assert called == []
+    assert session.browser_playback.full_preflight_state == "idle"
+    assert session.browser_playback.full_preflight_error is None
+
+
+def test_route2_non_retryable_quota_error_does_not_create_replacement_epoch(initialized_settings, monkeypatch) -> None:
+    manager = MobilePlaybackManager(initialized_settings)
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    active_epoch = _make_route2_epoch()
+    active_epoch.state = "failed"
+    active_epoch.last_error = "The download quota for this file has been exceeded."
+    session.browser_playback.active_epoch_id = active_epoch.epoch_id
+    session.browser_playback.state = "starting"
+    session.browser_playback.epochs[active_epoch.epoch_id] = active_epoch
+
+    replacement_creations: list[str] = []
+
+    monkeypatch.setattr(manager, "_ensure_route2_full_preflight_locked", lambda _session: None)
+    monkeypatch.setattr(manager, "_cleanup_route2_draining_epochs_locked", lambda _session, now_ts: None)
+    monkeypatch.setattr(manager, "_rebuild_route2_published_frontier_locked", lambda _epoch: None)
+    monkeypatch.setattr(manager, "_record_route2_frontier_sample_locked", lambda _session, _epoch, now_ts=None: None)
+    monkeypatch.setattr(manager, "_mark_route2_epoch_draining_locked", lambda _session, epoch, reason: setattr(epoch, "state", "draining"))
+    monkeypatch.setattr(manager, "_route2_epoch_startup_attach_ready_locked", lambda _session, _epoch: False)
+    monkeypatch.setattr(manager, "_write_route2_epoch_metadata_locked", lambda _epoch: None)
+    monkeypatch.setattr(manager, "_log_route2_event", lambda *args, **kwargs: None)
+
+    def _record_replacement(*args, **kwargs):
+        replacement_creations.append("replacement")
+        raise AssertionError("non-retryable quota error should not create replacement epochs")
+
+    monkeypatch.setattr(manager, "_create_route2_replacement_epoch_locked", _record_replacement)
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert replacement_creations == []
+    assert session.state == "failed"
+    assert session.browser_playback.state == "failed"
+    assert session.last_error == "The download quota for this file has been exceeded."
+    assert session.browser_playback.replacement_epoch_id is None
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert replacement_creations == []
+    assert session.browser_playback.replacement_epoch_id is None
 
 
 def test_native_external_launch_rejects_unsupported_target(client, admin_credentials) -> None:

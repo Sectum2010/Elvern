@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import subprocess
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
@@ -175,3 +178,39 @@ def _rewrite_stream_url_for_server_localhost(
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return parsed._replace(netloc=f"{host}:{settings.port}").geturl()
+
+
+def _probe_worker_source_input_error(source_input: str) -> str | None:
+    parsed = urlsplit(source_input)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    request = Request(source_input, method="HEAD")
+    try:
+        with urlopen(request, timeout=15):
+            return None
+    except HTTPError as exc:
+        detail: str | None = None
+        error_headers = getattr(exc, "headers", None) or {}
+        header_detail = error_headers.get("X-Elvern-Stream-Error-Detail")
+        if header_detail:
+            detail = str(header_detail).strip() or None
+        if not detail:
+            provider_reason = error_headers.get("X-Elvern-Provider-Reason")
+            if provider_reason:
+                detail = str(provider_reason).strip() or None
+        try:
+            if not detail:
+                payload = json.loads(exc.read().decode("utf-8"))
+                if isinstance(payload, dict):
+                    raw_detail = payload.get("detail")
+                    if isinstance(raw_detail, dict):
+                        detail = str(raw_detail.get("message") or raw_detail.get("detail") or "").strip() or None
+                    elif raw_detail is not None:
+                        detail = str(raw_detail).strip() or None
+                    if not detail and isinstance(payload.get("error"), dict):
+                        detail = str(payload["error"].get("message") or "").strip() or None
+        except Exception:
+            detail = None
+        return detail or f"Route 2 source input returned HTTP {exc.code}"
+    except URLError as exc:
+        return str(exc.reason or exc).strip() or "Route 2 source input could not be reached"
