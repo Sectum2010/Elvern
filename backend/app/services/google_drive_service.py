@@ -34,6 +34,7 @@ GOOGLE_DRIVE_SCOPES = (
 )
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 PROVIDER_AUTH_REQUIRED_CODE = "provider_auth_required"
+VALIDATED_UPSTREAM_STREAM_DEFAULT_CHUNK_SIZE = 64 * 1024
 
 
 def google_drive_enabled(settings: Settings) -> bool:
@@ -286,6 +287,8 @@ def proxy_google_drive_file_response(
     filename: str,
     resource_key: str | None,
     range_header: str | None,
+    chunk_size: int = 1024 * 1024,
+    validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
 ) -> StreamingResponse:
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -331,7 +334,12 @@ def proxy_google_drive_file_response(
     media_type = upstream_headers.get("Content-Type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
     status_code = getattr(upstream, "status", status.HTTP_200_OK)
     return StreamingResponse(
-        _iter_upstream_response(upstream, stream_validator=stream_validator),
+        _iter_upstream_response(
+            upstream,
+            chunk_size=chunk_size,
+            validated_chunk_size=validated_chunk_size,
+            stream_validator=stream_validator,
+        ),
         media_type=media_type,
         headers=response_headers,
         status_code=status_code,
@@ -347,9 +355,14 @@ def _iter_upstream_response(
     upstream,
     *,
     chunk_size: int = 1024 * 1024,
+    validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
 ) -> Iterator[bytes]:
-    effective_chunk_size = 64 * 1024 if stream_validator else chunk_size
+    effective_chunk_size = resolve_effective_upstream_chunk_size(
+        chunk_size=chunk_size,
+        stream_validator=stream_validator,
+        validated_chunk_size=validated_chunk_size,
+    )
     with upstream:
         while True:
             if stream_validator and not stream_validator():
@@ -360,6 +373,19 @@ def _iter_upstream_response(
             if stream_validator and not stream_validator():
                 break
             yield chunk
+
+
+def resolve_effective_upstream_chunk_size(
+    *,
+    chunk_size: int,
+    stream_validator: Callable[[], bool] | None = None,
+    validated_chunk_size: int | None = None,
+) -> int:
+    if stream_validator is None:
+        return chunk_size
+    if validated_chunk_size is not None and validated_chunk_size > 0:
+        return validated_chunk_size
+    return VALIDATED_UPSTREAM_STREAM_DEFAULT_CHUNK_SIZE
 
 
 def _list_folder_media_files(

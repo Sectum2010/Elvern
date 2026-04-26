@@ -130,6 +130,7 @@ class Settings:
     native_playback_session_minutes: int
     native_player_protocol: str
     playback_token_ttl_seconds: int
+    external_player_stream_ttl_seconds: int
     assistant_attachment_external_open_ttl_seconds: int
     desktop_playback_mode: str
     vlc_helper_protocol: str
@@ -212,6 +213,7 @@ def load_settings() -> Settings:
             or "elvern"
         ),
         playback_token_ttl_seconds=_get_int("ELVERN_PLAYBACK_TOKEN_TTL_SECONDS", 300),
+        external_player_stream_ttl_seconds=_get_int("ELVERN_EXTERNAL_PLAYER_STREAM_TTL_SECONDS", 43200),
         assistant_attachment_external_open_ttl_seconds=_get_int(
             "ELVERN_ASSISTANT_ATTACHMENT_EXTERNAL_OPEN_TTL_SECONDS",
             300,
@@ -279,6 +281,8 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("ELVERN_NATIVE_PLAYBACK_SESSION_MINUTES must be at least 1")
     if settings.playback_token_ttl_seconds < 30:
         raise ConfigError("ELVERN_PLAYBACK_TOKEN_TTL_SECONDS must be at least 30")
+    if settings.external_player_stream_ttl_seconds < 600 or settings.external_player_stream_ttl_seconds > 86400:
+        raise ConfigError("ELVERN_EXTERNAL_PLAYER_STREAM_TTL_SECONDS must be between 600 and 86400")
     if settings.assistant_attachment_external_open_ttl_seconds < 30:
         raise ConfigError("ELVERN_ASSISTANT_ATTACHMENT_EXTERNAL_OPEN_TTL_SECONDS must be at least 30")
     if settings.max_concurrent_mobile_workers < 1:

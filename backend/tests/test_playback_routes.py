@@ -198,6 +198,20 @@ def test_native_external_launch_route_redirects_for_supported_targets(
         assert "x-success" not in params
         assert "x-error" not in params
 
+    with get_connection(initialized_settings) as connection:
+        session_row = connection.execute(
+            """
+            SELECT auth_session_id, client_name
+            FROM native_playback_sessions
+            ORDER BY rowid DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert session_row is not None
+    assert session_row["auth_session_id"] is None
+    assert str(session_row["client_name"]).lower().startswith(f"elvern ios {target_app} handoff")
+
 
 def test_native_external_launch_route_rejects_unsupported_target(client, admin_credentials) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
@@ -210,6 +224,59 @@ def test_native_external_launch_route_rejects_unsupported_target(client, admin_c
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Unsupported external playback target"
+
+
+@pytest.mark.parametrize(
+    ("external_player", "expected_prefix"),
+    [
+        ("vlc", "elvern ios vlc handoff"),
+        ("infuse", "elvern ios infuse handoff"),
+    ],
+)
+def test_native_playback_session_route_decouples_ios_external_player_auth_session(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+    external_player: str,
+    expected_prefix: str,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name=f"native-session/{external_player}-external.mp4",
+    )
+
+    create_response = client.post(
+        f"/api/native-playback/{item['id']}/session",
+        headers={"user-agent": IOS_SAFARI_USER_AGENT},
+        json={
+            "client_name": "Custom Handoff Surface",
+            "external_player": external_player,
+        },
+    )
+
+    assert create_response.status_code == 200
+    created_session = create_response.json()
+
+    with get_connection(initialized_settings) as connection:
+        session_row = connection.execute(
+            """
+            SELECT auth_session_id, client_name
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (created_session["session_id"],),
+        ).fetchone()
+
+    assert session_row is not None
+    assert session_row["auth_session_id"] is None
+    assert str(session_row["client_name"]).lower().startswith(expected_prefix)
 
 
 def test_desktop_playback_route_returns_linux_same_host_direct_path(initialized_settings, client, admin_credentials) -> None:
@@ -372,6 +439,20 @@ def test_native_playback_details_route_fails_immediately_after_revoke_or_disable
     )
     assert create_response.status_code == 200
     created_session = create_response.json()
+
+    with get_connection(initialized_settings) as connection:
+        session_row = connection.execute(
+            """
+            SELECT auth_session_id
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (created_session["session_id"],),
+        ).fetchone()
+
+    assert session_row is not None
+    assert session_row["auth_session_id"] is not None
 
     details_before_invalidation = client.get(
         f"/api/native-playback/session/{created_session['session_id']}",

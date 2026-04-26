@@ -1,4 +1,5 @@
 import { apiRequest } from "../../lib/api";
+import { buildBrowserPlaybackSessionCreatePayload } from "../../lib/browserPlaybackSessionLifecycle";
 
 export function fetchPlaybackDecision({ itemId, forceHls = false }) {
   const path = forceHls
@@ -90,17 +91,13 @@ export function createOptimizedPlaybackSession({
   playbackMode,
   engineMode,
 }) {
-  const data = {
-    item_id: Number(itemId),
+  const data = buildBrowserPlaybackSessionCreatePayload({
+    itemId,
     profile,
-    start_position_seconds: startPositionSeconds,
-  };
-  if (playbackMode != null) {
-    data.playback_mode = playbackMode;
-  }
-  if (engineMode != null) {
-    data.engine_mode = engineMode;
-  }
+    startPositionSeconds,
+    playbackMode,
+    engineMode,
+  });
   return apiRequest(`${browserPlaybackSessionRoot}/sessions`, {
     method: "POST",
     data,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 from .mobile_playback_models import (
+    READY_AFTER_TARGET_SECONDS,
     ROUTE2_ATTACH_READY_SECONDS,
     ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X,
@@ -107,6 +108,18 @@ def _route2_epoch_startup_attach_ready_locked(
 ) -> bool:
     if route2_full_mode_requires_initial_attach_gate_locked(session):
         return bool(route2_full_mode_gate_locked(session, epoch)["mode_ready"])
+    if session.browser_playback.playback_mode == "lite" and session.browser_playback.client_attach_revision == 0:
+        if not epoch.init_published or epoch.contiguous_published_through_segment is None:
+            return False
+        actual_startup_runway_seconds = max(
+            0.0,
+            route2_epoch_ready_end_seconds_locked(session, epoch) - epoch.attach_position_seconds,
+        )
+        required_startup_runway_seconds = min(
+            READY_AFTER_TARGET_SECONDS,
+            max(0.0, session.duration_seconds - epoch.attach_position_seconds),
+        )
+        return actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds
     ready, _estimate_seconds, _supply_rate_x, _observation_seconds, _projected_runway_seconds, _display_confident = (
         route2_attach_gate_state_locked(
             session,
@@ -118,20 +131,6 @@ def _route2_epoch_startup_attach_ready_locked(
             reference_position_seconds=epoch.attach_position_seconds,
         )
     )
-    if (
-        ready
-        and session.browser_playback.playback_mode == "lite"
-        and session.browser_playback.client_attach_revision == 0
-    ):
-        actual_startup_runway_seconds = max(
-            0.0,
-            route2_epoch_ready_end_seconds_locked(session, epoch) - epoch.attach_position_seconds,
-        )
-        required_startup_runway_seconds = min(
-            ROUTE2_ATTACH_READY_SECONDS,
-            max(0.0, session.duration_seconds - epoch.attach_position_seconds),
-        )
-        return actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds
     return ready
 
 

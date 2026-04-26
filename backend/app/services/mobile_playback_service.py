@@ -1722,7 +1722,7 @@ class MobilePlaybackManager:
                 "-i",
                 source_input,
                 "-output_ts_offset",
-                f"{epoch.epoch_start_seconds:.3f}",
+                "0.000",
                 "-muxpreload",
                 "0",
                 "-muxdelay",

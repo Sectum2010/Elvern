@@ -32,7 +32,9 @@ from ..services.native_playback_service import (
     heartbeat_native_playback_session,
     inspect_native_playback_access,
     record_native_playback_session_event,
+    resolve_native_playback_session_client_name,
     save_native_playback_session_progress,
+    should_decouple_external_player_auth_session,
 )
 from ..services.transport_controller_service import (
     attach_native_session_primary_target,
@@ -180,6 +182,12 @@ def _emit_native_stream_debug_log(
         "item_id": (stream_context or {}).get("item_id"),
         "source_kind": (stream_context or {}).get("source_kind"),
         "stream_path_class": (stream_context or {}).get("stream_path_class"),
+        "external_player": (stream_context or {}).get("external_player"),
+        "validation_interval_seconds": (stream_context or {}).get("validation_interval_seconds"),
+        "ttl_refresh_interval_seconds": (stream_context or {}).get("ttl_refresh_interval_seconds"),
+        "chunk_size_bytes": (stream_context or {}).get("chunk_size_bytes"),
+        "auth_session_coupled": (stream_context or {}).get("auth_session_coupled"),
+        "session_ttl_seconds": (stream_context or {}).get("session_ttl_seconds"),
         "client_name": (stream_context or {}).get("client_name"),
         "container": (stream_context or {}).get("container"),
         "video_codec": (stream_context or {}).get("video_codec"),
@@ -301,14 +309,26 @@ def native_playback_session_create(
     )
     if transport_request is not None:
         transport_decision = resolve_transport_decision(transport_request)
+    session_client_name = resolve_native_playback_session_client_name(
+        client_name=payload.client_name if payload else None,
+        external_player=payload.external_player if payload else None,
+    )
+    auth_session_id = (
+        None
+        if should_decouple_external_player_auth_session(
+            client_name=session_client_name,
+            external_player=payload.external_player if payload else None,
+        )
+        else user.session_id
+    )
     session_payload = create_native_playback_session(
         request.app.state.settings,
         user_id=user.id,
         item=item,
-        auth_session_id=user.session_id,
+        auth_session_id=auth_session_id,
         user_agent=request.headers.get("user-agent"),
         source_ip=resolve_client_ip(request),
-        client_name=(payload.client_name if payload else None),
+        client_name=session_client_name,
     )
     session_payload = _rewrite_external_session_payload_urls(
         session_payload,
@@ -443,7 +463,7 @@ def native_playback_external_launch(
         request.app.state.settings,
         user_id=user.id,
         item=item,
-        auth_session_id=user.session_id,
+        auth_session_id=None,
         user_agent=request.headers.get("user-agent"),
         source_ip=resolve_client_ip(request),
         client_name=(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,9 @@ from backend.app.db import get_connection, utcnow_iso
 from backend.app.security import hash_session_token
 from backend.app.services.admin_service import create_user, update_user
 from backend.app.services.native_playback_service import (
+    _build_native_playback_stream_policy,
     create_native_playback_session,
+    build_native_stream_response,
     get_native_playback_session_payload,
     inspect_native_playback_access,
 )
@@ -296,6 +299,221 @@ def test_native_playback_access_is_invalidated_after_parent_session_revoke_or_us
         )
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == "Native playback session is invalid or has expired"
+
+
+def test_external_player_native_playback_survives_parent_session_revoke(initialized_settings, monkeypatch) -> None:
+    created = _create_standard_user(initialized_settings, username="native-ios-vlc")
+    session_user, token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="ios-vlc.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS VLC Handoff",
+    )
+
+    destroy_session(initialized_settings, token)
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is True
+    assert access_state["reason"] == "allowed"
+
+    payload = get_native_playback_session_payload(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert payload["session_id"] == native_session["session_id"]
+
+
+@pytest.mark.parametrize(
+    ("invalidation_mode", "expected_reason"),
+    [
+        ("user_disabled", "native_session_revoked"),
+        ("native_session_revoked", "native_session_revoked"),
+    ],
+)
+def test_external_player_native_playback_still_respects_user_disable_and_native_revoke(
+    initialized_settings,
+    monkeypatch,
+    invalidation_mode: str,
+    expected_reason: str,
+) -> None:
+    created = _create_standard_user(initialized_settings, username=f"native-external-{invalidation_mode}")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name=f"{invalidation_mode}-external.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS Infuse Handoff",
+    )
+
+    if invalidation_mode == "user_disabled":
+        update_user(
+            initialized_settings,
+            user_id=int(created["id"]),
+            enabled=False,
+            role=None,
+            current_admin_password=None,
+            actor=_admin_user(initialized_settings),
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+    else:
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                """
+                UPDATE native_playback_sessions
+                SET revoked_at = ?
+                WHERE session_id = ?
+                """,
+                (utcnow_iso(), str(native_session["session_id"])),
+            )
+            connection.commit()
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is False
+    assert access_state["reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
+    "client_name",
+    [
+        "Elvern iOS VLC Handoff",
+        "Elvern iOS Infuse Handoff",
+    ],
+)
+def test_external_player_native_playback_uses_external_stream_ttl(initialized_settings, monkeypatch, client_name: str) -> None:
+    created = _create_standard_user(initialized_settings, username=client_name.replace(" ", "-").lower())
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name=f"{client_name.replace(' ', '-').lower()}.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name=client_name,
+    )
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT auth_session_id, created_at, expires_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (str(native_session["session_id"]),),
+        ).fetchone()
+
+    assert row is not None
+    assert row["auth_session_id"] is None
+    created_at = datetime.fromisoformat(str(row["created_at"]))
+    expires_at = datetime.fromisoformat(str(row["expires_at"]))
+    assert int((expires_at - created_at).total_seconds()) == initialized_settings.external_player_stream_ttl_seconds
+
+
+def test_build_native_stream_response_exposes_external_player_debug_context(initialized_settings, monkeypatch) -> None:
+    created = _create_standard_user(initialized_settings, username="native-stream-context")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="native-stream-context.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS VLC Handoff",
+    )
+
+    response = build_native_stream_response(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+        range_header=None,
+        record_activity=False,
+    )
+    context = getattr(response, "_elvern_native_stream_context", None)
+
+    assert context is not None
+    assert context["external_player"] is True
+    assert context["validation_interval_seconds"] == 5.0
+    assert context["ttl_refresh_interval_seconds"] == 60.0
+    assert context["chunk_size_bytes"] == 2 * 1024 * 1024
+    assert context["auth_session_coupled"] is False
+    assert context["session_ttl_seconds"] == initialized_settings.external_player_stream_ttl_seconds
+
+
+def test_browser_internal_native_stream_policy_remains_short_lived(initialized_settings) -> None:
+    policy = _build_native_playback_stream_policy(
+        initialized_settings,
+        client_name="Pytest Native Handoff",
+        stream_path_class="local_file",
+    )
+
+    assert policy.external_player is False
+    assert policy.session_ttl_seconds == initialized_settings.playback_token_ttl_seconds
+    assert policy.validation_interval_seconds == 0.25
+    assert policy.ttl_refresh_interval_seconds == 30.0
+    assert policy.chunk_size_bytes == 64 * 1024
 
 
 def test_disabled_user_login_returns_disabled_reason(initialized_settings, client) -> None:

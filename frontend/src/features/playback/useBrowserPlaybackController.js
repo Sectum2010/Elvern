@@ -4,6 +4,11 @@ import {
   getPlaybackMode,
   resolveBrowserPlaybackSessionRoot,
 } from "../../lib/browserPlayback";
+import {
+  isBrowserPlaybackAbsolutePositionReady,
+  toBrowserPlaybackAbsoluteSeconds,
+  toBrowserPlaybackMediaElementSeconds,
+} from "../../lib/browserPlaybackTimeline";
 import { formatDuration } from "../../lib/format";
 import {
   fetchPlaybackDecision,
@@ -257,6 +262,22 @@ export function useBrowserPlaybackController({
     playback?.mode,
     playerMeasuredDuration,
   ]);
+
+  function resolveCurrentVideoAbsolutePosition(session = mobileSessionRef.current, video = videoRef.current) {
+    if (!video) {
+      return 0;
+    }
+    const mediaElementTime = Math.max(video.currentTime || 0, 0);
+    return session
+      ? toBrowserPlaybackAbsoluteSeconds(session, mediaElementTime)
+      : mediaElementTime;
+  }
+
+  function resolveMediaElementPositionForAbsolute(session, absoluteSeconds) {
+    return session
+      ? toBrowserPlaybackMediaElementSeconds(session, absoluteSeconds)
+      : Math.max(absoluteSeconds || 0, 0);
+  }
 
   function prepareControllerForLoad(nextItemId = itemId) {
     playbackFlowRef.current += 1;
@@ -726,14 +747,15 @@ export function useBrowserPlaybackController({
 
     function updatePlayerMetrics() {
       const actualTime = video.currentTime || 0;
-      actualMediaElementTimeRef.current = actualTime;
-      setActualMediaElementTime(actualTime);
+      const absoluteTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
+      actualMediaElementTimeRef.current = absoluteTime;
+      setActualMediaElementTime(absoluteTime);
       const displayTime =
         mobileSessionRef.current
         && pendingSeekPhaseRef.current !== "idle"
         && requestedTargetSecondsRef.current != null
           ? requestedTargetSecondsRef.current
-          : actualTime;
+          : absoluteTime;
       setPlaybackPosition(displayTime);
       const currentPlayback = playbackStateRef.current;
       const measuredDuration = readFiniteDuration(video);
@@ -747,7 +769,8 @@ export function useBrowserPlaybackController({
       const persistedDuration = fullDuration > 0
         ? fullDuration
         : readFiniteDuration(video);
-      if (!persistedDuration && video.currentTime <= 0) {
+      const absolutePositionSeconds = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
+      if (!persistedDuration && absolutePositionSeconds <= 0) {
         return;
       }
       const playbackMode =
@@ -756,7 +779,7 @@ export function useBrowserPlaybackController({
           : "browser_playback";
       const payload = await savePlaybackProgress({
         itemId: item.id,
-        positionSeconds: video.currentTime,
+        positionSeconds: absolutePositionSeconds,
         durationSeconds: persistedDuration || null,
         completed,
         playbackMode,
@@ -774,7 +797,8 @@ export function useBrowserPlaybackController({
       const persistedDuration = fullDuration > 0
         ? fullDuration
         : readFiniteDuration(video);
-      if (!navigator.sendBeacon || (!persistedDuration && video.currentTime <= 0)) {
+      const absolutePositionSeconds = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
+      if (!navigator.sendBeacon || (!persistedDuration && absolutePositionSeconds <= 0)) {
         flushProgress(completed);
         return;
       }
@@ -783,7 +807,7 @@ export function useBrowserPlaybackController({
           ? "experimental_playback"
           : "browser_playback";
       const body = JSON.stringify({
-        position_seconds: video.currentTime,
+        position_seconds: absolutePositionSeconds,
         duration_seconds: persistedDuration || null,
         completed,
         playback_mode: playbackMode,
@@ -804,11 +828,12 @@ export function useBrowserPlaybackController({
       const persistedDuration = fullDuration > 0
         ? fullDuration
         : readFiniteDuration(video);
+      const absolutePositionSeconds = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
       const payload = await recordPlaybackEvent({
         itemId: item.id,
         eventType,
         playbackMode: resolvePlaybackTrackingMode(),
-        positionSeconds: video.currentTime,
+        positionSeconds: absolutePositionSeconds,
         durationSeconds: persistedDuration || null,
       });
       onProgressChange(payload);
@@ -857,7 +882,7 @@ export function useBrowserPlaybackController({
         setSeekNotice(`Resuming at ${formatDuration(safeResume)} once that part is prepared.`);
         return;
       }
-      video.currentTime = safeResume;
+      video.currentTime = resolveMediaElementPositionForAbsolute(mobileSessionRef.current, safeResume);
       setPlaybackPosition(safeResume);
       pendingResumeRef.current = 0;
       resumeAppliedRef.current = true;
@@ -904,7 +929,7 @@ export function useBrowserPlaybackController({
     function handlePause() {
       stopProgressTimer();
       const shouldRecordStop =
-        video.currentTime > 0.5 &&
+        resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video) > 0.5 &&
         (!iosMobile
           || !mobileSessionRef.current
           || (
@@ -1039,11 +1064,14 @@ export function useBrowserPlaybackController({
       maybeAcknowledgeHlsAttachment({ playing: !video.paused, force: true });
       if (mobilePendingTargetRef.current != null && mobileSessionRef.current) {
         const pendingTarget = mobilePendingTargetRef.current;
-        video.currentTime = pendingTarget;
+        video.currentTime = resolveMediaElementPositionForAbsolute(mobileSessionRef.current, pendingTarget);
         setPlaybackPosition(pendingTarget);
         actualMediaElementTimeRef.current = pendingTarget;
         setActualMediaElementTime(pendingTarget);
-        mobileAwaitingTargetSeekRef.current = pendingTarget > 0.5;
+        mobileAwaitingTargetSeekRef.current = resolveMediaElementPositionForAbsolute(
+          mobileSessionRef.current,
+          pendingTarget,
+        ) > 0.5;
       }
       applyResumePosition();
     }
@@ -1125,7 +1153,9 @@ export function useBrowserPlaybackController({
           mobileWarmupProbeActiveRef.current = true;
           mobileWarmupPlaybackObservedRef.current = false;
           mobileWarmupStartPositionRef.current =
-            mobilePendingTargetRef.current != null ? mobilePendingTargetRef.current : video.currentTime;
+            mobilePendingTargetRef.current != null
+              ? resolveMediaElementPositionForAbsolute(mobileSessionRef.current, mobilePendingTargetRef.current)
+              : (video.currentTime || 0);
           const readinessGeneration = mobileReadinessGenerationRef.current;
           if (iosMobile && getPlaybackMode(currentSession?.playback_mode || playbackModeIntentRef.current) === "lite") {
             video.controls = true;
@@ -1258,14 +1288,14 @@ export function useBrowserPlaybackController({
       if (!mobileSessionRef.current) {
         return;
       }
-      const currentTime = video.currentTime || 0;
+      const absoluteCurrentTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
       mobileAwaitingTargetSeekRef.current = false;
-      actualMediaElementTimeRef.current = currentTime;
-      setActualMediaElementTime(currentTime);
+      actualMediaElementTimeRef.current = absoluteCurrentTime;
+      setActualMediaElementTime(absoluteCurrentTime);
       if (
         pendingSeekPhaseRef.current === "committing"
         && requestedTargetSecondsRef.current != null
-        && Math.abs(currentTime - requestedTargetSecondsRef.current) <= 0.75
+        && Math.abs(absoluteCurrentTime - requestedTargetSecondsRef.current) <= 0.75
       ) {
         finalizeRetargetVisibility(video, {
           resumePlayback: mobileResumeAfterReadyRef.current,
@@ -1276,16 +1306,16 @@ export function useBrowserPlaybackController({
       if (mobileRetargetTransitionRef.current && !mobileSeekPendingRef.current) {
         finalizeRetargetVisibility(video, {
           resumePlayback: mobileResumeAfterReadyRef.current,
-          committedPosition: currentTime,
+          committedPosition: absoluteCurrentTime,
         });
         return;
       }
       if (!mobileSeekPendingRef.current && !mobileRetargetTransitionRef.current) {
-        mobileLastStablePositionRef.current = currentTime;
-        committedPlayheadSecondsRef.current = currentTime;
-        setCommittedPlayheadSeconds(currentTime);
-        requestedTargetSecondsRef.current = currentTime;
-        setRequestedTargetSeconds(currentTime);
+        mobileLastStablePositionRef.current = absoluteCurrentTime;
+        committedPlayheadSecondsRef.current = absoluteCurrentTime;
+        setCommittedPlayheadSeconds(absoluteCurrentTime);
+        requestedTargetSecondsRef.current = absoluteCurrentTime;
+        setRequestedTargetSeconds(absoluteCurrentTime);
         clearOptimizedPlaybackPending();
         setPlaybackError("");
         setSeekNotice("");
@@ -1298,7 +1328,7 @@ export function useBrowserPlaybackController({
           // Ignore transient heartbeat failures after an in-range seek.
         });
       }
-      if (currentTime > 0.5) {
+      if (absoluteCurrentTime > 0.5) {
         reportPlaybackEvent("playback_seeked").catch((requestError) => {
           console.error("Failed to record playback seek", requestError);
         });
@@ -1330,8 +1360,9 @@ export function useBrowserPlaybackController({
       updatePlayerMetrics();
       clearMobileStallRecoveryTimer();
       if (mobileSessionRef.current && mobilePlayerCanPlayRef.current && !mobileSeekPendingRef.current) {
-        mobileLastStablePositionRef.current = video.currentTime || 0;
-        committedPlayheadSecondsRef.current = video.currentTime || 0;
+        const absoluteCurrentTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
+        mobileLastStablePositionRef.current = absoluteCurrentTime;
+        committedPlayheadSecondsRef.current = absoluteCurrentTime;
         setCommittedPlayheadSeconds(committedPlayheadSecondsRef.current);
         postMobileRuntimeHeartbeat({
           lifecycleState: "attached",
@@ -1375,12 +1406,8 @@ export function useBrowserPlaybackController({
         return;
       }
       const currentSession = mobileSessionRef.current;
-      const targetPosition = video.currentTime || 0;
-      const readyWindowEnd = Math.max((currentSession.ready_end_seconds || 0) - SEEK_HEADROOM_SECONDS, 0);
-      if (
-        targetPosition >= (currentSession.ready_start_seconds || 0)
-        && targetPosition <= readyWindowEnd
-      ) {
+      const targetPosition = resolveCurrentVideoAbsolutePosition(currentSession, video);
+      if (isBrowserPlaybackAbsolutePositionReady(currentSession, targetPosition, { headroomSeconds: SEEK_HEADROOM_SECONDS })) {
         mobilePendingTargetRef.current = null;
         mobileSeekPendingRef.current = false;
         pendingSeekPhaseRef.current = "idle";
@@ -1538,7 +1565,7 @@ export function useBrowserPlaybackController({
     ) {
       return;
     }
-    video.currentTime = pendingResume;
+    video.currentTime = resolveMediaElementPositionForAbsolute(mobileSessionRef.current, pendingResume);
     setPlaybackPosition(pendingResume);
     pendingResumeRef.current = 0;
     resumeAppliedRef.current = true;
@@ -1549,6 +1576,7 @@ export function useBrowserPlaybackController({
 
   return {
     videoRef,
+    mobilePendingTargetRef,
     mobileRetargetTransitionRef,
     mobileSeekPendingRef,
     mobileSession,

@@ -184,6 +184,7 @@ def build_cloud_stream_response(
     item_id: int,
     range_header: str | None,
     stream_validator=None,
+    validated_chunk_size: int | None = None,
 ):
     return _build_cloud_stream_response_impl(
         settings,
@@ -191,6 +192,7 @@ def build_cloud_stream_response(
         item_id=item_id,
         range_header=range_header,
         stream_validator=stream_validator,
+        validated_chunk_size=validated_chunk_size,
         get_access_token_by_account_id=get_google_drive_account_access_token_by_account_id,
     )
 

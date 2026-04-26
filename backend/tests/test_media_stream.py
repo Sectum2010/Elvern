@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from backend.app.media_stream import ensure_media_path_within_root
+from backend.app.media_stream import ensure_media_path_within_root, resolve_effective_stream_chunk_size
 from backend.app.services.local_library_source_service import update_shared_local_library_path
 
 
@@ -56,3 +56,24 @@ def test_media_root_uses_live_shared_local_library_path(initialized_settings, tm
     resolved = ensure_media_path_within_root(media_file, initialized_settings)
 
     assert resolved == media_file.resolve()
+
+
+def test_validated_media_stream_chunk_size_defaults_to_64kb() -> None:
+    assert (
+        resolve_effective_stream_chunk_size(
+            chunk_size=1024 * 1024,
+            stream_validator=lambda: True,
+        )
+        == 64 * 1024
+    )
+
+
+def test_validated_media_stream_chunk_size_can_use_external_player_override() -> None:
+    assert (
+        resolve_effective_stream_chunk_size(
+            chunk_size=1024 * 1024,
+            validated_chunk_size=2 * 1024 * 1024,
+            stream_validator=lambda: True,
+        )
+        == 2 * 1024 * 1024
+    )

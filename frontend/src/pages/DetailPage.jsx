@@ -17,6 +17,7 @@ import {
   readLibraryReturnTarget,
   rememberLibraryReturnTarget,
 } from "../lib/libraryNavigation";
+import { resolveBrowserPlaybackPlayerViewState } from "../lib/browserPlaybackPlayerState";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
@@ -63,6 +64,11 @@ const PROVIDER_ACTION_DESKTOP_VLC = "desktop_vlc_handoff";
 const PROVIDER_ACTION_IOS_VLC = "ios_external_vlc_handoff";
 const PROVIDER_ACTION_IOS_INFUSE = "ios_external_infuse_handoff";
 const PROVIDER_RECONNECT_CONTINUE_LABEL = "Continue anyway";
+const DESKTOP_PLAYBACK_HIDDEN_NOTE_PREFIXES = [
+  "No mapped direct source is configured",
+  "On the Elvern host, clicking Open in VLC launches the installed VLC app directly",
+  "Cloud libraries use a secure backend stream fallback for desktop VLC in this phase.",
+];
 const EMPTY_CLOUD_LIBRARIES = {
   google: {
     enabled: false,
@@ -358,6 +364,7 @@ export function DetailPage() {
   const isAdmin = user?.role === "admin";
   const {
     videoRef,
+    mobilePendingTargetRef,
     mobileRetargetTransitionRef,
     mobileSeekPendingRef,
     mobileSession,
@@ -1500,20 +1507,30 @@ export function DetailPage() {
     ? (mediaLibraryReferenceInfo.privateValue || "Not set")
     : "Loading...";
   const effectiveMediaLibraryReference = mediaLibraryReferenceInfo?.effectiveValue || "Loading...";
+  const visibleDesktopPlaybackNotes = Array.isArray(desktopPlayback?.notes)
+    ? desktopPlayback.notes.filter(
+        (note) => !DESKTOP_PLAYBACK_HIDDEN_NOTE_PREFIXES.some((prefix) => note.startsWith(prefix)),
+      )
+    : [];
 
   const showIosExternalApps = iosMobile;
-  const showInlinePlayer = !mobileSession || Boolean(streamSource && mobilePlayerCanPlay);
-  const showMobileWarmupShell =
-    Boolean(mobileSession) && (Boolean(streamSource) || Boolean(mobileFrozenFrameUrl)) && !mobilePlayerCanPlay;
-  const showPlayerShell = showInlinePlayer || showMobileWarmupShell;
-  const browserPlaybackPreparing = Boolean(mobileSession)
-    ? !mobilePlayerCanPlay
-    : optimizedPlaybackPending;
+  const {
+    browserPlaybackPreparing,
+    playerClassName,
+    showMobilePreparingPlaceholder,
+    showPlayerShell,
+    videoControlsEnabled,
+  } = resolveBrowserPlaybackPlayerViewState({
+    activePlaybackMode,
+    iosMobile,
+    mobileFrozenFrameUrl,
+    mobilePlayerCanPlay,
+    mobileSession,
+    optimizedPlaybackPending,
+    streamSource,
+  });
   const litePlaybackActive = browserPlaybackSessionActive && activePlaybackMode === "lite";
   const fullPlaybackActive = browserPlaybackSessionActive && activePlaybackMode === "full";
-  const showMobilePreparingPlaceholder = isRoute2SessionPayload(mobileSession)
-    ? !showPlayerShell && !mobileSession?.attach_ready
-    : optimizedPlaybackPending || (Boolean(mobileSession) && !mobilePlayerCanPlay);
   const hideActionsDisabled = browserPlaybackSessionActive || hiddenActionPending || globalHiddenActionPending;
   const showPrimaryStatusPill = isImportantPlaybackStatus(playbackStatus);
   const showPlaybackReasonPill = isImportantPlaybackReason(playback?.reason);
@@ -1978,9 +1995,9 @@ export function DetailPage() {
               </div>
             </div>
           ) : null}
-          {desktopPlayback?.notes?.length ? (
+          {visibleDesktopPlaybackNotes.length ? (
             <div className="desktop-playback-notes">
-              {desktopPlayback.notes.map((note) => (
+              {visibleDesktopPlaybackNotes.map((note) => (
                 <p className="page-note" key={note}>
                   {note}
                 </p>
@@ -2035,12 +2052,8 @@ export function DetailPage() {
             ) : null}
             <video
               key={videoElementKey}
-              className={mobileSession && !mobilePlayerCanPlay ? "player player--warmup" : "player"}
-              controls={
-                !mobileSession
-                || mobilePlayerCanPlay
-                || (iosMobile && activePlaybackMode === "lite" && Boolean(streamSource))
-              }
+              className={playerClassName}
+              controls={videoControlsEnabled}
               playsInline
               preload="metadata"
               ref={videoRef}

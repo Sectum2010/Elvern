@@ -13,6 +13,7 @@ from .services.local_library_source_service import get_effective_shared_local_li
 
 
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)")
+VALIDATED_STREAM_DEFAULT_CHUNK_SIZE = 64 * 1024
 
 
 def ensure_media_path_within_root(file_path: Path, settings: Settings) -> Path:
@@ -65,9 +66,14 @@ def _iter_file(
     end: int,
     *,
     chunk_size: int = 1024 * 1024,
+    validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
 ) -> Iterator[bytes]:
-    effective_chunk_size = 64 * 1024 if stream_validator else chunk_size
+    effective_chunk_size = resolve_effective_stream_chunk_size(
+        chunk_size=chunk_size,
+        stream_validator=stream_validator,
+        validated_chunk_size=validated_chunk_size,
+    )
     with file_path.open("rb") as handle:
         handle.seek(start)
         remaining = end - start + 1
@@ -83,11 +89,26 @@ def _iter_file(
             yield chunk
 
 
+def resolve_effective_stream_chunk_size(
+    *,
+    chunk_size: int,
+    stream_validator: Callable[[], bool] | None = None,
+    validated_chunk_size: int | None = None,
+) -> int:
+    if stream_validator is None:
+        return chunk_size
+    if validated_chunk_size is not None and validated_chunk_size > 0:
+        return validated_chunk_size
+    return VALIDATED_STREAM_DEFAULT_CHUNK_SIZE
+
+
 def build_stream_response(
     file_path: str,
     settings: Settings,
     range_header: str | None,
     *,
+    chunk_size: int = 1024 * 1024,
+    validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
 ) -> StreamingResponse:
     resolved = ensure_media_path_within_root(Path(file_path), settings)
@@ -107,7 +128,14 @@ def build_stream_response(
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
         status_code = status.HTTP_206_PARTIAL_CONTENT
     return StreamingResponse(
-        _iter_file(resolved, start, end, stream_validator=stream_validator),
+        _iter_file(
+            resolved,
+            start,
+            end,
+            chunk_size=chunk_size,
+            validated_chunk_size=validated_chunk_size,
+            stream_validator=stream_validator,
+        ),
         media_type=media_type or "application/octet-stream",
         headers=headers,
         status_code=status_code,

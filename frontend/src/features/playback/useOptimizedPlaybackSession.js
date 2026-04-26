@@ -7,6 +7,20 @@ import {
   getSessionModeEstimateSeconds,
   isHlsSessionPayload as isSharedHlsSessionPayload,
 } from "../../lib/browserPlayback";
+import {
+  toBrowserPlaybackAbsoluteSeconds,
+  toBrowserPlaybackMediaElementSeconds,
+} from "../../lib/browserPlaybackTimeline";
+import {
+  createBrowserPlaybackAttempt,
+  resolveBrowserPlaybackSessionNotFound,
+  SESSION_SOURCE_EXPLICIT_CREATE,
+  SESSION_SOURCE_RECOVERY_CREATE,
+  SESSION_SOURCE_RESTORE_ACTIVE,
+  SESSION_SOURCE_SEEK,
+  SESSION_SOURCE_STATUS,
+  shouldAcceptBrowserPlaybackSessionPayload,
+} from "../../lib/browserPlaybackSessionLifecycle";
 import { formatDuration } from "../../lib/format";
 import {
   createOptimizedPlaybackSession,
@@ -127,6 +141,10 @@ export function useOptimizedPlaybackSession({
   const committedPlayheadSecondsRef = useRef(0);
   const actualMediaElementTimeRef = useRef(0);
   const fullProbeInFlightRef = useRef(false);
+  const browserPlaybackAttemptCounterRef = useRef(0);
+  const browserPlaybackLatestAttemptRef = useRef(null);
+  const browserPlaybackCurrentSessionRef = useRef(null);
+  const browserPlaybackDeadSessionIdsRef = useRef(new Set());
 
   const [mobileSession, setMobileSession] = useState(null);
   const [mobilePlayerCanPlay, setMobilePlayerCanPlay] = useState(false);
@@ -149,6 +167,177 @@ export function useOptimizedPlaybackSession({
   function setMobileLifecycleStateValue(nextState) {
     mobileLifecycleStateRef.current = nextState;
     setMobileLifecycleState(nextState);
+  }
+
+  function clearBrowserPlaybackLifecycleState() {
+    browserPlaybackLatestAttemptRef.current = null;
+    browserPlaybackCurrentSessionRef.current = null;
+    browserPlaybackDeadSessionIdsRef.current = new Set();
+  }
+
+  function markBrowserPlaybackSessionDead(sessionId) {
+    const normalizedSessionId = typeof sessionId === "string" ? sessionId.trim() : "";
+    if (!normalizedSessionId) {
+      return;
+    }
+    const nextDeadSessionIds = new Set(browserPlaybackDeadSessionIdsRef.current);
+    nextDeadSessionIds.add(normalizedSessionId);
+    browserPlaybackDeadSessionIdsRef.current = nextDeadSessionIds;
+  }
+
+  function buildSyntheticBrowserPlaybackAttempt(identity, payload) {
+    const nextAttemptId = browserPlaybackAttemptCounterRef.current + 1;
+    browserPlaybackAttemptCounterRef.current = nextAttemptId;
+    return createBrowserPlaybackAttempt({
+      attemptId: nextAttemptId,
+      itemId: identity?.itemId || payload?.media_item_id || itemId,
+      playbackMode: identity?.playbackMode || payload?.playback_mode || playbackModeIntentRef.current,
+      startPositionSeconds: Math.max(
+        0,
+        Number(
+          identity?.startPositionSeconds
+          ?? payload?.pending_target_seconds
+          ?? payload?.target_position_seconds
+          ?? payload?.committed_playhead_seconds
+          ?? 0,
+        ),
+      ),
+      profile:
+        identity?.profile
+        || (typeof payload?.profile === "string" ? payload.profile : "")
+        || browserPlaybackProfile,
+      engineMode:
+        identity?.engineMode
+        || (typeof payload?.engine_mode === "string" ? payload.engine_mode : ""),
+    });
+  }
+
+  function acceptBrowserPlaybackSessionPayload(payload, source, { responseAttempt = null } = {}) {
+    const latestAttempt = browserPlaybackLatestAttemptRef.current;
+    const currentSession = browserPlaybackCurrentSessionRef.current;
+    const decision = shouldAcceptBrowserPlaybackSessionPayload({
+      payload,
+      source,
+      itemId,
+      responseAttempt,
+      latestAttempt,
+      currentSession,
+      deadSessionIds: browserPlaybackDeadSessionIdsRef.current,
+    });
+    if (!decision.accept) {
+      return { accepted: false, decision, identity: decision.identity };
+    }
+
+    let nextIdentity = decision.identity;
+    if (responseAttempt) {
+      browserPlaybackAttemptCounterRef.current = Math.max(
+        browserPlaybackAttemptCounterRef.current,
+        responseAttempt.attemptId || 0,
+      );
+      browserPlaybackLatestAttemptRef.current = responseAttempt;
+      nextIdentity = {
+        ...nextIdentity,
+        attemptId: responseAttempt.attemptId,
+        startPositionSeconds: responseAttempt.startPositionSeconds,
+        profile: responseAttempt.profile || nextIdentity.profile,
+        engineMode: responseAttempt.engineMode || nextIdentity.engineMode,
+      };
+    } else if (source === SESSION_SOURCE_RESTORE_ACTIVE && !currentSession && !latestAttempt) {
+      const syntheticAttempt = buildSyntheticBrowserPlaybackAttempt(nextIdentity, payload);
+      browserPlaybackLatestAttemptRef.current = syntheticAttempt;
+      nextIdentity = {
+        ...nextIdentity,
+        attemptId: syntheticAttempt.attemptId,
+        startPositionSeconds: syntheticAttempt.startPositionSeconds,
+        profile: syntheticAttempt.profile || nextIdentity.profile,
+        engineMode: syntheticAttempt.engineMode || nextIdentity.engineMode,
+      };
+    } else if (currentSession) {
+      nextIdentity = {
+        ...nextIdentity,
+        attemptId: currentSession.attemptId,
+        startPositionSeconds: currentSession.startPositionSeconds,
+        profile: nextIdentity.profile || currentSession.profile,
+        engineMode: nextIdentity.engineMode || currentSession.engineMode,
+      };
+    }
+
+    browserPlaybackCurrentSessionRef.current = nextIdentity;
+    syncMobilePlaybackState(payload);
+    return { accepted: true, decision, identity: nextIdentity };
+  }
+
+  function clearCurrentBrowserPlaybackSession({ preserveIntent = true } = {}) {
+    stopMobilePlaybackPolling();
+    attachedOptimizedManifestUrlRef.current = "";
+    mobileSessionRef.current = null;
+    browserPlaybackCurrentSessionRef.current = null;
+    mobilePendingTargetRef.current = null;
+    requestedTargetSecondsRef.current = null;
+    mobileAutoplayPendingRef.current = false;
+    mobileResumeAfterReadyRef.current = false;
+    mobileSeekPendingRef.current = false;
+    pendingSeekPhaseRef.current = "idle";
+    mobileAttachedEpochRef.current = null;
+    mobileAttachedManifestRevisionRef.current = "";
+    mobileAttachedManifestEndRef.current = 0;
+    mobileCanPlaySeenRef.current = false;
+    mobileLoadedDataSeenRef.current = false;
+    mobileAwaitingTargetSeekRef.current = false;
+    mobileFrameReadyRef.current = false;
+    mobileFrameProbePendingRef.current = false;
+    mobileReadinessGenerationRef.current += 1;
+    mobilePlayerCanPlayRef.current = false;
+    mobileWarmupProbeActiveRef.current = false;
+    mobileWarmupPlaybackObservedRef.current = false;
+    mobileWarmupStartPositionRef.current = 0;
+    mobileRetargetTransitionRef.current = false;
+    mobileLifecycleStateRef.current = "attached";
+    mobileRecoveryInFlightRef.current = false;
+    mobileHeartbeatInFlightRef.current = false;
+    mobilePendingAttachRevisionRef.current = 0;
+    mobileClientAttachRevisionRef.current = 0;
+    route2LastAttachAttemptAtRef.current = 0;
+    route2LastAttachAttemptRevisionRef.current = 0;
+    setMobileSession(null);
+    setMobilePlayerCanPlay(false);
+    setMobileFrozenFrameUrl("");
+    setRequestedTargetSeconds(null);
+    setPendingSeekPhase("idle");
+    setMobileLifecycleState("attached");
+    clearOptimizedPlaybackPending();
+    clearPlayerBinding();
+    const video = videoRef.current;
+    if (video) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+    setStreamSource(null);
+    if (!preserveIntent) {
+      browserStartPositionRef.current = 0;
+      playbackModeIntentRef.current = "lite";
+      setPlaybackModeIntent("lite");
+    }
+  }
+
+  function handleMissingBrowserPlaybackSession(sessionId) {
+    const outcome = resolveBrowserPlaybackSessionNotFound({
+      failedSessionId: sessionId,
+      currentSession: browserPlaybackCurrentSessionRef.current,
+    });
+    if (outcome.markDead) {
+      markBrowserPlaybackSessionDead(sessionId);
+    }
+    if (outcome.clearCurrentSession) {
+      clearCurrentBrowserPlaybackSession({ preserveIntent: true });
+      setPlaybackStatus(`${browserPlaybackLabelTitle} unavailable`);
+      setSeekNotice("");
+      setPlaybackError(
+        `This ${browserPlaybackLabel} session expired before it could attach. Start it again.`,
+      );
+    }
+    return outcome;
   }
 
   function applyMobileLifecycleStatus(nextState) {
@@ -180,6 +369,7 @@ export function useOptimizedPlaybackSession({
     stopMobilePlaybackPolling();
     attachedOptimizedManifestUrlRef.current = "";
     mobileSessionRef.current = null;
+    clearBrowserPlaybackLifecycleState();
     mobilePendingTargetRef.current = null;
     requestedTargetSecondsRef.current = null;
     mobileAutoplayPendingRef.current = false;
@@ -257,6 +447,14 @@ export function useOptimizedPlaybackSession({
 
   function resolveRoute2AttachPosition(payload = mobileSessionRef.current) {
     return resolveHlsAttachPosition(payload);
+  }
+
+  function resolveSessionMediaElementTime(payload, absoluteSeconds) {
+    return toBrowserPlaybackMediaElementSeconds(payload, absoluteSeconds);
+  }
+
+  function resolveSessionAbsoluteTime(payload, mediaElementSeconds) {
+    return toBrowserPlaybackAbsoluteSeconds(payload, mediaElementSeconds);
   }
 
   function resolveSessionAttachmentIdentity(payload = mobileSessionRef.current) {
@@ -502,8 +700,10 @@ export function useOptimizedPlaybackSession({
     attachedOptimizedManifestUrlRef.current = sessionManifestUrl;
     mobileCanPlaySeenRef.current = false;
     mobileLoadedDataSeenRef.current = false;
-    mobileAwaitingTargetSeekRef.current =
-      (targetPosition != null ? targetPosition : payload.target_position_seconds) > 0.5;
+    mobileAwaitingTargetSeekRef.current = resolveSessionMediaElementTime(
+      payload,
+      targetPosition != null ? targetPosition : payload.target_position_seconds,
+    ) > 0.5;
     mobileFrameReadyRef.current = false;
     mobileFrameProbePendingRef.current = false;
     mobileReadinessGenerationRef.current += 1;
@@ -623,7 +823,7 @@ export function useOptimizedPlaybackSession({
     mobileAwaitingTargetSeekRef.current = false;
     if (video) {
       try {
-        video.currentTime = nextCommittedPosition;
+        video.currentTime = resolveSessionMediaElementTime(payload, nextCommittedPosition);
       } catch {
         // Keep the current element time if Safari refuses the target reposition.
       }
@@ -648,7 +848,10 @@ export function useOptimizedPlaybackSession({
   }
 
   function finalizeRetargetVisibility(video, { resumePlayback, committedPosition }) {
-    const nextCommittedPosition = Math.max(committedPosition || video.currentTime || 0, 0);
+    const nextCommittedPosition = Math.max(
+      committedPosition ?? resolveSessionAbsoluteTime(mobileSessionRef.current, video.currentTime || 0),
+      0,
+    );
     committedPlayheadSecondsRef.current = nextCommittedPosition;
     mobileLastStablePositionRef.current = nextCommittedPosition;
     setCommittedPlayheadSeconds(nextCommittedPosition);
@@ -712,7 +915,7 @@ export function useOptimizedPlaybackSession({
     }
     mobileCanPlaySeenRef.current = false;
     mobileLoadedDataSeenRef.current = false;
-    mobileAwaitingTargetSeekRef.current = targetPosition > 0.5;
+    mobileAwaitingTargetSeekRef.current = resolveSessionMediaElementTime(payload, targetPosition) > 0.5;
     mobileFrameReadyRef.current = false;
     mobileFrameProbePendingRef.current = false;
     mobileReadinessGenerationRef.current += 1;
@@ -748,12 +951,12 @@ export function useOptimizedPlaybackSession({
       });
       return;
     }
-    mobileAwaitingTargetSeekRef.current = targetPosition > 0.5;
+    mobileAwaitingTargetSeekRef.current = resolveSessionMediaElementTime(payload, targetPosition) > 0.5;
     actualMediaElementTimeRef.current = targetPosition;
     setActualMediaElementTime(targetPosition);
     setPlaybackPosition(targetPosition);
     try {
-      video.currentTime = targetPosition;
+      video.currentTime = resolveSessionMediaElementTime(payload, targetPosition);
     } catch {
       // Safari can reject currentTime jumps until the media element settles.
     }
@@ -846,7 +1049,10 @@ export function useOptimizedPlaybackSession({
         sessionId: activeSession.session_id,
         data: payload,
       });
-      syncMobilePlaybackState(response);
+      const acceptedResponse = acceptBrowserPlaybackSessionPayload(response, SESSION_SOURCE_STATUS);
+      if (!acceptedResponse.accepted) {
+        return null;
+      }
       if (isRoute2SessionPayload(response)) {
         if (maybeStartRoute2SupplyRecovery(response)) {
           return response;
@@ -957,27 +1163,70 @@ export function useOptimizedPlaybackSession({
           browserPlaybackSessionRoot,
           sessionId: activeSession.session_id,
         });
-      } catch {
+        const acceptedStatus = acceptBrowserPlaybackSessionPayload(payload, SESSION_SOURCE_STATUS);
+        if (!acceptedStatus.accepted) {
+          return;
+        }
+      } catch (requestError) {
+        if (requestError?.status === 404) {
+          handleMissingBrowserPlaybackSession(activeSession.session_id);
+          return;
+        }
         const recoveryTarget = resolveMobileCommittedPosition(activeSession);
+        const recoveryAttempt =
+          browserPlaybackLatestAttemptRef.current
+          || buildSyntheticBrowserPlaybackAttempt(browserPlaybackCurrentSessionRef.current, activeSession);
         payload = await createOptimizedPlaybackSession({
           browserPlaybackSessionRoot,
           itemId,
           profile: activeSession.profile || "mobile_1080p",
           startPositionSeconds: recoveryTarget,
+          playbackMode: getPlaybackMode(activeSession.playback_mode || playbackModeIntentRef.current),
           engineMode: explicitRoute2Session ? "route2" : undefined,
         });
+        const acceptedRecoveryPayload = acceptBrowserPlaybackSessionPayload(
+          payload,
+          SESSION_SOURCE_RECOVERY_CREATE,
+          { responseAttempt: recoveryAttempt },
+        );
+        if (!acceptedRecoveryPayload.accepted) {
+          releasePlaybackSession(
+            payload.stop_url,
+            `${browserPlaybackSessionRoot}/sessions/${payload.session_id}/stop`,
+          );
+          return;
+        }
       }
       if (payload.state === "failed" || payload.state === "expired" || payload.state === "stopped") {
         const recoveryTarget = resolveMobileCommittedPosition(payload);
+        const recoveryAttempt =
+          browserPlaybackLatestAttemptRef.current
+          || buildSyntheticBrowserPlaybackAttempt(browserPlaybackCurrentSessionRef.current, payload);
         payload = await createOptimizedPlaybackSession({
           browserPlaybackSessionRoot,
           itemId,
           profile: payload.profile || activeSession.profile || "mobile_1080p",
           startPositionSeconds: recoveryTarget,
+          playbackMode: getPlaybackMode(
+            payload.playback_mode
+            || activeSession.playback_mode
+            || playbackModeIntentRef.current,
+          ),
           engineMode: (isRoute2SessionPayload(payload) || explicitRoute2Session) ? "route2" : undefined,
         });
+        const acceptedRecoveryPayload = acceptBrowserPlaybackSessionPayload(
+          payload,
+          SESSION_SOURCE_RECOVERY_CREATE,
+          { responseAttempt: recoveryAttempt },
+        );
+        if (!acceptedRecoveryPayload.accepted) {
+          releasePlaybackSession(
+            payload.stop_url,
+            `${browserPlaybackSessionRoot}/sessions/${payload.session_id}/stop`,
+          );
+          return;
+        }
       }
-      syncMobilePlaybackState(payload);
       const recoveryTarget = resolveMobileAuthorityPosition(payload);
       if (video && mobilePlayerCanPlayRef.current) {
         const frozenFrameUrl = captureVideoFrameSnapshot(video);
@@ -1052,7 +1301,10 @@ export function useOptimizedPlaybackSession({
         ) {
           return;
         }
-        syncMobilePlaybackState(payload);
+        const acceptedPayload = acceptBrowserPlaybackSessionPayload(payload, SESSION_SOURCE_STATUS);
+        if (!acceptedPayload.accepted) {
+          return;
+        }
         if (isRoute2SessionPayload(payload)) {
           if (maybeStartRoute2SupplyRecovery(payload)) {
             scheduleMobilePlaybackPoll(
@@ -1092,6 +1344,10 @@ export function useOptimizedPlaybackSession({
         if (pollToken !== mobilePollTokenRef.current) {
           return;
         }
+        if (requestError?.status === 404) {
+          handleMissingBrowserPlaybackSession(sessionId);
+          return;
+        }
         if (isRoute2SessionPayload(mobileSessionRef.current)) {
           recoverMobilePlaybackAfterResume("poll-error").catch((recoveryError) => {
             stopMobilePlaybackPolling();
@@ -1107,10 +1363,17 @@ export function useOptimizedPlaybackSession({
     }, delayMs);
   }
 
-  async function ensureMobileSessionReady(payload, { autoplay = false, targetPosition = null } = {}) {
-    syncMobilePlaybackState(payload);
+  async function ensureMobileSessionReady(
+    payload,
+    { autoplay = false, targetPosition = null } = {},
+    { source = SESSION_SOURCE_STATUS, responseAttempt = null } = {},
+  ) {
+    const acceptedPayload = acceptBrowserPlaybackSessionPayload(payload, source, { responseAttempt });
+    if (!acceptedPayload.accepted) {
+      return false;
+    }
     if (payload.last_error && payload.state === "failed") {
-      return;
+      return true;
     }
     if (isRoute2SessionPayload(payload)) {
       if (isRoute2AttachReady(payload)) {
@@ -1119,7 +1382,7 @@ export function useOptimizedPlaybackSession({
           targetPosition: targetPosition != null ? targetPosition : resolveRoute2AttachPosition(payload),
           resetSeekPreparation: true,
         });
-        return;
+        return true;
       }
       mobileAutoplayPendingRef.current = autoplay;
       mobilePendingTargetRef.current =
@@ -1128,7 +1391,7 @@ export function useOptimizedPlaybackSession({
         payload.session_id,
         Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
       );
-      return;
+      return true;
     }
     if (payload.playback_commit_ready) {
       armMobileManifestAttachment(payload, {
@@ -1136,7 +1399,7 @@ export function useOptimizedPlaybackSession({
         targetPosition,
         resetSeekPreparation: true,
       });
-      return;
+      return true;
     }
     mobileAutoplayPendingRef.current = autoplay;
     if (targetPosition != null) {
@@ -1148,23 +1411,35 @@ export function useOptimizedPlaybackSession({
       payload.session_id,
       Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
     );
+    return true;
   }
 
   async function startMobileOptimizedPlayback({ autoplay = true, playbackMode = "lite" } = {}) {
     const flowGeneration = playbackFlowRef.current;
     stopMobilePlaybackPolling();
+    browserPlaybackCurrentSessionRef.current = null;
     const targetPosition = Math.max(
       0,
       requestedTargetSecondsRef.current != null
         ? requestedTargetSecondsRef.current
         : browserStartPositionRef.current || 0,
     );
+    const explicitAttempt = createBrowserPlaybackAttempt({
+      attemptId: browserPlaybackAttemptCounterRef.current + 1,
+      itemId,
+      playbackMode,
+      startPositionSeconds: targetPosition,
+      profile: browserPlaybackProfile,
+      engineMode: "route2",
+    });
+    browserPlaybackAttemptCounterRef.current = explicitAttempt.attemptId;
+    browserPlaybackLatestAttemptRef.current = explicitAttempt;
     const payload = await createOptimizedPlaybackSession({
       browserPlaybackSessionRoot,
       itemId,
       profile: browserPlaybackProfile,
       startPositionSeconds: targetPosition,
-      playbackMode: getPlaybackMode(playbackMode),
+      playbackMode: explicitAttempt.playbackMode,
     });
     if (flowGeneration !== playbackFlowRef.current || currentItemIdRef.current !== itemId) {
       releasePlaybackSession(
@@ -1173,10 +1448,21 @@ export function useOptimizedPlaybackSession({
       );
       return null;
     }
-    return ensureMobileSessionReady(payload, {
+    const accepted = await ensureMobileSessionReady(payload, {
       autoplay,
       targetPosition,
+    }, {
+      source: SESSION_SOURCE_EXPLICIT_CREATE,
+      responseAttempt: explicitAttempt,
     });
+    if (!accepted) {
+      releasePlaybackSession(
+        payload.stop_url,
+        `${browserPlaybackSessionRoot}/sessions/${payload.session_id}/stop`,
+      );
+      return null;
+    }
+    return true;
   }
 
   async function retargetMobileOptimizedPlayback(targetPosition, { resumeAfterReady = true } = {}) {
@@ -1201,7 +1487,7 @@ export function useOptimizedPlaybackSession({
       resolveMobileCommittedPosition(activeSession)
       || mobileLastStablePositionRef.current
       || actualMediaElementTimeRef.current
-      || (video?.currentTime || 0);
+      || resolveSessionAbsoluteTime(activeSession, video?.currentTime || 0);
     if (video && mobilePlayerCanPlayRef.current) {
       const frozenFrameUrl = captureVideoFrameSnapshot(video);
       setMobileFrozenFrameUrl(frozenFrameUrl);
@@ -1214,9 +1500,10 @@ export function useOptimizedPlaybackSession({
     if (video) {
       video.pause();
       mobileAwaitingTargetSeekRef.current = false;
-      if (Math.abs((video.currentTime || 0) - stablePosition) > 0.25) {
+      const stableMediaElementTime = resolveSessionMediaElementTime(activeSession, stablePosition);
+      if (Math.abs((video.currentTime || 0) - stableMediaElementTime) > 0.25) {
         try {
-          video.currentTime = stablePosition;
+          video.currentTime = stableMediaElementTime;
         } catch {
           // Keep the current element time if Safari refuses this stabilizing rewind.
         }
@@ -1230,7 +1517,10 @@ export function useOptimizedPlaybackSession({
       lastStablePositionSeconds: stablePosition,
       playingBeforeSeek: resumeAfterReady,
     });
-    syncMobilePlaybackState(payload);
+    const acceptedPayload = acceptBrowserPlaybackSessionPayload(payload, SESSION_SOURCE_SEEK);
+    if (!acceptedPayload.accepted) {
+      return;
+    }
     if (isRoute2SessionPayload(payload)) {
       if (maybeAttachRoute2Authority(payload, { autoplay: resumeAfterReady })) {
         return;
@@ -1269,38 +1559,12 @@ export function useOptimizedPlaybackSession({
     }
     setPlaybackError("");
     setSeekNotice("");
-    syncMobilePlaybackState(payload);
-    const targetPosition = resolveMobileAuthorityPosition(payload);
-    if (isRoute2SessionPayload(payload)) {
-      if (isRoute2AttachReady(payload)) {
-        armMobileManifestAttachment(payload, {
-          autoplay: false,
-          targetPosition,
-          resetSeekPreparation: true,
-        });
-      } else {
-        setOptimizedPlaybackPending(true);
-        scheduleMobilePlaybackPoll(
-          payload.session_id,
-          Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
-        );
-      }
-      return true;
-    }
-    if (payload.playback_commit_ready) {
-      armMobileManifestAttachment(payload, {
-        autoplay: false,
-        targetPosition,
-        resetSeekPreparation: true,
-      });
-    } else {
-      setOptimizedPlaybackPending(true);
-      scheduleMobilePlaybackPoll(
-        payload.session_id,
-        Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
-      );
-    }
-    return true;
+    return ensureMobileSessionReady(payload, {
+      autoplay: false,
+      targetPosition: resolveMobileAuthorityPosition(payload),
+    }, {
+      source: SESSION_SOURCE_RESTORE_ACTIVE,
+    });
   }
 
   useEffect(() => {

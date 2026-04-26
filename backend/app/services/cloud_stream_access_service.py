@@ -118,6 +118,7 @@ def build_cloud_stream_response(
     item_id: int,
     range_header: str | None,
     stream_validator,
+    validated_chunk_size: int | None = None,
     get_access_token_by_account_id: Callable[..., str],
 ):
     target = resolve_media_stream_target(
@@ -136,6 +137,7 @@ def build_cloud_stream_response(
         filename=str(target["original_filename"]),
         resource_key=target.get("resource_key"),
         range_header=range_header,
+        validated_chunk_size=validated_chunk_size,
         stream_validator=stream_validator,
     )
 

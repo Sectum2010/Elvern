@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -30,7 +31,21 @@ EXTERNAL_STREAM_RANGE_PATTERN = re.compile(r"bytes=(\d+)-(\d*)")
 EXTERNAL_STREAM_NEAR_END_RANGE_GUARD_SECONDS = 120.0
 LINUX_SAME_HOST_VLC_DIRECT_PROGRESS_FRESH_SECONDS = 9.0
 IOS_VLC_CLOUD_CONSERVATIVE_RANGE_BACKOFF_SECONDS = 12.0
+DEFAULT_STREAM_VALIDATION_INTERVAL_SECONDS = 0.25
 ACTIVE_STREAM_TTL_REFRESH_SECONDS = 30.0
+EXTERNAL_PLAYER_STREAM_VALIDATION_INTERVAL_SECONDS = 5.0
+EXTERNAL_PLAYER_ACTIVE_STREAM_TTL_REFRESH_SECONDS = 60.0
+EXTERNAL_PLAYER_LOCAL_FILE_CHUNK_SIZE_BYTES = 2 * 1024 * 1024
+EXTERNAL_PLAYER_CLOUD_PROXY_CHUNK_SIZE_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class NativePlaybackStreamPolicy:
+    external_player: bool
+    session_ttl_seconds: int
+    validation_interval_seconds: float
+    ttl_refresh_interval_seconds: float
+    chunk_size_bytes: int
 
 
 def inspect_native_playback_access(
@@ -316,6 +331,76 @@ def cleanup_native_playback_sessions(settings: Settings) -> None:
         connection.commit()
 
 
+def resolve_native_playback_session_client_name(
+    *,
+    client_name: str | None,
+    external_player: object | None = None,
+) -> str | None:
+    normalized_external_player = str(external_player or "").strip().lower()
+    normalized_client_name = str(client_name or "").strip()
+    if normalized_external_player not in {"vlc", "infuse"}:
+        return normalized_client_name or None
+    canonical = "Elvern iOS VLC Handoff" if normalized_external_player == "vlc" else "Elvern iOS Infuse Handoff"
+    if not normalized_client_name:
+        return canonical
+    lowered = normalized_client_name.lower()
+    if lowered.startswith(canonical.lower()):
+        return normalized_client_name
+    return f"{canonical} - {normalized_client_name}"
+
+
+def should_decouple_external_player_auth_session(
+    *,
+    client_name: object | None = None,
+    external_player: object | None = None,
+) -> bool:
+    normalized_external_player = str(external_player or "").strip().lower()
+    if normalized_external_player in {"vlc", "infuse"}:
+        return True
+    return _is_ios_external_player_backend_stream_client(client_name)
+
+
+def _is_ios_external_player_backend_stream_client(client_name: object | None) -> bool:
+    normalized = str(client_name or "").strip().lower()
+    return normalized.startswith("elvern ios vlc handoff") or normalized.startswith("elvern ios infuse handoff")
+
+
+def _uses_external_player_backend_stream(client_name: object | None) -> bool:
+    normalized = str(client_name or "").strip().lower()
+    if _is_ios_external_player_backend_stream_client(normalized):
+        return True
+    return normalized.startswith("vlc helper fallback") or normalized.startswith("vlc playlist fallback")
+
+
+def _build_native_playback_stream_policy(
+    settings: Settings,
+    *,
+    client_name: object | None,
+    stream_path_class: str,
+) -> NativePlaybackStreamPolicy:
+    external_player = _uses_external_player_backend_stream(client_name)
+    if external_player:
+        chunk_size_bytes = (
+            EXTERNAL_PLAYER_CLOUD_PROXY_CHUNK_SIZE_BYTES
+            if stream_path_class == "cloud_proxy"
+            else EXTERNAL_PLAYER_LOCAL_FILE_CHUNK_SIZE_BYTES
+        )
+        return NativePlaybackStreamPolicy(
+            external_player=True,
+            session_ttl_seconds=settings.external_player_stream_ttl_seconds,
+            validation_interval_seconds=EXTERNAL_PLAYER_STREAM_VALIDATION_INTERVAL_SECONDS,
+            ttl_refresh_interval_seconds=EXTERNAL_PLAYER_ACTIVE_STREAM_TTL_REFRESH_SECONDS,
+            chunk_size_bytes=chunk_size_bytes,
+        )
+    return NativePlaybackStreamPolicy(
+        external_player=False,
+        session_ttl_seconds=settings.playback_token_ttl_seconds,
+        validation_interval_seconds=DEFAULT_STREAM_VALIDATION_INTERVAL_SECONDS,
+        ttl_refresh_interval_seconds=ACTIVE_STREAM_TTL_REFRESH_SECONDS,
+        chunk_size_bytes=64 * 1024,
+    )
+
+
 def create_native_playback_session(
     settings: Settings,
     *,
@@ -346,7 +431,7 @@ def create_native_playback_session(
     access_token = generate_session_token()
     access_token_hash = hash_session_token(access_token, settings.session_secret)
     now = datetime.now(timezone.utc)
-    expires_at = _session_expiry(settings, now)
+    expires_at = _session_expiry(settings, now, client_name=client_name)
     now_iso = now.isoformat()
     expires_at_iso = expires_at.isoformat()
     resume_seconds = float(item_payload.get("resume_position_seconds") or 0)
@@ -491,6 +576,7 @@ def save_native_playback_session_progress(
         position_seconds=saved["position_seconds"],
         duration_seconds=saved["duration_seconds"],
         extend_ttl=True,
+        client_name=row.get("client_name"),
     )
     return saved
 
@@ -592,6 +678,7 @@ def record_native_playback_session_event(
         position_seconds=saved["position_seconds"],
         duration_seconds=saved["duration_seconds"],
         extend_ttl=True,
+        client_name=row.get("client_name"),
     )
 
 
@@ -609,10 +696,19 @@ def build_native_stream_response(
         access_token=access_token,
         extend_ttl=True,
     )
+    stream_path_class = "cloud_proxy" if str(row.get("source_kind") or "local") == "cloud" else "local_file"
+    stream_policy = _build_native_playback_stream_policy(
+        settings,
+        client_name=row.get("client_name"),
+        stream_path_class=stream_path_class,
+    )
     stream_validator = _build_native_stream_validator(
         settings,
         session_id=session_id,
         access_token=access_token,
+        client_name=row.get("client_name"),
+        validation_interval_seconds=stream_policy.validation_interval_seconds,
+        ttl_refresh_interval_seconds=stream_policy.ttl_refresh_interval_seconds,
     )
     target = build_cloud_stream_response(
         settings,
@@ -620,20 +716,24 @@ def build_native_stream_response(
         item_id=int(row["media_item_id"]),
         range_header=range_header,
         stream_validator=stream_validator,
+        validated_chunk_size=(
+            stream_policy.chunk_size_bytes
+            if stream_path_class == "cloud_proxy"
+            else None
+        ),
     )
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
     if isinstance(target, dict):
-        stream_path_class = "local_file"
         file_path = ensure_media_path_within_root(Path(str(target["file_path"])), settings)
         response = build_stream_response(
             str(file_path),
             settings,
             range_header,
+            validated_chunk_size=stream_policy.chunk_size_bytes,
             stream_validator=stream_validator,
         )
     else:
-        stream_path_class = "cloud_proxy"
         response = target
     if _normalize_native_playback_mode(row.get("client_name")) == "infuse_external":
         content_disposition = _content_disposition_inline_filename(row.get("original_filename"))
@@ -648,6 +748,12 @@ def build_native_stream_response(
             "client_name": row.get("client_name"),
             "source_kind": str(row.get("source_kind") or "local"),
             "stream_path_class": stream_path_class,
+            "external_player": stream_policy.external_player,
+            "validation_interval_seconds": stream_policy.validation_interval_seconds,
+            "ttl_refresh_interval_seconds": stream_policy.ttl_refresh_interval_seconds,
+            "chunk_size_bytes": stream_policy.chunk_size_bytes,
+            "auth_session_coupled": row.get("auth_session_id") is not None,
+            "session_ttl_seconds": stream_policy.session_ttl_seconds,
             "file_size": row.get("file_size"),
             "duration_seconds": row.get("duration_seconds"),
             "container": row.get("container"),
@@ -755,7 +861,7 @@ def _require_native_session(
 
         current_expires = row["expires_at"]
         if extend_ttl:
-            current_expires = _session_expiry(settings, now).isoformat()
+            current_expires = _session_expiry(settings, now, client_name=row["client_name"]).isoformat()
             connection.execute(
                 """
                 UPDATE native_playback_sessions
@@ -777,6 +883,9 @@ def _build_native_stream_validator(
     *,
     session_id: str,
     access_token: str,
+    client_name: object | None,
+    validation_interval_seconds: float,
+    ttl_refresh_interval_seconds: float,
 ):
     next_check_at = 0.0
     next_ttl_refresh_at = 0.0
@@ -789,7 +898,7 @@ def _build_native_stream_validator(
         now_monotonic = monotonic()
         if now_monotonic < next_check_at:
             return True
-        next_check_at = now_monotonic + 0.25
+        next_check_at = now_monotonic + validation_interval_seconds
         stream_open = _native_stream_access_still_valid(
             settings,
             session_id=session_id,
@@ -797,9 +906,13 @@ def _build_native_stream_validator(
             extend_ttl=now_monotonic >= next_ttl_refresh_at,
         )
         if stream_open and now_monotonic >= next_ttl_refresh_at:
-            next_ttl_refresh_at = now_monotonic + ACTIVE_STREAM_TTL_REFRESH_SECONDS
+            next_ttl_refresh_at = now_monotonic + ttl_refresh_interval_seconds
         if not stream_open:
-            logger.info("Stopping native playback stream session=%s because access is no longer valid", session_id)
+            logger.info(
+                "Stopping native playback stream session=%s client=%s because access is no longer valid",
+                session_id,
+                client_name or "unknown",
+            )
         return stream_open
 
     return validator
@@ -818,7 +931,7 @@ def _native_stream_access_still_valid(
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT 1
+            SELECT n.client_name
             FROM native_playback_sessions n
             LEFT JOIN sessions s ON s.id = n.auth_session_id
             JOIN users u ON u.id = n.user_id
@@ -848,7 +961,7 @@ def _native_stream_access_still_valid(
                 """,
                 (
                     now_iso,
-                    _session_expiry(settings, now).isoformat(),
+                    _session_expiry(settings, now, client_name=row["client_name"]).isoformat(),
                     session_id,
                     token_hash,
                 ),
@@ -857,9 +970,19 @@ def _native_stream_access_still_valid(
     return row is not None
 
 
-def _session_expiry(settings: Settings, now: datetime | None = None) -> datetime:
+def _session_expiry(
+    settings: Settings,
+    now: datetime | None = None,
+    *,
+    client_name: object | None = None,
+) -> datetime:
     current = now or datetime.now(timezone.utc)
-    return current + timedelta(seconds=settings.playback_token_ttl_seconds)
+    ttl_seconds = (
+        settings.external_player_stream_ttl_seconds
+        if _uses_external_player_backend_stream(client_name)
+        else settings.playback_token_ttl_seconds
+    )
+    return current + timedelta(seconds=ttl_seconds)
 
 
 def _normalize_native_playback_mode(client_name: object) -> str:
@@ -884,10 +1007,11 @@ def _update_native_session_snapshot(
     position_seconds: float | None,
     duration_seconds: float | None,
     extend_ttl: bool,
+    client_name: object | None = None,
     last_progress_recorded_at: str | None = None,
 ) -> None:
     now_iso = utcnow_iso()
-    expires_at = _session_expiry(settings).isoformat() if extend_ttl else None
+    expires_at = _session_expiry(settings, client_name=client_name).isoformat() if extend_ttl else None
     with get_connection(settings) as connection:
         if extend_ttl:
             connection.execute(
