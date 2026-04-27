@@ -165,6 +165,12 @@ logger = logging.getLogger(__name__)
 ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
 
 
+class ActivePlaybackWorkerConflictError(Exception):
+    def __init__(self, detail: dict[str, object]) -> None:
+        self.detail = dict(detail)
+        super().__init__(str(self.detail.get("message") or "An active playback worker already exists"))
+
+
 def _read_text_tail(path: Path, *, max_lines: int = 100) -> str | None:
     try:
         content = path.read_text(encoding="utf-8", errors="replace")
@@ -407,23 +413,33 @@ class MobilePlaybackManager:
         if selected_engine_mode == "route2":
             with self._lock:
                 compatible_session: MobilePlaybackSession | None = None
-                conflicting_session: MobilePlaybackSession | None = None
+                same_movie_conflicting_session: MobilePlaybackSession | None = None
+                other_movie_conflicting_session: MobilePlaybackSession | None = None
                 route2_sessions = self._get_user_route2_sessions_locked(user_id)
                 for candidate in self._ordered_live_sessions_locked(route2_sessions):
+                    if candidate.browser_playback.engine_mode != "route2":
+                        continue
+                    self._refresh_route2_session_authority_locked(candidate)
                     if (
                         candidate.media_item_id != int(item["id"])
                         or candidate.profile != profile_key
-                        or candidate.browser_playback.engine_mode != "route2"
                         or candidate.browser_playback.playback_mode != selected_playback_mode
                         or candidate.source_fingerprint != source_fingerprint
                         or candidate.cache_key != cache_key
                     ):
+                        if other_movie_conflicting_session is None:
+                            other_movie_conflicting_session = candidate
                         continue
-                    self._refresh_route2_session_authority_locked(candidate)
+                    self._adopt_session_authority_locked(
+                        candidate,
+                        auth_session_id=auth_session_id,
+                        username=username,
+                    )
                     if self._route2_session_can_reuse_target_locked(candidate, target_position_seconds):
                         compatible_session = candidate
                         break
-                    conflicting_session = candidate
+                    if same_movie_conflicting_session is None:
+                        same_movie_conflicting_session = candidate
             if compatible_session is not None:
                 self.touch_session(compatible_session.session_id, user_id=user_id, media_access=True)
                 if (
@@ -432,15 +448,22 @@ class MobilePlaybackManager:
                     return self.seek_session(
                         compatible_session.session_id,
                         user_id=user_id,
+                        auth_session_id=auth_session_id,
+                        username=username,
                         target_position_seconds=target_position_seconds,
                         last_stable_position_seconds=compatible_session.last_stable_position_seconds,
                         playing_before_seek=False,
                     )
-                return self.get_session(compatible_session.session_id, user_id=user_id)
+                return self.get_session(
+                    compatible_session.session_id,
+                    user_id=user_id,
+                    auth_session_id=auth_session_id,
+                    username=username,
+                )
+            conflicting_session = same_movie_conflicting_session or other_movie_conflicting_session
             if conflicting_session is not None:
-                raise ValueError(
-                    "A Browser Playback Route 2 preparation for this movie and mode is already active for this user. "
-                    "Stop the existing preparation before starting a different target."
+                raise ActivePlaybackWorkerConflictError(
+                    self._build_active_playback_worker_conflict_detail_locked(conflicting_session)
                 )
         else:
             with self._lock:
@@ -519,9 +542,21 @@ class MobilePlaybackManager:
         self._ensure_worker_for_session(session.session_id)
         return self.get_session(session.session_id, user_id=user_id)
 
-    def get_session(self, session_id: str, *, user_id: int) -> dict[str, object]:
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+    ) -> dict[str, object]:
         with self._lock:
             session = self._get_owned_session_locked(session_id, user_id)
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
             if session.browser_playback.engine_mode == "route2":
                 self._touch_session_locked(session, media_access=False)
                 self._refresh_route2_session_authority_locked(session)
@@ -537,11 +572,22 @@ class MobilePlaybackManager:
             self._transition_session_state_locked(session)
             return self._snapshot_locked(session, cache_state)
 
-    def get_active_session(self, *, user_id: int) -> dict[str, object] | None:
+    def get_active_session(
+        self,
+        *,
+        user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+    ) -> dict[str, object] | None:
         with self._lock:
             session = self._resolve_preferred_session_locked(user_id)
             if session is None:
                 return None
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
             if session.browser_playback.engine_mode == "route2":
                 self._touch_session_locked(session, media_access=False)
                 self._refresh_route2_session_authority_locked(session)
@@ -557,11 +603,23 @@ class MobilePlaybackManager:
             self._transition_session_state_locked(session)
             return self._snapshot_locked(session, cache_state)
 
-    def get_active_session_for_item(self, item_id: int, *, user_id: int) -> dict[str, object] | None:
+    def get_active_session_for_item(
+        self,
+        item_id: int,
+        *,
+        user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+    ) -> dict[str, object] | None:
         with self._lock:
             session = self._resolve_preferred_session_locked(user_id, item_id=item_id)
             if session is None:
                 return None
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
             if session.browser_playback.engine_mode == "route2":
                 self._touch_session_locked(session, media_access=False)
                 self._refresh_route2_session_authority_locked(session)
@@ -582,12 +640,19 @@ class MobilePlaybackManager:
         session_id: str,
         *,
         user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
         target_position_seconds: float,
         last_stable_position_seconds: float | None = None,
         playing_before_seek: bool | None = None,
     ) -> dict[str, object]:
         with self._lock:
             session = self._get_owned_session_locked(session_id, user_id)
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
             if session.browser_playback.engine_mode == "route2":
                 target = self._clamp_time(target_position_seconds, session.duration_seconds)
                 stable_position = self._clamp_time(
@@ -673,13 +738,20 @@ class MobilePlaybackManager:
                 session.active_job = self._build_target_cluster_job(session)
             self._transition_session_state_locked(session)
         self._ensure_worker_for_session(session_id)
-        return self.get_session(session_id, user_id=user_id)
+        return self.get_session(
+            session_id,
+            user_id=user_id,
+            auth_session_id=auth_session_id,
+            username=username,
+        )
 
     def update_runtime(
         self,
         session_id: str,
         *,
         user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
         committed_playhead_seconds: float | None = None,
         actual_media_element_time_seconds: float | None = None,
         client_attach_revision: int | None = None,
@@ -691,6 +763,11 @@ class MobilePlaybackManager:
     ) -> dict[str, object]:
         with self._lock:
             session = self._get_owned_session_locked(session_id, user_id)
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
             if session.browser_playback.engine_mode == "route2":
                 if committed_playhead_seconds is not None:
                     session.committed_playhead_seconds = self._clamp_time(
@@ -762,6 +839,24 @@ class MobilePlaybackManager:
             self._unregister_session_locked(session)
         self._terminate_session(session)
         return True
+
+    def terminate_route2_worker(self, worker_id: str) -> bool:
+        normalized_worker_id = str(worker_id or "").strip()
+        if not normalized_worker_id:
+            return False
+        with self._lock:
+            record = self._route2_workers.get(normalized_worker_id)
+            if record is None:
+                return False
+            session = self._sessions.get(record.session_id)
+            if session is None or session.browser_playback.engine_mode != "route2":
+                return False
+            epoch = session.browser_playback.epochs.get(record.epoch_id)
+            if epoch is None or epoch.active_worker_id != normalized_worker_id:
+                return False
+            owner_user_id = session.user_id
+            session_id = session.session_id
+        return self.stop_session(session_id, user_id=owner_user_id)
 
     def touch_session(self, session_id: str, *, user_id: int, media_access: bool) -> None:
         with self._lock:
@@ -1083,6 +1178,53 @@ class MobilePlaybackManager:
                 self._active_session_by_user.pop(session.user_id, None)
             else:
                 self._active_session_by_user[session.user_id] = replacement.session_id
+
+    def _adopt_session_authority_locked(
+        self,
+        session: MobilePlaybackSession,
+        *,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+    ) -> None:
+        normalized_username = (username or "").strip() or None
+        if auth_session_id is not None:
+            session.auth_session_id = auth_session_id
+        if normalized_username:
+            session.username = normalized_username
+
+    def _route2_conflict_worker_id_locked(self, session: MobilePlaybackSession) -> str | None:
+        candidate_ids = [
+            session.browser_playback.replacement_epoch_id,
+            session.browser_playback.active_epoch_id,
+        ]
+        for epoch_id in candidate_ids:
+            if not epoch_id:
+                continue
+            epoch = session.browser_playback.epochs.get(epoch_id)
+            worker_id = epoch.active_worker_id if epoch is not None else None
+            if worker_id:
+                return worker_id
+        for record in self._route2_workers.values():
+            if record.session_id != session.session_id:
+                continue
+            if record.state in {"queued", "running", "stopping"}:
+                return record.worker_id
+        return None
+
+    def _build_active_playback_worker_conflict_detail_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> dict[str, object]:
+        title = session.media_title or f"Media Item {session.media_item_id}"
+        return {
+            "code": "active_playback_worker_exists",
+            "active_movie_title": title,
+            "active_media_item_id": session.media_item_id,
+            "active_playback_mode": session.browser_playback.playback_mode,
+            "active_worker_id": self._route2_conflict_worker_id_locked(session),
+            "active_session_id": session.session_id,
+            "message": f"{title} is still preparing.",
+        }
 
     def _route2_session_can_reuse_target_locked(
         self,

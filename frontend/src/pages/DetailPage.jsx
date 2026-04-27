@@ -8,6 +8,7 @@ import {
   getSessionModeEstimateSeconds,
   isIOSMobileBrowser,
   isHlsSessionPayload as isSharedHlsSessionPayload,
+  resolveBrowserPlaybackSessionRoot,
 } from "../lib/browserPlayback";
 import { getOrCreateDeviceId } from "../lib/device";
 import { formatBytes, formatDuration } from "../lib/format";
@@ -29,6 +30,10 @@ import {
   shouldGuardGoogleDriveAction,
   startGoogleDriveReconnect,
 } from "../lib/providerAuth";
+import {
+  buildActivePlaybackConflictPrompt,
+  getActivePlaybackWorkerConflict,
+} from "../lib/playbackWorkerOwnership";
 
 
 const SEEK_HEADROOM_SECONDS = 2;
@@ -348,6 +353,8 @@ export function DetailPage() {
   const [browserResumeModalOpen, setBrowserResumeModalOpen] = useState(false);
   const [browserResumePromptPosition, setBrowserResumePromptPosition] = useState(0);
   const [browserStopModalOpen, setBrowserStopModalOpen] = useState(false);
+  const [playbackConflictModal, setPlaybackConflictModal] = useState(null);
+  const [playbackConflictPending, setPlaybackConflictPending] = useState(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -360,6 +367,7 @@ export function DetailPage() {
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const desktopPlatform = detectDesktopPlatform();
   const iosMobile = isIOSMobileBrowser();
+  const browserPlaybackSessionRoot = resolveBrowserPlaybackSessionRoot();
   const showIosTransportDebug = iosTransportDebug && isIosTransportDebugEnabled(location.search);
   const localDevLoopback = isLocalDevelopmentLoopback(desktopPlatform);
   const desktopDeviceId = useMemo(() => getOrCreateDeviceId(), []);
@@ -827,6 +835,8 @@ export function DetailPage() {
       setBrowserResumeModalOpen(false);
       setBrowserResumePromptPosition(0);
       setBrowserStopModalOpen(false);
+      setPlaybackConflictModal(null);
+      setPlaybackConflictPending(false);
       setInfoModalOpen(false);
       try {
         const itemPayload = await apiRequest(`/api/library/item/${itemId}`);
@@ -914,6 +924,41 @@ export function DetailPage() {
     };
   }, [infoModalOpen]);
 
+  useEffect(() => {
+    if (
+      typeof window === "undefined"
+      || (!browserResumeModalOpen && !browserStopModalOpen && !playbackConflictModal)
+    ) {
+      return undefined;
+    }
+
+    function handleKeyDown(event) {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (playbackConflictPending) {
+        return;
+      }
+      if (playbackConflictModal) {
+        setPlaybackConflictModal(null);
+        return;
+      }
+      if (browserStopModalOpen) {
+        setBrowserStopModalOpen(false);
+        return;
+      }
+      if (browserResumeModalOpen) {
+        setBrowserResumeModalOpen(false);
+        setBrowserResumePromptPosition(0);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [browserResumeModalOpen, browserStopModalOpen, playbackConflictModal, playbackConflictPending]);
+
   function requestStopBrowserPlayback() {
     setBrowserResumeModalOpen(false);
     setBrowserResumePromptPosition(0);
@@ -935,6 +980,59 @@ export function DetailPage() {
       progressPayload,
       durationSeconds: fullDuration || item?.duration_seconds || progressPayload?.duration_seconds || 0,
     });
+  }
+
+  function closePlaybackConflictModal() {
+    if (playbackConflictPending) {
+      return;
+    }
+    setPlaybackConflictModal(null);
+  }
+
+  async function beginRequestedBrowserPlayback(startPositionSeconds, playbackMode) {
+    const requestedMovieTitle = getMovieCardTitle(item);
+    await startBrowserPlaybackFrom(startPositionSeconds, playbackMode, {
+      onActivePlaybackConflict: (activeConflict) => {
+        setPlaybackConflictModal({
+          ...activeConflict,
+          requestedMovieTitle,
+          requestedPlaybackMode: playbackMode,
+          requestedStartPositionSeconds: startPositionSeconds,
+        });
+      },
+    });
+  }
+
+  async function handleTerminatePlaybackConflict() {
+    if (!playbackConflictModal?.activeSessionId || playbackConflictPending) {
+      return;
+    }
+    setPlaybackConflictPending(true);
+    clearPlaybackError();
+    setError("");
+    try {
+      await apiRequest(
+        `${browserPlaybackSessionRoot}/sessions/${encodeURIComponent(playbackConflictModal.activeSessionId)}/stop`,
+        { method: "POST" },
+      );
+      const pendingRequest = playbackConflictModal;
+      setPlaybackConflictModal(null);
+      await beginRequestedBrowserPlayback(
+        pendingRequest.requestedStartPositionSeconds,
+        pendingRequest.requestedPlaybackMode,
+      );
+    } catch (requestError) {
+      const activePlaybackConflict = getActivePlaybackWorkerConflict(requestError);
+      if (activePlaybackConflict) {
+        setPlaybackConflictModal((current) => (current ? {
+          ...current,
+          ...activePlaybackConflict,
+        } : current));
+      }
+      setPlaybackError(requestError.message || "Failed to terminate the current background preparation");
+    } finally {
+      setPlaybackConflictPending(false);
+    }
   }
 
   async function beginBrowserPlaybackFlow(playbackMode = "lite", { skipReconnectGuard = false } = {}) {
@@ -977,7 +1075,7 @@ export function DetailPage() {
     setBrowserResumePromptPosition(0);
     setBrowserResumeModalOpen(false);
     setBrowserStopModalOpen(false);
-    void startBrowserPlaybackFrom(0, playbackMode);
+    void beginRequestedBrowserPlayback(0, playbackMode);
   }
 
   function handleStartLitePlayback() {
@@ -996,7 +1094,7 @@ export function DetailPage() {
     setBrowserResumePromptPosition(0);
     setBrowserStopModalOpen(false);
     resetIosExternalAppState();
-    void startBrowserPlaybackFrom(nextResumeStartPosition, playbackModeIntent);
+    void beginRequestedBrowserPlayback(nextResumeStartPosition, playbackModeIntent);
   }
 
   function handleStartBrowserPlaybackFromBeginning() {
@@ -1004,7 +1102,7 @@ export function DetailPage() {
     setBrowserResumePromptPosition(0);
     setBrowserStopModalOpen(false);
     resetIosExternalAppState();
-    void startBrowserPlaybackFrom(0, playbackModeIntent);
+    void beginRequestedBrowserPlayback(0, playbackModeIntent);
   }
 
   async function handleProviderReconnect() {
@@ -1708,6 +1806,49 @@ export function DetailPage() {
                 type="button"
               >
                 Keep preparing
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {playbackConflictModal ? (
+        <div
+          aria-labelledby="playback-conflict-modal-title"
+          aria-modal="true"
+          className="browser-resume-modal"
+          role="dialog"
+        >
+          <div
+            aria-hidden="true"
+            className="browser-resume-modal__backdrop"
+            onClick={closePlaybackConflictModal}
+          />
+          <div className="browser-resume-modal__card detail-info-modal__card playback-worker-choice-modal">
+            <div className="detail-info-modal__copy">
+              <p className="eyebrow detail-info-modal__eyebrow">PLAYBACK WORKER</p>
+              <p className="detail-info-modal__title" id="playback-conflict-modal-title">
+                {buildActivePlaybackConflictPrompt(
+                  playbackConflictModal.activeMovieTitle,
+                  playbackConflictModal.requestedMovieTitle,
+                )}
+              </p>
+            </div>
+            <div className="browser-resume-modal__actions playback-worker-choice-modal__actions">
+              <button
+                className="primary-button"
+                disabled={playbackConflictPending}
+                onClick={closePlaybackConflictModal}
+                type="button"
+              >
+                Keep Preparing
+              </button>
+              <button
+                className="ghost-button ghost-button--danger"
+                disabled={playbackConflictPending}
+                onClick={handleTerminatePlaybackConflict}
+                type="button"
+              >
+                Terminate Process
               </button>
             </div>
           </div>

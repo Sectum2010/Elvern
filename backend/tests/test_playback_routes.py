@@ -9,6 +9,7 @@ import pytest
 from backend.app.auth import authenticate_user, destroy_session
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.admin_service import create_user, update_user
+from backend.app.services.mobile_playback_service import ActivePlaybackWorkerConflictError
 
 
 IOS_SAFARI_USER_AGENT = (
@@ -24,6 +25,7 @@ DESKTOP_CHROME_USER_AGENT = (
 class BrowserPlaybackRouteManagerStub:
     def __init__(self, payload: dict[str, object]) -> None:
         self.payload = dict(payload)
+        self.create_exception: Exception | None = None
 
     def start(self) -> None:
         return None
@@ -32,17 +34,19 @@ class BrowserPlaybackRouteManagerStub:
         return None
 
     def create_session(self, *args, **kwargs) -> dict[str, object]:
+        if self.create_exception is not None:
+            raise self.create_exception
         return dict(self.payload)
 
-    def get_session(self, session_id: str, *, user_id: int) -> dict[str, object]:
+    def get_session(self, session_id: str, *, user_id: int, **kwargs) -> dict[str, object]:
         payload = dict(self.payload)
         payload["session_id"] = session_id
         return payload
 
-    def get_active_session(self, *, user_id: int) -> dict[str, object] | None:
+    def get_active_session(self, *, user_id: int, **kwargs) -> dict[str, object] | None:
         return dict(self.payload)
 
-    def get_active_session_for_item(self, item_id: int, *, user_id: int) -> dict[str, object] | None:
+    def get_active_session_for_item(self, item_id: int, *, user_id: int, **kwargs) -> dict[str, object] | None:
         payload = dict(self.payload)
         payload["media_item_id"] = item_id
         return payload
@@ -58,6 +62,8 @@ class AdminPlaybackWorkerManagerStub:
         self.payload = dict(payload)
         self.invalidated_user_calls: list[tuple[int, str]] = []
         self.invalidated_auth_session_calls: list[tuple[int, str]] = []
+        self.terminated_worker_ids: list[str] = []
+        self.terminate_result = True
 
     def start(self) -> None:
         return None
@@ -75,6 +81,10 @@ class AdminPlaybackWorkerManagerStub:
     def invalidate_auth_session(self, auth_session_id: int, *, reason: str) -> int:
         self.invalidated_auth_session_calls.append((auth_session_id, reason))
         return 1
+
+    def terminate_route2_worker(self, worker_id: str) -> bool:
+        self.terminated_worker_ids.append(worker_id)
+        return self.terminate_result
 
 
 class RouteTranscodeManagerStub:
@@ -424,6 +434,25 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                 ],
             },
         ],
+    }
+
+
+def _make_active_playback_worker_conflict_detail(
+    *,
+    title: str = "Coco",
+    media_item_id: int = 70,
+    playback_mode: str = "full",
+    worker_id: str = "worker-1",
+    session_id: str = "session-1",
+) -> dict[str, object]:
+    return {
+        "code": "active_playback_worker_exists",
+        "active_movie_title": title,
+        "active_media_item_id": media_item_id,
+        "active_playback_mode": playback_mode,
+        "active_worker_id": worker_id,
+        "active_session_id": session_id,
+        "message": f"{title} is still preparing.",
     }
 
 
@@ -786,6 +815,48 @@ def test_browser_playback_create_route_accepts_route2_diagnostic_strings(
     assert body["gate_reason"] == gate_reason
 
 
+def test_browser_playback_create_route_returns_structured_active_worker_conflict(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/route2-active-worker-conflict.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.create_exception = ActivePlaybackWorkerConflictError(
+        _make_active_playback_worker_conflict_detail(
+            title="Coco",
+            media_item_id=70,
+            playback_mode="full",
+            worker_id="worker-1",
+            session_id="session-1",
+        )
+    )
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_2160p",
+            "playback_mode": "full",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"] == _make_active_playback_worker_conflict_detail(
+        title="Coco",
+        media_item_id=70,
+        playback_mode="full",
+        worker_id="worker-1",
+        session_id="session-1",
+    )
+
+
 def test_admin_playback_workers_route_returns_route2_worker_registry(
     client,
     admin_credentials,
@@ -813,6 +884,52 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert payload["workers_by_user"][0]["allocated_cpu_cores"] == 9
     assert payload["workers_by_user"][0]["items"][0]["assigned_threads"] == 6
     assert payload["workers_by_user"][0]["items"][0]["cpu_cores_used"] == 7.2
+
+
+def test_admin_terminate_playback_worker_route_stops_owned_worker(
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    stub = AdminPlaybackWorkerManagerStub(_make_admin_playback_workers_payload())
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.post("/api/admin/playback-workers/worker-1/terminate")
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Playback worker terminated"
+    assert stub.terminated_worker_ids == ["worker-1"]
+
+
+def test_admin_terminate_playback_worker_route_returns_404_for_unknown_worker(
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    stub = AdminPlaybackWorkerManagerStub(_make_admin_playback_workers_payload())
+    stub.terminate_result = False
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.post("/api/admin/playback-workers/missing-worker/terminate")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Playback worker not found"
+    assert stub.terminated_worker_ids == ["missing-worker"]
+
+
+def test_non_admin_cannot_terminate_playback_worker(
+    initialized_settings,
+    client,
+) -> None:
+    created_user = _create_standard_user(initialized_settings, username="route2-non-admin")
+    _login(client, username=created_user["username"], password="family-password")
+    stub = AdminPlaybackWorkerManagerStub(_make_admin_playback_workers_payload())
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.post("/api/admin/playback-workers/worker-1/terminate")
+
+    assert response.status_code == 403
+    assert stub.terminated_worker_ids == []
 
 
 def test_admin_disable_user_route_invalidates_route2_workers(

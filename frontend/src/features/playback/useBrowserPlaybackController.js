@@ -4,6 +4,7 @@ import {
   getPlaybackMode,
   resolveBrowserPlaybackSessionRoot,
 } from "../../lib/browserPlayback";
+import { getActivePlaybackWorkerConflict } from "../../lib/playbackWorkerOwnership";
 import {
   isBrowserPlaybackAbsolutePositionReady,
   toBrowserPlaybackAbsoluteSeconds,
@@ -490,7 +491,11 @@ export function useBrowserPlaybackController({
     attachedOptimizedManifestUrlRef.current = "";
   }
 
-  async function startBrowserPlaybackFrom(startPositionSeconds, playbackMode = "lite") {
+  async function startBrowserPlaybackFrom(
+    startPositionSeconds,
+    playbackMode = "lite",
+    { onActivePlaybackConflict = null } = {},
+  ) {
     playbackFlowRef.current += 1;
     currentItemIdRef.current = itemId;
     attachedOptimizedManifestUrlRef.current = "";
@@ -529,8 +534,18 @@ export function useBrowserPlaybackController({
       });
     } catch (requestError) {
       clearOptimizedPlaybackPending();
+      const activePlaybackConflict = getActivePlaybackWorkerConflict(requestError);
+      if (activePlaybackConflict && typeof onActivePlaybackConflict === "function") {
+        setPlaybackError("");
+        setSeekNotice("");
+        setPlaybackStatus(`${browserPlaybackLabelTitle} blocked`);
+        onActivePlaybackConflict(activePlaybackConflict);
+        return false;
+      }
       setPlaybackError(requestError.message || `Failed to start ${browserPlaybackLabel}`);
+      return false;
     }
+    return true;
   }
 
   function playExistingBrowserSource() {

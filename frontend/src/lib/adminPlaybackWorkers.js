@@ -103,6 +103,36 @@ export function formatMemoryGaugeValue(value) {
   return formatByteValue(Number(value));
 }
 
+export function buildPlaybackWorkerSummaryBubbles(payload) {
+  if (!payload || !isFiniteNumber(payload.total_cpu_cores)) {
+    return [];
+  }
+  const bubbles = [
+    `${formatDecimalValue(payload.total_cpu_cores, { maximumFractionDigits: 0 })} Detected CPU cores`,
+    `CPU upbound ${payload.cpu_upbound_percent ?? payload.cpu_budget_percent}%`,
+  ];
+  const hasActiveWorkers = isFiniteNumber(payload.active_worker_count) && Number(payload.active_worker_count) > 0;
+  if (hasActiveWorkers && isFiniteNumber(payload.route2_cpu_percent_of_total)) {
+    bubbles.push(`${formatDecimalValue(payload.route2_cpu_percent_of_total)}% CPU used`);
+  }
+  if (hasActiveWorkers && isFiniteNumber(payload.route2_memory_percent_of_total)) {
+    bubbles.push(`${formatDecimalValue(payload.route2_memory_percent_of_total)}% RAM used`);
+  }
+  return bubbles;
+}
+
+export function buildPlaybackWorkerTerminatePrompt(title) {
+  const normalizedTitle = typeof title === "string" && title.trim()
+    ? title.trim()
+    : "this playback worker";
+  return `Are you sure you want to terminate ${normalizedTitle}?`;
+}
+
+export function canTerminatePlaybackWorker(workerState) {
+  const normalizedState = String(workerState || "").trim().toLowerCase();
+  return normalizedState === "running" || normalizedState === "queued";
+}
+
 export function shortenDiagnosticId(value, prefixLength = 6, suffixLength = 4) {
   if (typeof value !== "string" || !value.trim()) {
     return "";
@@ -162,6 +192,7 @@ export function summarizeWorkerGroup(group) {
     cpuPercentOfUserLimit,
     memoryBytes,
     memoryGaugePercent,
+    hasRunningWorkers: Number(group?.running_workers || 0) > 0,
   };
 }
 

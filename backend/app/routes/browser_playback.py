@@ -14,6 +14,7 @@ from ..schemas import (
     MobilePlaybackStopResponse,
 )
 from ..services.library_service import get_media_item_record
+from ..services.mobile_playback_service import ActivePlaybackWorkerConflictError
 
 
 router = APIRouter(tags=["browser_playback"])
@@ -26,6 +27,8 @@ def _get_browser_manager(request: Request):
 def _coerce_session_error(exc: Exception) -> HTTPException:
     if isinstance(exc, KeyError | PermissionError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Browser playback session not found")
+    if isinstance(exc, ActivePlaybackWorkerConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
     if isinstance(exc, ValueError):
         return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Browser playback request failed")
@@ -72,7 +75,12 @@ def get_browser_playback_session(
     user=CurrentUser,
 ) -> MobilePlaybackSessionResponse:
     try:
-        response = _get_browser_manager(request).get_session(session_id, user_id=int(user.id))
+        response = _get_browser_manager(request).get_session(
+            session_id,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+        )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
     return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
@@ -84,7 +92,11 @@ def get_active_browser_playback_session(
     user=CurrentUser,
 ) -> MobilePlaybackSessionResponse | None:
     try:
-        response = _get_browser_manager(request).get_active_session(user_id=int(user.id))
+        response = _get_browser_manager(request).get_active_session(
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+        )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
     if response is None:
@@ -99,7 +111,12 @@ def get_active_browser_playback_session_for_item(
     user=CurrentUser,
 ) -> MobilePlaybackSessionResponse | None:
     try:
-        response = _get_browser_manager(request).get_active_session_for_item(item_id, user_id=int(user.id))
+        response = _get_browser_manager(request).get_active_session_for_item(
+            item_id,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+        )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
     if response is None:
@@ -118,6 +135,8 @@ def seek_browser_playback_session(
         response = _get_browser_manager(request).seek_session(
             session_id,
             user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
             target_position_seconds=payload.target_position_seconds,
             last_stable_position_seconds=payload.last_stable_position_seconds,
             playing_before_seek=payload.playing_before_seek,
@@ -138,6 +157,8 @@ def heartbeat_browser_playback_session(
         response = _get_browser_manager(request).update_runtime(
             session_id,
             user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
             committed_playhead_seconds=payload.committed_playhead_seconds,
             actual_media_element_time_seconds=payload.actual_media_element_time_seconds,
             client_attach_revision=payload.client_attach_revision,

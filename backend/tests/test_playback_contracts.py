@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import time
 from pathlib import Path, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
 from urllib.error import HTTPError
@@ -9,6 +10,7 @@ from urllib.request import Request
 
 import pytest
 
+from backend.app.auth import authenticate_user, create_session as create_auth_session, destroy_session, get_user_by_session_token
 from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
     resolve_native_playback_session_client_name,
@@ -22,9 +24,11 @@ from backend.app.services.mobile_playback_models import (
     BrowserPlaybackSession,
     MobilePlaybackSession,
     PlaybackEpoch,
+    Route2WorkerRecord,
 )
 from backend.app.services.mobile_playback_source_service import _probe_worker_source_input_error
 from backend.app.services.mobile_playback_service import (
+    ActivePlaybackWorkerConflictError,
     MobilePlaybackManager,
     _parse_proc_status_rss_bytes,
 )
@@ -893,20 +897,38 @@ def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_sett
 
     monkeypatch.setattr("backend.app.services.mobile_playback_service.threading.Thread", _FakeThread)
 
-    item_a = _make_local_item(settings, item_id=311, relative_name="route2/many-a.mp4")
-    item_b = _make_local_item(settings, item_id=312, relative_name="route2/many-b.mp4")
-    item_c = _make_local_item(settings, item_id=313, relative_name="route2/many-c.mp4")
+    item_a = _make_local_item(settings, item_id=311, relative_name="route2/active-a.mp4")
+    item_b = _make_local_item(settings, item_id=312, relative_name="route2/active-b.mp4")
 
-    manager.create_session(item_a, user_id=1, auth_session_id=401, username="alice", engine_mode="route2", playback_mode="lite")
-    manager.create_session(item_b, user_id=1, auth_session_id=401, username="alice", engine_mode="route2", playback_mode="lite")
-    manager.create_session(item_c, user_id=1, auth_session_id=401, username="alice", engine_mode="route2", playback_mode="lite")
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=401,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
 
     manager._dispatch_waiting_sessions()
 
-    assert len(manager._route2_session_ids_by_user[1]) == 3
+    with pytest.raises(ActivePlaybackWorkerConflictError) as conflict:
+        manager.create_session(
+            item_b,
+            user_id=1,
+            auth_session_id=401,
+            username="alice",
+            engine_mode="route2",
+            playback_mode="lite",
+        )
+
+    detail = conflict.value.detail
+    assert detail["code"] == "active_playback_worker_exists"
+    assert detail["active_media_item_id"] == int(item_a["id"])
+    assert detail["active_session_id"] == first["session_id"]
+    assert len(manager._route2_session_ids_by_user[1]) == 1
     assert len(started_workers) == 1
     assert len([record for record in manager._route2_workers.values() if record.state == "running"]) == 1
-    assert len([record for record in manager._route2_workers.values() if record.state == "queued"]) == 2
+    assert len([record for record in manager._route2_workers.values() if record.state == "queued"]) == 0
 
 
 def test_route2_worker_scheduler_does_not_exceed_budget_derived_capacity(initialized_settings, monkeypatch) -> None:
@@ -988,6 +1010,170 @@ def test_route2_duplicate_same_user_movie_mode_reuses_existing_preparation(initi
     assert len({record.worker_id for record in manager._route2_workers.values() if record.session_id == first["session_id"]}) == 1
 
 
+def test_route2_logout_keep_preparing_reconnects_same_movie_without_duplicate_worker(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=335, relative_name="route2/reconnect-after-logout.mp4")
+    started_workers: list[tuple[str, str, str]] = []
+    auth_user, failure_reason = authenticate_user(
+        initialized_settings,
+        initialized_settings.admin_username,
+        initialized_settings.admin_bootstrap_password or "",
+    )
+    assert failure_reason is None
+    assert auth_user is not None
+    first_token = create_auth_session(
+        initialized_settings,
+        auth_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest-route2-keep-preparing",
+    )
+    first_session_user = get_user_by_session_token(initialized_settings, first_token)
+    assert first_session_user is not None
+    assert first_session_user.session_id is not None
+
+    class _FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.args = args
+
+        def start(self) -> None:
+            started_workers.append(self.args)
+
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.threading.Thread", _FakeThread)
+
+    first = manager.create_session(
+        item,
+        user_id=first_session_user.id,
+        auth_session_id=first_session_user.session_id,
+        username=first_session_user.username,
+        engine_mode="route2",
+        playback_mode="full",
+        start_position_seconds=0.0,
+    )
+    manager._dispatch_waiting_sessions()
+
+    with manager._lock:
+        session = manager._sessions[first["session_id"]]
+        session.last_client_seen_at = "2026-04-26T12:00:00+00:00"
+        session.last_media_access_at = "2026-04-26T12:00:00+00:00"
+        session.expires_at_ts = time.time() - 60
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.published_dir.mkdir(parents=True, exist_ok=True)
+        active_epoch.published_init_path.write_bytes(b"init")
+        for segment_index in range(70):
+            (active_epoch.published_dir / f"segment_{segment_index:06d}.m4s").write_bytes(b"segment")
+        manager._refresh_route2_session_authority_locked(session)
+        record = manager._route2_workers[active_epoch.active_worker_id]
+        record.state = "running"
+        prepared_ranges_before = [list(entry) for entry in record.prepared_ranges]
+
+    destroy_session(initialized_settings, first_token)
+    manager._reconcile_managed_session_auth_state()
+    manager._cleanup_sessions_and_cache()
+
+    with manager._lock:
+        assert first["session_id"] in manager._sessions
+
+    second_token = create_auth_session(
+        initialized_settings,
+        auth_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest-route2-reconnect",
+    )
+    second_session_user = get_user_by_session_token(initialized_settings, second_token)
+    assert second_session_user is not None
+    assert second_session_user.session_id is not None
+    restored = manager.get_active_session_for_item(
+        int(item["id"]),
+        user_id=second_session_user.id,
+        auth_session_id=second_session_user.session_id,
+        username=second_session_user.username,
+    )
+    second = manager.create_session(
+        item,
+        user_id=second_session_user.id,
+        auth_session_id=second_session_user.session_id,
+        username=second_session_user.username,
+        engine_mode="route2",
+        playback_mode="full",
+        start_position_seconds=30.0,
+    )
+
+    assert restored is not None
+    assert restored["session_id"] == first["session_id"]
+    assert second["session_id"] == first["session_id"]
+    assert second["ready_end_seconds"] >= 120.0
+    started_route2_workers = [args for args in started_workers if len(args) == 3]
+    assert len(started_route2_workers) == 1
+
+    with manager._lock:
+        session = manager._sessions[first["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        record = manager._route2_workers[active_epoch.active_worker_id]
+        assert session.auth_session_id == second_session_user.session_id
+        assert prepared_ranges_before == record.prepared_ranges
+        assert len({worker.worker_id for worker in manager._route2_workers.values() if worker.session_id == first["session_id"]}) == 1
+
+
+def test_route2_another_user_is_not_blocked_by_active_preparation(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item_a = _make_local_item(settings, item_id=336, relative_name="route2/user-a.mp4")
+    item_b = _make_local_item(settings, item_id=337, relative_name="route2/user-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=930,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+    second = manager.create_session(
+        item_b,
+        user_id=2,
+        auth_session_id=940,
+        username="bob",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    assert first["session_id"] != second["session_id"]
+    assert len(manager._route2_session_ids_by_user[1]) == 1
+    assert len(manager._route2_session_ids_by_user[2]) == 1
+
+
+def test_route2_stop_then_start_new_movie_allows_replacement_movie(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item_a = _make_local_item(settings, item_id=338, relative_name="route2/stop-then-start-a.mp4")
+    item_b = _make_local_item(settings, item_id=339, relative_name="route2/stop-then-start-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=950,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    assert manager.stop_session(first["session_id"], user_id=1) is True
+
+    second = manager.create_session(
+        item_b,
+        user_id=1,
+        auth_session_id=950,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+
+    assert second["session_id"] != first["session_id"]
+    assert len(manager._route2_session_ids_by_user[1]) == 1
+    assert second["media_item_id"] == int(item_b["id"])
+
+
 def test_route2_replacement_epoch_cap_fails_session_clearly(initialized_settings) -> None:
     manager, _settings = _make_route2_manager(
         initialized_settings,
@@ -1059,6 +1245,101 @@ def test_route2_stop_session_terminates_owned_worker(initialized_settings) -> No
     assert 1 not in manager._route2_session_ids_by_user
 
 
+def test_route2_admin_terminate_worker_stops_matching_owned_session(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=345, relative_name="route2/admin-terminate.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=911,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 6543
+            self.terminated = False
+            self.killed = False
+            self._return_code = None
+
+        def poll(self):
+            return self._return_code
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self._return_code = 0
+
+        def wait(self, timeout=None):
+            self._return_code = 0 if self._return_code is None else self._return_code
+            return self._return_code
+
+        def kill(self) -> None:
+            self.killed = True
+            self._return_code = -9
+
+    fake_process = _FakeProcess()
+    with manager._lock:
+        session = manager._sessions[payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.process = fake_process
+        record = manager._ensure_route2_worker_record_locked(session, active_epoch)
+        record.state = "running"
+        record.assigned_threads = 2
+        worker_id = record.worker_id
+
+    assert manager.terminate_route2_worker(worker_id) is True
+    assert fake_process.terminated is True
+    assert payload["session_id"] not in manager._sessions
+    summary = manager.get_route2_worker_status()
+    assert summary["active_worker_count"] == 0
+
+
+def test_route2_admin_terminate_worker_does_not_kill_unrelated_pid(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 7777
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self) -> None:
+            self.terminated = True
+
+    fake_process = _FakeProcess()
+    with manager._lock:
+        manager._route2_workers["orphan-worker"] = Route2WorkerRecord(
+            worker_id="orphan-worker",
+            session_id="missing-session",
+            epoch_id="missing-epoch",
+            user_id=999,
+            username="ghost",
+            auth_session_id=None,
+            media_item_id=999,
+            title="Orphan",
+            playback_mode="lite",
+            profile="mobile_1080p",
+            source_kind="local",
+            target_position_seconds=0.0,
+            state="running",
+            pid=fake_process.pid,
+            process=fake_process,
+        )
+
+    assert manager.terminate_route2_worker("orphan-worker") is False
+    assert fake_process.terminated is False
+
+
 def test_route2_disable_user_invalidates_owned_workers(initialized_settings) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
     item = _make_local_item(settings, item_id=351, relative_name="route2/disable.mp4")
@@ -1119,9 +1400,9 @@ def test_route2_revoke_auth_session_invalidates_matching_workers(initialized_set
     )
     payload_b = manager.create_session(
         item_b,
-        user_id=1,
+        user_id=2,
         auth_session_id=2202,
-        username="alice",
+        username="bob",
         engine_mode="route2",
         playback_mode="lite",
     )

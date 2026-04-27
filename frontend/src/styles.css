@@ -2255,6 +2255,13 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.75rem;
 }
 
+.admin-worker-card__actions {
+  display: grid;
+  gap: 0.55rem;
+  justify-items: start;
+  align-content: start;
+}
+
 .admin-worker-card__copy {
   display: grid;
   gap: 0.25rem;
@@ -2317,6 +2324,146 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .admin-worker-state--unknown {
   color: var(--text-muted);
+}
+
+.admin-worker-card__terminate {
+  border-color: rgba(229, 120, 120, 0.24);
+  color: #ffcaca;
+}
+
+.browser-resume-modal__card.detail-info-modal__card.admin-playback-worker-modal {
+  width: min(calc(100vw - 32px), 35rem);
+  max-width: 35rem;
+  max-height: none;
+  padding: clamp(1.8rem, 3vw, 2.25rem);
+  gap: 1.5rem;
+  overflow: visible;
+  grid-template-rows: none;
+}
+
+.admin-playback-worker-modal .detail-info-modal__copy {
+  gap: 0.5rem;
+}
+
+.admin-playback-worker-modal__prompt {
+  margin: 0;
+}
+
+.browser-resume-modal__actions.admin-playback-worker-modal__actions {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  flex-wrap: nowrap;
+}
+
+.admin-playback-worker-modal__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 11.5rem;
+  min-height: 3.375rem;
+  padding: 0.9rem 2.5rem;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.admin-playback-worker-modal__cancel {
+  background: linear-gradient(180deg, rgba(122, 152, 214, 0.92), rgba(94, 125, 191, 0.9));
+}
+
+.admin-playback-worker-modal__confirm {
+  justify-content: center;
+}
+
+@media (max-width: 519px) {
+  .browser-resume-modal__card.detail-info-modal__card.admin-playback-worker-modal {
+    width: calc(100vw - 32px);
+    padding: 1.5rem;
+  }
+
+  .browser-resume-modal__actions.admin-playback-worker-modal__actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-playback-worker-modal__actions button {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+  }
+}
+
+.browser-resume-modal__card.detail-info-modal__card.playback-worker-choice-modal {
+  width: min(calc(100vw - 32px), 35rem);
+  max-width: 35rem;
+  max-height: none;
+  padding: clamp(1.8rem, 3vw, 2.25rem);
+  gap: 1.5rem;
+  overflow: visible;
+  grid-template-rows: none;
+}
+
+.playback-worker-choice-modal .detail-info-modal__copy {
+  gap: 0.5rem;
+}
+
+.browser-resume-modal__actions.playback-worker-choice-modal__actions {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  flex-wrap: nowrap;
+}
+
+.playback-worker-choice-modal__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 11.5rem;
+  min-height: 3.375rem;
+  padding: 0.9rem 2.5rem;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.playback-worker-choice-modal__error {
+  margin: 0;
+  color: #ffc8c8;
+}
+
+@media (max-width: 519px) {
+  .browser-resume-modal__card.detail-info-modal__card.playback-worker-choice-modal {
+    width: calc(100vw - 32px);
+    padding: 1.5rem;
+  }
+
+  .browser-resume-modal__actions.playback-worker-choice-modal__actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .playback-worker-choice-modal__actions button {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+  }
 }
 
 .settings-toggle {

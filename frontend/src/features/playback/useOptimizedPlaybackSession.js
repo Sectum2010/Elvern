@@ -1550,6 +1550,9 @@ export function useOptimizedPlaybackSession({
   }
 
   async function restoreActiveBrowserPlaybackSession() {
+    // Route 2's reusable preparation cache lives on the backend session/epoch
+    // workspace. Browser buffers are transient and should not be treated as
+    // long-term storage for multi-GB media, especially on iPhone Safari.
     const payload = await fetchActiveOptimizedPlaybackSession({
       browserPlaybackSessionRoot,
       itemId,

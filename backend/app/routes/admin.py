@@ -274,6 +274,22 @@ def admin_playback_workers(
     )
 
 
+@router.post("/playback-workers/{worker_id}/terminate", response_model=MessageResponse)
+def admin_terminate_playback_worker(
+    worker_id: str,
+    request: Request,
+    user=CurrentAdmin,
+) -> MessageResponse:
+    del user
+    terminated = request.app.state.mobile_playback_manager.terminate_route2_worker(worker_id)
+    if not terminated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Playback worker not found",
+        )
+    return MessageResponse(message="Playback worker terminated")
+
+
 @router.get("/audit", response_model=AuditLogListResponse)
 def admin_audit_log(
     request: Request,

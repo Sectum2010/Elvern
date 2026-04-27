@@ -4,11 +4,13 @@ import { LoadingView } from "../components/LoadingView";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
+  buildPlaybackWorkerSummaryBubbles,
+  buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
+  canTerminatePlaybackWorker,
   formatCpuCoresValue,
   formatCpuCoresUsage,
   formatMemoryGaugeValue,
-  formatPercentValue,
   formatPreparedRanges,
   formatWorkerModeLabel,
   formatWorkerRuntime,
@@ -256,6 +258,9 @@ export function AdminPage() {
   const [userActionsModalUserId, setUserActionsModalUserId] = useState(null);
   const [playbackWorkersPayload, setPlaybackWorkersPayload] = useState(null);
   const [playbackWorkersWarning, setPlaybackWorkersWarning] = useState("");
+  const [playbackWorkersFeedback, setPlaybackWorkersFeedback] = useState(null);
+  const [terminateWorkerPending, setTerminateWorkerPending] = useState("");
+  const [terminateWorkerModal, setTerminateWorkerModal] = useState(null);
   const [selfDeleteState, setSelfDeleteState] = useState({
     open: false,
     password: "",
@@ -580,6 +585,49 @@ export function AdminPage() {
       clearUserEditors(userActionsModalUserId);
     }
     setUserActionsModalUserId(null);
+  }
+
+  function openTerminateWorkerModal(worker) {
+    setPlaybackWorkersFeedback(null);
+    setTerminateWorkerModal({
+      workerId: worker.worker_id,
+      sessionId: worker.session_id,
+      title: worker.title || "this playback worker",
+    });
+  }
+
+  function closeTerminateWorkerModal() {
+    if (terminateWorkerPending) {
+      return;
+    }
+    setTerminateWorkerModal(null);
+  }
+
+  async function handleTerminateWorkerConfirm() {
+    if (!terminateWorkerModal?.workerId || terminateWorkerPending) {
+      return;
+    }
+    setTerminateWorkerPending(terminateWorkerModal.workerId);
+    setPlaybackWorkersFeedback(null);
+    try {
+      await apiRequest(`/api/admin/playback-workers/${encodeURIComponent(terminateWorkerModal.workerId)}/terminate`, {
+        method: "POST",
+      });
+      const terminatedTitle = terminateWorkerModal.title;
+      setTerminateWorkerModal(null);
+      await loadAdminRealtimeState();
+      setPlaybackWorkersFeedback({
+        tone: "success",
+        text: `${terminatedTitle} terminated.`,
+      });
+    } catch (requestError) {
+      setPlaybackWorkersFeedback({
+        tone: "error",
+        text: requestError.message || `Failed to terminate ${terminateWorkerModal.title}.`,
+      });
+    } finally {
+      setTerminateWorkerPending("");
+    }
   }
 
   async function handleRescan() {
@@ -930,17 +978,10 @@ export function AdminPage() {
   const visibleRestorePlanWarnings = showAllRecoveryWarnings
     ? restorePlanWarnings
     : restorePlanWarnings.slice(0, RECOVERY_WARNING_LIMIT);
-  const playbackWorkerSummary = playbackWorkersPayload
-    ? [
-        `Route2 CPU used ${formatPercentValue(playbackWorkersPayload.route2_cpu_percent_of_total)} total`,
-        `Route2 CPU upbound ${playbackWorkersPayload.cpu_upbound_percent ?? playbackWorkersPayload.cpu_budget_percent}%`,
-        `Detected CPU cores ${playbackWorkersPayload.total_cpu_cores}`,
-        `Route2 RAM used ${formatMemoryGaugeValue(playbackWorkersPayload.route2_memory_bytes)}`,
-        `${playbackWorkersPayload.active_worker_count} active`,
-        `${playbackWorkersPayload.queued_worker_count} queued`,
-        `${playbackWorkersPayload.active_decoding_user_count} active user${playbackWorkersPayload.active_decoding_user_count === 1 ? "" : "s"}`,
-      ]
-    : [];
+  const playbackWorkerSummary = useMemo(
+    () => buildPlaybackWorkerSummaryBubbles(playbackWorkersPayload),
+    [playbackWorkersPayload],
+  );
 
   useEffect(() => {
     if (userActionsModalUserId == null || selectedUserActionsEntry) {
@@ -950,12 +991,16 @@ export function AdminPage() {
   }, [selectedUserActionsEntry, userActionsModalUserId]);
 
   useEffect(() => {
-    if (!selectedUserActionsEntry || typeof document === "undefined") {
+    if ((!selectedUserActionsEntry && !terminateWorkerModal) || typeof document === "undefined") {
       return undefined;
     }
     const previousOverflow = document.body.style.overflow;
     function handleKeyDown(event) {
       if (event.key === "Escape") {
+        if (terminateWorkerModal) {
+          closeTerminateWorkerModal();
+          return;
+        }
         closeUserActionsModal();
       }
     }
@@ -965,7 +1010,7 @@ export function AdminPage() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [selectedUserActionsEntry]);
+  }, [selectedUserActionsEntry, terminateWorkerModal, terminateWorkerPending]);
 
   if (loading && !statusPayload) {
     return <LoadingView label="Loading admin tools..." />;
@@ -1020,6 +1065,14 @@ export function AdminPage() {
       {playbackWorkersWarning ? (
         <p className="page-subnote admin-workers-summary__warning">
           Playback workers warning: {playbackWorkersWarning}
+        </p>
+      ) : null}
+      {playbackWorkersFeedback?.text ? (
+        <p
+          className={playbackWorkersFeedback.tone === "error" ? "action-feedback action-feedback--error" : "action-feedback"}
+          role={playbackWorkersFeedback.tone === "error" ? "alert" : "status"}
+        >
+          {playbackWorkersFeedback.text}
         </p>
       ) : null}
       <div className="admin-list">
@@ -1086,20 +1139,22 @@ export function AdminPage() {
                           Route2 background preparation for this user.
                         </p>
                       </div>
-                      <div className="admin-user-workers__gauges">
-                        <PlaybackResourceGauge
-                          gaugePercent={workerGroup.cpuGaugePercent}
-                          label="CPU"
-                          tone="cpu"
-                          valueLabel={formatCpuCoresUsage(workerGroup.cpuCoresUsed, workerGroup.allocatedCpuCores)}
-                        />
-                        <PlaybackResourceGauge
-                          gaugePercent={workerGroup.memoryGaugePercent}
-                          label="RAM"
-                          tone="memory"
-                          valueLabel={formatMemoryGaugeValue(workerGroup.memoryBytes)}
-                        />
-                      </div>
+                      {workerGroup.hasRunningWorkers ? (
+                        <div className="admin-user-workers__gauges">
+                          <PlaybackResourceGauge
+                            gaugePercent={workerGroup.cpuGaugePercent}
+                            label="CPU"
+                            tone="cpu"
+                            valueLabel={formatCpuCoresUsage(workerGroup.cpuCoresUsed, workerGroup.allocatedCpuCores)}
+                          />
+                          <PlaybackResourceGauge
+                            gaugePercent={workerGroup.memoryGaugePercent}
+                            label="RAM"
+                            tone="memory"
+                            valueLabel={formatMemoryGaugeValue(workerGroup.memoryBytes)}
+                          />
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="admin-user-workers__stats">
@@ -1117,6 +1172,7 @@ export function AdminPage() {
                         const epochDiagnosticId = shortenDiagnosticId(worker.epoch_id);
                         const hasTargetPosition = Number.isFinite(worker.target_position_seconds);
                         const normalizedState = String(worker.state || "unknown").toLowerCase();
+                        const canTerminateWorker = canTerminatePlaybackWorker(worker.state);
                         return (
                           <div className="admin-worker-card" key={worker.worker_id}>
                             <div className="admin-worker-card__header">
@@ -1126,14 +1182,26 @@ export function AdminPage() {
                                   {formatWorkerModeLabel(worker.playback_mode)} · {worker.profile || "profile unknown"} · {worker.source_kind}
                                 </p>
                               </div>
-                              <span
-                                className={[
-                                  "admin-worker-state",
-                                  `admin-worker-state--${normalizedState}`,
-                                ].join(" ")}
-                              >
-                                {worker.state || "unknown"}
-                              </span>
+                              <div className="admin-worker-card__actions">
+                                <span
+                                  className={[
+                                    "admin-worker-state",
+                                    `admin-worker-state--${normalizedState}`,
+                                  ].join(" ")}
+                                >
+                                  {worker.state || "unknown"}
+                                </span>
+                                {canTerminateWorker ? (
+                                  <button
+                                    className="ghost-button admin-worker-card__terminate"
+                                    disabled={terminateWorkerPending === worker.worker_id}
+                                    onClick={() => openTerminateWorkerModal(worker)}
+                                    type="button"
+                                  >
+                                    Terminate
+                                  </button>
+                                ) : null}
+                              </div>
                             </div>
 
                             <div className="admin-worker-card__meta">
@@ -1415,6 +1483,47 @@ export function AdminPage() {
               </p>
             )}
           </section>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const terminateWorkerConfirmationModal = terminateWorkerModal ? (
+    <div
+      aria-labelledby="admin-terminate-worker-modal-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="browser-resume-modal__backdrop"
+        onClick={closeTerminateWorkerModal}
+      />
+      <div className="browser-resume-modal__card detail-info-modal__card admin-playback-worker-modal">
+        <div className="detail-info-modal__copy">
+          <p className="eyebrow detail-info-modal__eyebrow">PLAYBACK WORKER</p>
+          <p id="admin-terminate-worker-modal-title" className="detail-info-modal__title admin-playback-worker-modal__prompt">
+            {buildPlaybackWorkerTerminatePrompt(terminateWorkerModal.title)}
+          </p>
+        </div>
+        <div className="browser-resume-modal__actions admin-playback-worker-modal__actions">
+          <button
+            className="primary-button admin-playback-worker-modal__cancel"
+            disabled={terminateWorkerPending === terminateWorkerModal.workerId}
+            onClick={closeTerminateWorkerModal}
+            type="button"
+          >
+            No
+          </button>
+          <button
+            className="ghost-button ghost-button--danger admin-playback-worker-modal__confirm"
+            disabled={terminateWorkerPending === terminateWorkerModal.workerId}
+            onClick={handleTerminateWorkerConfirm}
+            type="button"
+          >
+            Yes
+          </button>
         </div>
       </div>
     </div>
@@ -2087,6 +2196,7 @@ export function AdminPage() {
         </div>
       ) : null}
       {userActionsModal}
+      {terminateWorkerConfirmationModal}
     </section>
   );
 }
