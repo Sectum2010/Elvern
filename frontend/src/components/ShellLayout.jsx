@@ -94,7 +94,6 @@ export function ShellLayout({ children }) {
     setLogoutWorkerError("");
     try {
       setLogoutWorkerModal(null);
-      await completeLogout();
     } catch (requestError) {
       setLogoutWorkerModal((current) => current || logoutWorkerModal);
       setLogoutWorkerError(requestError.message || "Failed to log out");
