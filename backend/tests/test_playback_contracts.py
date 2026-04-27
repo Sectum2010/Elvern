@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import subprocess
 import time
 from pathlib import Path, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
@@ -16,10 +17,25 @@ from backend.app.services.native_playback_service import (
     resolve_native_playback_session_client_name,
 )
 from backend.app.routes.native_playback import _build_ios_external_launch_url
-from backend.app.config import refresh_settings
-from backend.app.db import utcnow_iso
+from backend.app.config import ConfigError, refresh_settings
+from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.desktop_playback_service import build_desktop_playback_resolution
 from backend.app.services.google_drive_service import proxy_google_drive_file_response
+from backend.app.services.library_service import get_media_item_record
+from backend.app.services.media_technical_metadata_service import (
+    build_local_source_fingerprint,
+    build_local_source_fingerprint_from_path,
+    get_technical_metadata,
+    get_local_technical_metadata_enrichment_status,
+    mark_technical_metadata_stale,
+    parse_ffprobe_technical_metadata,
+    resolve_trusted_technical_metadata,
+    run_local_technical_metadata_enrichment_batch,
+    run_one_local_technical_metadata_enrichment,
+    should_probe_local_item,
+    trigger_local_technical_metadata_enrichment_batch,
+    upsert_technical_metadata,
+)
 from backend.app.services.mobile_playback_models import (
     BrowserPlaybackSession,
     MobilePlaybackSession,
@@ -38,6 +54,18 @@ from backend.app.services.mobile_playback_route2_preflight_service import _ensur
 from backend.app.services.mobile_playback_route2_gates import (
     _route2_epoch_startup_attach_gate_locked,
     _route2_epoch_startup_attach_ready_locked,
+)
+from backend.app.services.route2_adaptive_controller import (
+    Route2AdaptiveShadowInput,
+    classify_route2_adaptive_shadow,
+)
+from backend.app.services.route2_transcode_strategy import (
+    Route2TranscodeStrategyInput,
+    select_route2_transcode_strategy,
+)
+from backend.app.services.route2_ffmpeg_command_adapter import (
+    Route2FFmpegCommandAdapterInput,
+    build_route2_ffmpeg_command_preview,
 )
 from backend.app.services.playback_service import build_playback_decision
 from fastapi import HTTPException
@@ -116,6 +144,14 @@ def _make_local_item(
     relative_name: str,
     video_codec: str | None = "h264",
     audio_codec: str | None = "aac",
+    container: str = "mp4",
+    width: int | None = 1920,
+    height: int | None = 1080,
+    pixel_format: str | None = None,
+    bit_depth: int | None = None,
+    audio_channels: int | None = None,
+    hdr_flag: bool | None = None,
+    dolby_vision_flag: bool | None = None,
 ) -> dict[str, object]:
     media_file = Path(settings.media_root) / relative_name
     media_file.parent.mkdir(parents=True, exist_ok=True)
@@ -123,12 +159,20 @@ def _make_local_item(
     return {
         "id": item_id,
         "title": f"Playback Contract {item_id}",
+        "original_filename": media_file.name,
         "file_path": str(media_file),
         "source_kind": "local",
         "duration_seconds": 120.0,
-        "container": "mp4",
+        "container": container,
         "video_codec": video_codec,
         "audio_codec": audio_codec,
+        "width": width,
+        "height": height,
+        "pixel_format": pixel_format,
+        "bit_depth": bit_depth,
+        "audio_channels": audio_channels,
+        "hdr_flag": hdr_flag,
+        "dolby_vision_flag": dolby_vision_flag,
         "resume_position_seconds": 18.5,
         "subtitles": [],
     }
@@ -153,6 +197,173 @@ class _TelemetryProcess:
 
     def poll(self):
         return None if self.running else 0
+
+
+def _make_route2_adaptive_input(**overrides) -> Route2AdaptiveShadowInput:
+    payload = Route2AdaptiveShadowInput(
+        worker_state="running",
+        playback_mode="full",
+        profile="mobile_2160p",
+        source_kind="local",
+        assigned_threads=4,
+        default_threads=4,
+        max_threads=8,
+        cpu_cores_used=4.0,
+        allocated_cpu_cores=8,
+        route2_cpu_upbound_cores=18,
+        route2_cpu_cores_used_total=8.0,
+        memory_bytes=512 * 1024 * 1024,
+        ready_end_seconds=180.0,
+        effective_playhead_seconds=40.0,
+        ahead_runway_seconds=140.0,
+        required_startup_runway_seconds=120.0,
+        supply_rate_x=1.0,
+        supply_observation_seconds=20.0,
+        client_goodput_bytes_per_second=4_000_000.0,
+        client_goodput_confident=True,
+        server_goodput_bytes_per_second=6_000_000.0,
+        server_goodput_confident=True,
+        non_retryable_error=None,
+        starvation_risk=False,
+        stalled_recovery_needed=False,
+        mode_ready=True,
+    )
+    for key, value in overrides.items():
+        setattr(payload, key, value)
+    return payload
+
+
+def _insert_media_item_record(settings, item: dict[str, object]) -> dict[str, object]:
+    file_path = str(item["file_path"])
+    file_size = int(item.get("file_size") or 0)
+    file_mtime = float(item.get("file_mtime") or 0.0)
+    candidate = Path(file_path)
+    if candidate.exists():
+        stat = candidate.stat()
+        file_size = int(item.get("file_size") or stat.st_size)
+        file_mtime = float(item.get("file_mtime") or stat.st_mtime)
+    elif file_size <= 0:
+        file_size = 1
+        file_mtime = time.time()
+
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO media_items (
+                id,
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+            """,
+            (
+                int(item["id"]),
+                str(item.get("title") or f"Media Item {item['id']}"),
+                str(item.get("original_filename") or Path(file_path).name or f"{item['id']}.bin"),
+                file_path,
+                str(item.get("source_kind") or "local"),
+                file_size,
+                file_mtime,
+                item.get("duration_seconds"),
+                item.get("width"),
+                item.get("height"),
+                item.get("video_codec"),
+                item.get("audio_codec"),
+                item.get("container"),
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+    return item
+
+
+def _make_route2_strategy_input(**overrides) -> Route2TranscodeStrategyInput:
+    payload = Route2TranscodeStrategyInput(
+        container="mp4",
+        video_codec="h264",
+        audio_codec="aac",
+        width=1920,
+        height=1080,
+        pixel_format="yuv420p",
+        bit_depth=8,
+        hdr_flag=False,
+        dolby_vision_flag=False,
+        audio_channels=2,
+        profile_key="mobile_2160p",
+        source_kind="local",
+        original_filename="movie.1080p.bluray.x264.aac.mkv",
+    )
+    for key, value in overrides.items():
+        setattr(payload, key, value)
+    return payload
+
+
+def _make_route2_ffmpeg_command_adapter_input(**overrides) -> Route2FFmpegCommandAdapterInput:
+    payload = Route2FFmpegCommandAdapterInput(
+        ffmpeg_path="/usr/bin/ffmpeg",
+        profile_key="mobile_2160p",
+        thread_budget=4,
+        source_input="https://example.test/library/movie.mp4",
+        source_input_kind="url",
+        epoch_start_seconds=0.0,
+        segment_pattern="/tmp/route2-preview/segment_%06d.m4s",
+        staging_manifest_path="/tmp/route2-preview/ffmpeg.m3u8",
+        strategy="full_transcode",
+        strategy_confidence="high",
+        strategy_reason="preview",
+        video_copy_safe=False,
+        audio_copy_safe=False,
+        risk_flags=[],
+        missing_metadata=[],
+        metadata_source="local_ffprobe",
+        metadata_trusted=True,
+    )
+    for key, value in overrides.items():
+        setattr(payload, key, value)
+    return payload
+
+
+def _upsert_trusted_local_technical_metadata(
+    settings,
+    item: dict[str, object],
+    **overrides,
+) -> dict[str, object]:
+    return upsert_technical_metadata(
+        settings,
+        media_item_id=int(item["id"]),
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probe_error": None,
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": build_local_source_fingerprint_from_path(item["file_path"]),
+            "container": item.get("container"),
+            "video_codec": item.get("video_codec"),
+            "audio_codec": item.get("audio_codec"),
+            "width": item.get("width"),
+            "height": item.get("height"),
+            **overrides,
+        },
+    )
 
 
 def test_ios_external_launch_url_contract_for_infuse_and_vlc() -> None:
@@ -553,6 +764,1671 @@ def test_route2_epoch_ffmpeg_command_keeps_resumed_media_timeline_local(initiali
     assert command[command.index("-threads") + 1] == "4"
 
 
+def test_route2_transcode_strategy_shadow_classifies_safe_h264_aac_as_stream_copy() -> None:
+    decision = select_route2_transcode_strategy(_make_route2_strategy_input())
+
+    assert decision.strategy == "stream_copy_video_audio"
+    assert decision.confidence == "high"
+    assert decision.video_copy_safe is True
+    assert decision.audio_copy_safe is True
+
+
+@pytest.mark.parametrize("audio_codec", ["truehd", "dts", "ac3"])
+def test_route2_transcode_strategy_shadow_classifies_safe_h264_with_unsafe_audio_as_copy_video_transcode_audio(
+    audio_codec: str,
+) -> None:
+    decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            audio_codec=audio_codec,
+            audio_channels=6,
+            original_filename=f"movie.1080p.bluray.x264.{audio_codec}.mkv",
+        )
+    )
+
+    assert decision.strategy == "copy_video_transcode_audio"
+    assert decision.video_copy_safe is True
+    assert decision.audio_copy_safe is False
+
+
+def test_route2_transcode_strategy_shadow_classifies_hevc_main10_with_aac_as_full_transcode() -> None:
+    decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            video_codec="hevc",
+            bit_depth=10,
+            original_filename="movie.2160p.hevc.10bit.aac.mkv",
+        )
+    )
+
+    assert decision.strategy == "full_transcode"
+    assert decision.confidence == "high"
+
+
+def test_route2_transcode_strategy_shadow_classifies_hevc_truehd_remux_as_full_transcode() -> None:
+    decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            container="mkv",
+            video_codec="hevc",
+            audio_codec="truehd",
+            width=3840,
+            height=2160,
+            bit_depth=10,
+            audio_channels=8,
+            original_filename="movie.2160p.truehd.atmos.dv.hevc.remux.mkv",
+        )
+    )
+
+    assert decision.strategy == "full_transcode"
+    assert "remux_risk" in decision.risk_flags
+
+
+def test_route2_transcode_strategy_shadow_classifies_unknown_video_codec_conservatively() -> None:
+    decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            video_codec="vp9",
+            original_filename="movie.vp9.aac.webm",
+        )
+    )
+
+    assert decision.strategy == "full_transcode"
+    assert decision.confidence in {"low", "medium"}
+
+
+def test_route2_transcode_strategy_shadow_requires_explicit_pixel_and_bit_depth_for_h264_copy() -> None:
+    decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            pixel_format=None,
+            bit_depth=None,
+        )
+    )
+
+    assert decision.strategy == "full_transcode"
+    assert "pixel_format" in decision.missing_metadata
+    assert "bit_depth" in decision.missing_metadata
+
+
+def test_route2_transcode_strategy_shadow_keeps_hdr_or_dolby_vision_on_full_transcode() -> None:
+    hdr_decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            hdr_flag=True,
+            original_filename="movie.hdr10.h264.aac.mp4",
+        )
+    )
+    dv_decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            dolby_vision_flag=True,
+            original_filename="movie.dv.h264.aac.mp4",
+        )
+    )
+
+    assert hdr_decision.strategy == "full_transcode"
+    assert dv_decision.strategy == "full_transcode"
+    assert "hdr_risk" in hdr_decision.risk_flags
+    assert "dolby_vision_risk" in dv_decision.risk_flags
+
+
+def test_route2_transcode_strategy_shadow_reports_missing_metadata_conservatively() -> None:
+    decision = select_route2_transcode_strategy(
+        _make_route2_strategy_input(
+            width=None,
+            height=None,
+            audio_channels=None,
+        )
+    )
+
+    assert decision.strategy == "full_transcode"
+    assert "width" in decision.missing_metadata
+    assert "height" in decision.missing_metadata
+
+
+def test_route2_transcode_strategy_shadow_is_pure_value_helper(monkeypatch) -> None:
+    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected io")))
+
+    decision = select_route2_transcode_strategy(_make_route2_strategy_input())
+
+    assert decision.strategy == "stream_copy_video_audio"
+
+
+def test_route2_transcode_strategy_shadow_does_not_change_current_ffmpeg_command_path(initialized_settings, monkeypatch) -> None:
+    manager = MobilePlaybackManager(initialized_settings)
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    session.profile = "mobile_2160p"
+    session.source_container = "mp4"
+    session.source_video_codec = "h264"
+    session.source_audio_codec = "aac"
+    session.source_width = 1920
+    session.source_height = 1080
+    session.source_pixel_format = "yuv420p"
+    session.source_bit_depth = 8
+    session.source_audio_channels = 2
+    epoch = _make_route2_epoch()
+
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._resolve_worker_source_input_impl",
+        lambda _settings, _session: ("https://example.test/route2-source.mp4", "url"),
+    )
+
+    command = manager._build_route2_epoch_ffmpeg_command(session=session, epoch=epoch, thread_budget=4)
+
+    assert "-c:v" in command
+    assert command[command.index("-c:v") + 1] == "libx264"
+    assert command[command.index("-c:a") + 1] == "aac"
+
+
+def test_route2_ffmpeg_command_adapter_full_transcode_preview_keeps_libx264_aac_shape() -> None:
+    preview = build_route2_ffmpeg_command_preview(_make_route2_ffmpeg_command_adapter_input())
+
+    assert preview.adapter_strategy == "full_transcode"
+    assert "-c:v" in preview.command_preview
+    assert preview.command_preview[preview.command_preview.index("-c:v") + 1] == "libx264"
+    assert preview.command_preview[preview.command_preview.index("-c:a") + 1] == "aac"
+    assert preview.active_enabled is False
+
+
+def test_route2_ffmpeg_command_adapter_stream_copy_preview_uses_copy_copy() -> None:
+    preview = build_route2_ffmpeg_command_preview(
+        _make_route2_ffmpeg_command_adapter_input(
+            strategy="stream_copy_video_audio",
+            video_copy_safe=True,
+            audio_copy_safe=True,
+        )
+    )
+
+    assert preview.adapter_strategy == "stream_copy_video_audio"
+    assert preview.command_preview[preview.command_preview.index("-c:v") + 1] == "copy"
+    assert preview.command_preview[preview.command_preview.index("-c:a") + 1] == "copy"
+
+
+def test_route2_ffmpeg_command_adapter_copy_video_transcode_audio_preview_uses_copy_and_aac() -> None:
+    preview = build_route2_ffmpeg_command_preview(
+        _make_route2_ffmpeg_command_adapter_input(
+            strategy="copy_video_transcode_audio",
+            video_copy_safe=True,
+            audio_copy_safe=False,
+        )
+    )
+
+    assert preview.adapter_strategy == "copy_video_transcode_audio"
+    assert preview.command_preview[preview.command_preview.index("-c:v") + 1] == "copy"
+    assert preview.command_preview[preview.command_preview.index("-c:a") + 1] == "aac"
+
+
+def test_route2_ffmpeg_command_adapter_hevc_like_strategy_falls_back_to_full_transcode_preview() -> None:
+    preview = build_route2_ffmpeg_command_preview(
+        _make_route2_ffmpeg_command_adapter_input(
+            strategy="full_transcode",
+            video_copy_safe=False,
+            audio_copy_safe=False,
+            risk_flags=["hdr_risk", "dolby_vision_risk", "high_bit_depth_risk", "remux_risk"],
+        )
+    )
+
+    assert preview.adapter_strategy == "full_transcode"
+    assert preview.fallback_reason is None
+    assert preview.command_preview[preview.command_preview.index("-c:v") + 1] == "libx264"
+
+
+def test_route2_ffmpeg_command_adapter_refuses_copy_preview_when_metadata_is_untrusted_or_unsafe() -> None:
+    preview = build_route2_ffmpeg_command_preview(
+        _make_route2_ffmpeg_command_adapter_input(
+            strategy="stream_copy_video_audio",
+            video_copy_safe=True,
+            audio_copy_safe=True,
+            metadata_source="coarse",
+            metadata_trusted=False,
+            risk_flags=["remux_risk"],
+        )
+    )
+
+    assert preview.adapter_strategy == "full_transcode"
+    assert preview.fallback_reason is not None
+    assert preview.command_preview[preview.command_preview.index("-c:v") + 1] == "libx264"
+
+
+def test_route2_ffmpeg_command_adapter_preview_redacts_source_urls_and_tokens() -> None:
+    preview = build_route2_ffmpeg_command_preview(
+        _make_route2_ffmpeg_command_adapter_input(
+            source_input="https://example.test/media/movie.mp4?token=secret&sig=abc&keep=ok",
+            strategy="stream_copy_video_audio",
+            video_copy_safe=True,
+            audio_copy_safe=True,
+        )
+    )
+
+    input_value = preview.command_preview[preview.command_preview.index("-i") + 1]
+    assert "secret" not in input_value
+    assert "abc" not in input_value
+    assert "REDACTED" in input_value
+    assert "keep=ok" in input_value
+
+
+def test_route2_ffmpeg_command_adapter_1259_like_fixture_remains_full_transcode_preview() -> None:
+    preview = build_route2_ffmpeg_command_preview(
+        _make_route2_ffmpeg_command_adapter_input(
+            strategy="full_transcode",
+            strategy_reason="hevc main10 remux",
+            risk_flags=["hdr_risk", "dolby_vision_risk", "remux_risk", "high_bit_depth_risk", "unsafe_pixel_format"],
+            metadata_source="local_ffprobe",
+            metadata_trusted=True,
+        )
+    )
+
+    assert preview.adapter_strategy == "full_transcode"
+    assert "libx264" in preview.command_preview
+
+
+def test_resolve_trusted_technical_metadata_accepts_matching_local_ffprobe_row(initialized_settings) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=904,
+        relative_name="route2/trusted-safe.mp4",
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(initialized_settings, item)
+    _upsert_trusted_local_technical_metadata(
+        initialized_settings,
+        item,
+        pixel_format="yuv420p",
+        bit_depth=8,
+        audio_channels=2,
+        color_transfer="bt709",
+        color_primaries="bt709",
+        color_space="bt709",
+        video_profile="High",
+        audio_profile="LC",
+    )
+
+    resolved = resolve_trusted_technical_metadata(
+        initialized_settings,
+        get_media_item_record(initialized_settings, item_id=int(item["id"])),
+    )
+
+    assert resolved is not None
+    assert resolved["metadata_source"] == "local_ffprobe"
+    assert resolved["pixel_format"] == "yuv420p"
+    assert resolved["bit_depth"] == 8
+    assert resolved["audio_channels"] == 2
+
+
+def test_resolve_trusted_technical_metadata_ignores_stale_fingerprint(initialized_settings) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=905,
+        relative_name="route2/stale-fingerprint.mp4",
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(initialized_settings, item)
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=int(item["id"]),
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probe_error": None,
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": "mismatched-fingerprint",
+            "container": "mp4",
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "yuv420p",
+            "bit_depth": 8,
+            "audio_channels": 2,
+        },
+    )
+
+    resolved = resolve_trusted_technical_metadata(
+        initialized_settings,
+        get_media_item_record(initialized_settings, item_id=int(item["id"])),
+    )
+
+    assert resolved is None
+
+
+@pytest.mark.parametrize("probe_status", ["failed", "stale", "never"])
+def test_resolve_trusted_technical_metadata_ignores_untrusted_probe_states(initialized_settings, probe_status: str) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=906 + ["failed", "stale", "never"].index(probe_status),
+        relative_name=f"route2/untrusted-{probe_status}.mp4",
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(initialized_settings, item)
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=int(item["id"]),
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": probe_status,
+            "probe_error": None,
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": build_local_source_fingerprint_from_path(item["file_path"]),
+            "container": "mp4",
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "yuv420p",
+            "bit_depth": 8,
+            "audio_channels": 2,
+        },
+    )
+
+    resolved = resolve_trusted_technical_metadata(
+        initialized_settings,
+        get_media_item_record(initialized_settings, item_id=int(item["id"])),
+    )
+
+    assert resolved is None
+
+
+def test_resolve_trusted_technical_metadata_ignores_wrong_version_or_source(initialized_settings) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=909,
+        relative_name="route2/untrusted-version.mp4",
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(initialized_settings, item)
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=int(item["id"]),
+        values={
+            "metadata_version": 999,
+            "metadata_source": "manual_import",
+            "probe_status": "probed",
+            "probe_error": None,
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": build_local_source_fingerprint_from_path(item["file_path"]),
+            "container": "mp4",
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "yuv420p",
+            "bit_depth": 8,
+            "audio_channels": 2,
+        },
+    )
+
+    resolved = resolve_trusted_technical_metadata(
+        initialized_settings,
+        get_media_item_record(initialized_settings, item_id=int(item["id"])),
+    )
+
+    assert resolved is None
+
+
+def test_resolve_trusted_technical_metadata_ignores_cloud_items_without_reads(initialized_settings, monkeypatch) -> None:
+    item = {
+        "id": 910,
+        "title": "Cloud Item",
+        "source_kind": "cloud",
+        "file_path": "/does/not/matter.mp4",
+    }
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.get_technical_metadata",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected metadata lookup")),
+    )
+
+    resolved = resolve_trusted_technical_metadata(initialized_settings, item)
+
+    assert resolved is None
+
+
+def test_route2_worker_status_uses_trusted_local_metadata_for_stream_copy_shadow(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(
+        settings,
+        item_id=911,
+        relative_name="route2/trusted-stream-copy.mp4",
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(settings, item)
+    _upsert_trusted_local_technical_metadata(
+        settings,
+        item,
+        pixel_format="yuv420p",
+        bit_depth=8,
+        audio_channels=2,
+    )
+    manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=101,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    summary = manager.get_route2_worker_status()
+    worker = next(group for group in summary["workers_by_user"] if group["user_id"] == 1)["items"][0]
+
+    assert worker["route2_transcode_strategy"] == "stream_copy_video_audio"
+    assert worker["route2_strategy_metadata_source"] == "local_ffprobe"
+    assert worker["route2_strategy_metadata_trusted"] is True
+    assert worker["route2_command_adapter_preview_strategy"] == "stream_copy_video_audio"
+    assert worker["route2_command_adapter_active"] is False
+    assert "copy video + copy audio" in worker["route2_command_adapter_summary"]
+    assert worker["route2_command_adapter_fallback_reason"] is None
+
+
+@pytest.mark.parametrize("audio_codec", ["truehd", "dts"])
+def test_route2_worker_status_uses_trusted_local_metadata_for_copy_video_transcode_audio_shadow(
+    initialized_settings,
+    audio_codec: str,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(
+        settings,
+        item_id=912 if audio_codec == "truehd" else 913,
+        relative_name=f"route2/trusted-copy-video-{audio_codec}.mp4",
+        audio_codec=audio_codec,
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(settings, item)
+    _upsert_trusted_local_technical_metadata(
+        settings,
+        item,
+        pixel_format="yuv420p",
+        bit_depth=8,
+        audio_channels=8,
+    )
+    manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=101,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    summary = manager.get_route2_worker_status()
+    worker = next(group for group in summary["workers_by_user"] if group["user_id"] == 1)["items"][0]
+
+    assert worker["route2_transcode_strategy"] == "copy_video_transcode_audio"
+    assert worker["route2_strategy_metadata_source"] == "local_ffprobe"
+    assert worker["route2_strategy_metadata_trusted"] is True
+    assert worker["route2_command_adapter_preview_strategy"] == "copy_video_transcode_audio"
+    assert worker["route2_command_adapter_active"] is False
+    assert "copy video + AAC audio transcode" in worker["route2_command_adapter_summary"]
+    assert worker["route2_command_adapter_fallback_reason"] is None
+
+
+def test_route2_worker_status_keeps_hevc_main10_truehd_on_full_transcode_with_trusted_metadata(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(
+        settings,
+        item_id=914,
+        relative_name="route2/trusted-hevc-full.mkv",
+        container="mkv",
+        video_codec="hevc",
+        audio_codec="truehd",
+        width=3840,
+        height=2160,
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(settings, item)
+    _upsert_trusted_local_technical_metadata(
+        settings,
+        item,
+        pixel_format="yuv420p10le",
+        bit_depth=10,
+        audio_channels=8,
+        dolby_vision_detected=True,
+    )
+    manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=101,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+
+    summary = manager.get_route2_worker_status()
+    worker = next(group for group in summary["workers_by_user"] if group["user_id"] == 1)["items"][0]
+
+    assert worker["route2_transcode_strategy"] == "full_transcode"
+    assert worker["route2_strategy_metadata_source"] == "local_ffprobe"
+    assert worker["route2_strategy_metadata_trusted"] is True
+    assert worker["route2_command_adapter_preview_strategy"] == "full_transcode"
+    assert worker["route2_command_adapter_active"] is False
+    assert "libx264 video + AAC audio" in worker["route2_command_adapter_summary"]
+
+
+def test_route2_worker_status_ignores_stale_or_missing_trusted_metadata_and_keeps_conservative_behavior(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(
+        settings,
+        item_id=915,
+        relative_name="route2/stale-fallback.mp4",
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(settings, item)
+    upsert_technical_metadata(
+        settings,
+        media_item_id=int(item["id"]),
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probe_error": None,
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": "stale-fingerprint",
+            "container": "mp4",
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "width": 1920,
+            "height": 1080,
+            "pixel_format": "yuv420p",
+            "bit_depth": 8,
+            "audio_channels": 2,
+        },
+    )
+    manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=101,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    summary = manager.get_route2_worker_status()
+    worker = next(group for group in summary["workers_by_user"] if group["user_id"] == 1)["items"][0]
+
+    assert worker["route2_transcode_strategy"] == "full_transcode"
+    assert worker["route2_strategy_metadata_source"] == "coarse"
+    assert worker["route2_strategy_metadata_trusted"] is False
+    assert worker["route2_command_adapter_preview_strategy"] == "full_transcode"
+    assert worker["route2_command_adapter_active"] is False
+
+
+def test_route2_trusted_metadata_shadow_does_not_change_current_ffmpeg_command_path(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(
+        settings,
+        item_id=916,
+        relative_name="route2/trusted-shadow-command.mp4",
+        pixel_format=None,
+        bit_depth=None,
+        audio_channels=None,
+    )
+    _insert_media_item_record(settings, item)
+    _upsert_trusted_local_technical_metadata(
+        settings,
+        item,
+        pixel_format="yuv420p",
+        bit_depth=8,
+        audio_channels=2,
+    )
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=111,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+    summary = manager.get_route2_worker_status()
+    worker = next(group for group in summary["workers_by_user"] if group["user_id"] == 1)["items"][0]
+    assert worker["route2_transcode_strategy"] == "stream_copy_video_audio"
+    assert worker["route2_command_adapter_preview_strategy"] == "stream_copy_video_audio"
+    assert worker["route2_command_adapter_active"] is False
+
+    with manager._lock:
+        session = manager._sessions[payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._resolve_worker_source_input_impl",
+        lambda _settings, _session: ("https://example.test/route2-source.mp4", "url"),
+    )
+
+    command = manager._build_route2_epoch_ffmpeg_command(session=session, epoch=active_epoch, thread_budget=4)
+
+    assert "-c:v" in command
+    assert command[command.index("-c:v") + 1] == "libx264"
+    assert command[command.index("-c:a") + 1] == "aac"
+
+
+def test_parse_ffprobe_technical_metadata_extracts_h264_yuv420p_aac_fields() -> None:
+    payload = {
+        "format": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "duration": "120.125",
+            "bit_rate": "4000000",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "h264",
+                "profile": "High",
+                "level": 41,
+                "pix_fmt": "yuv420p",
+                "width": 1920,
+                "height": 1080,
+                "color_transfer": "bt709",
+                "color_primaries": "bt709",
+                "color_space": "bt709",
+            },
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "profile": "LC",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "sample_rate": "48000",
+            },
+        ],
+    }
+
+    metadata = parse_ffprobe_technical_metadata(payload)
+
+    assert metadata["container"] == "mp4"
+    assert metadata["duration_seconds"] == pytest.approx(120.125)
+    assert metadata["bit_rate"] == 4_000_000
+    assert metadata["video_codec"] == "h264"
+    assert metadata["video_profile"] == "High"
+    assert metadata["video_level"] == "41"
+    assert metadata["pixel_format"] == "yuv420p"
+    assert metadata["bit_depth"] == 8
+    assert metadata["width"] == 1920
+    assert metadata["height"] == 1080
+    assert metadata["hdr_detected"] is False
+    assert metadata["dolby_vision_detected"] is False
+    assert metadata["audio_codec"] == "aac"
+    assert metadata["audio_profile"] == "LC"
+    assert metadata["audio_channels"] == 2
+    assert metadata["audio_channel_layout"] == "stereo"
+    assert metadata["audio_sample_rate"] == 48_000
+    assert metadata["subtitle_count"] == 0
+
+
+def test_parse_ffprobe_technical_metadata_extracts_hevc_main10_truehd_fields() -> None:
+    payload = {
+        "format": {
+            "format_name": "matroska,webm",
+            "duration": "6302.04",
+            "bit_rate": "81234567",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "profile": "Main 10",
+                "level": 153,
+                "pix_fmt": "yuv420p10le",
+                "width": 3840,
+                "height": 2160,
+                "color_transfer": "bt2020-10",
+                "color_primaries": "bt2020",
+                "color_space": "bt2020nc",
+            },
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "truehd",
+                "profile": "Dolby TrueHD",
+                "channels": 8,
+                "channel_layout": "7.1",
+                "sample_rate": "48000",
+            },
+        ],
+    }
+
+    metadata = parse_ffprobe_technical_metadata(payload)
+
+    assert metadata["container"] == "mkv"
+    assert metadata["video_codec"] == "hevc"
+    assert metadata["video_profile"] == "Main 10"
+    assert metadata["pixel_format"] == "yuv420p10le"
+    assert metadata["bit_depth"] == 10
+    assert metadata["audio_codec"] == "truehd"
+    assert metadata["audio_channels"] == 8
+    assert metadata["audio_channel_layout"] == "7.1"
+
+
+@pytest.mark.parametrize("color_transfer", ["smpte2084", "arib-std-b67"])
+def test_parse_ffprobe_technical_metadata_detects_hdr_from_transfer(color_transfer: str) -> None:
+    payload = {
+        "format": {"format_name": "matroska,webm"},
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "pix_fmt": "yuv420p10le",
+                "width": 3840,
+                "height": 2160,
+                "color_transfer": color_transfer,
+                "color_primaries": "bt2020",
+                "color_space": "bt2020nc",
+            }
+        ],
+    }
+
+    metadata = parse_ffprobe_technical_metadata(payload)
+
+    assert metadata["hdr_detected"] is True
+
+
+def test_parse_ffprobe_technical_metadata_detects_dolby_vision_from_side_data() -> None:
+    payload = {
+        "format": {"format_name": "matroska,webm"},
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "pix_fmt": "yuv420p10le",
+                "width": 3840,
+                "height": 2160,
+                "side_data_list": [
+                    {
+                        "side_data_type": "DOVI configuration record",
+                        "dv_profile": 8,
+                    }
+                ],
+            }
+        ],
+    }
+
+    metadata = parse_ffprobe_technical_metadata(payload)
+
+    assert metadata["dolby_vision_detected"] is True
+
+
+def test_parse_ffprobe_technical_metadata_counts_subtitle_streams() -> None:
+    payload = {
+        "format": {"format_name": "matroska,webm"},
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"},
+            {"index": 1, "codec_type": "subtitle", "codec_name": "subrip"},
+            {"index": 2, "codec_type": "subtitle", "codec_name": "ass"},
+        ],
+    }
+
+    metadata = parse_ffprobe_technical_metadata(payload)
+
+    assert metadata["subtitle_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"}, "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}]},
+        {"format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"}, "streams": [{"codec_type": "audio", "codec_name": "aac", "channels": 2}]},
+    ],
+)
+def test_parse_ffprobe_technical_metadata_tolerates_missing_audio_or_video(payload: dict[str, object]) -> None:
+    metadata = parse_ffprobe_technical_metadata(payload)
+
+    assert metadata["raw_probe_summary_json"] is not None
+
+
+@pytest.mark.parametrize("payload", [{}, {"format": "not-a-dict", "streams": "not-a-list"}])
+def test_parse_ffprobe_technical_metadata_tolerates_malformed_or_empty_payloads(payload: dict[str, object]) -> None:
+    metadata = parse_ffprobe_technical_metadata(payload)
+
+    assert metadata["container"] is None
+    assert metadata["video_codec"] is None
+    assert metadata["audio_codec"] is None
+    assert metadata["subtitle_count"] == 0
+
+
+def test_init_db_creates_media_item_technical_metadata_table_and_indexes(initialized_settings) -> None:
+    with get_connection(initialized_settings) as connection:
+        table = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'media_item_technical_metadata'
+            """
+        ).fetchone()
+        indexes = {
+            row["name"]
+            for row in connection.execute("PRAGMA index_list(media_item_technical_metadata)").fetchall()
+        }
+
+    assert table is not None
+    assert "idx_media_item_technical_metadata_probe_status" in indexes
+    assert "idx_media_item_technical_metadata_probed_at" in indexes
+    assert "idx_media_item_technical_metadata_source_fingerprint" in indexes
+    assert "idx_media_item_technical_metadata_source" in indexes
+
+
+def test_local_source_fingerprint_changes_when_size_or_mtime_changes() -> None:
+    original = build_local_source_fingerprint(
+        file_path="/tmp/movie.mkv",
+        file_size=100,
+        file_mtime_ns=1_000,
+    )
+    size_changed = build_local_source_fingerprint(
+        file_path="/tmp/movie.mkv",
+        file_size=101,
+        file_mtime_ns=1_000,
+    )
+    mtime_changed = build_local_source_fingerprint(
+        file_path="/tmp/movie.mkv",
+        file_size=100,
+        file_mtime_ns=1_001,
+    )
+
+    assert original != size_changed
+    assert original != mtime_changed
+
+
+def test_local_source_fingerprint_from_path_matches_explicit_components(tmp_path) -> None:
+    media_file = tmp_path / "fingerprint.mkv"
+    media_file.write_bytes(b"technical-metadata")
+    stat_before = media_file.stat()
+
+    expected = build_local_source_fingerprint(
+        file_path=media_file,
+        file_size=stat_before.st_size,
+        file_mtime_ns=stat_before.st_mtime_ns,
+    )
+    actual = build_local_source_fingerprint_from_path(media_file)
+
+    assert actual == expected
+
+
+def test_parse_ffprobe_technical_metadata_is_pure_and_does_not_touch_source_files(tmp_path, monkeypatch) -> None:
+    media_file = tmp_path / "movie.mkv"
+    media_file.write_bytes(b"read-only media placeholder")
+    stat_before = media_file.stat()
+
+    def _unexpected_open(*args, **kwargs):
+        raise AssertionError("parser should not open media files")
+
+    monkeypatch.setattr("builtins.open", _unexpected_open)
+
+    metadata = parse_ffprobe_technical_metadata(
+        {
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+            "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+        }
+    )
+    stat_after = media_file.stat()
+
+    assert metadata["video_codec"] == "h264"
+    assert stat_after.st_size == stat_before.st_size
+    assert stat_after.st_mtime_ns == stat_before.st_mtime_ns
+
+
+def test_local_technical_metadata_no_row_is_eligible(initialized_settings) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8101,
+        relative_name="technical/eligible.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+
+    stored_item = get_media_item_record(initialized_settings, item_id=8101)
+    assert stored_item is not None
+
+    eligible, reason = should_probe_local_item(initialized_settings, stored_item)
+
+    assert eligible is True
+    assert reason == "no_metadata_row"
+
+
+def test_local_technical_metadata_matching_probed_fingerprint_is_skipped(initialized_settings) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8102,
+        relative_name="technical/up_to_date.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+    fingerprint = build_local_source_fingerprint_from_path(item["file_path"])
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8102,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": fingerprint,
+        },
+    )
+
+    stored_item = get_media_item_record(initialized_settings, item_id=8102)
+    assert stored_item is not None
+
+    eligible, reason = should_probe_local_item(initialized_settings, stored_item)
+
+    assert eligible is False
+    assert reason == "fingerprint_unchanged"
+
+
+def test_local_technical_metadata_changed_source_marks_stale_and_eligible(initialized_settings) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8103,
+        relative_name="technical/stale.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+    fingerprint = build_local_source_fingerprint_from_path(item["file_path"])
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8103,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": fingerprint,
+            "video_codec": "h264",
+        },
+    )
+
+    media_file = Path(item["file_path"])
+    media_file.write_bytes(b"changed-content")
+    item["file_size"] = media_file.stat().st_size
+    item["file_mtime"] = media_file.stat().st_mtime
+    stored_item = get_media_item_record(initialized_settings, item_id=8103)
+    assert stored_item is not None
+
+    eligible, reason = should_probe_local_item(initialized_settings, stored_item)
+
+    assert eligible is True
+    assert reason == "source_fingerprint_changed"
+
+    stale_row = mark_technical_metadata_stale(
+        initialized_settings,
+        media_item_id=8103,
+        source_fingerprint=build_local_source_fingerprint_from_path(media_file),
+    )
+    assert stale_row["probe_status"] == "stale"
+
+
+def test_local_technical_metadata_cloud_item_is_not_eligible_and_does_not_run_ffprobe(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    item = {
+        "id": 8104,
+        "title": "Cloud Technical Metadata",
+        "original_filename": "cloud.mkv",
+        "file_path": "gdrive://cloud-item",
+        "source_kind": "cloud",
+        "duration_seconds": 90.0,
+        "container": "mkv",
+        "video_codec": None,
+        "audio_codec": None,
+        "width": None,
+        "height": None,
+    }
+    _insert_media_item_record(initialized_settings, item)
+
+    def _unexpected_run(*args, **kwargs):
+        raise AssertionError("cloud item should not invoke ffprobe")
+
+    monkeypatch.setattr("backend.app.services.media_technical_metadata_service.subprocess.run", _unexpected_run)
+
+    result = run_one_local_technical_metadata_enrichment(
+        initialized_settings,
+        media_item_id=8104,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "cloud_source_not_supported"
+
+
+def test_local_technical_metadata_successful_probe_writes_probed_row(initialized_settings, monkeypatch) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8105,
+        relative_name="technical/probed.mp4",
+        video_codec=None,
+        audio_codec=None,
+        width=None,
+        height=None,
+    )
+    _insert_media_item_record(initialized_settings, item)
+    ffprobe_payload = {
+        "format": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "duration": "91.25",
+            "bit_rate": "3500000",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "h264",
+                "profile": "High",
+                "pix_fmt": "yuv420p",
+                "width": 1920,
+                "height": 1080,
+            },
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "sample_rate": "48000",
+            },
+        ],
+    }
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(ffprobe_payload)
+        stderr = ""
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        lambda *args, **kwargs: _Completed(),
+    )
+
+    result = run_one_local_technical_metadata_enrichment(
+        initialized_settings,
+        media_item_id=8105,
+    )
+    row = get_technical_metadata(initialized_settings, 8105)
+
+    assert result["status"] == "probed"
+    assert row is not None
+    assert row["probe_status"] == "probed"
+    assert row["metadata_source"] == "local_ffprobe"
+    assert row["video_codec"] == "h264"
+    assert row["pixel_format"] == "yuv420p"
+    assert row["bit_depth"] == 8
+    assert row["audio_codec"] == "aac"
+    assert row["audio_channels"] == 2
+
+
+def test_local_technical_metadata_timeout_stores_failed_status(initialized_settings, monkeypatch) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8106,
+        relative_name="technical/timeout.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+
+    def _raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="ffprobe", timeout=30)
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        _raise_timeout,
+    )
+
+    result = run_one_local_technical_metadata_enrichment(
+        initialized_settings,
+        media_item_id=8106,
+    )
+    row = get_technical_metadata(initialized_settings, 8106)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "timeout"
+    assert row is not None
+    assert row["probe_status"] == "failed"
+    assert row["probe_error"] == "timeout"
+
+
+def test_local_technical_metadata_invalid_json_stores_failed_status(initialized_settings, monkeypatch) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8107,
+        relative_name="technical/invalid-json.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+
+    class _Completed:
+        returncode = 0
+        stdout = "{bad-json"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        lambda *args, **kwargs: _Completed(),
+    )
+
+    result = run_one_local_technical_metadata_enrichment(
+        initialized_settings,
+        media_item_id=8107,
+    )
+    row = get_technical_metadata(initialized_settings, 8107)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "invalid_json"
+    assert row is not None
+    assert row["probe_status"] == "failed"
+    assert row["probe_error"] == "invalid_json"
+
+
+def test_local_technical_metadata_missing_file_stores_failed_status(initialized_settings) -> None:
+    item = {
+        "id": 8108,
+        "title": "Missing Local File",
+        "original_filename": "missing.mkv",
+        "file_path": str(Path(initialized_settings.media_root) / "technical" / "missing.mkv"),
+        "source_kind": "local",
+        "duration_seconds": 100.0,
+        "container": "mkv",
+        "video_codec": "h264",
+        "audio_codec": "aac",
+        "width": 1920,
+        "height": 1080,
+    }
+    _insert_media_item_record(initialized_settings, item)
+
+    result = run_one_local_technical_metadata_enrichment(
+        initialized_settings,
+        media_item_id=8108,
+    )
+    row = get_technical_metadata(initialized_settings, 8108)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "missing_file"
+    assert row is not None
+    assert row["probe_status"] == "failed"
+    assert row["probe_error"] == "missing_file"
+
+
+def test_local_technical_metadata_probe_does_not_modify_local_file(initialized_settings, monkeypatch) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8109,
+        relative_name="technical/readonly.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+    media_file = Path(item["file_path"])
+    stat_before = media_file.stat()
+    content_before = media_file.read_bytes()
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+            }
+        )
+        stderr = ""
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        lambda *args, **kwargs: _Completed(),
+    )
+
+    result = run_one_local_technical_metadata_enrichment(
+        initialized_settings,
+        media_item_id=8109,
+    )
+    stat_after = media_file.stat()
+    content_after = media_file.read_bytes()
+
+    assert result["status"] == "probed"
+    assert stat_after.st_size == stat_before.st_size
+    assert stat_after.st_mtime_ns == stat_before.st_mtime_ns
+    assert content_after == content_before
+
+
+def test_local_technical_metadata_failed_probe_does_not_break_library_or_playback_functions(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8110,
+        relative_name="technical/library-safe.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+
+    def _raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="ffprobe", timeout=30)
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        _raise_timeout,
+    )
+
+    result = run_one_local_technical_metadata_enrichment(
+        initialized_settings,
+        media_item_id=8110,
+    )
+    stored_item = get_media_item_record(initialized_settings, item_id=8110)
+
+    assert result["status"] == "failed"
+    assert stored_item is not None
+
+    decision = build_playback_decision(
+        initialized_settings,
+        stored_item,
+        user_agent="Mozilla/5.0",
+        transcode_manager=StubTranscodeManager(),
+    )
+
+    assert isinstance(decision, dict)
+    assert decision["mode"] in {"direct", "hls"}
+
+
+def test_local_technical_metadata_failed_probe_respects_backoff_unless_retry_requested(
+    initialized_settings,
+) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8111,
+        relative_name="technical/backoff.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8111,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "failed",
+            "probe_error": "timeout",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        },
+    )
+
+    stored_item = get_media_item_record(initialized_settings, item_id=8111)
+    assert stored_item is not None
+
+    skipped, skipped_reason = should_probe_local_item(initialized_settings, stored_item)
+    retried, retried_reason = should_probe_local_item(
+        initialized_settings,
+        stored_item,
+        retry_failed=True,
+    )
+
+    assert skipped is False
+    assert skipped_reason == "failed_backoff_active"
+    assert retried is True
+    assert retried_reason == "retry_requested"
+
+
+def test_local_technical_metadata_batch_probes_only_local_eligible_items_and_skips_cloud(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    eligible = _make_local_item(
+        initialized_settings,
+        item_id=8112,
+        relative_name="technical/batch-eligible.mp4",
+    )
+    up_to_date = _make_local_item(
+        initialized_settings,
+        item_id=8113,
+        relative_name="technical/batch-up-to-date.mp4",
+    )
+    cloud_item = {
+        "id": 8114,
+        "title": "Cloud Batch Item",
+        "original_filename": "cloud-batch.mkv",
+        "file_path": "gdrive://cloud-batch",
+        "source_kind": "cloud",
+        "duration_seconds": 90.0,
+        "container": "mkv",
+        "video_codec": None,
+        "audio_codec": None,
+        "width": None,
+        "height": None,
+    }
+    _insert_media_item_record(initialized_settings, eligible)
+    _insert_media_item_record(initialized_settings, up_to_date)
+    _insert_media_item_record(initialized_settings, cloud_item)
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8113,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": build_local_source_fingerprint_from_path(up_to_date["file_path"]),
+        },
+    )
+
+    ffprobe_payload = {
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+        "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+    }
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(ffprobe_payload)
+        stderr = ""
+
+    def _fake_run(command, *args, **kwargs):
+        calls.append(list(command))
+        return _Completed()
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        _fake_run,
+    )
+
+    summary = run_local_technical_metadata_enrichment_batch(
+        initialized_settings,
+        limit=5,
+    )
+
+    assert summary["probed"] == 1
+    assert summary["cloud_skipped"] == 1
+    assert summary["skipped"] >= 1
+    assert len(calls) == 1
+    assert get_technical_metadata(initialized_settings, 8112)["probe_status"] == "probed"
+    assert get_technical_metadata(initialized_settings, 8113)["probe_status"] == "probed"
+    assert get_technical_metadata(initialized_settings, 8114) is None
+
+
+def test_local_technical_metadata_batch_respects_limit(initialized_settings, monkeypatch) -> None:
+    first = _make_local_item(
+        initialized_settings,
+        item_id=8115,
+        relative_name="technical/batch-limit-a.mp4",
+    )
+    second = _make_local_item(
+        initialized_settings,
+        item_id=8116,
+        relative_name="technical/batch-limit-b.mp4",
+    )
+    _insert_media_item_record(initialized_settings, first)
+    _insert_media_item_record(initialized_settings, second)
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+            }
+        )
+        stderr = ""
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        lambda *args, **kwargs: _Completed(),
+    )
+
+    summary = run_local_technical_metadata_enrichment_batch(
+        initialized_settings,
+        limit=1,
+    )
+
+    assert summary["probed"] == 1
+    rows = [get_technical_metadata(initialized_settings, 8115), get_technical_metadata(initialized_settings, 8116)]
+    assert sum(1 for row in rows if row is not None and row["probe_status"] == "probed") == 1
+
+
+def test_local_technical_metadata_batch_does_not_retry_recent_failed_rows_unless_requested(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8117,
+        relative_name="technical/batch-backoff.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8117,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "failed",
+            "probe_error": "timeout",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        },
+    )
+
+    def _unexpected_run(*args, **kwargs):
+        raise AssertionError("recent failed rows should not be probed without retry_failed")
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        _unexpected_run,
+    )
+
+    skipped_summary = run_local_technical_metadata_enrichment_batch(
+        initialized_settings,
+        limit=5,
+        retry_failed=False,
+    )
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+            }
+        )
+        stderr = ""
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        lambda *args, **kwargs: _Completed(),
+    )
+    retried_summary = run_local_technical_metadata_enrichment_batch(
+        initialized_settings,
+        limit=5,
+        retry_failed=True,
+    )
+
+    assert skipped_summary["probed"] == 0
+    assert skipped_summary["skipped"] >= 1
+    assert retried_summary["probed"] == 1
+
+
+def test_local_technical_metadata_batch_changed_fingerprint_becomes_stale_and_eligible(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8118,
+        relative_name="technical/batch-stale.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+    original_fingerprint = build_local_source_fingerprint_from_path(item["file_path"])
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8118,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": original_fingerprint,
+            "video_codec": "h264",
+        },
+    )
+    media_file = Path(item["file_path"])
+    media_file.write_bytes(b"changed batch stale payload")
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+            }
+        )
+        stderr = ""
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        lambda *args, **kwargs: _Completed(),
+    )
+
+    summary = run_local_technical_metadata_enrichment_batch(
+        initialized_settings,
+        limit=5,
+    )
+    row = get_technical_metadata(initialized_settings, 8118)
+
+    assert summary["stale"] >= 1
+    assert summary["probed"] == 1
+    assert row is not None
+    assert row["probe_status"] == "probed"
+    assert row["source_fingerprint"] != original_fingerprint
+
+
+def test_local_technical_metadata_enrichment_status_counts_local_rows_correctly(initialized_settings) -> None:
+    never_item = _make_local_item(
+        initialized_settings,
+        item_id=8119,
+        relative_name="technical/status-never.mp4",
+    )
+    probed_item = _make_local_item(
+        initialized_settings,
+        item_id=8120,
+        relative_name="technical/status-probed.mp4",
+    )
+    failed_item = _make_local_item(
+        initialized_settings,
+        item_id=8121,
+        relative_name="technical/status-failed.mp4",
+    )
+    stale_item = _make_local_item(
+        initialized_settings,
+        item_id=8122,
+        relative_name="technical/status-stale.mp4",
+    )
+    cloud_item = {
+        "id": 8123,
+        "title": "Cloud Status",
+        "original_filename": "cloud-status.mkv",
+        "file_path": "gdrive://cloud-status",
+        "source_kind": "cloud",
+        "duration_seconds": 60.0,
+        "container": "mkv",
+        "video_codec": None,
+        "audio_codec": None,
+        "width": None,
+        "height": None,
+    }
+    for item in [never_item, probed_item, failed_item, stale_item, cloud_item]:
+        _insert_media_item_record(initialized_settings, item)
+
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8120,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "probed",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": build_local_source_fingerprint_from_path(probed_item["file_path"]),
+        },
+    )
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8121,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "failed",
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        },
+    )
+    upsert_technical_metadata(
+        initialized_settings,
+        media_item_id=8122,
+        values={
+            "metadata_version": 1,
+            "metadata_source": "local_ffprobe",
+            "probe_status": "stale",
+            "updated_at": utcnow_iso(),
+        },
+    )
+
+    status_payload = get_local_technical_metadata_enrichment_status(initialized_settings)
+
+    assert status_payload["total_local_items"] >= 4
+    assert status_payload["probed_local_items"] >= 1
+    assert status_payload["failed_local_items"] >= 1
+    assert status_payload["stale_local_items"] >= 1
+    assert status_payload["never_probed_local_items"] >= 1
+    assert status_payload["cloud_items_not_supported"] >= 1
+    assert status_payload["running"] is False
+
+
+def test_local_technical_metadata_batch_probe_does_not_modify_local_file(initialized_settings, monkeypatch) -> None:
+    item = _make_local_item(
+        initialized_settings,
+        item_id=8124,
+        relative_name="technical/batch-readonly.mp4",
+    )
+    _insert_media_item_record(initialized_settings, item)
+    media_file = Path(item["file_path"])
+    stat_before = media_file.stat()
+    content_before = media_file.read_bytes()
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
+            }
+        )
+        stderr = ""
+
+    monkeypatch.setattr(
+        "backend.app.services.media_technical_metadata_service.subprocess.run",
+        lambda *args, **kwargs: _Completed(),
+    )
+
+    summary = run_local_technical_metadata_enrichment_batch(
+        initialized_settings,
+        limit=1,
+    )
+    stat_after = media_file.stat()
+    content_after = media_file.read_bytes()
+
+    assert summary["probed"] == 1
+    assert stat_after.st_size == stat_before.st_size
+    assert stat_after.st_mtime_ns == stat_before.st_mtime_ns
+    assert content_after == content_before
+
+
 def test_google_drive_stream_proxy_preserves_provider_error_detail(monkeypatch) -> None:
     request = Request("https://www.googleapis.com/drive/v3/files/demo?alt=media")
     payload = (
@@ -740,6 +2616,193 @@ def test_route2_cpu_upbound_env_alias_is_supported(monkeypatch, test_settings) -
     assert settings.route2_cpu_budget_percent == 91
 
 
+@pytest.mark.parametrize(
+    ("detected_cores", "expected_default"),
+    [
+        (20, 4),
+        (2, 2),
+    ],
+)
+def test_route2_max_worker_threads_default_is_min_four_or_detected_cores(
+    monkeypatch,
+    test_settings,
+    detected_cores: int,
+    expected_default: int,
+) -> None:
+    monkeypatch.delenv("ELVERN_ROUTE2_MAX_WORKER_THREADS", raising=False)
+    monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: detected_cores)
+
+    settings = refresh_settings()
+
+    assert settings.route2_max_worker_threads == expected_default
+
+
+def test_route2_max_worker_threads_env_override_still_works(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_MAX_WORKER_THREADS", "6")
+    monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 20)
+
+    settings = refresh_settings()
+
+    assert settings.route2_max_worker_threads == 6
+
+
+def test_route2_max_worker_threads_validation_still_rejects_invalid_values(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_MAX_WORKER_THREADS", "5")
+    monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 4)
+
+    with pytest.raises(ConfigError, match="ELVERN_ROUTE2_MAX_WORKER_THREADS"):
+        refresh_settings()
+
+
+def test_route2_adaptive_shadow_provider_error_classifies_without_thread_increase() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            non_retryable_error="The download quota for this file has been exceeded.",
+        )
+    )
+
+    assert decision.bottleneck_class == "PROVIDER_ERROR"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 4
+
+
+def test_route2_adaptive_shadow_queued_worker_is_waiting_for_capacity() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            worker_state="queued",
+            assigned_threads=0,
+            cpu_cores_used=None,
+        )
+    )
+
+    assert decision.bottleneck_class == "WAITING_FOR_CAPACITY"
+    assert decision.bottleneck_confidence == pytest.approx(0.98)
+
+
+def test_route2_adaptive_shadow_over_supplied_worker_recommends_same_or_lower_threads() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            supply_rate_x=1.8,
+            ahead_runway_seconds=220.0,
+            cpu_cores_used=2.0,
+        )
+    )
+
+    assert decision.bottleneck_class == "OVER_SUPPLIED"
+    assert decision.recommended_threads <= decision.current_threads
+    assert decision.safe_to_decrease_threads is True
+
+
+def test_route2_adaptive_shadow_cpu_bound_with_spare_budget_recommends_more_threads() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            cpu_cores_used=6.8,
+            allocated_cpu_cores=8,
+            route2_cpu_cores_used_total=7.0,
+        )
+    )
+
+    assert decision.bottleneck_class == "CPU_BOUND"
+    assert decision.safe_to_increase_threads is True
+    assert decision.recommended_threads == 6
+
+
+def test_route2_adaptive_shadow_cpu_bound_without_spare_budget_stays_under_supplied_cpu_limited() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            supply_rate_x=0.74,
+            ahead_runway_seconds=60.0,
+            cpu_cores_used=6.9,
+            allocated_cpu_cores=4,
+            route2_cpu_cores_used_total=18.0,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 4
+
+
+def test_route2_adaptive_shadow_cloud_low_supply_low_cpu_is_source_bound() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            source_kind="cloud",
+            supply_rate_x=0.72,
+            ahead_runway_seconds=50.0,
+            cpu_cores_used=2.2,
+            allocated_cpu_cores=8,
+            server_goodput_bytes_per_second=2_000_000.0,
+            client_goodput_bytes_per_second=4_000_000.0,
+        )
+    )
+
+    assert decision.bottleneck_class == "SOURCE_BOUND"
+    assert decision.safe_to_increase_threads is False
+
+
+def test_route2_adaptive_shadow_client_weak_while_backend_runway_is_healthy() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            supply_rate_x=1.35,
+            ahead_runway_seconds=150.0,
+            cpu_cores_used=3.5,
+            stalled_recovery_needed=True,
+        )
+    )
+
+    assert decision.bottleneck_class == "CLIENT_BOUND"
+    assert decision.safe_to_increase_threads is False
+
+
+def test_route2_adaptive_shadow_insufficient_metrics_falls_back_to_unknown() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            supply_rate_x=None,
+            ahead_runway_seconds=None,
+            cpu_cores_used=None,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNKNOWN"
+    assert "supply_rate_x" in decision.missing_metrics
+    assert "ahead_runway_seconds" in decision.missing_metrics
+
+
+def test_route2_adaptive_shadow_recommendation_clamps_to_min_and_max_threads() -> None:
+    low = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=2,
+            supply_rate_x=2.0,
+            ahead_runway_seconds=260.0,
+            cpu_cores_used=1.0,
+        )
+    )
+    high = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=7,
+            max_threads=6,
+            supply_rate_x=0.7,
+            ahead_runway_seconds=40.0,
+            cpu_cores_used=6.6,
+            allocated_cpu_cores=8,
+            route2_cpu_cores_used_total=8.0,
+        )
+    )
+
+    assert low.recommended_threads == 2
+    assert high.recommended_threads == 6
+
+
+def test_route2_adaptive_shadow_classifier_is_pure_value_helper(monkeypatch) -> None:
+    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected io")))
+
+    decision = classify_route2_adaptive_shadow(_make_route2_adaptive_input())
+
+    assert decision.current_threads == 4
+
+
 def test_route2_worker_status_first_sample_is_unsampled_then_reports_live_cpu_and_memory(initialized_settings, monkeypatch) -> None:
     manager, settings = _make_route2_manager(
         initialized_settings,
@@ -829,6 +2892,12 @@ def test_route2_worker_status_first_sample_is_unsampled_then_reports_live_cpu_an
     assert second_item["cpu_cores_used"] == pytest.approx(2.0)
     assert second_item["cpu_percent_of_total"] == pytest.approx(10.0)
     assert second_item["memory_bytes"] == 512 * 1024 * 1024
+    assert isinstance(second_item["adaptive_bottleneck_class"], str)
+    assert second_item["adaptive_recommended_threads"] is not None
+    assert isinstance(second_item["adaptive_missing_metrics"], list)
+    assert isinstance(second_item["route2_transcode_strategy"], str)
+    assert isinstance(second_item["route2_strategy_risk_flags"], list)
+    assert isinstance(second_item["route2_strategy_missing_metadata"], list)
     assert inspected_pids == [4321, 4321]
 
 

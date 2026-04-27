@@ -9,6 +9,9 @@ from fastapi.responses import StreamingResponse
 
 from ..auth import CurrentAdmin, CurrentHeartbeatAdmin, clear_session_cookie, resolve_client_ip
 from ..schemas import (
+    AdminTechnicalMetadataEnrichmentRequest,
+    AdminTechnicalMetadataEnrichmentTriggerResponse,
+    AdminTechnicalMetadataStatusResponse,
     AdminPlaybackWorkersStatusResponse,
     AdminPasswordUpdateRequest,
     AdminSessionListResponse,
@@ -75,6 +78,10 @@ from ..services.library_service import (
     hide_media_item_globally,
     list_globally_hidden_media_items,
     show_media_item_globally,
+)
+from ..services.media_technical_metadata_service import (
+    get_local_technical_metadata_enrichment_status,
+    trigger_local_technical_metadata_enrichment_batch,
 )
 from ..services.local_library_source_service import validate_shared_local_library_path
 
@@ -261,6 +268,38 @@ def admin_revoke_session(
         reason="admin_revoked",
     )
     return MessageResponse(message="Session revoked")
+
+
+@router.post(
+    "/technical-metadata/enrich-local",
+    response_model=AdminTechnicalMetadataEnrichmentTriggerResponse,
+)
+def admin_enrich_local_technical_metadata(
+    payload: AdminTechnicalMetadataEnrichmentRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminTechnicalMetadataEnrichmentTriggerResponse:
+    del user
+    result = trigger_local_technical_metadata_enrichment_batch(
+        request.app.state.settings,
+        limit=payload.limit,
+        retry_failed=payload.retry_failed,
+    )
+    return AdminTechnicalMetadataEnrichmentTriggerResponse(**result)
+
+
+@router.get(
+    "/technical-metadata/status",
+    response_model=AdminTechnicalMetadataStatusResponse,
+)
+def admin_local_technical_metadata_status(
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminTechnicalMetadataStatusResponse:
+    del user
+    return AdminTechnicalMetadataStatusResponse(
+        **get_local_technical_metadata_enrichment_status(request.app.state.settings)
+    )
 
 
 @router.get("/playback-workers", response_model=AdminPlaybackWorkersStatusResponse)

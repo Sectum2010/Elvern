@@ -159,6 +159,20 @@ from .mobile_playback_source_service import (
     _resolve_duration_seconds as _resolve_duration_seconds_impl,
     _resolve_worker_source_input as _resolve_worker_source_input_impl,
 )
+from .library_service import get_media_item_record
+from .media_technical_metadata_service import resolve_trusted_technical_metadata
+from .route2_ffmpeg_command_adapter import (
+    Route2FFmpegCommandAdapterInput,
+    build_route2_ffmpeg_command_preview,
+)
+from .route2_adaptive_controller import (
+    Route2AdaptiveShadowInput,
+    classify_route2_adaptive_shadow,
+)
+from .route2_transcode_strategy import (
+    Route2TranscodeStrategyInput,
+    select_route2_transcode_strategy,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -415,6 +429,16 @@ class MobilePlaybackManager:
             raise ValueError("Experimental playback requires a known duration")
         source_fingerprint = self._source_fingerprint(item, source_locator)
         cache_key = self._build_cache_key(source_fingerprint, profile_key)
+        source_width = int(item["width"]) if item.get("width") not in {None, ""} else None
+        source_height = int(item["height"]) if item.get("height") not in {None, ""} else None
+        source_bit_depth = int(item["bit_depth"]) if item.get("bit_depth") not in {None, ""} else None
+        source_audio_channels = int(item["audio_channels"]) if item.get("audio_channels") not in {None, ""} else None
+        source_hdr_flag = bool(item["hdr_flag"]) if item.get("hdr_flag") is not None else None
+        source_dolby_vision_flag = (
+            bool(item["dolby_vision_flag"])
+            if item.get("dolby_vision_flag") is not None
+            else None
+        )
 
         now = utcnow_iso()
         now_ts = time.time()
@@ -526,6 +550,17 @@ class MobilePlaybackManager:
                 engine_mode=selected_engine_mode,
                 playback_mode=selected_playback_mode,
             ),
+            source_original_filename=(str(item.get("original_filename") or "").strip() or None),
+            source_container=(str(item.get("container") or "").strip() or None),
+            source_video_codec=(str(item.get("video_codec") or "").strip() or None),
+            source_audio_codec=(str(item.get("audio_codec") or "").strip() or None),
+            source_width=source_width,
+            source_height=source_height,
+            source_pixel_format=(str(item.get("pixel_format") or "").strip() or None),
+            source_bit_depth=source_bit_depth,
+            source_hdr_flag=source_hdr_flag,
+            source_dolby_vision_flag=source_dolby_vision_flag,
+            source_audio_channels=source_audio_channels,
         )
         if selected_engine_mode == "route2":
             with self._lock:
@@ -1581,10 +1616,211 @@ class MobilePlaybackManager:
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
 
+    def _build_route2_adaptive_shadow_input_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        allocated_cpu_cores: int,
+        route2_cpu_cores_used_total: float | None,
+        route2_cpu_upbound_cores: int,
+    ) -> Route2AdaptiveShadowInput:
+        session = self._sessions.get(record.session_id)
+        if session is None:
+            return Route2AdaptiveShadowInput(
+                worker_state=record.state,
+                playback_mode=record.playback_mode,
+                profile=record.profile,
+                source_kind=record.source_kind,
+                assigned_threads=record.assigned_threads,
+                default_threads=4,
+                max_threads=self.settings.route2_max_worker_threads,
+                cpu_cores_used=record.cpu_cores_used,
+                allocated_cpu_cores=allocated_cpu_cores or None,
+                route2_cpu_upbound_cores=route2_cpu_upbound_cores,
+                route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+                memory_bytes=record.memory_bytes,
+                non_retryable_error=record.non_retryable_error,
+                mode_ready=False,
+            )
+
+        browser_session = session.browser_playback
+        epoch = browser_session.epochs.get(record.epoch_id)
+        if epoch is None:
+            return Route2AdaptiveShadowInput(
+                worker_state=record.state,
+                playback_mode=record.playback_mode,
+                profile=record.profile,
+                source_kind=record.source_kind,
+                assigned_threads=record.assigned_threads,
+                default_threads=4,
+                max_threads=self.settings.route2_max_worker_threads,
+                cpu_cores_used=record.cpu_cores_used,
+                allocated_cpu_cores=allocated_cpu_cores or None,
+                route2_cpu_upbound_cores=route2_cpu_upbound_cores,
+                route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+                memory_bytes=record.memory_bytes,
+                non_retryable_error=record.non_retryable_error or session.last_error,
+                mode_ready=session.state == "ready",
+            )
+
+        (
+            ready_end_seconds,
+            effective_playhead_seconds,
+            ahead_runway_seconds,
+            supply_rate_x,
+            supply_observation_seconds,
+            _manifest_complete,
+            _refill_in_progress,
+        ) = self._route2_runtime_supply_metrics_locked(session, epoch)
+        server_goodput = self._route2_server_byte_goodput_locked(epoch)
+        client_goodput = self._route2_client_goodput_locked(session)
+
+        return Route2AdaptiveShadowInput(
+            worker_state=record.state,
+            playback_mode=record.playback_mode,
+            profile=record.profile,
+            source_kind=record.source_kind,
+            assigned_threads=record.assigned_threads,
+            default_threads=4,
+            max_threads=self.settings.route2_max_worker_threads,
+            cpu_cores_used=record.cpu_cores_used,
+            allocated_cpu_cores=allocated_cpu_cores or None,
+            route2_cpu_upbound_cores=route2_cpu_upbound_cores,
+            route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+            memory_bytes=record.memory_bytes,
+            ready_end_seconds=ready_end_seconds,
+            effective_playhead_seconds=effective_playhead_seconds,
+            ahead_runway_seconds=ahead_runway_seconds,
+            required_startup_runway_seconds=120.0 if record.playback_mode == "full" else 45.0,
+            supply_rate_x=supply_rate_x,
+            supply_observation_seconds=supply_observation_seconds,
+            client_goodput_bytes_per_second=(
+                float(client_goodput["safe_rate"]) if float(client_goodput["safe_rate"] or 0.0) > 0.0 else None
+            ),
+            client_goodput_confident=bool(client_goodput["confident"]),
+            server_goodput_bytes_per_second=(
+                float(server_goodput["safe_rate"]) if float(server_goodput["safe_rate"] or 0.0) > 0.0 else None
+            ),
+            server_goodput_confident=bool(server_goodput["confident"]),
+            non_retryable_error=record.non_retryable_error or session.last_error,
+            starvation_risk=self._starvation_risk(session),
+            stalled_recovery_needed=self._stalled_recovery_needed(session),
+            mode_ready=session.state == "ready",
+        )
+
+    def _build_route2_transcode_strategy_input_locked(
+        self,
+        record: Route2WorkerRecord,
+    ) -> tuple[Route2TranscodeStrategyInput, str, bool]:
+        session = self._sessions.get(record.session_id)
+        if session is None:
+            return (
+                Route2TranscodeStrategyInput(
+                    profile_key=record.profile,
+                    source_kind=record.source_kind,
+                ),
+                "none",
+                False,
+            )
+
+        trusted_metadata = None
+        if session.source_kind == "local":
+            item = get_media_item_record(self.settings, item_id=session.media_item_id)
+            if item is not None:
+                trusted_metadata = resolve_trusted_technical_metadata(self.settings, item)
+
+        metadata_source = "local_ffprobe" if trusted_metadata is not None else "coarse"
+        metadata_trusted = trusted_metadata is not None
+        metadata = trusted_metadata or {}
+
+        return (
+            Route2TranscodeStrategyInput(
+                container=metadata.get("container") or session.source_container,
+                video_codec=metadata.get("video_codec") or session.source_video_codec,
+                video_profile=metadata.get("video_profile"),
+                video_level=metadata.get("video_level"),
+                audio_codec=metadata.get("audio_codec") or session.source_audio_codec,
+                audio_profile=metadata.get("audio_profile"),
+                width=metadata.get("width") if metadata.get("width") is not None else session.source_width,
+                height=metadata.get("height") if metadata.get("height") is not None else session.source_height,
+                pixel_format=metadata.get("pixel_format") if metadata.get("pixel_format") is not None else session.source_pixel_format,
+                bit_depth=metadata.get("bit_depth") if metadata.get("bit_depth") is not None else session.source_bit_depth,
+                color_transfer=metadata.get("color_transfer"),
+                color_primaries=metadata.get("color_primaries"),
+                color_space=metadata.get("color_space"),
+                hdr_flag=metadata.get("hdr_detected") if metadata.get("hdr_detected") is not None else session.source_hdr_flag,
+                dolby_vision_flag=(
+                    metadata.get("dolby_vision_detected")
+                    if metadata.get("dolby_vision_detected") is not None
+                    else session.source_dolby_vision_flag
+                ),
+                audio_channels=(
+                    metadata.get("audio_channels")
+                    if metadata.get("audio_channels") is not None
+                    else session.source_audio_channels
+                ),
+                audio_channel_layout=metadata.get("audio_channel_layout"),
+                audio_sample_rate=metadata.get("audio_sample_rate"),
+                profile_key=session.profile,
+                source_kind=session.source_kind,
+                original_filename=session.source_original_filename,
+            ),
+            metadata_source,
+            metadata_trusted,
+        )
+
+    def _build_route2_command_adapter_preview_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        strategy_input: Route2TranscodeStrategyInput,
+        strategy_decision,
+        strategy_metadata_source: str,
+        strategy_metadata_trusted: bool,
+    ):
+        session = self._sessions.get(record.session_id)
+        epoch = None
+        if session is not None and session.browser_playback.active_epoch_id:
+            epoch = session.browser_playback.epochs.get(session.browser_playback.active_epoch_id)
+        if epoch is None and session is not None and record.epoch_id:
+            epoch = session.browser_playback.epochs.get(record.epoch_id)
+
+        return build_route2_ffmpeg_command_preview(
+            Route2FFmpegCommandAdapterInput(
+                ffmpeg_path=str(self.settings.ffmpeg_path),
+                profile_key=(
+                    session.profile
+                    if session is not None and session.profile in MOBILE_PROFILES
+                    else record.profile if record.profile in MOBILE_PROFILES
+                    else "mobile_1080p"
+                ),
+                thread_budget=max(1, int(record.assigned_threads or self.settings.route2_max_worker_threads or 4)),
+                source_input=(
+                    session.source_locator
+                    if session is not None
+                    else strategy_input.original_filename or record.title
+                ),
+                source_input_kind=session.source_input_kind if session is not None else "path",
+                epoch_start_seconds=epoch.epoch_start_seconds if epoch is not None else 0.0,
+                segment_pattern=str(epoch.staging_dir / "segment_%06d.m4s") if epoch is not None else "segment_%06d.m4s",
+                staging_manifest_path=str(epoch.staging_manifest_path) if epoch is not None else "ffmpeg.m3u8",
+                strategy=strategy_decision.strategy,
+                strategy_confidence=strategy_decision.confidence,
+                strategy_reason=strategy_decision.reason,
+                video_copy_safe=strategy_decision.video_copy_safe,
+                audio_copy_safe=strategy_decision.audio_copy_safe,
+                risk_flags=list(strategy_decision.risk_flags),
+                missing_metadata=list(strategy_decision.missing_metadata),
+                metadata_source=strategy_metadata_source,
+                metadata_trusted=strategy_metadata_trusted,
+            )
+        )
+
     def get_route2_worker_status(self) -> dict[str, object]:
         with self._lock:
             budget = self._route2_budget_summary_locked()
             grouped_users: dict[int, dict[str, object]] = {}
+            payloads_by_worker_id: dict[str, dict[str, object]] = {}
             now_ts = time.time()
             sample_monotonic = time.monotonic()
             sampled_at = utcnow_iso()
@@ -1646,39 +1882,39 @@ class MobilePlaybackManager:
                 runtime_seconds = None
                 if record.started_at:
                     runtime_seconds = max(0.0, now_ts - self._parse_iso_ts(record.started_at))
-                group["items"].append(
-                    {
-                        "worker_id": record.worker_id,
-                        "session_id": record.session_id,
-                        "epoch_id": record.epoch_id,
-                        "media_item_id": record.media_item_id,
-                        "title": record.title,
-                        "playback_mode": record.playback_mode,
-                        "profile": record.profile,
-                        "source_kind": record.source_kind,
-                        "state": record.state,
-                        "runtime_seconds": round(runtime_seconds, 2) if runtime_seconds is not None else None,
-                        "pid": record.pid,
-                        "target_position_seconds": round(record.target_position_seconds, 2),
-                        "prepared_ranges": record.prepared_ranges,
-                        "stop_requested": record.stop_requested,
-                        "non_retryable_error": record.non_retryable_error,
-                        "failure_count": record.failure_count,
-                        "replacement_count": record.replacement_count,
-                        "assigned_threads": record.assigned_threads,
-                        "process_exists": record.process_exists,
-                        "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
-                        "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
-                        "cpu_percent": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
-                        "memory_bytes": record.memory_bytes,
-                        "memory_percent_of_total": round(record.memory_percent_of_total, 3) if record.memory_percent_of_total is not None else None,
-                        "telemetry_sampled": record.telemetry_sampled,
-                        "last_sampled_at": record.last_sampled_at,
-                        "failure_reason": record.non_retryable_error,
-                        "started_at": record.started_at,
-                        "last_seen_at": record.last_seen_at,
-                    }
-                )
+                payload = {
+                    "worker_id": record.worker_id,
+                    "session_id": record.session_id,
+                    "epoch_id": record.epoch_id,
+                    "media_item_id": record.media_item_id,
+                    "title": record.title,
+                    "playback_mode": record.playback_mode,
+                    "profile": record.profile,
+                    "source_kind": record.source_kind,
+                    "state": record.state,
+                    "runtime_seconds": round(runtime_seconds, 2) if runtime_seconds is not None else None,
+                    "pid": record.pid,
+                    "target_position_seconds": round(record.target_position_seconds, 2),
+                    "prepared_ranges": record.prepared_ranges,
+                    "stop_requested": record.stop_requested,
+                    "non_retryable_error": record.non_retryable_error,
+                    "failure_count": record.failure_count,
+                    "replacement_count": record.replacement_count,
+                    "assigned_threads": record.assigned_threads,
+                    "process_exists": record.process_exists,
+                    "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
+                    "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
+                    "cpu_percent": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
+                    "memory_bytes": record.memory_bytes,
+                    "memory_percent_of_total": round(record.memory_percent_of_total, 3) if record.memory_percent_of_total is not None else None,
+                    "telemetry_sampled": record.telemetry_sampled,
+                    "last_sampled_at": record.last_sampled_at,
+                    "failure_reason": record.non_retryable_error,
+                    "started_at": record.started_at,
+                    "last_seen_at": record.last_seen_at,
+                }
+                group["items"].append(payload)
+                payloads_by_worker_id[record.worker_id] = payload
             for group in grouped_users.values():
                 allocated_cpu_cores = max(0, int(group["allocated_cpu_cores"]))
                 cpu_cores_used = float(group["cpu_cores_used"]) if group["cpu_cores_used"] else 0.0
@@ -1695,6 +1931,51 @@ class MobilePlaybackManager:
                     if total_memory_bytes and memory_bytes > 0
                     else None
                 )
+            for record in sorted(self._route2_workers.values(), key=lambda value: value.worker_id):
+                payload = payloads_by_worker_id.get(record.worker_id)
+                if payload is None:
+                    continue
+                group = grouped_users.get(record.user_id)
+                allocated_cpu_cores = int(group.get("allocated_cpu_cores") or 0) if group is not None else 0
+                adaptive_input = self._build_route2_adaptive_shadow_input_locked(
+                    record,
+                    allocated_cpu_cores=allocated_cpu_cores,
+                    route2_cpu_cores_used_total=route2_cpu_cores_used if any_cpu_sampled else None,
+                    route2_cpu_upbound_cores=int(budget["route2_cpu_upbound_cores"]),
+                )
+                adaptive_decision = classify_route2_adaptive_shadow(adaptive_input)
+                payload["adaptive_bottleneck_class"] = adaptive_decision.bottleneck_class
+                payload["adaptive_bottleneck_confidence"] = round(adaptive_decision.bottleneck_confidence, 3)
+                payload["adaptive_recommended_threads"] = adaptive_decision.recommended_threads
+                payload["adaptive_current_threads"] = adaptive_decision.current_threads
+                payload["adaptive_safe_to_increase_threads"] = adaptive_decision.safe_to_increase_threads
+                payload["adaptive_safe_to_decrease_threads"] = adaptive_decision.safe_to_decrease_threads
+                payload["adaptive_reason"] = adaptive_decision.reason
+                payload["adaptive_missing_metrics"] = adaptive_decision.missing_metrics
+                strategy_input, strategy_metadata_source, strategy_metadata_trusted = (
+                    self._build_route2_transcode_strategy_input_locked(record)
+                )
+                strategy_decision = select_route2_transcode_strategy(strategy_input)
+                payload["route2_transcode_strategy"] = strategy_decision.strategy
+                payload["route2_transcode_strategy_confidence"] = strategy_decision.confidence
+                payload["route2_transcode_strategy_reason"] = strategy_decision.reason
+                payload["route2_video_copy_safe"] = strategy_decision.video_copy_safe
+                payload["route2_audio_copy_safe"] = strategy_decision.audio_copy_safe
+                payload["route2_strategy_risk_flags"] = strategy_decision.risk_flags
+                payload["route2_strategy_missing_metadata"] = strategy_decision.missing_metadata
+                payload["route2_strategy_metadata_source"] = strategy_metadata_source
+                payload["route2_strategy_metadata_trusted"] = strategy_metadata_trusted
+                command_adapter_preview = self._build_route2_command_adapter_preview_locked(
+                    record,
+                    strategy_input=strategy_input,
+                    strategy_decision=strategy_decision,
+                    strategy_metadata_source=strategy_metadata_source,
+                    strategy_metadata_trusted=strategy_metadata_trusted,
+                )
+                payload["route2_command_adapter_preview_strategy"] = command_adapter_preview.adapter_strategy
+                payload["route2_command_adapter_active"] = command_adapter_preview.active_enabled
+                payload["route2_command_adapter_summary"] = command_adapter_preview.command_preview_summary
+                payload["route2_command_adapter_fallback_reason"] = command_adapter_preview.fallback_reason
             route2_cpu_percent_of_total = (
                 round((route2_cpu_cores_used / int(budget["total_cpu_cores"])) * 100, 3)
                 if any_cpu_sampled

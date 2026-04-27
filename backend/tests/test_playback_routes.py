@@ -1008,6 +1008,123 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert payload["workers_by_user"][0]["items"][0]["cpu_cores_used"] == 7.2
 
 
+def test_admin_local_technical_metadata_enrich_route_returns_bounded_summary(
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    seen: dict[str, object] = {}
+
+    def _fake_trigger(settings, *, limit: int, retry_failed: bool, timeout_seconds: int = 30):
+        del settings, timeout_seconds
+        seen["limit"] = limit
+        seen["retry_failed"] = retry_failed
+        return {
+            "started": True,
+            "running": False,
+            "summary": {
+                "limit": limit,
+                "retry_failed": retry_failed,
+                "scanned_candidates": 7,
+                "probed": 2,
+                "skipped": 3,
+                "failed": 0,
+                "stale": 1,
+                "cloud_skipped": 1,
+                "current_item": None,
+                "errors": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "backend.app.routes.admin.trigger_local_technical_metadata_enrichment_batch",
+        _fake_trigger,
+    )
+
+    response = client.post(
+        "/api/admin/technical-metadata/enrich-local",
+        json={"limit": 5, "retry_failed": False},
+    )
+
+    assert response.status_code == 200
+    assert seen == {"limit": 5, "retry_failed": False}
+    payload = response.json()
+    assert payload["started"] is True
+    assert payload["running"] is False
+    assert payload["summary"]["limit"] == 5
+    assert payload["summary"]["cloud_skipped"] == 1
+
+
+def test_admin_local_technical_metadata_status_route_returns_counts(
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    monkeypatch.setattr(
+        "backend.app.routes.admin.get_local_technical_metadata_enrichment_status",
+        lambda settings: {
+            "total_local_items": 25,
+            "probed_local_items": 2,
+            "stale_local_items": 1,
+            "failed_local_items": 3,
+            "never_probed_local_items": 19,
+            "cloud_items_not_supported": 69,
+            "running": False,
+            "current_item": None,
+            "last_summary": {
+                "limit": 5,
+                "retry_failed": False,
+                "scanned_candidates": 7,
+                "probed": 2,
+                "skipped": 3,
+                "failed": 0,
+                "stale": 1,
+                "cloud_skipped": 1,
+                "current_item": None,
+                "errors": [],
+            },
+        },
+    )
+
+    response = client.get("/api/admin/technical-metadata/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_local_items"] == 25
+    assert payload["probed_local_items"] == 2
+    assert payload["cloud_items_not_supported"] == 69
+    assert payload["last_summary"]["limit"] == 5
+
+
+def test_non_admin_cannot_trigger_local_technical_metadata_enrichment(initialized_settings, client) -> None:
+    created_user = _create_standard_user(initialized_settings, username="technical-metadata-non-admin")
+    _login(client, username=created_user["username"], password="family-password")
+
+    response = client.post(
+        "/api/admin/technical-metadata/enrich-local",
+        json={"limit": 5, "retry_failed": False},
+    )
+
+    assert response.status_code == 403
+
+
+def test_admin_local_technical_metadata_enrich_route_rejects_unbounded_limit(
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    response = client.post(
+        "/api/admin/technical-metadata/enrich-local",
+        json={"limit": 999, "retry_failed": False},
+    )
+
+    assert response.status_code == 422
+
+
 def test_admin_terminate_playback_worker_route_stops_owned_worker(
     client,
     admin_credentials,

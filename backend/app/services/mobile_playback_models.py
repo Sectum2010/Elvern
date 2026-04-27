@@ -277,3 +277,14 @@ class MobilePlaybackSession:
     expires_at_ts: float = 0.0
     active_job: MobileClusterJob | None = None
     browser_playback: BrowserPlaybackSession = field(default_factory=BrowserPlaybackSession)
+    source_original_filename: str | None = None
+    source_container: str | None = None
+    source_video_codec: str | None = None
+    source_audio_codec: str | None = None
+    source_width: int | None = None
+    source_height: int | None = None
+    source_pixel_format: str | None = None
+    source_bit_depth: int | None = None
+    source_hdr_flag: bool | None = None
+    source_dolby_vision_flag: bool | None = None
+    source_audio_channels: int | None = None

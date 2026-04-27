@@ -1233,6 +1233,27 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     telemetry_sampled: bool = False
     last_sampled_at: str | None = None
     failure_reason: str | None = None
+    adaptive_bottleneck_class: str | None = None
+    adaptive_bottleneck_confidence: float | None = Field(default=None, ge=0, le=1)
+    adaptive_recommended_threads: int | None = Field(default=None, ge=0)
+    adaptive_current_threads: int | None = Field(default=None, ge=0)
+    adaptive_safe_to_increase_threads: bool = False
+    adaptive_safe_to_decrease_threads: bool = False
+    adaptive_reason: str | None = None
+    adaptive_missing_metrics: list[str] = Field(default_factory=list)
+    route2_transcode_strategy: str | None = None
+    route2_transcode_strategy_confidence: str | None = None
+    route2_transcode_strategy_reason: str | None = None
+    route2_video_copy_safe: bool = False
+    route2_audio_copy_safe: bool = False
+    route2_strategy_risk_flags: list[str] = Field(default_factory=list)
+    route2_strategy_missing_metadata: list[str] = Field(default_factory=list)
+    route2_strategy_metadata_source: str | None = None
+    route2_strategy_metadata_trusted: bool = False
+    route2_command_adapter_preview_strategy: str | None = None
+    route2_command_adapter_active: bool = False
+    route2_command_adapter_summary: str | None = None
+    route2_command_adapter_fallback_reason: str | None = None
     started_at: str | None = None
     last_seen_at: str
 
@@ -1269,6 +1290,47 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     active_decoding_user_count: int = Field(default=0, ge=0)
     per_user_budget_cores: int = Field(default=0, ge=0)
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
+
+
+class AdminTechnicalMetadataCurrentItemResponse(BaseModel):
+    id: int = Field(ge=1)
+    title: str = ""
+
+
+class AdminTechnicalMetadataBatchSummaryResponse(BaseModel):
+    limit: int = Field(ge=1)
+    retry_failed: bool = False
+    scanned_candidates: int = Field(default=0, ge=0)
+    probed: int = Field(default=0, ge=0)
+    skipped: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    stale: int = Field(default=0, ge=0)
+    cloud_skipped: int = Field(default=0, ge=0)
+    current_item: AdminTechnicalMetadataCurrentItemResponse | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class AdminTechnicalMetadataEnrichmentRequest(BaseModel):
+    limit: int = Field(default=5, ge=1, le=25)
+    retry_failed: bool = False
+
+
+class AdminTechnicalMetadataEnrichmentTriggerResponse(BaseModel):
+    started: bool
+    running: bool
+    summary: AdminTechnicalMetadataBatchSummaryResponse | None = None
+
+
+class AdminTechnicalMetadataStatusResponse(BaseModel):
+    total_local_items: int = Field(default=0, ge=0)
+    probed_local_items: int = Field(default=0, ge=0)
+    stale_local_items: int = Field(default=0, ge=0)
+    failed_local_items: int = Field(default=0, ge=0)
+    never_probed_local_items: int = Field(default=0, ge=0)
+    cloud_items_not_supported: int = Field(default=0, ge=0)
+    running: bool = False
+    current_item: AdminTechnicalMetadataCurrentItemResponse | None = None
+    last_summary: AdminTechnicalMetadataBatchSummaryResponse | None = None
 
 
 class AuditLogEventResponse(BaseModel):
