@@ -3,6 +3,15 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LoadingView } from "../components/LoadingView";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
+import {
+  buildPlaybackWorkersByUserId,
+  formatCpuGaugeValue,
+  formatMemoryGaugeValue,
+  formatPreparedRanges,
+  formatWorkerModeLabel,
+  formatWorkerRuntime,
+  shortenDiagnosticId,
+} from "../lib/adminPlaybackWorkers";
 import { formatCompletedRescanWarning, formatRescanBannerText, hasCloudSyncWarning } from "../lib/cloudSyncStatus";
 import { formatDate } from "../lib/format";
 
@@ -19,6 +28,7 @@ const ADMIN_STREAM_RELEVANT_EVENTS = [
   "user_enabled",
 ];
 const ADMIN_SECTION_AUTO_COLLAPSE_MS = 15_000;
+const PLAYBACK_WORKERS_POLL_MS = 4_000;
 const RECOVERY_CHECKPOINT_LIMIT = 4;
 const RECOVERY_WARNING_LIMIT = 4;
 const RECOVERY_TRIGGER_LABELS = {
@@ -128,6 +138,47 @@ function UserStatusIndicator({ color, label }) {
   );
 }
 
+function getUserAvatarInitials(username) {
+  if (typeof username !== "string") {
+    return "U";
+  }
+  const trimmed = username.trim();
+  if (!trimmed) {
+    return "U";
+  }
+  const parts = trimmed.split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0] || ""}${parts[1][0] || ""}`.toUpperCase();
+  }
+  return trimmed.slice(0, 2).toUpperCase();
+}
+
+function PlaybackResourceGauge({
+  label,
+  valueLabel,
+  gaugePercent = null,
+  tone = "cpu",
+}) {
+  const isActive = Number.isFinite(gaugePercent);
+  return (
+    <div className={["playback-resource-gauge", !isActive ? "playback-resource-gauge--inactive" : ""].filter(Boolean).join(" ")}>
+      <span className="playback-resource-gauge__value">
+        {label} {valueLabel}
+      </span>
+      <div
+        className={[
+          "playback-resource-gauge__circle",
+          `playback-resource-gauge__circle--${tone}`,
+          !isActive ? "playback-resource-gauge__circle--inactive" : "",
+        ].filter(Boolean).join(" ")}
+        style={isActive ? { "--playback-gauge-progress": `${gaugePercent}%` } : undefined}
+      >
+        <span>{label}</span>
+      </div>
+    </div>
+  );
+}
+
 function AdminSectionIcon({ name }) {
   if (name === "security") {
     return (
@@ -199,6 +250,9 @@ export function AdminPage() {
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [showAllAudit, setShowAllAudit] = useState(false);
   const [userFeedback, setUserFeedback] = useState({});
+  const [userActionsModalUserId, setUserActionsModalUserId] = useState(null);
+  const [playbackWorkersPayload, setPlaybackWorkersPayload] = useState(null);
+  const [playbackWorkersWarning, setPlaybackWorkersWarning] = useState("");
   const [selfDeleteState, setSelfDeleteState] = useState({
     open: false,
     password: "",
@@ -252,6 +306,27 @@ export function AdminPage() {
     () => usersPayload.some((entry) => entry.id !== user?.id && entry.role === "admin" && entry.enabled),
     [usersPayload, user?.id],
   );
+  const selectedUserActionsEntry = useMemo(
+    () => usersPayload.find((entry) => entry.id === userActionsModalUserId) || null,
+    [usersPayload, userActionsModalUserId],
+  );
+  const playbackWorkersByUserId = useMemo(
+    () => buildPlaybackWorkersByUserId(playbackWorkersPayload),
+    [playbackWorkersPayload],
+  );
+
+  async function loadPlaybackWorkers({ silent = false } = {}) {
+    try {
+      const payload = await apiRequest("/api/admin/playback-workers");
+      setPlaybackWorkersPayload(payload);
+      setPlaybackWorkersWarning("");
+    } catch (requestError) {
+      if (!silent) {
+        console.error("Failed to load playback worker status", requestError);
+      }
+      setPlaybackWorkersWarning(requestError.message || "Playback worker status is temporarily unavailable.");
+    }
+  }
 
   async function loadAdminData({ silent = false } = {}) {
     if (!silent) {
@@ -278,6 +353,9 @@ export function AdminPage() {
       setUsersPayload(users.users);
       setSessionsPayload(sessions.sessions);
       setAuditPayload(audit.events);
+      if (user?.role === "admin" && activeSection === "panel") {
+        await loadPlaybackWorkers({ silent: true });
+      }
     } catch (requestError) {
       setBanner({
         tone: "error",
@@ -337,6 +415,9 @@ export function AdminPage() {
       ]);
       setUsersPayload(users.users);
       setSessionsPayload(sessions.sessions);
+      if (activeSection === "panel") {
+        await loadPlaybackWorkers({ silent: true });
+      }
     } catch (requestError) {
       if (requestError.status !== 401 && requestError.status !== 403) {
         console.error("Failed to refresh admin realtime data", requestError);
@@ -380,6 +461,19 @@ export function AdminPage() {
       window.clearInterval(intervalId);
     };
   }, [statusPayload?.scan?.running]);
+
+  useEffect(() => {
+    if (user?.role !== "admin" || activeSection !== "panel") {
+      return undefined;
+    }
+    loadPlaybackWorkers({ silent: true });
+    const intervalId = window.setInterval(() => {
+      loadPlaybackWorkers({ silent: true });
+    }, PLAYBACK_WORKERS_POLL_MS);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activeSection, user?.role]);
 
   useEffect(() => {
     if (user?.role !== "admin") {
@@ -471,6 +565,18 @@ export function AdminPage() {
           currentAdminPassword: "",
         }
       : current));
+  }
+
+  function openUserActionsModal(entry) {
+    clearUserEditors(userActionsModalUserId);
+    setUserActionsModalUserId(entry.id);
+  }
+
+  function closeUserActionsModal() {
+    if (userActionsModalUserId != null) {
+      clearUserEditors(userActionsModalUserId);
+    }
+    setUserActionsModalUserId(null);
   }
 
   async function handleRescan() {
@@ -821,6 +927,41 @@ export function AdminPage() {
   const visibleRestorePlanWarnings = showAllRecoveryWarnings
     ? restorePlanWarnings
     : restorePlanWarnings.slice(0, RECOVERY_WARNING_LIMIT);
+  const playbackWorkerSummary = playbackWorkersPayload
+    ? [
+        `Route2 CPU budget ${playbackWorkersPayload.cpu_budget_percent}%`,
+        `${playbackWorkersPayload.total_cpu_cores} CPU cores`,
+        `${playbackWorkersPayload.total_route2_budget_cores} budget cores`,
+        `${playbackWorkersPayload.active_worker_count} active`,
+        `${playbackWorkersPayload.queued_worker_count} queued`,
+        `${playbackWorkersPayload.active_decoding_user_count} active user${playbackWorkersPayload.active_decoding_user_count === 1 ? "" : "s"}`,
+      ]
+    : [];
+
+  useEffect(() => {
+    if (userActionsModalUserId == null || selectedUserActionsEntry) {
+      return;
+    }
+    setUserActionsModalUserId(null);
+  }, [selectedUserActionsEntry, userActionsModalUserId]);
+
+  useEffect(() => {
+    if (!selectedUserActionsEntry || typeof document === "undefined") {
+      return undefined;
+    }
+    const previousOverflow = document.body.style.overflow;
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        closeUserActionsModal();
+      }
+    }
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [selectedUserActionsEntry]);
 
   if (loading && !statusPayload) {
     return <LoadingView label="Loading admin tools..." />;
@@ -865,14 +1006,39 @@ export function AdminPage() {
           <p className="page-subnote">Role changes and password updates require your current admin password.</p>
         </div>
       </div>
+      {playbackWorkerSummary.length > 0 ? (
+        <div className="admin-workers-summary" aria-label="Playback worker summary">
+          {playbackWorkerSummary.map((entry) => (
+            <span className="admin-workers-summary__pill" key={entry}>{entry}</span>
+          ))}
+        </div>
+      ) : null}
+      {playbackWorkersWarning ? (
+        <p className="page-subnote admin-workers-summary__warning">
+          Playback workers warning: {playbackWorkersWarning}
+        </p>
+      ) : null}
       <div className="admin-list">
         {usersPayload.map((entry) => {
           const isSelf = entry.id === user?.id;
-          const roleChangeOpen = roleConfirm.userId === entry.id;
-          const passwordOpen = passwordEditor.userId === entry.id;
+          const isActionsModalOpen = userActionsModalUserId === entry.id;
+          const workerGroup = playbackWorkersByUserId.get(entry.id) || null;
           return (
-            <div className="admin-list__row" key={entry.id}>
-              <div>
+            <div className="admin-list__row admin-user-row" key={entry.id}>
+              <button
+                aria-expanded={isActionsModalOpen}
+                aria-haspopup="dialog"
+                aria-label={`Open user actions for ${entry.username}`}
+                className="user-avatar-button"
+                onClick={() => openUserActionsModal(entry)}
+                type="button"
+              >
+                <span aria-hidden="true" className="user-avatar-button__initials">
+                  {getUserAvatarInitials(entry.username)}
+                </span>
+              </button>
+
+              <div className="admin-user-row__summary">
                 <div className="admin-user-heading">
                   <strong>{entry.username}</strong>
                   <UserStatusIndicator color={entry.status_color} label={entry.status_label} />
@@ -884,183 +1050,369 @@ export function AdminPage() {
                 {isSelf ? (
                   <p className="page-subnote">Your own admin account cannot be disabled. Use the self-delete flow below if needed.</p>
                 ) : null}
-                <InlineFeedback feedback={userFeedback[entry.id]} />
+                {!isActionsModalOpen ? <InlineFeedback feedback={userFeedback[entry.id]} /> : null}
               </div>
 
-              <div className="admin-action-stack">
-                <div className="admin-list__actions">
-                  {!isSelf ? (
-                    <button
-                      className="ghost-button"
-                      disabled={userActionPending === entry.id}
-                      onClick={() =>
-                        handleUpdateUser(
-                          entry,
-                          { enabled: !entry.enabled },
-                          `${entry.username} ${entry.enabled ? "disabled" : "enabled"}.`,
-                        )
-                      }
-                      type="button"
-                    >
-                      {entry.enabled ? "Disable" : "Enable"}
-                    </button>
-                  ) : null}
-
-                  {!isSelf ? (
-                    <button
-                      className="ghost-button"
-                      disabled={userActionPending === entry.id}
-                      onClick={() => {
-                        setPasswordEditor({
-                          userId: null,
-                          username: "",
-                          newPassword: "",
-                          currentAdminPassword: "",
-                        });
-                        setRoleConfirm({
-                          userId: entry.id,
-                          username: entry.username,
-                          nextRole: entry.role === "admin" ? "standard_user" : "admin",
-                          currentAdminPassword: "",
-                        });
-                      }}
-                      type="button"
-                    >
-                      Make {entry.role === "admin" ? "standard" : "admin"}
-                    </button>
-                  ) : null}
-
+              <div className="admin-user-row__priority">
+                {!isSelf ? (
                   <button
                     className="ghost-button"
                     disabled={userActionPending === entry.id}
-                    onClick={() => {
-                      setRoleConfirm({
-                        userId: null,
-                        username: "",
-                        nextRole: "standard_user",
-                        currentAdminPassword: "",
-                      });
-                      setPasswordEditor({
-                        userId: entry.id,
-                        username: entry.username,
-                        newPassword: "",
-                        currentAdminPassword: "",
-                      });
-                    }}
+                    onClick={() =>
+                      handleUpdateUser(
+                        entry,
+                        { enabled: !entry.enabled },
+                        `${entry.username} ${entry.enabled ? "disabled" : "enabled"}.`,
+                      )
+                    }
                     type="button"
                   >
-                    {isSelf ? "Update my password" : "Reset password"}
+                    {entry.enabled ? "Disable" : "Enable"}
                   </button>
-                </div>
-
-                {entry.role === "standard_user" ? (
-                  <div className="assistant-access-toggle">
-                    <div>
-                      <strong>Assistant (Beta)</strong>
-                      <p className="page-subnote">Secondary access only for the safe structured request form.</p>
-                    </div>
-                    <button
-                      className={entry.assistant_beta_enabled ? "ghost-button" : "primary-button"}
-                      disabled={userActionPending === entry.id}
-                      onClick={() => handleAssistantAccessToggle(entry)}
-                      type="button"
-                    >
-                      {entry.assistant_beta_enabled ? "Disable Assistant" : "Enable Assistant"}
-                    </button>
-                  </div>
-                ) : null}
-
-                {roleChangeOpen ? (
-                  <form
-                    className="admin-inline-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      handleSubmitRoleChange(entry);
-                    }}
-                  >
-                    <p className="page-subnote">
-                      Confirm making {entry.username} {roleConfirm.nextRole === "admin" ? "an admin" : "a standard user"}.
-                    </p>
-                    <input
-                      autoComplete="current-password"
-                      onChange={(event) =>
-                        setRoleConfirm((current) => ({
-                          ...current,
-                          currentAdminPassword: event.target.value,
-                        }))
-                      }
-                      placeholder="Current admin password"
-                      type="password"
-                      value={roleConfirm.currentAdminPassword}
-                    />
-                    <div className="admin-list__actions">
-                      <button className="primary-button" disabled={userActionPending === entry.id} type="submit">
-                        Confirm role change
-                      </button>
-                      <button
-                        className="ghost-button"
-                        onClick={() => clearUserEditors(entry.id)}
-                        type="button"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </form>
-                ) : null}
-
-                {passwordOpen ? (
-                  <form
-                    className="admin-inline-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      handleSubmitPassword(entry);
-                    }}
-                  >
-                    <input
-                      autoComplete="new-password"
-                      onChange={(event) =>
-                        setPasswordEditor((current) => ({
-                          ...current,
-                          newPassword: event.target.value,
-                        }))
-                      }
-                      placeholder="New password"
-                      type="password"
-                      value={passwordEditor.newPassword}
-                    />
-                    <input
-                      autoComplete="current-password"
-                      onChange={(event) =>
-                        setPasswordEditor((current) => ({
-                          ...current,
-                          currentAdminPassword: event.target.value,
-                        }))
-                      }
-                      placeholder="Current admin password"
-                      type="password"
-                      value={passwordEditor.currentAdminPassword}
-                    />
-                    <div className="admin-list__actions">
-                      <button className="primary-button" disabled={userActionPending === entry.id} type="submit">
-                        Save password
-                      </button>
-                      <button
-                        className="ghost-button"
-                        onClick={() => clearUserEditors(entry.id)}
-                        type="button"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </form>
                 ) : null}
               </div>
+
+              {workerGroup && workerGroup.totalWorkers > 0 ? (
+                <div className="admin-user-row__workers">
+                  <div className="admin-user-workers">
+                    <div className="admin-user-workers__header">
+                      <div className="admin-user-workers__copy">
+                        <strong>Playback workers</strong>
+                        <p className="page-subnote">
+                          Route2 background preparation for this user.
+                        </p>
+                      </div>
+                      <div className="admin-user-workers__gauges">
+                        <PlaybackResourceGauge
+                          gaugePercent={workerGroup.cpuGaugePercent}
+                          label="CPU"
+                          tone="cpu"
+                          valueLabel={formatCpuGaugeValue(workerGroup.cpuPercent)}
+                        />
+                        <PlaybackResourceGauge
+                          gaugePercent={workerGroup.memoryGaugePercent}
+                          label="RAM"
+                          tone="memory"
+                          valueLabel={formatMemoryGaugeValue(workerGroup.memoryBytes)}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="admin-user-workers__stats">
+                      <span className="admin-workers-summary__pill">{workerGroup.allocated_budget_cores} budget cores</span>
+                      <span className="admin-workers-summary__pill">{workerGroup.running_workers} running</span>
+                      <span className="admin-workers-summary__pill">{workerGroup.queued_workers} queued</span>
+                      <span className="admin-workers-summary__pill">{workerGroup.totalWorkers} total</span>
+                    </div>
+
+                    <div className="admin-user-workers__list">
+                      {workerGroup.items.map((worker) => {
+                        const preparedRanges = formatPreparedRanges(worker.prepared_ranges);
+                        const sessionDiagnosticId = shortenDiagnosticId(worker.session_id);
+                        const workerDiagnosticId = shortenDiagnosticId(worker.worker_id);
+                        const epochDiagnosticId = shortenDiagnosticId(worker.epoch_id);
+                        const hasTargetPosition = Number.isFinite(worker.target_position_seconds);
+                        const normalizedState = String(worker.state || "unknown").toLowerCase();
+                        return (
+                          <div className="admin-worker-card" key={worker.worker_id}>
+                            <div className="admin-worker-card__header">
+                              <div className="admin-worker-card__copy">
+                                <strong>{worker.title || "Untitled media item"}</strong>
+                                <p className="page-subnote">
+                                  {formatWorkerModeLabel(worker.playback_mode)} · {worker.profile || "profile unknown"} · {worker.source_kind}
+                                </p>
+                              </div>
+                              <span
+                                className={[
+                                  "admin-worker-state",
+                                  `admin-worker-state--${normalizedState}`,
+                                ].join(" ")}
+                              >
+                                {worker.state || "unknown"}
+                              </span>
+                            </div>
+
+                            <div className="admin-worker-card__meta">
+                              <span>Runtime {formatWorkerRuntime(worker.runtime_seconds)}</span>
+                              {worker.pid ? <span>PID {worker.pid}</span> : null}
+                              {worker.assigned_threads ? <span>{worker.assigned_threads} threads</span> : null}
+                              {hasTargetPosition ? <span>Target {Math.round(worker.target_position_seconds)}s</span> : null}
+                              {worker.replacement_count ? <span>{worker.replacement_count} replacements</span> : null}
+                              {worker.failure_count ? <span>{worker.failure_count} failures</span> : null}
+                            </div>
+
+                            {preparedRanges ? (
+                              <p className="page-subnote">Prepared ranges {preparedRanges}</p>
+                            ) : null}
+
+                            {sessionDiagnosticId || workerDiagnosticId || epochDiagnosticId ? (
+                              <div className="admin-worker-card__diagnostics">
+                                {sessionDiagnosticId ? <span>session {sessionDiagnosticId}</span> : null}
+                                {workerDiagnosticId ? <span>worker {workerDiagnosticId}</span> : null}
+                                {epochDiagnosticId ? <span>epoch {epochDiagnosticId}</span> : null}
+                              </div>
+                            ) : null}
+
+                            {worker.non_retryable_error ? (
+                              <p className="action-feedback action-feedback--error">{worker.non_retryable_error}</p>
+                            ) : null}
+
+                            {worker.stop_requested ? (
+                              <p className="page-subnote">Stop requested. Waiting for backend cleanup.</p>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           );
         })}
       </div>
     </section>
   );
+
+  const userActionsModal = selectedUserActionsEntry ? (
+    <div
+      aria-labelledby="admin-user-actions-modal-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="browser-resume-modal__backdrop"
+        onClick={closeUserActionsModal}
+      />
+      <div className="browser-resume-modal__card detail-info-modal__card admin-user-actions-modal">
+        <div className="detail-info-modal__header admin-user-actions-modal__header">
+          <div className="detail-info-modal__copy">
+            <p className="eyebrow detail-info-modal__eyebrow">User actions</p>
+            <div className="admin-user-actions-modal__title-row">
+              <div className="user-avatar-button user-avatar-button--static" aria-hidden="true">
+                <span className="user-avatar-button__initials">
+                  {getUserAvatarInitials(selectedUserActionsEntry.username)}
+                </span>
+              </div>
+              <div className="admin-user-actions-modal__title-copy">
+                <h2 id="admin-user-actions-modal-title" className="detail-info-modal__title">
+                  {selectedUserActionsEntry.username}
+                </h2>
+                <div className="admin-user-actions-modal__subtitle">
+                  <UserStatusIndicator
+                    color={selectedUserActionsEntry.status_color}
+                    label={selectedUserActionsEntry.status_label}
+                  />
+                  <span>
+                    {selectedUserActionsEntry.role} · {selectedUserActionsEntry.enabled ? "enabled" : "disabled"} · {selectedUserActionsEntry.active_sessions} live session{selectedUserActionsEntry.active_sessions === 1 ? "" : "s"}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <p className="page-subnote">
+              Last login {formatDate(selectedUserActionsEntry.last_login_at)}
+              {selectedUserActionsEntry.last_seen_at ? ` · last heartbeat ${formatDate(selectedUserActionsEntry.last_seen_at)}` : ""}
+              {selectedUserActionsEntry.last_activity_at ? ` · last activity ${formatDate(selectedUserActionsEntry.last_activity_at)}` : ""}
+            </p>
+          </div>
+          <button
+            className="ghost-button detail-info-modal__close"
+            onClick={closeUserActionsModal}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+        <div className="detail-info-modal__body admin-user-actions-modal__body">
+          <section className="admin-user-actions-modal__section">
+            <div className="admin-user-actions-modal__section-header">
+              <h3>Account actions</h3>
+              <p className="page-subnote">
+                Role changes and password updates still require your current admin password.
+              </p>
+            </div>
+            <div className="admin-user-actions-modal__meta">
+              <span className="admin-user-actions-modal__meta-pill">Role: {selectedUserActionsEntry.role}</span>
+              <span className="admin-user-actions-modal__meta-pill">
+                Account: {selectedUserActionsEntry.enabled ? "Enabled" : "Disabled"}
+              </span>
+            </div>
+            <div className="admin-list__actions">
+              {selectedUserActionsEntry.id !== user?.id ? (
+                <button
+                  className="ghost-button"
+                  disabled={userActionPending === selectedUserActionsEntry.id}
+                  onClick={() => {
+                    setPasswordEditor({
+                      userId: null,
+                      username: "",
+                      newPassword: "",
+                      currentAdminPassword: "",
+                    });
+                    setRoleConfirm({
+                      userId: selectedUserActionsEntry.id,
+                      username: selectedUserActionsEntry.username,
+                      nextRole: selectedUserActionsEntry.role === "admin" ? "standard_user" : "admin",
+                      currentAdminPassword: "",
+                    });
+                  }}
+                  type="button"
+                >
+                  Make {selectedUserActionsEntry.role === "admin" ? "standard" : "admin"}
+                </button>
+              ) : null}
+
+              <button
+                className="ghost-button"
+                disabled={userActionPending === selectedUserActionsEntry.id}
+                onClick={() => {
+                  setRoleConfirm({
+                    userId: null,
+                    username: "",
+                    nextRole: "standard_user",
+                    currentAdminPassword: "",
+                  });
+                  setPasswordEditor({
+                    userId: selectedUserActionsEntry.id,
+                    username: selectedUserActionsEntry.username,
+                    newPassword: "",
+                    currentAdminPassword: "",
+                  });
+                }}
+                type="button"
+              >
+                {selectedUserActionsEntry.id === user?.id ? "Update my password" : "Reset password"}
+              </button>
+            </div>
+
+            {selectedUserActionsEntry.id === user?.id ? (
+              <p className="page-subnote">Your own admin account cannot be disabled from the main row.</p>
+            ) : null}
+
+            <InlineFeedback feedback={userFeedback[selectedUserActionsEntry.id]} />
+
+            {roleConfirm.userId === selectedUserActionsEntry.id ? (
+              <form
+                className="admin-inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  handleSubmitRoleChange(selectedUserActionsEntry);
+                }}
+              >
+                <p className="page-subnote">
+                  Confirm making {selectedUserActionsEntry.username} {roleConfirm.nextRole === "admin" ? "an admin" : "a standard user"}.
+                </p>
+                <input
+                  autoComplete="current-password"
+                  onChange={(event) =>
+                    setRoleConfirm((current) => ({
+                      ...current,
+                      currentAdminPassword: event.target.value,
+                    }))
+                  }
+                  placeholder="Current admin password"
+                  type="password"
+                  value={roleConfirm.currentAdminPassword}
+                />
+                <div className="admin-list__actions">
+                  <button className="primary-button" disabled={userActionPending === selectedUserActionsEntry.id} type="submit">
+                    Confirm role change
+                  </button>
+                  <button
+                    className="ghost-button"
+                    onClick={() => clearUserEditors(selectedUserActionsEntry.id)}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : null}
+
+            {passwordEditor.userId === selectedUserActionsEntry.id ? (
+              <form
+                className="admin-inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  handleSubmitPassword(selectedUserActionsEntry);
+                }}
+              >
+                <input
+                  autoComplete="new-password"
+                  onChange={(event) =>
+                    setPasswordEditor((current) => ({
+                      ...current,
+                      newPassword: event.target.value,
+                    }))
+                  }
+                  placeholder="New password"
+                  type="password"
+                  value={passwordEditor.newPassword}
+                />
+                <input
+                  autoComplete="current-password"
+                  onChange={(event) =>
+                    setPasswordEditor((current) => ({
+                      ...current,
+                      currentAdminPassword: event.target.value,
+                    }))
+                  }
+                  placeholder="Current admin password"
+                  type="password"
+                  value={passwordEditor.currentAdminPassword}
+                />
+                <div className="admin-list__actions">
+                  <button className="primary-button" disabled={userActionPending === selectedUserActionsEntry.id} type="submit">
+                    Save password
+                  </button>
+                  <button
+                    className="ghost-button"
+                    onClick={() => clearUserEditors(selectedUserActionsEntry.id)}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : null}
+          </section>
+
+          <section className="admin-user-actions-modal__section">
+            <div className="admin-user-actions-modal__section-header">
+              <h3>Assistant Beta</h3>
+              <p className="page-subnote">Secondary access only for the safe structured request form.</p>
+            </div>
+            {selectedUserActionsEntry.role === "standard_user" ? (
+              <div className="assistant-access-toggle assistant-access-toggle--modal">
+                <div>
+                  <strong>{selectedUserActionsEntry.assistant_beta_enabled ? "Enabled" : "Disabled"}</strong>
+                  <p className="page-subnote">
+                    {selectedUserActionsEntry.assistant_beta_enabled
+                      ? "This user can access the Assistant (Beta) request flow."
+                      : "This user cannot access the Assistant (Beta) request flow."}
+                  </p>
+                </div>
+                <button
+                  className={selectedUserActionsEntry.assistant_beta_enabled ? "ghost-button" : "primary-button"}
+                  disabled={userActionPending === selectedUserActionsEntry.id}
+                  onClick={() => handleAssistantAccessToggle(selectedUserActionsEntry)}
+                  type="button"
+                >
+                  {selectedUserActionsEntry.assistant_beta_enabled ? "Disable Assistant" : "Enable Assistant"}
+                </button>
+              </div>
+            ) : (
+              <p className="page-subnote">
+                Assistant (Beta) access is only configurable for standard users in this phase.
+              </p>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   const createUserCard = (
     <section className="settings-card">
@@ -1728,6 +2080,7 @@ export function AdminPage() {
           ) : null}
         </div>
       ) : null}
+      {userActionsModal}
     </section>
   );
 }
