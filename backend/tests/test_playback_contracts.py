@@ -7,11 +7,14 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.error import HTTPError
 from urllib.request import Request
 
+import pytest
+
 from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
     resolve_native_playback_session_client_name,
 )
 from backend.app.routes.native_playback import _build_ios_external_launch_url
+from backend.app.config import refresh_settings
 from backend.app.db import utcnow_iso
 from backend.app.services.desktop_playback_service import build_desktop_playback_resolution
 from backend.app.services.google_drive_service import proxy_google_drive_file_response
@@ -21,7 +24,10 @@ from backend.app.services.mobile_playback_models import (
     PlaybackEpoch,
 )
 from backend.app.services.mobile_playback_source_service import _probe_worker_source_input_error
-from backend.app.services.mobile_playback_service import MobilePlaybackManager
+from backend.app.services.mobile_playback_service import (
+    MobilePlaybackManager,
+    _parse_proc_status_rss_bytes,
+)
 from backend.app.services.mobile_playback_route2_full_gate import _route2_full_mode_gate_locked
 from backend.app.services.mobile_playback_route2_preflight_service import _ensure_route2_full_preflight_locked
 from backend.app.services.mobile_playback_route2_gates import (
@@ -133,6 +139,15 @@ def _make_route2_manager(initialized_settings, **overrides) -> tuple[MobilePlayb
         **overrides,
     )
     return MobilePlaybackManager(settings), settings
+
+
+class _TelemetryProcess:
+    def __init__(self, *, pid: int = 4321, running: bool = True) -> None:
+        self.pid = pid
+        self.running = running
+
+    def poll(self):
+        return None if self.running else 0
 
 
 def test_ios_external_launch_url_contract_for_infuse_and_vlc() -> None:
@@ -697,8 +712,10 @@ def test_route2_cpu_budget_summary_uses_global_budget_and_fair_user_share(initia
     manager.create_session(item_b, user_id=2, auth_session_id=201, username="bob", engine_mode="route2", playback_mode="lite")
 
     summary = manager.get_route2_worker_status()
+    assert summary["cpu_upbound_percent"] == 90
     assert summary["cpu_budget_percent"] == 90
     assert summary["total_cpu_cores"] == 20
+    assert summary["route2_cpu_upbound_cores"] == 18
     assert summary["total_route2_budget_cores"] == 18
     assert summary["active_decoding_user_count"] == 2
     assert summary["per_user_budget_cores"] == 9
@@ -707,6 +724,151 @@ def test_route2_cpu_budget_summary_uses_global_budget_and_fair_user_share(initia
     summary = manager.get_route2_worker_status()
     assert summary["active_decoding_user_count"] == 3
     assert summary["per_user_budget_cores"] == 6
+
+
+def test_route2_cpu_upbound_env_alias_is_supported(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_CPU_UPBOUND_PERCENT", "91")
+    monkeypatch.setenv("ELVERN_ROUTE2_CPU_BUDGET_PERCENT", "88")
+
+    settings = refresh_settings()
+
+    assert settings.route2_cpu_budget_percent == 91
+
+
+def test_route2_worker_status_first_sample_is_unsampled_then_reports_live_cpu_and_memory(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_max_worker_threads=18,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_total_memory_bytes",
+        lambda: 8 * 1024 * 1024 * 1024,
+    )
+
+    monotonic_values = iter([100.0, 102.0])
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    cpu_seconds_by_call = iter([10.0, 14.0])
+    inspected_pids: list[int] = []
+
+    def _fake_read_cpu_seconds(pid: int) -> float:
+        inspected_pids.append(pid)
+        return next(cpu_seconds_by_call)
+
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_process_cpu_seconds",
+        _fake_read_cpu_seconds,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_process_rss_bytes",
+        lambda pid: 512 * 1024 * 1024,
+    )
+
+    item_a = _make_local_item(settings, item_id=304, relative_name="route2/live-a.mp4")
+    item_b = _make_local_item(settings, item_id=305, relative_name="route2/live-b.mp4")
+    running_payload = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=111,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+    manager.create_session(
+        item_b,
+        user_id=2,
+        auth_session_id=222,
+        username="bob",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    with manager._lock:
+        session = manager._sessions[running_payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.process = _TelemetryProcess(pid=4321, running=True)
+        record = manager._ensure_route2_worker_record_locked(session, active_epoch)
+        record.state = "running"
+        record.assigned_threads = 4
+
+    first = manager.get_route2_worker_status()
+    first_user = next(group for group in first["workers_by_user"] if group["user_id"] == 1)
+    first_item = first_user["items"][0]
+    assert first["route2_cpu_cores_used"] is None
+    assert first["route2_cpu_percent_of_total"] is None
+    assert first_item["telemetry_sampled"] is False
+    assert first_item["cpu_cores_used"] is None
+    assert first_item["memory_bytes"] == 512 * 1024 * 1024
+    assert first_item["memory_percent_of_total"] == pytest.approx(6.25)
+
+    second = manager.get_route2_worker_status()
+    second_user = next(group for group in second["workers_by_user"] if group["user_id"] == 1)
+    second_item = second_user["items"][0]
+    assert second["route2_cpu_cores_used"] == pytest.approx(2.0)
+    assert second["route2_cpu_percent_of_total"] == pytest.approx(10.0)
+    assert second["route2_cpu_percent_of_upbound"] == pytest.approx(11.111, rel=1e-3)
+    assert second["route2_memory_bytes"] == 512 * 1024 * 1024
+    assert second["route2_memory_percent_of_total"] == pytest.approx(6.25)
+    assert second_user["allocated_cpu_cores"] == 9
+    assert second_user["allocated_budget_cores"] == 9
+    assert second_user["cpu_cores_used"] == pytest.approx(2.0)
+    assert second_user["cpu_percent_of_user_limit"] == pytest.approx(22.222, rel=1e-3)
+    assert second_user["memory_bytes"] == 512 * 1024 * 1024
+    assert second_user["memory_percent_of_total"] == pytest.approx(6.25)
+    assert second_item["process_exists"] is True
+    assert second_item["telemetry_sampled"] is True
+    assert second_item["cpu_cores_used"] == pytest.approx(2.0)
+    assert second_item["cpu_percent_of_total"] == pytest.approx(10.0)
+    assert second_item["memory_bytes"] == 512 * 1024 * 1024
+    assert inspected_pids == [4321, 4321]
+
+
+def test_route2_worker_status_handles_exited_owned_worker_without_crashing(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_total_memory_bytes",
+        lambda: 8 * 1024 * 1024 * 1024,
+    )
+
+    item = _make_local_item(settings, item_id=306, relative_name="route2/exited.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=333,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    with manager._lock:
+        session = manager._sessions[payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.process = _TelemetryProcess(pid=9876, running=False)
+        record = manager._ensure_route2_worker_record_locked(session, active_epoch)
+        record.state = "running"
+        record.assigned_threads = 2
+        record.started_at = "2026-01-01T00:00:00+00:00"
+
+    summary = manager.get_route2_worker_status()
+    user_group = next(group for group in summary["workers_by_user"] if group["user_id"] == 1)
+    item_payload = user_group["items"][0]
+
+    assert item_payload["process_exists"] is False
+    assert item_payload["telemetry_sampled"] is False
+    assert item_payload["cpu_cores_used"] is None
+    assert item_payload["memory_bytes"] is None
+    assert item_payload["state"] == "interrupted"
+
+
+def test_route2_rss_parser_reads_vmrss_kib() -> None:
+    payload = "Name:\tffmpeg\nVmRSS:\t  524288 kB\nThreads:\t8\n"
+
+    assert _parse_proc_status_rss_bytes(payload) == 524288 * 1024
 
 
 def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_settings, monkeypatch) -> None:

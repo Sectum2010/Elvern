@@ -162,6 +162,7 @@ from .mobile_playback_source_service import (
 
 
 logger = logging.getLogger(__name__)
+ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
 
 
 def _read_text_tail(path: Path, *, max_lines: int = 100) -> str | None:
@@ -173,6 +174,130 @@ def _read_text_tail(path: Path, *, max_lines: int = 100) -> str | None:
     if not lines:
         return None
     return "\n".join(lines[-max_lines:])
+
+
+def _detect_total_cpu_cores() -> int:
+    return max(1, os.cpu_count() or 1)
+
+
+def _route2_cpu_upbound_cores_for_total(total_cpu_cores: int, upbound_percent: int) -> int:
+    return max(1, math.floor((max(1, total_cpu_cores) * upbound_percent) / 100))
+
+
+def _clock_ticks_per_second() -> int:
+    try:
+        return max(1, int(os.sysconf("SC_CLK_TCK")))
+    except (AttributeError, ValueError, OSError):
+        return 100
+
+
+def _page_size_bytes() -> int:
+    try:
+        return max(1, int(os.sysconf("SC_PAGE_SIZE")))
+    except (AttributeError, ValueError, OSError):
+        return 4096
+
+
+def _parse_proc_stat_cpu_seconds(payload: str) -> float | None:
+    normalized = str(payload or "").strip()
+    if not normalized:
+        return None
+    close_index = normalized.rfind(")")
+    if close_index < 0 or close_index + 2 >= len(normalized):
+        return None
+    tail = normalized[close_index + 2 :].split()
+    if len(tail) <= 12:
+        return None
+    try:
+        utime_ticks = int(tail[11])
+        stime_ticks = int(tail[12])
+    except ValueError:
+        return None
+    return (utime_ticks + stime_ticks) / _clock_ticks_per_second()
+
+
+def _read_process_cpu_seconds(pid: int) -> float | None:
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    stat_path = Path("/proc") / str(pid) / "stat"
+    try:
+        payload = stat_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return _parse_proc_stat_cpu_seconds(payload)
+
+
+def _parse_proc_status_rss_bytes(payload: str) -> int | None:
+    for raw_line in str(payload or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("VmRSS:"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            return None
+        try:
+            return int(parts[1]) * 1024
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_proc_statm_rss_bytes(payload: str) -> int | None:
+    parts = str(payload or "").strip().split()
+    if len(parts) < 2:
+        return None
+    try:
+        resident_pages = int(parts[1])
+    except ValueError:
+        return None
+    return resident_pages * _page_size_bytes()
+
+
+def _read_process_rss_bytes(pid: int) -> int | None:
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    proc_root = Path("/proc") / str(pid)
+    status_path = proc_root / "status"
+    try:
+        status_payload = status_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        status_payload = None
+    if status_payload is not None:
+        status_value = _parse_proc_status_rss_bytes(status_payload)
+        if status_value is not None:
+            return status_value
+    statm_path = proc_root / "statm"
+    try:
+        statm_payload = statm_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return _parse_proc_statm_rss_bytes(statm_payload)
+
+
+def _read_total_memory_bytes() -> int | None:
+    meminfo_path = Path("/proc/meminfo")
+    try:
+        payload = meminfo_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        payload = None
+    if payload is not None:
+        for raw_line in payload.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("MemTotal:"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                break
+            try:
+                return int(parts[1]) * 1024
+            except ValueError:
+                break
+    try:
+        page_size = max(1, int(os.sysconf("SC_PAGE_SIZE")))
+        phys_pages = max(1, int(os.sysconf("SC_PHYS_PAGES")))
+    except (AttributeError, ValueError, OSError):
+        return None
+    return page_size * phys_pages
 
 
 def _is_non_retryable_cloud_source_error(error: str | None) -> bool:
@@ -1096,11 +1221,109 @@ class MobilePlaybackManager:
     def _route2_running_threads_locked(self, *, user_id: int | None = None) -> int:
         return sum(max(0, int(record.assigned_threads)) for record in self._route2_running_workers_locked(user_id=user_id))
 
+    def _clear_route2_worker_telemetry_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        sampled_at: str | None = None,
+    ) -> None:
+        record.process_exists = False
+        record.cpu_cores_used = None
+        record.cpu_percent_of_total = None
+        record.memory_bytes = None
+        record.memory_percent_of_total = None
+        record.telemetry_sampled = False
+        if sampled_at is not None:
+            record.last_sampled_at = sampled_at
+        record.last_cpu_sample_monotonic = None
+        record.last_process_cpu_seconds = None
+        record.last_cpu_sample_pid = None
+
+    def _mark_route2_worker_unavailable_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        sampled_at: str,
+    ) -> None:
+        if record.state == "running":
+            record.state = "stopped" if record.stop_requested else "interrupted"
+        record.process = None
+        self._clear_route2_worker_telemetry_locked(record, sampled_at=sampled_at)
+
+    def _sample_route2_worker_telemetry_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        total_cpu_cores: int,
+        total_memory_bytes: int | None,
+        sample_monotonic: float,
+        sample_wall_ts: float,
+        sampled_at: str,
+    ) -> None:
+        process = record.process
+        pid = record.pid or (process.pid if process is not None else None)
+        if process is None or pid is None:
+            started_reference = record.started_at or record.created_at
+            if (
+                record.state == "running"
+                and started_reference
+                and (sample_wall_ts - self._parse_iso_ts(started_reference)) <= ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS
+            ):
+                self._clear_route2_worker_telemetry_locked(record, sampled_at=sampled_at)
+                return
+            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+            return
+        record.pid = pid
+        if process.poll() is not None:
+            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+            return
+
+        cpu_seconds = _read_process_cpu_seconds(pid)
+        memory_bytes = _read_process_rss_bytes(pid)
+        if cpu_seconds is None and process.poll() is not None:
+            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+            return
+
+        record.process_exists = True
+        record.last_sampled_at = sampled_at
+        record.memory_bytes = memory_bytes
+        record.memory_percent_of_total = (
+            (memory_bytes / total_memory_bytes) * 100
+            if memory_bytes is not None and total_memory_bytes
+            else None
+        )
+
+        telemetry_sampled = (
+            cpu_seconds is not None
+            and record.last_cpu_sample_pid == pid
+            and record.last_cpu_sample_monotonic is not None
+            and record.last_process_cpu_seconds is not None
+            and sample_monotonic > record.last_cpu_sample_monotonic
+        )
+        cpu_cores_used = None
+        if telemetry_sampled:
+            delta_cpu_seconds = max(0.0, cpu_seconds - record.last_process_cpu_seconds)
+            delta_wall_seconds = sample_monotonic - record.last_cpu_sample_monotonic
+            if delta_wall_seconds > 0:
+                cpu_cores_used = delta_cpu_seconds / delta_wall_seconds
+            else:
+                telemetry_sampled = False
+        record.telemetry_sampled = bool(telemetry_sampled and cpu_cores_used is not None)
+        record.cpu_cores_used = cpu_cores_used if record.telemetry_sampled else None
+        record.cpu_percent_of_total = (
+            (record.cpu_cores_used / total_cpu_cores) * 100
+            if record.cpu_cores_used is not None and total_cpu_cores > 0
+            else None
+        )
+        record.last_cpu_sample_pid = pid
+        record.last_cpu_sample_monotonic = sample_monotonic
+        record.last_process_cpu_seconds = cpu_seconds
+
     def _route2_budget_summary_locked(self) -> dict[str, object]:
-        total_cpu_cores = max(1, os.cpu_count() or 1)
-        total_route2_budget_cores = max(
-            1,
-            math.floor((total_cpu_cores * self.settings.route2_cpu_budget_percent) / 100),
+        total_cpu_cores = _detect_total_cpu_cores()
+        total_route2_budget_cores = _route2_cpu_upbound_cores_for_total(
+            total_cpu_cores,
+            self.settings.route2_cpu_budget_percent,
         )
         active_user_ids = sorted(
             {
@@ -1116,8 +1339,10 @@ class MobilePlaybackManager:
             else total_route2_budget_cores
         )
         return {
+            "cpu_upbound_percent": self.settings.route2_cpu_budget_percent,
             "cpu_budget_percent": self.settings.route2_cpu_budget_percent,
             "total_cpu_cores": total_cpu_cores,
+            "route2_cpu_upbound_cores": total_route2_budget_cores,
             "total_route2_budget_cores": total_route2_budget_cores,
             "active_decoding_user_count": active_decoding_user_count,
             "active_user_ids": active_user_ids,
@@ -1131,26 +1356,63 @@ class MobilePlaybackManager:
             budget = self._route2_budget_summary_locked()
             grouped_users: dict[int, dict[str, object]] = {}
             now_ts = time.time()
+            sample_monotonic = time.monotonic()
+            sampled_at = utcnow_iso()
+            total_memory_bytes = _read_total_memory_bytes()
+            route2_cpu_cores_used = 0.0
+            route2_memory_bytes = 0
+            any_cpu_sampled = False
+            any_memory_sampled = False
             for record in sorted(self._route2_workers.values(), key=lambda value: (value.user_id, value.title, value.worker_id)):
+                if record.state == "running":
+                    self._sample_route2_worker_telemetry_locked(
+                        record,
+                        total_cpu_cores=int(budget["total_cpu_cores"]),
+                        total_memory_bytes=total_memory_bytes,
+                        sample_monotonic=sample_monotonic,
+                        sample_wall_ts=now_ts,
+                        sampled_at=sampled_at,
+                    )
+                else:
+                    self._clear_route2_worker_telemetry_locked(record)
                 group = grouped_users.setdefault(
                     record.user_id,
                     {
                         "user_id": record.user_id,
                         "username": record.username,
+                        "allocated_cpu_cores": (
+                            budget["per_user_budget_cores"]
+                            if record.user_id in budget["active_user_ids"]
+                            else 0
+                        ),
                         "allocated_budget_cores": (
                             budget["per_user_budget_cores"]
                             if record.user_id in budget["active_user_ids"]
                             else 0
                         ),
+                        "cpu_cores_used": 0.0,
+                        "cpu_percent_of_user_limit": None,
+                        "memory_bytes": 0,
+                        "memory_percent_of_total": None,
                         "running_workers": 0,
                         "queued_workers": 0,
+                        "total_workers": 0,
                         "items": [],
                     },
                 )
+                group["total_workers"] += 1
                 if record.state == "running":
                     group["running_workers"] += 1
                 elif record.state == "queued":
                     group["queued_workers"] += 1
+                if record.cpu_cores_used is not None:
+                    group["cpu_cores_used"] += record.cpu_cores_used
+                    route2_cpu_cores_used += record.cpu_cores_used
+                    any_cpu_sampled = True
+                if record.memory_bytes is not None:
+                    group["memory_bytes"] += record.memory_bytes
+                    route2_memory_bytes += record.memory_bytes
+                    any_memory_sampled = True
                 runtime_seconds = None
                 if record.started_at:
                     runtime_seconds = max(0.0, now_ts - self._parse_iso_ts(record.started_at))
@@ -1174,14 +1436,57 @@ class MobilePlaybackManager:
                         "failure_count": record.failure_count,
                         "replacement_count": record.replacement_count,
                         "assigned_threads": record.assigned_threads,
-                        "cpu_percent": None,
-                        "memory_bytes": None,
+                        "process_exists": record.process_exists,
+                        "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
+                        "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
+                        "cpu_percent": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
+                        "memory_bytes": record.memory_bytes,
+                        "memory_percent_of_total": round(record.memory_percent_of_total, 3) if record.memory_percent_of_total is not None else None,
+                        "telemetry_sampled": record.telemetry_sampled,
+                        "last_sampled_at": record.last_sampled_at,
+                        "failure_reason": record.non_retryable_error,
                         "started_at": record.started_at,
                         "last_seen_at": record.last_seen_at,
                     }
                 )
+            for group in grouped_users.values():
+                allocated_cpu_cores = max(0, int(group["allocated_cpu_cores"]))
+                cpu_cores_used = float(group["cpu_cores_used"]) if group["cpu_cores_used"] else 0.0
+                memory_bytes = int(group["memory_bytes"]) if group["memory_bytes"] else 0
+                group["cpu_cores_used"] = round(cpu_cores_used, 3) if cpu_cores_used > 0 else None
+                group["cpu_percent_of_user_limit"] = (
+                    round((cpu_cores_used / allocated_cpu_cores) * 100, 3)
+                    if allocated_cpu_cores > 0 and cpu_cores_used > 0
+                    else None
+                )
+                group["memory_bytes"] = memory_bytes if memory_bytes > 0 else None
+                group["memory_percent_of_total"] = (
+                    round((memory_bytes / total_memory_bytes) * 100, 3)
+                    if total_memory_bytes and memory_bytes > 0
+                    else None
+                )
+            route2_cpu_percent_of_total = (
+                round((route2_cpu_cores_used / int(budget["total_cpu_cores"])) * 100, 3)
+                if any_cpu_sampled
+                else None
+            )
+            route2_cpu_percent_of_upbound = (
+                round((route2_cpu_cores_used / int(budget["route2_cpu_upbound_cores"])) * 100, 3)
+                if any_cpu_sampled and int(budget["route2_cpu_upbound_cores"]) > 0
+                else None
+            )
             return {
                 **budget,
+                "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
+                "route2_cpu_percent_of_total": route2_cpu_percent_of_total,
+                "route2_cpu_percent_of_upbound": route2_cpu_percent_of_upbound,
+                "total_memory_bytes": total_memory_bytes,
+                "route2_memory_bytes": route2_memory_bytes if any_memory_sampled else None,
+                "route2_memory_percent_of_total": (
+                    round((route2_memory_bytes / total_memory_bytes) * 100, 3)
+                    if any_memory_sampled and total_memory_bytes
+                    else None
+                ),
                 "workers_by_user": sorted(grouped_users.values(), key=lambda value: ((value["username"] or ""), value["user_id"])),
             }
 

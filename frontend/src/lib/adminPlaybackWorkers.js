@@ -2,6 +2,13 @@ function isFiniteNumber(value) {
   return Number.isFinite(value);
 }
 
+function formatDecimalValue(value, { maximumFractionDigits = 1 } = {}) {
+  return new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits,
+  }).format(Number(value));
+}
+
 function formatByteValue(value) {
   if (!isFiniteNumber(value) || value <= 0) {
     return "0 B";
@@ -61,11 +68,32 @@ export function formatWorkerModeLabel(playbackMode) {
   return String(playbackMode).toLowerCase() === "full" ? "Full" : "Lite";
 }
 
+export function formatCpuCoresValue(value) {
+  if (!isFiniteNumber(value)) {
+    return "—";
+  }
+  return `${formatDecimalValue(value)} cores`;
+}
+
+export function formatCpuCoresUsage(value, allocatedCores) {
+  if (!isFiniteNumber(value) || !isFiniteNumber(allocatedCores) || Number(allocatedCores) <= 0) {
+    return "—";
+  }
+  return `${formatDecimalValue(value)} / ${formatDecimalValue(allocatedCores)} cores`;
+}
+
 export function formatCpuGaugeValue(value) {
   if (!isFiniteNumber(value)) {
     return "—";
   }
-  return `${Math.round(Number(value))}%`;
+  return `${formatDecimalValue(value)}%`;
+}
+
+export function formatPercentValue(value) {
+  if (!isFiniteNumber(value)) {
+    return "—";
+  }
+  return `${formatDecimalValue(value)}%`;
 }
 
 export function formatMemoryGaugeValue(value) {
@@ -88,32 +116,50 @@ export function shortenDiagnosticId(value, prefixLength = 6, suffixLength = 4) {
 
 export function summarizeWorkerGroup(group) {
   const items = Array.isArray(group?.items) ? group.items : [];
-  const cpuValues = items
-    .map((item) => (isFiniteNumber(item?.cpu_percent) ? Number(item.cpu_percent) : null))
+  const cpuCoresValues = items
+    .map((item) => (isFiniteNumber(item?.cpu_cores_used) ? Number(item.cpu_cores_used) : null))
     .filter((value) => value != null);
   const memoryBytesValues = items
     .map((item) => (isFiniteNumber(item?.memory_bytes) ? Number(item.memory_bytes) : null))
     .filter((value) => value != null);
-  const memoryPercentValues = items
-    .map((item) => (isFiniteNumber(item?.memory_percent) ? Number(item.memory_percent) : null))
-    .filter((value) => value != null);
-
-  const cpuPercent = cpuValues.length > 0
-    ? cpuValues.reduce((sum, value) => sum + value, 0)
-    : null;
-  const memoryBytes = memoryBytesValues.length > 0
-    ? memoryBytesValues.reduce((sum, value) => sum + value, 0)
-    : null;
-  const memoryGaugePercent = memoryPercentValues.length > 0
-    ? clampGaugePercent(memoryPercentValues.reduce((sum, value) => sum + value, 0))
+  const allocatedCpuCores = isFiniteNumber(group?.allocated_cpu_cores)
+    ? Number(group.allocated_cpu_cores)
+    : isFiniteNumber(group?.allocated_budget_cores)
+      ? Number(group.allocated_budget_cores)
+      : null;
+  const cpuCoresUsed = isFiniteNumber(group?.cpu_cores_used)
+    ? Number(group.cpu_cores_used)
+    : (
+      cpuCoresValues.length > 0
+        ? cpuCoresValues.reduce((sum, value) => sum + value, 0)
+        : null
+    );
+  const cpuPercentOfUserLimit = isFiniteNumber(group?.cpu_percent_of_user_limit)
+    ? Number(group.cpu_percent_of_user_limit)
+    : (
+      cpuCoresUsed != null && allocatedCpuCores != null && allocatedCpuCores > 0
+        ? (cpuCoresUsed / allocatedCpuCores) * 100
+        : null
+    );
+  const memoryBytes = isFiniteNumber(group?.memory_bytes)
+    ? Number(group.memory_bytes)
+    : (
+      memoryBytesValues.length > 0
+        ? memoryBytesValues.reduce((sum, value) => sum + value, 0)
+        : null
+    );
+  const memoryGaugePercent = isFiniteNumber(group?.memory_percent_of_total)
+    ? clampGaugePercent(group.memory_percent_of_total)
     : null;
 
   return {
     ...group,
     items,
-    totalWorkers: items.length,
-    cpuPercent,
-    cpuGaugePercent: cpuPercent == null ? null : clampGaugePercent(cpuPercent),
+    totalWorkers: isFiniteNumber(group?.total_workers) ? Number(group.total_workers) : items.length,
+    allocatedCpuCores,
+    cpuCoresUsed,
+    cpuGaugePercent: cpuPercentOfUserLimit == null ? null : clampGaugePercent(cpuPercentOfUserLimit),
+    cpuPercentOfUserLimit,
     memoryBytes,
     memoryGaugePercent,
   };

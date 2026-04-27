@@ -284,9 +284,17 @@ def _make_browser_playback_route2_payload(
 
 def _make_admin_playback_workers_payload() -> dict[str, object]:
     return {
+        "cpu_upbound_percent": 90,
         "cpu_budget_percent": 90,
         "total_cpu_cores": 20,
+        "route2_cpu_upbound_cores": 18,
         "total_route2_budget_cores": 18,
+        "route2_cpu_cores_used": 7.2,
+        "route2_cpu_percent_of_total": 36.0,
+        "route2_cpu_percent_of_upbound": 40.0,
+        "total_memory_bytes": 32 * 1024 * 1024 * 1024,
+        "route2_memory_bytes": 2 * 1024 * 1024 * 1024,
+        "route2_memory_percent_of_total": 6.25,
         "active_worker_count": 1,
         "queued_worker_count": 2,
         "active_decoding_user_count": 2,
@@ -295,9 +303,15 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
             {
                 "user_id": 1,
                 "username": "alice",
+                "allocated_cpu_cores": 9,
                 "allocated_budget_cores": 9,
+                "cpu_cores_used": 7.2,
+                "cpu_percent_of_user_limit": 80.0,
+                "memory_bytes": int(1.2 * 1024 * 1024 * 1024),
+                "memory_percent_of_total": 3.75,
                 "running_workers": 1,
                 "queued_workers": 1,
+                "total_workers": 2,
                 "items": [
                     {
                         "worker_id": "worker-1",
@@ -318,8 +332,15 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "failure_count": 0,
                         "replacement_count": 1,
                         "assigned_threads": 6,
-                        "cpu_percent": None,
-                        "memory_bytes": None,
+                        "process_exists": True,
+                        "cpu_cores_used": 7.2,
+                        "cpu_percent_of_total": 36.0,
+                        "cpu_percent": 36.0,
+                        "memory_bytes": int(1.2 * 1024 * 1024 * 1024),
+                        "memory_percent_of_total": 3.75,
+                        "telemetry_sampled": True,
+                        "last_sampled_at": "2026-04-26T12:00:06+00:00",
+                        "failure_reason": None,
                         "started_at": "2026-04-26T12:00:00+00:00",
                         "last_seen_at": "2026-04-26T12:00:05+00:00",
                     },
@@ -342,8 +363,15 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "failure_count": 0,
                         "replacement_count": 0,
                         "assigned_threads": 0,
+                        "process_exists": False,
+                        "cpu_cores_used": None,
+                        "cpu_percent_of_total": None,
                         "cpu_percent": None,
                         "memory_bytes": None,
+                        "memory_percent_of_total": None,
+                        "telemetry_sampled": False,
+                        "last_sampled_at": None,
+                        "failure_reason": None,
                         "started_at": None,
                         "last_seen_at": "2026-04-26T12:00:05+00:00",
                     },
@@ -352,9 +380,15 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
             {
                 "user_id": 2,
                 "username": "bob",
+                "allocated_cpu_cores": 9,
                 "allocated_budget_cores": 9,
+                "cpu_cores_used": None,
+                "cpu_percent_of_user_limit": None,
+                "memory_bytes": None,
+                "memory_percent_of_total": None,
                 "running_workers": 0,
                 "queued_workers": 1,
+                "total_workers": 1,
                 "items": [
                     {
                         "worker_id": "worker-3",
@@ -375,8 +409,15 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "failure_count": 1,
                         "replacement_count": 0,
                         "assigned_threads": 0,
+                        "process_exists": False,
+                        "cpu_cores_used": None,
+                        "cpu_percent_of_total": None,
                         "cpu_percent": None,
                         "memory_bytes": None,
+                        "memory_percent_of_total": None,
+                        "telemetry_sampled": False,
+                        "last_sampled_at": None,
+                        "failure_reason": "The download quota for this file has been exceeded.",
                         "started_at": None,
                         "last_seen_at": "2026-04-26T12:00:05+00:00",
                     },
@@ -757,15 +798,21 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["cpu_upbound_percent"] == 90
     assert payload["cpu_budget_percent"] == 90
     assert payload["total_cpu_cores"] == 20
+    assert payload["route2_cpu_upbound_cores"] == 18
     assert payload["total_route2_budget_cores"] == 18
+    assert payload["route2_cpu_percent_of_total"] == 36.0
+    assert payload["route2_memory_bytes"] == 2147483648
     assert payload["active_worker_count"] == 1
     assert payload["queued_worker_count"] == 2
     assert payload["active_decoding_user_count"] == 2
     assert payload["per_user_budget_cores"] == 9
     assert len(payload["workers_by_user"]) == 2
+    assert payload["workers_by_user"][0]["allocated_cpu_cores"] == 9
     assert payload["workers_by_user"][0]["items"][0]["assigned_threads"] == 6
+    assert payload["workers_by_user"][0]["items"][0]["cpu_cores_used"] == 7.2
 
 
 def test_admin_disable_user_route_invalidates_route2_workers(

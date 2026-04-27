@@ -46,6 +46,18 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
+def _get_first_int(names: tuple[str, ...], default: int) -> int:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None or raw.strip() == "":
+            continue
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise ConfigError(f"{name} must be an integer") from exc
+    return default
+
+
 def _get_path(name: str, default: Path | None = None) -> Path:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -211,7 +223,10 @@ def load_settings() -> Settings:
         mobile_session_ttl_minutes=_get_int("ELVERN_MOBILE_SESSION_TTL_MINUTES", 15),
         mobile_cache_ttl_hours=_get_int("ELVERN_MOBILE_CACHE_TTL_HOURS", 24),
         browser_playback_route2_enabled=_get_bool("ELVERN_BROWSER_PLAYBACK_ROUTE2_ENABLED", True),
-        route2_cpu_budget_percent=_get_int("ELVERN_ROUTE2_CPU_BUDGET_PERCENT", 90),
+        route2_cpu_budget_percent=_get_first_int(
+            ("ELVERN_ROUTE2_CPU_UPBOUND_PERCENT", "ELVERN_ROUTE2_CPU_BUDGET_PERCENT"),
+            90,
+        ),
         route2_min_worker_threads=_get_int("ELVERN_ROUTE2_MIN_WORKER_THREADS", 1),
         route2_max_worker_threads=_get_int(
             "ELVERN_ROUTE2_MAX_WORKER_THREADS",
@@ -312,7 +327,9 @@ def validate_settings(settings: Settings) -> None:
     if settings.mobile_cache_ttl_hours < 1:
         raise ConfigError("ELVERN_MOBILE_CACHE_TTL_HOURS must be at least 1")
     if settings.route2_cpu_budget_percent < 10 or settings.route2_cpu_budget_percent > 95:
-        raise ConfigError("ELVERN_ROUTE2_CPU_BUDGET_PERCENT must be between 10 and 95")
+        raise ConfigError(
+            "ELVERN_ROUTE2_CPU_UPBOUND_PERCENT or ELVERN_ROUTE2_CPU_BUDGET_PERCENT must be between 10 and 95"
+        )
     if settings.route2_min_worker_threads < 1:
         raise ConfigError("ELVERN_ROUTE2_MIN_WORKER_THREADS must be at least 1")
     if (

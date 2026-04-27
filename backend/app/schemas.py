@@ -1222,8 +1222,15 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     failure_count: int = Field(default=0, ge=0)
     replacement_count: int = Field(default=0, ge=0)
     assigned_threads: int = Field(default=0, ge=0)
+    process_exists: bool = False
+    cpu_cores_used: float | None = Field(default=None, ge=0)
+    cpu_percent_of_total: float | None = Field(default=None, ge=0)
     cpu_percent: float | None = Field(default=None, ge=0)
     memory_bytes: int | None = Field(default=None, ge=0)
+    memory_percent_of_total: float | None = Field(default=None, ge=0)
+    telemetry_sampled: bool = False
+    last_sampled_at: str | None = None
+    failure_reason: str | None = None
     started_at: str | None = None
     last_seen_at: str
 
@@ -1231,16 +1238,30 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
 class AdminPlaybackWorkersUserSummaryResponse(BaseModel):
     user_id: int
     username: str | None = None
+    allocated_cpu_cores: int = Field(default=0, ge=0)
     allocated_budget_cores: int = Field(default=0, ge=0)
+    cpu_cores_used: float | None = Field(default=None, ge=0)
+    cpu_percent_of_user_limit: float | None = Field(default=None, ge=0)
+    memory_bytes: int | None = Field(default=None, ge=0)
+    memory_percent_of_total: float | None = Field(default=None, ge=0)
     running_workers: int = Field(default=0, ge=0)
     queued_workers: int = Field(default=0, ge=0)
+    total_workers: int = Field(default=0, ge=0)
     items: list[AdminPlaybackWorkerItemResponse] = Field(default_factory=list)
 
 
 class AdminPlaybackWorkersStatusResponse(BaseModel):
+    cpu_upbound_percent: int = Field(ge=0)
     cpu_budget_percent: int = Field(ge=0)
     total_cpu_cores: int = Field(ge=1)
+    route2_cpu_upbound_cores: int = Field(ge=1)
     total_route2_budget_cores: int = Field(ge=1)
+    route2_cpu_cores_used: float | None = Field(default=None, ge=0)
+    route2_cpu_percent_of_total: float | None = Field(default=None, ge=0)
+    route2_cpu_percent_of_upbound: float | None = Field(default=None, ge=0)
+    total_memory_bytes: int | None = Field(default=None, ge=0)
+    route2_memory_bytes: int | None = Field(default=None, ge=0)
+    route2_memory_percent_of_total: float | None = Field(default=None, ge=0)
     active_worker_count: int = Field(default=0, ge=0)
     queued_worker_count: int = Field(default=0, ge=0)
     active_decoding_user_count: int = Field(default=0, ge=0)

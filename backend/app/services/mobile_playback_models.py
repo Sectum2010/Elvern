@@ -200,6 +200,16 @@ class Route2WorkerRecord:
     failure_count: int = 0
     replacement_count: int = 0
     assigned_threads: int = 0
+    process_exists: bool = False
+    cpu_cores_used: float | None = None
+    cpu_percent_of_total: float | None = None
+    memory_bytes: int | None = None
+    memory_percent_of_total: float | None = None
+    telemetry_sampled: bool = False
+    last_sampled_at: str | None = None
+    last_cpu_sample_monotonic: float | None = field(default=None, repr=False)
+    last_process_cpu_seconds: float | None = field(default=None, repr=False)
+    last_cpu_sample_pid: int | None = field(default=None, repr=False)
     process: subprocess.Popen[str] | None = field(default=None, repr=False)
 
 

@@ -5,8 +5,10 @@ import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
   buildPlaybackWorkersByUserId,
-  formatCpuGaugeValue,
+  formatCpuCoresValue,
+  formatCpuCoresUsage,
   formatMemoryGaugeValue,
+  formatPercentValue,
   formatPreparedRanges,
   formatWorkerModeLabel,
   formatWorkerRuntime,
@@ -160,10 +162,11 @@ function PlaybackResourceGauge({
   tone = "cpu",
 }) {
   const isActive = Number.isFinite(gaugePercent);
+  const displayValueLabel = valueLabel === "—" ? `${label} —` : valueLabel;
   return (
     <div className={["playback-resource-gauge", !isActive ? "playback-resource-gauge--inactive" : ""].filter(Boolean).join(" ")}>
       <span className="playback-resource-gauge__value">
-        {label} {valueLabel}
+        {displayValueLabel}
       </span>
       <div
         className={[
@@ -929,9 +932,10 @@ export function AdminPage() {
     : restorePlanWarnings.slice(0, RECOVERY_WARNING_LIMIT);
   const playbackWorkerSummary = playbackWorkersPayload
     ? [
-        `Route2 CPU budget ${playbackWorkersPayload.cpu_budget_percent}%`,
-        `${playbackWorkersPayload.total_cpu_cores} CPU cores`,
-        `${playbackWorkersPayload.total_route2_budget_cores} budget cores`,
+        `Route2 CPU used ${formatPercentValue(playbackWorkersPayload.route2_cpu_percent_of_total)} total`,
+        `Route2 CPU upbound ${playbackWorkersPayload.cpu_upbound_percent ?? playbackWorkersPayload.cpu_budget_percent}%`,
+        `Detected CPU cores ${playbackWorkersPayload.total_cpu_cores}`,
+        `Route2 RAM used ${formatMemoryGaugeValue(playbackWorkersPayload.route2_memory_bytes)}`,
         `${playbackWorkersPayload.active_worker_count} active`,
         `${playbackWorkersPayload.queued_worker_count} queued`,
         `${playbackWorkersPayload.active_decoding_user_count} active user${playbackWorkersPayload.active_decoding_user_count === 1 ? "" : "s"}`,
@@ -1087,7 +1091,7 @@ export function AdminPage() {
                           gaugePercent={workerGroup.cpuGaugePercent}
                           label="CPU"
                           tone="cpu"
-                          valueLabel={formatCpuGaugeValue(workerGroup.cpuPercent)}
+                          valueLabel={formatCpuCoresUsage(workerGroup.cpuCoresUsed, workerGroup.allocatedCpuCores)}
                         />
                         <PlaybackResourceGauge
                           gaugePercent={workerGroup.memoryGaugePercent}
@@ -1099,7 +1103,7 @@ export function AdminPage() {
                     </div>
 
                     <div className="admin-user-workers__stats">
-                      <span className="admin-workers-summary__pill">{workerGroup.allocated_budget_cores} budget cores</span>
+                      <span className="admin-workers-summary__pill">{workerGroup.allocatedCpuCores ?? workerGroup.allocated_budget_cores ?? 0} allocated cores</span>
                       <span className="admin-workers-summary__pill">{workerGroup.running_workers} running</span>
                       <span className="admin-workers-summary__pill">{workerGroup.queued_workers} queued</span>
                       <span className="admin-workers-summary__pill">{workerGroup.totalWorkers} total</span>
@@ -1137,6 +1141,8 @@ export function AdminPage() {
                               {worker.pid ? <span>PID {worker.pid}</span> : null}
                               {worker.assigned_threads ? <span>{worker.assigned_threads} threads</span> : null}
                               {hasTargetPosition ? <span>Target {Math.round(worker.target_position_seconds)}s</span> : null}
+                              {worker.cpu_cores_used != null ? <span>CPU {formatCpuCoresValue(worker.cpu_cores_used)}</span> : null}
+                              {worker.memory_bytes != null ? <span>RAM {formatMemoryGaugeValue(worker.memory_bytes)}</span> : null}
                               {worker.replacement_count ? <span>{worker.replacement_count} replacements</span> : null}
                               {worker.failure_count ? <span>{worker.failure_count} failures</span> : null}
                             </div>
@@ -1153,8 +1159,8 @@ export function AdminPage() {
                               </div>
                             ) : null}
 
-                            {worker.non_retryable_error ? (
-                              <p className="action-feedback action-feedback--error">{worker.non_retryable_error}</p>
+                            {worker.failure_reason || worker.non_retryable_error ? (
+                              <p className="action-feedback action-feedback--error">{worker.failure_reason || worker.non_retryable_error}</p>
                             ) : null}
 
                             {worker.stop_requested ? (
