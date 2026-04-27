@@ -154,6 +154,7 @@ def _route2_full_mode_gate_locked(
         supply_observation_seconds + 0.001 >= ROUTE2_SUPPLY_SURPLUS_MIN_OBSERVATION_SECONDS
         and supply_rate_x + 0.001 >= ROUTE2_SUPPLY_SURPLUS_MIN_RATE_X
     )
+    fast_start_playable = bool(epoch.init_published and epoch.contiguous_published_through_segment is not None)
     fast_start_wait_seconds = None
     if not supply_surplus or actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds:
         fast_start_wait_seconds = 0.0 if supply_surplus else None
@@ -166,6 +167,30 @@ def _route2_full_mode_gate_locked(
         )
         fast_start_wait_seconds = quantized_runway_deficit_seconds / supply_rate_x
     if browser_session.full_preflight_state != "ready" or not browser_session.full_source_bin_bytes:
+        if supply_surplus and fast_start_playable and actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds:
+            return _route2_full_mode_gate_result(
+                mode_state="ready",
+                mode_ready=True,
+                mode_estimate_seconds=0.0,
+                mode_estimate_source="fast_start_supply_surplus",
+                gate_reason="full_fast_start_supply_surplus",
+                required_startup_runway_seconds=required_startup_runway_seconds,
+                actual_startup_runway_seconds=actual_startup_runway_seconds,
+                supply_rate_x=supply_rate_x,
+                supply_observation_seconds=supply_observation_seconds,
+            )
+        if supply_surplus and fast_start_wait_seconds is not None:
+            return _route2_full_mode_gate_result(
+                mode_state="preparing",
+                mode_ready=False,
+                mode_estimate_seconds=fast_start_wait_seconds,
+                mode_estimate_source="fast_start_supply_surplus",
+                gate_reason="full_fast_start_waiting_for_runway",
+                required_startup_runway_seconds=required_startup_runway_seconds,
+                actual_startup_runway_seconds=actual_startup_runway_seconds,
+                supply_rate_x=supply_rate_x,
+                supply_observation_seconds=supply_observation_seconds,
+            )
         bootstrap_eta_seconds = route2_full_bootstrap_eta_locked(session, epoch, now_ts=now_ts)
         return _route2_full_mode_gate_result(
             mode_state="estimating" if bootstrap_eta_seconds is None else "preparing",
@@ -180,6 +205,30 @@ def _route2_full_mode_gate_locked(
         )
     budget_metrics = route2_full_budget_metrics_locked(session, epoch)
     if budget_metrics is None:
+        if supply_surplus and fast_start_playable and actual_startup_runway_seconds + 0.001 >= required_startup_runway_seconds:
+            return _route2_full_mode_gate_result(
+                mode_state="ready",
+                mode_ready=True,
+                mode_estimate_seconds=0.0,
+                mode_estimate_source="fast_start_supply_surplus",
+                gate_reason="full_fast_start_supply_surplus",
+                required_startup_runway_seconds=required_startup_runway_seconds,
+                actual_startup_runway_seconds=actual_startup_runway_seconds,
+                supply_rate_x=supply_rate_x,
+                supply_observation_seconds=supply_observation_seconds,
+            )
+        if supply_surplus and fast_start_wait_seconds is not None:
+            return _route2_full_mode_gate_result(
+                mode_state="preparing",
+                mode_ready=False,
+                mode_estimate_seconds=fast_start_wait_seconds,
+                mode_estimate_source="fast_start_supply_surplus",
+                gate_reason="full_fast_start_waiting_for_runway",
+                required_startup_runway_seconds=required_startup_runway_seconds,
+                actual_startup_runway_seconds=actual_startup_runway_seconds,
+                supply_rate_x=supply_rate_x,
+                supply_observation_seconds=supply_observation_seconds,
+            )
         bootstrap_eta_seconds = route2_full_bootstrap_eta_locked(session, epoch, now_ts=now_ts)
         return _route2_full_mode_gate_result(
             mode_state="estimating" if bootstrap_eta_seconds is None else "preparing",

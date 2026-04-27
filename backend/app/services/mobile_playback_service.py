@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import shutil
 import statistics
 import subprocess
@@ -60,6 +61,7 @@ from .mobile_playback_models import (
     MobileClusterJob,
     MobilePlaybackSession,
     PlaybackEpoch,
+    Route2WorkerRecord,
 )
 from .mobile_playback_route2_metrics import (
     _route2_client_goodput_locked as _route2_client_goodput_locked_impl,
@@ -190,8 +192,10 @@ class MobilePlaybackManager:
         self._lock = threading.Lock()
         self._sessions: dict[str, MobilePlaybackSession] = {}
         self._active_session_by_user: dict[int, str] = {}
+        self._route2_session_ids_by_user: dict[int, set[str]] = {}
         self._cache_states: dict[str, CacheState] = {}
         self._workers: dict[str, str] = {}
+        self._route2_workers: dict[str, Route2WorkerRecord] = {}
         self._manager_stop = threading.Event()
         self._manager_thread: threading.Thread | None = None
         self._session_root = self.settings.transcode_dir / "mobile_sessions"
@@ -203,6 +207,7 @@ class MobilePlaybackManager:
         self._cache_root.mkdir(parents=True, exist_ok=True)
         self._route2_root.mkdir(parents=True, exist_ok=True)
         (self._route2_root / "preflight").mkdir(parents=True, exist_ok=True)
+        self._recover_stale_route2_worker_metadata()
         self._cleanup_orphaned_cache_dirs()
         if self._manager_thread is None:
             self._manager_thread = threading.Thread(
@@ -226,7 +231,9 @@ class MobilePlaybackManager:
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._active_session_by_user.clear()
+            self._route2_session_ids_by_user.clear()
             self._workers.clear()
+            self._route2_workers.clear()
         for session in sessions:
             self._terminate_session(session, remove_session_dir=False)
 
@@ -235,6 +242,8 @@ class MobilePlaybackManager:
         item: dict[str, object],
         *,
         user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
         profile: str = "mobile_1080p",
         start_position_seconds: float = 0.0,
         engine_mode: str | None = None,
@@ -270,49 +279,79 @@ class MobilePlaybackManager:
         now = utcnow_iso()
         now_ts = time.time()
         target_position_seconds = self._clamp_time(start_position_seconds, duration_seconds)
-
-        with self._lock:
-            existing_session_id = self._active_session_by_user.get(user_id)
-            existing_session = self._sessions.get(existing_session_id) if existing_session_id else None
-
-        if (
-            existing_session
-            and existing_session.state not in {"failed", "stopped", "expired"}
-            and existing_session.media_item_id == int(item["id"])
-            and existing_session.profile == profile_key
-            and existing_session.browser_playback.engine_mode == selected_engine_mode
-            and existing_session.browser_playback.playback_mode == selected_playback_mode
-        ):
-            self.touch_session(existing_session.session_id, user_id=user_id, media_access=True)
-            if (
-                selected_engine_mode == "legacy"
-                and abs(existing_session.target_position_seconds - target_position_seconds) > SEGMENT_DURATION_SECONDS
-            ):
-                return self.seek_session(
-                    existing_session.session_id,
-                    user_id=user_id,
-                    target_position_seconds=target_position_seconds,
-                    last_stable_position_seconds=existing_session.last_stable_position_seconds,
-                    playing_before_seek=False,
+        if selected_engine_mode == "route2":
+            with self._lock:
+                compatible_session: MobilePlaybackSession | None = None
+                conflicting_session: MobilePlaybackSession | None = None
+                route2_sessions = self._get_user_route2_sessions_locked(user_id)
+                for candidate in self._ordered_live_sessions_locked(route2_sessions):
+                    if (
+                        candidate.media_item_id != int(item["id"])
+                        or candidate.profile != profile_key
+                        or candidate.browser_playback.engine_mode != "route2"
+                        or candidate.browser_playback.playback_mode != selected_playback_mode
+                        or candidate.source_fingerprint != source_fingerprint
+                        or candidate.cache_key != cache_key
+                    ):
+                        continue
+                    self._refresh_route2_session_authority_locked(candidate)
+                    if self._route2_session_can_reuse_target_locked(candidate, target_position_seconds):
+                        compatible_session = candidate
+                        break
+                    conflicting_session = candidate
+            if compatible_session is not None:
+                self.touch_session(compatible_session.session_id, user_id=user_id, media_access=True)
+                if (
+                    abs(compatible_session.target_position_seconds - target_position_seconds) > SEGMENT_DURATION_SECONDS
+                ):
+                    return self.seek_session(
+                        compatible_session.session_id,
+                        user_id=user_id,
+                        target_position_seconds=target_position_seconds,
+                        last_stable_position_seconds=compatible_session.last_stable_position_seconds,
+                        playing_before_seek=False,
+                    )
+                return self.get_session(compatible_session.session_id, user_id=user_id)
+            if conflicting_session is not None:
+                raise ValueError(
+                    "A Browser Playback Route 2 preparation for this movie and mode is already active for this user. "
+                    "Stop the existing preparation before starting a different target."
                 )
+        else:
+            with self._lock:
+                existing_session_id = self._active_session_by_user.get(user_id)
+                existing_session = self._sessions.get(existing_session_id) if existing_session_id else None
             if (
-                selected_engine_mode == "route2"
-                and abs(existing_session.target_position_seconds - target_position_seconds) > SEGMENT_DURATION_SECONDS
+                existing_session
+                and existing_session.browser_playback.engine_mode == "legacy"
+                and existing_session.state not in {"failed", "stopped", "expired"}
+                and existing_session.media_item_id == int(item["id"])
+                and existing_session.profile == profile_key
+                and existing_session.browser_playback.playback_mode == selected_playback_mode
             ):
-                self.stop_session(existing_session.session_id, user_id=user_id)
-                existing_session = None
-            else:
+                self.touch_session(existing_session.session_id, user_id=user_id, media_access=True)
+                if abs(existing_session.target_position_seconds - target_position_seconds) > SEGMENT_DURATION_SECONDS:
+                    return self.seek_session(
+                        existing_session.session_id,
+                        user_id=user_id,
+                        target_position_seconds=target_position_seconds,
+                        last_stable_position_seconds=existing_session.last_stable_position_seconds,
+                        playing_before_seek=False,
+                    )
                 return self.get_session(existing_session.session_id, user_id=user_id)
-
-        if existing_session:
-            self.stop_session(existing_session.session_id, user_id=user_id)
+            if existing_session and existing_session.browser_playback.engine_mode == "legacy":
+                self.stop_session(existing_session.session_id, user_id=user_id)
 
         session_id = uuid.uuid4().hex
         session = MobilePlaybackSession(
             session_id=session_id,
             user_id=user_id,
+            auth_session_id=auth_session_id,
+            username=(username or "").strip() or None,
             media_item_id=int(item["id"]),
+            media_title=str(item.get("title") or f"Media Item {item['id']}"),
             profile=profile_key,
+            source_kind=source_kind,
             duration_seconds=duration_seconds,
             cache_key=cache_key,
             source_locator=source_locator,
@@ -335,7 +374,7 @@ class MobilePlaybackManager:
             with self._lock:
                 self._initialize_route2_session_locked(session)
                 self._sessions[session.session_id] = session
-                self._active_session_by_user[user_id] = session.session_id
+                self._register_route2_session_locked(session)
             return self.get_session(session.session_id, user_id=user_id)
 
         cache_state = self._load_cache_state(
@@ -375,9 +414,8 @@ class MobilePlaybackManager:
 
     def get_active_session(self, *, user_id: int) -> dict[str, object] | None:
         with self._lock:
-            session_id = self._active_session_by_user.get(user_id)
-            session = self._sessions.get(session_id) if session_id else None
-            if session is None or session.state in {"failed", "stopped", "expired"}:
+            session = self._resolve_preferred_session_locked(user_id)
+            if session is None:
                 return None
             if session.browser_playback.engine_mode == "route2":
                 self._touch_session_locked(session, media_access=False)
@@ -396,13 +434,8 @@ class MobilePlaybackManager:
 
     def get_active_session_for_item(self, item_id: int, *, user_id: int) -> dict[str, object] | None:
         with self._lock:
-            session_id = self._active_session_by_user.get(user_id)
-            session = self._sessions.get(session_id) if session_id else None
-            if (
-                session is None
-                or session.media_item_id != item_id
-                or session.state in {"failed", "stopped", "expired"}
-            ):
+            session = self._resolve_preferred_session_locked(user_id, item_id=item_id)
+            if session is None:
                 return None
             if session.browser_playback.engine_mode == "route2":
                 self._touch_session_locked(session, media_access=False)
@@ -601,8 +634,7 @@ class MobilePlaybackManager:
             if session is None:
                 return False
             self._sessions.pop(session.session_id, None)
-            if self._active_session_by_user.get(user_id) == session.session_id:
-                self._active_session_by_user.pop(user_id, None)
+            self._unregister_session_locked(session)
         self._terminate_session(session)
         return True
 
@@ -847,6 +879,386 @@ class MobilePlaybackManager:
                 )
                 raise FileNotFoundError("Route 2 epoch segment is not published yet")
             return segment_path
+
+    def _session_activity_ts(self, session: MobilePlaybackSession) -> float:
+        return max(
+            self._parse_iso_ts(session.last_client_seen_at),
+            self._parse_iso_ts(session.last_media_access_at),
+        )
+
+    def _ordered_live_sessions_locked(
+        self,
+        sessions: list[MobilePlaybackSession],
+    ) -> list[MobilePlaybackSession]:
+        return sorted(
+            [
+                session
+                for session in sessions
+                if session.state not in {"failed", "stopped", "expired"}
+            ],
+            key=self._session_activity_ts,
+            reverse=True,
+        )
+
+    def _resolve_preferred_session_locked(
+        self,
+        user_id: int,
+        *,
+        item_id: int | None = None,
+    ) -> MobilePlaybackSession | None:
+        candidates = self._ordered_live_sessions_locked(
+            [
+                session
+                for session in self._sessions.values()
+                if session.user_id == user_id
+                and (item_id is None or session.media_item_id == item_id)
+            ]
+        )
+        if not candidates:
+            self._active_session_by_user.pop(user_id, None)
+            return None
+        preferred_session_id = self._active_session_by_user.get(user_id)
+        if preferred_session_id:
+            preferred_session = self._sessions.get(preferred_session_id)
+            if (
+                preferred_session is not None
+                and preferred_session in candidates
+                and (item_id is None or preferred_session.media_item_id == item_id)
+            ):
+                return preferred_session
+        preferred_session = candidates[0]
+        self._active_session_by_user[user_id] = preferred_session.session_id
+        return preferred_session
+
+    def _get_user_route2_sessions_locked(self, user_id: int) -> list[MobilePlaybackSession]:
+        session_ids = self._route2_session_ids_by_user.get(user_id, set())
+        sessions: list[MobilePlaybackSession] = []
+        for session_id in session_ids:
+            session = self._sessions.get(session_id)
+            if session is None or session.browser_playback.engine_mode != "route2":
+                continue
+            sessions.append(session)
+        return sessions
+
+    def _register_route2_session_locked(self, session: MobilePlaybackSession) -> None:
+        session_ids = self._route2_session_ids_by_user.setdefault(session.user_id, set())
+        session_ids.add(session.session_id)
+        self._active_session_by_user[session.user_id] = session.session_id
+
+    def _unregister_session_locked(self, session: MobilePlaybackSession) -> None:
+        if session.browser_playback.engine_mode == "route2":
+            session_ids = self._route2_session_ids_by_user.get(session.user_id)
+            if session_ids is not None:
+                session_ids.discard(session.session_id)
+                if not session_ids:
+                    self._route2_session_ids_by_user.pop(session.user_id, None)
+        if self._active_session_by_user.get(session.user_id) == session.session_id:
+            replacement = self._resolve_preferred_session_locked(session.user_id)
+            if replacement is None or replacement.session_id == session.session_id:
+                self._active_session_by_user.pop(session.user_id, None)
+            else:
+                self._active_session_by_user[session.user_id] = replacement.session_id
+
+    def _route2_session_can_reuse_target_locked(
+        self,
+        session: MobilePlaybackSession,
+        target_position_seconds: float,
+    ) -> bool:
+        if abs(session.target_position_seconds - target_position_seconds) <= SEGMENT_DURATION_SECONDS:
+            return True
+        browser_session = session.browser_playback
+        active_epoch = (
+            browser_session.epochs.get(browser_session.active_epoch_id)
+            if browser_session.active_epoch_id
+            else None
+        )
+        if (
+            active_epoch is not None
+            and active_epoch.init_published
+            and active_epoch.contiguous_published_through_segment is not None
+            and self._route2_position_in_epoch_locked(session, active_epoch, target_position_seconds)
+        ):
+            return True
+        return (
+            session.ready_start_seconds <= target_position_seconds <= session.ready_end_seconds
+            and session.ready_end_seconds > session.ready_start_seconds
+        )
+
+    def _route2_epoch_prepared_ranges_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> list[list[float]]:
+        self._rebuild_route2_published_frontier_locked(epoch)
+        if not epoch.init_published or epoch.contiguous_published_through_segment is None:
+            return []
+        return [[
+            round(epoch.epoch_start_seconds, 2),
+            round(self._route2_epoch_ready_end_seconds(session, epoch), 2),
+        ]]
+
+    def _ensure_route2_worker_record_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> Route2WorkerRecord:
+        worker_id = epoch.active_worker_id or uuid.uuid4().hex
+        epoch.active_worker_id = worker_id
+        record = self._route2_workers.get(worker_id)
+        if record is None:
+            record = Route2WorkerRecord(
+                worker_id=worker_id,
+                session_id=session.session_id,
+                epoch_id=epoch.epoch_id,
+                user_id=session.user_id,
+                username=session.username,
+                auth_session_id=session.auth_session_id,
+                media_item_id=session.media_item_id,
+                title=session.media_title,
+                playback_mode=session.browser_playback.playback_mode,
+                profile=session.profile,
+                source_kind=session.source_kind,
+                target_position_seconds=round(epoch.attach_position_seconds, 2),
+            )
+            self._route2_workers[worker_id] = record
+        self._sync_route2_worker_record_locked(record, session, epoch)
+        return record
+
+    def _sync_route2_worker_record_locked(
+        self,
+        record: Route2WorkerRecord,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> None:
+        record.username = session.username
+        record.auth_session_id = session.auth_session_id
+        record.title = session.media_title
+        record.playback_mode = session.browser_playback.playback_mode
+        record.profile = session.profile
+        record.source_kind = session.source_kind
+        record.target_position_seconds = round(epoch.attach_position_seconds, 2)
+        record.last_seen_at = utcnow_iso()
+        record.prepared_ranges = self._route2_epoch_prepared_ranges_locked(session, epoch)
+        record.stop_requested = epoch.stop_requested
+        record.non_retryable_error = epoch.last_error if _is_non_retryable_cloud_source_error(epoch.last_error) else None
+        record.replacement_count = session.browser_playback.replacement_epoch_count
+        process = epoch.process
+        if process is not None and process.poll() is None:
+            record.process = process
+            record.pid = process.pid
+        else:
+            record.process = None
+            record.pid = None
+
+    def _finalize_route2_worker_record_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        *,
+        state: str,
+        increment_failure: bool = False,
+        remove: bool = False,
+    ) -> None:
+        worker_id = epoch.active_worker_id
+        if not worker_id:
+            return
+        record = self._ensure_route2_worker_record_locked(session, epoch)
+        record.state = state
+        if increment_failure:
+            record.failure_count += 1
+        if state != "running":
+            record.process = None
+            record.pid = None
+        self._sync_route2_worker_record_locked(record, session, epoch)
+        if remove:
+            self._route2_workers.pop(worker_id, None)
+
+    def _remove_route2_worker_record_locked(self, epoch: PlaybackEpoch) -> None:
+        worker_id = epoch.active_worker_id
+        if not worker_id:
+            return
+        self._route2_workers.pop(worker_id, None)
+
+    def _route2_running_workers_locked(self, *, user_id: int | None = None) -> list[Route2WorkerRecord]:
+        return [
+            record
+            for record in self._route2_workers.values()
+            if record.state == "running" and (user_id is None or record.user_id == user_id)
+        ]
+
+    def _route2_queued_workers_locked(self, *, user_id: int | None = None) -> list[Route2WorkerRecord]:
+        return [
+            record
+            for record in self._route2_workers.values()
+            if record.state == "queued" and (user_id is None or record.user_id == user_id)
+        ]
+
+    def _route2_running_threads_locked(self, *, user_id: int | None = None) -> int:
+        return sum(max(0, int(record.assigned_threads)) for record in self._route2_running_workers_locked(user_id=user_id))
+
+    def _route2_budget_summary_locked(self) -> dict[str, object]:
+        total_cpu_cores = max(1, os.cpu_count() or 1)
+        total_route2_budget_cores = max(
+            1,
+            math.floor((total_cpu_cores * self.settings.route2_cpu_budget_percent) / 100),
+        )
+        active_user_ids = sorted(
+            {
+                record.user_id
+                for record in self._route2_workers.values()
+                if record.state in {"queued", "running"}
+            }
+        )
+        active_decoding_user_count = len(active_user_ids)
+        per_user_budget_cores = (
+            max(1, math.floor(total_route2_budget_cores / active_decoding_user_count))
+            if active_decoding_user_count > 0
+            else total_route2_budget_cores
+        )
+        return {
+            "cpu_budget_percent": self.settings.route2_cpu_budget_percent,
+            "total_cpu_cores": total_cpu_cores,
+            "total_route2_budget_cores": total_route2_budget_cores,
+            "active_decoding_user_count": active_decoding_user_count,
+            "active_user_ids": active_user_ids,
+            "per_user_budget_cores": per_user_budget_cores,
+            "active_worker_count": len(self._route2_running_workers_locked()),
+            "queued_worker_count": len(self._route2_queued_workers_locked()),
+        }
+
+    def get_route2_worker_status(self) -> dict[str, object]:
+        with self._lock:
+            budget = self._route2_budget_summary_locked()
+            grouped_users: dict[int, dict[str, object]] = {}
+            now_ts = time.time()
+            for record in sorted(self._route2_workers.values(), key=lambda value: (value.user_id, value.title, value.worker_id)):
+                group = grouped_users.setdefault(
+                    record.user_id,
+                    {
+                        "user_id": record.user_id,
+                        "username": record.username,
+                        "allocated_budget_cores": (
+                            budget["per_user_budget_cores"]
+                            if record.user_id in budget["active_user_ids"]
+                            else 0
+                        ),
+                        "running_workers": 0,
+                        "queued_workers": 0,
+                        "items": [],
+                    },
+                )
+                if record.state == "running":
+                    group["running_workers"] += 1
+                elif record.state == "queued":
+                    group["queued_workers"] += 1
+                runtime_seconds = None
+                if record.started_at:
+                    runtime_seconds = max(0.0, now_ts - self._parse_iso_ts(record.started_at))
+                group["items"].append(
+                    {
+                        "worker_id": record.worker_id,
+                        "session_id": record.session_id,
+                        "epoch_id": record.epoch_id,
+                        "media_item_id": record.media_item_id,
+                        "title": record.title,
+                        "playback_mode": record.playback_mode,
+                        "profile": record.profile,
+                        "source_kind": record.source_kind,
+                        "state": record.state,
+                        "runtime_seconds": round(runtime_seconds, 2) if runtime_seconds is not None else None,
+                        "pid": record.pid,
+                        "target_position_seconds": round(record.target_position_seconds, 2),
+                        "prepared_ranges": record.prepared_ranges,
+                        "stop_requested": record.stop_requested,
+                        "non_retryable_error": record.non_retryable_error,
+                        "failure_count": record.failure_count,
+                        "replacement_count": record.replacement_count,
+                        "assigned_threads": record.assigned_threads,
+                        "cpu_percent": None,
+                        "memory_bytes": None,
+                        "started_at": record.started_at,
+                        "last_seen_at": record.last_seen_at,
+                    }
+                )
+            return {
+                **budget,
+                "workers_by_user": sorted(grouped_users.values(), key=lambda value: ((value["username"] or ""), value["user_id"])),
+            }
+
+    def invalidate_user_sessions(self, user_id: int, *, reason: str) -> int:
+        with self._lock:
+            sessions = self._collect_sessions_to_invalidate_locked(
+                lambda session: session.user_id == user_id,
+                reason=reason,
+            )
+        self._invalidate_sessions(sessions)
+        return len(sessions)
+
+    def invalidate_auth_session(self, auth_session_id: int, *, reason: str) -> int:
+        with self._lock:
+            sessions = self._collect_sessions_to_invalidate_locked(
+                lambda session: session.auth_session_id == auth_session_id,
+                reason=reason,
+            )
+        self._invalidate_sessions(sessions)
+        return len(sessions)
+
+    def _collect_sessions_to_invalidate_locked(
+        self,
+        predicate,
+        *,
+        reason: str,
+    ) -> list[MobilePlaybackSession]:
+        sessions: list[MobilePlaybackSession] = []
+        for session in list(self._sessions.values()):
+            if not predicate(session):
+                continue
+            session.state = "failed"
+            session.last_error = self._session_invalidation_message(reason)
+            sessions.append(session)
+            self._sessions.pop(session.session_id, None)
+            self._unregister_session_locked(session)
+        return sessions
+
+    def _invalidate_sessions(self, sessions: list[MobilePlaybackSession]) -> None:
+        for session in sessions:
+            self._terminate_session(session)
+
+    def _session_invalidation_message(self, reason: str) -> str:
+        if reason == "user_disabled":
+            return "This account has been disabled. Browser playback preparation was stopped."
+        if reason == "admin_revoked":
+            return "This signed-in session was revoked. Browser playback preparation was stopped."
+        if reason == "self_deleted":
+            return "This account was deleted. Browser playback preparation was stopped."
+        return "Browser playback preparation was stopped by backend control."
+
+    def _recover_stale_route2_worker_metadata(self) -> None:
+        route2_sessions_root = self._route2_root / "sessions"
+        if not route2_sessions_root.exists():
+            return
+        interrupted_error = "Route 2 worker was interrupted by backend restart"
+        for metadata_path in route2_sessions_root.glob("*/epochs/*/epoch.json"):
+            try:
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            claimed_worker = bool(payload.get("active_worker_id"))
+            incomplete_state = str(payload.get("state") or "") in {"starting", "warming"}
+            if not claimed_worker and not incomplete_state:
+                continue
+            payload["active_worker_id"] = None
+            if not bool(payload.get("transcoder_completed")):
+                payload["state"] = "failed"
+                payload["last_error"] = interrupted_error
+            payload["updated_at"] = utcnow_iso()
+            try:
+                metadata_path.write_text(
+                    json.dumps(payload, ensure_ascii=True, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                continue
 
     def _validate_transcoding(self) -> None:
         if not self.settings.transcode_enabled:
@@ -1503,21 +1915,55 @@ class MobilePlaybackManager:
             clamp_time=self._clamp_time,
         )
 
-    def _terminate_route2_epoch_locked(self, epoch: PlaybackEpoch) -> None:
+    def _terminate_route2_epoch_locked(
+        self,
+        epoch: PlaybackEpoch,
+        *,
+        final_state: str = "stopped",
+        session: MobilePlaybackSession | None = None,
+        remove_worker_record: bool = False,
+    ) -> None:
+        worker_id = epoch.active_worker_id
+        if session is not None and worker_id:
+            self._finalize_route2_worker_record_locked(
+                session,
+                epoch,
+                state="stopping",
+                remove=False,
+            )
         _terminate_route2_epoch_locked_impl(
             epoch,
             workers=self._workers,
         )
+        if session is not None and worker_id:
+            epoch.active_worker_id = worker_id
+            self._finalize_route2_worker_record_locked(
+                session,
+                epoch,
+                state=final_state,
+                remove=remove_worker_record,
+            )
+        elif remove_worker_record and worker_id:
+            self._route2_workers.pop(worker_id, None)
+        epoch.active_worker_id = None
 
     def _discard_route2_epoch_locked(
         self,
         session: MobilePlaybackSession,
         epoch_id: str,
     ) -> None:
+        epoch = session.browser_playback.epochs.get(epoch_id)
+        if epoch is not None:
+            self._terminate_route2_epoch_locked(
+                epoch,
+                session=session,
+                final_state="stopped",
+                remove_worker_record=True,
+            )
         _discard_route2_epoch_locked_impl(
             session,
             epoch_id,
-            terminate_route2_epoch_locked=self._terminate_route2_epoch_locked,
+            terminate_route2_epoch_locked=lambda _epoch: None,
         )
 
     def _create_route2_replacement_epoch_locked(
@@ -1526,16 +1972,32 @@ class MobilePlaybackManager:
         *,
         target_position_seconds: float,
         reason: str,
-    ) -> PlaybackEpoch:
+    ) -> PlaybackEpoch | None:
         browser_session = session.browser_playback
         if browser_session.replacement_epoch_id:
             self._discard_route2_epoch_locked(session, browser_session.replacement_epoch_id)
+        if browser_session.replacement_epoch_count >= self.settings.route2_max_replacement_epochs_per_session:
+            browser_session.state = "failed"
+            session.state = "failed"
+            session.last_error = (
+                "Browser Playback Route 2 reached the maximum number of replacement epochs for this session."
+            )
+            self._log_route2_event(
+                "replacement_epoch_cap_exceeded",
+                session=session,
+                level=logging.ERROR,
+                replacement_epoch_count=browser_session.replacement_epoch_count,
+                configured_cap=self.settings.route2_max_replacement_epochs_per_session,
+                reason=reason,
+            )
+            return None
         session.epoch += 1
         session.target_position_seconds = self._clamp_time(target_position_seconds, session.duration_seconds)
         session.pending_target_seconds = session.target_position_seconds
         replacement_epoch = self._build_route2_epoch_locked(session)
         browser_session.replacement_epoch_id = replacement_epoch.epoch_id
         browser_session.epochs[replacement_epoch.epoch_id] = replacement_epoch
+        browser_session.replacement_epoch_count += 1
         self._ensure_route2_epoch_workspace_locked(replacement_epoch)
         browser_session.replacement_retry_not_before_ts = 0.0
         self._log_route2_event(
@@ -1566,7 +2028,7 @@ class MobilePlaybackManager:
                 reason="replacement_promotion",
                 required_client_revision=next_attach_revision,
             )
-            self._terminate_route2_epoch_locked(previous_active)
+            self._terminate_route2_epoch_locked(previous_active, session=session)
             previous_active.stop_requested = False
             self._write_route2_epoch_metadata_locked(previous_active)
         browser_session.active_epoch_id = replacement_epoch.epoch_id
@@ -1587,13 +2049,23 @@ class MobilePlaybackManager:
             previous_epoch_id=previous_active.epoch_id if previous_active is not None else None,
         )
 
-    def _route2_epoch_needs_worker_locked(self, epoch: PlaybackEpoch) -> bool:
+    def _route2_epoch_needs_worker_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> bool:
         if epoch.state in {"failed", "draining", "ended"}:
             return False
         if epoch.transcoder_completed:
             return False
-        if epoch.active_worker_id or (epoch.process and epoch.process.poll() is None):
+        record = self._route2_workers.get(epoch.active_worker_id) if epoch.active_worker_id else None
+        if record is not None and record.state in {"queued", "running", "stopping"}:
+            self._sync_route2_worker_record_locked(record, session, epoch)
             return False
+        if epoch.process and epoch.process.poll() is None:
+            return False
+        if epoch.active_worker_id and record is None:
+            epoch.active_worker_id = None
         return True
 
     def _ensure_route2_epoch_workers_locked(self, session: MobilePlaybackSession) -> None:
@@ -1606,31 +2078,32 @@ class MobilePlaybackManager:
             epoch = browser_session.epochs.get(epoch_id)
             if epoch is None:
                 continue
-            if epoch.active_worker_id or (epoch.process and epoch.process.poll() is None):
+            if epoch.process and epoch.process.poll() is None:
+                record = self._ensure_route2_worker_record_locked(session, epoch)
+                record.state = "running"
+                self._sync_route2_worker_record_locked(record, session, epoch)
                 running_epoch_exists = True
                 if epoch.state == "starting":
                     epoch.state = "warming"
                     self._write_route2_epoch_metadata_locked(epoch)
                 continue
-            if not self._route2_epoch_needs_worker_locked(epoch):
-                continue
-            if len(self._workers) >= self.settings.max_concurrent_mobile_workers:
+            record = self._route2_workers.get(epoch.active_worker_id) if epoch.active_worker_id else None
+            if record is not None and record.state == "queued":
                 waiting_epoch_exists = True
+                self._sync_route2_worker_record_locked(record, session, epoch)
+                if epoch.state not in {"failed", "draining", "ended"} and epoch.state != "starting":
+                    epoch.state = "starting"
+                    self._write_route2_epoch_metadata_locked(epoch)
                 continue
-            worker_id = uuid.uuid4().hex
-            epoch.active_worker_id = worker_id
+            if not self._route2_epoch_needs_worker_locked(session, epoch):
+                continue
+            record = self._ensure_route2_worker_record_locked(session, epoch)
             epoch.stop_requested = False
-            epoch.state = "warming"
-            self._workers[worker_id] = session.session_id
-            running_epoch_exists = True
+            record.state = "queued"
+            record.assigned_threads = 0
+            epoch.state = "starting"
+            waiting_epoch_exists = True
             self._write_route2_epoch_metadata_locked(epoch)
-            thread = threading.Thread(
-                target=self._run_route2_epoch_worker,
-                args=(session.session_id, epoch.epoch_id, worker_id),
-                daemon=True,
-                name=f"elvern-route2-worker-{worker_id[:8]}",
-            )
-            thread.start()
         if running_epoch_exists:
             session.worker_state = "running"
             session.queue_started_ts = None
@@ -1714,6 +2187,7 @@ class MobilePlaybackManager:
         *,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
+        thread_budget: int,
     ) -> list[str]:
         profile = MOBILE_PROFILES[session.profile]
         segment_pattern = epoch.staging_dir / "segment_%06d.m4s"
@@ -1733,6 +2207,8 @@ class MobilePlaybackManager:
             "warning",
             "-nostdin",
             "-y",
+            "-threads",
+            str(max(1, int(thread_budget))),
         ]
         if source_input_kind == "url":
             command.extend(
@@ -1837,21 +2313,36 @@ class MobilePlaybackManager:
         with self._lock:
             session = self._sessions.get(session_id)
             if not session or session.browser_playback.engine_mode != "route2":
-                self._workers.pop(worker_id, None)
+                self._route2_workers.pop(worker_id, None)
                 return
             epoch = session.browser_playback.epochs.get(epoch_id)
             if epoch is None or epoch.active_worker_id != worker_id:
-                self._workers.pop(worker_id, None)
+                self._route2_workers.pop(worker_id, None)
                 return
+            record = self._route2_workers.get(worker_id)
+            if record is None:
+                return
+            thread_budget = max(
+                self.settings.route2_min_worker_threads,
+                int(record.assigned_threads or self.settings.route2_min_worker_threads),
+            )
             shutil.rmtree(epoch.staging_dir, ignore_errors=True)
             epoch.staging_dir.mkdir(parents=True, exist_ok=True)
             try:
-                command = self._build_route2_epoch_ffmpeg_command(session=session, epoch=epoch)
+                command = self._build_route2_epoch_ffmpeg_command(
+                    session=session,
+                    epoch=epoch,
+                    thread_budget=thread_budget,
+                )
             except Exception as exc:  # noqa: BLE001
-                self._workers.pop(worker_id, None)
-                epoch.active_worker_id = None
                 epoch.state = "failed"
                 epoch.last_error = str(exc) or "Browser Playback Route 2 could not prepare the source"
+                self._finalize_route2_worker_record_locked(
+                    session,
+                    epoch,
+                    state="failed",
+                    increment_failure=True,
+                )
                 self._log_route2_event(
                     "epoch_worker_prepare_failed",
                     session=session,
@@ -1864,10 +2355,11 @@ class MobilePlaybackManager:
                 return
             stderr_path = epoch.epoch_dir / "ffmpeg.stderr.log"
         logger.info(
-            "Starting Browser Playback Route 2 epoch session=%s epoch=%s target=%.2f command=%s",
+            "Starting Browser Playback Route 2 epoch session=%s epoch=%s target=%.2f threads=%s command=%s",
             session_id,
             epoch_id,
             epoch.attach_position_seconds,
+            thread_budget,
             " ".join(command),
         )
         stderr_stream = None
@@ -1883,16 +2375,22 @@ class MobilePlaybackManager:
             if stderr_stream is not None:
                 stderr_stream.close()
             with self._lock:
-                self._workers.pop(worker_id, None)
                 session = self._sessions.get(session_id)
                 if not session or session.browser_playback.engine_mode != "route2":
+                    self._route2_workers.pop(worker_id, None)
                     return
                 epoch = session.browser_playback.epochs.get(epoch_id)
                 if epoch is None:
+                    self._route2_workers.pop(worker_id, None)
                     return
-                epoch.active_worker_id = None
                 epoch.state = "failed"
                 epoch.last_error = str(exc)
+                self._finalize_route2_worker_record_locked(
+                    session,
+                    epoch,
+                    state="failed",
+                    increment_failure=True,
+                )
                 self._log_route2_event(
                     "epoch_worker_spawn_failed",
                     session=session,
@@ -1911,16 +2409,22 @@ class MobilePlaybackManager:
             session = self._sessions.get(session_id)
             if not session or session.browser_playback.engine_mode != "route2":
                 process.terminate()
-                self._workers.pop(worker_id, None)
+                self._route2_workers.pop(worker_id, None)
                 return
             epoch = session.browser_playback.epochs.get(epoch_id)
             if epoch is None or epoch.active_worker_id != worker_id:
                 process.terminate()
-                self._workers.pop(worker_id, None)
+                self._route2_workers.pop(worker_id, None)
                 return
             epoch.process = process
             if epoch.state == "starting":
                 epoch.state = "warming"
+            record = self._ensure_route2_worker_record_locked(session, epoch)
+            record.state = "running"
+            record.assigned_threads = thread_budget
+            if not record.started_at:
+                record.started_at = utcnow_iso()
+            self._sync_route2_worker_record_locked(record, session, epoch)
             self._write_route2_epoch_metadata_locked(epoch)
 
         while process.poll() is None and not self._manager_stop.is_set():
@@ -1943,17 +2447,22 @@ class MobilePlaybackManager:
         if return_code != 0 and source_input_kind == "url" and source_input:
             source_input_error = _probe_worker_source_input_error_impl(source_input)
         with self._lock:
-            self._workers.pop(worker_id, None)
             session = self._sessions.get(session_id)
             if not session or session.browser_playback.engine_mode != "route2":
+                self._route2_workers.pop(worker_id, None)
                 return
             epoch = session.browser_playback.epochs.get(epoch_id)
             if epoch is None:
+                self._route2_workers.pop(worker_id, None)
                 return
             epoch.process = None
-            epoch.active_worker_id = None
             if epoch.stop_requested or epoch.state in {"draining", "ended"}:
                 epoch.stop_requested = False
+                self._finalize_route2_worker_record_locked(
+                    session,
+                    epoch,
+                    state="stopped",
+                )
                 self._write_route2_epoch_metadata_locked(epoch)
                 self._refresh_route2_session_authority_locked(session)
                 return
@@ -1966,6 +2475,12 @@ class MobilePlaybackManager:
                         "Browser Playback Route 2 epoch transcoder failed "
                         f"(ffmpeg exited with code {return_code})"
                     )
+                )
+                self._finalize_route2_worker_record_locked(
+                    session,
+                    epoch,
+                    state="failed",
+                    increment_failure=True,
                 )
                 self._log_route2_event(
                     "epoch_worker_failed",
@@ -1981,6 +2496,11 @@ class MobilePlaybackManager:
                 return
             epoch.transcoder_completed = True
             epoch.last_error = None
+            self._finalize_route2_worker_record_locked(
+                session,
+                epoch,
+                state="completed",
+            )
             self._log_route2_event(
                 "epoch_worker_completed",
                 session=session,
@@ -2101,6 +2621,9 @@ class MobilePlaybackManager:
                     target_position_seconds=self._route2_recovery_target_locked(session, active_epoch),
                     reason="active_epoch_failure",
                 )
+                if replacement_epoch is None and session.state == "failed":
+                    self._write_route2_epoch_metadata_locked(active_epoch)
+                    return
             browser_session.state = "recovering"
 
         if (
@@ -2118,6 +2641,9 @@ class MobilePlaybackManager:
                 target_position_seconds=self._route2_recovery_target_locked(session, active_epoch),
                 reason="draining_epoch_retry",
             )
+            if replacement_epoch is None and session.state == "failed":
+                self._write_route2_epoch_metadata_locked(active_epoch)
+                return
 
         if replacement_epoch is not None:
             replacement_attach_ready = self._route2_epoch_startup_attach_ready_locked(session, replacement_epoch)
@@ -2486,6 +3012,7 @@ class MobilePlaybackManager:
         if media_access:
             session.last_media_access_at = now
         session.expires_at_ts = time.time() + (self.settings.mobile_session_ttl_minutes * 60)
+        self._active_session_by_user[session.user_id] = session.session_id
 
     def _browser_session_state(self, session: MobilePlaybackSession) -> str:
         browser_session = session.browser_playback
@@ -3087,8 +3614,14 @@ class MobilePlaybackManager:
         if session.active_job:
             self._terminate_job(session.active_job)
         if session.browser_playback.engine_mode == "route2":
-            for epoch in session.browser_playback.epochs.values():
-                self._terminate_route2_epoch_locked(epoch)
+            with self._lock:
+                for epoch in session.browser_playback.epochs.values():
+                    self._terminate_route2_epoch_locked(
+                        epoch,
+                        session=session,
+                        final_state="stopped",
+                        remove_worker_record=True,
+                    )
         if remove_session_dir:
             shutil.rmtree(self._session_root / session.session_id, ignore_errors=True)
             shutil.rmtree(self._route2_root / "sessions" / session.session_id, ignore_errors=True)
@@ -3154,8 +3687,134 @@ class MobilePlaybackManager:
             raise PermissionError("Mobile playback session not found")
         return session
 
+    def _route2_has_background_activity_locked(self, session: MobilePlaybackSession) -> bool:
+        return any(
+            record.session_id == session.session_id and record.state in {"queued", "running"}
+            for record in self._route2_workers.values()
+        )
+
+    def _reconcile_managed_session_auth_state(self) -> None:
+        with self._lock:
+            managed_sessions = [
+                (session.user_id, session.auth_session_id)
+                for session in self._sessions.values()
+            ]
+        if not managed_sessions:
+            return
+        user_ids = sorted({user_id for user_id, _auth_session_id in managed_sessions})
+        auth_session_ids = sorted(
+            {
+                auth_session_id
+                for _user_id, auth_session_id in managed_sessions
+                if auth_session_id is not None
+            }
+        )
+        disabled_user_ids: set[int] = set()
+        revoked_auth_session_ids: set[int] = set()
+        with get_connection(self.settings) as connection:
+            if user_ids:
+                placeholders = ",".join("?" for _ in user_ids)
+                for row in connection.execute(
+                    f"""
+                    SELECT id, enabled
+                    FROM users
+                    WHERE id IN ({placeholders})
+                    """,
+                    tuple(user_ids),
+                ).fetchall():
+                    if not bool(row["enabled"]):
+                        disabled_user_ids.add(int(row["id"]))
+            if auth_session_ids:
+                placeholders = ",".join("?" for _ in auth_session_ids)
+                for row in connection.execute(
+                    f"""
+                    SELECT id, revoked_at, revoked_reason
+                    FROM sessions
+                    WHERE id IN ({placeholders})
+                    """,
+                    tuple(auth_session_ids),
+                ).fetchall():
+                    if row["revoked_at"] is None:
+                        continue
+                    if str(row["revoked_reason"] or "") == "logout":
+                        continue
+                    revoked_auth_session_ids.add(int(row["id"]))
+        for user_id in sorted(disabled_user_ids):
+            self.invalidate_user_sessions(user_id, reason="user_disabled")
+        for auth_session_id in sorted(revoked_auth_session_ids):
+            self.invalidate_auth_session(auth_session_id, reason="admin_revoked")
+
+    def _dispatch_waiting_route2_workers_locked(self) -> None:
+        budget = self._route2_budget_summary_locked()
+        available_total_threads = int(budget["total_route2_budget_cores"]) - self._route2_running_threads_locked()
+        if available_total_threads < self.settings.route2_min_worker_threads:
+            return
+        per_user_budget_cores = int(budget["per_user_budget_cores"])
+        queued_by_user: dict[int, list[Route2WorkerRecord]] = {}
+        for record in sorted(
+            self._route2_workers.values(),
+            key=lambda value: (self._parse_iso_ts(value.created_at), value.worker_id),
+        ):
+            if record.state != "queued":
+                continue
+            session = self._sessions.get(record.session_id)
+            if session is None or session.browser_playback.engine_mode != "route2":
+                continue
+            epoch = session.browser_playback.epochs.get(record.epoch_id)
+            if epoch is None:
+                continue
+            queued_by_user.setdefault(record.user_id, []).append(record)
+        if not queued_by_user:
+            return
+
+        made_progress = True
+        while made_progress and available_total_threads >= self.settings.route2_min_worker_threads:
+            made_progress = False
+            for user_id in sorted(
+                queued_by_user,
+                key=lambda value: self._parse_iso_ts(queued_by_user[value][0].created_at) if queued_by_user[value] else 0.0,
+            ):
+                queue = queued_by_user.get(user_id) or []
+                if not queue:
+                    continue
+                running_user_threads = self._route2_running_threads_locked(user_id=user_id)
+                user_remaining_threads = per_user_budget_cores - running_user_threads
+                if user_remaining_threads < self.settings.route2_min_worker_threads:
+                    continue
+                if available_total_threads < self.settings.route2_min_worker_threads:
+                    return
+                record = queue.pop(0)
+                session = self._sessions.get(record.session_id)
+                if session is None or session.browser_playback.engine_mode != "route2":
+                    continue
+                epoch = session.browser_playback.epochs.get(record.epoch_id)
+                if epoch is None:
+                    continue
+                assigned_threads = min(
+                    self.settings.route2_max_worker_threads,
+                    available_total_threads,
+                    user_remaining_threads,
+                )
+                if assigned_threads < self.settings.route2_min_worker_threads:
+                    continue
+                record.state = "running"
+                record.assigned_threads = assigned_threads
+                if not record.started_at:
+                    record.started_at = utcnow_iso()
+                self._sync_route2_worker_record_locked(record, session, epoch)
+                thread = threading.Thread(
+                    target=self._run_route2_epoch_worker,
+                    args=(session.session_id, epoch.epoch_id, record.worker_id),
+                    daemon=True,
+                    name=f"elvern-route2-worker-{record.worker_id[:8]}",
+                )
+                thread.start()
+                available_total_threads -= assigned_threads
+                made_progress = True
+
     def _manager_loop(self) -> None:
         while not self._manager_stop.wait(1):
+            self._reconcile_managed_session_auth_state()
             self._cleanup_sessions_and_cache()
             self._dispatch_waiting_sessions()
 
@@ -3166,6 +3825,17 @@ class MobilePlaybackManager:
             for session_id, session in list(self._sessions.items()):
                 if session.browser_playback.engine_mode == "route2":
                     self._cleanup_route2_draining_epochs_locked(session, now_ts=now_ts)
+                    if self._route2_has_background_activity_locked(session):
+                        session.expires_at_ts = max(
+                            session.expires_at_ts,
+                            now_ts + (self.settings.mobile_session_ttl_minutes * 60),
+                        )
+                    if session.expires_at_ts <= now_ts:
+                        session.state = "expired"
+                        stale_sessions.append(session)
+                        self._sessions.pop(session_id, None)
+                        self._unregister_session_locked(session)
+                    continue
                 idle_for = now_ts - max(
                     self._parse_iso_ts(session.last_client_seen_at),
                     self._parse_iso_ts(session.last_media_access_at),
@@ -3174,8 +3844,7 @@ class MobilePlaybackManager:
                     session.state = "expired"
                     stale_sessions.append(session)
                     self._sessions.pop(session_id, None)
-                    if self._active_session_by_user.get(session.user_id) == session_id:
-                        self._active_session_by_user.pop(session.user_id, None)
+                    self._unregister_session_locked(session)
                 elif session.worker_state == "queued" and session.queue_started_ts:
                     if now_ts - session.queue_started_ts > self.settings.mobile_queue_timeout_seconds:
                         session.last_error = "Maximum concurrent mobile workers reached; try again when another experimental playback job finishes."
@@ -3189,31 +3858,28 @@ class MobilePlaybackManager:
 
     def _dispatch_waiting_sessions(self) -> None:
         with self._lock:
-            available_slots = self.settings.max_concurrent_mobile_workers - len(self._workers)
-            if available_slots <= 0:
-                return
-            session_ids = [
+            route2_session_ids = [
                 session.session_id
                 for session in self._sessions.values()
-                if (
-                    session.browser_playback.engine_mode == "route2"
-                    or (session.worker_state == "queued" and session.state in {"queued", "ready", "preparing", "retargeting"})
-                )
+                if session.browser_playback.engine_mode == "route2"
             ]
-        for session_id in session_ids:
+            legacy_session_ids = [
+                session.session_id
+                for session in self._sessions.values()
+                if session.browser_playback.engine_mode != "route2"
+                and session.worker_state == "queued"
+                and session.state in {"queued", "ready", "preparing", "retargeting"}
+            ]
+        for session_id in route2_session_ids:
             with self._lock:
                 session = self._sessions.get(session_id)
-                if session is None:
+                if session is None or session.browser_playback.engine_mode != "route2":
                     continue
-                engine_mode = session.browser_playback.engine_mode
-            if engine_mode == "route2":
-                with self._lock:
-                    session = self._sessions.get(session_id)
-                    if session is None or session.browser_playback.engine_mode != "route2":
-                        continue
-                    self._refresh_route2_session_authority_locked(session)
-            else:
-                self._ensure_worker_for_session(session_id)
+                self._refresh_route2_session_authority_locked(session)
+        with self._lock:
+            self._dispatch_waiting_route2_workers_locked()
+        for session_id in legacy_session_ids:
+            self._ensure_worker_for_session(session_id)
 
     def _cleanup_orphaned_cache_dirs(self) -> None:
         self._cleanup_orphaned_cache_dirs_locked(time.time())

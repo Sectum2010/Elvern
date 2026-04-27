@@ -21,6 +21,62 @@ DESKTOP_CHROME_USER_AGENT = (
 )
 
 
+class BrowserPlaybackRouteManagerStub:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = dict(payload)
+
+    def start(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def create_session(self, *args, **kwargs) -> dict[str, object]:
+        return dict(self.payload)
+
+    def get_session(self, session_id: str, *, user_id: int) -> dict[str, object]:
+        payload = dict(self.payload)
+        payload["session_id"] = session_id
+        return payload
+
+    def get_active_session(self, *, user_id: int) -> dict[str, object] | None:
+        return dict(self.payload)
+
+    def get_active_session_for_item(self, item_id: int, *, user_id: int) -> dict[str, object] | None:
+        payload = dict(self.payload)
+        payload["media_item_id"] = item_id
+        return payload
+
+    def update_runtime(self, session_id: str, *, user_id: int, **kwargs) -> dict[str, object]:
+        payload = dict(self.payload)
+        payload["session_id"] = session_id
+        return payload
+
+
+class AdminPlaybackWorkerManagerStub:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = dict(payload)
+        self.invalidated_user_calls: list[tuple[int, str]] = []
+        self.invalidated_auth_session_calls: list[tuple[int, str]] = []
+
+    def start(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def get_route2_worker_status(self) -> dict[str, object]:
+        return dict(self.payload)
+
+    def invalidate_user_sessions(self, user_id: int, *, reason: str) -> int:
+        self.invalidated_user_calls.append((user_id, reason))
+        return 1
+
+    def invalidate_auth_session(self, auth_session_id: int, *, reason: str) -> int:
+        self.invalidated_auth_session_calls.append((auth_session_id, reason))
+        return 1
+
+
 class RouteTranscodeManagerStub:
     def __init__(self, *, status: str = "queued") -> None:
         self._snapshot = {
@@ -177,6 +233,157 @@ def _set_shared_progress(
             ),
         )
         connection.commit()
+
+
+def _make_browser_playback_route2_payload(
+    *,
+    item_id: int,
+    session_id: str = "route2-session",
+    mode_estimate_source: str = "fast_start_supply_surplus",
+    gate_reason: str = "full_fast_start_supply_surplus",
+) -> dict[str, object]:
+    return {
+        "session_id": session_id,
+        "media_item_id": item_id,
+        "epoch": 1,
+        "manifest_revision": "route2:1:epoch-1",
+        "state": "ready",
+        "profile": "mobile_2160p",
+        "duration_seconds": 14125.17,
+        "target_position_seconds": 837.01,
+        "ready_start_seconds": 817.01,
+        "ready_end_seconds": 957.01,
+        "can_play_from_target": True,
+        "manifest_url": f"/api/mobile-playback/sessions/{session_id}/index.m3u8",
+        "status_url": f"/api/mobile-playback/sessions/{session_id}",
+        "seek_url": f"/api/mobile-playback/sessions/{session_id}/seek",
+        "heartbeat_url": f"/api/mobile-playback/sessions/{session_id}/heartbeat",
+        "stop_url": f"/api/mobile-playback/sessions/{session_id}/stop",
+        "worker_state": "running",
+        "engine_mode": "route2",
+        "playback_mode": "full",
+        "mode_state": "ready",
+        "mode_ready": True,
+        "mode_estimate_seconds": 0.0,
+        "mode_estimate_source": mode_estimate_source,
+        "active_epoch_id": "epoch-1",
+        "active_manifest_url": f"/api/mobile-playback/epochs/epoch-1/index.m3u8",
+        "attach_position_seconds": 837.01,
+        "attach_ready": True,
+        "browser_session_state": "active",
+        "session_state": "active",
+        "active_epoch_state": "attach_ready",
+        "gate_reason": gate_reason,
+        "required_startup_runway_seconds": 120.0,
+        "actual_startup_runway_seconds": 140.0,
+        "effective_goodput_ratio": 2.847,
+        "supply_rate_x": 2.847,
+        "supply_observation_seconds": 16.92,
+    }
+
+
+def _make_admin_playback_workers_payload() -> dict[str, object]:
+    return {
+        "cpu_budget_percent": 90,
+        "total_cpu_cores": 20,
+        "total_route2_budget_cores": 18,
+        "active_worker_count": 1,
+        "queued_worker_count": 2,
+        "active_decoding_user_count": 2,
+        "per_user_budget_cores": 9,
+        "workers_by_user": [
+            {
+                "user_id": 1,
+                "username": "alice",
+                "allocated_budget_cores": 9,
+                "running_workers": 1,
+                "queued_workers": 1,
+                "items": [
+                    {
+                        "worker_id": "worker-1",
+                        "session_id": "session-1",
+                        "epoch_id": "epoch-1",
+                        "media_item_id": 501,
+                        "title": "Two Towers",
+                        "playback_mode": "full",
+                        "profile": "mobile_2160p",
+                        "source_kind": "local",
+                        "state": "running",
+                        "runtime_seconds": 12.5,
+                        "pid": 4321,
+                        "target_position_seconds": 837.01,
+                        "prepared_ranges": [[817.01, 957.01]],
+                        "stop_requested": False,
+                        "non_retryable_error": None,
+                        "failure_count": 0,
+                        "replacement_count": 1,
+                        "assigned_threads": 6,
+                        "cpu_percent": None,
+                        "memory_bytes": None,
+                        "started_at": "2026-04-26T12:00:00+00:00",
+                        "last_seen_at": "2026-04-26T12:00:05+00:00",
+                    },
+                    {
+                        "worker_id": "worker-2",
+                        "session_id": "session-2",
+                        "epoch_id": "epoch-2",
+                        "media_item_id": 502,
+                        "title": "Queued Prep",
+                        "playback_mode": "lite",
+                        "profile": "mobile_1080p",
+                        "source_kind": "cloud",
+                        "state": "queued",
+                        "runtime_seconds": None,
+                        "pid": None,
+                        "target_position_seconds": 120.0,
+                        "prepared_ranges": [],
+                        "stop_requested": False,
+                        "non_retryable_error": None,
+                        "failure_count": 0,
+                        "replacement_count": 0,
+                        "assigned_threads": 0,
+                        "cpu_percent": None,
+                        "memory_bytes": None,
+                        "started_at": None,
+                        "last_seen_at": "2026-04-26T12:00:05+00:00",
+                    },
+                ],
+            },
+            {
+                "user_id": 2,
+                "username": "bob",
+                "allocated_budget_cores": 9,
+                "running_workers": 0,
+                "queued_workers": 1,
+                "items": [
+                    {
+                        "worker_id": "worker-3",
+                        "session_id": "session-3",
+                        "epoch_id": "epoch-3",
+                        "media_item_id": 503,
+                        "title": "Cloud Wait",
+                        "playback_mode": "full",
+                        "profile": "mobile_2160p",
+                        "source_kind": "cloud",
+                        "state": "queued",
+                        "runtime_seconds": None,
+                        "pid": None,
+                        "target_position_seconds": 42.0,
+                        "prepared_ranges": [],
+                        "stop_requested": False,
+                        "non_retryable_error": "The download quota for this file has been exceeded.",
+                        "failure_count": 1,
+                        "replacement_count": 0,
+                        "assigned_threads": 0,
+                        "cpu_percent": None,
+                        "memory_bytes": None,
+                        "started_at": None,
+                        "last_seen_at": "2026-04-26T12:00:05+00:00",
+                    },
+                ],
+            },
+        ],
+    }
 
 
 @pytest.mark.parametrize(
@@ -423,6 +630,191 @@ def test_native_playback_session_route_ignores_other_users_progress_for_ios_vlc_
     assert create_response.status_code == 200
     created_session = create_response.json()
     assert created_session["resume_seconds"] == 600.0
+
+
+def test_browser_playback_routes_accept_full_fast_start_estimate_source(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/full-fast-start-route-shape.mp4",
+    )
+    payload = _make_browser_playback_route2_payload(item_id=int(item["id"]))
+    client.app.state.mobile_playback_manager = BrowserPlaybackRouteManagerStub(payload)
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_2160p",
+            "playback_mode": "full",
+            "start_position_seconds": 837.01,
+        },
+    )
+    assert create_response.status_code == 200
+    assert create_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert create_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+
+    session_response = client.get(f"/api/browser-playback/sessions/{payload['session_id']}")
+    assert session_response.status_code == 200
+    assert session_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert session_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+
+    active_response = client.get("/api/browser-playback/active")
+    assert active_response.status_code == 200
+    assert active_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert active_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+
+    item_active_response = client.get(f"/api/browser-playback/items/{item['id']}/active")
+    assert item_active_response.status_code == 200
+    assert item_active_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert item_active_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+
+    heartbeat_response = client.post(
+        f"/api/browser-playback/sessions/{payload['session_id']}/heartbeat",
+        json={
+            "committed_playhead_seconds": 840.0,
+            "actual_media_element_time_seconds": 3.0,
+            "client_attach_revision": 1,
+            "lifecycle_state": "attached",
+            "playing": True,
+        },
+    )
+    assert heartbeat_response.status_code == 200
+    assert heartbeat_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert heartbeat_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+
+
+@pytest.mark.parametrize(
+    ("mode_estimate_source", "gate_reason"),
+    [
+        ("none", "not_full_mode"),
+        ("none", "full_gate_not_required"),
+        ("none", "lite_slow_supply_unknown_or_deficit"),
+        ("none", "startup_projected_runway"),
+        ("bootstrap", "full_preflight_bootstrap"),
+        ("bootstrap", "full_budget_unavailable_bootstrap"),
+        ("bootstrap", "full_bootstrap_server_unknown"),
+        ("bootstrap", "full_bootstrap_effective_goodput_unknown"),
+        ("bootstrap", "full_budget_waiting_for_client_probe"),
+        ("none", "full_budget_waiting_for_client_probe"),
+        ("none", "full_budget_waiting_for_stable_eta"),
+        ("true", "full_budget_waiting"),
+        ("true", "full_budget_complete"),
+        ("true", "full_budget_projected_ready"),
+        ("fast_start_supply_surplus", "full_fast_start_supply_surplus"),
+        ("fast_start_supply_surplus", "full_fast_start_waiting_for_runway"),
+        ("true", "lite_fast_supply_surplus"),
+    ],
+)
+def test_browser_playback_create_route_accepts_route2_diagnostic_strings(
+    initialized_settings,
+    client,
+    admin_credentials,
+    mode_estimate_source: str,
+    gate_reason: str,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name=f"browser/route2-diagnostics-{mode_estimate_source}-{gate_reason}.mp4",
+    )
+    payload = _make_browser_playback_route2_payload(
+        item_id=int(item["id"]),
+        mode_estimate_source=mode_estimate_source,
+        gate_reason=gate_reason,
+    )
+    client.app.state.mobile_playback_manager = BrowserPlaybackRouteManagerStub(payload)
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_2160p",
+            "playback_mode": "full",
+            "start_position_seconds": 837.01,
+        },
+    )
+
+    assert create_response.status_code == 200
+    body = create_response.json()
+    assert body["mode_estimate_source"] == mode_estimate_source
+    assert body["gate_reason"] == gate_reason
+
+
+def test_admin_playback_workers_route_returns_route2_worker_registry(
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    stub = AdminPlaybackWorkerManagerStub(_make_admin_playback_workers_payload())
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.get("/api/admin/playback-workers")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cpu_budget_percent"] == 90
+    assert payload["total_cpu_cores"] == 20
+    assert payload["total_route2_budget_cores"] == 18
+    assert payload["active_worker_count"] == 1
+    assert payload["queued_worker_count"] == 2
+    assert payload["active_decoding_user_count"] == 2
+    assert payload["per_user_budget_cores"] == 9
+    assert len(payload["workers_by_user"]) == 2
+    assert payload["workers_by_user"][0]["items"][0]["assigned_threads"] == 6
+
+
+def test_admin_disable_user_route_invalidates_route2_workers(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    created_user = _create_standard_user(initialized_settings, username="route2-disable-user")
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    stub = AdminPlaybackWorkerManagerStub(_make_admin_playback_workers_payload())
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.patch(
+        f"/api/admin/users/{created_user['id']}",
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 200
+    assert stub.invalidated_user_calls == [(int(created_user["id"]), "user_disabled")]
+
+
+def test_admin_revoke_session_route_invalidates_route2_workers(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    created_user = _create_standard_user(initialized_settings, username="route2-revoke-user")
+    _login(client, username=str(created_user["username"]), password="family-password")
+    with get_connection(initialized_settings) as connection:
+        session_row = connection.execute(
+            """
+            SELECT id
+            FROM sessions
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(created_user["id"]),),
+        ).fetchone()
+    assert session_row is not None
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    stub = AdminPlaybackWorkerManagerStub(_make_admin_playback_workers_payload())
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.post(f"/api/admin/sessions/{int(session_row['id'])}/revoke")
+
+    assert response.status_code == 200
+    assert stub.invalidated_auth_session_calls == [(int(session_row["id"]), "admin_revoked")]
 
 
 def test_desktop_playback_route_returns_linux_same_host_direct_path(initialized_settings, client, admin_credentials) -> None:

@@ -44,6 +44,8 @@ def create_mobile_playback_session(
         response = _get_mobile_manager(request).create_session(
             item,
             user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
             profile=payload.profile,
             start_position_seconds=float(payload.start_position_seconds or 0.0),
             engine_mode=payload.engine_mode,

@@ -25,6 +25,7 @@ def _initialize_route2_session_locked(
     browser_session.last_attach_warning_revision = 0
     browser_session.replacement_epoch_id = None
     browser_session.replacement_retry_not_before_ts = 0.0
+    browser_session.replacement_epoch_count = 0
     browser_session.full_preflight_error = None
     browser_session.full_prepare_started_at_ts = (
         time.time() if browser_session.playback_mode == "full" else 0.0

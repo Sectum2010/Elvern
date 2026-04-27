@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
 from urllib.error import HTTPError
@@ -51,12 +52,16 @@ def _make_route2_session(*, playback_mode: str = "lite", client_attach_revision:
     return MobilePlaybackSession(
         session_id="route2-session",
         user_id=1,
+        auth_session_id=101,
+        username="alice",
         media_item_id=104,
+        media_title="Route2 Session Movie",
         profile="mobile_2160p",
+        source_kind="cloud",
         duration_seconds=6302.0,
         cache_key="route2-cache",
         source_locator="gdrive://coco",
-        source_input_kind="cloud",
+        source_input_kind="url",
         source_fingerprint="route2-fingerprint",
         created_at=utcnow_iso(),
         last_client_seen_at=utcnow_iso(),
@@ -116,6 +121,18 @@ def _make_local_item(
         "resume_position_seconds": 18.5,
         "subtitles": [],
     }
+
+
+def _make_route2_manager(initialized_settings, **overrides) -> tuple[MobilePlaybackManager, object]:
+    settings = replace(
+        initialized_settings,
+        transcode_enabled=True,
+        browser_playback_route2_enabled=True,
+        ffmpeg_path=overrides.pop("ffmpeg_path", "/usr/bin/ffmpeg"),
+        ffprobe_path=overrides.pop("ffprobe_path", "/usr/bin/ffprobe"),
+        **overrides,
+    )
+    return MobilePlaybackManager(settings), settings
 
 
 def test_ios_external_launch_url_contract_for_infuse_and_vlc() -> None:
@@ -326,6 +343,54 @@ def test_route2_full_initial_attach_supply_surplus_waits_until_120_seconds() -> 
     assert gate["actual_startup_runway_seconds"] == 119.0
     assert gate["mode_estimate_source"] == "fast_start_supply_surplus"
     assert gate["gate_reason"] == "full_fast_start_waiting_for_runway"
+    assert gate["mode_estimate_seconds"] is not None
+    assert gate["mode_estimate_seconds"] < 5.0
+
+
+def test_route2_full_initial_attach_supply_surplus_starts_before_preflight_ready() -> None:
+    session = _make_route2_session(playback_mode="full", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: True,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 3600.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: None,
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 125.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 1.2, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is True
+    assert gate["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert gate["gate_reason"] == "full_fast_start_supply_surplus"
+
+
+def test_route2_full_initial_attach_supply_surplus_starts_before_budget_metrics_exist() -> None:
+    session = _make_full_gate_session()
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: True,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 3600.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: None,
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 0.0, "observation_seconds": 0.0, "confident": False},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 125.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 1.2, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is True
+    assert gate["mode_estimate_source"] == "fast_start_supply_surplus"
+    assert gate["gate_reason"] == "full_fast_start_supply_surplus"
 
 
 def test_route2_full_initial_attach_supply_surplus_starts_at_120_seconds() -> None:
@@ -398,6 +463,33 @@ def test_route2_full_existing_budget_complete_condition_still_returns_ready() ->
     assert gate["gate_reason"] == "full_budget_complete"
 
 
+def test_route2_full_existing_budget_projected_ready_condition_still_returns_ready() -> None:
+    session = _make_full_gate_session()
+    epoch = _make_route2_epoch()
+
+    gate = _route2_full_mode_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: True,
+        route2_full_prepare_elapsed_seconds_locked=lambda _session, now_ts=None: 25.0,
+        ensure_route2_full_preflight_locked=lambda _session: None,
+        route2_full_bootstrap_eta_locked=lambda _session, _epoch, now_ts=None: 34.0,
+        route2_full_budget_metrics_locked=lambda _session, _epoch: _make_full_budget_metrics(
+            prepared_bytes=10_000.0,
+            cumulative_budget_bytes=[50_000.0, 120_000.0, 250_000.0],
+            reserve_bytes=0.0,
+            reference_bytes_per_second=100.0,
+        ),
+        route2_server_byte_goodput_locked=lambda _epoch: {"safe_rate": 2000.0, "observation_seconds": 10.0, "confident": True},
+        route2_client_goodput_locked=lambda _session: {"safe_rate": 2000.0, "observation_seconds": 10.0, "confident": True},
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 40.0,
+        route2_supply_model_locked=lambda _epoch: {"effective_rate_x": 0.8, "observation_seconds": 6.0},
+    )
+
+    assert gate["mode_ready"] is True
+    assert gate["gate_reason"] == "full_budget_projected_ready"
+
+
 def test_route2_full_gate_not_required_stays_ready_for_noninitial_attach() -> None:
     session = _make_full_gate_session()
     epoch = _make_route2_epoch()
@@ -433,11 +525,12 @@ def test_route2_epoch_ffmpeg_command_keeps_resumed_media_timeline_local(initiali
         lambda _settings, _session: ("https://example.test/route2-source.mkv", "url"),
     )
 
-    command = manager._build_route2_epoch_ffmpeg_command(session=session, epoch=epoch)
+    command = manager._build_route2_epoch_ffmpeg_command(session=session, epoch=epoch, thread_budget=4)
 
     offset_index = command.index("-output_ts_offset")
     assert command[offset_index + 1] == "0.000"
     assert command[command.index("-ss") + 1] == "3307.200"
+    assert command[command.index("-threads") + 1] == "4"
 
 
 def test_google_drive_stream_proxy_preserves_provider_error_detail(monkeypatch) -> None:
@@ -590,6 +683,325 @@ def test_route2_non_retryable_quota_error_does_not_create_replacement_epoch(init
 
     assert replacement_creations == []
     assert session.browser_playback.replacement_epoch_id is None
+
+
+def test_route2_cpu_budget_summary_uses_global_budget_and_fair_user_share(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+
+    item_a = _make_local_item(settings, item_id=301, relative_name="route2/cpu-a.mp4")
+    item_b = _make_local_item(settings, item_id=302, relative_name="route2/cpu-b.mp4")
+    item_c = _make_local_item(settings, item_id=303, relative_name="route2/cpu-c.mp4")
+
+    manager.create_session(item_a, user_id=1, auth_session_id=101, username="alice", engine_mode="route2", playback_mode="lite")
+    manager.create_session(item_b, user_id=2, auth_session_id=201, username="bob", engine_mode="route2", playback_mode="lite")
+
+    summary = manager.get_route2_worker_status()
+    assert summary["cpu_budget_percent"] == 90
+    assert summary["total_cpu_cores"] == 20
+    assert summary["total_route2_budget_cores"] == 18
+    assert summary["active_decoding_user_count"] == 2
+    assert summary["per_user_budget_cores"] == 9
+
+    manager.create_session(item_c, user_id=3, auth_session_id=301, username="carol", engine_mode="route2", playback_mode="lite")
+    summary = manager.get_route2_worker_status()
+    assert summary["active_decoding_user_count"] == 3
+    assert summary["per_user_budget_cores"] == 6
+
+
+def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=50,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 4)
+
+    started_workers: list[tuple[str, str, str]] = []
+
+    class _FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+            self.name = name
+
+        def start(self) -> None:
+            started_workers.append(self.args)
+
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.threading.Thread", _FakeThread)
+
+    item_a = _make_local_item(settings, item_id=311, relative_name="route2/many-a.mp4")
+    item_b = _make_local_item(settings, item_id=312, relative_name="route2/many-b.mp4")
+    item_c = _make_local_item(settings, item_id=313, relative_name="route2/many-c.mp4")
+
+    manager.create_session(item_a, user_id=1, auth_session_id=401, username="alice", engine_mode="route2", playback_mode="lite")
+    manager.create_session(item_b, user_id=1, auth_session_id=401, username="alice", engine_mode="route2", playback_mode="lite")
+    manager.create_session(item_c, user_id=1, auth_session_id=401, username="alice", engine_mode="route2", playback_mode="lite")
+
+    manager._dispatch_waiting_sessions()
+
+    assert len(manager._route2_session_ids_by_user[1]) == 3
+    assert len(started_workers) == 1
+    assert len([record for record in manager._route2_workers.values() if record.state == "running"]) == 1
+    assert len([record for record in manager._route2_workers.values() if record.state == "queued"]) == 2
+
+
+def test_route2_worker_scheduler_does_not_exceed_budget_derived_capacity(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=50,
+        route2_min_worker_threads=1,
+        route2_max_worker_threads=1,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 4)
+
+    started_workers: list[tuple[str, str, str]] = []
+
+    class _FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.args = args
+
+        def start(self) -> None:
+            started_workers.append(self.args)
+
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.threading.Thread", _FakeThread)
+
+    item_a = _make_local_item(settings, item_id=321, relative_name="route2/fair-a.mp4")
+    item_b = _make_local_item(settings, item_id=322, relative_name="route2/fair-b.mp4")
+    item_c = _make_local_item(settings, item_id=323, relative_name="route2/fair-c.mp4")
+
+    manager.create_session(item_a, user_id=1, auth_session_id=501, username="alice", engine_mode="route2", playback_mode="lite")
+    manager.create_session(item_b, user_id=2, auth_session_id=601, username="bob", engine_mode="route2", playback_mode="lite")
+    manager.create_session(item_c, user_id=3, auth_session_id=701, username="carol", engine_mode="route2", playback_mode="lite")
+
+    manager._dispatch_waiting_sessions()
+
+    running_workers = [record for record in manager._route2_workers.values() if record.state == "running"]
+    queued_workers = [record for record in manager._route2_workers.values() if record.state == "queued"]
+
+    assert len(started_workers) == 2
+    assert len(running_workers) == 2
+    assert len(queued_workers) == 1
+    assert sum(record.assigned_threads for record in running_workers) <= 2
+
+
+def test_route2_duplicate_same_user_movie_mode_reuses_existing_preparation(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=331, relative_name="route2/reuse.mp4")
+
+    first = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=801,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+        start_position_seconds=0.0,
+    )
+
+    with manager._lock:
+        session = manager._sessions[first["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.published_dir.mkdir(parents=True, exist_ok=True)
+        active_epoch.published_init_path.write_bytes(b"init")
+        for segment_index in range(25):
+            (active_epoch.published_dir / f"segment_{segment_index:06d}.m4s").write_bytes(b"segment")
+        manager._refresh_route2_session_authority_locked(session)
+
+    second = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=801,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+        start_position_seconds=10.0,
+    )
+
+    assert second["session_id"] == first["session_id"]
+    assert second["target_position_seconds"] == 10.0
+    assert second["ready_end_seconds"] >= 40.0
+    assert len(manager._route2_session_ids_by_user[1]) == 1
+    assert len({record.worker_id for record in manager._route2_workers.values() if record.session_id == first["session_id"]}) == 1
+
+
+def test_route2_replacement_epoch_cap_fails_session_clearly(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_max_replacement_epochs_per_session=2,
+    )
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+
+    with manager._lock:
+        manager._initialize_route2_session_locked(session)
+        manager._sessions[session.session_id] = session
+        manager._register_route2_session_locked(session)
+        first = manager._create_route2_replacement_epoch_locked(session, target_position_seconds=30.0, reason="seek-1")
+        second = manager._create_route2_replacement_epoch_locked(session, target_position_seconds=60.0, reason="seek-2")
+        third = manager._create_route2_replacement_epoch_locked(session, target_position_seconds=90.0, reason="seek-3")
+
+    assert first is not None
+    assert second is not None
+    assert third is None
+    assert session.state == "failed"
+    assert "maximum number of replacement epochs" in (session.last_error or "").lower()
+
+
+def test_route2_stop_session_terminates_owned_worker(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=341, relative_name="route2/stop.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=901,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 4321
+            self.terminated = False
+            self.killed = False
+            self._return_code = None
+
+        def poll(self):
+            return self._return_code
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self._return_code = 0
+
+        def wait(self, timeout=None):
+            self._return_code = 0 if self._return_code is None else self._return_code
+            return self._return_code
+
+        def kill(self) -> None:
+            self.killed = True
+            self._return_code = -9
+
+    fake_process = _FakeProcess()
+    with manager._lock:
+        session = manager._sessions[payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.process = fake_process
+        record = manager._ensure_route2_worker_record_locked(session, active_epoch)
+        record.state = "running"
+        record.assigned_threads = 2
+
+    assert manager.stop_session(payload["session_id"], user_id=1) is True
+    assert fake_process.terminated is True
+    assert payload["session_id"] not in manager._sessions
+    assert 1 not in manager._route2_session_ids_by_user
+
+
+def test_route2_disable_user_invalidates_owned_workers(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=351, relative_name="route2/disable.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=1001,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 9876
+            self.terminated = False
+            self._return_code = None
+
+        def poll(self):
+            return self._return_code
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self._return_code = 0
+
+        def wait(self, timeout=None):
+            self._return_code = 0 if self._return_code is None else self._return_code
+            return self._return_code
+
+        def kill(self) -> None:
+            self._return_code = -9
+
+    fake_process = _FakeProcess()
+    with manager._lock:
+        session = manager._sessions[payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.process = fake_process
+        record = manager._ensure_route2_worker_record_locked(session, active_epoch)
+        record.state = "running"
+
+    assert manager.invalidate_user_sessions(1, reason="user_disabled") == 1
+    assert fake_process.terminated is True
+    assert payload["session_id"] not in manager._sessions
+
+
+def test_route2_revoke_auth_session_invalidates_matching_workers(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item_a = _make_local_item(settings, item_id=361, relative_name="route2/revoke-a.mp4")
+    item_b = _make_local_item(settings, item_id=362, relative_name="route2/revoke-b.mp4")
+
+    payload_a = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=1101,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+    payload_b = manager.create_session(
+        item_b,
+        user_id=1,
+        auth_session_id=2202,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    assert manager.invalidate_auth_session(1101, reason="admin_revoked") == 1
+    assert payload_a["session_id"] not in manager._sessions
+    assert payload_b["session_id"] in manager._sessions
+
+
+def test_route2_startup_cleanup_marks_stale_running_metadata_as_interrupted(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    metadata_path = (
+        settings.transcode_dir
+        / "browser_playback_route2"
+        / "sessions"
+        / "stale-session"
+        / "epochs"
+        / "stale-epoch"
+        / "epoch.json"
+    )
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        """
+{
+  "epoch_id": "stale-epoch",
+  "session_id": "stale-session",
+  "state": "warming",
+  "active_worker_id": "dead-worker",
+  "transcoder_completed": false,
+  "last_error": null
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    manager.start()
+    manager.shutdown()
+
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["active_worker_id"] is None
+    assert payload["state"] == "failed"
+    assert "backend restart" in str(payload["last_error"]).lower()
 
 
 def test_native_external_launch_rejects_unsupported_target(client, admin_credentials) -> None:

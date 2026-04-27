@@ -176,6 +176,34 @@ class PlaybackEpoch:
 
 
 @dataclass(slots=True)
+class Route2WorkerRecord:
+    worker_id: str
+    session_id: str
+    epoch_id: str
+    user_id: int
+    username: str | None
+    auth_session_id: int | None
+    media_item_id: int
+    title: str
+    playback_mode: str
+    profile: str
+    source_kind: str
+    target_position_seconds: float
+    state: str = "queued"
+    pid: int | None = None
+    started_at: str | None = None
+    created_at: str = field(default_factory=utcnow_iso)
+    last_seen_at: str = field(default_factory=utcnow_iso)
+    prepared_ranges: list[list[float]] = field(default_factory=list)
+    stop_requested: bool = False
+    non_retryable_error: str | None = None
+    failure_count: int = 0
+    replacement_count: int = 0
+    assigned_threads: int = 0
+    process: subprocess.Popen[str] | None = field(default=None, repr=False)
+
+
+@dataclass(slots=True)
 class BrowserPlaybackSession:
     engine_mode: str = "legacy"
     playback_mode: str = "lite"
@@ -188,6 +216,7 @@ class BrowserPlaybackSession:
     active_epoch_id: str | None = None
     replacement_epoch_id: str | None = None
     replacement_retry_not_before_ts: float = 0.0
+    replacement_epoch_count: int = 0
     full_preflight_state: str = "idle"
     full_preflight_error: str | None = None
     full_preflight_started_at_ts: float = 0.0
@@ -201,8 +230,12 @@ class BrowserPlaybackSession:
 class MobilePlaybackSession:
     session_id: str
     user_id: int
+    auth_session_id: int | None
+    username: str | None
     media_item_id: int
+    media_title: str
     profile: str
+    source_kind: str
     duration_seconds: float
     cache_key: str
     source_locator: str

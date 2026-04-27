@@ -474,7 +474,7 @@ BrowserPlaybackMode = Literal["lite", "full"]
 BrowserPlaybackSessionEngineState = Literal["legacy", "starting", "switching", "active", "recovering", "stopped", "failed"]
 BrowserPlaybackEpochState = Literal["starting", "warming", "attach_ready", "active", "draining", "ended", "failed"]
 BrowserPlaybackModeState = Literal["estimating", "preparing", "ready"]
-BrowserPlaybackEstimateSource = Literal["none", "bootstrap", "true"]
+BrowserPlaybackEstimateSource = str
 MobilePlaybackState = Literal["queued", "preparing", "ready", "retargeting", "failed", "stopped", "expired"]
 MobilePlaybackWorkerState = Literal["idle", "queued", "running"]
 MobilePlaybackLifecycleState = Literal["attached", "background-suspended", "resuming", "recovering", "fatal"]
@@ -555,6 +555,10 @@ class MobilePlaybackSessionResponse(BaseModel):
     mode_ready: bool = False
     mode_estimate_seconds: float | None = Field(default=None, ge=0)
     mode_estimate_source: BrowserPlaybackEstimateSource = "none"
+    required_startup_runway_seconds: float | None = Field(default=None, ge=0)
+    actual_startup_runway_seconds: float | None = Field(default=None, ge=0)
+    effective_goodput_ratio: float | None = Field(default=None, ge=0)
+    gate_reason: str | None = None
     session_state: BrowserPlaybackSessionEngineState = "legacy"
     attach_revision: int = Field(default=0, ge=0)
     client_attach_revision: int = Field(default=0, ge=0)
@@ -1197,6 +1201,51 @@ class AdminSessionResponse(BaseModel):
 
 class AdminSessionListResponse(BaseModel):
     sessions: list[AdminSessionResponse] = Field(default_factory=list)
+
+
+class AdminPlaybackWorkerItemResponse(BaseModel):
+    worker_id: str
+    session_id: str
+    epoch_id: str
+    media_item_id: int = Field(ge=1)
+    title: str
+    playback_mode: str
+    profile: str
+    source_kind: str
+    state: str
+    runtime_seconds: float | None = Field(default=None, ge=0)
+    pid: int | None = Field(default=None, ge=1)
+    target_position_seconds: float = Field(ge=0)
+    prepared_ranges: list[list[float]] = Field(default_factory=list)
+    stop_requested: bool = False
+    non_retryable_error: str | None = None
+    failure_count: int = Field(default=0, ge=0)
+    replacement_count: int = Field(default=0, ge=0)
+    assigned_threads: int = Field(default=0, ge=0)
+    cpu_percent: float | None = Field(default=None, ge=0)
+    memory_bytes: int | None = Field(default=None, ge=0)
+    started_at: str | None = None
+    last_seen_at: str
+
+
+class AdminPlaybackWorkersUserSummaryResponse(BaseModel):
+    user_id: int
+    username: str | None = None
+    allocated_budget_cores: int = Field(default=0, ge=0)
+    running_workers: int = Field(default=0, ge=0)
+    queued_workers: int = Field(default=0, ge=0)
+    items: list[AdminPlaybackWorkerItemResponse] = Field(default_factory=list)
+
+
+class AdminPlaybackWorkersStatusResponse(BaseModel):
+    cpu_budget_percent: int = Field(ge=0)
+    total_cpu_cores: int = Field(ge=1)
+    total_route2_budget_cores: int = Field(ge=1)
+    active_worker_count: int = Field(default=0, ge=0)
+    queued_worker_count: int = Field(default=0, ge=0)
+    active_decoding_user_count: int = Field(default=0, ge=0)
+    per_user_budget_cores: int = Field(default=0, ge=0)
+    workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
 
 
 class AuditLogEventResponse(BaseModel):

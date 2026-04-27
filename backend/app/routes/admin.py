@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from ..auth import CurrentAdmin, CurrentHeartbeatAdmin, clear_session_cookie, resolve_client_ip
 from ..schemas import (
+    AdminPlaybackWorkersStatusResponse,
     AdminPasswordUpdateRequest,
     AdminSessionListResponse,
     AdminSelfDeleteRequest,
@@ -132,6 +133,11 @@ def admin_update_user(
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+    if payload.enabled is False:
+        request.app.state.mobile_playback_manager.invalidate_user_sessions(
+            user_id,
+            reason="user_disabled",
+        )
     return AdminUserResponse(**updated)
 
 
@@ -187,6 +193,10 @@ def admin_self_delete(
         confirm=payload.confirm,
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
+    )
+    request.app.state.mobile_playback_manager.invalidate_user_sessions(
+        int(user.id),
+        reason="self_deleted",
     )
     clear_session_cookie(response, request.app.state.settings)
     return MessageResponse(message="Your admin account was deleted")
@@ -246,7 +256,22 @@ def admin_revoke_session(
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+    request.app.state.mobile_playback_manager.invalidate_auth_session(
+        session_id,
+        reason="admin_revoked",
+    )
     return MessageResponse(message="Session revoked")
+
+
+@router.get("/playback-workers", response_model=AdminPlaybackWorkersStatusResponse)
+def admin_playback_workers(
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminPlaybackWorkersStatusResponse:
+    del user
+    return AdminPlaybackWorkersStatusResponse(
+        **request.app.state.mobile_playback_manager.get_route2_worker_status()
+    )
 
 
 @router.get("/audit", response_model=AuditLogListResponse)

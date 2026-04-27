@@ -126,6 +126,10 @@ class Settings:
     mobile_session_ttl_minutes: int
     mobile_cache_ttl_hours: int
     browser_playback_route2_enabled: bool
+    route2_cpu_budget_percent: int
+    route2_min_worker_threads: int
+    route2_max_worker_threads: int
+    route2_max_replacement_epochs_per_session: int
     native_playback_enabled: bool
     native_playback_session_minutes: int
     native_player_protocol: str
@@ -153,6 +157,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    total_cpu_cores = max(1, os.cpu_count() or 1)
     media_root = _get_path("ELVERN_MEDIA_ROOT")
     db_path = _get_path("ELVERN_DB_PATH", DEFAULT_DB_PATH)
     admin_username = os.getenv("ELVERN_ADMIN_USERNAME", "admin").strip()
@@ -206,6 +211,16 @@ def load_settings() -> Settings:
         mobile_session_ttl_minutes=_get_int("ELVERN_MOBILE_SESSION_TTL_MINUTES", 15),
         mobile_cache_ttl_hours=_get_int("ELVERN_MOBILE_CACHE_TTL_HOURS", 24),
         browser_playback_route2_enabled=_get_bool("ELVERN_BROWSER_PLAYBACK_ROUTE2_ENABLED", True),
+        route2_cpu_budget_percent=_get_int("ELVERN_ROUTE2_CPU_BUDGET_PERCENT", 90),
+        route2_min_worker_threads=_get_int("ELVERN_ROUTE2_MIN_WORKER_THREADS", 1),
+        route2_max_worker_threads=_get_int(
+            "ELVERN_ROUTE2_MAX_WORKER_THREADS",
+            min(8, total_cpu_cores),
+        ),
+        route2_max_replacement_epochs_per_session=_get_int(
+            "ELVERN_ROUTE2_MAX_REPLACEMENT_EPOCHS_PER_SESSION",
+            3,
+        ),
         native_playback_enabled=_get_bool("ELVERN_NATIVE_PLAYBACK_ENABLED", True),
         native_playback_session_minutes=_get_int("ELVERN_NATIVE_PLAYBACK_SESSION_MINUTES", 20),
         native_player_protocol=(
@@ -255,6 +270,7 @@ def load_settings() -> Settings:
 
 
 def validate_settings(settings: Settings) -> None:
+    total_cpu_cores = max(1, os.cpu_count() or 1)
     if not settings.media_root.exists():
         raise ConfigError(
             f"ELVERN_MEDIA_ROOT does not exist: {settings.media_root}"
@@ -295,6 +311,19 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("ELVERN_MOBILE_SESSION_TTL_MINUTES must be at least 1")
     if settings.mobile_cache_ttl_hours < 1:
         raise ConfigError("ELVERN_MOBILE_CACHE_TTL_HOURS must be at least 1")
+    if settings.route2_cpu_budget_percent < 10 or settings.route2_cpu_budget_percent > 95:
+        raise ConfigError("ELVERN_ROUTE2_CPU_BUDGET_PERCENT must be between 10 and 95")
+    if settings.route2_min_worker_threads < 1:
+        raise ConfigError("ELVERN_ROUTE2_MIN_WORKER_THREADS must be at least 1")
+    if (
+        settings.route2_max_worker_threads < settings.route2_min_worker_threads
+        or settings.route2_max_worker_threads > total_cpu_cores
+    ):
+        raise ConfigError(
+            "ELVERN_ROUTE2_MAX_WORKER_THREADS must be at least the min worker threads and no more than os.cpu_count()"
+        )
+    if settings.route2_max_replacement_epochs_per_session < 0:
+        raise ConfigError("ELVERN_ROUTE2_MAX_REPLACEMENT_EPOCHS_PER_SESSION must be at least 0")
     if not settings.native_player_protocol.replace("-", "").isalnum():
         raise ConfigError(
             "ELVERN_NATIVE_PLAYER_PROTOCOL must be alphanumeric and may include hyphens"
