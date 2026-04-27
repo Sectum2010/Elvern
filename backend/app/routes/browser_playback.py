@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 
 from ..auth import CurrentUser
 from ..schemas import (
+    BrowserPlaybackClientDeviceClass,
     MobilePlaybackHeartbeatRequest,
     MobilePlaybackSeekRequest,
     MobilePlaybackSessionCreateRequest,
@@ -21,6 +22,18 @@ from ..services.mobile_playback_service import (
 
 
 router = APIRouter(tags=["browser_playback"])
+
+
+def _resolve_browser_playback_profile(
+    requested_profile: str,
+    client_device_class: BrowserPlaybackClientDeviceClass | None,
+) -> str:
+    normalized_profile = "mobile_2160p" if requested_profile == "mobile_2160p" else "mobile_1080p"
+    if normalized_profile != "mobile_2160p":
+        return normalized_profile
+    if client_device_class in {"tablet", "desktop"}:
+        return normalized_profile
+    return "mobile_1080p"
 
 
 def _get_browser_manager(request: Request):
@@ -64,12 +77,16 @@ def create_browser_playback_session(
             media_item_id=int(item["id"]),
             playback_mode=payload.playback_mode,
         )
+        resolved_profile = _resolve_browser_playback_profile(
+            payload.profile,
+            payload.client_device_class,
+        )
         response = manager.create_session(
             item,
             user_id=int(user.id),
             auth_session_id=user.session_id,
             username=user.username,
-            profile=payload.profile,
+            profile=resolved_profile,
             start_position_seconds=float(payload.start_position_seconds or 0.0),
             engine_mode=payload.engine_mode,
             playback_mode=payload.playback_mode,

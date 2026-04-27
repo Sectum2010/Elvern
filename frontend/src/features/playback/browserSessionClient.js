@@ -90,6 +90,7 @@ export function createOptimizedPlaybackSession({
   startPositionSeconds,
   playbackMode,
   engineMode,
+  clientDeviceClass,
 }) {
   const data = buildBrowserPlaybackSessionCreatePayload({
     itemId,
@@ -97,6 +98,7 @@ export function createOptimizedPlaybackSession({
     startPositionSeconds,
     playbackMode,
     engineMode,
+    clientDeviceClass,
   });
   return apiRequest(`${browserPlaybackSessionRoot}/sessions`, {
     method: "POST",

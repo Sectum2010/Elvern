@@ -471,6 +471,7 @@ class PlaybackDecisionResponse(BaseModel):
 MobilePlaybackProfile = Literal["mobile_1080p", "mobile_2160p"]
 BrowserPlaybackEngineMode = Literal["legacy", "route2"]
 BrowserPlaybackMode = Literal["lite", "full"]
+BrowserPlaybackClientDeviceClass = Literal["phone", "tablet", "desktop", "unknown"]
 BrowserPlaybackSessionEngineState = Literal["legacy", "starting", "switching", "active", "recovering", "stopped", "failed"]
 BrowserPlaybackEpochState = Literal["starting", "warming", "attach_ready", "active", "draining", "ended", "failed"]
 BrowserPlaybackModeState = Literal["estimating", "preparing", "ready"]
@@ -486,6 +487,7 @@ class MobilePlaybackSessionCreateRequest(BaseModel):
     start_position_seconds: float | None = Field(default=None, ge=0)
     engine_mode: BrowserPlaybackEngineMode | None = None
     playback_mode: BrowserPlaybackMode | None = None
+    client_device_class: BrowserPlaybackClientDeviceClass | None = None
 
 
 class MobilePlaybackSeekRequest(BaseModel):

@@ -86,6 +86,7 @@ export function useOptimizedPlaybackSession({
   optimizedPlaybackPending,
   browserPlaybackSessionRoot,
   browserPlaybackProfile,
+  browserPlaybackDeviceClass,
   videoRef,
   clearPlayerBinding,
   clearOptimizedPlaybackPending,
@@ -1183,6 +1184,7 @@ export function useOptimizedPlaybackSession({
           startPositionSeconds: recoveryTarget,
           playbackMode: getPlaybackMode(activeSession.playback_mode || playbackModeIntentRef.current),
           engineMode: explicitRoute2Session ? "route2" : undefined,
+          clientDeviceClass: browserPlaybackDeviceClass,
         });
         const acceptedRecoveryPayload = acceptBrowserPlaybackSessionPayload(
           payload,
@@ -1213,6 +1215,7 @@ export function useOptimizedPlaybackSession({
             || playbackModeIntentRef.current,
           ),
           engineMode: (isRoute2SessionPayload(payload) || explicitRoute2Session) ? "route2" : undefined,
+          clientDeviceClass: browserPlaybackDeviceClass,
         });
         const acceptedRecoveryPayload = acceptBrowserPlaybackSessionPayload(
           payload,
@@ -1440,6 +1443,7 @@ export function useOptimizedPlaybackSession({
       profile: browserPlaybackProfile,
       startPositionSeconds: targetPosition,
       playbackMode: explicitAttempt.playbackMode,
+      clientDeviceClass: browserPlaybackDeviceClass,
     });
     if (flowGeneration !== playbackFlowRef.current || currentItemIdRef.current !== itemId) {
       releasePlaybackSession(

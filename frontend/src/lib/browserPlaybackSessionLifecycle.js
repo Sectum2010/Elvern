@@ -32,6 +32,7 @@ export function buildBrowserPlaybackSessionCreatePayload({
   startPositionSeconds = 0,
   playbackMode,
   engineMode,
+  clientDeviceClass,
 } = {}) {
   const data = {
     item_id: Number(itemId),
@@ -43,6 +44,9 @@ export function buildBrowserPlaybackSessionCreatePayload({
   }
   if (engineMode != null) {
     data.engine_mode = engineMode;
+  }
+  if (clientDeviceClass != null) {
+    data.client_device_class = clientDeviceClass;
   }
   return data;
 }

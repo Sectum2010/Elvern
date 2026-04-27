@@ -31,6 +31,7 @@ class BrowserPlaybackRouteManagerStub:
         self.create_exception: Exception | None = None
         self.browser_cooldown_exception: Exception | None = None
         self.create_calls = 0
+        self.create_kwargs: list[dict[str, object]] = []
 
     def start(self) -> None:
         return None
@@ -45,9 +46,14 @@ class BrowserPlaybackRouteManagerStub:
 
     def create_session(self, *args, **kwargs) -> dict[str, object]:
         self.create_calls += 1
+        self.create_kwargs.append(dict(kwargs))
         if self.create_exception is not None:
             raise self.create_exception
-        return dict(self.payload)
+        payload = dict(self.payload)
+        if "profile" in kwargs:
+            payload["profile"] = kwargs["profile"]
+            self.payload["profile"] = kwargs["profile"]
+        return payload
 
     def get_session(self, session_id: str, *, user_id: int, **kwargs) -> dict[str, object]:
         payload = dict(self.payload)
@@ -749,6 +755,7 @@ def test_browser_playback_routes_accept_full_fast_start_estimate_source(
         json={
             "item_id": int(item["id"]),
             "profile": "mobile_2160p",
+            "client_device_class": "desktop",
             "playback_mode": "full",
             "start_position_seconds": 837.01,
         },
@@ -833,6 +840,7 @@ def test_browser_playback_create_route_accepts_route2_diagnostic_strings(
         json={
             "item_id": int(item["id"]),
             "profile": "mobile_2160p",
+            "client_device_class": "desktop",
             "playback_mode": "full",
             "start_position_seconds": 837.01,
         },
@@ -871,6 +879,7 @@ def test_browser_playback_create_route_returns_structured_active_worker_conflict
         json={
             "item_id": int(item["id"]),
             "profile": "mobile_2160p",
+            "client_device_class": "desktop",
             "playback_mode": "full",
             "start_position_seconds": 12.0,
         },
@@ -912,6 +921,7 @@ def test_browser_playback_create_route_returns_structured_worker_cooldown(
         json={
             "item_id": int(item["id"]),
             "profile": "mobile_2160p",
+            "client_device_class": "desktop",
             "playback_mode": playback_mode,
             "start_position_seconds": 12.0,
         },
@@ -923,6 +933,50 @@ def test_browser_playback_create_route_returns_structured_worker_cooldown(
         remaining_seconds=27,
     )
     assert stub.create_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("client_device_class", "expected_profile"),
+    [
+        ("phone", "mobile_1080p"),
+        ("unknown", "mobile_1080p"),
+        ("tablet", "mobile_2160p"),
+        ("desktop", "mobile_2160p"),
+        (None, "mobile_1080p"),
+    ],
+)
+def test_browser_playback_create_route_caps_profile_by_client_device_class(
+    initialized_settings,
+    client,
+    admin_credentials,
+    client_device_class: str | None,
+    expected_profile: str,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name=f"browser/route2-device-class-{client_device_class or 'missing'}.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    client.app.state.mobile_playback_manager = stub
+
+    request_payload = {
+        "item_id": int(item["id"]),
+        "profile": "mobile_2160p",
+        "playback_mode": "full",
+        "start_position_seconds": 12.0,
+    }
+    if client_device_class is not None:
+        request_payload["client_device_class"] = client_device_class
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json=request_payload,
+    )
+
+    assert create_response.status_code == 200
+    assert create_response.json()["profile"] == expected_profile
+    assert stub.create_kwargs[-1]["profile"] == expected_profile
 
 
 def test_admin_playback_workers_route_returns_route2_worker_registry(

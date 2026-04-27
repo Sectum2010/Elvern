@@ -5,6 +5,10 @@ import {
   resolveBrowserPlaybackSessionRoot,
 } from "../../lib/browserPlayback";
 import {
+  capBrowserPlaybackProfileForDeviceClass,
+  detectBrowserPlaybackDeviceClass,
+} from "../../lib/browserPlaybackDevice";
+import {
   getActivePlaybackWorkerConflict,
   getPlaybackWorkerCooldown,
 } from "../../lib/playbackWorkerOwnership";
@@ -82,7 +86,22 @@ export function useBrowserPlaybackController({
   const [playbackModeIntent, setPlaybackModeIntent] = useState("lite");
 
   const browserPlaybackSessionRoot = resolveBrowserPlaybackSessionRoot();
-  const browserPlaybackProfile = iosMobile ? "mobile_1080p" : "mobile_2160p";
+  const browserPlaybackDeviceClass = useMemo(() => {
+    if (typeof navigator === "undefined") {
+      return iosMobile ? "phone" : "unknown";
+    }
+    return detectBrowserPlaybackDeviceClass({
+      userAgent: navigator.userAgent,
+      maxTouchPoints: navigator.maxTouchPoints,
+    });
+  }, [iosMobile]);
+  const browserPlaybackProfile = useMemo(
+    () => capBrowserPlaybackProfileForDeviceClass({
+      deviceClass: browserPlaybackDeviceClass,
+      requestedProfile: "mobile_2160p",
+    }),
+    [browserPlaybackDeviceClass],
+  );
 
   function clearOptimizedPlaybackPending() {
     setOptimizedPlaybackPending(false);
@@ -187,6 +206,7 @@ export function useBrowserPlaybackController({
     optimizedPlaybackPending,
     browserPlaybackSessionRoot,
     browserPlaybackProfile,
+    browserPlaybackDeviceClass,
     videoRef,
     clearPlayerBinding,
     clearOptimizedPlaybackPending,

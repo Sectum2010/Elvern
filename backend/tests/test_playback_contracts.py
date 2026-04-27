@@ -1248,6 +1248,38 @@ def test_route2_stop_session_terminates_owned_worker(initialized_settings) -> No
         assert manager._browser_playback_cooldowns == {}
 
 
+def test_route2_user_stop_does_not_create_browser_cooldown_and_allows_immediate_restart(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=342, relative_name="route2/stop-restart.mp4")
+    first = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=902,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    assert manager.stop_session(first["session_id"], user_id=1) is True
+
+    with manager._lock:
+        assert manager._browser_playback_cooldowns == {}
+
+    second = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=903,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    assert second["media_item_id"] == int(item["id"])
+    assert second["session_id"] != first["session_id"]
+
+
 def test_route2_admin_terminate_worker_creates_browser_cooldown_for_same_user_movie(
     initialized_settings,
     monkeypatch,
