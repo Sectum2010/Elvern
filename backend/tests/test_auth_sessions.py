@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,32 @@ def _create_media_item(settings, *, relative_name: str = "movie.mp4") -> dict[st
         "resume_position_seconds": 0,
         "subtitles": [],
     }
+
+
+def _login_headers(*, ip_address: str = "203.0.113.10", user_agent: str = "Pytest Browser 1.0") -> dict[str, str]:
+    return {
+        "x-forwarded-for": ip_address,
+        "user-agent": user_agent,
+    }
+
+
+def _recent_auth_login_details(settings, *, limit: int = 20) -> list[dict[str, object] | None]:
+    with get_connection(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT details_json
+            FROM audit_logs
+            WHERE action = 'auth.login'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    payload: list[dict[str, object] | None] = []
+    for row in rows:
+        details_json = row["details_json"]
+        payload.append(json.loads(details_json) if details_json else None)
+    return payload
 
 
 def test_create_session_stores_only_the_hashed_token(initialized_settings) -> None:
@@ -544,3 +571,220 @@ def test_disabled_user_login_returns_disabled_reason(initialized_settings, clien
     )
     assert login_response.status_code == 403
     assert login_response.json()["detail"] == "This account has been disabled"
+
+
+def test_login_rate_limit_default_max_attempts_is_ten(initialized_settings) -> None:
+    assert initialized_settings.login_max_attempts == 10
+    assert initialized_settings.login_lockout_seconds == 600
+
+
+def test_login_rate_limit_locks_same_client_bucket_after_tenth_failure_across_usernames(
+    initialized_settings,
+    client,
+) -> None:
+    _create_standard_user(initialized_settings, username="ethan")
+    headers = _login_headers()
+
+    for _ in range(5):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+            headers=headers,
+        )
+        assert response.status_code == 401
+
+    for attempt in range(4):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "ethan", "password": "wrong-password"},
+            headers=headers,
+        )
+        assert response.status_code == 401, attempt
+
+    tenth_response = client.post(
+        "/api/auth/login",
+        json={"username": "ethan", "password": "wrong-password"},
+        headers=headers,
+    )
+
+    assert tenth_response.status_code == 429
+    assert tenth_response.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+
+    different_username_same_bucket = client.post(
+        "/api/auth/login",
+        json={"username": initialized_settings.admin_username, "password": "test-admin-password"},
+        headers=headers,
+    )
+    assert different_username_same_bucket.status_code == 429
+    assert different_username_same_bucket.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+
+
+def test_login_rate_limit_private_browsing_simulation_with_same_ip_and_user_agent_is_still_locked(
+    initialized_settings,
+    client,
+) -> None:
+    headers = _login_headers(ip_address="203.0.113.20", user_agent="Pytest Private Browser 1.0")
+
+    for attempt in range(10):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+            headers=headers,
+        )
+        expected_status = 429 if attempt == 9 else 401
+        assert response.status_code == expected_status
+
+    client.cookies.clear()
+    retry_response = client.post(
+        "/api/auth/login",
+        json={"username": "someone-else", "password": "wrong-password"},
+        headers=headers,
+    )
+
+    assert retry_response.status_code == 429
+    assert retry_response.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+
+
+def test_login_rate_limit_different_client_bucket_is_not_blocked(
+    initialized_settings,
+    client,
+) -> None:
+    blocked_headers = _login_headers(ip_address="203.0.113.30", user_agent="Pytest Device A")
+
+    for attempt in range(10):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+            headers=blocked_headers,
+        )
+        expected_status = 429 if attempt == 9 else 401
+        assert response.status_code == expected_status
+
+    different_ip_response = client.post(
+        "/api/auth/login",
+        json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+        headers=_login_headers(ip_address="203.0.113.31", user_agent="Pytest Device A"),
+    )
+    assert different_ip_response.status_code == 401
+    assert different_ip_response.json()["detail"] == "Invalid username or password"
+
+    different_user_agent_response = client.post(
+        "/api/auth/login",
+        json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+        headers=_login_headers(ip_address="203.0.113.30", user_agent="Pytest Device B"),
+    )
+    assert different_user_agent_response.status_code == 401
+    assert different_user_agent_response.json()["detail"] == "Invalid username or password"
+
+
+def test_successful_login_clears_client_bucket_failures(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    headers = _login_headers(ip_address="203.0.113.40", user_agent="Pytest Success Reset")
+
+    for _ in range(9):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+            headers=headers,
+        )
+        assert response.status_code == 401
+
+    success_response = client.post(
+        "/api/auth/login",
+        json=admin_credentials,
+        headers=headers,
+    )
+    assert success_response.status_code == 200
+
+    post_success_failure = client.post(
+        "/api/auth/login",
+        json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+        headers=headers,
+    )
+    assert post_success_failure.status_code == 401
+    assert post_success_failure.json()["detail"] == "Invalid username or password"
+
+
+def test_disabled_login_does_not_count_as_invalid_password_for_device_lockout(
+    initialized_settings,
+    client,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="disabled-device-lockout")
+    update_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        enabled=False,
+        role=None,
+        current_admin_password=None,
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    headers = _login_headers(ip_address="203.0.113.50", user_agent="Pytest Disabled Isolation")
+
+    disabled_response = client.post(
+        "/api/auth/login",
+        json={"username": "disabled-device-lockout", "password": "family-password"},
+        headers=headers,
+    )
+    assert disabled_response.status_code == 403
+    assert disabled_response.json()["detail"] == "This account has been disabled"
+
+    for _ in range(9):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+            headers=headers,
+        )
+        assert response.status_code == 401
+
+    tenth_invalid = client.post(
+        "/api/auth/login",
+        json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+        headers=headers,
+    )
+    assert tenth_invalid.status_code == 429
+    assert tenth_invalid.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+
+
+def test_login_audit_log_distinguishes_invalid_credentials_and_device_rate_limited(
+    initialized_settings,
+    client,
+) -> None:
+    headers = _login_headers(ip_address="203.0.113.60", user_agent="Pytest Audit Device")
+
+    first_failure = client.post(
+        "/api/auth/login",
+        json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+        headers=headers,
+    )
+    assert first_failure.status_code == 401
+
+    for _ in range(8):
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "ethan", "password": "wrong-password"},
+            headers=headers,
+        )
+        assert response.status_code == 401
+
+    locked_response = client.post(
+        "/api/auth/login",
+        json={"username": "ethan", "password": "wrong-password"},
+        headers=headers,
+    )
+    assert locked_response.status_code == 429
+
+    latest_details = _recent_auth_login_details(initialized_settings, limit=12)
+    reasons = [detail["reason"] for detail in latest_details if detail]
+
+    assert "invalid_credentials" in reasons
+    assert "device_rate_limited" in reasons
+    assert latest_details[0] == {
+        "attempted_username": "ethan",
+        "reason": "device_rate_limited",
+        "retry_after": 600,
+    }

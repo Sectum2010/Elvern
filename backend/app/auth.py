@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -73,6 +74,13 @@ def resolve_client_ip(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
+
+
+def build_login_client_bucket(request: Request) -> str:
+    ip_address = resolve_client_ip(request).strip() or "unknown"
+    user_agent = " ".join((request.headers.get("user-agent") or "").strip().lower().split()) or "unknown"
+    digest = hashlib.sha256(f"{ip_address}\n{user_agent}".encode("utf-8")).hexdigest()
+    return f"login-device:{digest}"
 
 
 def ensure_admin_user(settings: Settings) -> None:

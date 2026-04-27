@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import math
 import secrets
 import threading
 import time
@@ -77,7 +78,7 @@ class LoginRateLimiter:
         with self._lock:
             blocked_until = self._blocked_until.get(key)
             if blocked_until and blocked_until > now:
-                return int(blocked_until - now)
+                return max(1, math.ceil(blocked_until - now))
             self._blocked_until.pop(key, None)
             recent = [
                 timestamp

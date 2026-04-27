@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from ..auth import (
+    build_login_client_bucket,
     CurrentHeartbeatUser,
     CurrentUser,
     authenticate_user,
@@ -24,31 +25,36 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 def login(payload: AuthLoginRequest, request: Request, response: Response) -> AuthUserEnvelope:
     settings = request.app.state.settings
     rate_limiter = request.app.state.login_rate_limiter
-    rate_limit_key = f"{resolve_client_ip(request)}:{payload.username.strip().lower()}"
-    retry_after = rate_limiter.check(rate_limit_key)
+    attempted_username = payload.username.strip()
+    client_bucket = build_login_client_bucket(request)
+    retry_after = rate_limiter.check(client_bucket)
     if retry_after:
         log_audit_event(
             settings,
             action="auth.login",
             outcome="failure",
-            username=payload.username.strip(),
+            username=attempted_username,
             ip_address=resolve_client_ip(request),
             user_agent=request.headers.get("user-agent"),
-            details={"reason": "rate_limited", "retry_after": retry_after},
+            details={
+                "reason": "device_rate_limited",
+                "retry_after": retry_after,
+                "attempted_username": attempted_username,
+            },
         )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many login attempts. Try again in {retry_after} seconds.",
+            detail=f"Too many login attempts from this device. Try again in {retry_after} seconds.",
         )
 
-    user, failure_reason = authenticate_user(settings, payload.username.strip(), payload.password)
+    user, failure_reason = authenticate_user(settings, attempted_username, payload.password)
     if user is None:
         if failure_reason == "disabled":
             log_audit_event(
                 settings,
                 action="auth.login",
                 outcome="failure",
-                username=payload.username.strip(),
+                username=attempted_username,
                 ip_address=resolve_client_ip(request),
                 user_agent=request.headers.get("user-agent"),
                 details={"reason": "account_disabled"},
@@ -57,25 +63,38 @@ def login(payload: AuthLoginRequest, request: Request, response: Response) -> Au
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This account has been disabled",
             )
-        log_audit_event(
-            settings,
-            action="auth.login",
-            outcome="failure",
-            username=payload.username.strip(),
-            ip_address=resolve_client_ip(request),
-            user_agent=request.headers.get("user-agent"),
-            details={"reason": "invalid_credentials"},
-        )
-        lockout = rate_limiter.register_failure(rate_limit_key)
-        message = "Invalid username or password"
+        lockout = rate_limiter.register_failure(client_bucket)
         if lockout:
-            message = f"Too many login attempts. Try again in {lockout} seconds."
+            log_audit_event(
+                settings,
+                action="auth.login",
+                outcome="failure",
+                username=attempted_username,
+                ip_address=resolve_client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+                details={
+                    "reason": "device_rate_limited",
+                    "retry_after": lockout,
+                    "attempted_username": attempted_username,
+                },
+            )
+            message = f"Too many login attempts from this device. Try again in {lockout} seconds."
             status_code = status.HTTP_429_TOO_MANY_REQUESTS
         else:
+            log_audit_event(
+                settings,
+                action="auth.login",
+                outcome="failure",
+                username=attempted_username,
+                ip_address=resolve_client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+                details={"reason": "invalid_credentials"},
+            )
+            message = "Invalid username or password"
             status_code = status.HTTP_401_UNAUTHORIZED
         raise HTTPException(status_code=status_code, detail=message)
 
-    rate_limiter.clear(rate_limit_key)
+    rate_limiter.clear(client_bucket)
     token = create_session(
         settings,
         user,

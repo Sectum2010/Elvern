@@ -277,7 +277,7 @@ def load_settings() -> Settings:
         ),
         log_level=os.getenv("ELVERN_LOG_LEVEL", "INFO").strip().upper() or "INFO",
         login_window_seconds=_get_int("ELVERN_LOGIN_WINDOW_SECONDS", 300),
-        login_max_attempts=_get_int("ELVERN_LOGIN_MAX_ATTEMPTS", 5),
+        login_max_attempts=_get_int("ELVERN_LOGIN_MAX_ATTEMPTS", 10),
         login_lockout_seconds=_get_int("ELVERN_LOGIN_LOCKOUT_SECONDS", 600),
     )
     validate_settings(settings)
