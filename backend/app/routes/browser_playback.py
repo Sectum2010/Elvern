@@ -14,7 +14,10 @@ from ..schemas import (
     MobilePlaybackStopResponse,
 )
 from ..services.library_service import get_media_item_record
-from ..services.mobile_playback_service import ActivePlaybackWorkerConflictError
+from ..services.mobile_playback_service import (
+    ActivePlaybackWorkerConflictError,
+    PlaybackWorkerCooldownError,
+)
 
 
 router = APIRouter(tags=["browser_playback"])
@@ -28,6 +31,8 @@ def _coerce_session_error(exc: Exception) -> HTTPException:
     if isinstance(exc, KeyError | PermissionError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Browser playback session not found")
     if isinstance(exc, ActivePlaybackWorkerConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
+    if isinstance(exc, PlaybackWorkerCooldownError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
     if isinstance(exc, ValueError):
         return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -53,7 +58,13 @@ def create_browser_playback_session(
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
     try:
-        response = _get_browser_manager(request).create_session(
+        manager = _get_browser_manager(request)
+        manager.raise_if_browser_playback_cooldown_active(
+            user_id=int(user.id),
+            media_item_id=int(item["id"]),
+            playback_mode=payload.playback_mode,
+        )
+        response = manager.create_session(
             item,
             user_id=int(user.id),
             auth_session_id=user.session_id,

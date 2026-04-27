@@ -30,6 +30,7 @@ from backend.app.services.mobile_playback_source_service import _probe_worker_so
 from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
     MobilePlaybackManager,
+    PlaybackWorkerCooldownError,
     _parse_proc_status_rss_bytes,
 )
 from backend.app.services.mobile_playback_route2_full_gate import _route2_full_mode_gate_locked
@@ -1243,6 +1244,159 @@ def test_route2_stop_session_terminates_owned_worker(initialized_settings) -> No
     assert fake_process.terminated is True
     assert payload["session_id"] not in manager._sessions
     assert 1 not in manager._route2_session_ids_by_user
+    with manager._lock:
+        assert manager._browser_playback_cooldowns == {}
+
+
+def test_route2_admin_terminate_worker_creates_browser_cooldown_for_same_user_movie(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=344, relative_name="route2/admin-cooldown.mp4")
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.time.time", lambda: 100.0)
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=910,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 6542
+            self.terminated = False
+            self.killed = False
+            self._return_code = None
+
+        def poll(self):
+            return self._return_code
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self._return_code = 0
+
+        def wait(self, timeout=None):
+            self._return_code = 0 if self._return_code is None else self._return_code
+            return self._return_code
+
+        def kill(self) -> None:
+            self.killed = True
+            self._return_code = -9
+
+    fake_process = _FakeProcess()
+    with manager._lock:
+        session = manager._sessions[payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        active_epoch.process = fake_process
+        record = manager._ensure_route2_worker_record_locked(session, active_epoch)
+        record.state = "running"
+        worker_id = record.worker_id
+
+    assert manager.terminate_route2_worker(worker_id, apply_admin_cooldown=True) is True
+    assert fake_process.terminated is True
+
+    with manager._lock:
+        entry = manager._browser_playback_cooldowns[(1, int(item["id"]))]
+
+    assert entry["reason"] == "admin_terminated_worker"
+    assert entry["expires_at_ts"] == 130.0
+
+    with pytest.raises(PlaybackWorkerCooldownError) as cooldown:
+        manager.raise_if_browser_playback_cooldown_active(
+            user_id=1,
+            media_item_id=int(item["id"]),
+            playback_mode="lite",
+        )
+
+    assert cooldown.value.detail == {
+        "code": "playback_worker_cooldown",
+        "media_item_id": int(item["id"]),
+        "remaining_seconds": 30,
+        "message": "Your current quota for this movie has been reached. Please try again in 30 seconds.",
+    }
+
+
+@pytest.mark.parametrize("playback_mode", ["lite", "full"])
+def test_route2_browser_cooldown_blocks_same_user_same_movie_for_lite_and_full(
+    initialized_settings,
+    monkeypatch,
+    playback_mode: str,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.time.time", lambda: 200.0)
+
+    with manager._lock:
+        manager._record_admin_terminated_browser_playback_cooldown_locked(
+            user_id=1,
+            media_item_id=345,
+        )
+
+    with pytest.raises(PlaybackWorkerCooldownError) as cooldown:
+        manager.raise_if_browser_playback_cooldown_active(
+            user_id=1,
+            media_item_id=345,
+            playback_mode=playback_mode,
+        )
+
+    assert cooldown.value.detail == {
+        "code": "playback_worker_cooldown",
+        "media_item_id": 345,
+        "remaining_seconds": 30,
+        "message": "Your current quota for this movie has been reached. Please try again in 30 seconds.",
+    }
+
+
+def test_route2_browser_cooldown_does_not_block_other_user_or_other_movie_and_expires(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    now_holder = {"value": 300.0}
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service.time.time",
+        lambda: now_holder["value"],
+    )
+
+    with manager._lock:
+        manager._record_admin_terminated_browser_playback_cooldown_locked(
+            user_id=1,
+            media_item_id=346,
+        )
+
+    manager.raise_if_browser_playback_cooldown_active(user_id=2, media_item_id=346, playback_mode="lite")
+    manager.raise_if_browser_playback_cooldown_active(user_id=1, media_item_id=347, playback_mode="full")
+
+    now_holder["value"] = 331.0
+    manager.raise_if_browser_playback_cooldown_active(user_id=1, media_item_id=346, playback_mode="lite")
+
+    with manager._lock:
+        assert (1, 346) not in manager._browser_playback_cooldowns
+
+
+def test_route2_browser_cooldown_is_not_enforced_by_generic_session_create(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _make_local_item(settings, item_id=347, relative_name="route2/browser-only-cooldown.mp4")
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.time.time", lambda: 400.0)
+
+    with manager._lock:
+        manager._record_admin_terminated_browser_playback_cooldown_locked(
+            user_id=1,
+            media_item_id=int(item["id"]),
+        )
+
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=920,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    assert payload["media_item_id"] == int(item["id"])
 
 
 def test_route2_admin_terminate_worker_stops_matching_owned_session(initialized_settings) -> None:
@@ -1292,6 +1446,8 @@ def test_route2_admin_terminate_worker_stops_matching_owned_session(initialized_
     assert manager.terminate_route2_worker(worker_id) is True
     assert fake_process.terminated is True
     assert payload["session_id"] not in manager._sessions
+    with manager._lock:
+        assert manager._browser_playback_cooldowns == {}
     summary = manager.get_route2_worker_status()
     assert summary["active_worker_count"] == 0
 

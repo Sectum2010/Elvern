@@ -9,7 +9,10 @@ import pytest
 from backend.app.auth import authenticate_user, destroy_session
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.admin_service import create_user, update_user
-from backend.app.services.mobile_playback_service import ActivePlaybackWorkerConflictError
+from backend.app.services.mobile_playback_service import (
+    ActivePlaybackWorkerConflictError,
+    PlaybackWorkerCooldownError,
+)
 
 
 IOS_SAFARI_USER_AGENT = (
@@ -26,6 +29,8 @@ class BrowserPlaybackRouteManagerStub:
     def __init__(self, payload: dict[str, object]) -> None:
         self.payload = dict(payload)
         self.create_exception: Exception | None = None
+        self.browser_cooldown_exception: Exception | None = None
+        self.create_calls = 0
 
     def start(self) -> None:
         return None
@@ -33,7 +38,13 @@ class BrowserPlaybackRouteManagerStub:
     def shutdown(self) -> None:
         return None
 
+    def raise_if_browser_playback_cooldown_active(self, **kwargs) -> None:
+        del kwargs
+        if self.browser_cooldown_exception is not None:
+            raise self.browser_cooldown_exception
+
     def create_session(self, *args, **kwargs) -> dict[str, object]:
+        self.create_calls += 1
         if self.create_exception is not None:
             raise self.create_exception
         return dict(self.payload)
@@ -63,6 +74,7 @@ class AdminPlaybackWorkerManagerStub:
         self.invalidated_user_calls: list[tuple[int, str]] = []
         self.invalidated_auth_session_calls: list[tuple[int, str]] = []
         self.terminated_worker_ids: list[str] = []
+        self.terminated_worker_cooldown_flags: list[bool] = []
         self.terminate_result = True
 
     def start(self) -> None:
@@ -82,8 +94,9 @@ class AdminPlaybackWorkerManagerStub:
         self.invalidated_auth_session_calls.append((auth_session_id, reason))
         return 1
 
-    def terminate_route2_worker(self, worker_id: str) -> bool:
+    def terminate_route2_worker(self, worker_id: str, *, apply_admin_cooldown: bool = False) -> bool:
         self.terminated_worker_ids.append(worker_id)
+        self.terminated_worker_cooldown_flags.append(bool(apply_admin_cooldown))
         return self.terminate_result
 
 
@@ -453,6 +466,22 @@ def _make_active_playback_worker_conflict_detail(
         "active_worker_id": worker_id,
         "active_session_id": session_id,
         "message": f"{title} is still preparing.",
+    }
+
+
+def _make_playback_worker_cooldown_detail(
+    *,
+    media_item_id: int = 70,
+    remaining_seconds: int = 30,
+) -> dict[str, object]:
+    return {
+        "code": "playback_worker_cooldown",
+        "media_item_id": media_item_id,
+        "remaining_seconds": remaining_seconds,
+        "message": (
+            "Your current quota for this movie has been reached. "
+            f"Please try again in {remaining_seconds} seconds."
+        ),
     }
 
 
@@ -857,6 +886,45 @@ def test_browser_playback_create_route_returns_structured_active_worker_conflict
     )
 
 
+@pytest.mark.parametrize("playback_mode", ["lite", "full"])
+def test_browser_playback_create_route_returns_structured_worker_cooldown(
+    initialized_settings,
+    client,
+    admin_credentials,
+    playback_mode: str,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name=f"browser/route2-worker-cooldown-{playback_mode}.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.browser_cooldown_exception = PlaybackWorkerCooldownError(
+        _make_playback_worker_cooldown_detail(
+            media_item_id=int(item["id"]),
+            remaining_seconds=27,
+        )
+    )
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_2160p",
+            "playback_mode": playback_mode,
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"] == _make_playback_worker_cooldown_detail(
+        media_item_id=int(item["id"]),
+        remaining_seconds=27,
+    )
+    assert stub.create_calls == 0
+
+
 def test_admin_playback_workers_route_returns_route2_worker_registry(
     client,
     admin_credentials,
@@ -899,6 +967,7 @@ def test_admin_terminate_playback_worker_route_stops_owned_worker(
     assert response.status_code == 200
     assert response.json()["message"] == "Playback worker terminated"
     assert stub.terminated_worker_ids == ["worker-1"]
+    assert stub.terminated_worker_cooldown_flags == [True]
 
 
 def test_admin_terminate_playback_worker_route_returns_404_for_unknown_worker(
@@ -915,6 +984,7 @@ def test_admin_terminate_playback_worker_route_returns_404_for_unknown_worker(
     assert response.status_code == 404
     assert response.json()["detail"] == "Playback worker not found"
     assert stub.terminated_worker_ids == ["missing-worker"]
+    assert stub.terminated_worker_cooldown_flags == [True]
 
 
 def test_non_admin_cannot_terminate_playback_worker(

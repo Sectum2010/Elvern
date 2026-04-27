@@ -163,12 +163,19 @@ from .mobile_playback_source_service import (
 
 logger = logging.getLogger(__name__)
 ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
+ADMIN_TERMINATED_BROWSER_PLAYBACK_COOLDOWN_SECONDS = 30.0
 
 
 class ActivePlaybackWorkerConflictError(Exception):
     def __init__(self, detail: dict[str, object]) -> None:
         self.detail = dict(detail)
         super().__init__(str(self.detail.get("message") or "An active playback worker already exists"))
+
+
+class PlaybackWorkerCooldownError(Exception):
+    def __init__(self, detail: dict[str, object]) -> None:
+        self.detail = dict(detail)
+        super().__init__(str(self.detail.get("message") or "Playback is temporarily unavailable for this movie"))
 
 
 def _read_text_tail(path: Path, *, max_lines: int = 100) -> str | None:
@@ -327,6 +334,7 @@ class MobilePlaybackManager:
         self._cache_states: dict[str, CacheState] = {}
         self._workers: dict[str, str] = {}
         self._route2_workers: dict[str, Route2WorkerRecord] = {}
+        self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
         self._manager_thread: threading.Thread | None = None
         self._session_root = self.settings.transcode_dir / "mobile_sessions"
@@ -365,6 +373,7 @@ class MobilePlaybackManager:
             self._route2_session_ids_by_user.clear()
             self._workers.clear()
             self._route2_workers.clear()
+            self._browser_playback_cooldowns.clear()
         for session in sessions:
             self._terminate_session(session, remove_session_dir=False)
 
@@ -840,7 +849,28 @@ class MobilePlaybackManager:
         self._terminate_session(session)
         return True
 
-    def terminate_route2_worker(self, worker_id: str) -> bool:
+    def raise_if_browser_playback_cooldown_active(
+        self,
+        *,
+        user_id: int,
+        media_item_id: int,
+        playback_mode: str | None = None,
+    ) -> None:
+        selected_playback_mode = self._select_playback_mode(playback_mode)
+        if selected_playback_mode not in {"lite", "full"}:
+            return
+        now_ts = time.time()
+        with self._lock:
+            self._cleanup_browser_playback_cooldowns_locked(now_ts)
+            detail = self._build_browser_playback_cooldown_detail_locked(
+                user_id=user_id,
+                media_item_id=media_item_id,
+                now_ts=now_ts,
+            )
+        if detail is not None:
+            raise PlaybackWorkerCooldownError(detail)
+
+    def terminate_route2_worker(self, worker_id: str, *, apply_admin_cooldown: bool = False) -> bool:
         normalized_worker_id = str(worker_id or "").strip()
         if not normalized_worker_id:
             return False
@@ -856,7 +886,15 @@ class MobilePlaybackManager:
                 return False
             owner_user_id = session.user_id
             session_id = session.session_id
-        return self.stop_session(session_id, user_id=owner_user_id)
+            media_item_id = session.media_item_id
+        stopped = self.stop_session(session_id, user_id=owner_user_id)
+        if stopped and apply_admin_cooldown:
+            with self._lock:
+                self._record_admin_terminated_browser_playback_cooldown_locked(
+                    user_id=owner_user_id,
+                    media_item_id=media_item_id,
+                )
+        return stopped
 
     def touch_session(self, session_id: str, *, user_id: int, media_access: bool) -> None:
         with self._lock:
@@ -1224,6 +1262,56 @@ class MobilePlaybackManager:
             "active_worker_id": self._route2_conflict_worker_id_locked(session),
             "active_session_id": session.session_id,
             "message": f"{title} is still preparing.",
+        }
+
+    def _cleanup_browser_playback_cooldowns_locked(self, now_ts: float | None = None) -> None:
+        current_ts = float(now_ts if now_ts is not None else time.time())
+        expired_keys = [
+            key
+            for key, entry in self._browser_playback_cooldowns.items()
+            if float(entry.get("expires_at_ts") or 0.0) <= current_ts
+        ]
+        for key in expired_keys:
+            self._browser_playback_cooldowns.pop(key, None)
+
+    def _record_admin_terminated_browser_playback_cooldown_locked(
+        self,
+        *,
+        user_id: int,
+        media_item_id: int,
+        now_ts: float | None = None,
+    ) -> None:
+        current_ts = float(now_ts if now_ts is not None else time.time())
+        self._cleanup_browser_playback_cooldowns_locked(current_ts)
+        self._browser_playback_cooldowns[(int(user_id), int(media_item_id))] = {
+            "reason": "admin_terminated_worker",
+            "expires_at_ts": current_ts + ADMIN_TERMINATED_BROWSER_PLAYBACK_COOLDOWN_SECONDS,
+        }
+
+    def _build_browser_playback_cooldown_detail_locked(
+        self,
+        *,
+        user_id: int,
+        media_item_id: int,
+        now_ts: float | None = None,
+    ) -> dict[str, object] | None:
+        current_ts = float(now_ts if now_ts is not None else time.time())
+        entry = self._browser_playback_cooldowns.get((int(user_id), int(media_item_id)))
+        if entry is None:
+            return None
+        expires_at_ts = float(entry.get("expires_at_ts") or 0.0)
+        if expires_at_ts <= current_ts:
+            self._browser_playback_cooldowns.pop((int(user_id), int(media_item_id)), None)
+            return None
+        remaining_seconds = max(1, math.ceil(expires_at_ts - current_ts))
+        return {
+            "code": "playback_worker_cooldown",
+            "media_item_id": int(media_item_id),
+            "remaining_seconds": remaining_seconds,
+            "message": (
+                "Your current quota for this movie has been reached. "
+                f"Please try again in {remaining_seconds} seconds."
+            ),
         }
 
     def _route2_session_can_reuse_target_locked(

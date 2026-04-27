@@ -19,6 +19,24 @@ export function getActivePlaybackWorkerConflict(error) {
   };
 }
 
+export function getPlaybackWorkerCooldown(error) {
+  const detail = error?.detail || error?.payload?.detail || null;
+  if (!detail || typeof detail !== "object" || detail.code !== "playback_worker_cooldown") {
+    return null;
+  }
+  const remainingSeconds = Number(detail.remaining_seconds || 0);
+  const message =
+    typeof detail.message === "string" && detail.message.trim()
+      ? detail.message.trim()
+      : `Your current quota for this movie has been reached. Please try again in ${Math.max(1, Math.ceil(remainingSeconds || 0))} seconds.`;
+  return {
+    code: "playback_worker_cooldown",
+    mediaItemId: Number(detail.media_item_id || 0),
+    remainingSeconds: Number.isFinite(remainingSeconds) ? remainingSeconds : 0,
+    message,
+  };
+}
+
 export function buildActivePlaybackConflictPrompt(activeMovieTitle, newMovieTitle) {
   const activeTitle = normalizeTitle(activeMovieTitle);
   const requestedTitle = normalizeTitle(newMovieTitle);

@@ -4,7 +4,10 @@ import {
   getPlaybackMode,
   resolveBrowserPlaybackSessionRoot,
 } from "../../lib/browserPlayback";
-import { getActivePlaybackWorkerConflict } from "../../lib/playbackWorkerOwnership";
+import {
+  getActivePlaybackWorkerConflict,
+  getPlaybackWorkerCooldown,
+} from "../../lib/playbackWorkerOwnership";
 import {
   isBrowserPlaybackAbsolutePositionReady,
   toBrowserPlaybackAbsoluteSeconds,
@@ -540,6 +543,13 @@ export function useBrowserPlaybackController({
         setSeekNotice("");
         setPlaybackStatus(`${browserPlaybackLabelTitle} blocked`);
         onActivePlaybackConflict(activePlaybackConflict);
+        return false;
+      }
+      const playbackCooldown = getPlaybackWorkerCooldown(requestError);
+      if (playbackCooldown) {
+        setSeekNotice("");
+        setPlaybackStatus(`${browserPlaybackLabelTitle} blocked`);
+        setPlaybackError(playbackCooldown.message);
         return false;
       }
       setPlaybackError(requestError.message || `Failed to start ${browserPlaybackLabel}`);

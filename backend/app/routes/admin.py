@@ -281,7 +281,10 @@ def admin_terminate_playback_worker(
     user=CurrentAdmin,
 ) -> MessageResponse:
     del user
-    terminated = request.app.state.mobile_playback_manager.terminate_route2_worker(worker_id)
+    terminated = request.app.state.mobile_playback_manager.terminate_route2_worker(
+        worker_id,
+        apply_admin_cooldown=True,
+    )
     if not terminated:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

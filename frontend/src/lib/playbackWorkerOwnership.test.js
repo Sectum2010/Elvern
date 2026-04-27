@@ -5,6 +5,7 @@ import {
   buildActivePlaybackConflictPrompt,
   buildLogoutPlaybackWorkerPrompt,
   getActivePlaybackWorkerConflict,
+  getPlaybackWorkerCooldown,
 } from "./playbackWorkerOwnership.js";
 
 
@@ -44,5 +45,23 @@ test("active playback conflict helper normalizes structured 409 detail", () => {
     activeWorkerId: "worker-1",
     activeSessionId: "session-1",
     message: "Coco is still preparing.",
+  });
+});
+
+
+test("playback worker cooldown helper normalizes structured 409 detail", () => {
+  const detail = getPlaybackWorkerCooldown({
+    detail: {
+      code: "playback_worker_cooldown",
+      media_item_id: 70,
+      remaining_seconds: 27,
+      message: "Your current quota for this movie has been reached. Please try again in 27 seconds.",
+    },
+  });
+  assert.deepEqual(detail, {
+    code: "playback_worker_cooldown",
+    mediaItemId: 70,
+    remainingSeconds: 27,
+    message: "Your current quota for this movie has been reached. Please try again in 27 seconds.",
   });
 });
