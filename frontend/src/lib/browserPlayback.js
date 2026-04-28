@@ -1,13 +1,11 @@
 import { useEffect, useState } from "react";
 
 import { apiRequest } from "./api";
+import { isIOSLikeBrowser } from "./platformDetection";
 
 
 export function isIOSMobileBrowser() {
-  if (typeof navigator === "undefined") {
-    return false;
-  }
-  return /iphone|ipad|ipod/i.test(navigator.userAgent || "");
+  return isIOSLikeBrowser();
 }
 
 export function resolveBrowserPlaybackSessionRoot() {

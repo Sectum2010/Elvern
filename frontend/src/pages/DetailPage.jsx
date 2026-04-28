@@ -12,6 +12,7 @@ import {
 } from "../lib/browserPlayback";
 import { getOrCreateDeviceId } from "../lib/device";
 import { formatBytes, formatDuration } from "../lib/format";
+import { detectDesktopPlatform } from "../lib/platformDetection";
 import { useBrowserPlaybackController } from "../features/playback/useBrowserPlaybackController";
 import {
   extractLibraryReturnState,
@@ -89,23 +90,6 @@ const EMPTY_CLOUD_LIBRARIES = {
   shared_libraries: [],
 };
 
-
-function detectDesktopPlatform() {
-  if (typeof navigator === "undefined") {
-    return null;
-  }
-  const agent = (navigator.userAgent || "").toLowerCase();
-  if (agent.includes("windows")) {
-    return "windows";
-  }
-  if ((agent.includes("macintosh") || agent.includes("mac os x")) && !agent.includes("iphone") && !agent.includes("ipad")) {
-    return "mac";
-  }
-  if (agent.includes("linux") && !agent.includes("android")) {
-    return "linux";
-  }
-  return null;
-}
 
 function isLocalDevelopmentLoopback(platform) {
   if (typeof window === "undefined" || platform !== "linux") {
@@ -355,6 +339,8 @@ export function DetailPage() {
   const [browserStopModalOpen, setBrowserStopModalOpen] = useState(false);
   const [playbackConflictModal, setPlaybackConflictModal] = useState(null);
   const [playbackConflictPending, setPlaybackConflictPending] = useState(false);
+  const [desktopSeekDraft, setDesktopSeekDraft] = useState(null);
+  const desktopSeekCommitPendingRef = useRef(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -384,6 +370,7 @@ export function DetailPage() {
     playback,
     playbackError,
     seekNotice,
+    playbackPosition,
     playbackStatus,
     playbackModeIntent,
     prepareEstimateObservedAtMs,
@@ -416,6 +403,7 @@ export function DetailPage() {
     resetPendingPlaybackPreparation,
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
+    seekBrowserPlaybackTo,
     stopCurrentBrowserPlaybackSession,
   } = useBrowserPlaybackController({
     itemId,
@@ -1661,6 +1649,21 @@ export function DetailPage() {
   const hideActionsDisabled = browserPlaybackSessionActive || hiddenActionPending || globalHiddenActionPending;
   const showPrimaryStatusPill = isImportantPlaybackStatus(playbackStatus);
   const showPlaybackReasonPill = isImportantPlaybackReason(playback?.reason);
+  const showDesktopBrowserSeekControl =
+    !iosMobile
+    && showPlayerShell
+    && Boolean(mobileSession)
+    && fullDuration > 0;
+  const desktopSeekPosition = Math.max(
+    0,
+    Math.min(
+      fullDuration || 0,
+      desktopSeekDraft != null ? desktopSeekDraft : playbackPosition || 0,
+    ),
+  );
+  const desktopSeekProgressPercent = fullDuration > 0
+    ? Math.min(100, Math.max(0, (desktopSeekPosition / fullDuration) * 100))
+    : 0;
   const prepareEstimateDisplay = (() => {
     if (!showMobilePreparingPlaceholder || !isRoute2SessionPayload(mobileSession)) {
       return {
@@ -1727,6 +1730,29 @@ export function DetailPage() {
           ? `Prepared through ${preparedDurationLabel} of ${formatDuration(fullDuration)} while Elvern transcodes ahead.`
           : `Prepared through ${preparedDurationLabel} while Elvern transcodes ahead.`
       : "Full movie is available for direct playback.";
+
+  function normalizeDesktopSeekValue(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      return 0;
+    }
+    if (fullDuration > 0) {
+      return Math.min(fullDuration, Math.max(0, numericValue));
+    }
+    return Math.max(0, numericValue);
+  }
+
+  function commitDesktopBrowserSeek(value) {
+    if (!showDesktopBrowserSeekControl || desktopSeekCommitPendingRef.current) {
+      return;
+    }
+    const targetPosition = normalizeDesktopSeekValue(value);
+    desktopSeekCommitPendingRef.current = true;
+    setDesktopSeekDraft(null);
+    seekBrowserPlaybackTo(targetPosition).finally(() => {
+      desktopSeekCommitPendingRef.current = false;
+    });
+  }
 
   return (
     <section className="page-section page-section--detail">
@@ -2230,6 +2256,39 @@ export function DetailPage() {
               playsInline
               preload="metadata"
               ref={videoRef}
+            />
+          </div>
+        ) : null}
+        {showDesktopBrowserSeekControl ? (
+          <div className="desktop-browser-seek" aria-label="Movie seek controls">
+            <input
+              aria-label="Seek movie position"
+              className="desktop-browser-seek__range"
+              max={Math.max(1, Math.round(fullDuration))}
+              min="0"
+              onBlur={(event) => {
+                if (desktopSeekDraft != null) {
+                  commitDesktopBrowserSeek(event.currentTarget.value);
+                }
+              }}
+              onChange={(event) => {
+                setDesktopSeekDraft(normalizeDesktopSeekValue(event.currentTarget.value));
+              }}
+              onKeyUp={(event) => {
+                if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+                  commitDesktopBrowserSeek(event.currentTarget.value);
+                }
+              }}
+              onPointerCancel={() => {
+                setDesktopSeekDraft(null);
+              }}
+              onPointerUp={(event) => {
+                commitDesktopBrowserSeek(event.currentTarget.value);
+              }}
+              step="1"
+              style={{ "--desktop-seek-progress": `${desktopSeekProgressPercent}%` }}
+              type="range"
+              value={Math.round(desktopSeekPosition)}
             />
           </div>
         ) : null}

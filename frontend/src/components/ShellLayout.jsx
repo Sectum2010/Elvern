@@ -40,7 +40,28 @@ export function ShellLayout({ children }) {
   const isLibraryRootPage = location.pathname === "/library";
   const isLibrarySourcePage = location.pathname === "/library/local" || location.pathname === "/library/cloud";
 
+  function clearLogoutInteractionState() {
+    if (typeof window !== "undefined" && collapseTimerRef.current) {
+      window.clearTimeout(collapseTimerRef.current);
+      collapseTimerRef.current = 0;
+    }
+    if (typeof document !== "undefined") {
+      const activeElement = document.activeElement;
+      if (activeElement && typeof activeElement.blur === "function") {
+        activeElement.blur();
+      }
+      document.body?.style.removeProperty("overflow");
+      document.body?.style.removeProperty("pointer-events");
+      document.body?.removeAttribute("inert");
+      document.documentElement?.removeAttribute("inert");
+    }
+    setAccountExpanded(false);
+    setLogoutWorkerModal(null);
+    setLogoutWorkerError("");
+  }
+
   async function completeLogout() {
+    clearLogoutInteractionState();
     await logout();
     navigate("/login", { replace: true });
   }
@@ -93,7 +114,7 @@ export function ShellLayout({ children }) {
     setLogoutWorkerPending("keep");
     setLogoutWorkerError("");
     try {
-      setLogoutWorkerModal(null);
+      await completeLogout();
     } catch (requestError) {
       setLogoutWorkerModal((current) => current || logoutWorkerModal);
       setLogoutWorkerError(requestError.message || "Failed to log out");
@@ -108,15 +129,19 @@ export function ShellLayout({ children }) {
     }
     setLogoutWorkerPending("terminate");
     setLogoutWorkerError("");
+    const stopUrl =
+      logoutWorkerModal.stopUrl
+      || `${logoutWorkerModal.sessionRoot}/sessions/${encodeURIComponent(logoutWorkerModal.sessionId)}/stop`;
     try {
-      await apiRequest(
-        logoutWorkerModal.stopUrl || `${logoutWorkerModal.sessionRoot}/sessions/${encodeURIComponent(logoutWorkerModal.sessionId)}/stop`,
-        { method: "POST" },
-      );
-      setLogoutWorkerModal(null);
+      await apiRequest(stopUrl, { method: "POST" });
+    } catch {
+      // Logout is explicit user intent here; a failed worker stop must not trap the session.
+    }
+    try {
       await completeLogout();
     } catch (requestError) {
-      setLogoutWorkerError(requestError.message || "Failed to terminate the background preparation");
+      setLogoutWorkerModal((current) => current || logoutWorkerModal);
+      setLogoutWorkerError(requestError.message || "Failed to log out");
     } finally {
       setLogoutWorkerPending("");
     }
@@ -202,6 +227,12 @@ export function ShellLayout({ children }) {
   useEffect(() => () => {
     if (typeof window !== "undefined" && collapseTimerRef.current) {
       window.clearTimeout(collapseTimerRef.current);
+    }
+    if (typeof document !== "undefined") {
+      document.body?.style.removeProperty("overflow");
+      document.body?.style.removeProperty("pointer-events");
+      document.body?.removeAttribute("inert");
+      document.documentElement?.removeAttribute("inert");
     }
   }, []);
 

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest } from "../lib/api";
 import { getOrCreateDeviceId } from "../lib/device";
+import {
+  detectClientPlatform,
+  isDesktopClientPlatform,
+} from "../lib/platformDetection";
 
 
 const IOS_APP_LINKS = {
@@ -23,34 +27,8 @@ const MOBILE_APP_STATUS_PREFIX = "elvern-install-app-status:";
 
 
 function detectInstallPlatform() {
-  if (typeof navigator === "undefined") {
-    return "linux";
-  }
-  const agent = (navigator.userAgent || "").toLowerCase();
-  const platform = (navigator.platform || "").toLowerCase();
-  const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
-  const iPadDesktopClassAgent =
-    maxTouchPoints > 1 && (agent.includes("macintosh") || platform.includes("mac"));
-
-  if (agent.includes("iphone") || agent.includes("ipod")) {
-    return "iphone";
-  }
-  if (agent.includes("ipad") || iPadDesktopClassAgent) {
-    return "ipad";
-  }
-  if (agent.includes("android")) {
-    return "android";
-  }
-  if (agent.includes("windows")) {
-    return "windows";
-  }
-  if (agent.includes("macintosh") || (agent.includes("mac os x") && !agent.includes("iphone") && !agent.includes("ipad"))) {
-    return "mac";
-  }
-  if (agent.includes("linux") || platform.includes("linux") || agent.includes("x11")) {
-    return "linux";
-  }
-  return "linux";
+  const platform = detectClientPlatform();
+  return platform === "unknown" ? "linux" : platform;
 }
 
 function detectIosStoreRegion() {
@@ -68,7 +46,7 @@ function detectIosStoreRegion() {
 }
 
 function isDesktopPlatform(platform) {
-  return platform === "windows" || platform === "mac" || platform === "linux";
+  return isDesktopClientPlatform(platform);
 }
 
 function platformLabel(platform) {
@@ -120,13 +98,13 @@ function stateCopy(state) {
     case "helper_not_required":
       return "Not required on this Linux desktop";
     case "up_to_date":
-      return "Up to date";
+      return "Helper verified";
     case "update_available":
-      return "Update available";
+      return "Helper update available";
     case "release_unavailable":
       return "Installer package unavailable";
     default:
-      return "Not verified yet";
+      return "Helper not verified";
   }
 }
 
@@ -140,16 +118,16 @@ function normalizeMobileAppInstallState(value) {
 
   if (value === "opened") {
     return {
-      status: "installed",
+      status: "could_not_verify",
       lastCheckedAt: null,
     };
   }
 
   if (typeof value === "object" && value !== null) {
     const normalizedStatus =
-      value.status === "installed" || value.status === "could_not_verify" || value.status === "not_verified"
-      ? value.status
-      : "unverified";
+      value.status === "could_not_verify" || value.status === "not_verified"
+        ? value.status
+        : "unverified";
     const normalizedLastCheckedAt = Number.isFinite(Number(value.lastCheckedAt))
       ? Number(value.lastCheckedAt)
       : null;
@@ -174,7 +152,12 @@ function readMobileAppStatus(key) {
     if (!raw) {
       return normalizeMobileAppInstallState(null);
     }
-    return normalizeMobileAppInstallState(JSON.parse(raw));
+    const parsed = JSON.parse(raw);
+    const normalized = normalizeMobileAppInstallState(parsed);
+    if (parsed === "opened" || parsed?.status === "installed") {
+      writeMobileAppStatus(key, normalized);
+    }
+    return normalized;
   } catch {
     return normalizeMobileAppInstallState(null);
   }
@@ -196,16 +179,10 @@ function writeMobileAppStatus(key, value) {
 }
 
 function mobileAppButtonLabel(appState, platform) {
-  if (appState.status === "installed") {
-    return "Open";
-  }
   return platform === "android" ? "Get" : "Test";
 }
 
 function mobileAppStatusLabel(appState) {
-  if (appState.status === "installed") {
-    return "Installed";
-  }
   if (appState.status === "could_not_verify" || appState.status === "not_verified") {
     return "Could not verify open";
   }
@@ -213,16 +190,13 @@ function mobileAppStatusLabel(appState) {
 }
 
 function mobileAppStatusCopy(appState, platform) {
-  if (appState.status === "installed") {
-    return "Verified by successfully opening the app scheme from this device.";
-  }
   if (appState.status === "could_not_verify" || appState.status === "not_verified") {
     return "A failed test only means the web could not confirm a successful app handoff.";
   }
   if (platform === "android") {
     return "Mobile web cannot reliably verify installed Android apps here.";
   }
-  return "Use Test to try the app scheme. Only a successful handoff marks the app as installed.";
+  return "Use Test to try the app scheme. Safari cannot always prove whether the app opened, so Elvern will not mark it installed unless a future verifiable signal exists.";
 }
 
 function formatLastChecked(lastCheckedAt) {
@@ -251,7 +225,7 @@ function desktopVlcStatus(status, platform) {
   const detectionPath = status?.vlc_detection_path || "";
   if (detectionState === "installed") {
     return {
-      label: "Installed",
+      label: "VLC detected",
       copy: detectionPath
         ? `Verified by a grounded ${platform === "linux" ? "host-side" : "desktop helper"} VLC lookup at ${detectionPath}.`
         : `Verified by a grounded ${platform === "linux" ? "host-side" : "desktop helper"} VLC lookup.`,
@@ -266,7 +240,7 @@ function desktopVlcStatus(status, platform) {
     };
   }
   return {
-    label: "Install state unknown",
+    label: "VLC not verified",
     copy: platform === "linux"
       ? "Run the host check below to confirm whether Elvern can see VLC on this Linux machine."
       : "Run the helper test below. Elvern only knows local VLC state after the client-side helper calls back from this device.",
@@ -281,10 +255,10 @@ function desktopHelperSummaryCopy(platform, status) {
     return "Windows and macOS use the client-side Elvern VLC Opener for Open in VLC, but this server does not currently expose an imported helper package for this platform.";
   }
   if (status?.state === "up_to_date") {
-    return "This device has already reported back through the desktop helper. Use the test below any time Open in VLC feels stale or misconfigured.";
+    return "This device has completed a real helper callback. Use the test below any time Open in VLC feels stale or misconfigured.";
   }
   if (status?.state === "update_available") {
-    return "A helper was seen from this device before, but Elvern now has a newer package available for this platform.";
+    return "A helper callback was seen from this device before, but Elvern now has a newer package available for this platform.";
   }
   return "Windows and macOS use the client-side Elvern VLC Opener for Open in VLC. Server install does not register the protocol handler on this device.";
 }
@@ -314,7 +288,7 @@ function desktopHelperFeedbackForStatus(platform, status) {
     return "Elvern refreshed the Linux host VLC check.";
   }
   if (status.vlc_detection_state === "installed") {
-    return "The desktop helper called back to Elvern and reported VLC on this device.";
+    return "The desktop helper called back to Elvern and reported VLC detection on this device.";
   }
   if (status.vlc_detection_state === "not_detected") {
     return "The desktop helper called back to Elvern, but it reported that VLC was not detected on this device.";
@@ -428,13 +402,13 @@ function verifyMobileAppInstall({ openUrl, statusKey, onStatusChange }) {
     window.removeEventListener("blur", handleWindowBlur);
   }
 
-  function markOpened() {
+  function markCouldNotVerify() {
     if (finished) {
       return;
     }
     finished = true;
     const nextState = {
-      status: "installed",
+      status: "could_not_verify",
       lastCheckedAt: Date.now(),
     };
     writeMobileAppStatus(statusKey, nextState);
@@ -444,12 +418,12 @@ function verifyMobileAppInstall({ openUrl, statusKey, onStatusChange }) {
 
   function handleVisibilityChange() {
     if (document.visibilityState === "hidden") {
-      markOpened();
+      markCouldNotVerify();
     }
   }
 
   function handlePageHide() {
-    markOpened();
+    markCouldNotVerify();
   }
 
   function handleWindowBlur() {
@@ -458,7 +432,7 @@ function verifyMobileAppInstall({ openUrl, statusKey, onStatusChange }) {
         return;
       }
       if (document.visibilityState === "hidden" || !document.hasFocus()) {
-        markOpened();
+        markCouldNotVerify();
       }
     }, 250);
   }
@@ -472,23 +446,9 @@ function verifyMobileAppInstall({ openUrl, statusKey, onStatusChange }) {
     if (finished) {
       return;
     }
-    cleanup();
-    const nextState = {
-      status: "could_not_verify",
-      lastCheckedAt: Date.now(),
-    };
-    writeMobileAppStatus(statusKey, nextState);
-    onStatusChange(statusKey, nextState);
+    markCouldNotVerify();
   }, 2200);
 }
-
-function openMobileAppScheme(openUrl) {
-  if (typeof window === "undefined" || !openUrl) {
-    return;
-  }
-  window.location.assign(openUrl);
-}
-
 
 export function InstallPage() {
   const platform = useMemo(() => detectInstallPlatform(), []);
@@ -572,11 +532,11 @@ export function InstallPage() {
     }
 
     const notes = [
-      "Helper install is client-side. Server install does not register the protocol handler on this device.",
+      "Helper verification is client-side. Server install does not register the protocol handler on this device.",
       status?.latest_releases?.length
         ? "Download the package that matches this desktop, run its installer or registration step, then come back here and use Test desktop helper."
         : "This server does not currently expose a helper download for this platform, so this page can only show the expected client-side readiness state.",
-      "The test is heuristic. If nothing opens or this page never updates, the protocol handler is probably missing, misregistered, or blocked by the browser.",
+      "The test requires a real helper callback. If nothing opens or this page never updates, the protocol handler is probably missing, misregistered, or blocked by the browser.",
     ];
     if (status?.vlc_detection_state === "not_detected") {
       notes.push("The helper has reached Elvern before, but local VLC was not detected on this device.");
@@ -610,11 +570,6 @@ export function InstallPage() {
       return;
     }
     if (platform === "iphone" || platform === "ipad") {
-      const currentStatus = mobileAppStatus[app.mobile_status_key] || normalizeMobileAppInstallState(null);
-      if (currentStatus.status === "installed") {
-        openMobileAppScheme(app.open_url);
-        return;
-      }
       setAppCheckPendingKey(app.mobile_status_key);
       verifyMobileAppInstall({
         openUrl: app.open_url,
@@ -833,7 +788,7 @@ export function InstallPage() {
               <p className="page-subnote">
                 {platform === "linux"
                   ? "Check whether Elvern can see VLC on this Linux host."
-                  : "Check whether the client-side helper can call back and whether VLC was detected on this device."}
+                  : "Check whether the client-side helper can call back, then whether VLC was detected on this device."}
               </p>
             </div>
           </div>

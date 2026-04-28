@@ -5,6 +5,23 @@ import { PasswordInput } from "../components/PasswordInput";
 
 const VIEWPORT_SYNC_API_KEY = "__elvernRequestViewportNormalization";
 
+function clearStaleInteractionState() {
+  if (typeof document === "undefined") {
+    return;
+  }
+  document.body?.style.removeProperty("overflow");
+  document.body?.style.removeProperty("pointer-events");
+  document.body?.removeAttribute("inert");
+  document.documentElement?.removeAttribute("inert");
+}
+
+function isEditableElement(element) {
+  if (!(element instanceof HTMLElement)) {
+    return false;
+  }
+  return element.matches("input, textarea, select, [contenteditable='true']");
+}
+
 export function LoginPage() {
   const { user, login, loading, authNotice, clearAuthNotice } = useAuth();
   const [username, setUsername] = useState("");
@@ -17,18 +34,18 @@ export function LoginPage() {
       return undefined;
     }
 
-    const activeElement = document.activeElement;
-    if (activeElement instanceof HTMLElement && typeof activeElement.blur === "function") {
-      activeElement.blur();
-    }
+    clearStaleInteractionState();
 
     window.scrollTo(0, 0);
     const requestViewportNormalization = window[VIEWPORT_SYNC_API_KEY];
     if (typeof requestViewportNormalization === "function") {
-      requestViewportNormalization({ resetViewport: true });
+      requestViewportNormalization({ resetViewport: !isEditableElement(document.activeElement) });
     }
 
     const settleTimer = window.setTimeout(() => {
+      if (isEditableElement(document.activeElement)) {
+        return;
+      }
       window.scrollTo(0, 0);
       if (typeof requestViewportNormalization === "function") {
         requestViewportNormalization({ resetViewport: true });

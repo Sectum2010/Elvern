@@ -589,6 +589,86 @@ export function useBrowserPlaybackController({
     });
   }
 
+  async function seekBrowserPlaybackTo(targetPositionSeconds, { resumeAfterReady = null } = {}) {
+    const numericTarget = Number(targetPositionSeconds);
+    if (!Number.isFinite(numericTarget) || numericTarget < 0) {
+      return false;
+    }
+    const targetPosition = fullDuration > 0
+      ? Math.min(fullDuration, numericTarget)
+      : numericTarget;
+    const video = videoRef.current;
+    const activeSession = mobileSessionRef.current;
+    const shouldResumeAfterReady =
+      resumeAfterReady != null
+        ? Boolean(resumeAfterReady)
+        : Boolean(video && !video.paused);
+
+    if (activeSession) {
+      if (
+        video
+        && isBrowserPlaybackAbsolutePositionReady(
+          activeSession,
+          targetPosition,
+          { headroomSeconds: SEEK_HEADROOM_SECONDS },
+        )
+      ) {
+        let localSeekApplied = false;
+        try {
+          video.currentTime = resolveMediaElementPositionForAbsolute(activeSession, targetPosition);
+          localSeekApplied = true;
+        } catch {
+          localSeekApplied = false;
+        }
+        if (localSeekApplied) {
+          mobilePendingTargetRef.current = null;
+          mobileSeekPendingRef.current = false;
+          pendingSeekPhaseRef.current = "idle";
+          mobileLastStablePositionRef.current = targetPosition;
+          committedPlayheadSecondsRef.current = targetPosition;
+          actualMediaElementTimeRef.current = targetPosition;
+          requestedTargetSecondsRef.current = targetPosition;
+          setCommittedPlayheadSeconds(targetPosition);
+          setActualMediaElementTime(targetPosition);
+          setRequestedTargetSeconds(targetPosition);
+          setPlaybackPosition(targetPosition);
+          clearOptimizedPlaybackPending();
+          setPlaybackError("");
+          setSeekNotice("");
+          setPlaybackStatus(browserStreamLabelTitle);
+          maybeAcknowledgeHlsAttachment({ playing: shouldResumeAfterReady, force: true });
+          return true;
+        }
+      }
+
+      try {
+        await retargetMobileOptimizedPlayback(targetPosition, {
+          resumeAfterReady: shouldResumeAfterReady,
+        });
+        return true;
+      } catch (requestError) {
+        clearOptimizedPlaybackPending();
+        mobileSeekPendingRef.current = false;
+        pendingSeekPhaseRef.current = "idle";
+        setPendingSeekPhase("idle");
+        setPlaybackError(requestError.message || "Failed to prepare the requested playback position");
+        return false;
+      }
+    }
+
+    if (!video) {
+      return false;
+    }
+    try {
+      video.currentTime = resolveMediaElementPositionForAbsolute(null, targetPosition);
+      setPlaybackPosition(targetPosition);
+      return true;
+    } catch (requestError) {
+      setPlaybackError(requestError.message || "Failed to seek playback");
+      return false;
+    }
+  }
+
   async function stopCurrentBrowserPlaybackSession() {
     const activeSession = mobileSessionRef.current;
     playbackFlowRef.current += 1;
@@ -1631,6 +1711,7 @@ export function useBrowserPlaybackController({
     playback,
     playbackError,
     seekNotice,
+    playbackPosition,
     playbackStatus,
     playbackModeIntent,
     prepareEstimateObservedAtMs,
@@ -1665,6 +1746,7 @@ export function useBrowserPlaybackController({
     resetPendingPlaybackPreparation,
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
+    seekBrowserPlaybackTo,
     stopCurrentBrowserPlaybackSession,
   };
 }
