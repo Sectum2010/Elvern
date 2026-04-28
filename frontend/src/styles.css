@@ -565,6 +565,42 @@ button {
   color: #f4f8fb;
 }
 
+.password-input {
+  position: relative;
+  width: 100%;
+}
+
+.password-input__field {
+  box-sizing: border-box;
+  padding-right: 3.4rem;
+}
+
+.password-input__toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: rgba(211, 225, 237, 0.82);
+  transform: translateY(-50%);
+}
+
+.password-input__toggle:hover,
+.password-input__toggle:focus-visible {
+  color: #f4f8fb;
+}
+
+.password-input__toggle:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .status-stack {
   display: flex;
   flex-wrap: wrap;

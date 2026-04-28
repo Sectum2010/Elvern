@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LoadingView } from "../components/LoadingView";
+import { PasswordInput } from "../components/PasswordInput";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
@@ -1378,7 +1379,7 @@ export function AdminPage() {
                 <p className="page-subnote">
                   Confirm making {selectedUserActionsEntry.username} {roleConfirm.nextRole === "admin" ? "an admin" : "a standard user"}.
                 </p>
-                <input
+                <PasswordInput
                   autoComplete="current-password"
                   onChange={(event) =>
                     setRoleConfirm((current) => ({
@@ -1387,7 +1388,6 @@ export function AdminPage() {
                     }))
                   }
                   placeholder="Current admin password"
-                  type="password"
                   value={roleConfirm.currentAdminPassword}
                 />
                 <div className="admin-list__actions">
@@ -1413,7 +1413,7 @@ export function AdminPage() {
                   handleSubmitPassword(selectedUserActionsEntry);
                 }}
               >
-                <input
+                <PasswordInput
                   autoComplete="new-password"
                   onChange={(event) =>
                     setPasswordEditor((current) => ({
@@ -1422,10 +1422,9 @@ export function AdminPage() {
                     }))
                   }
                   placeholder="New password"
-                  type="password"
                   value={passwordEditor.newPassword}
                 />
-                <input
+                <PasswordInput
                   autoComplete="current-password"
                   onChange={(event) =>
                     setPasswordEditor((current) => ({
@@ -1434,7 +1433,6 @@ export function AdminPage() {
                     }))
                   }
                   placeholder="Current admin password"
-                  type="password"
                   value={passwordEditor.currentAdminPassword}
                 />
                 <div className="admin-list__actions">
@@ -1544,10 +1542,9 @@ export function AdminPage() {
         </label>
         <label>
           Password
-          <input
+          <PasswordInput
             onChange={(event) => setCreateUserForm((current) => ({ ...current, password: event.target.value }))}
             required
-            type="password"
             value={createUserForm.password}
           />
         </label>
@@ -1604,7 +1601,7 @@ export function AdminPage() {
               <p className="page-subnote">
                 Enter your current admin password first. You will see one final destructive confirmation before anything is deleted.
               </p>
-              <input
+              <PasswordInput
                 autoComplete="current-password"
                 onChange={(event) =>
                   setSelfDeleteState((current) => ({
@@ -1613,7 +1610,6 @@ export function AdminPage() {
                   }))
                 }
                 placeholder="Current admin password"
-                type="password"
                 value={selfDeleteState.password}
               />
               {selfDeleteState.error ? <p className="form-error">{selfDeleteState.error}</p> : null}

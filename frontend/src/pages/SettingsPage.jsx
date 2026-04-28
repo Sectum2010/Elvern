@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { PasswordInput } from "../components/PasswordInput";
 import { apiRequest } from "../lib/api";
 import {
   formatGoogleConnectionHealthLabel,
@@ -1482,7 +1483,7 @@ export function SettingsPage() {
                     <strong>HTTPS app origin</strong>
                     <small>Use the private HTTPS hostname users actually browse to, not a raw HTTP IP address.</small>
                   </span>
-                  <input
+                  <PasswordInput
                     autoCapitalize="off"
                     autoCorrect="off"
                     className="cloud-source-form__input"
@@ -1529,7 +1530,6 @@ export function SettingsPage() {
                       setGoogleDriveSetupDraft((current) => ({ ...current, client_secret: event.target.value }))
                     }
                     spellCheck="false"
-                    type="password"
                     value={googleDriveSetupDraft.client_secret}
                   />
                 </label>

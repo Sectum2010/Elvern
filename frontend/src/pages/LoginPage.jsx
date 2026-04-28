@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { PasswordInput } from "../components/PasswordInput";
 
 const VIEWPORT_SYNC_API_KEY = "__elvernRequestViewportNormalization";
 
@@ -90,7 +91,7 @@ export function LoginPage() {
 
           <label>
             Password
-            <input
+            <PasswordInput
               autoComplete="current-password"
               name="password"
               onChange={(event) => {
@@ -100,7 +101,6 @@ export function LoginPage() {
                 setPassword(event.target.value);
               }}
               required
-              type="password"
               value={password}
             />
           </label>
