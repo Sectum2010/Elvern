@@ -754,6 +754,36 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   width: min(100%, 16rem);
 }
 
+.app-shell--library-root .series-rail__slide .media-card,
+.app-shell--library-source .series-rail__slide .media-card {
+  border-color: rgba(152, 176, 201, 0.035);
+  background:
+    linear-gradient(180deg, rgba(18, 24, 31, 0.86) 0%, rgba(12, 18, 26, 0.96) 100%);
+  box-shadow: none;
+}
+
+.app-shell--library-root .series-rail__slide .media-card__poster::after,
+.app-shell--library-source .series-rail__slide .media-card__poster::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  block-size: 16%;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(12, 18, 26, 0), rgba(12, 18, 26, 0.72));
+}
+
+.app-shell--library-root .series-rail__slide .media-card__progress,
+.app-shell--library-source .series-rail__slide .media-card__progress {
+  z-index: 2;
+}
+
+.app-shell--library-root .series-rail__slide .media-card__body,
+.app-shell--library-source .series-rail__slide .media-card__body {
+  background:
+    linear-gradient(180deg, rgba(12, 18, 26, 0.94) 0%, rgba(10, 16, 24, 0.94) 72%, rgba(10, 16, 24, 0.88) 100%);
+}
+
 .series-rail-pack-row {
   display: grid;
   gap: 1rem;
@@ -3960,35 +3990,6 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
     width: 100%;
   }
 
-  .page-section--library[data-library-device="ipad"] .series-rail__slide .media-card,
-  .page-section--library-source[data-library-device="ipad"] .series-rail__slide .media-card {
-    border-color: rgba(152, 176, 201, 0.035);
-    background:
-      linear-gradient(180deg, rgba(18, 24, 31, 0.86) 0%, rgba(12, 18, 26, 0.96) 100%);
-    box-shadow: none;
-  }
-
-  .page-section--library[data-library-device="ipad"] .series-rail__slide .media-card__poster::after,
-  .page-section--library-source[data-library-device="ipad"] .series-rail__slide .media-card__poster::after {
-    content: "";
-    position: absolute;
-    inset: auto 0 0;
-    block-size: 16%;
-    z-index: 1;
-    pointer-events: none;
-    background: linear-gradient(180deg, rgba(12, 18, 26, 0), rgba(12, 18, 26, 0.72));
-  }
-
-  .page-section--library[data-library-device="ipad"] .series-rail__slide .media-card__progress,
-  .page-section--library-source[data-library-device="ipad"] .series-rail__slide .media-card__progress {
-    z-index: 2;
-  }
-
-  .page-section--library[data-library-device="ipad"] .series-rail__slide .media-card__body,
-  .page-section--library-source[data-library-device="ipad"] .series-rail__slide .media-card__body {
-    background:
-      linear-gradient(180deg, rgba(12, 18, 26, 0.94) 0%, rgba(10, 16, 24, 0.94) 72%, rgba(10, 16, 24, 0.88) 100%);
-  }
 }
 
 html[data-device-shell="iphone"] {
