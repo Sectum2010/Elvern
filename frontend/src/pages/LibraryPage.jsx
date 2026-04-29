@@ -867,9 +867,10 @@ export function LibraryPage() {
   }
 
   const isSearching = deferredQuery.trim().length > 0;
+  const libraryDevice = detectClientPlatform() === "ipad" ? "ipad" : undefined;
 
   return (
-    <section className="page-section page-section--library">
+    <section className="page-section page-section--library" data-library-device={libraryDevice}>
       <ProviderReconnectModal
         allowReconnect
         message={cloudReconnectPrompt?.message || ""}
