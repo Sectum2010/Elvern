@@ -66,6 +66,12 @@ function dedupeAnchors(anchors) {
 export function getViewportMeasurement({
   viewportWindow = typeof window !== "undefined" ? window : null,
 } = {}) {
+  return getVisualViewportMeasurement({ viewportWindow });
+}
+
+export function getVisualViewportMeasurement({
+  viewportWindow = typeof window !== "undefined" ? window : null,
+} = {}) {
   if (!viewportWindow) {
     return {
       width: 0,
@@ -74,6 +80,7 @@ export function getViewportMeasurement({
       offsetLeft: 0,
       scrollY: 0,
       scrollX: 0,
+      scale: 1,
     };
   }
   const visualViewport = viewportWindow.visualViewport;
@@ -84,7 +91,56 @@ export function getViewportMeasurement({
     offsetLeft: toFiniteNumber(visualViewport?.offsetLeft, 0),
     scrollY: toFiniteNumber(viewportWindow.scrollY, 0),
     scrollX: toFiniteNumber(viewportWindow.scrollX, 0),
+    scale: toFiniteNumber(visualViewport?.scale, 1),
   };
+}
+
+export function getLayoutViewportMeasurement({
+  viewportWindow = typeof window !== "undefined" ? window : null,
+} = {}) {
+  if (!viewportWindow) {
+    return {
+      width: 0,
+      height: 0,
+      offsetTop: 0,
+      offsetLeft: 0,
+      scrollY: 0,
+      scrollX: 0,
+      scale: 1,
+    };
+  }
+  const documentElement = viewportWindow.document?.documentElement || null;
+  const layoutWidth = documentElement?.clientWidth || viewportWindow.innerWidth || 0;
+  const layoutHeight = documentElement?.clientHeight || viewportWindow.innerHeight || 0;
+  return {
+    width: toFiniteNumber(layoutWidth, viewportWindow.innerWidth || 0),
+    height: toFiniteNumber(layoutHeight, viewportWindow.innerHeight || 0),
+    offsetTop: 0,
+    offsetLeft: 0,
+    scrollY: toFiniteNumber(viewportWindow.scrollY, 0),
+    scrollX: toFiniteNumber(viewportWindow.scrollX, 0),
+    scale: 1,
+  };
+}
+
+export function isVisualViewportZoomed({
+  viewportWindow = typeof window !== "undefined" ? window : null,
+  tolerance = 0.01,
+} = {}) {
+  const scale = Number(viewportWindow?.visualViewport?.scale);
+  return Number.isFinite(scale) && Math.abs(scale - 1) > tolerance;
+}
+
+export function getRestoreViewportMeasurement({
+  viewportWindow = typeof window !== "undefined" ? window : null,
+} = {}) {
+  return isVisualViewportZoomed({ viewportWindow })
+    ? getLayoutViewportMeasurement({ viewportWindow })
+    : getVisualViewportMeasurement({ viewportWindow });
+}
+
+export function isLibraryOrientationRestorePlatform(platform) {
+  return platform === "iphone" || platform === "ipad";
 }
 
 export function getViewportSamplePoints({ orientation = "portrait" } = {}) {
@@ -614,7 +670,7 @@ export function findViewportAnchorTarget(anchor, {
   if (!anchor || !doc) {
     return null;
   }
-  if (anchor.anchorType === VIEWPORT_ANCHOR_MEDIA_ITEM && anchor.itemId) {
+  if (anchor.anchorType === VIEWPORT_ANCHOR_MEDIA_ITEM && (anchor.itemId || anchor.instanceKey)) {
     if (anchor.instanceKey) {
       const exactNode = doc.querySelector(
         `[data-library-card-instance-key="${safeSelectorValue(anchor.instanceKey)}"]`,
@@ -629,6 +685,80 @@ export function findViewportAnchorTarget(anchor, {
     return doc.querySelector(`[data-series-rail-key="${safeSelectorValue(anchor.railKey)}"]`);
   }
   return null;
+}
+
+export function buildLibraryReturnAnchor(target = {}) {
+  if (!target) {
+    return null;
+  }
+  const itemId = target.anchorItemId === undefined || target.anchorItemId === null
+    ? null
+    : String(target.anchorItemId);
+  const instanceKey = target.anchorInstanceKey ? String(target.anchorInstanceKey) : null;
+  if (!itemId && !instanceKey) {
+    return null;
+  }
+  return {
+    anchorType: VIEWPORT_ANCHOR_MEDIA_ITEM,
+    itemId,
+    instanceKey,
+    viewportRatioY: Number.isFinite(target.anchorViewportRatioY)
+      ? target.anchorViewportRatioY
+      : CENTER_MOVIE_VIEWPORT_RATIO_Y,
+    viewportRatioX: Number.isFinite(target.anchorViewportRatioX)
+      ? target.anchorViewportRatioX
+      : null,
+    scrollY: toFiniteNumber(target.scrollY, 0),
+    railKey: target.railKey ? String(target.railKey) : null,
+  };
+}
+
+export function selectLibraryReturnRestoreTarget(target = {}, {
+  doc = typeof document !== "undefined" ? document : null,
+} = {}) {
+  const anchor = buildLibraryReturnAnchor(target);
+  const targetNode = findViewportAnchorTarget(anchor, { doc });
+  return {
+    anchor,
+    targetNode,
+  };
+}
+
+export function restoreHorizontalRailPosition({
+  targetNode = null,
+  railKey = null,
+  railScrollLeft = null,
+} = {}) {
+  if (!targetNode) {
+    return false;
+  }
+  const railNode = targetNode.closest?.("[data-series-rail-key]") || null;
+  if (!railNode) {
+    return false;
+  }
+  if (railKey && railNode.getAttribute?.("data-series-rail-key") !== String(railKey)) {
+    return false;
+  }
+  const viewportNode = railNode.querySelector?.(".series-rail__viewport") || null;
+  if (!viewportNode) {
+    return false;
+  }
+  if (Number.isFinite(railScrollLeft)) {
+    viewportNode.scrollLeft = Math.max(0, railScrollLeft);
+    return true;
+  }
+  const viewportRect = viewportNode.getBoundingClientRect?.();
+  const targetRect = targetNode.getBoundingClientRect?.();
+  if (!viewportRect || !targetRect) {
+    return false;
+  }
+  const targetCenterOffset = (
+    targetRect.left
+    - viewportRect.left
+    - ((viewportRect.width - targetRect.width) / 2)
+  );
+  viewportNode.scrollLeft = Math.max(0, viewportNode.scrollLeft + targetCenterOffset);
+  return true;
 }
 
 export function selectRestoreAnchorCandidate(anchors = [], {

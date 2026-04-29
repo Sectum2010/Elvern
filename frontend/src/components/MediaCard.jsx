@@ -16,6 +16,11 @@ import {
 } from "../lib/smartPosterLoading";
 
 
+function toFiniteNumber(value, fallback = null) {
+  const parsedValue = Number(value);
+  return Number.isFinite(parsedValue) ? parsedValue : fallback;
+}
+
 function getProgressPercent(item) {
   if (!item.progress_seconds || !item.progress_duration_seconds) {
     return 0;
@@ -24,6 +29,64 @@ function getProgressPercent(item) {
     0,
     Math.min(100, (item.progress_seconds / item.progress_duration_seconds) * 100),
   );
+}
+
+function getLibraryReturnTargetFromCardClick({
+  event,
+  itemId,
+  listPath,
+  fallbackInstanceKey = null,
+}) {
+  const scrollY = typeof window !== "undefined" ? window.scrollY : 0;
+  const baseTarget = {
+    listPath,
+    anchorItemId: itemId,
+    anchorInstanceKey: fallbackInstanceKey,
+    scrollY,
+    pendingRestore: false,
+  };
+  if (typeof window === "undefined") {
+    return baseTarget;
+  }
+  const cardNode = event?.currentTarget?.closest?.(".media-card")
+    || event?.target?.closest?.(".media-card")
+    || null;
+  if (!cardNode) {
+    return baseTarget;
+  }
+  const rect = cardNode.getBoundingClientRect();
+  const visualViewport = window.visualViewport || null;
+  const viewportScale = toFiniteNumber(visualViewport?.scale, 1);
+  const useVisualViewport = Math.abs(viewportScale - 1) <= 0.01;
+  const layoutViewportWidth = window.document?.documentElement?.clientWidth || window.innerWidth || 0;
+  const layoutViewportHeight = window.document?.documentElement?.clientHeight || window.innerHeight || 0;
+  const viewportWidth = useVisualViewport
+    ? toFiniteNumber(visualViewport?.width, layoutViewportWidth)
+    : layoutViewportWidth;
+  const viewportHeight = useVisualViewport
+    ? toFiniteNumber(visualViewport?.height, layoutViewportHeight)
+    : layoutViewportHeight;
+  const viewportOffsetTop = useVisualViewport ? toFiniteNumber(visualViewport?.offsetTop, 0) : 0;
+  const viewportOffsetLeft = useVisualViewport ? toFiniteNumber(visualViewport?.offsetLeft, 0) : 0;
+  const railNode = cardNode.closest?.("[data-series-rail-key]") || null;
+  const railViewportNode = railNode?.querySelector?.(".series-rail__viewport") || null;
+  return {
+    ...baseTarget,
+    anchorItemId: toFiniteNumber(cardNode.getAttribute("data-library-item-id"), itemId),
+    anchorInstanceKey: cardNode.getAttribute("data-library-card-instance-key") || fallbackInstanceKey,
+    anchorViewportRatioY: viewportHeight
+      ? (rect.top - viewportOffsetTop) / viewportHeight
+      : null,
+    anchorViewportRatioX: viewportWidth
+      ? (rect.left - viewportOffsetLeft) / viewportWidth
+      : null,
+    viewportWidth,
+    viewportHeight,
+    railKey: railNode?.getAttribute?.("data-series-rail-key") || null,
+    railScrollLeft: Number.isFinite(railViewportNode?.scrollLeft)
+      ? railViewportNode.scrollLeft
+      : null,
+  };
 }
 
 
@@ -78,16 +141,17 @@ export function MediaCard({
   const detailState = buildLibraryReturnState({
     listPath: location.pathname,
     anchorItemId: item.id,
+    anchorInstanceKey: cardInstanceKey,
     scrollY: typeof window !== "undefined" ? window.scrollY : 0,
   });
 
-  function handleOpenDetail() {
-    rememberLibraryReturnTarget({
+  function handleOpenDetail(event) {
+    rememberLibraryReturnTarget(getLibraryReturnTargetFromCardClick({
+      event,
       listPath: location.pathname,
-      anchorItemId: item.id,
-      scrollY: typeof window !== "undefined" ? window.scrollY : 0,
-      pendingRestore: false,
-    });
+      itemId: item.id,
+      fallbackInstanceKey: cardInstanceKey,
+    }));
   }
 
   function openRankTooltip() {

@@ -36,11 +36,16 @@ import {
   computeRestoreVerificationCorrection,
   formatViewportAnchorDebug,
   formatViewportAnchorCandidateListDebug,
+  getLayoutViewportMeasurement,
   getOrientationRestoreRefinementDelayMs,
-  getViewportMeasurement,
+  getRestoreViewportMeasurement,
+  isLibraryOrientationRestorePlatform,
   isRestoreAttemptStale,
   isUserRestoreCancellationEvent,
+  isVisualViewportZoomed,
   MAX_ORIENTATION_RESTORE_CORRECTIONS,
+  restoreHorizontalRailPosition,
+  selectLibraryReturnRestoreTarget,
   selectPreferredOrientationRestoreTarget,
   shouldLogViewportAnchorDebug,
 } from "../lib/viewportAnchor";
@@ -392,7 +397,7 @@ export function LibraryPage() {
     if (typeof window === "undefined" || typeof document === "undefined") {
       return undefined;
     }
-    if (document.documentElement.dataset.deviceShell !== "iphone") {
+    if (!isLibraryOrientationRestorePlatform(detectClientPlatform())) {
       return undefined;
     }
     const visualViewport = window.visualViewport || null;
@@ -416,7 +421,7 @@ export function LibraryPage() {
     }
 
     function readMeasurement() {
-      return getViewportMeasurement({ viewportWindow: window });
+      return getLayoutViewportMeasurement({ viewportWindow: window });
     }
 
     function readOrientation(measurement = readMeasurement()) {
@@ -465,12 +470,15 @@ export function LibraryPage() {
         return latestCenterMovieAnchorRef.current;
       }
       const measurement = readMeasurement();
+      orientationLastMeasurementRef.current = measurement;
+      if (isVisualViewportZoomed({ viewportWindow: window })) {
+        return latestCenterMovieAnchorRef.current;
+      }
       const nextAnchor = captureCenterMovieAnchor({
         doc: document,
         viewportWindow: window,
         orientation: readOrientation(measurement),
       });
-      orientationLastMeasurementRef.current = measurement;
       if (nextAnchor?.itemId) {
         latestCenterMovieAnchorRef.current = nextAnchor;
         logOrientationAnchorDebug("latest center movie anchor updated", {
@@ -506,6 +514,8 @@ export function LibraryPage() {
       }
       const stableAnchor = latestCenterMovieAnchorRef.current?.itemId
         ? latestCenterMovieAnchorRef.current
+        : isVisualViewportZoomed({ viewportWindow: window })
+          ? null
         : captureCenterMovieAnchor({
           doc: document,
           viewportWindow: window,
@@ -521,6 +531,9 @@ export function LibraryPage() {
     }
 
     function captureFallbackOrientationAnchors({ allowSeriesQueryFallback = false } = {}) {
+      if (isVisualViewportZoomed({ viewportWindow: window })) {
+        return orientationAnchorsRef.current;
+      }
       const nextAnchors = captureViewportAnchorCandidates({
         doc: document,
         viewportWindow: window,
@@ -604,7 +617,7 @@ export function LibraryPage() {
         completeOrientationRestore();
         return;
       }
-      const measurement = getViewportMeasurement({ viewportWindow: window });
+      const measurement = getRestoreViewportMeasurement({ viewportWindow: window });
       const correctionTop = computeRestoreVerificationCorrection({
         anchor,
         currentScrollY: window.scrollY,
@@ -660,7 +673,7 @@ export function LibraryPage() {
         completeOrientationRestore();
         return;
       }
-      const measurement = getViewportMeasurement({ viewportWindow: window });
+      const measurement = getRestoreViewportMeasurement({ viewportWindow: window });
       const nextTop = computeAnchorRestoreScrollTop({
         anchor,
         currentScrollY: window.scrollY,
@@ -787,7 +800,7 @@ export function LibraryPage() {
     if (loading || typeof window === "undefined" || typeof document === "undefined") {
       return;
     }
-    if (document.documentElement.dataset.deviceShell !== "iphone") {
+    if (!isLibraryOrientationRestorePlatform(detectClientPlatform())) {
       return;
     }
     orientationSamplerRef.current?.({
@@ -811,19 +824,37 @@ export function LibraryPage() {
     if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== location.pathname) {
       return undefined;
     }
-    const restoreKey = `${location.pathname}:${rememberedTarget.anchorItemId || "none"}:${rememberedTarget.scrollY}`;
+    const restoreKey = [
+      location.pathname,
+      rememberedTarget.anchorInstanceKey || rememberedTarget.anchorItemId || "none",
+      rememberedTarget.anchorViewportRatioY ?? "none",
+      rememberedTarget.scrollY,
+    ].join(":");
     if (libraryReturnRestoreKeyRef.current === restoreKey) {
       return undefined;
     }
     libraryReturnRestoreKeyRef.current = restoreKey;
     const timerId = window.setTimeout(() => {
       window.requestAnimationFrame(() => {
-        const targetNode = rememberedTarget.anchorItemId
-          ? document.querySelector(`[data-library-item-id="${rememberedTarget.anchorItemId}"]`)
-          : null;
+        const { anchor, targetNode } = selectLibraryReturnRestoreTarget(rememberedTarget, {
+          doc: document,
+        });
         if (targetNode) {
-          const nextTop = window.scrollY + targetNode.getBoundingClientRect().top - 96;
-          window.scrollTo({ top: Math.max(0, nextTop), behavior: "auto" });
+          restoreHorizontalRailPosition({
+            targetNode,
+            railKey: rememberedTarget.railKey,
+            railScrollLeft: rememberedTarget.railScrollLeft,
+          });
+          const nextTop = computeAnchorRestoreScrollTop({
+            anchor,
+            currentScrollY: window.scrollY,
+            targetRectTop: targetNode.getBoundingClientRect().top,
+            viewportMeasurement: getRestoreViewportMeasurement({ viewportWindow: window }),
+          });
+          window.scrollTo({
+            top: Number.isFinite(nextTop) ? nextTop : rememberedTarget.scrollY,
+            behavior: "auto",
+          });
         } else if (rememberedTarget.scrollY > 0) {
           window.scrollTo({ top: rememberedTarget.scrollY, behavior: "auto" });
         } else {

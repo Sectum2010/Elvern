@@ -16,18 +16,26 @@ import {
   packIpadPortraitSeriesRailRows,
   packSeriesRailRows,
 } from "../lib/seriesRails";
+import {
+  computeAnchorRestoreScrollTop,
+  getRestoreViewportMeasurement,
+  restoreHorizontalRailPosition,
+  selectLibraryReturnRestoreTarget,
+} from "../lib/viewportAnchor";
 
 
 function MediaGrid({
   items,
   activeBrowserPlaybackItemId = null,
   smartPosterLoadingEnabled = false,
+  sectionKey = "library-source",
 }) {
   return (
     <div className="media-grid">
       {items.map((item) => (
         <MediaCard
           backgroundPlaybackActive={activeBrowserPlaybackItemId === item.id}
+          cardInstanceKey={`${sectionKey}:${item.id}`}
           item={item}
           key={item.id}
           smartPosterLoadingEnabled={smartPosterLoadingEnabled}
@@ -216,19 +224,37 @@ export function LibrarySourcePage({ sourceKind }) {
     if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== location.pathname) {
       return undefined;
     }
-    const restoreKey = `${location.pathname}:${rememberedTarget.anchorItemId || "none"}:${rememberedTarget.scrollY}`;
+    const restoreKey = [
+      location.pathname,
+      rememberedTarget.anchorInstanceKey || rememberedTarget.anchorItemId || "none",
+      rememberedTarget.anchorViewportRatioY ?? "none",
+      rememberedTarget.scrollY,
+    ].join(":");
     if (libraryReturnRestoreKeyRef.current === restoreKey) {
       return undefined;
     }
     libraryReturnRestoreKeyRef.current = restoreKey;
     const timerId = window.setTimeout(() => {
       window.requestAnimationFrame(() => {
-        const targetNode = rememberedTarget.anchorItemId
-          ? document.querySelector(`[data-library-item-id="${rememberedTarget.anchorItemId}"]`)
-          : null;
+        const { anchor, targetNode } = selectLibraryReturnRestoreTarget(rememberedTarget, {
+          doc: document,
+        });
         if (targetNode) {
-          const nextTop = window.scrollY + targetNode.getBoundingClientRect().top - 96;
-          window.scrollTo({ top: Math.max(0, nextTop), behavior: "auto" });
+          restoreHorizontalRailPosition({
+            targetNode,
+            railKey: rememberedTarget.railKey,
+            railScrollLeft: rememberedTarget.railScrollLeft,
+          });
+          const nextTop = computeAnchorRestoreScrollTop({
+            anchor,
+            currentScrollY: window.scrollY,
+            targetRectTop: targetNode.getBoundingClientRect().top,
+            viewportMeasurement: getRestoreViewportMeasurement({ viewportWindow: window }),
+          });
+          window.scrollTo({
+            top: Number.isFinite(nextTop) ? nextTop : rememberedTarget.scrollY,
+            behavior: "auto",
+          });
         } else if (rememberedTarget.scrollY > 0) {
           window.scrollTo({ top: rememberedTarget.scrollY, behavior: "auto" });
         } else {
@@ -330,6 +356,7 @@ export function LibrarySourcePage({ sourceKind }) {
                 <MediaGrid
                   activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                   items={filteredItems}
+                  sectionKey={`${sourceKind}:other-movies`}
                   smartPosterLoadingEnabled
                 />
               </section>

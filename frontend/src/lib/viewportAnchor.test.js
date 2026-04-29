@@ -7,9 +7,14 @@ import {
   computeAnchorRestoreScrollTop,
   computeRestoreScrollTop,
   computeRestoreVerificationCorrection,
+  getLayoutViewportMeasurement,
+  getRestoreViewportMeasurement,
   getViewportMeasurement,
+  isLibraryOrientationRestorePlatform,
   isRestoreAttemptStale,
   isUserRestoreCancellationEvent,
+  isVisualViewportZoomed,
+  selectLibraryReturnRestoreTarget,
   selectPreferredOrientationRestoreTarget,
   VIEWPORT_ANCHOR_MEDIA_ITEM,
 } from "./viewportAnchor.js";
@@ -468,4 +473,162 @@ test("layout-only scroll does not cancel restore", () => {
     }),
     false,
   );
+});
+
+test("layout and visual viewport measurements remain distinct under zoom", () => {
+  const viewportWindow = {
+    innerWidth: 1024,
+    innerHeight: 1366,
+    scrollX: 0,
+    scrollY: 500,
+    document: {
+      documentElement: {
+        clientWidth: 1024,
+        clientHeight: 1366,
+      },
+    },
+    visualViewport: {
+      width: 512,
+      height: 683,
+      offsetTop: 120,
+      offsetLeft: 16,
+      scale: 2,
+    },
+  };
+
+  assert.deepEqual(getLayoutViewportMeasurement({ viewportWindow }), {
+    width: 1024,
+    height: 1366,
+    offsetTop: 0,
+    offsetLeft: 0,
+    scrollY: 500,
+    scrollX: 0,
+    scale: 1,
+  });
+  assert.deepEqual(getViewportMeasurement({ viewportWindow }), {
+    width: 512,
+    height: 683,
+    offsetTop: 120,
+    offsetLeft: 16,
+    scrollY: 500,
+    scrollX: 0,
+    scale: 2,
+  });
+  assert.equal(isVisualViewportZoomed({ viewportWindow }), true);
+  assert.deepEqual(
+    getRestoreViewportMeasurement({ viewportWindow }),
+    getLayoutViewportMeasurement({ viewportWindow }),
+  );
+});
+
+test("restore measurement uses visual viewport when page is not zoomed", () => {
+  const viewportWindow = {
+    innerWidth: 1024,
+    innerHeight: 1366,
+    scrollX: 0,
+    scrollY: 250,
+    document: {
+      documentElement: {
+        clientWidth: 1024,
+        clientHeight: 1366,
+      },
+    },
+    visualViewport: {
+      width: 1000,
+      height: 1200,
+      offsetTop: 60,
+      offsetLeft: 0,
+      scale: 1,
+    },
+  };
+
+  assert.equal(isVisualViewportZoomed({ viewportWindow }), false);
+  assert.deepEqual(
+    getRestoreViewportMeasurement({ viewportWindow }),
+    getViewportMeasurement({ viewportWindow }),
+  );
+});
+
+test("library return restore target prefers exact instance over duplicate item id", () => {
+  const firstDuplicateNode = createElement({
+    mediaItemId: "404",
+    instanceKey: "continue-watching:404",
+    rectTop: 100,
+  });
+  const clickedNode = createElement({
+    mediaItemId: "404",
+    instanceKey: "series:dragon:404",
+    rectTop: 320,
+  });
+  const doc = createProbeDocument(new Map([
+    ["1:1", firstDuplicateNode],
+    ["2:2", clickedNode],
+  ]));
+
+  const result = selectLibraryReturnRestoreTarget({
+    anchorItemId: 404,
+    anchorInstanceKey: "series:dragon:404",
+    anchorViewportRatioY: 0.4,
+  }, { doc });
+
+  assert.equal(result.anchor?.instanceKey, "series:dragon:404");
+  assert.equal(result.targetNode, clickedNode);
+});
+
+test("library return restore target falls back to item id when exact instance is missing", () => {
+  const fallbackNode = createElement({
+    mediaItemId: "405",
+    instanceKey: "continue-watching:405",
+    rectTop: 180,
+  });
+  const doc = createProbeDocument(new Map([
+    ["1:1", fallbackNode],
+  ]));
+
+  const result = selectLibraryReturnRestoreTarget({
+    anchorItemId: 405,
+    anchorInstanceKey: "missing-instance:405",
+    anchorViewportRatioY: 0.4,
+  }, { doc });
+
+  assert.equal(result.targetNode, fallbackNode);
+});
+
+test("library return restore scroll top uses saved viewport ratio", () => {
+  const { anchor } = selectLibraryReturnRestoreTarget({
+    anchorItemId: 501,
+    anchorInstanceKey: "series:501",
+    anchorViewportRatioY: 0.25,
+    scrollY: 800,
+  }, {
+    doc: {
+      querySelector() {
+        return createElement({ mediaItemId: "501", instanceKey: "series:501" });
+      },
+    },
+  });
+
+  assert.equal(
+    computeAnchorRestoreScrollTop({
+      anchor,
+      currentScrollY: 1000,
+      targetRectTop: 500,
+      viewportMeasurement: {
+        width: 800,
+        height: 1000,
+        offsetTop: 0,
+        offsetLeft: 0,
+        scrollY: 1000,
+        scrollX: 0,
+      },
+    }),
+    1250,
+  );
+});
+
+test("library orientation restore platform includes iPad without removing iPhone", () => {
+  assert.equal(isLibraryOrientationRestorePlatform("ipad"), true);
+  assert.equal(isLibraryOrientationRestorePlatform("iphone"), true);
+  assert.equal(isLibraryOrientationRestorePlatform("macos"), false);
+  assert.equal(isLibraryOrientationRestorePlatform("android"), false);
 });
