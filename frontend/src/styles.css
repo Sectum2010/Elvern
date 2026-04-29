@@ -3450,6 +3450,41 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   outline-offset: 0.25rem;
 }
 
+.playback-debug-panel {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid rgba(152, 176, 201, 0.18);
+  border-radius: 1rem;
+  background: rgba(7, 12, 18, 0.78);
+}
+
+.playback-debug-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.playback-debug-panel__header .page-note {
+  margin: 0.15rem 0 0;
+}
+
+.playback-debug-panel__output {
+  max-height: 28rem;
+  margin: 0;
+  overflow: auto;
+  border-radius: 0.75rem;
+  background: rgba(2, 5, 9, 0.9);
+  color: #dbe9f6;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  padding: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .player-placeholder {
   display: grid;
   gap: 0.55rem;

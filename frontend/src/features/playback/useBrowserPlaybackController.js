@@ -48,6 +48,42 @@ function buildFreshManifestUrl(url) {
   return `${url}${separator}vod_attach=${Date.now()}`;
 }
 
+function readHlsSupportDiagnostics(video) {
+  const canPlayAppleHls = video?.canPlayType?.("application/vnd.apple.mpegurl") || "";
+  const canPlayXMpegUrl = video?.canPlayType?.("application/x-mpegURL") || "";
+  return {
+    canPlayTypeApplicationVndAppleMpegurl: canPlayAppleHls,
+    canPlayTypeApplicationXMpegUrl: canPlayXMpegUrl,
+    nativeHlsSupport: canPlayAppleHls || canPlayXMpegUrl,
+    hlsJsSupported: Hls.isSupported(),
+    hlsJsVersion: Hls.version || "",
+  };
+}
+
+function compactHlsConfig(config = {}) {
+  const keys = [
+    "autoStartLoad",
+    "backBufferLength",
+    "enableWorker",
+    "liveDurationInfinity",
+    "liveMaxLatencyDurationCount",
+    "liveSyncDurationCount",
+    "lowLatencyMode",
+    "maxBufferHole",
+    "maxBufferLength",
+    "maxBufferSize",
+    "nudgeMaxRetry",
+    "nudgeOffset",
+  ];
+  return keys.reduce((result, key) => {
+    const value = config[key];
+    if (["boolean", "number", "string"].includes(typeof value) || value == null) {
+      result[key] = value ?? null;
+    }
+    return result;
+  }, {});
+}
+
 export function useBrowserPlaybackController({
   itemId,
   item,
@@ -86,6 +122,13 @@ export function useBrowserPlaybackController({
   const [playerLocalDuration, setPlayerLocalDuration] = useState(0);
   const [optimizedPlaybackPending, setOptimizedPlaybackPending] = useState(false);
   const [playbackModeIntent, setPlaybackModeIntent] = useState("lite");
+  const [hlsEngineDiagnostics, setHlsEngineDiagnostics] = useState({
+    selectedEngine: "none",
+    nativeHlsSelected: false,
+    hlsJsSelected: false,
+    hlsJsAttachedToVideo: false,
+    hlsJsConfig: null,
+  });
 
   const browserPlaybackSessionRoot = resolveBrowserPlaybackSessionRoot();
   const browserPlaybackDeviceClass = useMemo(() => {
@@ -334,6 +377,13 @@ export function useBrowserPlaybackController({
     setPlayerMeasuredDuration(0);
     setPlayerLocalPosition(0);
     setPlayerLocalDuration(0);
+    setHlsEngineDiagnostics({
+      selectedEngine: "none",
+      nativeHlsSelected: false,
+      hlsJsSelected: false,
+      hlsJsAttachedToVideo: false,
+      hlsJsConfig: null,
+    });
     clearOptimizedPlaybackPending();
     fallbackAttemptedRef.current = false;
     forceHlsRef.current = false;
@@ -737,6 +787,17 @@ export function useBrowserPlaybackController({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !streamSource) {
+      setHlsEngineDiagnostics((current) => (
+        current.selectedEngine === "none"
+          ? current
+          : {
+            selectedEngine: "none",
+            nativeHlsSelected: false,
+            hlsJsSelected: false,
+            hlsJsAttachedToVideo: false,
+            hlsJsConfig: null,
+          }
+      ));
       return undefined;
     }
 
@@ -838,6 +899,14 @@ export function useBrowserPlaybackController({
     video.addEventListener("error", handlePlaybackFailure);
 
     if (streamSource.mode === "direct") {
+      setHlsEngineDiagnostics({
+        selectedEngine: "direct",
+        nativeHlsSelected: false,
+        hlsJsSelected: false,
+        hlsJsAttachedToVideo: false,
+        hlsJsConfig: null,
+        ...readHlsSupportDiagnostics(video),
+      });
       video.addEventListener("loadedmetadata", maybeAutoplay, { once: true });
       video.src = streamSource.url;
       video.load();
@@ -851,8 +920,17 @@ export function useBrowserPlaybackController({
       video.canPlayType("application/vnd.apple.mpegurl")
       || video.canPlayType("application/x-mpegURL");
     const useManualMobileAutoplay = iosMobile && Boolean(mobileSessionRef.current);
+    const hlsSupportDiagnostics = readHlsSupportDiagnostics(video);
 
     if (nativeHlsSupport) {
+      setHlsEngineDiagnostics({
+        selectedEngine: "native_hls",
+        nativeHlsSelected: true,
+        hlsJsSelected: false,
+        hlsJsAttachedToVideo: false,
+        hlsJsConfig: null,
+        ...hlsSupportDiagnostics,
+      });
       if (!useManualMobileAutoplay) {
         video.addEventListener("loadedmetadata", maybeAutoplay, { once: true });
       }
@@ -867,6 +945,14 @@ export function useBrowserPlaybackController({
     }
 
     if (!Hls.isSupported()) {
+      setHlsEngineDiagnostics({
+        selectedEngine: "unsupported_hls",
+        nativeHlsSelected: false,
+        hlsJsSelected: false,
+        hlsJsAttachedToVideo: false,
+        hlsJsConfig: null,
+        ...hlsSupportDiagnostics,
+      });
       setPlaybackError("This browser cannot play HLS fallback streams");
       return () => {
         video.removeEventListener("error", handlePlaybackFailure);
@@ -877,6 +963,14 @@ export function useBrowserPlaybackController({
     hlsRef.current = hls;
     hls.loadSource(streamSource.url);
     hls.attachMedia(video);
+    setHlsEngineDiagnostics({
+      selectedEngine: "hls.js",
+      nativeHlsSelected: false,
+      hlsJsSelected: true,
+      hlsJsAttachedToVideo: true,
+      hlsJsConfig: compactHlsConfig(hls.config),
+      ...hlsSupportDiagnostics,
+    });
     hls.on(Hls.Events.MANIFEST_PARSED, maybeAutoplay);
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (data.fatal) {
@@ -1759,6 +1853,9 @@ export function useBrowserPlaybackController({
     playerLocalDuration,
     playbackStatus,
     playbackModeIntent,
+    browserPlaybackDeviceClass,
+    browserPlaybackProfile,
+    hlsEngineDiagnostics,
     prepareEstimateObservedAtMs,
     prepareEstimateNowMs,
     videoElementKey,
