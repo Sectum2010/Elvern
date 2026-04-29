@@ -14,19 +14,9 @@ import { getOrCreateDeviceId } from "../lib/device";
 import { formatBytes, formatDuration } from "../lib/format";
 import { detectClientPlatform, detectDesktopPlatform } from "../lib/platformDetection";
 import {
-  fetchManifestDiagnostics,
-  isPlaybackDebugEnabled,
-  readComputedElementDiagnostics,
-  readElementFromVideoPoint,
-  redactDiagnosticUrl,
-  serializeDiagnosticNumber,
-  serializeTimeRanges,
-} from "../lib/playbackDiagnostics";
-import {
   resolveDetailVlcActionRoute,
   shouldShowDesktopBrowserSeekControl,
   shouldShowMacAppFullscreenControl,
-  shouldShowMacHlsWindowControls,
 } from "../lib/playbackRouting";
 import { useBrowserPlaybackController } from "../features/playback/useBrowserPlaybackController";
 import {
@@ -354,16 +344,10 @@ export function DetailPage() {
   const [browserStopModalOpen, setBrowserStopModalOpen] = useState(false);
   const [playbackConflictModal, setPlaybackConflictModal] = useState(null);
   const [playbackConflictPending, setPlaybackConflictPending] = useState(false);
-  const [macHlsWindowSeekDraft, setMacHlsWindowSeekDraft] = useState(null);
   const [desktopSeekDraft, setDesktopSeekDraft] = useState(null);
   const [macAppFullscreenActive, setMacAppFullscreenActive] = useState(false);
   const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
-  const [playbackDebugOutput, setPlaybackDebugOutput] = useState("");
-  const [playbackDebugMessage, setPlaybackDebugMessage] = useState("");
-  const [playbackDebugError, setPlaybackDebugError] = useState("");
-  const [playbackDebugPending, setPlaybackDebugPending] = useState(false);
   const playerShellRef = useRef(null);
-  const macHlsWindowSeekCommitPendingRef = useRef(false);
   const desktopSeekCommitPendingRef = useRef(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
@@ -380,7 +364,6 @@ export function DetailPage() {
   const iosMobile = isIOSMobileBrowser();
   const browserPlaybackSessionRoot = resolveBrowserPlaybackSessionRoot();
   const showIosTransportDebug = iosTransportDebug && isIosTransportDebugEnabled(location.search);
-  const showPlaybackDebug = isPlaybackDebugEnabled(location.search);
   const localDevLoopback = isLocalDevelopmentLoopback(desktopPlatform);
   const desktopDeviceId = useMemo(() => getOrCreateDeviceId(), []);
   const isAdmin = user?.role === "admin";
@@ -444,17 +427,12 @@ export function DetailPage() {
     playbackError,
     seekNotice,
     playbackPosition,
-    playerLocalPosition,
-    playerLocalDuration,
     playbackStatus,
     playbackModeIntent,
     prepareEstimateObservedAtMs,
     prepareEstimateNowMs,
     videoElementKey,
     activePlaybackMode,
-    browserPlaybackDeviceClass,
-    browserPlaybackProfile,
-    hlsEngineDiagnostics,
     browserPlaybackLabel,
     browserPlaybackLabelTitle,
     browserStreamLabelTitle,
@@ -482,7 +460,6 @@ export function DetailPage() {
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
     seekBrowserPlaybackTo,
-    seekBrowserPlaybackWindowTo,
     stopCurrentBrowserPlaybackSession,
   } = useBrowserPlaybackController({
     itemId,
@@ -1737,29 +1714,6 @@ export function DetailPage() {
   const hideActionsDisabled = browserPlaybackSessionActive || hiddenActionPending || globalHiddenActionPending;
   const showPrimaryStatusPill = isImportantPlaybackStatus(playbackStatus);
   const showPlaybackReasonPill = isImportantPlaybackReason(playback?.reason);
-  const showMacHlsWindowSeekControl = shouldShowMacHlsWindowControls({
-    desktopPlatform,
-    iosMobile,
-    showPlayerShell,
-    hasMobileSession: Boolean(mobileSession),
-    playerLocalDuration,
-  });
-  const macHlsWindowSeekPosition = Math.max(
-    0,
-    Math.min(
-      playerLocalDuration || 0,
-      macHlsWindowSeekDraft != null ? macHlsWindowSeekDraft : playerLocalPosition || 0,
-    ),
-  );
-  const macHlsWindowSeekProgressPercent = playerLocalDuration > 0
-    ? Math.min(100, Math.max(0, (macHlsWindowSeekPosition / playerLocalDuration) * 100))
-    : 0;
-  const macHlsWindowStartSeconds = Math.max(mobileSession?.ready_start_seconds || 0, 0);
-  const macHlsWindowPositionLabel = `${formatDuration(macHlsWindowSeekPosition)} / ${formatDuration(playerLocalDuration)}`;
-  const macHlsWindowRangeLabel = formatTimeRange(
-    macHlsWindowStartSeconds,
-    macHlsWindowStartSeconds + Math.max(playerLocalDuration || 0, 0),
-  );
   const showDesktopBrowserSeekControl = shouldShowDesktopBrowserSeekControl({
     desktopPlatform,
     iosMobile,
@@ -1857,30 +1811,6 @@ export function DetailPage() {
           : `Prepared through ${preparedDurationLabel} while Elvern transcodes ahead.`
       : "Full movie is available for direct playback.";
 
-  function normalizeMacHlsWindowSeekValue(value) {
-    const numericValue = Number(value);
-    if (!Number.isFinite(numericValue)) {
-      return 0;
-    }
-    if (playerLocalDuration > 0) {
-      return Math.min(playerLocalDuration, Math.max(0, numericValue));
-    }
-    return Math.max(0, numericValue);
-  }
-
-  function commitMacHlsWindowSeek(value) {
-    if (!showMacHlsWindowSeekControl || macHlsWindowSeekCommitPendingRef.current) {
-      return;
-    }
-    const targetPosition = normalizeMacHlsWindowSeekValue(value);
-    macHlsWindowSeekCommitPendingRef.current = true;
-    setMacHlsWindowSeekDraft(null);
-    seekBrowserPlaybackWindowTo(targetPosition);
-    window.requestAnimationFrame(() => {
-      macHlsWindowSeekCommitPendingRef.current = false;
-    });
-  }
-
   function normalizeDesktopSeekValue(value) {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) {
@@ -1934,157 +1864,6 @@ export function DetailPage() {
       setMacAppFullscreenError(
         fullscreenError?.message || "Fullscreen is not available in this browser.",
       );
-    }
-  }
-
-  async function handleCopyPlaybackDiagnostics() {
-    if (!showPlaybackDebug) {
-      return;
-    }
-    setPlaybackDebugPending(true);
-    setPlaybackDebugError("");
-    setPlaybackDebugMessage("");
-    const video = videoRef.current;
-    const playerShell = playerShellRef.current;
-    const playerSurface = playerShell?.querySelector?.(".player-fullscreen-surface") || null;
-    const macWindowBar = typeof document !== "undefined"
-      ? document.querySelector(".mac-hls-window-seek")
-      : null;
-    const absoluteBar = typeof document !== "undefined"
-      ? document.querySelector(".desktop-browser-seek")
-      : null;
-    const manifestUrl = streamSource?.mode === "hls"
-      ? streamSource.url
-      : video?.currentSrc || video?.src || "";
-
-    try {
-      const manifest = await fetchManifestDiagnostics(manifestUrl);
-      const diagnostics = {
-        generated_at_utc: new Date().toISOString(),
-        item: {
-          id: item?.id ?? itemId,
-          title: item ? getMovieCardTitle(item) : "",
-          source_kind: item?.source_kind || "",
-        },
-        platform: {
-          userAgent: typeof navigator !== "undefined" ? navigator.userAgent || "" : "",
-          navigatorPlatform: typeof navigator !== "undefined" ? navigator.platform || "" : "",
-          maxTouchPoints: typeof navigator !== "undefined" ? Number(navigator.maxTouchPoints || 0) : 0,
-          detectedClientPlatform: clientPlatform,
-          detectedDesktopPlatform: desktopPlatform,
-          detectedDeviceClass: browserPlaybackDeviceClass,
-          browserPlaybackProfile,
-          iosMobile,
-          isIpad: clientPlatform === "ipad",
-          isIphone: clientPlatform === "iphone",
-          isMacPath: desktopPlatform === "mac" && !iosMobile,
-          isWindowsPath: desktopPlatform === "windows" && !iosMobile,
-          isLinuxPath: desktopPlatform === "linux" && !iosMobile,
-        },
-        hls_engine: hlsEngineDiagnostics,
-        video: video ? {
-          controls: video.controls,
-          controlsList: video.getAttribute("controlsList") || "",
-          playsInline: video.playsInline,
-          disablePictureInPicture: video.disablePictureInPicture,
-          preload: video.preload,
-          currentSrc: redactDiagnosticUrl(video.currentSrc || ""),
-          src: redactDiagnosticUrl(video.getAttribute("src") || video.src || ""),
-          className: video.className || "",
-          readyState: video.readyState,
-          networkState: video.networkState,
-          paused: video.paused,
-          ended: video.ended,
-          duration: serializeDiagnosticNumber(video.duration),
-          currentTime: serializeDiagnosticNumber(video.currentTime),
-          playbackRate: serializeDiagnosticNumber(video.playbackRate),
-          error: video.error ? {
-            code: video.error.code,
-            message: video.error.message || "",
-          } : null,
-        } : null,
-        time_ranges: video ? {
-          seekable: serializeTimeRanges(video.seekable),
-          buffered: serializeTimeRanges(video.buffered),
-          played: serializeTimeRanges(video.played),
-        } : null,
-        route2_session: mobileSession ? {
-          session_id: mobileSession.session_id || "",
-          engine_mode: mobileSession.engine_mode || "",
-          playback_mode: mobileSession.playback_mode || "",
-          active_epoch_id: mobileSession.active_epoch_id || "",
-          replacement_epoch_id: mobileSession.replacement_epoch_id || "",
-          attach_ready: Boolean(mobileSession.attach_ready),
-          attach_revision: mobileSession.attach_revision ?? null,
-          client_attach_revision: mobileSession.client_attach_revision ?? null,
-          ready_start_seconds: mobileSession.ready_start_seconds ?? null,
-          ready_end_seconds: mobileSession.ready_end_seconds ?? null,
-          target_position_seconds: mobileSession.target_position_seconds ?? null,
-          attach_position_seconds: mobileSession.attach_position_seconds ?? null,
-          committed_playhead_seconds: mobileSession.committed_playhead_seconds ?? null,
-          actual_media_element_time_seconds: mobileSession.actual_media_element_time_seconds ?? null,
-          duration_seconds: mobileSession.duration_seconds ?? null,
-          manifest_complete: Boolean(mobileSession.manifest_complete),
-          active_manifest_url: redactDiagnosticUrl(mobileSession.active_manifest_url || ""),
-          manifest_url: redactDiagnosticUrl(mobileSession.manifest_url || ""),
-          cache_ranges: mobileSession.cache_ranges || [],
-          lifecycle_state: mobileSession.lifecycle_state || "",
-          browser_session_state: mobileSession.browser_session_state || "",
-          active_epoch_state: mobileSession.active_epoch_state || "",
-        } : null,
-        playback_state: {
-          streamSource: streamSource ? {
-            mode: streamSource.mode || "",
-            url: redactDiagnosticUrl(streamSource.url || ""),
-          } : null,
-          playbackModeIntent,
-          activePlaybackMode,
-          playbackStatus,
-          playbackError,
-          seekNotice,
-          playbackPosition,
-          playerLocalPosition,
-          playerLocalDuration,
-          fullDuration,
-          availableDuration,
-          resumableStartPosition,
-          resumePosition,
-          optimizedPlaybackPending,
-          browserPlaybackSessionActive,
-          hasAnyBrowserPlaybackArtifacts,
-        },
-        ui_controls: {
-          videoControlsEnabled,
-          showPlayerShell,
-          showMacAppFullscreenControl,
-          macAppFullscreenActive,
-          showMacHlsWindowSeekControl,
-          showDesktopBrowserSeekControl,
-          macHlsWindowSeekPosition,
-          desktopSeekPosition,
-        },
-        manifest,
-        css_overlay_sanity: {
-          video: readComputedElementDiagnostics(video),
-          player_shell: readComputedElementDiagnostics(playerShell),
-          player_fullscreen_surface: readComputedElementDiagnostics(playerSurface),
-          mac_hls_window_bar: readComputedElementDiagnostics(macWindowBar),
-          full_movie_absolute_bar: readComputedElementDiagnostics(absoluteBar),
-          element_from_point_bottom_center: readElementFromVideoPoint(video, { yRatio: 0.92 }),
-        },
-      };
-      const text = JSON.stringify(diagnostics, null, 2);
-      setPlaybackDebugOutput(text);
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        setPlaybackDebugMessage("Playback diagnostics copied.");
-      } else {
-        setPlaybackDebugMessage("Clipboard is unavailable; diagnostics are shown below.");
-      }
-    } catch (debugError) {
-      setPlaybackDebugError(debugError?.message || "Failed to collect playback diagnostics");
-    } finally {
-      setPlaybackDebugPending(false);
     }
   }
 
@@ -2614,61 +2393,6 @@ export function DetailPage() {
           </div>
         ) : null}
         {macAppFullscreenError ? <p className="form-error">{macAppFullscreenError}</p> : null}
-        {showMacHlsWindowSeekControl ? (
-          <div className="mac-hls-window-seek" aria-label="Current HLS window seek controls">
-            <div className="mac-hls-window-seek__controls">
-              <button
-                className="mac-hls-window-seek__button"
-                disabled={macHlsWindowSeekPosition <= 0}
-                onClick={() => commitMacHlsWindowSeek(macHlsWindowSeekPosition - 10)}
-                type="button"
-              >
-                -10s
-              </button>
-              <div className="mac-hls-window-seek__labels" aria-hidden="true">
-                <span>Window {macHlsWindowPositionLabel}</span>
-                {macHlsWindowRangeLabel ? <span>{macHlsWindowRangeLabel}</span> : null}
-              </div>
-              <button
-                className="mac-hls-window-seek__button"
-                disabled={macHlsWindowSeekPosition >= playerLocalDuration}
-                onClick={() => commitMacHlsWindowSeek(macHlsWindowSeekPosition + 10)}
-                type="button"
-              >
-                +10s
-              </button>
-            </div>
-            <input
-              aria-label="Seek current playback window"
-              className="mac-hls-window-seek__range"
-              max={Math.max(1, Math.round(playerLocalDuration))}
-              min="0"
-              onBlur={(event) => {
-                if (macHlsWindowSeekDraft != null) {
-                  commitMacHlsWindowSeek(event.currentTarget.value);
-                }
-              }}
-              onChange={(event) => {
-                setMacHlsWindowSeekDraft(normalizeMacHlsWindowSeekValue(event.currentTarget.value));
-              }}
-              onKeyUp={(event) => {
-                if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
-                  commitMacHlsWindowSeek(event.currentTarget.value);
-                }
-              }}
-              onPointerCancel={() => {
-                setMacHlsWindowSeekDraft(null);
-              }}
-              onPointerUp={(event) => {
-                commitMacHlsWindowSeek(event.currentTarget.value);
-              }}
-              step="1"
-              style={{ "--mac-hls-window-progress": `${macHlsWindowSeekProgressPercent}%` }}
-              type="range"
-              value={Math.round(macHlsWindowSeekPosition)}
-            />
-          </div>
-        ) : null}
         {showDesktopBrowserSeekControl ? (
           <div className="desktop-browser-seek" aria-label="Movie seek controls">
             <input
@@ -2706,31 +2430,6 @@ export function DetailPage() {
           <div className="player-runtime-notes">
             <p className="page-note">{optimizedProgressNote}</p>
             {seekNotice ? <p className="page-note">{seekNotice}</p> : null}
-          </div>
-        ) : null}
-        {showPlaybackDebug ? (
-          <div className="playback-debug-panel">
-            <div className="playback-debug-panel__header">
-              <div>
-                <p className="eyebrow">Playback Debug</p>
-                <p className="page-note">
-                  Gated diagnostics only. Compare this dump across Linux, Windows, and macOS.
-                </p>
-              </div>
-              <button
-                className="ghost-button"
-                disabled={playbackDebugPending}
-                onClick={handleCopyPlaybackDiagnostics}
-                type="button"
-              >
-                {playbackDebugPending ? "Collecting..." : "Copy playback diagnostics"}
-              </button>
-            </div>
-            {playbackDebugMessage ? <p className="form-success">{playbackDebugMessage}</p> : null}
-            {playbackDebugError ? <p className="form-error">{playbackDebugError}</p> : null}
-            {playbackDebugOutput ? (
-              <pre className="playback-debug-panel__output">{playbackDebugOutput}</pre>
-            ) : null}
           </div>
         ) : null}
 

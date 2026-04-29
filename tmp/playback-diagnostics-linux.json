@@ -1,0 +1,340 @@
+{
+  "_capture": {
+    "base_url": "http://127.0.0.1:4173",
+    "browser": "Firefox headless via direct geckodriver WebDriver on Linux/DGX",
+    "item_id": 1264,
+    "item_source_kind": "local",
+    "item_title": "Pacific.Rim.Uprising.2018.Multi.UHD.2160p.Bluray.x265.HDR.Atmos.7.1.En+Hi+]-DTOne",
+    "last_pre_capture_sample": {
+      "body": "Library\nInstall\nSettings\nAdmin\nLogout\n\nPLAYER\n\nPacific Rim Uprising\nBack to library\nOpen in VLC\nStop Lite Playback\nFull Playback\n\nInstalled VLC will use the actual local file path on this Linux host.\n\nReusable cached ranges: Unknown length-0:18.\n\nPLAYBACK DEBUG\n\nGated diagnostics only. Compare this dump across Linux, Windows, and macOS.\n\nCopy playback diagnostics\nInfo\nHide for everyone\nHide for me",
+      "debugButton": true,
+      "video": {
+        "buffered": [
+          {
+            "end": 16.019833,
+            "start": 0.083
+          }
+        ],
+        "currentSrc": "blob:http://127.0.0.1:4173/d20beb5d-caab-45da-a198-80e1a45660b9",
+        "currentTime": 1.289854,
+        "duration": 16.099,
+        "networkState": 2,
+        "paused": false,
+        "readyState": 4,
+        "seekable": [
+          {
+            "end": 16.099,
+            "start": 0
+          }
+        ]
+      }
+    },
+    "loaded_before_capture": true,
+    "sample_count": 4
+  },
+  "css_overlay_sanity": {
+    "element_from_point_bottom_center": {
+      "element": {
+        "class_name": "player",
+        "id": "",
+        "tag_name": "VIDEO"
+      },
+      "point": {
+        "x": 714,
+        "y": 616.2059741210937,
+        "y_ratio": 0.92
+      }
+    },
+    "full_movie_absolute_bar": null,
+    "mac_hls_window_bar": null,
+    "player_fullscreen_surface": {
+      "border_radius": "16px",
+      "class_name": "player-fullscreen-surface",
+      "display": "block",
+      "height": "673.883px",
+      "id": "",
+      "margin_bottom": "0px",
+      "object_fit": "fill",
+      "overflow": "visible",
+      "overflow_x": "visible",
+      "overflow_y": "visible",
+      "padding_bottom": "0px",
+      "pointer_events": "auto",
+      "position": "relative",
+      "rect": {
+        "bottom": 670.1166381835938,
+        "height": 673.88330078125,
+        "left": 115,
+        "right": 1313,
+        "top": -3.76666259765625,
+        "width": 1198,
+        "x": 115,
+        "y": -3.76666259765625
+      },
+      "tag_name": "DIV",
+      "transform": "none",
+      "width": "1198px",
+      "z_index": "1"
+    },
+    "player_shell": {
+      "border_radius": "16px",
+      "class_name": "player-shell",
+      "display": "block",
+      "height": "673.883px",
+      "id": "",
+      "margin_bottom": "0px",
+      "object_fit": "fill",
+      "overflow": "visible",
+      "overflow_x": "visible",
+      "overflow_y": "visible",
+      "padding_bottom": "0px",
+      "pointer_events": "auto",
+      "position": "relative",
+      "rect": {
+        "bottom": 670.1166381835938,
+        "height": 673.88330078125,
+        "left": 115,
+        "right": 1313,
+        "top": -3.76666259765625,
+        "width": 1198,
+        "x": 115,
+        "y": -3.76666259765625
+      },
+      "tag_name": "DIV",
+      "transform": "none",
+      "width": "1198px",
+      "z_index": "auto"
+    },
+    "video": {
+      "border_radius": "16px",
+      "class_name": "player",
+      "display": "block",
+      "height": "673.883px",
+      "id": "",
+      "margin_bottom": "0px",
+      "object_fit": "contain",
+      "overflow": "clip",
+      "overflow_x": "clip",
+      "overflow_y": "clip",
+      "padding_bottom": "0px",
+      "pointer_events": "auto",
+      "position": "static",
+      "rect": {
+        "bottom": 670.1166381835938,
+        "height": 673.88330078125,
+        "left": 115,
+        "right": 1313,
+        "top": -3.76666259765625,
+        "width": 1198,
+        "x": 115,
+        "y": -3.76666259765625
+      },
+      "tag_name": "VIDEO",
+      "transform": "none",
+      "width": "1198px",
+      "z_index": "auto"
+    }
+  },
+  "generated_at_utc": "2026-04-29T02:06:28.810Z",
+  "hls_engine": {
+    "canPlayTypeApplicationVndAppleMpegurl": "",
+    "canPlayTypeApplicationXMpegUrl": "",
+    "hlsJsAttachedToVideo": true,
+    "hlsJsConfig": {
+      "autoStartLoad": true,
+      "backBufferLength": null,
+      "enableWorker": true,
+      "liveDurationInfinity": false,
+      "liveMaxLatencyDurationCount": null,
+      "liveSyncDurationCount": 3,
+      "lowLatencyMode": true,
+      "maxBufferHole": 0.1,
+      "maxBufferLength": 30,
+      "maxBufferSize": 60000000,
+      "nudgeMaxRetry": 3,
+      "nudgeOffset": 0.1
+    },
+    "hlsJsSelected": true,
+    "hlsJsSupported": true,
+    "hlsJsVersion": "1.6.15",
+    "nativeHlsSelected": false,
+    "nativeHlsSupport": "",
+    "selectedEngine": "hls.js"
+  },
+  "item": {
+    "id": 1264,
+    "source_kind": "local",
+    "title": "Pacific Rim Uprising"
+  },
+  "manifest": {
+    "classification": "event_open",
+    "contains_endlist": false,
+    "contains_event_playlist_type": true,
+    "contains_vod_playlist_type": false,
+    "fetched": true,
+    "first_lines": [
+      "#EXTM3U",
+      "#EXT-X-VERSION:7",
+      "#EXT-X-TARGETDURATION:2",
+      "#EXT-X-MEDIA-SEQUENCE:0",
+      "#EXT-X-PLAYLIST-TYPE:EVENT",
+      "#EXT-X-INDEPENDENT-SEGMENTS",
+      "#EXT-X-MAP:URI=\"init.mp4\"",
+      "#EXT-X-START:TIME-OFFSET=0.000,PRECISE=YES",
+      "#EXTINF:2.000,",
+      "segments/0.m4s",
+      "#EXTINF:2.000,",
+      "segments/1.m4s",
+      "#EXTINF:2.000,",
+      "segments/2.m4s",
+      "#EXTINF:2.000,",
+      "segments/3.m4s",
+      "#EXTINF:2.000,",
+      "segments/4.m4s",
+      "#EXTINF:2.000,",
+      "segments/5.m4s",
+      "#EXTINF:2.000,",
+      "segments/6.m4s",
+      "#EXTINF:2.000,",
+      "segments/7.m4s",
+      "#EXTINF:2.000,",
+      "segments/8.m4s",
+      "#EXTINF:2.000,",
+      "segments/9.m4s",
+      ""
+    ],
+    "http_status": 200,
+    "media_sequence": "0",
+    "ok": true,
+    "playlist_type": "EVENT",
+    "target_duration": "2",
+    "url": "/api/browser-playback/epochs/27256eccf9434286909dc26873ac6b1f/index.m3u8?attach_revision=1"
+  },
+  "platform": {
+    "browserPlaybackProfile": "mobile_2160p",
+    "detectedClientPlatform": "linux",
+    "detectedDesktopPlatform": "linux",
+    "detectedDeviceClass": "desktop",
+    "iosMobile": false,
+    "isIpad": false,
+    "isIphone": false,
+    "isLinuxPath": true,
+    "isMacPath": false,
+    "isWindowsPath": false,
+    "maxTouchPoints": 0,
+    "navigatorPlatform": "Linux x86_64",
+    "userAgent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0"
+  },
+  "playback_state": {
+    "activePlaybackMode": "lite",
+    "availableDuration": 18,
+    "browserPlaybackSessionActive": true,
+    "fullDuration": 6644.22,
+    "hasAnyBrowserPlaybackArtifacts": true,
+    "optimizedPlaybackPending": false,
+    "playbackError": "",
+    "playbackModeIntent": "lite",
+    "playbackPosition": 1.334625,
+    "playbackStatus": "Lite Playback",
+    "playerLocalDuration": 18,
+    "playerLocalPosition": 1.334625,
+    "resumableStartPosition": 0,
+    "resumePosition": 0,
+    "seekNotice": "",
+    "streamSource": {
+      "mode": "hls",
+      "url": "/api/browser-playback/epochs/27256eccf9434286909dc26873ac6b1f/index.m3u8?attach_revision=1"
+    }
+  },
+  "route2_session": {
+    "active_epoch_id": "27256eccf9434286909dc26873ac6b1f",
+    "active_epoch_state": "warming",
+    "active_manifest_url": "/api/browser-playback/epochs/27256eccf9434286909dc26873ac6b1f/index.m3u8",
+    "actual_media_element_time_seconds": 0,
+    "attach_position_seconds": 0,
+    "attach_ready": false,
+    "attach_revision": 1,
+    "browser_session_state": "starting",
+    "cache_ranges": [
+      [
+        0,
+        18
+      ]
+    ],
+    "client_attach_revision": 1,
+    "committed_playhead_seconds": 0,
+    "duration_seconds": 6644.22,
+    "engine_mode": "route2",
+    "lifecycle_state": "attached",
+    "manifest_complete": false,
+    "manifest_url": "/api/browser-playback/epochs/27256eccf9434286909dc26873ac6b1f/index.m3u8",
+    "playback_mode": "lite",
+    "ready_end_seconds": 18,
+    "ready_start_seconds": 0,
+    "replacement_epoch_id": "",
+    "session_id": "a7388bb047004cb4bbced70a1226e928",
+    "target_position_seconds": 0
+  },
+  "time_ranges": {
+    "buffered": {
+      "length": 1,
+      "ranges": [
+        {
+          "duration": 15.936832999999998,
+          "end": 16.019833,
+          "index": 0,
+          "start": 0.083
+        }
+      ]
+    },
+    "played": {
+      "length": 1,
+      "ranges": [
+        {
+          "duration": 1.334625,
+          "end": 1.334625,
+          "index": 0,
+          "start": 0
+        }
+      ]
+    },
+    "seekable": {
+      "length": 1,
+      "ranges": [
+        {
+          "duration": 16.099,
+          "end": 16.099,
+          "index": 0,
+          "start": 0
+        }
+      ]
+    }
+  },
+  "ui_controls": {
+    "desktopSeekPosition": 1.334625,
+    "macAppFullscreenActive": false,
+    "macHlsWindowSeekPosition": 1.334625,
+    "showDesktopBrowserSeekControl": false,
+    "showMacAppFullscreenControl": false,
+    "showMacHlsWindowSeekControl": false,
+    "showPlayerShell": true,
+    "videoControlsEnabled": true
+  },
+  "video": {
+    "className": "player",
+    "controls": true,
+    "controlsList": "",
+    "currentSrc": "blob:http://127.0.0.1:4173/d20beb5d-caab-45da-a198-80e1a45660b9",
+    "currentTime": 1.334625,
+    "disablePictureInPicture": false,
+    "duration": 16.099,
+    "ended": false,
+    "error": null,
+    "networkState": 2,
+    "paused": false,
+    "playbackRate": 1,
+    "preload": "metadata",
+    "readyState": 4,
+    "src": "blob:http://127.0.0.1:4173/d20beb5d-caab-45da-a198-80e1a45660b9"
+  }
+}

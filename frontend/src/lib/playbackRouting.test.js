@@ -5,7 +5,6 @@ import {
   resolveDetailVlcActionRoute,
   shouldShowDesktopBrowserSeekControl,
   shouldShowMacAppFullscreenControl,
-  shouldShowMacHlsWindowControls,
 } from "./playbackRouting.js";
 
 test("macOS desktop VLC uses desktop helper handoff when direct open is not available", () => {
@@ -72,20 +71,14 @@ test("iPad and iPhone route VLC through iOS external app handoff, not desktop he
   }
 });
 
-test("Mac-only HLS and absolute seek controls do not appear on iPad or iPhone", () => {
+test("Mac-only fullscreen and absolute seek controls do not appear on iPad or iPhone", () => {
   const common = {
     showPlayerShell: true,
     hasMobileSession: true,
     fullDuration: 7200,
-    playerLocalDuration: 420,
   };
 
   assert.equal(shouldShowDesktopBrowserSeekControl({
-    ...common,
-    desktopPlatform: null,
-    iosMobile: true,
-  }), false);
-  assert.equal(shouldShowMacHlsWindowControls({
     ...common,
     desktopPlatform: null,
     iosMobile: true,
@@ -97,20 +90,13 @@ test("Mac-only HLS and absolute seek controls do not appear on iPad or iPhone", 
   }), false);
 });
 
-test("real Mac desktop can show Mac-only window controls and full movie seek", () => {
+test("real Mac desktop can show app fullscreen and full movie seek", () => {
   assert.equal(shouldShowDesktopBrowserSeekControl({
     desktopPlatform: "mac",
     iosMobile: false,
     showPlayerShell: true,
     hasMobileSession: true,
     fullDuration: 7200,
-  }), true);
-  assert.equal(shouldShowMacHlsWindowControls({
-    desktopPlatform: "mac",
-    iosMobile: false,
-    showPlayerShell: true,
-    hasMobileSession: true,
-    playerLocalDuration: 420,
   }), true);
   assert.equal(shouldShowMacAppFullscreenControl({
     desktopPlatform: "mac",

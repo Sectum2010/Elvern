@@ -3315,95 +3315,6 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   pointer-events: none;
 }
 
-.mac-hls-window-seek {
-  display: grid;
-  gap: 0.35rem;
-  margin-top: 0.65rem;
-  padding-inline: 0.05rem;
-}
-
-.mac-hls-window-seek__controls {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.55rem;
-}
-
-.mac-hls-window-seek__button {
-  border: 1px solid rgba(152, 176, 201, 0.22);
-  border-radius: 999px;
-  background: rgba(17, 27, 39, 0.84);
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 0.78rem;
-  font-weight: 700;
-  line-height: 1;
-  min-width: 3.2rem;
-  padding: 0.42rem 0.6rem;
-}
-
-.mac-hls-window-seek__button:disabled {
-  cursor: not-allowed;
-  opacity: 0.42;
-}
-
-.mac-hls-window-seek__labels {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.75rem;
-  color: var(--text-muted);
-  font-size: 0.78rem;
-  line-height: 1.2;
-}
-
-.mac-hls-window-seek__labels span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mac-hls-window-seek__range {
-  appearance: none;
-  width: 100%;
-  height: 0.42rem;
-  min-height: 1.25rem;
-  border-radius: 999px;
-  border: 0;
-  background:
-    linear-gradient(
-      90deg,
-      rgba(235, 190, 112, 0.95) 0 var(--mac-hls-window-progress, 0%),
-      rgba(152, 176, 201, 0.16) var(--mac-hls-window-progress, 0%) 100%
-    );
-  accent-color: #ebbe70;
-  cursor: pointer;
-}
-
-.mac-hls-window-seek__range::-webkit-slider-thumb {
-  appearance: none;
-  width: 0.92rem;
-  height: 0.92rem;
-  border-radius: 999px;
-  border: 2px solid #ebbe70;
-  background: #fff8ec;
-  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.32);
-}
-
-.mac-hls-window-seek__range::-moz-range-thumb {
-  width: 0.92rem;
-  height: 0.92rem;
-  border-radius: 999px;
-  border: 2px solid #ebbe70;
-  background: #fff8ec;
-  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.32);
-}
-
-.mac-hls-window-seek__range:focus-visible {
-  outline: 2px solid rgba(235, 190, 112, 0.86);
-  outline-offset: 0.25rem;
-}
-
 .desktop-browser-seek {
   margin-top: 0.65rem;
   padding-inline: 0.05rem;
@@ -3448,41 +3359,6 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .desktop-browser-seek__range:focus-visible {
   outline: 2px solid rgba(143, 182, 218, 0.86);
   outline-offset: 0.25rem;
-}
-
-.playback-debug-panel {
-  display: grid;
-  gap: 0.75rem;
-  margin-top: 1rem;
-  padding: 1rem;
-  border: 1px solid rgba(152, 176, 201, 0.18);
-  border-radius: 1rem;
-  background: rgba(7, 12, 18, 0.78);
-}
-
-.playback-debug-panel__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.playback-debug-panel__header .page-note {
-  margin: 0.15rem 0 0;
-}
-
-.playback-debug-panel__output {
-  max-height: 28rem;
-  margin: 0;
-  overflow: auto;
-  border-radius: 0.75rem;
-  background: rgba(2, 5, 9, 0.9);
-  color: #dbe9f6;
-  font-size: 0.78rem;
-  line-height: 1.45;
-  padding: 0.85rem;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 .player-placeholder {

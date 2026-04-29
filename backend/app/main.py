@@ -15,6 +15,7 @@ from .routes.assistant import router as assistant_router
 from .routes.auth import router as auth_router
 from .routes.browser_playback import router as browser_playback_router
 from .routes.cloud_libraries import router as cloud_libraries_router
+from .routes.debug import router as debug_router
 from .routes.desktop_helper import router as desktop_helper_router
 from .routes.desktop_playback import router as desktop_playback_router
 from .routes.library import router as library_router
@@ -79,6 +80,7 @@ app.include_router(assistant_raw_router)
 app.include_router(auth_router)
 app.include_router(browser_playback_router)
 app.include_router(cloud_libraries_router)
+app.include_router(debug_router)
 app.include_router(desktop_helper_router)
 app.include_router(desktop_playback_router)
 app.include_router(library_router)

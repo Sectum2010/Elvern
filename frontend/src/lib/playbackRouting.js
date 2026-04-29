@@ -12,20 +12,6 @@ export function shouldShowDesktopBrowserSeekControl({
     && Number(fullDuration || 0) > 0;
 }
 
-export function shouldShowMacHlsWindowControls({
-  desktopPlatform,
-  iosMobile,
-  showPlayerShell,
-  hasMobileSession,
-  playerLocalDuration,
-} = {}) {
-  return desktopPlatform === "mac"
-    && !iosMobile
-    && Boolean(showPlayerShell)
-    && Boolean(hasMobileSession)
-    && Number(playerLocalDuration || 0) > 0;
-}
-
 export function shouldShowMacAppFullscreenControl({
   desktopPlatform,
   iosMobile,
