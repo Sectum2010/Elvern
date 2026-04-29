@@ -11,7 +11,11 @@ import {
   clearLibraryReturnPending,
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
-import { packSeriesRailRows } from "../lib/seriesRails";
+import { detectClientPlatform } from "../lib/platformDetection";
+import {
+  packIpadPortraitSeriesRailRows,
+  packSeriesRailRows,
+} from "../lib/seriesRails";
 
 
 function MediaGrid({
@@ -35,6 +39,34 @@ function MediaGrid({
 
 function formatMovieCount(count) {
   return `${count} ${count === 1 ? "movie" : "movies"}`;
+}
+
+function isIpadPortraitLibraryViewport() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return detectClientPlatform() === "ipad"
+    && window.matchMedia("(min-width: 740px)").matches;
+}
+
+function useIpadPortraitLibraryLayout() {
+  const [enabled, setEnabled] = useState(() => isIpadPortraitLibraryViewport());
+
+  useEffect(() => {
+    function updateLayoutMode() {
+      setEnabled(isIpadPortraitLibraryViewport());
+    }
+
+    updateLayoutMode();
+    window.addEventListener("resize", updateLayoutMode);
+    window.addEventListener("orientationchange", updateLayoutMode);
+    return () => {
+      window.removeEventListener("resize", updateLayoutMode);
+      window.removeEventListener("orientationchange", updateLayoutMode);
+    };
+  }, []);
+
+  return enabled;
 }
 
 
@@ -84,6 +116,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const [items, setItems] = useState([]);
   const [seriesRails, setSeriesRails] = useState([]);
   const libraryReturnRestoreKeyRef = useRef("");
+  const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const copy = SOURCE_PAGE_COPY[sourceKind] || SOURCE_PAGE_COPY.local;
   const normalizedQuery = deferredQuery.trim().toLowerCase();
   const visibleSeriesRails = useMemo(
@@ -118,8 +151,10 @@ export function LibrarySourcePage({ sourceKind }) {
     [items, normalizedQuery, visibleSeriesRailItemIds],
   );
   const packedSeriesRailRows = useMemo(
-    () => packSeriesRailRows(visibleSeriesRails),
-    [visibleSeriesRails],
+    () => (useIpadPortraitSeriesPacking
+      ? packIpadPortraitSeriesRailRows(visibleSeriesRails)
+      : packSeriesRailRows(visibleSeriesRails)),
+    [useIpadPortraitSeriesPacking, visibleSeriesRails],
   );
   const sourceVisibleCount = items.length;
   const hasVisibleContent = visibleSeriesRails.length > 0 || filteredItems.length > 0;
@@ -263,7 +298,13 @@ export function LibrarySourcePage({ sourceKind }) {
         hasVisibleContent ? (
           <>
             {packedSeriesRailRows.map((row) => (
-              <div className="series-rail-pack-row" key={row.key}>
+              <div
+                className={[
+                  "series-rail-pack-row",
+                  row.layout ? `series-rail-pack-row--${row.layout}` : "",
+                ].filter(Boolean).join(" ")}
+                key={row.key}
+              >
                 {row.blocks.map((block) => (
                   <div
                     className="series-rail-pack-block"

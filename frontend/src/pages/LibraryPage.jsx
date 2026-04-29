@@ -23,7 +23,11 @@ import {
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
 import { startGoogleDriveReconnect } from "../lib/providerAuth";
-import { packSeriesRailRows } from "../lib/seriesRails";
+import { detectClientPlatform } from "../lib/platformDetection";
+import {
+  packIpadPortraitSeriesRailRows,
+  packSeriesRailRows,
+} from "../lib/seriesRails";
 import { getSmartPosterOrientation } from "../lib/smartPosterLoading";
 import {
   captureCenterMovieAnchor,
@@ -65,6 +69,34 @@ function MediaGrid({
 
 function formatMovieCount(count) {
   return `${count} ${count === 1 ? "movie" : "movies"}`;
+}
+
+function isIpadPortraitLibraryViewport() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return detectClientPlatform() === "ipad"
+    && window.matchMedia("(min-width: 740px)").matches;
+}
+
+function useIpadPortraitLibraryLayout() {
+  const [enabled, setEnabled] = useState(() => isIpadPortraitLibraryViewport());
+
+  useEffect(() => {
+    function updateLayoutMode() {
+      setEnabled(isIpadPortraitLibraryViewport());
+    }
+
+    updateLayoutMode();
+    window.addEventListener("resize", updateLayoutMode);
+    window.addEventListener("orientationchange", updateLayoutMode);
+    return () => {
+      window.removeEventListener("resize", updateLayoutMode);
+      window.removeEventListener("orientationchange", updateLayoutMode);
+    };
+  }, []);
+
+  return enabled;
 }
 
 export function LibraryPage() {
@@ -127,6 +159,7 @@ export function LibraryPage() {
   const orientationSamplerRef = useRef(() => {});
   const orientationDebugLogAtRef = useRef(0);
   const libraryReturnRestoreKeyRef = useRef("");
+  const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const isPhoneClient = useMemo(() => {
     if (typeof navigator === "undefined") {
       return false;
@@ -176,8 +209,10 @@ export function LibraryPage() {
     [library.items, seriesRailItemIds],
   );
   const packedSeriesRailRows = useMemo(
-    () => packSeriesRailRows(visibleSeriesRails),
-    [visibleSeriesRails],
+    () => (useIpadPortraitSeriesPacking
+      ? packIpadPortraitSeriesRailRows(visibleSeriesRails)
+      : packSeriesRailRows(visibleSeriesRails)),
+    [useIpadPortraitSeriesPacking, visibleSeriesRails],
   );
   const cloudReconnectPrompt = useMemo(
     () => getCloudReconnectPrompt(cloudLibraries),
@@ -962,7 +997,13 @@ export function LibraryPage() {
           ) : null}
 
           {packedSeriesRailRows.map((row) => (
-            <div className="series-rail-pack-row" key={row.key}>
+            <div
+              className={[
+                "series-rail-pack-row",
+                row.layout ? `series-rail-pack-row--${row.layout}` : "",
+              ].filter(Boolean).join(" ")}
+              key={row.key}
+            >
               {row.blocks.map((block) => (
                 <div
                   className="series-rail-pack-block"

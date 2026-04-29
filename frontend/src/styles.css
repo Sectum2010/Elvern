@@ -645,19 +645,6 @@ button {
   overflow-anchor: none;
 }
 
-.series-rail::before {
-  content: "";
-  position: absolute;
-  inset: 2.5rem -1.1rem -1rem -1.1rem;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(circle at 16% 24%, rgba(210, 88, 196, 0.1), transparent 26%),
-    radial-gradient(circle at 84% 38%, rgba(93, 126, 255, 0.11), transparent 28%),
-    linear-gradient(135deg, rgba(128, 37, 123, 0.06) 0%, rgba(54, 72, 170, 0.04) 100%);
-  filter: blur(26px);
-}
-
 .series-rail__header {
   align-items: end;
 }
@@ -3895,6 +3882,82 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   .app-shell--library-root .library-mobile-search-card,
   .app-shell--library-root .library-desktop-hero__search--mobile {
     display: none;
+  }
+}
+
+@media (min-width: 740px) and (max-width: 1400px) and (any-pointer: coarse) {
+  html:not([data-device-shell="iphone"]) .app-shell--library-root,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source {
+    max-width: min(1120px, 100%);
+    padding-inline:
+      max(1.25rem, env(safe-area-inset-left, 0px))
+      max(1.25rem, env(safe-area-inset-right, 0px));
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .page-section--library .media-grid,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .page-section--library-source .media-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 0.78rem;
+    justify-items: stretch;
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .media-grid .media-card,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .media-grid .media-card {
+    width: 100%;
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-block,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-block {
+    grid-column: auto;
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.78rem;
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair .series-rail-pack-block,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair .series-rail-pack-block {
+    grid-column: span var(--series-rail-pack-span, 2);
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__viewport,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__viewport {
+    --series-rail-gap: 0.78rem;
+    --series-rail-peek: 0rem;
+    --series-rail-card-width: calc((100% - (var(--series-rail-gap) * 3)) / 4);
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__viewport--desktop.series-rail__viewport--peek,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__viewport--desktop.series-rail__viewport--peek,
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__viewport--desktop.series-rail__viewport--packed,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__viewport--desktop.series-rail__viewport--packed {
+    --series-rail-peek: 0rem;
+    --series-rail-card-width: calc((100% - (var(--series-rail-gap) * 3)) / 4);
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair .series-rail__viewport,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair .series-rail__viewport,
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair .series-rail__viewport--desktop.series-rail__viewport--packed,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair .series-rail__viewport--desktop.series-rail__viewport--packed {
+    --series-rail-card-width: calc((100% - var(--series-rail-gap)) / 2);
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__track,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__track {
+    padding-right: 0;
+  }
+
+  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__slide .media-card,
+  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__slide .media-card {
+    width: 100%;
   }
 }
 
