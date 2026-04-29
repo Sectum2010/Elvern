@@ -13,6 +13,12 @@ import {
 import { getOrCreateDeviceId } from "../lib/device";
 import { formatBytes, formatDuration } from "../lib/format";
 import { detectDesktopPlatform } from "../lib/platformDetection";
+import {
+  resolveDetailVlcActionRoute,
+  shouldShowDesktopBrowserSeekControl,
+  shouldShowMacAppFullscreenControl,
+  shouldShowMacHlsWindowControls,
+} from "../lib/playbackRouting";
 import { useBrowserPlaybackController } from "../features/playback/useBrowserPlaybackController";
 import {
   extractLibraryReturnState,
@@ -339,7 +345,12 @@ export function DetailPage() {
   const [browserStopModalOpen, setBrowserStopModalOpen] = useState(false);
   const [playbackConflictModal, setPlaybackConflictModal] = useState(null);
   const [playbackConflictPending, setPlaybackConflictPending] = useState(false);
+  const [macHlsWindowSeekDraft, setMacHlsWindowSeekDraft] = useState(null);
   const [desktopSeekDraft, setDesktopSeekDraft] = useState(null);
+  const [macAppFullscreenActive, setMacAppFullscreenActive] = useState(false);
+  const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
+  const playerShellRef = useRef(null);
+  const macHlsWindowSeekCommitPendingRef = useRef(false);
   const desktopSeekCommitPendingRef = useRef(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
@@ -358,6 +369,53 @@ export function DetailPage() {
   const localDevLoopback = isLocalDevelopmentLoopback(desktopPlatform);
   const desktopDeviceId = useMemo(() => getOrCreateDeviceId(), []);
   const isAdmin = user?.role === "admin";
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+    const readFullscreenElement = () => (
+      document.fullscreenElement
+      || document.webkitFullscreenElement
+      || null
+    );
+    const syncMacFullscreenState = () => {
+      const shell = playerShellRef.current;
+      const active = Boolean(shell && readFullscreenElement() === shell);
+      setMacAppFullscreenActive(active);
+      if (!active) {
+        setMacAppFullscreenError("");
+      }
+    };
+
+    document.addEventListener("fullscreenchange", syncMacFullscreenState);
+    document.addEventListener("webkitfullscreenchange", syncMacFullscreenState);
+    syncMacFullscreenState();
+    return () => {
+      document.removeEventListener("fullscreenchange", syncMacFullscreenState);
+      document.removeEventListener("webkitfullscreenchange", syncMacFullscreenState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+    const className = "elvern-player-fullscreen-active";
+    const body = document.body;
+    if (macAppFullscreenActive) {
+      document.documentElement.classList.add(className);
+      body?.classList.add(className);
+    } else {
+      document.documentElement.classList.remove(className);
+      body?.classList.remove(className);
+    }
+    return () => {
+      document.documentElement.classList.remove(className);
+      body?.classList.remove(className);
+    };
+  }, [macAppFullscreenActive]);
+
   const {
     videoRef,
     mobilePendingTargetRef,
@@ -371,6 +429,8 @@ export function DetailPage() {
     playbackError,
     seekNotice,
     playbackPosition,
+    playerLocalPosition,
+    playerLocalDuration,
     playbackStatus,
     playbackModeIntent,
     prepareEstimateObservedAtMs,
@@ -404,6 +464,7 @@ export function DetailPage() {
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
     seekBrowserPlaybackTo,
+    seekBrowserPlaybackWindowTo,
     stopCurrentBrowserPlaybackSession,
   } = useBrowserPlaybackController({
     itemId,
@@ -1182,7 +1243,11 @@ export function DetailPage() {
         if (!payload?.protocol_url) {
           throw new Error("Desktop VLC handoff did not return a launch URL.");
         }
-        setVlcLaunchMessage(payload.message || "Launching installed VLC via the Elvern desktop opener.");
+        setVlcLaunchMessage(
+          desktopPlayback.used_backend_fallback
+            ? "Sent handoff to the desktop helper. The helper will preflight the backend stream URL before launching VLC."
+            : (payload.message || "Launching installed VLC via the Elvern desktop opener."),
+        );
         window.location.assign(payload.protocol_url);
         return;
       }
@@ -1629,6 +1694,11 @@ export function DetailPage() {
     : [];
 
   const showIosExternalApps = iosMobile;
+  const vlcActionRoute = resolveDetailVlcActionRoute({
+    desktopPlatform,
+    iosMobile,
+    desktopPlayback,
+  });
   const {
     browserPlaybackPreparing,
     playerClassName,
@@ -1649,11 +1719,49 @@ export function DetailPage() {
   const hideActionsDisabled = browserPlaybackSessionActive || hiddenActionPending || globalHiddenActionPending;
   const showPrimaryStatusPill = isImportantPlaybackStatus(playbackStatus);
   const showPlaybackReasonPill = isImportantPlaybackReason(playback?.reason);
-  const showDesktopBrowserSeekControl =
-    !iosMobile
-    && showPlayerShell
-    && Boolean(mobileSession)
-    && fullDuration > 0;
+  const showMacHlsWindowSeekControl = shouldShowMacHlsWindowControls({
+    desktopPlatform,
+    iosMobile,
+    showPlayerShell,
+    hasMobileSession: Boolean(mobileSession),
+    playerLocalDuration,
+  });
+  const macHlsWindowSeekPosition = Math.max(
+    0,
+    Math.min(
+      playerLocalDuration || 0,
+      macHlsWindowSeekDraft != null ? macHlsWindowSeekDraft : playerLocalPosition || 0,
+    ),
+  );
+  const macHlsWindowSeekProgressPercent = playerLocalDuration > 0
+    ? Math.min(100, Math.max(0, (macHlsWindowSeekPosition / playerLocalDuration) * 100))
+    : 0;
+  const macHlsWindowStartSeconds = Math.max(mobileSession?.ready_start_seconds || 0, 0);
+  const macHlsWindowPositionLabel = `${formatDuration(macHlsWindowSeekPosition)} / ${formatDuration(playerLocalDuration)}`;
+  const macHlsWindowRangeLabel = formatTimeRange(
+    macHlsWindowStartSeconds,
+    macHlsWindowStartSeconds + Math.max(playerLocalDuration || 0, 0),
+  );
+  const showDesktopBrowserSeekControl = shouldShowDesktopBrowserSeekControl({
+    desktopPlatform,
+    iosMobile,
+    showPlayerShell,
+    hasMobileSession: Boolean(mobileSession),
+    fullDuration,
+  });
+  const showMacAppFullscreenControl = shouldShowMacAppFullscreenControl({
+    desktopPlatform,
+    iosMobile,
+    showPlayerShell,
+  });
+  const resolvedPlayerClassName = showMacAppFullscreenControl
+    ? `${playerClassName} player--app-fullscreen-managed`
+    : playerClassName;
+  const playerShellClassName = [
+    "player-shell",
+    showMacAppFullscreenControl ? "player-shell--app-fullscreen" : "",
+    macAppFullscreenActive ? "player-shell--app-fullscreen-active" : "",
+  ].filter(Boolean).join(" ");
   const desktopSeekPosition = Math.max(
     0,
     Math.min(
@@ -1731,6 +1839,30 @@ export function DetailPage() {
           : `Prepared through ${preparedDurationLabel} while Elvern transcodes ahead.`
       : "Full movie is available for direct playback.";
 
+  function normalizeMacHlsWindowSeekValue(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      return 0;
+    }
+    if (playerLocalDuration > 0) {
+      return Math.min(playerLocalDuration, Math.max(0, numericValue));
+    }
+    return Math.max(0, numericValue);
+  }
+
+  function commitMacHlsWindowSeek(value) {
+    if (!showMacHlsWindowSeekControl || macHlsWindowSeekCommitPendingRef.current) {
+      return;
+    }
+    const targetPosition = normalizeMacHlsWindowSeekValue(value);
+    macHlsWindowSeekCommitPendingRef.current = true;
+    setMacHlsWindowSeekDraft(null);
+    seekBrowserPlaybackWindowTo(targetPosition);
+    window.requestAnimationFrame(() => {
+      macHlsWindowSeekCommitPendingRef.current = false;
+    });
+  }
+
   function normalizeDesktopSeekValue(value) {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) {
@@ -1752,6 +1884,39 @@ export function DetailPage() {
     seekBrowserPlaybackTo(targetPosition).finally(() => {
       desktopSeekCommitPendingRef.current = false;
     });
+  }
+
+  async function toggleMacAppFullscreen() {
+    if (!showMacAppFullscreenControl || typeof document === "undefined") {
+      return;
+    }
+    const shell = playerShellRef.current;
+    if (!shell) {
+      return;
+    }
+    setMacAppFullscreenError("");
+    const activeElement = document.fullscreenElement || document.webkitFullscreenElement || null;
+    try {
+      if (activeElement === shell) {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        }
+        return;
+      }
+      if (shell.requestFullscreen) {
+        await shell.requestFullscreen();
+      } else if (shell.webkitRequestFullscreen) {
+        shell.webkitRequestFullscreen();
+      } else {
+        throw new Error("Fullscreen is not available in this browser.");
+      }
+    } catch (fullscreenError) {
+      setMacAppFullscreenError(
+        fullscreenError?.message || "Fullscreen is not available in this browser.",
+      );
+    }
   }
 
   return (
@@ -2041,7 +2206,7 @@ export function DetailPage() {
             {showPlaybackReasonPill ? <span className="status-pill">{playback.reason}</span> : null}
           </div>
           <div className="player-actions">
-            {desktopPlatform ? (
+            {vlcActionRoute.surface.startsWith("desktop") ? (
               <button
                 className="primary-button"
                 disabled={vlcLaunchPending || !desktopPlayback}
@@ -2215,6 +2380,13 @@ export function DetailPage() {
               </div>
             </div>
           ) : null}
+          {desktopPlayback?.used_backend_fallback && (desktopPlatform === "mac" || desktopPlatform === "windows") ? (
+            <div className="native-handoff">
+              <p className="native-handoff__label">
+                {desktopPlatform === "mac" ? "Mac direct path mapping" : "Windows direct path mapping"} is not configured, so Open in VLC is using a backend stream fallback. The helper now verifies that exact URL from this desktop before launching VLC; a helper launch alone does not prove VLC playback opened.
+              </p>
+            </div>
+          ) : null}
           {desktopPlayback && !desktopPlayback.open_supported && !desktopPlayback.handoff_supported ? (
             <div className="native-handoff">
               <p className="native-handoff__label">
@@ -2240,22 +2412,91 @@ export function DetailPage() {
         </div>
 
         {showPlayerShell ? (
-          <div className="player-shell">
-            {mobileFrozenFrameUrl && (mobileRetargetTransitionRef.current || !mobilePlayerCanPlay) ? (
-              <img
-                alt=""
-                aria-hidden="true"
-                className="player-frozen-frame"
-                src={mobileFrozenFrameUrl}
+          <div className={playerShellClassName} ref={playerShellRef}>
+            <div className="player-fullscreen-surface">
+              {mobileFrozenFrameUrl && (mobileRetargetTransitionRef.current || !mobilePlayerCanPlay) ? (
+                <img
+                  alt=""
+                  aria-hidden="true"
+                  className="player-frozen-frame"
+                  src={mobileFrozenFrameUrl}
+                />
+              ) : null}
+              <video
+                key={videoElementKey}
+                className={resolvedPlayerClassName}
+                controls={videoControlsEnabled}
+                controlsList={showMacAppFullscreenControl ? "nofullscreen nodownload noremoteplayback" : undefined}
+                disablePictureInPicture={showMacAppFullscreenControl ? true : undefined}
+                playsInline
+                preload="metadata"
+                ref={videoRef}
               />
+            </div>
+            {showMacAppFullscreenControl ? (
+              <button
+                className="player-app-fullscreen-button"
+                onClick={toggleMacAppFullscreen}
+                type="button"
+              >
+                {macAppFullscreenActive ? "Exit fullscreen" : "Fullscreen"}
+              </button>
             ) : null}
-            <video
-              key={videoElementKey}
-              className={playerClassName}
-              controls={videoControlsEnabled}
-              playsInline
-              preload="metadata"
-              ref={videoRef}
+          </div>
+        ) : null}
+        {macAppFullscreenError ? <p className="form-error">{macAppFullscreenError}</p> : null}
+        {showMacHlsWindowSeekControl ? (
+          <div className="mac-hls-window-seek" aria-label="Current HLS window seek controls">
+            <div className="mac-hls-window-seek__controls">
+              <button
+                className="mac-hls-window-seek__button"
+                disabled={macHlsWindowSeekPosition <= 0}
+                onClick={() => commitMacHlsWindowSeek(macHlsWindowSeekPosition - 10)}
+                type="button"
+              >
+                -10s
+              </button>
+              <div className="mac-hls-window-seek__labels" aria-hidden="true">
+                <span>Window {macHlsWindowPositionLabel}</span>
+                {macHlsWindowRangeLabel ? <span>{macHlsWindowRangeLabel}</span> : null}
+              </div>
+              <button
+                className="mac-hls-window-seek__button"
+                disabled={macHlsWindowSeekPosition >= playerLocalDuration}
+                onClick={() => commitMacHlsWindowSeek(macHlsWindowSeekPosition + 10)}
+                type="button"
+              >
+                +10s
+              </button>
+            </div>
+            <input
+              aria-label="Seek current playback window"
+              className="mac-hls-window-seek__range"
+              max={Math.max(1, Math.round(playerLocalDuration))}
+              min="0"
+              onBlur={(event) => {
+                if (macHlsWindowSeekDraft != null) {
+                  commitMacHlsWindowSeek(event.currentTarget.value);
+                }
+              }}
+              onChange={(event) => {
+                setMacHlsWindowSeekDraft(normalizeMacHlsWindowSeekValue(event.currentTarget.value));
+              }}
+              onKeyUp={(event) => {
+                if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+                  commitMacHlsWindowSeek(event.currentTarget.value);
+                }
+              }}
+              onPointerCancel={() => {
+                setMacHlsWindowSeekDraft(null);
+              }}
+              onPointerUp={(event) => {
+                commitMacHlsWindowSeek(event.currentTarget.value);
+              }}
+              step="1"
+              style={{ "--mac-hls-window-progress": `${macHlsWindowSeekProgressPercent}%` }}
+              type="range"
+              value={Math.round(macHlsWindowSeekPosition)}
             />
           </div>
         ) : null}

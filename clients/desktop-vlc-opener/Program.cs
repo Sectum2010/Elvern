@@ -49,8 +49,13 @@ internal static class Program
                 : VlcLocator.FindInstalledVlc();
             OpenerLog.Info($"Resolved VLC path: {vlcPath}");
             var validatedTarget = ValidateTarget(handoff);
+            if (string.Equals(handoff.TargetKind, "url", StringComparison.OrdinalIgnoreCase))
+            {
+                await apiClient.PreflightPlaybackTargetAsync(validatedTarget).ConfigureAwait(false);
+            }
             var launchTarget = PrepareLaunchTarget(validatedTarget);
             var processStart = BuildProcessStartInfo(vlcPath, handoff, launchTarget);
+            OpenerLog.Info($"VLC command: {FormatProcessStartInfo(processStart)}");
             OpenerLog.Info($"Launching VLC with final target: {launchTarget}");
 
             var launchedProcess = Process.Start(processStart)
@@ -195,6 +200,13 @@ internal static class Program
         }
         directStart.ArgumentList.Add(launchTarget);
         return directStart;
+    }
+
+    private static string FormatProcessStartInfo(ProcessStartInfo processStart)
+    {
+        var arguments = processStart.ArgumentList
+            .Select(static argument => argument.Contains(' ') ? $"\"{argument}\"" : argument);
+        return $"{processStart.FileName} {string.Join(" ", arguments)}".Trim();
     }
 
     private static void ApplyFreshHandoffFlags(ProcessStartInfo processStart)

@@ -67,6 +67,27 @@ body {
   background: var(--app-page-background);
 }
 
+html.elvern-player-fullscreen-active,
+html.elvern-player-fullscreen-active body,
+html.elvern-player-fullscreen-active #root {
+  background: #000 !important;
+}
+
+html.elvern-player-fullscreen-active body {
+  overflow: hidden;
+}
+
+html.elvern-player-fullscreen-active .app-viewport-backdrop,
+body.elvern-player-fullscreen-active .app-viewport-backdrop {
+  background: #000 !important;
+}
+
+html.elvern-player-fullscreen-active .app-viewport-backdrop::after,
+body.elvern-player-fullscreen-active .app-viewport-backdrop::after {
+  background: #000 !important;
+  filter: none;
+}
+
 .app-viewport-backdrop {
   position: fixed;
   inset:
@@ -3116,33 +3137,162 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   isolation: isolate;
 }
 
+.player-fullscreen-surface {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  min-height: 240px;
+  border-radius: inherit;
+  background: #000;
+  line-height: 0;
+}
+
+.player-shell--app-fullscreen-active {
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.player--app-fullscreen-managed::-webkit-media-controls-fullscreen-button {
+  display: none !important;
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .player:fullscreen,
 .player:-webkit-full-screen,
 .player-shell:fullscreen,
 .player-shell:-webkit-full-screen {
-  width: 100vw;
-  height: 100vh;
+  position: fixed;
+  inset: 0;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 100%;
+  min-height: 0;
   max-width: none;
   max-height: none;
   margin: 0;
+  padding: 0;
   border: 0;
   border-radius: 0;
   outline: 0;
   box-shadow: none;
   background: #000;
   overflow: hidden;
+  transform: none;
+  aspect-ratio: auto;
+  line-height: 0;
+}
+
+.player-shell--app-fullscreen:fullscreen,
+.player-shell--app-fullscreen:-webkit-full-screen {
+  background: #000 !important;
+  isolation: isolate;
+}
+
+.player-shell--app-fullscreen:fullscreen::before,
+.player-shell--app-fullscreen:-webkit-full-screen::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  z-index: 0;
+  background: #000;
+  pointer-events: none;
 }
 
 .player:fullscreen,
 .player:-webkit-full-screen,
 .player-shell:fullscreen .player,
 .player-shell:-webkit-full-screen .player {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  box-shadow: none;
+  background: #000;
+  transform: none;
+  aspect-ratio: auto;
   object-fit: contain;
+  object-position: center center;
+}
+
+.player-shell:fullscreen .player-fullscreen-surface,
+.player-shell:-webkit-full-screen .player-fullscreen-surface {
+  position: absolute;
+  inset: -2px;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  box-shadow: none;
+  background: #000;
+  overflow: hidden;
+  transform: translateZ(0);
+}
+
+.player-shell--app-fullscreen:fullscreen .player,
+.player-shell--app-fullscreen:-webkit-full-screen .player {
+  background-color: #000 !important;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.player-shell:fullscreen .player-frozen-frame,
+.player-shell:-webkit-full-screen .player-frozen-frame {
+  border-radius: 0;
+  background: #000;
 }
 
 .player:fullscreen::backdrop,
 .player-shell:fullscreen::backdrop {
   background: #000;
+}
+
+.player::-webkit-backdrop,
+.player-shell::-webkit-backdrop {
+  background: #000;
+}
+
+.player-app-fullscreen-button {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 4;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.64);
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.48rem 0.68rem;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.player-app-fullscreen-button:hover,
+.player-app-fullscreen-button:focus-visible {
+  background: rgba(0, 0, 0, 0.84);
+  border-color: rgba(255, 255, 255, 0.48);
+  transform: translateY(-1px);
+}
+
+.player-shell--app-fullscreen:fullscreen .player-app-fullscreen-button,
+.player-shell--app-fullscreen:-webkit-full-screen .player-app-fullscreen-button {
+  top: max(0.9rem, env(safe-area-inset-top));
+  right: max(0.9rem, env(safe-area-inset-right));
 }
 
 .player--warmup {
@@ -3163,6 +3313,95 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   object-fit: contain;
   background: #000;
   pointer-events: none;
+}
+
+.mac-hls-window-seek {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+  padding-inline: 0.05rem;
+}
+
+.mac-hls-window-seek__controls {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.mac-hls-window-seek__button {
+  border: 1px solid rgba(152, 176, 201, 0.22);
+  border-radius: 999px;
+  background: rgba(17, 27, 39, 0.84);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1;
+  min-width: 3.2rem;
+  padding: 0.42rem 0.6rem;
+}
+
+.mac-hls-window-seek__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.mac-hls-window-seek__labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.mac-hls-window-seek__labels span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mac-hls-window-seek__range {
+  appearance: none;
+  width: 100%;
+  height: 0.42rem;
+  min-height: 1.25rem;
+  border-radius: 999px;
+  border: 0;
+  background:
+    linear-gradient(
+      90deg,
+      rgba(235, 190, 112, 0.95) 0 var(--mac-hls-window-progress, 0%),
+      rgba(152, 176, 201, 0.16) var(--mac-hls-window-progress, 0%) 100%
+    );
+  accent-color: #ebbe70;
+  cursor: pointer;
+}
+
+.mac-hls-window-seek__range::-webkit-slider-thumb {
+  appearance: none;
+  width: 0.92rem;
+  height: 0.92rem;
+  border-radius: 999px;
+  border: 2px solid #ebbe70;
+  background: #fff8ec;
+  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.32);
+}
+
+.mac-hls-window-seek__range::-moz-range-thumb {
+  width: 0.92rem;
+  height: 0.92rem;
+  border-radius: 999px;
+  border: 2px solid #ebbe70;
+  background: #fff8ec;
+  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.32);
+}
+
+.mac-hls-window-seek__range:focus-visible {
+  outline: 2px solid rgba(235, 190, 112, 0.86);
+  outline-offset: 0.25rem;
 }
 
 .desktop-browser-seek {
@@ -3785,6 +4024,13 @@ html[data-device-shell="iphone"] .series-rail__viewport {
 }
 
 html[data-device-shell="iphone"] .player-shell {
+  min-height: 0;
+  aspect-ratio: 16 / 9;
+}
+
+html[data-device-shell="iphone"] .player-fullscreen-surface {
+  width: 100%;
+  height: 100%;
   min-height: 0;
   aspect-ratio: 16 / 9;
 }

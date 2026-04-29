@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -1271,6 +1271,32 @@ def test_desktop_playback_route_returns_mapped_windows_path_when_configured(
     assert payload["used_backend_fallback"] is False
 
 
+def test_desktop_playback_route_returns_mapped_mac_path_when_configured(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="desktop/mac-map.mp4",
+    )
+    client.app.state.settings = replace(initialized_settings, library_root_mac="/Volumes/Family Media")
+
+    response = client.get(
+        f"/api/desktop-playback/{item['id']}",
+        params={"platform": "mac"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["platform"] == "mac"
+    assert payload["strategy"] == "direct_path"
+    assert payload["vlc_target"] == str(PurePosixPath("/Volumes/Family Media").joinpath("desktop", "mac-map.mp4"))
+    assert payload["same_host_launch"] is False
+    assert payload["used_backend_fallback"] is False
+
+
 def test_desktop_playback_route_returns_backend_fallback_when_mapping_is_missing(
     initialized_settings,
     client,
@@ -1295,6 +1321,83 @@ def test_desktop_playback_route_returns_backend_fallback_when_mapping_is_missing
     assert payload["used_backend_fallback"] is True
     assert "short-lived backend URL" in payload["vlc_target"]
     assert any("Windows VLC mapping is not configured yet" in note for note in payload["notes"])
+
+
+@pytest.mark.parametrize("platform", ["mac", "windows"])
+def test_desktop_helper_handoff_resolves_backend_stream_url_for_remote_desktop(
+    initialized_settings,
+    client,
+    admin_credentials,
+    platform,
+) -> None:
+    settings = replace(
+        initialized_settings,
+        public_app_origin="https://elvern.example",
+        backend_origin="http://100.75.83.33:8000",
+        library_root_mac=None,
+        library_root_windows=None,
+    )
+    client.app.state.settings = settings
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        settings,
+        relative_name=f"desktop/{platform}-helper-backend-fallback.mp4",
+    )
+
+    details_response = client.get(
+        f"/api/desktop-playback/{item['id']}",
+        params={"platform": platform},
+    )
+    assert details_response.status_code == 200
+    details_payload = details_response.json()
+    assert details_payload["platform"] == platform
+    assert details_payload["open_method"] == "protocol_helper"
+    assert details_payload["handoff_supported"] is True
+
+    create_response = client.post(
+        f"/api/desktop-playback/{item['id']}/handoff",
+        json={"platform": platform, "device_id": f"{platform}-pytest"},
+    )
+    assert create_response.status_code == 200
+    create_payload = create_response.json()
+    assert create_payload["strategy"] == "backend_url"
+
+    parsed_protocol_url = urlsplit(create_payload["protocol_url"])
+    protocol_params = parse_qs(parsed_protocol_url.query)
+    assert parsed_protocol_url.scheme == settings.vlc_helper_protocol
+    assert protocol_params["api"] == [settings.backend_origin]
+    assert protocol_params["handoff"] == [create_payload["handoff_id"]]
+
+    resolve_response = client.get(
+        f"/api/desktop-playback/handoff/{create_payload['handoff_id']}",
+        params={"token": protocol_params["token"][0]},
+        headers={
+            "x-elvern-helper-platform": platform,
+            "x-elvern-vlc-detection-state": "installed",
+        },
+    )
+    assert resolve_response.status_code == 200
+    resolve_payload = resolve_response.json()
+    assert resolve_payload["platform"] == platform
+    assert resolve_payload["strategy"] == "backend_url"
+    assert resolve_payload["target_kind"] == "url"
+    assert resolve_payload["target"].startswith(
+        f"{settings.backend_origin}/api/native-playback/session/",
+    )
+    assert "token=" in resolve_payload["target"]
+    session_id = urlsplit(resolve_payload["target"]).path.rstrip("/").split("/")[-2]
+    with get_connection(settings) as connection:
+        session_row = connection.execute(
+            """
+            SELECT auth_session_id, client_name
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    assert session_row is not None
+    assert session_row["auth_session_id"] is None
+    assert str(session_row["client_name"]).lower().startswith(f"vlc helper fallback ({platform})")
 
 
 def test_playback_decision_route_returns_direct_for_safe_desktop_browser(

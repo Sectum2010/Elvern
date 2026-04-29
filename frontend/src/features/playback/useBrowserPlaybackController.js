@@ -82,6 +82,8 @@ export function useBrowserPlaybackController({
   const [playbackStatus, setPlaybackStatus] = useState("Checking playback compatibility");
   const [playbackPosition, setPlaybackPosition] = useState(0);
   const [playerMeasuredDuration, setPlayerMeasuredDuration] = useState(0);
+  const [playerLocalPosition, setPlayerLocalPosition] = useState(0);
+  const [playerLocalDuration, setPlayerLocalDuration] = useState(0);
   const [optimizedPlaybackPending, setOptimizedPlaybackPending] = useState(false);
   const [playbackModeIntent, setPlaybackModeIntent] = useState("lite");
 
@@ -303,6 +305,23 @@ export function useBrowserPlaybackController({
       : Math.max(absoluteSeconds || 0, 0);
   }
 
+  function resolveRoute2WindowDuration(session = mobileSessionRef.current, video = videoRef.current) {
+    if (session) {
+      const sessionWindowDuration = Math.max(
+        0,
+        (session.ready_end_seconds || 0) - (session.ready_start_seconds || 0),
+      );
+      if (sessionWindowDuration > 0) {
+        return sessionWindowDuration;
+      }
+    }
+    const measuredDuration = readFiniteDuration(video);
+    if (measuredDuration > 0) {
+      return measuredDuration;
+    }
+    return 0;
+  }
+
   function prepareControllerForLoad(nextItemId = itemId) {
     playbackFlowRef.current += 1;
     currentItemIdRef.current = nextItemId;
@@ -313,6 +332,8 @@ export function useBrowserPlaybackController({
     setPlayback(null);
     setPlaybackPosition(0);
     setPlayerMeasuredDuration(0);
+    setPlayerLocalPosition(0);
+    setPlayerLocalDuration(0);
     clearOptimizedPlaybackPending();
     fallbackAttemptedRef.current = false;
     forceHlsRef.current = false;
@@ -669,6 +690,26 @@ export function useBrowserPlaybackController({
     }
   }
 
+  function seekBrowserPlaybackWindowTo(localPositionSeconds) {
+    const numericTarget = Number(localPositionSeconds);
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(numericTarget) || numericTarget < 0) {
+      return false;
+    }
+    const windowDuration = resolveRoute2WindowDuration(mobileSessionRef.current, video);
+    const localTarget = windowDuration > 0
+      ? Math.min(windowDuration, numericTarget)
+      : numericTarget;
+    try {
+      video.currentTime = localTarget;
+      setPlayerLocalPosition(localTarget);
+      return true;
+    } catch (requestError) {
+      setPlaybackError(requestError.message || "Failed to seek the current playback window");
+      return false;
+    }
+  }
+
   async function stopCurrentBrowserPlaybackSession() {
     const activeSession = mobileSessionRef.current;
     playbackFlowRef.current += 1;
@@ -875,6 +916,8 @@ export function useBrowserPlaybackController({
       const absoluteTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
       actualMediaElementTimeRef.current = absoluteTime;
       setActualMediaElementTime(absoluteTime);
+      setPlayerLocalPosition(Math.max(actualTime, 0));
+      setPlayerLocalDuration(resolveRoute2WindowDuration(mobileSessionRef.current, video));
       const displayTime =
         mobileSessionRef.current
         && pendingSeekPhaseRef.current !== "idle"
@@ -1712,6 +1755,8 @@ export function useBrowserPlaybackController({
     playbackError,
     seekNotice,
     playbackPosition,
+    playerLocalPosition,
+    playerLocalDuration,
     playbackStatus,
     playbackModeIntent,
     prepareEstimateObservedAtMs,
@@ -1747,6 +1792,7 @@ export function useBrowserPlaybackController({
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
     seekBrowserPlaybackTo,
+    seekBrowserPlaybackWindowTo,
     stopCurrentBrowserPlaybackSession,
   };
 }

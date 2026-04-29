@@ -94,6 +94,46 @@ internal sealed class ElvernDesktopApiClient : IDisposable
         }
     }
 
+    public async Task PreflightPlaybackTargetAsync(
+        string targetUrl,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out var targetUri)
+            || (targetUri.Scheme != Uri.UriSchemeHttp && targetUri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException($"Cannot preflight invalid playback URL target: {targetUrl}");
+        }
+
+        var headResult = await TryPreflightRequestAsync(
+            () => new HttpRequestMessage(HttpMethod.Head, targetUri),
+            "HEAD",
+            cancellationToken
+        ).ConfigureAwait(false);
+        if (headResult.Success)
+        {
+            return;
+        }
+
+        OpenerLog.Info($"URL target HEAD preflight did not pass; trying GET range. Result: {headResult.Summary}");
+        var rangeResult = await TryPreflightRequestAsync(
+            () =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, targetUri);
+                request.Headers.Range = new RangeHeaderValue(0, 1);
+                return request;
+            },
+            "GET range bytes=0-1",
+            cancellationToken
+        ).ConfigureAwait(false);
+        if (rangeResult.Success)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"VLC URL target preflight failed before launch. HEAD: {headResult.Summary}; GET range: {rangeResult.Summary}");
+    }
+
     public async Task ReportLaunchStartedAsync(
         string startedUrl,
         CancellationToken cancellationToken = default)
@@ -115,6 +155,70 @@ internal sealed class ElvernDesktopApiClient : IDisposable
     {
         _httpClient.Dispose();
     }
+
+    private async Task<PreflightResult> TryPreflightRequestAsync(
+        Func<HttpRequestMessage> createRequest,
+        string methodLabel,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var request = createRequest();
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken
+            ).ConfigureAwait(false);
+            var bodyPreview = response.IsSuccessStatusCode
+                ? string.Empty
+                : await ReadSmallBodyPreviewAsync(response, cancellationToken).ConfigureAwait(false);
+            var finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? request.RequestUri?.ToString() ?? "";
+            var contentLength = response.Content.Headers.ContentLength?.ToString() ?? "unknown";
+            var contentType = response.Content.Headers.ContentType?.ToString() ?? "unknown";
+            var acceptRanges = response.Headers.AcceptRanges.Any()
+                ? string.Join(",", response.Headers.AcceptRanges)
+                : "unknown";
+            var contentRange = response.Content.Headers.ContentRange?.ToString() ?? "none";
+            var summary =
+                $"{methodLabel} status={(int)response.StatusCode} {response.ReasonPhrase}; "
+                + $"finalUrl={finalUrl}; contentType={contentType}; acceptRanges={acceptRanges}; "
+                + $"contentLength={contentLength}; contentRange={contentRange}"
+                + (string.IsNullOrWhiteSpace(bodyPreview) ? "" : $"; bodyPreview={bodyPreview}");
+            OpenerLog.Info($"URL target preflight: {summary}");
+            return new PreflightResult(response.IsSuccessStatusCode, summary);
+        }
+        catch (Exception ex)
+        {
+            var summary = $"{methodLabel} exception={ex.GetType().Name}: {ex.Message}";
+            OpenerLog.Info($"URL target preflight: {summary}");
+            return new PreflightResult(false, summary);
+        }
+    }
+
+    private static async Task<string> ReadSmallBodyPreviewAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        const int MaxPreviewBytes = 512;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var buffer = new byte[MaxPreviewBytes];
+            var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
+            if (bytesRead <= 0)
+            {
+                return string.Empty;
+            }
+            return System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead).ReplaceLineEndings(" ").Trim();
+        }
+        catch (Exception ex)
+        {
+            return $"<failed to read response preview: {ex.Message}>";
+        }
+    }
+
+    private sealed record PreflightResult(bool Success, string Summary);
 
     private static string ExtractErrorMessage(string payload)
     {
