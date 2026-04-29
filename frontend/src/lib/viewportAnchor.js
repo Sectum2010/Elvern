@@ -6,6 +6,8 @@ export const MAX_ORIENTATION_RESTORE_CORRECTIONS = 2;
 
 const DEBUG_STORAGE_KEY = "elvern_smart_poster_debug";
 const DEFAULT_REFINE_RESTORE_DELAY_MS = 150;
+const DEFAULT_VIEWPORT_RESET_CONTENT = "width=device-width, initial-scale=1.0, viewport-fit=cover, shrink-to-fit=no";
+const DEFAULT_VIEWPORT_RESET_DELAY_MS = 180;
 const CENTER_MOVIE_SAMPLE_POINTS = Object.freeze([
   { key: "center", xRatio: 0.5, yRatio: 0.45 },
   { key: "upper", xRatio: 0.5, yRatio: 0.35 },
@@ -141,6 +143,76 @@ export function getRestoreViewportMeasurement({
 
 export function isLibraryOrientationRestorePlatform(platform) {
   return platform === "iphone" || platform === "ipad";
+}
+
+export function canUpdateStableViewportAnchor({
+  platform,
+  restoreInProgress = false,
+  viewportWindow = typeof window !== "undefined" ? window : null,
+} = {}) {
+  return (
+    isLibraryOrientationRestorePlatform(platform)
+    && !restoreInProgress
+    && !isVisualViewportZoomed({ viewportWindow })
+  );
+}
+
+export function shouldRecoverZoomedLibraryRotation({
+  platform,
+  viewportWindow = typeof window !== "undefined" ? window : null,
+  orientationChanged = false,
+  majorViewportChange = false,
+  eventType = "",
+} = {}) {
+  return (
+    platform === "ipad"
+    && isVisualViewportZoomed({ viewportWindow })
+    && (orientationChanged || majorViewportChange || eventType === "orientationchange")
+  );
+}
+
+export function resolveStableOrientationAnchor({
+  lastStableAnchor = null,
+  latestAnchor = null,
+  isZoomed = false,
+  capturedAnchor = null,
+} = {}) {
+  if (lastStableAnchor?.itemId) {
+    return lastStableAnchor;
+  }
+  if (latestAnchor?.itemId) {
+    return latestAnchor;
+  }
+  if (isZoomed) {
+    return null;
+  }
+  return capturedAnchor?.itemId ? capturedAnchor : null;
+}
+
+export function buildTemporaryViewportScaleResetContent(content = "") {
+  const baseContent = String(content || DEFAULT_VIEWPORT_RESET_CONTENT)
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !/^maximum-scale\s*=/i.test(part));
+  return [...baseContent, "maximum-scale=1.0"].join(", ");
+}
+
+export function requestTemporaryViewportScaleReset({
+  doc = typeof document !== "undefined" ? document : null,
+  viewportWindow = typeof window !== "undefined" ? window : null,
+  restoreDelayMs = DEFAULT_VIEWPORT_RESET_DELAY_MS,
+} = {}) {
+  const viewportMeta = doc?.querySelector?.('meta[name="viewport"]') || null;
+  if (!viewportMeta || !viewportWindow?.setTimeout) {
+    return false;
+  }
+  const originalContent = viewportMeta.getAttribute("content") || "";
+  viewportMeta.setAttribute("content", buildTemporaryViewportScaleResetContent(originalContent));
+  viewportWindow.setTimeout(() => {
+    viewportMeta.setAttribute("content", originalContent);
+  }, restoreDelayMs);
+  return true;
 }
 
 export function getViewportSamplePoints({ orientation = "portrait" } = {}) {

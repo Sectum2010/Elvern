@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   buildMediaItemAnchor,
+  buildTemporaryViewportScaleResetContent,
+  canUpdateStableViewportAnchor,
   captureCenterMovieAnchor,
   computeAnchorRestoreScrollTop,
   computeRestoreScrollTop,
@@ -14,8 +16,12 @@ import {
   isRestoreAttemptStale,
   isUserRestoreCancellationEvent,
   isVisualViewportZoomed,
+  requestTemporaryViewportScaleReset,
+  resolveStableOrientationAnchor,
+  restoreHorizontalRailPosition,
   selectLibraryReturnRestoreTarget,
   selectPreferredOrientationRestoreTarget,
+  shouldRecoverZoomedLibraryRotation,
   VIEWPORT_ANCHOR_MEDIA_ITEM,
 } from "./viewportAnchor.js";
 
@@ -631,4 +637,193 @@ test("library orientation restore platform includes iPad without removing iPhone
   assert.equal(isLibraryOrientationRestorePlatform("iphone"), true);
   assert.equal(isLibraryOrientationRestorePlatform("macos"), false);
   assert.equal(isLibraryOrientationRestorePlatform("android"), false);
+});
+
+test("zoomed viewport blocks canonical stable anchor updates", () => {
+  const zoomedWindow = {
+    innerWidth: 1024,
+    innerHeight: 1366,
+    visualViewport: {
+      width: 512,
+      height: 683,
+      scale: 2,
+    },
+  };
+  const stableWindow = {
+    innerWidth: 1024,
+    innerHeight: 1366,
+    visualViewport: {
+      width: 1024,
+      height: 1366,
+      scale: 1,
+    },
+  };
+
+  assert.equal(canUpdateStableViewportAnchor({
+    platform: "ipad",
+    viewportWindow: zoomedWindow,
+  }), false);
+  assert.equal(canUpdateStableViewportAnchor({
+    platform: "ipad",
+    viewportWindow: stableWindow,
+  }), true);
+  assert.equal(canUpdateStableViewportAnchor({
+    platform: "ipad",
+    restoreInProgress: true,
+    viewportWindow: stableWindow,
+  }), false);
+});
+
+test("zoomed iPad rotation requests recovery without applying to iPhone or non-rotation zoom", () => {
+  const zoomedWindow = {
+    visualViewport: {
+      scale: 1.8,
+    },
+  };
+
+  assert.equal(shouldRecoverZoomedLibraryRotation({
+    platform: "ipad",
+    viewportWindow: zoomedWindow,
+    orientationChanged: true,
+    eventType: "orientationchange",
+  }), true);
+  assert.equal(shouldRecoverZoomedLibraryRotation({
+    platform: "iphone",
+    viewportWindow: zoomedWindow,
+    orientationChanged: true,
+    eventType: "orientationchange",
+  }), false);
+  assert.equal(shouldRecoverZoomedLibraryRotation({
+    platform: "ipad",
+    viewportWindow: zoomedWindow,
+    orientationChanged: false,
+    majorViewportChange: false,
+    eventType: "resize",
+  }), false);
+});
+
+test("zoomed orientation transition freezes previous stable exact anchor", () => {
+  const stableAnchor = buildMediaItemAnchor({
+    itemId: "700",
+    instanceKey: "series:stable:700",
+    rectTop: 200,
+    viewportHeight: 1000,
+    scrollY: 1200,
+  });
+  const latestAnchor = buildMediaItemAnchor({
+    itemId: "701",
+    instanceKey: "series:latest:701",
+    rectTop: 300,
+    viewportHeight: 1000,
+    scrollY: 1200,
+  });
+  const capturedAnchor = buildMediaItemAnchor({
+    itemId: "702",
+    instanceKey: "series:captured:702",
+    rectTop: 400,
+    viewportHeight: 1000,
+    scrollY: 1200,
+  });
+
+  assert.equal(resolveStableOrientationAnchor({
+    lastStableAnchor: stableAnchor,
+    latestAnchor,
+    isZoomed: true,
+    capturedAnchor,
+  }), stableAnchor);
+  assert.equal(resolveStableOrientationAnchor({
+    lastStableAnchor: null,
+    latestAnchor,
+    isZoomed: true,
+    capturedAnchor,
+  }), latestAnchor);
+  assert.equal(resolveStableOrientationAnchor({
+    lastStableAnchor: null,
+    latestAnchor: null,
+    isZoomed: true,
+    capturedAnchor,
+  }), null);
+});
+
+test("temporary viewport scale reset preserves original viewport content", () => {
+  const writes = [];
+  const meta = {
+    content: "width=device-width, initial-scale=1.0, viewport-fit=cover",
+    getAttribute(name) {
+      return name === "content" ? this.content : null;
+    },
+    setAttribute(name, value) {
+      if (name === "content") {
+        this.content = value;
+        writes.push(value);
+      }
+    },
+  };
+  let restoreCallback = null;
+  const requested = requestTemporaryViewportScaleReset({
+    doc: {
+      querySelector(selector) {
+        return selector === 'meta[name="viewport"]' ? meta : null;
+      },
+    },
+    viewportWindow: {
+      setTimeout(callback) {
+        restoreCallback = callback;
+        return 1;
+      },
+    },
+  });
+
+  assert.equal(requested, true);
+  assert.equal(writes[0], "width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0");
+  restoreCallback();
+  assert.equal(writes[1], "width=device-width, initial-scale=1.0, viewport-fit=cover");
+  assert.equal(
+    buildTemporaryViewportScaleResetContent("width=device-width, maximum-scale=5.0"),
+    "width=device-width, maximum-scale=1.0",
+  );
+});
+
+test("rail scrollLeft restore remains supported before vertical restore", () => {
+  const viewportNode = {
+    scrollLeft: 10,
+    getBoundingClientRect() {
+      return {
+        left: 100,
+        width: 400,
+      };
+    },
+  };
+  const railNode = {
+    getAttribute(name) {
+      return name === "data-series-rail-key" ? "series:test" : null;
+    },
+    querySelector(selector) {
+      return selector === ".series-rail__viewport" ? viewportNode : null;
+    },
+  };
+  const targetNode = {
+    closest(selector) {
+      return selector === "[data-series-rail-key]" ? railNode : null;
+    },
+    getBoundingClientRect() {
+      return {
+        left: 500,
+        width: 100,
+      };
+    },
+  };
+
+  assert.equal(restoreHorizontalRailPosition({
+    targetNode,
+    railKey: "series:test",
+    railScrollLeft: 80,
+  }), true);
+  assert.equal(viewportNode.scrollLeft, 80);
+  assert.equal(restoreHorizontalRailPosition({
+    targetNode,
+    railKey: "series:test",
+    railScrollLeft: null,
+  }), true);
+  assert.equal(viewportNode.scrollLeft, 330);
 });
