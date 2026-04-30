@@ -119,6 +119,7 @@ class UserSettingsResponse(BaseModel):
     hide_duplicate_movies: bool = True
     hide_recently_added: bool = False
     floating_controls_position: Literal["bottom", "top"] = "bottom"
+    poster_card_appearance: Literal["classic", "modern"] = "classic"
     media_library_reference_private_value: str | None = None
     media_library_reference_shared_default_value: str = ""
     media_library_reference_effective_value: str = ""
@@ -128,6 +129,7 @@ class UserSettingsUpdateRequest(BaseModel):
     hide_duplicate_movies: bool | None = None
     hide_recently_added: bool | None = None
     floating_controls_position: Literal["bottom", "top"] | None = None
+    poster_card_appearance: str | None = None
     media_library_reference_private_value: str | None = None
 
 

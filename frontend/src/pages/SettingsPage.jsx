@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PasswordInput } from "../components/PasswordInput";
 import { apiRequest } from "../lib/api";
@@ -10,6 +10,69 @@ import {
 import { startGoogleDriveReconnect } from "../lib/providerAuth";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
+
+const SETTINGS_SECTIONS = [
+  { key: "preferences", label: "Preferences", icon: "preferences" },
+  { key: "display", label: "Display", icon: "display" },
+  { key: "libraries", label: "Libraries", icon: "libraries" },
+  { key: "hidden", label: "Hidden", icon: "hidden" },
+  { key: "advanced", label: "Advanced", icon: "advanced" },
+];
+
+const POSTER_CARD_APPEARANCE_OPTIONS = [
+  { value: "classic", label: "Classic" },
+  { value: "modern", label: "Modern" },
+];
+
+
+function normalizePosterCardAppearance(value) {
+  return value === "modern" ? "modern" : "classic";
+}
+
+
+function SettingsSectionIcon({ icon }) {
+  if (icon === "display") {
+    return (
+      <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
+        <rect x="4" y="5" width="16" height="11" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M9 20h6M12 16v4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+        <circle cx="9" cy="9" r="1.4" fill="currentColor" />
+        <path d="M7.5 13l2.7-2.5 2.1 1.8 1.3-1.2 2.9 2.9" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
+      </svg>
+    );
+  }
+  if (icon === "libraries") {
+    return (
+      <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
+        <path d="M5 6.5h14M5 12h14M5 17.5h14" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+        <path d="M7 4.5v4M11 10v4M16 15.5v4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+      </svg>
+    );
+  }
+  if (icon === "hidden") {
+    return (
+      <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
+        <path d="M3.5 12s3-5 8.5-5 8.5 5 8.5 5a13 13 0 0 1-2.6 2.9M14.2 14.2A3 3 0 0 1 9.8 9.8M5 5l14 14" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+      </svg>
+    );
+  }
+  if (icon === "advanced") {
+    return (
+      <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
+        <path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7z" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M12 3.5v2.1M12 18.4v2.1M4.6 7.8l1.8 1M17.6 15.2l1.8 1M4.6 16.2l1.8-1M17.6 8.8l1.8-1" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
+      <path d="M5 7h14M7 12h10M9 17h6" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
+      <circle cx="8" cy="7" r="1.7" fill="currentColor" />
+      <circle cx="16" cy="12" r="1.7" fill="currentColor" />
+      <circle cx="11" cy="17" r="1.7" fill="currentColor" />
+    </svg>
+  );
+}
 
 
 function StatusRow({ label, value }) {
@@ -245,10 +308,13 @@ export function SettingsPage() {
     hide_duplicate_movies: true,
     hide_recently_added: false,
     floating_controls_position: "bottom",
+    poster_card_appearance: "classic",
     media_library_reference_private_value: null,
     media_library_reference_shared_default_value: "",
     media_library_reference_effective_value: "",
   });
+  const [activeSettingsSection, setActiveSettingsSection] = useState("preferences");
+  const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
   const [globalHiddenItems, setGlobalHiddenItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -584,6 +650,35 @@ export function SettingsPage() {
       );
     } catch (requestError) {
       setError(requestError.message || "Failed to update floating controls position");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handlePosterCardAppearanceChange(nextValue) {
+    const normalizedValue = normalizePosterCardAppearance(nextValue);
+    if (normalizedValue === normalizePosterCardAppearance(settings.poster_card_appearance)) {
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await apiRequest("/api/user-settings", {
+        method: "PATCH",
+        data: { poster_card_appearance: normalizedValue },
+      });
+      setSettings(payload);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+      }
+      setMessage(
+        normalizedValue === "modern"
+          ? "Poster appearance set to Modern."
+          : "Poster appearance set to Classic.",
+      );
+    } catch (requestError) {
+      setError(requestError.message || "Failed to update poster appearance");
     } finally {
       setSaving(false);
     }
@@ -1093,6 +1188,17 @@ export function SettingsPage() {
     }));
   }
 
+  function handleSettingsPanelToggle(sectionKey) {
+    setActiveSettingsSection((currentSection) => {
+      if (currentSection === sectionKey) {
+        setActiveSettingsButtonExpanded((currentExpanded) => !currentExpanded);
+        return currentSection;
+      }
+      setActiveSettingsButtonExpanded(true);
+      return sectionKey;
+    });
+  }
+
   return (
     <section className="page-section">
       <DirectoryPickerModal
@@ -1108,16 +1214,40 @@ export function SettingsPage() {
         title={directoryPicker.title}
       />
 
-      <div className="section-header">
-        <div>
-          <p className="eyebrow">Settings</p>
-          <h1>Account and library preferences</h1>
+      <div className="admin-nav-card settings-section-nav-card" aria-label="Settings sections">
+        <div className="admin-nav-card__actions settings-section-nav-card__actions" role="tablist">
+          {SETTINGS_SECTIONS.map((section) => {
+            const isActive = activeSettingsSection === section.key;
+            return (
+              <button
+                aria-label={section.label}
+                aria-expanded={isActive}
+                aria-selected={isActive}
+                className={[
+                  "admin-nav-card__button",
+                  isActive ? "admin-nav-card__button--active" : "",
+                  isActive && activeSettingsButtonExpanded ? "admin-nav-card__button--expanded" : "",
+                ].filter(Boolean).join(" ")}
+                key={section.key}
+                onClick={() => handleSettingsPanelToggle(section.key)}
+                role="tab"
+                title={section.label}
+                type="button"
+              >
+                <span className="admin-nav-card__icon">
+                  <SettingsSectionIcon icon={section.icon} />
+                </span>
+                <span className="admin-nav-card__label">{section.label}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
       {error ? <p className="form-error">{error}</p> : null}
       {message ? <p className="page-note">{message}</p> : null}
 
+      {activeSettingsSection === "preferences" ? (
       <div className="settings-grid">
         <section className="settings-card">
           <h2>Your account</h2>
@@ -1127,39 +1257,42 @@ export function SettingsPage() {
             Password changes are admin-managed. Contact an admin if you need a password reset.
           </p>
         </section>
+      </div>
+      ) : null}
 
-        <section className="settings-card">
-          <h2>Library</h2>
+      {activeSettingsSection === "display" ? (
+      <div className="settings-grid settings-grid--display">
+        <section className="settings-card settings-card--wide settings-display-card">
+          <div className="settings-inline-header">
+            <div>
+              <h2>Poster appearance</h2>
+              <p className="page-subnote">Choose how movie cards appear in your library.</p>
+            </div>
+          </div>
           {loading ? (
-            <p className="page-subnote">Loading your library preferences...</p>
+            <p className="page-subnote">Loading display preferences...</p>
           ) : (
-            <>
-              <label className="settings-toggle">
-                <span>
-                  <strong>Hide duplicate copies</strong>
-                  <small>Show only the highest-quality copy for the same title, year, and edition.</small>
-                </span>
-                <input
-                  checked={settings.hide_duplicate_movies}
-                  disabled={saving}
-                  onChange={handleDuplicateToggle}
-                  type="checkbox"
-                />
-              </label>
-
-              <label className="settings-toggle">
-                <span>
-                  <strong>Hide Recently added</strong>
-                  <small>Remove the Recently added section from your Library view.</small>
-                </span>
-                <input
-                  checked={settings.hide_recently_added}
-                  disabled={saving}
-                  onChange={handleRecentlyAddedToggle}
-                  type="checkbox"
-                />
-              </label>
-            </>
+            <div className="settings-segmented-control" role="radiogroup" aria-label="Poster appearance">
+              {POSTER_CARD_APPEARANCE_OPTIONS.map((option) => {
+                const isSelected = normalizePosterCardAppearance(settings.poster_card_appearance) === option.value;
+                return (
+                  <button
+                    aria-checked={isSelected}
+                    className={[
+                      "settings-segmented-control__button",
+                      isSelected ? "settings-segmented-control__button--active" : "",
+                    ].filter(Boolean).join(" ")}
+                    disabled={saving}
+                    key={option.value}
+                    onClick={() => handlePosterCardAppearanceChange(option.value)}
+                    role="radio"
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
           )}
         </section>
 
@@ -1182,6 +1315,50 @@ export function SettingsPage() {
                 <option value="bottom">Bottom</option>
                 <option value="top">Top</option>
               </select>
+            </label>
+          )}
+        </section>
+
+        <section className="settings-card">
+          <h2>Library</h2>
+          {loading ? (
+            <p className="page-subnote">Loading your library preferences...</p>
+          ) : (
+            <label className="settings-toggle">
+              <span>
+                <strong>Hide Recently added</strong>
+                <small>Remove the Recently added section from your Library view.</small>
+              </span>
+              <input
+                checked={settings.hide_recently_added}
+                disabled={saving}
+                onChange={handleRecentlyAddedToggle}
+                type="checkbox"
+              />
+            </label>
+          )}
+        </section>
+      </div>
+      ) : null}
+
+      {activeSettingsSection === "libraries" ? (
+      <div className="settings-grid">
+        <section className="settings-card">
+          <h2>Library</h2>
+          {loading ? (
+            <p className="page-subnote">Loading your library preferences...</p>
+          ) : (
+            <label className="settings-toggle">
+              <span>
+                <strong>Hide duplicate copies</strong>
+                <small>Show only the highest-quality copy for the same title, year, and edition.</small>
+              </span>
+              <input
+                checked={settings.hide_duplicate_movies}
+                disabled={saving}
+                onChange={handleDuplicateToggle}
+                type="checkbox"
+              />
             </label>
           )}
         </section>
@@ -1580,7 +1757,11 @@ export function SettingsPage() {
             </div>
           </SettingsAccordionSection>
         ) : null}
+      </div>
+      ) : null}
 
+      {activeSettingsSection === "hidden" ? (
+      <div className="settings-grid">
         <section className="settings-card settings-card--wide">
           <details className="settings-disclosure">
             <summary className="settings-disclosure__summary">
@@ -1716,7 +1897,11 @@ export function SettingsPage() {
             </details>
           </section>
         ) : null}
+      </div>
+      ) : null}
 
+      {activeSettingsSection === "advanced" ? (
+      <div className="settings-grid">
         {user?.role === "admin" ? (
           <SettingsAccordionSection
             description="Admin-only real shared local library path. This is the live shared local library path Elvern currently uses."
@@ -1872,20 +2057,8 @@ export function SettingsPage() {
           </SettingsAccordionSection>
         ) : null}
 
-        {user?.role === "admin" ? (
-          <section className="settings-card settings-card--wide">
-            <div className="settings-inline-header">
-              <div>
-                <h2>Admin tools</h2>
-                <p className="page-subnote">Manage users, password resets, sessions, audit logs, and rescans.</p>
-              </div>
-              <Link className="ghost-button ghost-button--inline" to="/admin">
-                Open Admin
-              </Link>
-            </div>
-          </section>
-        ) : null}
       </div>
+      ) : null}
     </section>
   );
 }

@@ -17,6 +17,7 @@ def read_user_settings(request: Request, user=CurrentUser) -> UserSettingsRespon
         hide_duplicate_movies=payload["hide_duplicate_movies"],
         hide_recently_added=payload["hide_recently_added"],
         floating_controls_position=str(payload["floating_controls_position"]),
+        poster_card_appearance=str(payload["poster_card_appearance"]),
         media_library_reference_private_value=payload["media_library_reference_private_value"],
         media_library_reference_shared_default_value=str(payload["media_library_reference_shared_default_value"]),
         media_library_reference_effective_value=str(payload["media_library_reference_effective_value"]),
@@ -40,12 +41,14 @@ def patch_user_settings(
         hide_duplicate_movies=payload.hide_duplicate_movies,
         hide_recently_added=payload.hide_recently_added,
         floating_controls_position=payload.floating_controls_position,
+        poster_card_appearance=payload.poster_card_appearance,
         media_library_reference_private_value=payload.media_library_reference_private_value,
     )
     return UserSettingsResponse(
         hide_duplicate_movies=updated["hide_duplicate_movies"],
         hide_recently_added=updated["hide_recently_added"],
         floating_controls_position=str(updated["floating_controls_position"]),
+        poster_card_appearance=str(updated["poster_card_appearance"]),
         media_library_reference_private_value=updated["media_library_reference_private_value"],
         media_library_reference_shared_default_value=str(updated["media_library_reference_shared_default_value"]),
         media_library_reference_effective_value=str(updated["media_library_reference_effective_value"]),

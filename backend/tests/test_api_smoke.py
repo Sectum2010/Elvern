@@ -2068,6 +2068,36 @@ def test_resolve_same_host_request_uses_request_host_candidates(initialized_sett
     }
 
 
+def test_user_settings_poster_card_appearance_defaults_and_persists(client, admin_credentials) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    initial = client.get("/api/user-settings")
+    assert initial.status_code == 200
+    assert initial.json()["poster_card_appearance"] == "classic"
+
+    modern_update = client.patch(
+        "/api/user-settings",
+        json={"poster_card_appearance": "modern"},
+    )
+    assert modern_update.status_code == 200
+    assert modern_update.json()["poster_card_appearance"] == "modern"
+
+    repeat = client.get("/api/user-settings")
+    assert repeat.status_code == 200
+    assert repeat.json()["poster_card_appearance"] == "modern"
+
+    invalid_update = client.patch(
+        "/api/user-settings",
+        json={"poster_card_appearance": "neon"},
+    )
+    assert invalid_update.status_code == 200
+    assert invalid_update.json()["poster_card_appearance"] == "classic"
+
+
 def test_standard_user_private_media_library_reference_uses_shared_default_and_stays_private(
     client,
     admin_credentials,

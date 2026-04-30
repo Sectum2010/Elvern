@@ -12,11 +12,16 @@ import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNot
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
+function normalizePosterCardAppearance(value) {
+  return value === "modern" ? "modern" : "classic";
+}
+
 export function ShellLayout({ children }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [floatingControlsPosition, setFloatingControlsPosition] = useState("bottom");
+  const [posterCardAppearance, setPosterCardAppearance] = useState("classic");
   const [accountExpanded, setAccountExpanded] = useState(false);
   const [logoutWorkerModal, setLogoutWorkerModal] = useState(null);
   const [logoutWorkerPending, setLogoutWorkerPending] = useState("");
@@ -203,17 +208,25 @@ export function ShellLayout({ children }) {
         const payload = await apiRequest("/api/user-settings");
         if (active) {
           setFloatingControlsPosition(payload.floating_controls_position === "top" ? "top" : "bottom");
+          setPosterCardAppearance(normalizePosterCardAppearance(payload.poster_card_appearance));
         }
       } catch {
         if (active) {
           setFloatingControlsPosition("bottom");
+          setPosterCardAppearance("classic");
         }
       }
     }
 
     function handleSettingsChanged(event) {
-      const nextValue = event?.detail?.floating_controls_position;
-      setFloatingControlsPosition(nextValue === "top" ? "top" : "bottom");
+      const nextFloatingControlsPosition = event?.detail?.floating_controls_position;
+      const nextPosterCardAppearance = event?.detail?.poster_card_appearance;
+      if (nextFloatingControlsPosition !== undefined) {
+        setFloatingControlsPosition(nextFloatingControlsPosition === "top" ? "top" : "bottom");
+      }
+      if (nextPosterCardAppearance !== undefined) {
+        setPosterCardAppearance(normalizePosterCardAppearance(nextPosterCardAppearance));
+      }
     }
 
     loadUserSettings();
@@ -258,6 +271,7 @@ export function ShellLayout({ children }) {
       className={[
         "app-shell",
         `app-shell--floating-island-${floatingControlsPosition}`,
+        `app-shell--poster-card-${posterCardAppearance}`,
         isLibraryRootPage ? "app-shell--library-root" : "",
         isLibrarySourcePage ? "app-shell--library-source" : "",
       ].filter(Boolean).join(" ")}
