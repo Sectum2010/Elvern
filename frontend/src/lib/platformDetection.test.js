@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  detectClientDeviceClass,
   detectClientPlatform,
   detectDesktopPlatform,
   isIOSLikeBrowser,
@@ -17,6 +18,7 @@ test("iPadOS Safari desktop-class user agent is treated as iPad before macOS", (
   };
 
   assert.equal(detectClientPlatform(input), "ipad");
+  assert.equal(detectClientDeviceClass(input), "tablet");
   assert.equal(detectDesktopPlatform(input), null);
   assert.equal(isIOSLikeBrowser(input), true);
 });
@@ -31,6 +33,7 @@ test("real macOS desktop remains a desktop Mac", () => {
   };
 
   assert.equal(detectClientPlatform(input), "mac");
+  assert.equal(detectClientDeviceClass(input), "desktop");
   assert.equal(detectDesktopPlatform(input), "mac");
   assert.equal(isIOSLikeBrowser(input), false);
 });
@@ -45,6 +48,7 @@ test("Windows desktop is classified as desktop Windows", () => {
   };
 
   assert.equal(detectClientPlatform(input), "windows");
+  assert.equal(detectClientDeviceClass(input), "desktop");
   assert.equal(detectDesktopPlatform(input), "windows");
   assert.equal(isIOSLikeBrowser(input), false);
 });
@@ -59,6 +63,7 @@ test("Linux desktop is classified as desktop Linux", () => {
   };
 
   assert.equal(detectClientPlatform(input), "linux");
+  assert.equal(detectClientDeviceClass(input), "desktop");
   assert.equal(detectDesktopPlatform(input), "linux");
   assert.equal(isIOSLikeBrowser(input), false);
 });
@@ -73,6 +78,46 @@ test("iPhone is classified as iPhone and never as desktop", () => {
   };
 
   assert.equal(detectClientPlatform(input), "iphone");
+  assert.equal(detectClientDeviceClass(input), "phone");
   assert.equal(detectDesktopPlatform(input), null);
   assert.equal(isIOSLikeBrowser(input), true);
+});
+
+test("iPod is classified as a phone device class", () => {
+  const input = {
+    userAgent:
+      "Mozilla/5.0 (iPod touch; CPU iPhone OS 16_7 like Mac OS X) AppleWebKit/605.1.15 "
+      + "(KHTML, like Gecko) Version/16.7 Mobile/15E148 Safari/604.1",
+    platform: "iPod",
+    maxTouchPoints: 5,
+  };
+
+  assert.equal(detectClientPlatform(input), "iphone");
+  assert.equal(detectClientDeviceClass(input), "phone");
+});
+
+test("Android Chrome phone is classified as a phone device class", () => {
+  const input = {
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+      + "(KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36",
+    platform: "Linux armv8l",
+    maxTouchPoints: 5,
+  };
+
+  assert.equal(detectClientPlatform(input), "android");
+  assert.equal(detectClientDeviceClass(input), "phone");
+});
+
+test("Android tablet user agent is classified as tablet, not phone", () => {
+  const input = {
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 14; Pixel Tablet) AppleWebKit/537.36 "
+      + "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    platform: "Linux armv8l",
+    maxTouchPoints: 5,
+  };
+
+  assert.equal(detectClientPlatform(input), "android");
+  assert.equal(detectClientDeviceClass(input), "tablet");
 });

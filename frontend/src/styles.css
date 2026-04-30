@@ -4005,77 +4005,77 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
 }
 
 @media (min-width: 740px) and (max-width: 1400px) and (any-pointer: coarse) {
-  html:not([data-device-shell="iphone"]) .app-shell--library-root,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source {
+  .app-shell--library-root:not(:has(.page-section--library[data-device-class="phone"])),
+  .app-shell--library-source:not(:has(.page-section--library-source[data-device-class="phone"])) {
     max-width: min(1120px, 100%);
     padding-inline:
       max(1.25rem, env(safe-area-inset-left, 0px))
       max(1.25rem, env(safe-area-inset-right, 0px));
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .page-section--library .media-grid,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .page-section--library-source .media-grid {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .media-grid,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .media-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
     gap: 0.78rem;
     justify-items: stretch;
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .media-grid .media-card,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .media-grid .media-card {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .media-grid .media-card,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .media-grid .media-card {
     width: 100%;
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail-pack-row,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail-pack-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 1rem;
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-block,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-block {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail-pack-block,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail-pack-block {
     grid-column: auto;
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair {
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 0.78rem;
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair .series-rail-pack-block,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair .series-rail-pack-block {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair .series-rail-pack-block,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair .series-rail-pack-block {
     grid-column: span var(--series-rail-pack-span, 2);
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__viewport,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__viewport {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail__viewport,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail__viewport {
     --series-rail-gap: 0.78rem;
     --series-rail-peek: 0rem;
     --series-rail-card-width: calc((100% - (var(--series-rail-gap) * 3)) / 4);
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__viewport--desktop.series-rail__viewport--peek,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__viewport--desktop.series-rail__viewport--peek,
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__viewport--desktop.series-rail__viewport--packed,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__viewport--desktop.series-rail__viewport--packed {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail__viewport--desktop.series-rail__viewport--peek,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail__viewport--desktop.series-rail__viewport--peek,
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail__viewport--desktop.series-rail__viewport--packed,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail__viewport--desktop.series-rail__viewport--packed {
     --series-rail-peek: 0rem;
     --series-rail-card-width: calc((100% - (var(--series-rail-gap) * 3)) / 4);
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair .series-rail__viewport,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair .series-rail__viewport,
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail-pack-row--ipad-two-pair .series-rail__viewport--desktop.series-rail__viewport--packed,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail-pack-row--ipad-two-pair .series-rail__viewport--desktop.series-rail__viewport--packed {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair .series-rail__viewport,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair .series-rail__viewport,
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair .series-rail__viewport--desktop.series-rail__viewport--packed,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail-pack-row--ipad-two-pair .series-rail__viewport--desktop.series-rail__viewport--packed {
     --series-rail-card-width: calc((100% - var(--series-rail-gap)) / 2);
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__track,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__track {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail__track,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail__track {
     padding-right: 0;
   }
 
-  html:not([data-device-shell="iphone"]) .app-shell--library-root .series-rail__slide .media-card,
-  html:not([data-device-shell="iphone"]) .app-shell--library-source .series-rail__slide .media-card {
+  .app-shell--library-root .page-section--library:not([data-device-class="phone"]) .series-rail__slide .media-card,
+  .app-shell--library-source .page-section--library-source:not([data-device-class="phone"]) .series-rail__slide .media-card {
     width: 100%;
   }
 
@@ -4108,7 +4108,22 @@ html[data-device-shell="iphone"] .media-grid {
   grid-template-columns: repeat(1, minmax(0, 1fr));
 }
 
+.app-shell--library-root .page-section--library[data-device-class="phone"] .media-grid,
+.app-shell--library-source .page-section--library-source[data-device-class="phone"] .media-grid {
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
 html[data-device-shell="iphone"] .series-rail__viewport {
+  --series-rail-gap: 0.8rem;
+  scroll-snap-type: none;
+  scroll-behavior: auto;
+  touch-action: auto;
+  overscroll-behavior-x: auto;
+  overscroll-behavior-y: auto;
+}
+
+.app-shell--library-root .page-section--library[data-device-class="phone"] .series-rail__viewport,
+.app-shell--library-source .page-section--library-source[data-device-class="phone"] .series-rail__viewport {
   --series-rail-gap: 0.8rem;
   scroll-snap-type: none;
   scroll-behavior: auto;
@@ -4143,12 +4158,29 @@ html[data-device-shell="iphone"] .series-rail__viewport--phone-portrait.series-r
   --series-rail-card-width: calc(100% - var(--series-rail-peek));
 }
 
+.app-shell--library-root .page-section--library[data-device-class="phone"] .series-rail__viewport--phone-portrait.series-rail__viewport--peek,
+.app-shell--library-source .page-section--library-source[data-device-class="phone"] .series-rail__viewport--phone-portrait.series-rail__viewport--peek {
+  --series-rail-peek: clamp(4.2rem, 20vw, 5.7rem);
+  --series-rail-card-width: calc(100% - var(--series-rail-peek));
+}
+
 html[data-device-shell="iphone"] .series-rail__slide .media-card {
+  width: 100%;
+}
+
+.app-shell--library-root .page-section--library[data-device-class="phone"] .series-rail__slide .media-card,
+.app-shell--library-source .page-section--library-source[data-device-class="phone"] .series-rail__slide .media-card {
   width: 100%;
 }
 
 @media (orientation: landscape) {
   html[data-device-shell="iphone"] .media-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .app-shell--library-root .page-section--library[data-device-class="phone"] .media-grid,
+  .app-shell--library-source .page-section--library-source[data-device-class="phone"] .media-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.75rem;
   }
@@ -4159,7 +4191,20 @@ html[data-device-shell="iphone"] .series-rail__slide .media-card {
     mask-image: none;
   }
 
+  .app-shell--library-root .page-section--library[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--static,
+  .app-shell--library-source .page-section--library-source[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--static {
+    overflow-x: hidden;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
   html[data-device-shell="iphone"] .series-rail__viewport--phone-landscape.series-rail__viewport--peek {
+    --series-rail-peek: clamp(4.2rem, 14vw, 6rem);
+    --series-rail-card-width: calc(((100% - var(--series-rail-gap) - var(--series-rail-peek)) / 2) * 0.88);
+  }
+
+  .app-shell--library-root .page-section--library[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--peek,
+  .app-shell--library-source .page-section--library-source[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--peek {
     --series-rail-peek: clamp(4.2rem, 14vw, 6rem);
     --series-rail-card-width: calc(((100% - var(--series-rail-gap) - var(--series-rail-peek)) / 2) * 0.88);
   }
@@ -4171,7 +4216,21 @@ html[data-device-shell="iphone"] .series-rail__slide .media-card {
     padding-right: 0;
   }
 
+  .app-shell--library-root .page-section--library[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--static .series-rail__track,
+  .app-shell--library-source .page-section--library-source[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--static .series-rail__track {
+    grid-auto-flow: initial;
+    grid-auto-columns: unset;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding-right: 0;
+  }
+
   html[data-device-shell="iphone"] .series-rail__viewport--phone-landscape.series-rail__viewport--static .series-rail__slide .media-card {
+    width: 100%;
+    margin-inline: 0;
+  }
+
+  .app-shell--library-root .page-section--library[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--static .series-rail__slide .media-card,
+  .app-shell--library-source .page-section--library-source[data-device-class="phone"] .series-rail__viewport--phone-landscape.series-rail__viewport--static .series-rail__slide .media-card {
     width: 100%;
     margin-inline: 0;
   }

@@ -11,7 +11,7 @@ import {
   clearLibraryReturnPending,
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
-import { detectClientPlatform } from "../lib/platformDetection";
+import { detectClientDeviceClass, detectClientPlatform } from "../lib/platformDetection";
 import {
   packIpadPortraitSeriesRailRows,
   packSeriesRailRows,
@@ -167,6 +167,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const sourceVisibleCount = items.length;
   const hasVisibleContent = visibleSeriesRails.length > 0 || filteredItems.length > 0;
   const libraryDevice = detectClientPlatform() === "ipad" ? "ipad" : undefined;
+  const libraryDeviceClass = detectClientDeviceClass() === "phone" ? "phone" : undefined;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -269,7 +270,11 @@ export function LibrarySourcePage({ sourceKind }) {
   }, [items, loading, location.pathname, location.state, seriesRails]);
 
   return (
-    <section className="page-section page-section--library-source" data-library-device={libraryDevice}>
+    <section
+      className="page-section page-section--library-source"
+      data-device-class={libraryDeviceClass}
+      data-library-device={libraryDevice}
+    >
       <div className={`library-focus-hero library-focus-hero--${sourceKind}`}>
         <div className="library-focus-hero__row">
           <div className="library-focus-hero__copy">

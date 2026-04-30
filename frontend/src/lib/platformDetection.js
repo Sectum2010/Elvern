@@ -61,6 +61,25 @@ export function detectClientPlatform(input = null) {
   return "unknown";
 }
 
+export function detectClientDeviceClass(input = null) {
+  const snapshot = normalizePlatformInput(input || readNavigatorPlatformSnapshot());
+  const platform = detectClientPlatform(snapshot);
+
+  if (platform === "iphone") {
+    return "phone";
+  }
+  if (platform === "ipad") {
+    return "tablet";
+  }
+  if (platform === "android") {
+    return snapshot.userAgent.includes("mobile") ? "phone" : "tablet";
+  }
+  if (isDesktopClientPlatform(platform)) {
+    return "desktop";
+  }
+  return "unknown";
+}
+
 export function isIOSClientPlatform(platform) {
   return platform === "iphone" || platform === "ipad";
 }

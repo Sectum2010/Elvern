@@ -23,7 +23,7 @@ import {
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
 import { startGoogleDriveReconnect } from "../lib/providerAuth";
-import { detectClientPlatform } from "../lib/platformDetection";
+import { detectClientDeviceClass, detectClientPlatform } from "../lib/platformDetection";
 import {
   packIpadPortraitSeriesRailRows,
   packSeriesRailRows,
@@ -931,9 +931,14 @@ export function LibraryPage() {
 
   const isSearching = deferredQuery.trim().length > 0;
   const libraryDevice = detectClientPlatform() === "ipad" ? "ipad" : undefined;
+  const libraryDeviceClass = detectClientDeviceClass() === "phone" ? "phone" : undefined;
 
   return (
-    <section className="page-section page-section--library" data-library-device={libraryDevice}>
+    <section
+      className="page-section page-section--library"
+      data-device-class={libraryDeviceClass}
+      data-library-device={libraryDevice}
+    >
       <ProviderReconnectModal
         allowReconnect
         message={cloudReconnectPrompt?.message || ""}

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MediaCard } from "./MediaCard";
+import { detectClientDeviceClass } from "../lib/platformDetection";
+import { resolveSeriesRailViewportKind } from "../lib/seriesRailViewport";
 
 const DESKTOP_DRAG_THRESHOLD_PX = 8;
 const DESKTOP_DRAG_RESPONSE = 0.84;
@@ -25,10 +27,10 @@ function detectViewportKind() {
   if (typeof window === "undefined" || typeof document === "undefined") {
     return "desktop";
   }
-  if (document.documentElement.dataset.deviceShell !== "iphone") {
-    return "desktop";
-  }
-  return window.matchMedia("(orientation: landscape)").matches ? "phone-landscape" : "phone-portrait";
+  return resolveSeriesRailViewportKind({
+    deviceClass: detectClientDeviceClass(),
+    isLandscape: window.matchMedia("(orientation: landscape)").matches,
+  });
 }
 
 
