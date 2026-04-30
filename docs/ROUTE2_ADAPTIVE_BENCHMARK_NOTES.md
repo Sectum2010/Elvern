@@ -106,3 +106,78 @@ Cloud end-to-end thread benchmark is deferred. The current probe intentionally a
 - 32 MiB windows sustained roughly 18-23.6 MiB/s.
 - These source probes do not prove CPU thread scaling. They show the cloud source path is capable of moderate range throughput in this run, but full Route2 cloud preparation still needs end-to-end measurement before applying local-file thread conclusions to cloud media.
 - If a real cloud Route2 worker shows low supply while these source numbers are the limiting factor and CPU is low/moderate, the adaptive classifier should remain SOURCE_BOUND and must not add threads.
+
+## Cloud End-to-End Benchmark: The Green Mile + Avatar Way of Water
+
+### 20260430T051846Z - Benchmark-only cloud ffmpeg e2e run
+
+- Benchmark run id/date-time: `20260430T051846Z`
+- Benchmark script: `scripts/route2-cloud-benchmark.py`
+- Mode: `ffmpeg-e2e`
+- Path measured: Google Drive API -> temporary Elvern benchmark localhost proxy -> ffmpeg -> isolated HLS/fMP4 output
+- Thread counts: `4`, `6`, `10`, `12`
+- Repeat count: `1`
+- Profile: `mobile_2160p`
+- Sample duration: `150s`
+- Artifact paths:
+  - `dev/artifacts/route2-cloud-benchmark/20260430T051846Z/summary.json`
+  - `dev/artifacts/route2-cloud-benchmark/20260430T051846Z/summary.csv`
+
+This run did not create normal Route2/native playback sessions and did not write production Route2 cache. The benchmark proxy exposed only tokenless localhost URLs to ffmpeg and forwarded provider Range reads internally.
+
+| Media ID | Title | File Size |
+|---:|---|---:|
+| 102 | The Green Mile (1999) | 34,215,479,539 bytes / 31.87 GiB |
+| 935 | Avatar.The.Way.of.Water.2022.2160p.REPACK.UHD.BluRay.REMUX.DV.HDR.HEVC.Atmos-TRiToN | 76,167,796,686 bytes / 70.94 GiB |
+
+### Raw Cloud E2E Results
+
+| Media ID | Threads | Wall Time | First Segment | 45s Runway | 120s Runway | Avg CPU Cores | Peak CPU Cores | Peak RSS | Supply Rate | Source Requests | Source Bytes | Source Rate | Result |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 102 | 4 | 47.544s | 3.503s | 15.513s | 38.035s | 9.619 | 13.349 | 2.97 GiB | 3.155x | 6 | 374,949,165 | 7.521 MiB/s | success |
+| 102 | 6 | 39.042s | 3.504s | 13.514s | 32.035s | 11.958 | 15.104 | 3.07 GiB | 3.843x | 6 | 374,949,165 | 9.159 MiB/s | success |
+| 102 | 10 | 38.538s | 3.503s | 13.514s | 31.532s | 12.255 | 15.307 | 3.13 GiB | 3.893x | 6 | 374,949,165 | 9.279 MiB/s | success |
+| 102 | 12 | 38.038s | 3.504s | 13.012s | 31.531s | 12.555 | 15.325 | 3.19 GiB | 3.944x | 6 | 375,997,741 | 9.427 MiB/s | success |
+| 935 | 4 | 71.566s | 4.005s | 20.519s | 57.053s | 7.526 | 10.053 | 3.10 GiB | 2.096x | 6 | 891,611,340 | 11.881 MiB/s | success |
+| 935 | 6 | 55.554s | 5.005s | 18.017s | 45.044s | 9.978 | 12.546 | 3.12 GiB | 2.701x | 6 | 891,611,340 | 15.306 MiB/s | success |
+| 935 | 10 | 48.054s | 3.504s | 16.519s | 39.042s | 11.944 | 15.428 | 3.35 GiB | 3.122x | 6 | 895,805,644 | 17.778 MiB/s | success |
+| 935 | 12 | 44.052s | 3.504s | 14.517s | 35.043s | 13.092 | 16.084 | 3.51 GiB | 3.406x | 6 | 891,611,340 | 19.302 MiB/s | success |
+
+All cloud e2e runs succeeded. The benchmark proxy saw HTTP 206 Range responses for all source requests and no provider/auth/quota errors.
+
+### Per-Movie Interpretation
+
+The Green Mile:
+
+- 6 improved materially over 4: wall time dropped from 47.544s to 39.042s, and 120s runway dropped from 38.035s to 32.035s.
+- 10 barely improved over 6: wall time improved by about 0.504s and 120s runway by about 0.503s.
+- 12 barely improved over 10: wall time improved by about 0.5s and 120s runway was effectively unchanged.
+- Peak CPU stayed around 15.3 cores, below an 18-core Route2 upbound.
+- Peak RSS stayed around 3.2 GiB.
+- This sample looks CPU/thread-beneficial from 4 -> 6, then mostly flat. Past 6, it may be source/proxy, encode pipeline, or source media complexity limited rather than meaningfully thread-limited.
+
+Avatar: The Way of Water:
+
+- 6 improved materially over 4: wall time dropped from 71.566s to 55.554s, and 120s runway dropped from 57.053s to 45.044s.
+- 10 improved over 6: wall time dropped to 48.054s, and 120s runway dropped to 39.042s.
+- 12 improved over 10: wall time dropped to 44.052s, and 120s runway dropped to 35.043s.
+- Peak CPU at 12 was 16.084 cores, still below an 18-core Route2 upbound but closer to it than the Green Mile.
+- Peak RSS stayed around 3.5 GiB.
+- This sample still appears CPU/thread-beneficial through 12, with no cloud-source error signal in this first run.
+
+### Cross-Cloud Interpretation
+
+- The earlier source probes showed about 14-15 MiB/s average range throughput with HTTP 206 support.
+- In e2e mode, higher thread counts increased source bytes consumed per second as ffmpeg demanded more input, and the proxy continued returning 206 without provider errors.
+- Both cloud movies strongly support 4 -> 6 as a first CPU-bound promotion target.
+- The Green Mile does not justify 10+ on its own, while Avatar still benefits from 10 and 12.
+- Because these are single-repeat benchmark-only runs, do not change adaptive policy yet.
+- 10 remains a reasonable conservative shadow ceiling based on the combined local LOTR and first cloud e2e data.
+- 12 should remain configurable / experimental until a full 2-12 matrix with repeats confirms the benefit across more cloud titles and provider conditions.
+
+### Policy Implication
+
+- Keep real playback behavior unchanged.
+- Keep treating cloud SOURCE_BOUND evidence as a hard blocker for thread promotion.
+- If cloud source probes/e2e source metrics are healthy, low supply plus CPU-active workers can still be CPU_BOUND for cloud items.
+- Run the full 2-12 thread matrix with at least 2 repeats before changing the shadow adaptive default or promotion ladder again.
