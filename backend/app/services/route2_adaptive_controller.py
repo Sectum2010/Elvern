@@ -99,6 +99,16 @@ def _adaptive_recommendation_ceiling(payload: Route2AdaptiveShadowInput) -> int:
     return max(1, ceiling)
 
 
+def _benchmark_informed_promotion_target(current_threads: int, adaptive_ceiling: int) -> int:
+    if current_threads <= 4:
+        target = 6
+    elif current_threads < 10:
+        target = 10
+    else:
+        target = min(current_threads + 2, adaptive_ceiling) if adaptive_ceiling > 10 else current_threads
+    return max(current_threads, min(int(target), int(adaptive_ceiling)))
+
+
 def _looks_like_provider_error(message: str | None) -> bool:
     normalized = (message or "").strip().lower()
     if not normalized:
@@ -307,7 +317,8 @@ def classify_route2_adaptive_shadow(
             0,
             int(math.floor(min(user_headroom_cores, global_headroom_cores))),
         )
-    candidate_thread_ceiling = min(adaptive_ceiling, resource_headroom_ceiling, current_threads + 2)
+    benchmark_target = _benchmark_informed_promotion_target(current_threads, adaptive_ceiling)
+    candidate_thread_ceiling = min(adaptive_ceiling, resource_headroom_ceiling, benchmark_target)
     target_increase_threads = candidate_thread_ceiling
     adaptive_ceiling_cap_active = adaptive_ceiling <= current_threads
     real_spawn_cap_is_below_shadow = payload.max_threads < adaptive_ceiling
@@ -343,7 +354,8 @@ def classify_route2_adaptive_shadow(
             )
             reason = (
                 "Low supply with a CPU-active worker and available user/global CPU headroom; "
-                "adaptive ceiling permits promotion, so the shadow controller recommends a one-step thread increase."
+                "adaptive ceiling permits promotion, so the shadow controller recommends a benchmark-informed "
+                f"thread target of {target_increase_threads}."
             )
             if real_spawn_cap_is_below_shadow:
                 reason += (

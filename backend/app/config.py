@@ -235,7 +235,7 @@ def load_settings() -> Settings:
         ),
         route2_adaptive_max_worker_threads=_get_int(
             "ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS",
-            min(8, total_cpu_cores),
+            min(10, total_cpu_cores),
         ),
         route2_max_replacement_epochs_per_session=_get_int(
             "ELVERN_ROUTE2_MAX_REPLACEMENT_EPOCHS_PER_SESSION",

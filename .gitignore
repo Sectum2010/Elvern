@@ -33,6 +33,9 @@ clients/desktop-vlc-opener/artifacts/
 clients/desktop-vlc-opener/**/bin/
 clients/desktop-vlc-opener/**/obj/
 
+# Developer-only benchmark artifacts
+dev/artifacts/
+
 # Editor / local agent state
 .vscode/
 .claude/

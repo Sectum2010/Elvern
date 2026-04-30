@@ -209,7 +209,7 @@ def _make_route2_adaptive_input(**overrides) -> Route2AdaptiveShadowInput:
         assigned_threads=4,
         default_threads=4,
         max_threads=8,
-        adaptive_max_threads=8,
+        adaptive_max_threads=10,
         cpu_cores_used=4.0,
         allocated_cpu_cores=8,
         user_cpu_cores_used_total=4.0,
@@ -2651,7 +2651,7 @@ def test_route2_max_worker_threads_env_override_still_works(monkeypatch, test_se
     assert settings.route2_max_worker_threads == 6
 
 
-def test_route2_adaptive_max_worker_threads_defaults_to_min_eight_or_detected_cores(
+def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_cores(
     monkeypatch,
     test_settings,
 ) -> None:
@@ -2661,7 +2661,7 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_eight_or_detected_co
     settings = refresh_settings()
 
     assert settings.route2_max_worker_threads == 4
-    assert settings.route2_adaptive_max_worker_threads == 8
+    assert settings.route2_adaptive_max_worker_threads == 10
 
 
 def test_route2_adaptive_max_worker_threads_env_override_is_shadow_only_config(monkeypatch, test_settings) -> None:
@@ -2752,7 +2752,7 @@ def test_route2_adaptive_shadow_early_bootstrap_is_unknown_not_storage_bound() -
     assert decision.safe_to_increase_threads is False
 
 
-def test_route2_adaptive_shadow_single_user_cpu_bound_with_headroom_recommends_one_step_increase() -> None:
+def test_route2_adaptive_shadow_current_four_promotes_to_benchmark_target_six() -> None:
     decision = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
             supply_rate_x=0.78,
@@ -2764,17 +2764,18 @@ def test_route2_adaptive_shadow_single_user_cpu_bound_with_headroom_recommends_o
             route2_cpu_upbound_cores=18,
             route2_cpu_cores_used_total=7.5,
             max_threads=4,
-            adaptive_max_threads=8,
+            adaptive_max_threads=10,
         )
     )
 
     assert decision.bottleneck_class == "CPU_BOUND"
     assert decision.safe_to_increase_threads is True
     assert decision.recommended_threads == 6
+    assert "benchmark-informed thread target of 6" in decision.reason
     assert "Real worker spawn is still capped at 4" in decision.reason
 
 
-def test_route2_adaptive_shadow_cpu_bound_current_six_promotes_to_adaptive_ceiling() -> None:
+def test_route2_adaptive_shadow_current_six_promotes_to_benchmark_target_ten() -> None:
     decision = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
             assigned_threads=6,
@@ -2786,36 +2787,61 @@ def test_route2_adaptive_shadow_cpu_bound_current_six_promotes_to_adaptive_ceili
             user_cpu_cores_used_total=7.5,
             route2_cpu_upbound_cores=18,
             route2_cpu_cores_used_total=7.5,
-            max_threads=8,
-            adaptive_max_threads=8,
+            max_threads=4,
+            adaptive_max_threads=10,
         )
     )
 
     assert decision.bottleneck_class == "CPU_BOUND"
     assert decision.safe_to_increase_threads is True
-    assert decision.recommended_threads == 8
+    assert decision.recommended_threads == 10
+    assert "benchmark-informed thread target of 10" in decision.reason
+    assert "Real worker spawn is still capped at 4" in decision.reason
 
 
-def test_route2_adaptive_shadow_cpu_bound_at_adaptive_ceiling_does_not_increase() -> None:
+def test_route2_adaptive_shadow_current_eight_promotes_to_benchmark_target_ten() -> None:
     decision = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
             assigned_threads=8,
             supply_rate_x=0.78,
             ahead_runway_seconds=70.0,
             supply_observation_seconds=20.0,
-            cpu_cores_used=8.2,
+            cpu_cores_used=8.8,
             allocated_cpu_cores=18,
-            user_cpu_cores_used_total=8.2,
+            user_cpu_cores_used_total=8.8,
             route2_cpu_upbound_cores=18,
-            route2_cpu_cores_used_total=8.2,
+            route2_cpu_cores_used_total=8.8,
             max_threads=4,
-            adaptive_max_threads=8,
+            adaptive_max_threads=10,
+        )
+    )
+
+    assert decision.bottleneck_class == "CPU_BOUND"
+    assert decision.safe_to_increase_threads is True
+    assert decision.recommended_threads == 10
+    assert "benchmark-informed thread target of 10" in decision.reason
+
+
+def test_route2_adaptive_shadow_cpu_bound_at_adaptive_ceiling_does_not_increase() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=10,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=10.2,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=10.2,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=10.2,
+            max_threads=4,
+            adaptive_max_threads=10,
         )
     )
 
     assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
     assert decision.safe_to_increase_threads is False
-    assert decision.recommended_threads == 8
+    assert decision.recommended_threads == 10
     assert "adaptive recommendation ceiling" in decision.reason
 
 
