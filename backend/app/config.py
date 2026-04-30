@@ -141,6 +141,7 @@ class Settings:
     route2_cpu_budget_percent: int
     route2_min_worker_threads: int
     route2_max_worker_threads: int
+    route2_adaptive_max_worker_threads: int
     route2_max_replacement_epochs_per_session: int
     native_playback_enabled: bool
     native_playback_session_minutes: int
@@ -231,6 +232,10 @@ def load_settings() -> Settings:
         route2_max_worker_threads=_get_int(
             "ELVERN_ROUTE2_MAX_WORKER_THREADS",
             min(4, total_cpu_cores),
+        ),
+        route2_adaptive_max_worker_threads=_get_int(
+            "ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS",
+            min(8, total_cpu_cores),
         ),
         route2_max_replacement_epochs_per_session=_get_int(
             "ELVERN_ROUTE2_MAX_REPLACEMENT_EPOCHS_PER_SESSION",
@@ -338,6 +343,13 @@ def validate_settings(settings: Settings) -> None:
     ):
         raise ConfigError(
             "ELVERN_ROUTE2_MAX_WORKER_THREADS must be at least the min worker threads and no more than os.cpu_count()"
+        )
+    if (
+        settings.route2_adaptive_max_worker_threads < settings.route2_min_worker_threads
+        or settings.route2_adaptive_max_worker_threads > total_cpu_cores
+    ):
+        raise ConfigError(
+            "ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS must be at least the min worker threads and no more than os.cpu_count()"
         )
     if settings.route2_max_replacement_epochs_per_session < 0:
         raise ConfigError("ELVERN_ROUTE2_MAX_REPLACEMENT_EPOCHS_PER_SESSION must be at least 0")

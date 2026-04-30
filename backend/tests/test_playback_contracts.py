@@ -47,6 +47,7 @@ from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
     MobilePlaybackManager,
     PlaybackWorkerCooldownError,
+    _parse_proc_stat_cpu_seconds,
     _parse_proc_status_rss_bytes,
 )
 from backend.app.services.mobile_playback_route2_full_gate import _route2_full_mode_gate_locked
@@ -208,11 +209,15 @@ def _make_route2_adaptive_input(**overrides) -> Route2AdaptiveShadowInput:
         assigned_threads=4,
         default_threads=4,
         max_threads=8,
+        adaptive_max_threads=8,
         cpu_cores_used=4.0,
         allocated_cpu_cores=8,
+        user_cpu_cores_used_total=4.0,
         route2_cpu_upbound_cores=18,
         route2_cpu_cores_used_total=8.0,
         memory_bytes=512 * 1024 * 1024,
+        total_memory_bytes=16 * 1024 * 1024 * 1024,
+        route2_memory_bytes_total=512 * 1024 * 1024,
         ready_end_seconds=180.0,
         effective_playhead_seconds=40.0,
         ahead_runway_seconds=140.0,
@@ -2646,11 +2651,43 @@ def test_route2_max_worker_threads_env_override_still_works(monkeypatch, test_se
     assert settings.route2_max_worker_threads == 6
 
 
+def test_route2_adaptive_max_worker_threads_defaults_to_min_eight_or_detected_cores(
+    monkeypatch,
+    test_settings,
+) -> None:
+    monkeypatch.delenv("ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS", raising=False)
+    monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 20)
+
+    settings = refresh_settings()
+
+    assert settings.route2_max_worker_threads == 4
+    assert settings.route2_adaptive_max_worker_threads == 8
+
+
+def test_route2_adaptive_max_worker_threads_env_override_is_shadow_only_config(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_MAX_WORKER_THREADS", "4")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS", "10")
+    monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 20)
+
+    settings = refresh_settings()
+
+    assert settings.route2_max_worker_threads == 4
+    assert settings.route2_adaptive_max_worker_threads == 10
+
+
 def test_route2_max_worker_threads_validation_still_rejects_invalid_values(monkeypatch, test_settings) -> None:
     monkeypatch.setenv("ELVERN_ROUTE2_MAX_WORKER_THREADS", "5")
     monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 4)
 
     with pytest.raises(ConfigError, match="ELVERN_ROUTE2_MAX_WORKER_THREADS"):
+        refresh_settings()
+
+
+def test_route2_adaptive_max_worker_threads_validation_rejects_invalid_values(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS", "9")
+    monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 8)
+
+    with pytest.raises(ConfigError, match="ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS"):
         refresh_settings()
 
 
@@ -2693,20 +2730,93 @@ def test_route2_adaptive_shadow_over_supplied_worker_recommends_same_or_lower_th
     assert decision.safe_to_decrease_threads is True
 
 
-def test_route2_adaptive_shadow_cpu_bound_with_spare_budget_recommends_more_threads() -> None:
+def test_route2_adaptive_shadow_early_bootstrap_is_unknown_not_storage_bound() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            source_kind="local",
+            assigned_threads=4,
+            cpu_cores_used=2.0,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=2.0,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=2.0,
+            ahead_runway_seconds=0.0,
+            supply_rate_x=0.0,
+            supply_observation_seconds=0.0,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNKNOWN"
+    assert "early_bootstrap_insufficient_samples" in decision.reason
+    assert decision.recommended_threads == 4
+    assert decision.safe_to_increase_threads is False
+
+
+def test_route2_adaptive_shadow_single_user_cpu_bound_with_headroom_recommends_one_step_increase() -> None:
     decision = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
             supply_rate_x=0.78,
             ahead_runway_seconds=70.0,
-            cpu_cores_used=6.8,
-            allocated_cpu_cores=8,
-            route2_cpu_cores_used_total=7.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=7.5,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=7.5,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=7.5,
+            max_threads=4,
+            adaptive_max_threads=8,
         )
     )
 
     assert decision.bottleneck_class == "CPU_BOUND"
     assert decision.safe_to_increase_threads is True
     assert decision.recommended_threads == 6
+    assert "Real worker spawn is still capped at 4" in decision.reason
+
+
+def test_route2_adaptive_shadow_cpu_bound_current_six_promotes_to_adaptive_ceiling() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=6,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=7.5,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=7.5,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=7.5,
+            max_threads=8,
+            adaptive_max_threads=8,
+        )
+    )
+
+    assert decision.bottleneck_class == "CPU_BOUND"
+    assert decision.safe_to_increase_threads is True
+    assert decision.recommended_threads == 8
+
+
+def test_route2_adaptive_shadow_cpu_bound_at_adaptive_ceiling_does_not_increase() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=8,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=8.2,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=8.2,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=8.2,
+            max_threads=4,
+            adaptive_max_threads=8,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 8
+    assert "adaptive recommendation ceiling" in decision.reason
 
 
 def test_route2_adaptive_shadow_cpu_bound_without_spare_budget_stays_under_supplied_cpu_limited() -> None:
@@ -2716,7 +2826,9 @@ def test_route2_adaptive_shadow_cpu_bound_without_spare_budget_stays_under_suppl
             ahead_runway_seconds=60.0,
             cpu_cores_used=6.9,
             allocated_cpu_cores=4,
+            user_cpu_cores_used_total=4.0,
             route2_cpu_cores_used_total=18.0,
+            adaptive_max_threads=8,
         )
     )
 
@@ -2733,6 +2845,7 @@ def test_route2_adaptive_shadow_cloud_low_supply_low_cpu_is_source_bound() -> No
             ahead_runway_seconds=50.0,
             cpu_cores_used=2.2,
             allocated_cpu_cores=8,
+            user_cpu_cores_used_total=2.2,
             server_goodput_bytes_per_second=2_000_000.0,
             client_goodput_bytes_per_second=4_000_000.0,
         )
@@ -2756,6 +2869,30 @@ def test_route2_adaptive_shadow_client_weak_while_backend_runway_is_healthy() ->
     assert decision.safe_to_increase_threads is False
 
 
+def test_route2_adaptive_shadow_memory_guard_blocks_thread_increase() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=7.5,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=7.5,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=7.5,
+            max_threads=8,
+            adaptive_max_threads=8,
+            total_memory_bytes=10 * 1024 * 1024 * 1024,
+            route2_memory_bytes_total=8 * 1024 * 1024 * 1024,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 4
+    assert "memory pressure guard" in decision.reason
+
+
 def test_route2_adaptive_shadow_insufficient_metrics_falls_back_to_unknown() -> None:
     decision = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
@@ -2770,7 +2907,7 @@ def test_route2_adaptive_shadow_insufficient_metrics_falls_back_to_unknown() -> 
     assert "ahead_runway_seconds" in decision.missing_metrics
 
 
-def test_route2_adaptive_shadow_recommendation_clamps_to_min_and_max_threads() -> None:
+def test_route2_adaptive_shadow_decrease_clamps_to_min_and_real_max_no_longer_hides_current_threads() -> None:
     low = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
             assigned_threads=2,
@@ -2787,12 +2924,15 @@ def test_route2_adaptive_shadow_recommendation_clamps_to_min_and_max_threads() -
             ahead_runway_seconds=40.0,
             cpu_cores_used=6.6,
             allocated_cpu_cores=8,
+            user_cpu_cores_used_total=8.0,
             route2_cpu_cores_used_total=8.0,
+            adaptive_max_threads=8,
         )
     )
 
     assert low.recommended_threads == 2
-    assert high.recommended_threads == 6
+    assert high.current_threads == 7
+    assert high.recommended_threads == 7
 
 
 def test_route2_adaptive_shadow_classifier_is_pure_value_helper(monkeypatch) -> None:
@@ -2943,6 +3083,16 @@ def test_route2_rss_parser_reads_vmrss_kib() -> None:
     payload = "Name:\tffmpeg\nVmRSS:\t  524288 kB\nThreads:\t8\n"
 
     assert _parse_proc_status_rss_bytes(payload) == 524288 * 1024
+
+
+def test_route2_cpu_stat_parser_reads_user_and_system_ticks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._clock_ticks_per_second",
+        lambda: 100,
+    )
+    payload = "4321 (ffmpeg worker) S 1 2 3 4 5 6 7 8 9 10 250 75 0 0 20 0 1 0 12345"
+
+    assert _parse_proc_stat_cpu_seconds(payload) == pytest.approx(3.25)
 
 
 def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_settings, monkeypatch) -> None:

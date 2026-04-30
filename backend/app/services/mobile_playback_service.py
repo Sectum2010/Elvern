@@ -1612,6 +1612,8 @@ class MobilePlaybackManager:
             "active_decoding_user_count": active_decoding_user_count,
             "active_user_ids": active_user_ids,
             "per_user_budget_cores": per_user_budget_cores,
+            "max_worker_threads": self.settings.route2_max_worker_threads,
+            "adaptive_max_worker_threads": self.settings.route2_adaptive_max_worker_threads,
             "active_worker_count": len(self._route2_running_workers_locked()),
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
@@ -1621,8 +1623,11 @@ class MobilePlaybackManager:
         record: Route2WorkerRecord,
         *,
         allocated_cpu_cores: int,
+        user_cpu_cores_used_total: float | None,
         route2_cpu_cores_used_total: float | None,
         route2_cpu_upbound_cores: int,
+        total_memory_bytes: int | None,
+        route2_memory_bytes_total: int | None,
     ) -> Route2AdaptiveShadowInput:
         session = self._sessions.get(record.session_id)
         if session is None:
@@ -1634,11 +1639,15 @@ class MobilePlaybackManager:
                 assigned_threads=record.assigned_threads,
                 default_threads=4,
                 max_threads=self.settings.route2_max_worker_threads,
+                adaptive_max_threads=self.settings.route2_adaptive_max_worker_threads,
                 cpu_cores_used=record.cpu_cores_used,
                 allocated_cpu_cores=allocated_cpu_cores or None,
+                user_cpu_cores_used_total=user_cpu_cores_used_total,
                 route2_cpu_upbound_cores=route2_cpu_upbound_cores,
                 route2_cpu_cores_used_total=route2_cpu_cores_used_total,
                 memory_bytes=record.memory_bytes,
+                total_memory_bytes=total_memory_bytes,
+                route2_memory_bytes_total=route2_memory_bytes_total,
                 non_retryable_error=record.non_retryable_error,
                 mode_ready=False,
             )
@@ -1654,11 +1663,15 @@ class MobilePlaybackManager:
                 assigned_threads=record.assigned_threads,
                 default_threads=4,
                 max_threads=self.settings.route2_max_worker_threads,
+                adaptive_max_threads=self.settings.route2_adaptive_max_worker_threads,
                 cpu_cores_used=record.cpu_cores_used,
                 allocated_cpu_cores=allocated_cpu_cores or None,
+                user_cpu_cores_used_total=user_cpu_cores_used_total,
                 route2_cpu_upbound_cores=route2_cpu_upbound_cores,
                 route2_cpu_cores_used_total=route2_cpu_cores_used_total,
                 memory_bytes=record.memory_bytes,
+                total_memory_bytes=total_memory_bytes,
+                route2_memory_bytes_total=route2_memory_bytes_total,
                 non_retryable_error=record.non_retryable_error or session.last_error,
                 mode_ready=session.state == "ready",
             )
@@ -1683,11 +1696,15 @@ class MobilePlaybackManager:
             assigned_threads=record.assigned_threads,
             default_threads=4,
             max_threads=self.settings.route2_max_worker_threads,
+            adaptive_max_threads=self.settings.route2_adaptive_max_worker_threads,
             cpu_cores_used=record.cpu_cores_used,
             allocated_cpu_cores=allocated_cpu_cores or None,
+            user_cpu_cores_used_total=user_cpu_cores_used_total,
             route2_cpu_upbound_cores=route2_cpu_upbound_cores,
             route2_cpu_cores_used_total=route2_cpu_cores_used_total,
             memory_bytes=record.memory_bytes,
+            total_memory_bytes=total_memory_bytes,
+            route2_memory_bytes_total=route2_memory_bytes_total,
             ready_end_seconds=ready_end_seconds,
             effective_playhead_seconds=effective_playhead_seconds,
             ahead_runway_seconds=ahead_runway_seconds,
@@ -1937,11 +1954,19 @@ class MobilePlaybackManager:
                     continue
                 group = grouped_users.get(record.user_id)
                 allocated_cpu_cores = int(group.get("allocated_cpu_cores") or 0) if group is not None else 0
+                user_cpu_cores_used_total = (
+                    float(group.get("cpu_cores_used"))
+                    if group is not None and group.get("cpu_cores_used") is not None
+                    else None
+                )
                 adaptive_input = self._build_route2_adaptive_shadow_input_locked(
                     record,
                     allocated_cpu_cores=allocated_cpu_cores,
+                    user_cpu_cores_used_total=user_cpu_cores_used_total,
                     route2_cpu_cores_used_total=route2_cpu_cores_used if any_cpu_sampled else None,
                     route2_cpu_upbound_cores=int(budget["route2_cpu_upbound_cores"]),
+                    total_memory_bytes=total_memory_bytes,
+                    route2_memory_bytes_total=route2_memory_bytes if any_memory_sampled else None,
                 )
                 adaptive_decision = classify_route2_adaptive_shadow(adaptive_input)
                 payload["adaptive_bottleneck_class"] = adaptive_decision.bottleneck_class
