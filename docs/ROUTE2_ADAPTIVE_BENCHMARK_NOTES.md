@@ -41,3 +41,68 @@ This document is the curated human-readable record of Route2 adaptive thread ben
 - 10 should be the conservative high-performance shadow ceiling.
 - 12 should remain configurable / experimental until more data is collected.
 - Never promote threads unless CPU/thread is the likely bottleneck and source/client/storage/provider/RAM guards pass.
+
+## Cloud Benchmark Plan / Source Probe Notes
+
+Cloud benchmarks are separate from local file benchmarks because the bottleneck can be the provider/source path rather than CPU threads. Do not download an entire cloud file to local disk and then benchmark the local copy; that hides the real path:
+
+`Google Drive API -> Elvern/Spark cloud proxy path -> ffmpeg -> Route2/HLS output`
+
+Cloud source probes collect controlled Google Drive range-read measurements without creating live Route2/native playback sessions or writing production cache. Useful fields are request status, Range behavior, first-byte latency, bytes read, elapsed time, MiB/s, and provider/auth/quota errors. For interpretation:
+
+- If cloud range throughput is low or highly variable while CPU is not active, classify the situation as SOURCE_BOUND rather than CPU_BOUND.
+- If cloud throughput is healthy and Route2 supply is still low while the worker is CPU-active, CPU-bound promotion remains plausible.
+- Provider auth, quota, HTTP 403/429/5xx, or token errors should stop cloud benchmarking and must not be papered over as thread-scaling evidence.
+
+### 20260430T050918Z - Google Drive source probes
+
+- Benchmark run id/date-time: `20260430T050918Z`
+- Benchmark script: `scripts/route2-cloud-benchmark.py`
+- Mode: source probe only
+- Range sizes: `8 MiB`, `32 MiB`
+- Positions: start, middle, near-end
+- Artifact paths:
+  - `dev/artifacts/route2-cloud-benchmark/20260430T050918Z/summary.json`
+  - `dev/artifacts/route2-cloud-benchmark/20260430T050918Z/source_probes.csv`
+
+Cloud end-to-end thread benchmark is deferred. The current probe intentionally avoids creating Route2/native playback sessions; full end-to-end cloud benchmarking should use a benchmark-only proxy/session design that still measures the Elvern proxy path without touching live sessions or production cache.
+
+#### Media Items
+
+| Media ID | Title | Source | File Size | Probe Result |
+|---:|---|---|---:|---|
+| 102 | The Green Mile (1999) | Google Drive cloud | 34,215,479,539 bytes / 31.87 GiB | 6/6 probes succeeded |
+| 935 | Avatar.The.Way.of.Water.2022.2160p.REPACK.UHD.BluRay.REMUX.DV.HDR.HEVC.Atmos-TRiToN | Google Drive cloud | 76,167,796,686 bytes / 70.94 GiB | 6/6 probes succeeded |
+
+#### Raw Source Probe Results
+
+| Media ID | Probe | HTTP | First Byte | Elapsed | Bytes Read | Throughput | Result |
+|---:|---|---:|---:|---:|---:|---:|---|
+| 102 | start 8 MiB | 206 | 0.567s | 0.958s | 8,388,608 | 8.355 MiB/s | success |
+| 102 | start 32 MiB | 206 | 0.353s | 1.354s | 33,554,432 | 23.633 MiB/s | success |
+| 102 | middle 8 MiB | 206 | 0.620s | 0.987s | 8,388,608 | 8.104 MiB/s | success |
+| 102 | middle 32 MiB | 206 | 0.409s | 1.643s | 33,554,432 | 19.478 MiB/s | success |
+| 102 | near-end 8 MiB | 206 | 0.582s | 1.022s | 8,388,608 | 7.826 MiB/s | success |
+| 102 | near-end 32 MiB | 206 | 0.525s | 1.720s | 33,554,432 | 18.605 MiB/s | success |
+| 935 | start 8 MiB | 206 | 0.645s | 1.034s | 8,388,608 | 7.733 MiB/s | success |
+| 935 | start 32 MiB | 206 | 0.398s | 1.773s | 33,554,432 | 18.052 MiB/s | success |
+| 935 | middle 8 MiB | 206 | 0.453s | 0.691s | 8,388,608 | 11.584 MiB/s | success |
+| 935 | middle 32 MiB | 206 | 0.540s | 1.598s | 33,554,432 | 20.021 MiB/s | success |
+| 935 | near-end 8 MiB | 206 | 0.493s | 0.793s | 8,388,608 | 10.083 MiB/s | success |
+| 935 | near-end 32 MiB | 206 | 0.396s | 1.402s | 33,554,432 | 22.832 MiB/s | success |
+
+#### Aggregate Source Probe Summary
+
+| Media ID | Avg Throughput | Median Throughput | Min Throughput | Max Throughput | Avg First Byte |
+|---:|---:|---:|---:|---:|---:|
+| 102 | 14.334 MiB/s | 13.480 MiB/s | 7.826 MiB/s | 23.633 MiB/s | 0.509s |
+| 935 | 15.051 MiB/s | 14.818 MiB/s | 7.733 MiB/s | 22.832 MiB/s | 0.488s |
+
+#### Cloud Probe Interpretation
+
+- Both cloud items support byte Range requests and returned HTTP 206 for all tested ranges.
+- First-byte latency was roughly 0.35s to 0.65s in this run.
+- 8 MiB windows were slower and more latency-sensitive, around 7.7-11.6 MiB/s.
+- 32 MiB windows sustained roughly 18-23.6 MiB/s.
+- These source probes do not prove CPU thread scaling. They show the cloud source path is capable of moderate range throughput in this run, but full Route2 cloud preparation still needs end-to-end measurement before applying local-file thread conclusions to cloud media.
+- If a real cloud Route2 worker shows low supply while these source numbers are the limiting factor and CPU is low/moderate, the adaptive classifier should remain SOURCE_BOUND and must not add threads.
