@@ -46,9 +46,13 @@ from backend.app.services.mobile_playback_source_service import _probe_worker_so
 from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
     _HostCpuJiffySample,
+    _HostCpuPressureSnapshot,
+    _Route2ResourceSnapshot,
     MobilePlaybackManager,
     PlaybackWorkerCooldownError,
+    _build_host_cpu_pressure_snapshot,
     _count_external_ffmpeg_processes,
+    _host_cpu_pressure_from_resource_snapshot,
     _parse_proc_stat_host_cpu_jiffies,
     _parse_proc_stat_cpu_seconds,
     _parse_proc_status_rss_bytes,
@@ -3321,6 +3325,8 @@ def test_route2_worker_status_first_sample_is_unsampled_then_reports_live_cpu_an
     assert isinstance(second_item["route2_strategy_risk_flags"], list)
     assert isinstance(second_item["route2_strategy_missing_metadata"], list)
     assert inspected_pids == [4321, 4321]
+    with manager._lock:
+        assert manager._route2_workers[record.worker_id].assigned_threads == 4
 
 
 def test_route2_worker_status_handles_exited_owned_worker_without_crashing(initialized_settings, monkeypatch) -> None:
@@ -3383,6 +3389,83 @@ def test_route2_host_cpu_jiffy_parser_reads_aggregate_cpu_line() -> None:
     assert _parse_proc_stat_host_cpu_jiffies(payload) == (1010, 860)
 
 
+def test_route2_host_cpu_pressure_first_sample_is_immature() -> None:
+    snapshot = _build_host_cpu_pressure_snapshot(
+        previous_sample=None,
+        current_sample=_HostCpuJiffySample(
+            total_jiffies=1_000,
+            idle_jiffies=800,
+            total_cpu_cores=20,
+            sample_monotonic=100.0,
+        ),
+        route2_cpu_cores_used_total=0.0,
+        external_ffmpeg_process_count=0,
+    )
+
+    assert snapshot.host_cpu_sample_mature is False
+    assert snapshot.host_cpu_total_cores == 20
+    assert snapshot.host_cpu_used_cores is None
+    assert snapshot.external_cpu_cores_used_estimate is None
+
+
+def test_route2_host_cpu_pressure_computes_mature_usage_and_external_estimate(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._clock_ticks_per_second",
+        lambda: 100,
+    )
+
+    snapshot = _build_host_cpu_pressure_snapshot(
+        previous_sample=_HostCpuJiffySample(
+            total_jiffies=1_000,
+            idle_jiffies=800,
+            total_cpu_cores=20,
+            sample_monotonic=100.0,
+        ),
+        current_sample=_HostCpuJiffySample(
+            total_jiffies=3_000,
+            idle_jiffies=1_600,
+            total_cpu_cores=20,
+            sample_monotonic=102.0,
+        ),
+        route2_cpu_cores_used_total=2.0,
+        external_ffmpeg_process_count=0,
+    )
+
+    assert snapshot.host_cpu_sample_mature is True
+    assert snapshot.host_cpu_used_cores == pytest.approx(6.0)
+    assert snapshot.host_cpu_used_percent == pytest.approx(0.3)
+    assert snapshot.external_cpu_cores_used_estimate == pytest.approx(4.0)
+    assert snapshot.external_cpu_percent_estimate == pytest.approx(0.2)
+
+
+def test_route2_external_cpu_estimate_never_goes_negative(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._clock_ticks_per_second",
+        lambda: 100,
+    )
+
+    snapshot = _build_host_cpu_pressure_snapshot(
+        previous_sample=_HostCpuJiffySample(
+            total_jiffies=1_000,
+            idle_jiffies=800,
+            total_cpu_cores=20,
+            sample_monotonic=100.0,
+        ),
+        current_sample=_HostCpuJiffySample(
+            total_jiffies=3_000,
+            idle_jiffies=1_600,
+            total_cpu_cores=20,
+            sample_monotonic=102.0,
+        ),
+        route2_cpu_cores_used_total=9.0,
+        external_ffmpeg_process_count=0,
+    )
+
+    assert snapshot.host_cpu_used_cores == pytest.approx(6.0)
+    assert snapshot.external_cpu_cores_used_estimate == pytest.approx(0.0)
+    assert snapshot.external_cpu_percent_estimate == pytest.approx(0.0)
+
+
 def test_route2_external_ffmpeg_detector_excludes_owned_route2_pids(tmp_path: Path) -> None:
     for pid, comm in {
         100: "ffmpeg\n",
@@ -3396,6 +3479,152 @@ def test_route2_external_ffmpeg_detector_excludes_owned_route2_pids(tmp_path: Pa
     (tmp_path / "self").mkdir()
 
     assert _count_external_ffmpeg_processes(proc_root=tmp_path, owned_route2_pids={100}) == 2
+
+
+def test_route2_external_ffmpeg_detector_uses_comm_without_cmdline(tmp_path: Path) -> None:
+    proc_dir = tmp_path / "200"
+    proc_dir.mkdir()
+    (proc_dir / "comm").write_text("ffmpeg\n", encoding="utf-8")
+
+    assert _count_external_ffmpeg_processes(proc_root=tmp_path, owned_route2_pids=set()) == 1
+
+
+def test_route2_stale_resource_snapshot_marks_adaptive_input_immature(initialized_settings, monkeypatch) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    record = Route2WorkerRecord(
+        worker_id="worker-a",
+        session_id="missing-session",
+        epoch_id="epoch-a",
+        user_id=1,
+        username="alice",
+        auth_session_id=11,
+        media_item_id=501,
+        title="Telemetry Test",
+        playback_mode="full",
+        profile="mobile_1080p",
+        source_kind="local",
+        target_position_seconds=0.0,
+        state="running",
+        assigned_threads=6,
+    )
+    manager._route2_resource_snapshot = _Route2ResourceSnapshot(
+        sampled_at_ts=100.0,
+        sampled_at="2026-01-01T00:00:00+00:00",
+        sample_mature=True,
+        sample_stale=False,
+        host_cpu_total_cores=20,
+        host_cpu_used_cores=8.0,
+        host_cpu_used_percent=0.4,
+        route2_cpu_cores_used_total=4.0,
+        route2_cpu_percent_of_host=20.0,
+        per_user_cpu_cores_used_total={1: 4.0},
+        total_memory_bytes=8 * 1024 * 1024 * 1024,
+        route2_memory_bytes_total=512 * 1024 * 1024,
+        route2_memory_percent_of_total=6.25,
+        external_cpu_cores_used_estimate=0.5,
+        external_cpu_percent_estimate=0.025,
+        external_ffmpeg_process_count=0,
+        external_ffmpeg_cpu_cores_estimate=None,
+        external_pressure_level="none",
+        missing_metrics=[],
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.time.time", lambda: 106.0)
+
+    adaptive_input = manager._build_route2_adaptive_shadow_input_locked(
+        record,
+        allocated_cpu_cores=18,
+        user_cpu_cores_used_total=None,
+        route2_cpu_cores_used_total=None,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+        host_cpu_pressure=_HostCpuPressureSnapshot(
+            host_cpu_total_cores=20,
+            host_cpu_used_cores=1.0,
+            host_cpu_used_percent=0.05,
+            external_cpu_cores_used_estimate=0.0,
+            external_cpu_percent_estimate=0.0,
+            external_ffmpeg_process_count=0,
+            external_ffmpeg_cpu_cores_estimate=None,
+            host_cpu_sample_mature=True,
+        ),
+        total_memory_bytes=None,
+        route2_memory_bytes_total=None,
+    )
+
+    assert manager._route2_resource_snapshot.sample_stale is True
+    assert adaptive_input.host_cpu_sample_mature is False
+
+
+def test_route2_fresh_resource_snapshot_feeds_adaptive_input(initialized_settings, monkeypatch) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    record = Route2WorkerRecord(
+        worker_id="worker-b",
+        session_id="missing-session",
+        epoch_id="epoch-b",
+        user_id=7,
+        username="bob",
+        auth_session_id=77,
+        media_item_id=502,
+        title="Telemetry Test",
+        playback_mode="full",
+        profile="mobile_1080p",
+        source_kind="local",
+        target_position_seconds=0.0,
+        state="running",
+        assigned_threads=6,
+    )
+    manager._route2_resource_snapshot = _Route2ResourceSnapshot(
+        sampled_at_ts=100.0,
+        sampled_at="2026-01-01T00:00:00+00:00",
+        sample_mature=True,
+        sample_stale=False,
+        host_cpu_total_cores=20,
+        host_cpu_used_cores=7.5,
+        host_cpu_used_percent=0.375,
+        route2_cpu_cores_used_total=5.5,
+        route2_cpu_percent_of_host=27.5,
+        per_user_cpu_cores_used_total={7: 5.5},
+        total_memory_bytes=16 * 1024 * 1024 * 1024,
+        route2_memory_bytes_total=3 * 1024 * 1024 * 1024,
+        route2_memory_percent_of_total=18.75,
+        external_cpu_cores_used_estimate=2.0,
+        external_cpu_percent_estimate=0.1,
+        external_ffmpeg_process_count=1,
+        external_ffmpeg_cpu_cores_estimate=None,
+        external_pressure_level="moderate",
+        missing_metrics=[],
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.time.time", lambda: 101.0)
+
+    adaptive_input = manager._build_route2_adaptive_shadow_input_locked(
+        record,
+        allocated_cpu_cores=18,
+        user_cpu_cores_used_total=None,
+        route2_cpu_cores_used_total=None,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+        host_cpu_pressure=_HostCpuPressureSnapshot(
+            host_cpu_total_cores=None,
+            host_cpu_used_cores=None,
+            host_cpu_used_percent=None,
+            external_cpu_cores_used_estimate=None,
+            external_cpu_percent_estimate=None,
+            external_ffmpeg_process_count=0,
+            external_ffmpeg_cpu_cores_estimate=None,
+            host_cpu_sample_mature=False,
+        ),
+        total_memory_bytes=None,
+        route2_memory_bytes_total=None,
+    )
+
+    assert adaptive_input.host_cpu_sample_mature is True
+    assert adaptive_input.host_cpu_used_cores == pytest.approx(7.5)
+    assert adaptive_input.external_cpu_cores_used_estimate == pytest.approx(2.0)
+    assert adaptive_input.external_ffmpeg_process_count == 1
+    assert adaptive_input.user_cpu_cores_used_total == pytest.approx(5.5)
+    assert adaptive_input.route2_cpu_cores_used_total == pytest.approx(5.5)
+    assert adaptive_input.total_memory_bytes == 16 * 1024 * 1024 * 1024
+    assert adaptive_input.route2_memory_bytes_total == 3 * 1024 * 1024 * 1024
 
 
 def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_settings, monkeypatch) -> None:

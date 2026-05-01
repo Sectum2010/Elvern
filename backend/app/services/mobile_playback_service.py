@@ -178,6 +178,8 @@ from .route2_transcode_strategy import (
 
 logger = logging.getLogger(__name__)
 ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
+ROUTE2_RESOURCE_TELEMETRY_INTERVAL_SECONDS = 1.0
+ROUTE2_RESOURCE_SNAPSHOT_STALE_SECONDS = 5.0
 ADMIN_TERMINATED_BROWSER_PLAYBACK_COOLDOWN_SECONDS = 30.0
 
 
@@ -199,6 +201,43 @@ class _HostCpuPressureSnapshot:
     external_ffmpeg_process_count: int
     external_ffmpeg_cpu_cores_estimate: float | None
     host_cpu_sample_mature: bool
+
+
+@dataclass(slots=True)
+class _Route2WorkerTelemetryReadTarget:
+    worker_id: str
+    pid: int
+
+
+@dataclass(slots=True)
+class _Route2WorkerTelemetryReadResult:
+    worker_id: str
+    pid: int
+    cpu_seconds: float | None
+    memory_bytes: int | None
+
+
+@dataclass(slots=True)
+class _Route2ResourceSnapshot:
+    sampled_at_ts: float
+    sampled_at: str
+    sample_mature: bool
+    sample_stale: bool
+    host_cpu_total_cores: int | None
+    host_cpu_used_cores: float | None
+    host_cpu_used_percent: float | None
+    route2_cpu_cores_used_total: float | None
+    route2_cpu_percent_of_host: float | None
+    per_user_cpu_cores_used_total: dict[int, float]
+    total_memory_bytes: int | None
+    route2_memory_bytes_total: int | None
+    route2_memory_percent_of_total: float | None
+    external_cpu_cores_used_estimate: float | None
+    external_cpu_percent_estimate: float | None
+    external_ffmpeg_process_count: int
+    external_ffmpeg_cpu_cores_estimate: float | None
+    external_pressure_level: str
+    missing_metrics: list[str]
 
 
 class ActivePlaybackWorkerConflictError(Exception):
@@ -327,6 +366,114 @@ def _count_external_ffmpeg_processes(*, proc_root: Path = Path("/proc"), owned_r
     return count
 
 
+def _build_host_cpu_pressure_snapshot(
+    *,
+    previous_sample: _HostCpuJiffySample | None,
+    current_sample: _HostCpuJiffySample | None,
+    route2_cpu_cores_used_total: float | None,
+    external_ffmpeg_process_count: int,
+) -> _HostCpuPressureSnapshot:
+    if current_sample is None or previous_sample is None:
+        return _HostCpuPressureSnapshot(
+            host_cpu_total_cores=current_sample.total_cpu_cores if current_sample is not None else None,
+            host_cpu_used_cores=None,
+            host_cpu_used_percent=None,
+            external_cpu_cores_used_estimate=None,
+            external_cpu_percent_estimate=None,
+            external_ffmpeg_process_count=external_ffmpeg_process_count,
+            external_ffmpeg_cpu_cores_estimate=None,
+            host_cpu_sample_mature=False,
+        )
+
+    delta_total_jiffies = current_sample.total_jiffies - previous_sample.total_jiffies
+    delta_idle_jiffies = current_sample.idle_jiffies - previous_sample.idle_jiffies
+    delta_wall_seconds = current_sample.sample_monotonic - previous_sample.sample_monotonic
+    if delta_total_jiffies <= 0 or delta_idle_jiffies < 0 or delta_wall_seconds <= 0:
+        return _HostCpuPressureSnapshot(
+            host_cpu_total_cores=current_sample.total_cpu_cores,
+            host_cpu_used_cores=None,
+            host_cpu_used_percent=None,
+            external_cpu_cores_used_estimate=None,
+            external_cpu_percent_estimate=None,
+            external_ffmpeg_process_count=external_ffmpeg_process_count,
+            external_ffmpeg_cpu_cores_estimate=None,
+            host_cpu_sample_mature=False,
+        )
+
+    used_jiffies = max(0, delta_total_jiffies - delta_idle_jiffies)
+    used_seconds = used_jiffies / _clock_ticks_per_second()
+    total_cores = max(float(current_sample.total_cpu_cores), 1.0)
+    host_cpu_used_cores = min(total_cores, max(0.0, used_seconds / delta_wall_seconds))
+    host_cpu_used_percent = host_cpu_used_cores / total_cores
+    external_cpu_cores_used_estimate = None
+    external_cpu_percent_estimate = None
+    if route2_cpu_cores_used_total is not None:
+        external_cpu_cores_used_estimate = max(0.0, host_cpu_used_cores - float(route2_cpu_cores_used_total))
+        external_cpu_percent_estimate = external_cpu_cores_used_estimate / total_cores
+
+    return _HostCpuPressureSnapshot(
+        host_cpu_total_cores=current_sample.total_cpu_cores,
+        host_cpu_used_cores=host_cpu_used_cores,
+        host_cpu_used_percent=host_cpu_used_percent,
+        external_cpu_cores_used_estimate=external_cpu_cores_used_estimate,
+        external_cpu_percent_estimate=external_cpu_percent_estimate,
+        external_ffmpeg_process_count=external_ffmpeg_process_count,
+        external_ffmpeg_cpu_cores_estimate=None,
+        host_cpu_sample_mature=True,
+    )
+
+
+def _classify_external_pressure_level(host_cpu_pressure: _HostCpuPressureSnapshot) -> str:
+    if not host_cpu_pressure.host_cpu_sample_mature:
+        return "unknown"
+    external_cores = host_cpu_pressure.external_cpu_cores_used_estimate
+    external_percent = host_cpu_pressure.external_cpu_percent_estimate
+    host_percent = host_cpu_pressure.host_cpu_used_percent
+    if (
+        (external_cores is not None and external_cores >= 4.0)
+        or (external_percent is not None and external_percent >= 0.20)
+        or (
+            host_percent is not None
+            and host_percent >= 0.75
+            and external_cores is not None
+            and external_cores >= 1.0
+        )
+    ):
+        return "high"
+    if (
+        host_cpu_pressure.external_ffmpeg_process_count > 0
+        or (external_cores is not None and external_cores >= 1.0)
+        or (external_percent is not None and external_percent >= 0.08)
+        or (host_percent is not None and host_percent >= 0.60)
+    ):
+        return "moderate"
+    return "none"
+
+
+def _host_cpu_pressure_from_resource_snapshot(snapshot: _Route2ResourceSnapshot | None) -> _HostCpuPressureSnapshot:
+    if snapshot is None:
+        return _HostCpuPressureSnapshot(
+            host_cpu_total_cores=None,
+            host_cpu_used_cores=None,
+            host_cpu_used_percent=None,
+            external_cpu_cores_used_estimate=None,
+            external_cpu_percent_estimate=None,
+            external_ffmpeg_process_count=0,
+            external_ffmpeg_cpu_cores_estimate=None,
+            host_cpu_sample_mature=False,
+        )
+    return _HostCpuPressureSnapshot(
+        host_cpu_total_cores=snapshot.host_cpu_total_cores,
+        host_cpu_used_cores=snapshot.host_cpu_used_cores,
+        host_cpu_used_percent=snapshot.host_cpu_used_percent,
+        external_cpu_cores_used_estimate=snapshot.external_cpu_cores_used_estimate,
+        external_cpu_percent_estimate=snapshot.external_cpu_percent_estimate,
+        external_ffmpeg_process_count=snapshot.external_ffmpeg_process_count,
+        external_ffmpeg_cpu_cores_estimate=snapshot.external_ffmpeg_cpu_cores_estimate,
+        host_cpu_sample_mature=bool(snapshot.sample_mature and not snapshot.sample_stale),
+    )
+
+
 def _read_process_cpu_seconds(pid: int) -> float | None:
     if not isinstance(pid, int) or pid <= 0:
         return None
@@ -433,9 +580,11 @@ class MobilePlaybackManager:
         self._workers: dict[str, str] = {}
         self._route2_workers: dict[str, Route2WorkerRecord] = {}
         self._last_host_cpu_jiffy_sample: _HostCpuJiffySample | None = None
+        self._route2_resource_snapshot: _Route2ResourceSnapshot | None = None
         self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
         self._manager_thread: threading.Thread | None = None
+        self._route2_resource_telemetry_thread: threading.Thread | None = None
         self._session_root = self.settings.transcode_dir / "mobile_sessions"
         self._cache_root = self.settings.transcode_dir / "mobile_cache"
         self._route2_root = self.settings.transcode_dir / "browser_playback_route2"
@@ -454,6 +603,13 @@ class MobilePlaybackManager:
                 name="elvern-mobile-playback-manager",
             )
             self._manager_thread.start()
+        if self._route2_resource_telemetry_thread is None:
+            self._route2_resource_telemetry_thread = threading.Thread(
+                target=self._route2_resource_telemetry_loop,
+                daemon=True,
+                name="elvern-route2-resource-telemetry",
+            )
+            self._route2_resource_telemetry_thread.start()
         logger.info(
             "Mobile playback manager ready: root=%s cache=%s workers=%s",
             self._session_root,
@@ -465,6 +621,8 @@ class MobilePlaybackManager:
         self._manager_stop.set()
         if self._manager_thread and self._manager_thread.is_alive():
             self._manager_thread.join(timeout=2)
+        if self._route2_resource_telemetry_thread and self._route2_resource_telemetry_thread.is_alive():
+            self._route2_resource_telemetry_thread.join(timeout=2)
         with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
@@ -473,7 +631,10 @@ class MobilePlaybackManager:
             self._workers.clear()
             self._route2_workers.clear()
             self._last_host_cpu_jiffy_sample = None
+            self._route2_resource_snapshot = None
             self._browser_playback_cooldowns.clear()
+            self._manager_thread = None
+            self._route2_resource_telemetry_thread = None
         for session in sessions:
             self._terminate_session(session, remove_session_dir=False)
 
@@ -1601,40 +1762,19 @@ class MobilePlaybackManager:
         record.process = None
         self._clear_route2_worker_telemetry_locked(record, sampled_at=sampled_at)
 
-    def _sample_route2_worker_telemetry_locked(
+    def _apply_route2_worker_telemetry_sample_locked(
         self,
         record: Route2WorkerRecord,
         *,
+        pid: int,
+        cpu_seconds: float | None,
+        memory_bytes: int | None,
         total_cpu_cores: int,
         total_memory_bytes: int | None,
         sample_monotonic: float,
-        sample_wall_ts: float,
         sampled_at: str,
     ) -> None:
-        process = record.process
-        pid = record.pid or (process.pid if process is not None else None)
-        if process is None or pid is None:
-            started_reference = record.started_at or record.created_at
-            if (
-                record.state == "running"
-                and started_reference
-                and (sample_wall_ts - self._parse_iso_ts(started_reference)) <= ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS
-            ):
-                self._clear_route2_worker_telemetry_locked(record, sampled_at=sampled_at)
-                return
-            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
-            return
         record.pid = pid
-        if process.poll() is not None:
-            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
-            return
-
-        cpu_seconds = _read_process_cpu_seconds(pid)
-        memory_bytes = _read_process_rss_bytes(pid)
-        if cpu_seconds is None and process.poll() is not None:
-            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
-            return
-
         record.process_exists = True
         record.last_sampled_at = sampled_at
         record.memory_bytes = memory_bytes
@@ -1670,6 +1810,249 @@ class MobilePlaybackManager:
         record.last_cpu_sample_monotonic = sample_monotonic
         record.last_process_cpu_seconds = cpu_seconds
 
+    def _sample_route2_worker_telemetry_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        total_cpu_cores: int,
+        total_memory_bytes: int | None,
+        sample_monotonic: float,
+        sample_wall_ts: float,
+        sampled_at: str,
+    ) -> None:
+        process = record.process
+        pid = record.pid or (process.pid if process is not None else None)
+        if process is None or pid is None:
+            started_reference = record.started_at or record.created_at
+            if (
+                record.state == "running"
+                and started_reference
+                and (sample_wall_ts - self._parse_iso_ts(started_reference)) <= ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS
+            ):
+                self._clear_route2_worker_telemetry_locked(record, sampled_at=sampled_at)
+                return
+            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+            return
+        record.pid = pid
+        if process.poll() is not None:
+            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+            return
+
+        cpu_seconds = _read_process_cpu_seconds(pid)
+        memory_bytes = _read_process_rss_bytes(pid)
+        if cpu_seconds is None and process.poll() is not None:
+            self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+            return
+
+        self._apply_route2_worker_telemetry_sample_locked(
+            record,
+            pid=pid,
+            cpu_seconds=cpu_seconds,
+            memory_bytes=memory_bytes,
+            total_cpu_cores=total_cpu_cores,
+            total_memory_bytes=total_memory_bytes,
+            sample_monotonic=sample_monotonic,
+            sampled_at=sampled_at,
+        )
+
+    def _collect_route2_worker_telemetry_targets_locked(
+        self,
+    ) -> tuple[list[_Route2WorkerTelemetryReadTarget], set[int]]:
+        targets: list[_Route2WorkerTelemetryReadTarget] = []
+        owned_route2_pids: set[int] = set()
+        for record in self._route2_workers.values():
+            process = record.process
+            pid = record.pid or (process.pid if process is not None else None)
+            if isinstance(pid, int) and pid > 0:
+                owned_route2_pids.add(pid)
+            if record.state != "running" or not isinstance(pid, int) or pid <= 0:
+                continue
+            targets.append(
+                _Route2WorkerTelemetryReadTarget(
+                    worker_id=record.worker_id,
+                    pid=pid,
+                )
+            )
+        return targets, owned_route2_pids
+
+    def _read_route2_worker_telemetry_targets(
+        self,
+        targets: list[_Route2WorkerTelemetryReadTarget],
+    ) -> dict[str, _Route2WorkerTelemetryReadResult]:
+        results: dict[str, _Route2WorkerTelemetryReadResult] = {}
+        for target in targets:
+            results[target.worker_id] = _Route2WorkerTelemetryReadResult(
+                worker_id=target.worker_id,
+                pid=target.pid,
+                cpu_seconds=_read_process_cpu_seconds(target.pid),
+                memory_bytes=_read_process_rss_bytes(target.pid),
+            )
+        return results
+
+    def _route2_cpu_total_for_host_pressure_locked(self) -> float | None:
+        running_records = [record for record in self._route2_workers.values() if record.state == "running"]
+        if not running_records:
+            return 0.0
+        route2_cpu_cores_used_total = 0.0
+        any_cpu_sampled = False
+        for record in running_records:
+            if record.cpu_cores_used is None:
+                continue
+            route2_cpu_cores_used_total += record.cpu_cores_used
+            any_cpu_sampled = True
+        return route2_cpu_cores_used_total if any_cpu_sampled else None
+
+    def _store_route2_resource_snapshot_locked(
+        self,
+        *,
+        sampled_at_ts: float,
+        sampled_at: str,
+        total_memory_bytes: int | None,
+        host_cpu_pressure: _HostCpuPressureSnapshot,
+    ) -> _Route2ResourceSnapshot:
+        running_records = [record for record in self._route2_workers.values() if record.state == "running"]
+        route2_cpu_cores_used_total = 0.0
+        route2_memory_bytes_total = 0
+        per_user_cpu_cores_used_total: dict[int, float] = {}
+        any_cpu_sampled = False
+        any_memory_sampled = False
+        for record in running_records:
+            if record.cpu_cores_used is not None:
+                route2_cpu_cores_used_total += record.cpu_cores_used
+                per_user_cpu_cores_used_total[record.user_id] = (
+                    per_user_cpu_cores_used_total.get(record.user_id, 0.0) + record.cpu_cores_used
+                )
+                any_cpu_sampled = True
+            if record.memory_bytes is not None:
+                route2_memory_bytes_total += record.memory_bytes
+                any_memory_sampled = True
+
+        if any_cpu_sampled:
+            route2_cpu_total: float | None = route2_cpu_cores_used_total
+        elif running_records:
+            route2_cpu_total = None
+        else:
+            route2_cpu_total = 0.0
+
+        if any_memory_sampled:
+            route2_memory_total: int | None = route2_memory_bytes_total
+        elif running_records:
+            route2_memory_total = None
+        else:
+            route2_memory_total = 0
+
+        missing_metrics: list[str] = []
+        if not host_cpu_pressure.host_cpu_sample_mature:
+            missing_metrics.append("host_cpu_sample_mature")
+        if running_records and route2_cpu_total is None:
+            missing_metrics.append("route2_cpu_cores_used_total")
+        if total_memory_bytes is None:
+            missing_metrics.append("total_memory_bytes")
+        if running_records and route2_memory_total is None:
+            missing_metrics.append("route2_memory_bytes_total")
+
+        host_total_cores = host_cpu_pressure.host_cpu_total_cores
+        snapshot = _Route2ResourceSnapshot(
+            sampled_at_ts=sampled_at_ts,
+            sampled_at=sampled_at,
+            sample_mature=host_cpu_pressure.host_cpu_sample_mature,
+            sample_stale=False,
+            host_cpu_total_cores=host_total_cores,
+            host_cpu_used_cores=host_cpu_pressure.host_cpu_used_cores,
+            host_cpu_used_percent=host_cpu_pressure.host_cpu_used_percent,
+            route2_cpu_cores_used_total=route2_cpu_total,
+            route2_cpu_percent_of_host=(
+                (route2_cpu_total / host_total_cores) * 100
+                if route2_cpu_total is not None and host_total_cores
+                else None
+            ),
+            per_user_cpu_cores_used_total=per_user_cpu_cores_used_total,
+            total_memory_bytes=total_memory_bytes,
+            route2_memory_bytes_total=route2_memory_total,
+            route2_memory_percent_of_total=(
+                (route2_memory_total / total_memory_bytes) * 100
+                if route2_memory_total is not None and total_memory_bytes
+                else None
+            ),
+            external_cpu_cores_used_estimate=host_cpu_pressure.external_cpu_cores_used_estimate,
+            external_cpu_percent_estimate=host_cpu_pressure.external_cpu_percent_estimate,
+            external_ffmpeg_process_count=host_cpu_pressure.external_ffmpeg_process_count,
+            external_ffmpeg_cpu_cores_estimate=host_cpu_pressure.external_ffmpeg_cpu_cores_estimate,
+            external_pressure_level=_classify_external_pressure_level(host_cpu_pressure),
+            missing_metrics=missing_metrics,
+        )
+        self._route2_resource_snapshot = snapshot
+        return snapshot
+
+    def _latest_route2_resource_snapshot_locked(self, *, now_ts: float | None = None) -> _Route2ResourceSnapshot | None:
+        snapshot = self._route2_resource_snapshot
+        if snapshot is None:
+            return None
+        reference_ts = time.time() if now_ts is None else now_ts
+        snapshot.sample_stale = (reference_ts - snapshot.sampled_at_ts) > ROUTE2_RESOURCE_SNAPSHOT_STALE_SECONDS
+        return snapshot
+
+    def _sample_route2_resource_telemetry(self) -> None:
+        sampled_at_ts = time.time()
+        sample_monotonic = time.monotonic()
+        sampled_at = utcnow_iso()
+        total_cpu_cores = _detect_total_cpu_cores()
+        total_memory_bytes = _read_total_memory_bytes()
+        with self._lock:
+            targets, owned_route2_pids = self._collect_route2_worker_telemetry_targets_locked()
+
+        worker_results = self._read_route2_worker_telemetry_targets(targets)
+        current_host_sample = _read_host_cpu_jiffy_sample(sample_monotonic=sample_monotonic)
+        external_ffmpeg_process_count = _count_external_ffmpeg_processes(owned_route2_pids=owned_route2_pids)
+
+        with self._lock:
+            for worker_id, result in worker_results.items():
+                record = self._route2_workers.get(worker_id)
+                if record is None or record.state != "running" or record.pid != result.pid:
+                    continue
+                process = record.process
+                if process is not None and process.poll() is not None:
+                    self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+                    continue
+                if result.cpu_seconds is None and process is not None and process.poll() is not None:
+                    self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
+                    continue
+                self._apply_route2_worker_telemetry_sample_locked(
+                    record,
+                    pid=result.pid,
+                    cpu_seconds=result.cpu_seconds,
+                    memory_bytes=result.memory_bytes,
+                    total_cpu_cores=total_cpu_cores,
+                    total_memory_bytes=total_memory_bytes,
+                    sample_monotonic=sample_monotonic,
+                    sampled_at=sampled_at,
+                )
+
+            previous_host_sample = self._last_host_cpu_jiffy_sample
+            if current_host_sample is not None:
+                self._last_host_cpu_jiffy_sample = current_host_sample
+            host_cpu_pressure = _build_host_cpu_pressure_snapshot(
+                previous_sample=previous_host_sample,
+                current_sample=current_host_sample,
+                route2_cpu_cores_used_total=self._route2_cpu_total_for_host_pressure_locked(),
+                external_ffmpeg_process_count=external_ffmpeg_process_count,
+            )
+            self._store_route2_resource_snapshot_locked(
+                sampled_at_ts=sampled_at_ts,
+                sampled_at=sampled_at,
+                total_memory_bytes=total_memory_bytes,
+                host_cpu_pressure=host_cpu_pressure,
+            )
+
+    def _route2_resource_telemetry_loop(self) -> None:
+        while not self._manager_stop.is_set():
+            try:
+                self._sample_route2_resource_telemetry()
+            except Exception:
+                logger.debug("Route2 resource telemetry sample failed", exc_info=True)
+            if self._manager_stop.wait(ROUTE2_RESOURCE_TELEMETRY_INTERVAL_SECONDS):
+                break
+
     def _sample_host_cpu_pressure_locked(
         self,
         *,
@@ -1682,55 +2065,11 @@ class MobilePlaybackManager:
         previous_sample = self._last_host_cpu_jiffy_sample
         if current_sample is not None:
             self._last_host_cpu_jiffy_sample = current_sample
-        if current_sample is None or previous_sample is None:
-            return _HostCpuPressureSnapshot(
-                host_cpu_total_cores=current_sample.total_cpu_cores if current_sample is not None else None,
-                host_cpu_used_cores=None,
-                host_cpu_used_percent=None,
-                external_cpu_cores_used_estimate=None,
-                external_cpu_percent_estimate=None,
-                external_ffmpeg_process_count=external_ffmpeg_process_count,
-                external_ffmpeg_cpu_cores_estimate=None,
-                host_cpu_sample_mature=False,
-            )
-
-        delta_total_jiffies = current_sample.total_jiffies - previous_sample.total_jiffies
-        delta_idle_jiffies = current_sample.idle_jiffies - previous_sample.idle_jiffies
-        delta_wall_seconds = current_sample.sample_monotonic - previous_sample.sample_monotonic
-        if delta_total_jiffies <= 0 or delta_idle_jiffies < 0 or delta_wall_seconds <= 0:
-            return _HostCpuPressureSnapshot(
-                host_cpu_total_cores=current_sample.total_cpu_cores,
-                host_cpu_used_cores=None,
-                host_cpu_used_percent=None,
-                external_cpu_cores_used_estimate=None,
-                external_cpu_percent_estimate=None,
-                external_ffmpeg_process_count=external_ffmpeg_process_count,
-                external_ffmpeg_cpu_cores_estimate=None,
-                host_cpu_sample_mature=False,
-            )
-
-        used_jiffies = max(0, delta_total_jiffies - delta_idle_jiffies)
-        used_seconds = used_jiffies / _clock_ticks_per_second()
-        host_cpu_used_cores = min(
-            float(current_sample.total_cpu_cores),
-            max(0.0, used_seconds / delta_wall_seconds),
-        )
-        host_cpu_used_percent = host_cpu_used_cores / max(float(current_sample.total_cpu_cores), 1.0)
-        external_cpu_cores_used_estimate = None
-        external_cpu_percent_estimate = None
-        if route2_cpu_cores_used_total is not None:
-            external_cpu_cores_used_estimate = max(0.0, host_cpu_used_cores - float(route2_cpu_cores_used_total))
-            external_cpu_percent_estimate = external_cpu_cores_used_estimate / max(float(current_sample.total_cpu_cores), 1.0)
-
-        return _HostCpuPressureSnapshot(
-            host_cpu_total_cores=current_sample.total_cpu_cores,
-            host_cpu_used_cores=host_cpu_used_cores,
-            host_cpu_used_percent=host_cpu_used_percent,
-            external_cpu_cores_used_estimate=external_cpu_cores_used_estimate,
-            external_cpu_percent_estimate=external_cpu_percent_estimate,
+        return _build_host_cpu_pressure_snapshot(
+            previous_sample=previous_sample,
+            current_sample=current_sample,
+            route2_cpu_cores_used_total=route2_cpu_cores_used_total,
             external_ffmpeg_process_count=external_ffmpeg_process_count,
-            external_ffmpeg_cpu_cores_estimate=None,
-            host_cpu_sample_mature=True,
         )
 
     def _route2_budget_summary_locked(self) -> dict[str, object]:
@@ -1780,6 +2119,19 @@ class MobilePlaybackManager:
         total_memory_bytes: int | None,
         route2_memory_bytes_total: int | None,
     ) -> Route2AdaptiveShadowInput:
+        resource_snapshot = self._latest_route2_resource_snapshot_locked()
+        if resource_snapshot is not None:
+            host_cpu_pressure = _host_cpu_pressure_from_resource_snapshot(resource_snapshot)
+            if not resource_snapshot.sample_stale:
+                if record.user_id in resource_snapshot.per_user_cpu_cores_used_total:
+                    user_cpu_cores_used_total = resource_snapshot.per_user_cpu_cores_used_total[record.user_id]
+                if resource_snapshot.route2_cpu_cores_used_total is not None:
+                    route2_cpu_cores_used_total = resource_snapshot.route2_cpu_cores_used_total
+                if resource_snapshot.total_memory_bytes is not None:
+                    total_memory_bytes = resource_snapshot.total_memory_bytes
+                if resource_snapshot.route2_memory_bytes_total is not None:
+                    route2_memory_bytes_total = resource_snapshot.route2_memory_bytes_total
+
         session = self._sessions.get(record.session_id)
         if session is None:
             return Route2AdaptiveShadowInput(
@@ -2136,6 +2488,14 @@ class MobilePlaybackManager:
                 owned_route2_pids=owned_route2_pids,
                 sample_monotonic=sample_monotonic,
             )
+            resource_snapshot = self._store_route2_resource_snapshot_locked(
+                sampled_at_ts=now_ts,
+                sampled_at=sampled_at,
+                total_memory_bytes=total_memory_bytes,
+                host_cpu_pressure=host_cpu_pressure,
+            )
+            resource_snapshot = self._latest_route2_resource_snapshot_locked(now_ts=now_ts)
+            host_cpu_pressure = _host_cpu_pressure_from_resource_snapshot(resource_snapshot)
             for record in sorted(self._route2_workers.values(), key=lambda value: value.worker_id):
                 payload = payloads_by_worker_id.get(record.worker_id)
                 if payload is None:
@@ -2234,6 +2594,21 @@ class MobilePlaybackManager:
                     else None
                 ),
                 "host_cpu_sample_mature": host_cpu_pressure.host_cpu_sample_mature,
+                "resource_sample_age_seconds": (
+                    round(now_ts - resource_snapshot.sampled_at_ts, 3)
+                    if resource_snapshot is not None
+                    else None
+                ),
+                "resource_sample_mature": (
+                    bool(resource_snapshot.sample_mature and not resource_snapshot.sample_stale)
+                    if resource_snapshot is not None
+                    else False
+                ),
+                "resource_sample_stale": resource_snapshot.sample_stale if resource_snapshot is not None else True,
+                "external_pressure_level": (
+                    resource_snapshot.external_pressure_level if resource_snapshot is not None else "unknown"
+                ),
+                "resource_missing_metrics": resource_snapshot.missing_metrics if resource_snapshot is not None else ["resource_snapshot"],
                 "total_memory_bytes": total_memory_bytes,
                 "route2_memory_bytes": route2_memory_bytes if any_memory_sampled else None,
                 "route2_memory_percent_of_total": (

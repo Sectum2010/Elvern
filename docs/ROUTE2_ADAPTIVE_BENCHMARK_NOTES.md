@@ -466,3 +466,22 @@ Shadow promotion policy:
 - No external pressure lets the benchmark-informed ladder operate normally: `4/5 -> 6`, `6/7/8 -> 9`, and strict local-only `9/10/11 -> 12`.
 
 This remains shadow-only. Future real adaptive control must add continuous host telemetry and real backoff/queue behavior before enabling actual thread changes.
+
+## Phase 1H-1 Continuous Resource Telemetry Loop
+
+Phase 1H-1 adds a continuous Route2 resource telemetry loop, but real adaptive thread control remains disabled. Real `assigned_threads`, worker spawn behavior, ffmpeg command paths, playback behavior, and production cache behavior are unchanged.
+
+The manager now samples Route2 resource state independently of admin/status polling:
+
+- A background thread named `elvern-route2-resource-telemetry` starts with `MobilePlaybackManager.start()`.
+- The loop samples once per second.
+- The loop snapshots Route2 worker PIDs under the manager lock, releases the lock for `/proc` reads, then reacquires the lock to store results.
+- Worker CPU/RAM still uses `/proc/<pid>/stat` and `/proc/<pid>/status`/`statm`.
+- Host CPU still uses aggregate `/proc/stat` samples and requires two samples before host pressure is mature.
+- External `ffmpeg` / `ffprobe` detection remains read-only and uses `/proc/<pid>/comm` only, excluding known Route2 worker PIDs.
+
+The internal resource snapshot includes sample time, maturity/staleness, host CPU usage, Route2 CPU totals, per-user Route2 CPU totals, Route2 memory totals, external CPU estimate, external ffmpeg count, external pressure level, and missing metrics. Snapshots older than five seconds are stale and must be treated conservatively by shadow logic.
+
+Status/admin calls may still refresh telemetry while the loop is proving out, but adaptive shadow input now prefers the latest resource snapshot when it is fresh. Missing or stale telemetry is not interpreted as healthy host capacity.
+
+This is still a prerequisite step only. Real adaptive control remains blocked until continuous telemetry is live-validated, failure behavior is proven safe, and future feature flags decide where real adaptive spawn may hook in.
