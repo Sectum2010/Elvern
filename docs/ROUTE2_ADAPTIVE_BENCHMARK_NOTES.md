@@ -413,3 +413,56 @@ CPU and memory:
 - 10 is still reasonable as a conservative high-performance ceiling, but this session suggests the useful local step is really the `8 -> 9` tier, while `9/10/11` are mostly equivalent.
 - 12 showed repeatable-looking benefit across all four local movies in Session 1, but it should remain experimental until Session 2 confirms the pattern.
 - Odd counts matter: `9` was consistently important; `5`, `7`, and `11` mostly sat inside plateaus.
+
+## Benchmark-Informed Shadow Policy After Local Full Matrix Session 1
+
+The active benchmark phase is paused here. Do not continue chasing the Avatar Google Drive quota gap or run more Route2 thread benchmarks unless explicitly requested.
+
+This policy note is for the shadow adaptive recommendation model only. Real playback behavior, real `assigned_threads`, real worker spawn behavior, ffmpeg command paths, and production Route2 cache behavior remain unchanged.
+
+### Shadow Ladder
+
+The benchmark-informed shadow ladder is now:
+
+| Tier | Role |
+|---:|---|
+| `4` | Conservative baseline / current real default behavior |
+| `6` | First CPU-bound promotion target |
+| `9` | Second useful CPU-bound tier |
+| `12` | Strict experimental heavy tier |
+
+`8` and `10` are not preferred promotion targets. Local Full Matrix Session 1 repeatedly showed `6-8` and `9-11` plateau behavior, while `5 -> 6`, `8 -> 9`, and `11 -> 12` were the meaningful jumps.
+
+### Guardrails
+
+- Future real adaptive control should not be enabled yet.
+- Shadow promotion must still require adequate samples, low supply or insufficient runway, CPU-active worker evidence, user/global CPU headroom, RAM guard pass, and no source/client/storage/provider/bootstrap blockers.
+- Provider/auth/quota failures, including Google Drive `403`, `429`, auth/token failures, and quota errors, override CPU-bound promotion.
+- Cloud 12-thread promotion remains blocked by default. Cloud 12 is still experimental until more quota-clean evidence exists and an explicit future flag or policy enables it.
+- Real `route2_max_worker_threads` remains separate from the shadow adaptive ceiling. The shadow model may recommend beyond the real conservative cap, but it must say that real worker spawn remains separately capped.
+
+### Future Real Adapter Note
+
+Future real adaptive spawn may consider starting at `6` for single-user Route2 workloads, but only after continuous telemetry, active-user accounting, source/provider guards, and rollback behavior are mature. The current implementation may surface that single-user information in shadow reasons, but it must not change actual `assigned_threads`.
+
+## External Host Pressure Guard
+
+Non-Elvern work has priority over Elvern Route2 speed. `ELVERN_ROUTE2_CPU_UPBOUND_PERCENT` is only Elvern's internal safety cap. For example, `90%` on a 20-core host means Route2 must not exceed about 18 cores internally, but it is not unconditional permission to consume those cores when the host is already busy with non-Elvern work.
+
+The shadow adaptive controller now treats external host pressure as an additional conservative guard:
+
+- Host CPU pressure is estimated from Linux `/proc/stat` aggregate CPU samples.
+- Route2 CPU usage is subtracted from host CPU usage to estimate external/non-Elvern CPU pressure.
+- External `ffmpeg` / `ffprobe` processes are detected read-only from `/proc/<pid>/comm`, excluding known Route2 worker PIDs.
+- Full command lines are not exposed or logged for this detector.
+- Elvern must not kill, pause, renice, throttle, or otherwise modify non-Elvern processes.
+
+Shadow promotion policy:
+
+- Missing or immature host CPU samples block higher-tier promotions. A first-tier `6` recommendation may still be allowed only when CPU-bound evidence is strong.
+- High external CPU pressure blocks all Route2 thread promotion.
+- External ffmpeg blocks `12` and blocks aggressive `9` promotion by default.
+- Moderate external pressure limits Route2 to the first promotion tier.
+- No external pressure lets the benchmark-informed ladder operate normally: `4/5 -> 6`, `6/7/8 -> 9`, and strict local-only `9/10/11 -> 12`.
+
+This remains shadow-only. Future real adaptive control must add continuous host telemetry and real backoff/queue behavior before enabling actual thread changes.

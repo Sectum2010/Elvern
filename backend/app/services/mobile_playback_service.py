@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -180,6 +181,26 @@ ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
 ADMIN_TERMINATED_BROWSER_PLAYBACK_COOLDOWN_SECONDS = 30.0
 
 
+@dataclass(slots=True)
+class _HostCpuJiffySample:
+    total_jiffies: int
+    idle_jiffies: int
+    total_cpu_cores: int
+    sample_monotonic: float
+
+
+@dataclass(slots=True)
+class _HostCpuPressureSnapshot:
+    host_cpu_total_cores: int | None
+    host_cpu_used_cores: float | None
+    host_cpu_used_percent: float | None
+    external_cpu_cores_used_estimate: float | None
+    external_cpu_percent_estimate: float | None
+    external_ffmpeg_process_count: int
+    external_ffmpeg_cpu_cores_estimate: float | None
+    host_cpu_sample_mature: bool
+
+
 class ActivePlaybackWorkerConflictError(Exception):
     def __init__(self, detail: dict[str, object]) -> None:
         self.detail = dict(detail)
@@ -241,6 +262,69 @@ def _parse_proc_stat_cpu_seconds(payload: str) -> float | None:
     except ValueError:
         return None
     return (utime_ticks + stime_ticks) / _clock_ticks_per_second()
+
+
+def _parse_proc_stat_host_cpu_jiffies(payload: str) -> tuple[int, int] | None:
+    for raw_line in str(payload or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("cpu "):
+            continue
+        fields = line.split()[1:]
+        if len(fields) < 4:
+            return None
+        try:
+            values = [max(0, int(value)) for value in fields]
+        except ValueError:
+            return None
+        total_jiffies = sum(values)
+        idle_jiffies = values[3] + (values[4] if len(values) > 4 else 0)
+        return total_jiffies, idle_jiffies
+    return None
+
+
+def _read_host_cpu_jiffy_sample(*, sample_monotonic: float) -> _HostCpuJiffySample | None:
+    stat_path = Path("/proc/stat")
+    try:
+        payload = stat_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    parsed = _parse_proc_stat_host_cpu_jiffies(payload)
+    if parsed is None:
+        return None
+    total_jiffies, idle_jiffies = parsed
+    return _HostCpuJiffySample(
+        total_jiffies=total_jiffies,
+        idle_jiffies=idle_jiffies,
+        total_cpu_cores=_detect_total_cpu_cores(),
+        sample_monotonic=sample_monotonic,
+    )
+
+
+def _proc_comm_is_ffmpeg_like(comm: str | None) -> bool:
+    normalized = str(comm or "").strip().lower()
+    return normalized in {"ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe"}
+
+
+def _count_external_ffmpeg_processes(*, proc_root: Path = Path("/proc"), owned_route2_pids: set[int] | None = None) -> int:
+    owned_pids = {int(pid) for pid in (owned_route2_pids or set()) if int(pid) > 0}
+    count = 0
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in owned_pids:
+            continue
+        try:
+            comm = (entry / "comm").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _proc_comm_is_ffmpeg_like(comm):
+            count += 1
+    return count
 
 
 def _read_process_cpu_seconds(pid: int) -> float | None:
@@ -348,6 +432,7 @@ class MobilePlaybackManager:
         self._cache_states: dict[str, CacheState] = {}
         self._workers: dict[str, str] = {}
         self._route2_workers: dict[str, Route2WorkerRecord] = {}
+        self._last_host_cpu_jiffy_sample: _HostCpuJiffySample | None = None
         self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
         self._manager_thread: threading.Thread | None = None
@@ -387,6 +472,7 @@ class MobilePlaybackManager:
             self._route2_session_ids_by_user.clear()
             self._workers.clear()
             self._route2_workers.clear()
+            self._last_host_cpu_jiffy_sample = None
             self._browser_playback_cooldowns.clear()
         for session in sessions:
             self._terminate_session(session, remove_session_dir=False)
@@ -1584,6 +1670,69 @@ class MobilePlaybackManager:
         record.last_cpu_sample_monotonic = sample_monotonic
         record.last_process_cpu_seconds = cpu_seconds
 
+    def _sample_host_cpu_pressure_locked(
+        self,
+        *,
+        route2_cpu_cores_used_total: float | None,
+        owned_route2_pids: set[int],
+        sample_monotonic: float,
+    ) -> _HostCpuPressureSnapshot:
+        external_ffmpeg_process_count = _count_external_ffmpeg_processes(owned_route2_pids=owned_route2_pids)
+        current_sample = _read_host_cpu_jiffy_sample(sample_monotonic=sample_monotonic)
+        previous_sample = self._last_host_cpu_jiffy_sample
+        if current_sample is not None:
+            self._last_host_cpu_jiffy_sample = current_sample
+        if current_sample is None or previous_sample is None:
+            return _HostCpuPressureSnapshot(
+                host_cpu_total_cores=current_sample.total_cpu_cores if current_sample is not None else None,
+                host_cpu_used_cores=None,
+                host_cpu_used_percent=None,
+                external_cpu_cores_used_estimate=None,
+                external_cpu_percent_estimate=None,
+                external_ffmpeg_process_count=external_ffmpeg_process_count,
+                external_ffmpeg_cpu_cores_estimate=None,
+                host_cpu_sample_mature=False,
+            )
+
+        delta_total_jiffies = current_sample.total_jiffies - previous_sample.total_jiffies
+        delta_idle_jiffies = current_sample.idle_jiffies - previous_sample.idle_jiffies
+        delta_wall_seconds = current_sample.sample_monotonic - previous_sample.sample_monotonic
+        if delta_total_jiffies <= 0 or delta_idle_jiffies < 0 or delta_wall_seconds <= 0:
+            return _HostCpuPressureSnapshot(
+                host_cpu_total_cores=current_sample.total_cpu_cores,
+                host_cpu_used_cores=None,
+                host_cpu_used_percent=None,
+                external_cpu_cores_used_estimate=None,
+                external_cpu_percent_estimate=None,
+                external_ffmpeg_process_count=external_ffmpeg_process_count,
+                external_ffmpeg_cpu_cores_estimate=None,
+                host_cpu_sample_mature=False,
+            )
+
+        used_jiffies = max(0, delta_total_jiffies - delta_idle_jiffies)
+        used_seconds = used_jiffies / _clock_ticks_per_second()
+        host_cpu_used_cores = min(
+            float(current_sample.total_cpu_cores),
+            max(0.0, used_seconds / delta_wall_seconds),
+        )
+        host_cpu_used_percent = host_cpu_used_cores / max(float(current_sample.total_cpu_cores), 1.0)
+        external_cpu_cores_used_estimate = None
+        external_cpu_percent_estimate = None
+        if route2_cpu_cores_used_total is not None:
+            external_cpu_cores_used_estimate = max(0.0, host_cpu_used_cores - float(route2_cpu_cores_used_total))
+            external_cpu_percent_estimate = external_cpu_cores_used_estimate / max(float(current_sample.total_cpu_cores), 1.0)
+
+        return _HostCpuPressureSnapshot(
+            host_cpu_total_cores=current_sample.total_cpu_cores,
+            host_cpu_used_cores=host_cpu_used_cores,
+            host_cpu_used_percent=host_cpu_used_percent,
+            external_cpu_cores_used_estimate=external_cpu_cores_used_estimate,
+            external_cpu_percent_estimate=external_cpu_percent_estimate,
+            external_ffmpeg_process_count=external_ffmpeg_process_count,
+            external_ffmpeg_cpu_cores_estimate=None,
+            host_cpu_sample_mature=True,
+        )
+
     def _route2_budget_summary_locked(self) -> dict[str, object]:
         total_cpu_cores = _detect_total_cpu_cores()
         total_route2_budget_cores = _route2_cpu_upbound_cores_for_total(
@@ -1626,6 +1775,8 @@ class MobilePlaybackManager:
         user_cpu_cores_used_total: float | None,
         route2_cpu_cores_used_total: float | None,
         route2_cpu_upbound_cores: int,
+        active_route2_user_count: int | None,
+        host_cpu_pressure: _HostCpuPressureSnapshot,
         total_memory_bytes: int | None,
         route2_memory_bytes_total: int | None,
     ) -> Route2AdaptiveShadowInput:
@@ -1645,6 +1796,15 @@ class MobilePlaybackManager:
                 user_cpu_cores_used_total=user_cpu_cores_used_total,
                 route2_cpu_upbound_cores=route2_cpu_upbound_cores,
                 route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+                active_route2_user_count=active_route2_user_count,
+                host_cpu_total_cores=host_cpu_pressure.host_cpu_total_cores,
+                host_cpu_used_cores=host_cpu_pressure.host_cpu_used_cores,
+                host_cpu_used_percent=host_cpu_pressure.host_cpu_used_percent,
+                external_cpu_cores_used_estimate=host_cpu_pressure.external_cpu_cores_used_estimate,
+                external_cpu_percent_estimate=host_cpu_pressure.external_cpu_percent_estimate,
+                external_ffmpeg_process_count=host_cpu_pressure.external_ffmpeg_process_count,
+                external_ffmpeg_cpu_cores_estimate=host_cpu_pressure.external_ffmpeg_cpu_cores_estimate,
+                host_cpu_sample_mature=host_cpu_pressure.host_cpu_sample_mature,
                 memory_bytes=record.memory_bytes,
                 total_memory_bytes=total_memory_bytes,
                 route2_memory_bytes_total=route2_memory_bytes_total,
@@ -1669,6 +1829,15 @@ class MobilePlaybackManager:
                 user_cpu_cores_used_total=user_cpu_cores_used_total,
                 route2_cpu_upbound_cores=route2_cpu_upbound_cores,
                 route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+                active_route2_user_count=active_route2_user_count,
+                host_cpu_total_cores=host_cpu_pressure.host_cpu_total_cores,
+                host_cpu_used_cores=host_cpu_pressure.host_cpu_used_cores,
+                host_cpu_used_percent=host_cpu_pressure.host_cpu_used_percent,
+                external_cpu_cores_used_estimate=host_cpu_pressure.external_cpu_cores_used_estimate,
+                external_cpu_percent_estimate=host_cpu_pressure.external_cpu_percent_estimate,
+                external_ffmpeg_process_count=host_cpu_pressure.external_ffmpeg_process_count,
+                external_ffmpeg_cpu_cores_estimate=host_cpu_pressure.external_ffmpeg_cpu_cores_estimate,
+                host_cpu_sample_mature=host_cpu_pressure.host_cpu_sample_mature,
                 memory_bytes=record.memory_bytes,
                 total_memory_bytes=total_memory_bytes,
                 route2_memory_bytes_total=route2_memory_bytes_total,
@@ -1702,6 +1871,15 @@ class MobilePlaybackManager:
             user_cpu_cores_used_total=user_cpu_cores_used_total,
             route2_cpu_upbound_cores=route2_cpu_upbound_cores,
             route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+            active_route2_user_count=active_route2_user_count,
+            host_cpu_total_cores=host_cpu_pressure.host_cpu_total_cores,
+            host_cpu_used_cores=host_cpu_pressure.host_cpu_used_cores,
+            host_cpu_used_percent=host_cpu_pressure.host_cpu_used_percent,
+            external_cpu_cores_used_estimate=host_cpu_pressure.external_cpu_cores_used_estimate,
+            external_cpu_percent_estimate=host_cpu_pressure.external_cpu_percent_estimate,
+            external_ffmpeg_process_count=host_cpu_pressure.external_ffmpeg_process_count,
+            external_ffmpeg_cpu_cores_estimate=host_cpu_pressure.external_ffmpeg_cpu_cores_estimate,
+            host_cpu_sample_mature=host_cpu_pressure.host_cpu_sample_mature,
             memory_bytes=record.memory_bytes,
             total_memory_bytes=total_memory_bytes,
             route2_memory_bytes_total=route2_memory_bytes_total,
@@ -1948,6 +2126,16 @@ class MobilePlaybackManager:
                     if total_memory_bytes and memory_bytes > 0
                     else None
                 )
+            owned_route2_pids = {
+                int(record.pid)
+                for record in self._route2_workers.values()
+                if isinstance(record.pid, int) and record.pid > 0
+            }
+            host_cpu_pressure = self._sample_host_cpu_pressure_locked(
+                route2_cpu_cores_used_total=route2_cpu_cores_used if any_cpu_sampled else None,
+                owned_route2_pids=owned_route2_pids,
+                sample_monotonic=sample_monotonic,
+            )
             for record in sorted(self._route2_workers.values(), key=lambda value: value.worker_id):
                 payload = payloads_by_worker_id.get(record.worker_id)
                 if payload is None:
@@ -1965,6 +2153,8 @@ class MobilePlaybackManager:
                     user_cpu_cores_used_total=user_cpu_cores_used_total,
                     route2_cpu_cores_used_total=route2_cpu_cores_used if any_cpu_sampled else None,
                     route2_cpu_upbound_cores=int(budget["route2_cpu_upbound_cores"]),
+                    active_route2_user_count=int(budget["active_decoding_user_count"]),
+                    host_cpu_pressure=host_cpu_pressure,
                     total_memory_bytes=total_memory_bytes,
                     route2_memory_bytes_total=route2_memory_bytes if any_memory_sampled else None,
                 )
@@ -2016,6 +2206,34 @@ class MobilePlaybackManager:
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_percent_of_total": route2_cpu_percent_of_total,
                 "route2_cpu_percent_of_upbound": route2_cpu_percent_of_upbound,
+                "host_cpu_total_cores": host_cpu_pressure.host_cpu_total_cores,
+                "host_cpu_used_cores": (
+                    round(host_cpu_pressure.host_cpu_used_cores, 3)
+                    if host_cpu_pressure.host_cpu_used_cores is not None
+                    else None
+                ),
+                "host_cpu_used_percent": (
+                    round(host_cpu_pressure.host_cpu_used_percent, 4)
+                    if host_cpu_pressure.host_cpu_used_percent is not None
+                    else None
+                ),
+                "external_cpu_cores_used_estimate": (
+                    round(host_cpu_pressure.external_cpu_cores_used_estimate, 3)
+                    if host_cpu_pressure.external_cpu_cores_used_estimate is not None
+                    else None
+                ),
+                "external_cpu_percent_estimate": (
+                    round(host_cpu_pressure.external_cpu_percent_estimate, 4)
+                    if host_cpu_pressure.external_cpu_percent_estimate is not None
+                    else None
+                ),
+                "external_ffmpeg_process_count": host_cpu_pressure.external_ffmpeg_process_count,
+                "external_ffmpeg_cpu_cores_estimate": (
+                    round(host_cpu_pressure.external_ffmpeg_cpu_cores_estimate, 3)
+                    if host_cpu_pressure.external_ffmpeg_cpu_cores_estimate is not None
+                    else None
+                ),
+                "host_cpu_sample_mature": host_cpu_pressure.host_cpu_sample_mature,
                 "total_memory_bytes": total_memory_bytes,
                 "route2_memory_bytes": route2_memory_bytes if any_memory_sampled else None,
                 "route2_memory_percent_of_total": (

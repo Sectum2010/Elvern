@@ -45,8 +45,11 @@ from backend.app.services.mobile_playback_models import (
 from backend.app.services.mobile_playback_source_service import _probe_worker_source_input_error
 from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
+    _HostCpuJiffySample,
     MobilePlaybackManager,
     PlaybackWorkerCooldownError,
+    _count_external_ffmpeg_processes,
+    _parse_proc_stat_host_cpu_jiffies,
     _parse_proc_stat_cpu_seconds,
     _parse_proc_status_rss_bytes,
 )
@@ -215,6 +218,15 @@ def _make_route2_adaptive_input(**overrides) -> Route2AdaptiveShadowInput:
         user_cpu_cores_used_total=4.0,
         route2_cpu_upbound_cores=18,
         route2_cpu_cores_used_total=8.0,
+        active_route2_user_count=1,
+        host_cpu_total_cores=20,
+        host_cpu_used_cores=8.2,
+        host_cpu_used_percent=0.41,
+        external_cpu_cores_used_estimate=0.2,
+        external_cpu_percent_estimate=0.01,
+        external_ffmpeg_process_count=0,
+        external_ffmpeg_cpu_cores_estimate=None,
+        host_cpu_sample_mature=True,
         memory_bytes=512 * 1024 * 1024,
         total_memory_bytes=16 * 1024 * 1024 * 1024,
         route2_memory_bytes_total=512 * 1024 * 1024,
@@ -2764,18 +2776,41 @@ def test_route2_adaptive_shadow_current_four_promotes_to_benchmark_target_six() 
             route2_cpu_upbound_cores=18,
             route2_cpu_cores_used_total=7.5,
             max_threads=4,
-            adaptive_max_threads=10,
+            adaptive_max_threads=12,
         )
     )
 
     assert decision.bottleneck_class == "CPU_BOUND"
     assert decision.safe_to_increase_threads is True
     assert decision.recommended_threads == 6
-    assert "benchmark-informed thread target of 6" in decision.reason
+    assert "selected 6 as the first CPU-bound promotion target" in decision.reason
     assert "Real worker spawn is still capped at 4" in decision.reason
 
 
-def test_route2_adaptive_shadow_current_six_promotes_to_benchmark_target_ten() -> None:
+def test_route2_adaptive_shadow_current_five_promotes_to_benchmark_target_six() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=5,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=7.5,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=7.5,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=7.5,
+            max_threads=4,
+            adaptive_max_threads=12,
+        )
+    )
+
+    assert decision.bottleneck_class == "CPU_BOUND"
+    assert decision.safe_to_increase_threads is True
+    assert decision.recommended_threads == 6
+    assert "selected 6 as the first CPU-bound promotion target" in decision.reason
+
+
+def test_route2_adaptive_shadow_current_six_promotes_to_benchmark_target_nine() -> None:
     decision = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
             assigned_threads=6,
@@ -2794,12 +2829,12 @@ def test_route2_adaptive_shadow_current_six_promotes_to_benchmark_target_ten() -
 
     assert decision.bottleneck_class == "CPU_BOUND"
     assert decision.safe_to_increase_threads is True
-    assert decision.recommended_threads == 10
-    assert "benchmark-informed thread target of 10" in decision.reason
+    assert decision.recommended_threads == 9
+    assert "6-8 often plateau" in decision.reason
     assert "Real worker spawn is still capped at 4" in decision.reason
 
 
-def test_route2_adaptive_shadow_current_eight_promotes_to_benchmark_target_ten() -> None:
+def test_route2_adaptive_shadow_current_eight_promotes_to_benchmark_target_nine() -> None:
     decision = classify_route2_adaptive_shadow(
         _make_route2_adaptive_input(
             assigned_threads=8,
@@ -2818,8 +2853,191 @@ def test_route2_adaptive_shadow_current_eight_promotes_to_benchmark_target_ten()
 
     assert decision.bottleneck_class == "CPU_BOUND"
     assert decision.safe_to_increase_threads is True
-    assert decision.recommended_threads == 10
-    assert "benchmark-informed thread target of 10" in decision.reason
+    assert decision.recommended_threads == 9
+    assert "6-8 often plateau" in decision.reason
+
+
+def test_route2_adaptive_shadow_high_external_cpu_blocks_promotion() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=7.5,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=7.5,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=7.5,
+            max_threads=4,
+            adaptive_max_threads=12,
+            host_cpu_total_cores=20,
+            host_cpu_used_cores=14.0,
+            host_cpu_used_percent=0.70,
+            external_cpu_cores_used_estimate=6.5,
+            external_cpu_percent_estimate=0.325,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 4
+    assert "External host CPU pressure" in decision.reason
+    assert "non-Elvern workload has priority" in decision.reason
+
+
+def test_route2_adaptive_shadow_external_ffmpeg_blocks_nine_tier_promotion() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=6,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=7.5,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=7.5,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=7.5,
+            max_threads=4,
+            adaptive_max_threads=12,
+            external_cpu_cores_used_estimate=0.2,
+            external_cpu_percent_estimate=0.01,
+            external_ffmpeg_process_count=1,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 6
+    assert "External ffmpeg process detected" in decision.reason
+
+
+def test_route2_adaptive_shadow_immature_host_sample_blocks_nine_tier_promotion() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=6,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=20.0,
+            cpu_cores_used=7.5,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=7.5,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=7.5,
+            max_threads=4,
+            adaptive_max_threads=12,
+            host_cpu_total_cores=None,
+            host_cpu_used_cores=None,
+            host_cpu_used_percent=None,
+            external_cpu_cores_used_estimate=None,
+            external_cpu_percent_estimate=None,
+            host_cpu_sample_mature=False,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 6
+    assert "Host CPU pressure metrics are missing or immature" in decision.reason
+
+
+def test_route2_adaptive_shadow_current_nine_holds_twelve_when_strict_conditions_do_not_pass() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=9,
+            supply_rate_x=0.92,
+            ahead_runway_seconds=100.0,
+            supply_observation_seconds=30.0,
+            cpu_cores_used=9.2,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=9.2,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=9.2,
+            max_threads=4,
+            adaptive_max_threads=12,
+            active_route2_user_count=1,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 9
+    assert "12 is a strict experimental heavy tier" in decision.reason
+
+
+def test_route2_adaptive_shadow_external_ffmpeg_blocks_strict_twelve_tier() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=9,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=30.0,
+            cpu_cores_used=9.2,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=9.2,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=9.2,
+            max_threads=4,
+            adaptive_max_threads=12,
+            active_route2_user_count=1,
+            external_cpu_cores_used_estimate=0.2,
+            external_cpu_percent_estimate=0.01,
+            external_ffmpeg_process_count=1,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 9
+    assert "External ffmpeg process detected" in decision.reason
+
+
+def test_route2_adaptive_shadow_current_nine_promotes_to_twelve_when_strict_conditions_pass() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            assigned_threads=9,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=30.0,
+            cpu_cores_used=9.2,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=9.2,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=9.2,
+            max_threads=4,
+            adaptive_max_threads=12,
+            active_route2_user_count=1,
+        )
+    )
+
+    assert decision.bottleneck_class == "CPU_BOUND"
+    assert decision.safe_to_increase_threads is True
+    assert decision.recommended_threads == 12
+    assert "Strict experimental 12-thread heavy tier conditions passed" in decision.reason
+
+
+def test_route2_adaptive_shadow_cloud_current_nine_does_not_promote_to_twelve_by_default() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            source_kind="cloud",
+            assigned_threads=9,
+            supply_rate_x=0.78,
+            ahead_runway_seconds=70.0,
+            supply_observation_seconds=30.0,
+            cpu_cores_used=9.2,
+            allocated_cpu_cores=18,
+            user_cpu_cores_used_total=9.2,
+            route2_cpu_upbound_cores=18,
+            route2_cpu_cores_used_total=9.2,
+            max_threads=4,
+            adaptive_max_threads=12,
+            active_route2_user_count=1,
+        )
+    )
+
+    assert decision.bottleneck_class == "UNDER_SUPPLIED_BUT_CPU_LIMITED"
+    assert decision.safe_to_increase_threads is False
+    assert decision.recommended_threads == 9
+    assert "Cloud provider/source guard blocks 12-tier promotion" in decision.reason
 
 
 def test_route2_adaptive_shadow_cpu_bound_at_adaptive_ceiling_does_not_increase() -> None:
@@ -2878,6 +3096,22 @@ def test_route2_adaptive_shadow_cloud_low_supply_low_cpu_is_source_bound() -> No
     )
 
     assert decision.bottleneck_class == "SOURCE_BOUND"
+    assert decision.safe_to_increase_threads is False
+
+
+def test_route2_adaptive_shadow_local_low_supply_low_cpu_is_storage_bound() -> None:
+    decision = classify_route2_adaptive_shadow(
+        _make_route2_adaptive_input(
+            source_kind="local",
+            supply_rate_x=0.72,
+            ahead_runway_seconds=50.0,
+            cpu_cores_used=2.2,
+            allocated_cpu_cores=8,
+            user_cpu_cores_used_total=2.2,
+        )
+    )
+
+    assert decision.bottleneck_class == "STORAGE_BOUND"
     assert decision.safe_to_increase_threads is False
 
 
@@ -3001,6 +3235,20 @@ def test_route2_worker_status_first_sample_is_unsampled_then_reports_live_cpu_an
         "backend.app.services.mobile_playback_service._read_process_rss_bytes",
         lambda pid: 512 * 1024 * 1024,
     )
+    host_cpu_samples = iter(
+        [
+            _HostCpuJiffySample(total_jiffies=1_000, idle_jiffies=800, total_cpu_cores=20, sample_monotonic=100.0),
+            _HostCpuJiffySample(total_jiffies=3_000, idle_jiffies=1_600, total_cpu_cores=20, sample_monotonic=102.0),
+        ]
+    )
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_host_cpu_jiffy_sample",
+        lambda *, sample_monotonic: next(host_cpu_samples),
+    )
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._count_external_ffmpeg_processes",
+        lambda *, owned_route2_pids: 1,
+    )
 
     item_a = _make_local_item(settings, item_id=304, relative_name="route2/live-a.mp4")
     item_b = _make_local_item(settings, item_id=305, relative_name="route2/live-b.mp4")
@@ -3034,6 +3282,8 @@ def test_route2_worker_status_first_sample_is_unsampled_then_reports_live_cpu_an
     first_item = first_user["items"][0]
     assert first["route2_cpu_cores_used"] is None
     assert first["route2_cpu_percent_of_total"] is None
+    assert first["host_cpu_sample_mature"] is False
+    assert first["external_ffmpeg_process_count"] == 1
     assert first_item["telemetry_sampled"] is False
     assert first_item["cpu_cores_used"] is None
     assert first_item["memory_bytes"] == 512 * 1024 * 1024
@@ -3045,6 +3295,12 @@ def test_route2_worker_status_first_sample_is_unsampled_then_reports_live_cpu_an
     assert second["route2_cpu_cores_used"] == pytest.approx(2.0)
     assert second["route2_cpu_percent_of_total"] == pytest.approx(10.0)
     assert second["route2_cpu_percent_of_upbound"] == pytest.approx(11.111, rel=1e-3)
+    assert second["host_cpu_sample_mature"] is True
+    assert second["host_cpu_used_cores"] == pytest.approx(6.0)
+    assert second["host_cpu_used_percent"] == pytest.approx(0.3)
+    assert second["external_cpu_cores_used_estimate"] == pytest.approx(4.0)
+    assert second["external_cpu_percent_estimate"] == pytest.approx(0.2)
+    assert second["external_ffmpeg_process_count"] == 1
     assert second["route2_memory_bytes"] == 512 * 1024 * 1024
     assert second["route2_memory_percent_of_total"] == pytest.approx(6.25)
     assert second_user["allocated_cpu_cores"] == 9
@@ -3119,6 +3375,27 @@ def test_route2_cpu_stat_parser_reads_user_and_system_ticks(monkeypatch) -> None
     payload = "4321 (ffmpeg worker) S 1 2 3 4 5 6 7 8 9 10 250 75 0 0 20 0 1 0 12345"
 
     assert _parse_proc_stat_cpu_seconds(payload) == pytest.approx(3.25)
+
+
+def test_route2_host_cpu_jiffy_parser_reads_aggregate_cpu_line() -> None:
+    payload = "cpu  100 20 30 850 10 0 0 0 0 0\ncpu0 50 0 10 400 0 0 0 0 0 0\n"
+
+    assert _parse_proc_stat_host_cpu_jiffies(payload) == (1010, 860)
+
+
+def test_route2_external_ffmpeg_detector_excludes_owned_route2_pids(tmp_path: Path) -> None:
+    for pid, comm in {
+        100: "ffmpeg\n",
+        101: "ffprobe\n",
+        102: "python\n",
+        103: "ffmpeg\n",
+    }.items():
+        proc_dir = tmp_path / str(pid)
+        proc_dir.mkdir()
+        (proc_dir / "comm").write_text(comm, encoding="utf-8")
+    (tmp_path / "self").mkdir()
+
+    assert _count_external_ffmpeg_processes(proc_root=tmp_path, owned_route2_pids={100}) == 2
 
 
 def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_settings, monkeypatch) -> None:

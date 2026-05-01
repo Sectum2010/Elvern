@@ -33,6 +33,15 @@ class Route2AdaptiveShadowInput:
     user_cpu_cores_used_total: float | None = None
     route2_cpu_upbound_cores: int | None = None
     route2_cpu_cores_used_total: float | None = None
+    active_route2_user_count: int | None = None
+    host_cpu_total_cores: int | None = None
+    host_cpu_used_cores: float | None = None
+    host_cpu_used_percent: float | None = None
+    external_cpu_cores_used_estimate: float | None = None
+    external_cpu_percent_estimate: float | None = None
+    external_ffmpeg_process_count: int | None = None
+    external_ffmpeg_cpu_cores_estimate: float | None = None
+    host_cpu_sample_mature: bool = False
     memory_bytes: int | None = None
     total_memory_bytes: int | None = None
     route2_memory_bytes_total: int | None = None
@@ -99,14 +108,162 @@ def _adaptive_recommendation_ceiling(payload: Route2AdaptiveShadowInput) -> int:
     return max(1, ceiling)
 
 
-def _benchmark_informed_promotion_target(current_threads: int, adaptive_ceiling: int) -> int:
-    if current_threads <= 4:
+def _benchmark_preferred_promotion_target(current_threads: int) -> int:
+    if current_threads <= 5:
         target = 6
-    elif current_threads < 10:
-        target = 10
+    elif current_threads <= 8:
+        target = 9
+    elif current_threads <= 11:
+        target = 12
     else:
-        target = min(current_threads + 2, adaptive_ceiling) if adaptive_ceiling > 10 else current_threads
-    return max(current_threads, min(int(target), int(adaptive_ceiling)))
+        target = current_threads
+    return max(current_threads, int(target))
+
+
+def _ladder_reason_for_target(target_threads: int) -> str:
+    if target_threads == 6:
+        return "Benchmark-informed ladder selected 6 as the first CPU-bound promotion target."
+    if target_threads == 9:
+        return "Benchmark data shows 6-8 often plateau; selecting 9 as the next useful tier."
+    if target_threads == 12:
+        return "Strict experimental 12-thread heavy tier conditions passed."
+    return "Benchmark-informed ladder did not select a higher thread tier."
+
+
+def _strict_twelve_tier_hold_reason(
+    payload: Route2AdaptiveShadowInput,
+    *,
+    current_threads: int,
+    worker_thread_pressure_ratio: float | None,
+    cpu_cores_used: float | None,
+    supply_rate_x: float,
+    runway_seconds: float,
+    required_startup_runway_seconds: float,
+    user_headroom_cores: float | None,
+    global_headroom_cores: float | None,
+    memory_pressure_ratio: float | None,
+) -> str | None:
+    if current_threads < 9 or current_threads > 11:
+        return None
+    if payload.source_kind != "local":
+        return "Cloud provider/source guard blocks 12-tier promotion; 12 remains strict/experimental for cloud."
+    if payload.active_route2_user_count != 1:
+        if payload.active_route2_user_count is None:
+            return "12 is a strict experimental heavy tier and was not selected because active Route2 user accounting is unavailable."
+        return "12 is a strict experimental heavy tier and was not selected because multiple Route2 users are active."
+    if payload.supply_observation_seconds is None or float(payload.supply_observation_seconds) < 20.0:
+        return "12 is a strict experimental heavy tier and was not selected because the supply sample is not long enough."
+    strongly_cpu_active = (
+        cpu_cores_used is not None
+        and (
+            (worker_thread_pressure_ratio is not None and worker_thread_pressure_ratio >= 0.95)
+            or cpu_cores_used >= max(2.0, current_threads * 0.95)
+        )
+    )
+    if not strongly_cpu_active:
+        return "12 is a strict experimental heavy tier and was not selected because the worker is not strongly CPU-active."
+    clearly_low_supply = (
+        supply_rate_x < 0.90
+        or runway_seconds + 0.001 < (required_startup_runway_seconds * 0.75)
+    )
+    if not clearly_low_supply:
+        return "12 is a strict experimental heavy tier and was not selected because supply is not clearly low enough."
+    if user_headroom_cores is None or global_headroom_cores is None:
+        return "12 is a strict experimental heavy tier and was not selected because CPU headroom is unmeasured."
+    if min(user_headroom_cores, global_headroom_cores) < 3.0:
+        return "12 is a strict experimental heavy tier and was not selected because user/global CPU headroom is not large enough."
+    if memory_pressure_ratio is None:
+        return "12 is a strict experimental heavy tier and was not selected because memory pressure is unmeasured."
+    if memory_pressure_ratio >= 0.80:
+        return "12 is a strict experimental heavy tier and was not selected because the memory pressure guard blocks it."
+    return None
+
+
+def _external_host_pressure_hold_reason(
+    payload: Route2AdaptiveShadowInput,
+    *,
+    current_threads: int,
+    target_threads: int,
+    worker_thread_pressure_ratio: float | None,
+    cpu_cores_used: float | None,
+    supply_rate_x: float,
+    runway_seconds: float,
+    required_startup_runway_seconds: float,
+) -> str | None:
+    if target_threads <= current_threads:
+        return None
+
+    host_metrics_mature = (
+        payload.host_cpu_sample_mature
+        and payload.host_cpu_total_cores is not None
+        and payload.host_cpu_used_cores is not None
+        and payload.host_cpu_used_percent is not None
+    )
+    strongly_cpu_active = (
+        cpu_cores_used is not None
+        and (
+            (worker_thread_pressure_ratio is not None and worker_thread_pressure_ratio >= 0.95)
+            or cpu_cores_used >= max(2.0, current_threads * 0.95)
+        )
+    )
+    clearly_low_supply = (
+        supply_rate_x < 0.85
+        or runway_seconds + 0.001 < (required_startup_runway_seconds * 0.75)
+    )
+    if not host_metrics_mature:
+        if target_threads <= 6 and strongly_cpu_active and clearly_low_supply:
+            return None
+        return (
+            "Host CPU pressure metrics are missing or immature; non-Elvern workload has priority, "
+            "so shadow controller blocks higher Route2 promotion."
+        )
+
+    host_total_cores = max(1.0, float(payload.host_cpu_total_cores or 1))
+    host_used_cores = max(0.0, float(payload.host_cpu_used_cores or 0.0))
+    host_used_ratio = max(0.0, float(payload.host_cpu_used_percent or 0.0))
+    if host_used_ratio > 1.0:
+        host_used_ratio = host_used_ratio / 100.0
+    external_cpu_cores = max(0.0, float(payload.external_cpu_cores_used_estimate or 0.0))
+    external_cpu_ratio = max(0.0, float(payload.external_cpu_percent_estimate or 0.0))
+    if external_cpu_ratio > 1.0:
+        external_cpu_ratio = external_cpu_ratio / 100.0
+    external_ffmpeg_count = max(0, int(payload.external_ffmpeg_process_count or 0))
+    host_spare_cores = max(0.0, host_total_cores - host_used_cores)
+    high_external_pressure = (
+        external_cpu_cores >= 4.0
+        or external_cpu_ratio >= 0.20
+        or (host_used_ratio >= 0.75 and external_cpu_cores >= 1.0)
+    )
+    if high_external_pressure:
+        return (
+            "External host CPU pressure is present; non-Elvern workload has priority, "
+            "so shadow controller blocks Route2 promotion."
+        )
+
+    if external_ffmpeg_count > 0:
+        if target_threads >= 9:
+            return (
+                "External ffmpeg process detected; non-Elvern ffmpeg has priority, "
+                "so shadow controller blocks aggressive Route2 promotion."
+            )
+        if host_spare_cores < 2.0 or external_cpu_cores >= 1.0 or external_cpu_ratio >= 0.05:
+            return (
+                "External ffmpeg process detected and host spare capacity is limited; "
+                "shadow controller blocks Route2 promotion."
+            )
+
+    moderate_external_pressure = (
+        external_cpu_cores >= 1.0
+        or external_cpu_ratio >= 0.08
+        or host_used_ratio >= 0.60
+    )
+    if moderate_external_pressure and target_threads > 6:
+        return (
+            "Moderate external host CPU pressure limits Route2 to the first promotion tier; "
+            "shadow controller blocks higher Route2 promotion."
+        )
+
+    return None
 
 
 def _looks_like_provider_error(message: str | None) -> bool:
@@ -184,6 +341,22 @@ def classify_route2_adaptive_shadow(
         missing_metrics.append("route2_cpu_upbound_cores")
     if payload.route2_cpu_cores_used_total is None:
         missing_metrics.append("route2_cpu_cores_used_total")
+    if payload.active_route2_user_count is None:
+        missing_metrics.append("active_route2_user_count")
+    if not payload.host_cpu_sample_mature:
+        missing_metrics.append("host_cpu_sample_mature")
+    if payload.host_cpu_total_cores is None:
+        missing_metrics.append("host_cpu_total_cores")
+    if payload.host_cpu_used_cores is None:
+        missing_metrics.append("host_cpu_used_cores")
+    if payload.host_cpu_used_percent is None:
+        missing_metrics.append("host_cpu_used_percent")
+    if payload.external_cpu_cores_used_estimate is None:
+        missing_metrics.append("external_cpu_cores_used_estimate")
+    if payload.external_cpu_percent_estimate is None:
+        missing_metrics.append("external_cpu_percent_estimate")
+    if payload.external_ffmpeg_process_count is None:
+        missing_metrics.append("external_ffmpeg_process_count")
     if payload.ahead_runway_seconds is None:
         missing_metrics.append("ahead_runway_seconds")
     if payload.supply_rate_x is None:
@@ -317,9 +490,33 @@ def classify_route2_adaptive_shadow(
             0,
             int(math.floor(min(user_headroom_cores, global_headroom_cores))),
         )
-    benchmark_target = _benchmark_informed_promotion_target(current_threads, adaptive_ceiling)
-    candidate_thread_ceiling = min(adaptive_ceiling, resource_headroom_ceiling, benchmark_target)
-    target_increase_threads = candidate_thread_ceiling
+    preferred_ladder_target = _benchmark_preferred_promotion_target(current_threads)
+    strict_twelve_hold_reason = _strict_twelve_tier_hold_reason(
+        payload,
+        current_threads=current_threads,
+        worker_thread_pressure_ratio=worker_thread_pressure_ratio,
+        cpu_cores_used=cpu_cores_used,
+        supply_rate_x=supply_rate_x,
+        runway_seconds=runway_seconds,
+        required_startup_runway_seconds=required_startup_runway_seconds,
+        user_headroom_cores=user_headroom_cores,
+        global_headroom_cores=global_headroom_cores,
+        memory_pressure_ratio=memory_pressure_ratio,
+    )
+    benchmark_target = preferred_ladder_target
+    if preferred_ladder_target == 12 and strict_twelve_hold_reason is not None:
+        benchmark_target = current_threads
+    target_increase_threads = benchmark_target
+    external_pressure_hold_reason = _external_host_pressure_hold_reason(
+        payload,
+        current_threads=current_threads,
+        target_threads=target_increase_threads,
+        worker_thread_pressure_ratio=worker_thread_pressure_ratio,
+        cpu_cores_used=cpu_cores_used,
+        supply_rate_x=supply_rate_x,
+        runway_seconds=runway_seconds,
+        required_startup_runway_seconds=required_startup_runway_seconds,
+    )
     adaptive_ceiling_cap_active = adaptive_ceiling <= current_threads
     real_spawn_cap_is_below_shadow = payload.max_threads < adaptive_ceiling
 
@@ -346,7 +543,14 @@ def classify_route2_adaptive_shadow(
                 safe_to_decrease_threads=False,
                 missing_metrics=missing_metrics,
             )
-        if current_threads < candidate_thread_ceiling and user_has_cpu_headroom and global_has_cpu_headroom:
+        if (
+            target_increase_threads > current_threads
+            and external_pressure_hold_reason is None
+            and target_increase_threads <= adaptive_ceiling
+            and target_increase_threads <= resource_headroom_ceiling
+            and user_has_cpu_headroom
+            and global_has_cpu_headroom
+        ):
             cpu_bound_confidence = (
                 0.9
                 if user_budget_pressure_ratio is not None and global_upbound_pressure_ratio is not None
@@ -354,13 +558,18 @@ def classify_route2_adaptive_shadow(
             )
             reason = (
                 "Low supply with a CPU-active worker and available user/global CPU headroom; "
-                "adaptive ceiling permits promotion, so the shadow controller recommends a benchmark-informed "
-                f"thread target of {target_increase_threads}."
+                "adaptive ceiling permits promotion. "
+                f"{_ladder_reason_for_target(target_increase_threads)}"
             )
             if real_spawn_cap_is_below_shadow:
                 reason += (
                     f" Real worker spawn is still capped at {payload.max_threads}; shadow adaptive control "
                     f"would recommend {target_increase_threads} if enabled."
+                )
+            if payload.active_route2_user_count == 1:
+                reason += (
+                    " Single-user Route2 accounting is present; future real adaptive spawn could consider "
+                    "starting at 6 only after continuous telemetry is mature."
                 )
             return Route2AdaptiveShadowDecision(
                 bottleneck_class="CPU_BOUND",
@@ -372,16 +581,27 @@ def classify_route2_adaptive_shadow(
                 safe_to_decrease_threads=False,
                 missing_metrics=missing_metrics,
             )
-        if adaptive_ceiling_cap_active:
+        if external_pressure_hold_reason is not None:
+            reason = external_pressure_hold_reason
+        elif strict_twelve_hold_reason is not None:
+            reason = strict_twelve_hold_reason
+        elif adaptive_ceiling_cap_active or preferred_ladder_target > adaptive_ceiling:
             reason = (
                 "Supply is lagging and the worker is CPU-active, but the adaptive recommendation ceiling "
                 "prevents a shadow thread increase."
+            )
+        elif preferred_ladder_target > resource_headroom_ceiling:
+            reason = (
+                "Supply is lagging and the worker is CPU-active, but user/global CPU headroom is not large "
+                "enough for the next benchmark-informed thread tier."
             )
         elif not user_has_cpu_headroom or not global_has_cpu_headroom:
             reason = (
                 "Supply is lagging and the worker is CPU-active, but user or global Route2 CPU headroom "
                 "is unavailable or unmeasured."
             )
+        elif preferred_ladder_target <= current_threads:
+            reason = "Benchmark-informed ladder has no default increase beyond the current thread tier."
         else:
             reason = "Supply is lagging and the worker is CPU-active, but no safe shadow thread increase is available."
         return Route2AdaptiveShadowDecision(
