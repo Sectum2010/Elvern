@@ -198,6 +198,74 @@ def _make_route2_manager(initialized_settings, **overrides) -> tuple[MobilePlayb
     return MobilePlaybackManager(settings), settings
 
 
+def _set_route2_resource_snapshot(
+    manager: MobilePlaybackManager,
+    *,
+    sampled_at_ts: float | None = None,
+    sample_mature: bool = True,
+    host_cpu_total_cores: int = 20,
+    host_cpu_used_cores: float = 1.0,
+    host_cpu_used_percent: float = 0.05,
+    route2_cpu_cores_used_total: float | None = 0.0,
+    per_user_cpu_cores_used_total: dict[int, float] | None = None,
+    total_memory_bytes: int | None = 16 * 1024 * 1024 * 1024,
+    route2_memory_bytes_total: int | None = 0,
+    external_cpu_cores_used_estimate: float | None = 0.0,
+    external_cpu_percent_estimate: float | None = 0.0,
+    external_ffmpeg_process_count: int = 0,
+    external_pressure_level: str = "none",
+) -> None:
+    if sampled_at_ts is None:
+        sampled_at_ts = time.time()
+    manager._route2_resource_snapshot = _Route2ResourceSnapshot(
+        sampled_at_ts=sampled_at_ts,
+        sampled_at="2026-01-01T00:00:00+00:00",
+        sample_mature=sample_mature,
+        sample_stale=False,
+        host_cpu_total_cores=host_cpu_total_cores,
+        host_cpu_used_cores=host_cpu_used_cores,
+        host_cpu_used_percent=host_cpu_used_percent,
+        route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+        route2_cpu_percent_of_host=(
+            (route2_cpu_cores_used_total / host_cpu_total_cores) * 100
+            if route2_cpu_cores_used_total is not None and host_cpu_total_cores
+            else None
+        ),
+        per_user_cpu_cores_used_total=per_user_cpu_cores_used_total or {},
+        total_memory_bytes=total_memory_bytes,
+        route2_memory_bytes_total=route2_memory_bytes_total,
+        route2_memory_percent_of_total=(
+            (route2_memory_bytes_total / total_memory_bytes) * 100
+            if route2_memory_bytes_total is not None and total_memory_bytes
+            else None
+        ),
+        external_cpu_cores_used_estimate=external_cpu_cores_used_estimate,
+        external_cpu_percent_estimate=external_cpu_percent_estimate,
+        external_ffmpeg_process_count=external_ffmpeg_process_count,
+        external_ffmpeg_cpu_cores_estimate=None,
+        external_pressure_level=external_pressure_level,
+        missing_metrics=[],
+    )
+
+
+def _make_route2_worker_record_for_spawn_dry_run(*, source_kind: str = "local", user_id: int = 1) -> Route2WorkerRecord:
+    return Route2WorkerRecord(
+        worker_id="spawn-dry-run-worker",
+        session_id="spawn-dry-run-session",
+        epoch_id="spawn-dry-run-epoch",
+        user_id=user_id,
+        username="alice",
+        auth_session_id=11,
+        media_item_id=990,
+        title="Spawn Dry Run",
+        playback_mode="full",
+        profile="mobile_1080p",
+        source_kind=source_kind,
+        target_position_seconds=0.0,
+        state="queued",
+    )
+
+
 class _TelemetryProcess:
     def __init__(self, *, pid: int = 4321, running: bool = True) -> None:
         self.pid = pid
@@ -3625,6 +3693,284 @@ def test_route2_fresh_resource_snapshot_feeds_adaptive_input(initialized_setting
     assert adaptive_input.route2_cpu_cores_used_total == pytest.approx(5.5)
     assert adaptive_input.total_memory_bytes == 16 * 1024 * 1024 * 1024
     assert adaptive_input.route2_memory_bytes_total == 3 * 1024 * 1024 * 1024
+
+
+def test_route2_adaptive_spawn_dry_run_local_single_user_recommends_six(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_max_worker_threads=4,
+        route2_adaptive_max_worker_threads=12,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert decision.recommended_threads == 6
+    assert decision.blockers == []
+    assert "would choose 6" in decision.reason
+    assert decision.sample_mature is True
+
+
+def test_route2_adaptive_spawn_dry_run_multi_user_remains_conservative(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=9,
+        user_remaining_threads=9,
+        allocated_cpu_cores=9,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=2,
+    )
+
+    assert decision.recommended_threads == 4
+    assert "not_single_user_route2_workload" in decision.blockers
+    assert "not a single-user workload" in decision.reason
+
+
+def test_route2_adaptive_spawn_dry_run_cloud_remains_deferred(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="cloud", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert decision.recommended_threads == 4
+    assert "cloud_adaptive_spawn_deferred" in decision.blockers
+    assert "cloud real adaptive initial spawn is deferred" in decision.reason
+
+
+def test_route2_adaptive_spawn_dry_run_external_cpu_remains_conservative(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
+    _set_route2_resource_snapshot(
+        manager,
+        host_cpu_used_cores=14.0,
+        host_cpu_used_percent=0.70,
+        external_cpu_cores_used_estimate=5.0,
+        external_cpu_percent_estimate=0.25,
+        external_pressure_level="high",
+        per_user_cpu_cores_used_total={1: 0.0},
+    )
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert decision.recommended_threads == 4
+    assert "external_host_cpu_pressure_high" in decision.blockers
+    assert "external host CPU pressure is high" in decision.reason
+
+
+def test_route2_adaptive_spawn_dry_run_external_ffmpeg_remains_conservative(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
+    _set_route2_resource_snapshot(
+        manager,
+        external_ffmpeg_process_count=1,
+        external_pressure_level="moderate",
+        per_user_cpu_cores_used_total={1: 0.0},
+    )
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert decision.recommended_threads == 4
+    assert "external_ffmpeg_detected" in decision.blockers
+    assert "external ffmpeg/ffprobe is present" in decision.reason
+
+
+def test_route2_adaptive_spawn_dry_run_stale_or_missing_telemetry_remains_conservative(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
+    _set_route2_resource_snapshot(
+        manager,
+        sampled_at_ts=time.time() - 10.0,
+        per_user_cpu_cores_used_total={1: 0.0},
+    )
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    stale_decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+    manager._route2_resource_snapshot = None
+    missing_decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert stale_decision.recommended_threads == 4
+    assert "telemetry_missing_or_stale" in stale_decision.blockers
+    assert "resource telemetry is missing, immature, or stale" in stale_decision.reason
+    assert missing_decision.recommended_threads == 4
+    assert "telemetry_missing_or_stale" in missing_decision.blockers
+
+
+def test_route2_adaptive_spawn_dry_run_ram_pressure_remains_conservative(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
+    _set_route2_resource_snapshot(
+        manager,
+        total_memory_bytes=10 * 1024 * 1024 * 1024,
+        route2_memory_bytes_total=9 * 1024 * 1024 * 1024,
+        per_user_cpu_cores_used_total={1: 0.0},
+    )
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert decision.recommended_threads == 4
+    assert "route2_memory_pressure" in decision.blockers
+    assert "memory pressure" in decision.reason
+
+
+def test_route2_adaptive_spawn_dry_run_respects_adaptive_max_below_six(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=5)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert decision.recommended_threads == 5
+    assert "caps the first-tier target below 6" in decision.reason
+
+
+def test_route2_adaptive_spawn_dry_run_respects_route2_min_worker_threads(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_min_worker_threads=7,
+        route2_max_worker_threads=7,
+        route2_adaptive_max_worker_threads=12,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=7,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+    )
+
+    assert decision.recommended_threads == 7
+    assert decision.recommended_threads >= manager.settings.route2_min_worker_threads
+
+
+def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+        route2_adaptive_max_worker_threads=12,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    started_workers: list[tuple[str, str, str]] = []
+
+    class _FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.args = args
+
+        def start(self) -> None:
+            started_workers.append(self.args)
+
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.threading.Thread", _FakeThread)
+
+    item = _make_local_item(settings, item_id=313, relative_name="route2/spawn-dry-run.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=801,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    manager._dispatch_waiting_sessions()
+
+    with manager._lock:
+        session = manager._sessions[payload["session_id"]]
+        active_epoch = session.browser_playback.epochs[session.browser_playback.active_epoch_id]
+        record = manager._route2_workers[active_epoch.active_worker_id]
+        assert record.assigned_threads == 4
+        assert record.fixed_assigned_threads_at_dispatch == 4
+        assert record.adaptive_spawn_dry_run_enabled is True
+        assert record.adaptive_spawn_dry_run_threads == 6
+        assert record.adaptive_spawn_dry_run_source == "initial_spawn"
+        assert record.adaptive_spawn_dry_run_sample_mature is True
+    status = manager.get_route2_worker_status()
+    user_group = next(group for group in status["workers_by_user"] if group["user_id"] == 1)
+    item_payload = user_group["items"][0]
+    assert item_payload["assigned_threads"] == 4
+    assert item_payload["fixed_assigned_threads_at_dispatch"] == 4
+    assert item_payload["adaptive_spawn_dry_run_enabled"] is True
+    assert item_payload["adaptive_spawn_dry_run_threads"] == 6
+    assert item_payload["adaptive_spawn_dry_run_source"] == "initial_spawn"
+    assert len(started_workers) == 1
 
 
 def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_settings, monkeypatch) -> None:

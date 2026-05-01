@@ -240,6 +240,16 @@ class _Route2ResourceSnapshot:
     missing_metrics: list[str]
 
 
+@dataclass(slots=True)
+class _Route2AdaptiveSpawnDryRunDecision:
+    recommended_threads: int
+    reason: str
+    blockers: list[str]
+    policy: str
+    sample_age_seconds: float | None
+    sample_mature: bool
+
+
 class ActivePlaybackWorkerConflictError(Exception):
     def __init__(self, detail: dict[str, object]) -> None:
         self.detail = dict(detail)
@@ -2106,6 +2116,142 @@ class MobilePlaybackManager:
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
 
+    def _route2_conservative_spawn_target_locked(
+        self,
+        *,
+        fixed_assigned_threads: int,
+        available_total_threads: int,
+        user_remaining_threads: int,
+    ) -> int:
+        baseline = min(
+            max(int(self.settings.route2_min_worker_threads), 4),
+            max(0, int(fixed_assigned_threads)),
+        )
+        ceiling = min(
+            max(0, int(available_total_threads)),
+            max(0, int(user_remaining_threads)),
+            max(0, int(self.settings.route2_adaptive_max_worker_threads)),
+        )
+        if ceiling <= 0:
+            return 0
+        return min(baseline, ceiling)
+
+    def _build_route2_adaptive_spawn_dry_run_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        fixed_assigned_threads: int,
+        available_total_threads: int,
+        user_remaining_threads: int,
+        allocated_cpu_cores: int,
+        route2_cpu_upbound_cores: int,
+        active_route2_user_count: int,
+    ) -> _Route2AdaptiveSpawnDryRunDecision:
+        snapshot = self._latest_route2_resource_snapshot_locked()
+        sample_age_seconds = (time.time() - snapshot.sampled_at_ts) if snapshot is not None else None
+        sample_mature = bool(snapshot is not None and snapshot.sample_mature and not snapshot.sample_stale)
+        conservative_target = self._route2_conservative_spawn_target_locked(
+            fixed_assigned_threads=fixed_assigned_threads,
+            available_total_threads=available_total_threads,
+            user_remaining_threads=user_remaining_threads,
+        )
+        policy = "phase_1h_2_initial_spawn_dry_run"
+        blockers: list[str] = []
+        reason_parts: list[str] = []
+
+        if record.source_kind != "local":
+            blockers.append("cloud_adaptive_spawn_deferred")
+            reason_parts.append("cloud real adaptive initial spawn is deferred")
+        if active_route2_user_count != 1:
+            blockers.append("not_single_user_route2_workload")
+            reason_parts.append("Route2 is not a single-user workload")
+        if not sample_mature:
+            blockers.append("telemetry_missing_or_stale")
+            reason_parts.append("resource telemetry is missing, immature, or stale")
+
+        route2_memory_pressure = None
+        route2_cpu_total = None
+        user_cpu_total = None
+        if snapshot is not None and not snapshot.sample_stale:
+            route2_cpu_total = snapshot.route2_cpu_cores_used_total
+            user_cpu_total = snapshot.per_user_cpu_cores_used_total.get(record.user_id, 0.0)
+            if snapshot.total_memory_bytes and snapshot.route2_memory_bytes_total is not None:
+                route2_memory_pressure = snapshot.route2_memory_bytes_total / snapshot.total_memory_bytes
+            external_level = snapshot.external_pressure_level
+            if external_level == "high":
+                blockers.append("external_host_cpu_pressure_high")
+                reason_parts.append("external host CPU pressure is high")
+            elif external_level == "moderate":
+                blockers.append("external_host_cpu_pressure_moderate")
+                reason_parts.append("external host CPU pressure is moderate")
+            if snapshot.external_ffmpeg_process_count > 0:
+                blockers.append("external_ffmpeg_detected")
+                reason_parts.append("external ffmpeg/ffprobe is present")
+        if snapshot is None or snapshot.total_memory_bytes is None or snapshot.route2_memory_bytes_total is None:
+            blockers.append("memory_metrics_missing")
+            reason_parts.append("Route2 memory telemetry is missing")
+        elif route2_memory_pressure is not None and route2_memory_pressure >= 0.80:
+            blockers.append("route2_memory_pressure")
+            reason_parts.append("Route2 memory pressure blocks adaptive initial spawn")
+        if route2_cpu_total is None:
+            blockers.append("route2_cpu_metrics_missing")
+            reason_parts.append("Route2 CPU telemetry is missing")
+        if user_cpu_total is None:
+            blockers.append("user_cpu_metrics_missing")
+            reason_parts.append("per-user Route2 CPU telemetry is missing")
+
+        first_tier_target = max(6, int(self.settings.route2_min_worker_threads))
+        adaptive_ceiling = min(
+            max(0, int(self.settings.route2_adaptive_max_worker_threads)),
+            max(0, int(available_total_threads)),
+            max(0, int(user_remaining_threads)),
+            max(0, int(route2_cpu_upbound_cores)),
+        )
+        dry_run_target = min(first_tier_target, adaptive_ceiling)
+        if dry_run_target < int(self.settings.route2_min_worker_threads):
+            blockers.append("below_min_worker_threads")
+            reason_parts.append("adaptive dry-run ceiling is below route2_min_worker_threads")
+        if dry_run_target < first_tier_target:
+            reason_parts.append("adaptive max or CPU budget caps the first-tier target below 6")
+        if route2_cpu_total is not None and (route2_cpu_upbound_cores - route2_cpu_total) < dry_run_target:
+            blockers.append("global_cpu_headroom_insufficient")
+            reason_parts.append("global Route2 CPU headroom is insufficient")
+        if user_cpu_total is not None and (allocated_cpu_cores - user_cpu_total) < dry_run_target:
+            blockers.append("user_cpu_headroom_insufficient")
+            reason_parts.append("per-user Route2 CPU headroom is insufficient")
+
+        if blockers:
+            return _Route2AdaptiveSpawnDryRunDecision(
+                recommended_threads=conservative_target,
+                reason=(
+                    "Initial spawn dry-run remains conservative: "
+                    + "; ".join(dict.fromkeys(reason_parts))
+                    + ". Real assigned_threads remains fixed."
+                ),
+                blockers=list(dict.fromkeys(blockers)),
+                policy=policy,
+                sample_age_seconds=sample_age_seconds,
+                sample_mature=sample_mature,
+            )
+
+        capped_note = (
+            " Adaptive max or CPU budget caps the first-tier target below 6."
+            if dry_run_target < first_tier_target
+            else ""
+        )
+        return _Route2AdaptiveSpawnDryRunDecision(
+            recommended_threads=dry_run_target,
+            reason=(
+                f"Initial spawn dry-run would choose {dry_run_target} threads for a local single-user "
+                "Route2 workload with mature telemetry, no external pressure, RAM safe, and enough "
+                f"user/global CPU headroom.{capped_note} Real assigned_threads remains fixed."
+            ),
+            blockers=[],
+            policy=policy,
+            sample_age_seconds=sample_age_seconds,
+            sample_mature=sample_mature,
+        )
+
     def _build_route2_adaptive_shadow_input_locked(
         self,
         record: Route2WorkerRecord,
@@ -2448,6 +2594,19 @@ class MobilePlaybackManager:
                     "failure_count": record.failure_count,
                     "replacement_count": record.replacement_count,
                     "assigned_threads": record.assigned_threads,
+                    "fixed_assigned_threads_at_dispatch": record.fixed_assigned_threads_at_dispatch,
+                    "adaptive_spawn_dry_run_enabled": record.adaptive_spawn_dry_run_enabled,
+                    "adaptive_spawn_dry_run_threads": record.adaptive_spawn_dry_run_threads,
+                    "adaptive_spawn_dry_run_reason": record.adaptive_spawn_dry_run_reason,
+                    "adaptive_spawn_dry_run_blockers": list(record.adaptive_spawn_dry_run_blockers),
+                    "adaptive_spawn_dry_run_policy": record.adaptive_spawn_dry_run_policy,
+                    "adaptive_spawn_dry_run_source": record.adaptive_spawn_dry_run_source,
+                    "adaptive_spawn_dry_run_sample_age_seconds": (
+                        round(record.adaptive_spawn_dry_run_sample_age_seconds, 3)
+                        if record.adaptive_spawn_dry_run_sample_age_seconds is not None
+                        else None
+                    ),
+                    "adaptive_spawn_dry_run_sample_mature": record.adaptive_spawn_dry_run_sample_mature,
                     "process_exists": record.process_exists,
                     "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
                     "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
@@ -5231,7 +5390,25 @@ class MobilePlaybackManager:
                 )
                 if assigned_threads < self.settings.route2_min_worker_threads:
                     continue
+                spawn_dry_run = self._build_route2_adaptive_spawn_dry_run_locked(
+                    record,
+                    fixed_assigned_threads=assigned_threads,
+                    available_total_threads=available_total_threads,
+                    user_remaining_threads=user_remaining_threads,
+                    allocated_cpu_cores=per_user_budget_cores,
+                    route2_cpu_upbound_cores=int(budget["route2_cpu_upbound_cores"]),
+                    active_route2_user_count=int(budget["active_decoding_user_count"]),
+                )
                 record.state = "running"
+                record.fixed_assigned_threads_at_dispatch = assigned_threads
+                record.adaptive_spawn_dry_run_enabled = True
+                record.adaptive_spawn_dry_run_threads = spawn_dry_run.recommended_threads
+                record.adaptive_spawn_dry_run_reason = spawn_dry_run.reason
+                record.adaptive_spawn_dry_run_blockers = spawn_dry_run.blockers
+                record.adaptive_spawn_dry_run_policy = spawn_dry_run.policy
+                record.adaptive_spawn_dry_run_source = "initial_spawn"
+                record.adaptive_spawn_dry_run_sample_age_seconds = spawn_dry_run.sample_age_seconds
+                record.adaptive_spawn_dry_run_sample_mature = spawn_dry_run.sample_mature
                 record.assigned_threads = assigned_threads
                 if not record.started_at:
                     record.started_at = utcnow_iso()

@@ -200,6 +200,15 @@ class Route2WorkerRecord:
     failure_count: int = 0
     replacement_count: int = 0
     assigned_threads: int = 0
+    fixed_assigned_threads_at_dispatch: int | None = None
+    adaptive_spawn_dry_run_enabled: bool = False
+    adaptive_spawn_dry_run_threads: int | None = None
+    adaptive_spawn_dry_run_reason: str | None = None
+    adaptive_spawn_dry_run_blockers: list[str] = field(default_factory=list)
+    adaptive_spawn_dry_run_policy: str | None = None
+    adaptive_spawn_dry_run_source: str | None = None
+    adaptive_spawn_dry_run_sample_age_seconds: float | None = None
+    adaptive_spawn_dry_run_sample_mature: bool | None = None
     process_exists: bool = False
     cpu_cores_used: float | None = None
     cpu_percent_of_total: float | None = None

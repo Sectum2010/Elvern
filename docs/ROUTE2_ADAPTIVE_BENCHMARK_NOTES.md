@@ -485,3 +485,22 @@ The internal resource snapshot includes sample time, maturity/staleness, host CP
 Status/admin calls may still refresh telemetry while the loop is proving out, but adaptive shadow input now prefers the latest resource snapshot when it is fresh. Missing or stale telemetry is not interpreted as healthy host capacity.
 
 This is still a prerequisite step only. Real adaptive control remains blocked until continuous telemetry is live-validated, failure behavior is proven safe, and future feature flags decide where real adaptive spawn may hook in.
+
+## Phase 1H-2 Adaptive Spawn Dry-Run Advisor
+
+Phase 1H-2 adds dry-run spawn advice at the real Route2 dispatch decision point, but it does not change real playback behavior. `_dispatch_waiting_route2_workers_locked()` still assigns real worker threads with the fixed budget logic, and ffmpeg still receives `record.assigned_threads` exactly as before.
+
+Spawn dry-run advice is different from runtime adaptive bottleneck classification:
+
+- Runtime shadow classification evaluates an already-running worker with supply rate, runway, client/server goodput, CPU activity, and provider/source/client/storage/RAM guards.
+- Initial spawn advice has no supply rate, runway, or CPU-active evidence yet.
+- Initial spawn advice therefore uses only conservative startup context: source kind, active Route2 user count, fresh resource telemetry, host/external pressure, RAM pressure, adaptive ceiling, and user/global CPU headroom.
+
+Current dry-run startup policy:
+
+- Local single-user Route2 workload with mature telemetry, no external host pressure, no external ffmpeg, safe RAM, and enough user/global CPU headroom may dry-run recommend `6`.
+- Cloud initial real adaptive spawn remains deferred and dry-runs conservative.
+- Multi-user, missing/stale telemetry, external CPU pressure, external ffmpeg, RAM pressure, insufficient CPU budget, or adaptive max below the target keeps dry-run advice conservative or capped.
+- Dry-run advice never changes real `assigned_threads`.
+
+This is intentionally a status/metadata step. Future real adaptive control may use this advisor after live validation, feature flags, and rollback behavior are mature.
