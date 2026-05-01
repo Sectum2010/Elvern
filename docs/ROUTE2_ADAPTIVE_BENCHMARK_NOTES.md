@@ -295,3 +295,121 @@ Avatar: The Way of Water:
 - Keep 10 as the conservative shadow high-performance ceiling for now.
 - Treat 12 as experimental until more full-repeat data exists.
 - For cloud media, provider/auth/quota failures must block thread promotion even if prior rows showed CPU/thread scaling.
+
+## Local Full Matrix Session 1
+
+### 20260430T224826Z - Repeat 1 only
+
+- Benchmark session id/date-time: `20260430T224826Z-local-full-matrix-session-1`
+- Benchmark script: `scripts/route2-thread-benchmark.py`
+- Mode: isolated local Route2-style ffmpeg/HLS/fMP4 preparation benchmark
+- Session label: `local-full-matrix-session-1`
+- Repeat index: `1`
+- Thread counts: `1-12`
+- Randomization seed: `elvern-local-full-matrix-session-1-20260430`
+- Artifact root:
+  - `dev/artifacts/route2-thread-benchmark/20260430T224826Z-local-full-matrix-session-1/`
+- Combined generated summaries:
+  - `dev/artifacts/route2-thread-benchmark/20260430T224826Z-local-full-matrix-session-1/session1-combined-summary.json`
+  - `dev/artifacts/route2-thread-benchmark/20260430T224826Z-local-full-matrix-session-1/session1-combined-summary.csv`
+
+This was Session 1 / Repeat 1 only. Session 2 / Repeat 2 is intentionally pending. The run did not touch production Route2 cache, live playback sessions, adaptive policy, or real `assigned_threads`.
+
+### Run Plan
+
+| Movie | Exact Local Path | File Size | Randomized Thread Order |
+|---|---|---:|---|
+| The Lord of the Rings: The Return of the King | `/home/sectum/Videos/Movies/Favorite Movies/Lord of the Rings (4K UHD)/The.Lord.of.the.Rings.The.Return.of.the.King.2003.Extended.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX-FraMeSToR.mkv` | 141,123,556,741 bytes / 131.43 GiB | `2, 7, 4, 3, 12, 10, 9, 1, 5, 11, 6, 8` |
+| Pacific Rim (2013) | `/home/sectum/Videos/Movies/Favorite Movies/Pacific Rim (med qual)/Pacific Rim (2013) 4K.mkv` | 25,969,762,472 bytes / 24.18 GiB | `8, 1, 9, 4, 12, 2, 11, 6, 10, 5, 7, 3` |
+| Pirates of the Caribbean: Dead Man's Chest | `/home/sectum/Videos/Movies/Favorite Movies/Pirates of the Caribbean (4K UHD)/Pirates.of.the.Caribbean.Dead.Mans.Chest.2006.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.HYBRID.REMUX-FraMeSToR.mkv` | 54,533,400,379 bytes / 50.78 GiB | `5, 9, 1, 2, 3, 7, 12, 8, 4, 6, 11, 10` |
+| Harry Potter and the Goblet of Fire | `/home/sectum/Videos/Movies/Favorite Movies/Harry Potter (4K UHD)/Harry.Potter.and.the.Goblet.of.Fire.2005.4K.UHD.2160p.REMUX.DV.DTS-HD.MA.7.1.Dual.PTBR-BrRemux.mkv` | 59,721,627,293 bytes / 55.62 GiB | `11, 10, 1, 3, 9, 5, 12, 6, 2, 4, 8, 7` |
+
+All requested local movies were found as local video files. No poster images or cloud entries were benchmarked.
+
+### Curated Results
+
+Each row below is one successful Session 1 run.
+
+| Movie | Thread | Wall | First Segment | 45s Runway | 120s Runway | Supply Rate | Avg CPU Cores | Peak CPU Cores | Peak RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| LOTR Return of the King | 1 | 1037.093s | 8.512s | 226.751s | 819.843s | 0.145x | 1.178 | 2.018 | 1.97 GiB |
+| LOTR Return of the King | 2 | 437.425s | 4.504s | 109.111s | 350.840s | 0.343x | 2.873 | 4.295 | 2.30 GiB |
+| LOTR Return of the King | 3 | 401.397s | 4.004s | 106.101s | 330.333s | 0.374x | 3.165 | 5.611 | 2.45 GiB |
+| LOTR Return of the King | 4 | 394.862s | 4.004s | 106.594s | 326.796s | 0.380x | 3.253 | 5.555 | 2.58 GiB |
+| LOTR Return of the King | 5 | 392.889s | 4.003s | 106.106s | 325.821s | 0.382x | 3.276 | 6.095 | 2.68 GiB |
+| LOTR Return of the King | 6 | 251.736s | 3.003s | 79.075s | 211.699s | 0.596x | 5.227 | 8.591 | 2.83 GiB |
+| LOTR Return of the King | 7 | 252.735s | 3.003s | 80.571s | 213.197s | 0.594x | 5.300 | 9.193 | 2.96 GiB |
+| LOTR Return of the King | 8 | 252.235s | 3.003s | 80.070s | 213.199s | 0.595x | 5.350 | 10.331 | 3.10 GiB |
+| LOTR Return of the King | 9 | 196.691s | 22.022s | 64.562s | 166.161s | 0.763x | 7.041 | 11.810 | 3.25 GiB |
+| LOTR Return of the King | 10 | 195.188s | 22.023s | 63.562s | 165.161s | 0.769x | 7.138 | 12.669 | 3.39 GiB |
+| LOTR Return of the King | 11 | 196.181s | 21.523s | 64.058s | 165.652s | 0.765x | 7.126 | 12.607 | 3.52 GiB |
+| LOTR Return of the King | 12 | 174.664s | 4.504s | 58.053s | 147.638s | 0.859x | 8.220 | 13.947 | 3.67 GiB |
+| Pacific Rim | 1 | 1373.956s | 79.084s | 351.857s | 1102.674s | 0.109x | 1.079 | 1.858 | 1.84 GiB |
+| Pacific Rim | 2 | 549.991s | 31.027s | 141.129s | 440.399s | 0.273x | 2.768 | 4.037 | 2.18 GiB |
+| Pacific Rim | 3 | 466.435s | 28.524s | 123.606s | 376.851s | 0.322x | 3.306 | 5.035 | 2.32 GiB |
+| Pacific Rim | 4 | 447.444s | 28.028s | 121.118s | 362.860s | 0.335x | 3.467 | 6.153 | 2.46 GiB |
+| Pacific Rim | 5 | 447.913s | 28.025s | 120.604s | 362.831s | 0.335x | 3.509 | 6.754 | 2.57 GiB |
+| Pacific Rim | 6 | 283.762s | 18.517s | 77.570s | 231.711s | 0.529x | 5.665 | 8.093 | 2.69 GiB |
+| Pacific Rim | 7 | 280.755s | 18.019s | 77.569s | 230.208s | 0.534x | 5.792 | 9.112 | 2.84 GiB |
+| Pacific Rim | 8 | 279.765s | 18.016s | 77.568s | 229.717s | 0.536x | 5.838 | 9.964 | 2.96 GiB |
+| Pacific Rim | 9 | 219.206s | 14.514s | 62.057s | 180.170s | 0.684x | 7.601 | 11.810 | 3.11 GiB |
+| Pacific Rim | 10 | 219.702s | 14.514s | 62.555s | 181.166s | 0.683x | 7.643 | 12.146 | 3.26 GiB |
+| Pacific Rim | 11 | 218.701s | 14.513s | 61.553s | 180.666s | 0.686x | 7.683 | 12.647 | 3.39 GiB |
+| Pacific Rim | 12 | 201.185s | 13.513s | 56.552s | 165.651s | 0.746x | 8.552 | 14.567 | 3.52 GiB |
+| Pirates Dead Man's Chest | 1 | 1262.156s | 62.558s | 269.247s | 999.417s | 0.119x | 1.148 | 1.819 | 1.94 GiB |
+| Pirates Dead Man's Chest | 2 | 533.491s | 35.031s | 126.612s | 424.895s | 0.281x | 2.785 | 4.216 | 2.27 GiB |
+| Pirates Dead Man's Chest | 3 | 494.457s | 34.533s | 124.119s | 393.370s | 0.303x | 3.044 | 5.695 | 2.43 GiB |
+| Pirates Dead Man's Chest | 4 | 472.422s | 34.028s | 122.105s | 375.830s | 0.318x | 3.190 | 5.795 | 2.55 GiB |
+| Pirates Dead Man's Chest | 5 | 470.453s | 34.539s | 123.624s | 374.865s | 0.319x | 3.208 | 5.855 | 2.64 GiB |
+| Pirates Dead Man's Chest | 6 | 303.277s | 22.022s | 81.074s | 242.221s | 0.495x | 5.101 | 8.473 | 2.78 GiB |
+| Pirates Dead Man's Chest | 7 | 298.274s | 21.519s | 79.571s | 237.715s | 0.503x | 5.226 | 9.290 | 2.93 GiB |
+| Pirates Dead Man's Chest | 8 | 299.776s | 22.022s | 80.574s | 238.722s | 0.500x | 5.261 | 9.810 | 3.01 GiB |
+| Pirates Dead Man's Chest | 9 | 235.213s | 17.516s | 64.558s | 187.666s | 0.638x | 6.849 | 11.850 | 3.16 GiB |
+| Pirates Dead Man's Chest | 10 | 233.711s | 17.515s | 64.057s | 186.168s | 0.642x | 6.924 | 12.348 | 3.30 GiB |
+| Pirates Dead Man's Chest | 11 | 234.711s | 17.518s | 64.560s | 187.167s | 0.639x | 6.921 | 13.027 | 3.42 GiB |
+| Pirates Dead Man's Chest | 12 | 210.692s | 15.516s | 57.053s | 167.654s | 0.712x | 7.915 | 14.089 | 3.54 GiB |
+| Harry Potter Goblet of Fire | 1 | 962.832s | 24.519s | 284.244s | 758.154s | 0.156x | 1.162 | 1.779 | 1.95 GiB |
+| Harry Potter Goblet of Fire | 2 | 417.363s | 10.509s | 113.593s | 328.781s | 0.359x | 2.766 | 3.857 | 2.27 GiB |
+| Harry Potter Goblet of Fire | 3 | 389.830s | 10.508s | 93.579s | 305.759s | 0.385x | 3.007 | 4.497 | 2.40 GiB |
+| Harry Potter Goblet of Fire | 4 | 390.409s | 10.513s | 92.098s | 305.823s | 0.384x | 3.004 | 4.996 | 2.53 GiB |
+| Harry Potter Goblet of Fire | 5 | 390.855s | 10.009s | 92.075s | 305.771s | 0.384x | 3.045 | 5.356 | 2.66 GiB |
+| Harry Potter Goblet of Fire | 6 | 263.233s | 11.010s | 66.558s | 200.678s | 0.570x | 4.690 | 7.914 | 2.75 GiB |
+| Harry Potter Goblet of Fire | 7 | 265.264s | 11.013s | 67.067s | 202.202s | 0.566x | 4.662 | 8.133 | 2.90 GiB |
+| Harry Potter Goblet of Fire | 8 | 263.743s | 11.011s | 66.562s | 201.686s | 0.569x | 4.744 | 8.394 | 3.03 GiB |
+| Harry Potter Goblet of Fire | 9 | 216.189s | 9.509s | 64.555s | 164.642s | 0.694x | 5.980 | 10.832 | 3.15 GiB |
+| Harry Potter Goblet of Fire | 10 | 216.193s | 10.008s | 65.057s | 165.646s | 0.694x | 6.014 | 11.091 | 3.31 GiB |
+| Harry Potter Goblet of Fire | 11 | 215.696s | 9.509s | 64.559s | 165.650s | 0.696x | 6.066 | 10.929 | 3.42 GiB |
+| Harry Potter Goblet of Fire | 12 | 197.680s | 9.510s | 60.554s | 148.636s | 0.759x | 6.807 | 12.587 | 3.52 GiB |
+
+### Plateau-Focused Interpretation
+
+Across all four movies, Session 1 shows a consistent stair-step shape:
+
+- `4 -> 5` was essentially flat for every movie.
+- `5 -> 6` was the strongest midrange jump for every movie.
+- `6 -> 7 -> 8` was mostly flat; the earlier LOTR `6 -> 8` plateau reproduced almost exactly.
+- `8 -> 9` was a second major jump for every movie.
+- `9 -> 10 -> 11` was mostly flat.
+- `11 -> 12` produced another clear jump for every movie in this session.
+
+Per movie:
+
+- LOTR: `5 -> 6` improved 120s runway by 114.122s; `6 -> 8` was flat/slightly worse; `8 -> 9` improved by 47.038s; `12` improved by 18.014s over `11`.
+- Pacific Rim: `5 -> 6` improved by 131.120s; `6 -> 8` was nearly flat; `8 -> 9` improved by 49.547s; `12` improved by 15.015s over `11`.
+- Pirates: `5 -> 6` improved by 132.644s; `6 -> 8` was effectively flat; `8 -> 9` improved by 51.056s; `12` improved by 19.513s over `11`.
+- Harry Potter: `5 -> 6` improved by 105.093s; `6 -> 8` was effectively flat; `8 -> 9` improved by 37.044s; `12` improved by 17.014s over `11`.
+
+CPU and memory:
+
+- CPU usage often increased inside a plateau without meaningful supply improvement. Example: LOTR peak CPU rose from 8.591 cores at 6 threads to 10.331 at 8 threads while 120s runway stayed about 212-213s.
+- Peak CPU did not approach the 18-core Route2 upbound. The highest peak CPU in this session was Pacific Rim at 12 threads with 14.567 cores.
+- RSS was safe in this session. Peak RSS stayed below 3.7 GiB for all rows.
+
+### Cross-Movie Policy Notes
+
+- Do not change adaptive policy from Session 1 alone; Session 2 / Repeat 2 is still needed.
+- 6 remains strongly supported as the first CPU-bound promotion target.
+- 8 often sits inside a plateau and is not clearly better than 6 for these local samples.
+- 10 is still reasonable as a conservative high-performance ceiling, but this session suggests the useful local step is really the `8 -> 9` tier, while `9/10/11` are mostly equivalent.
+- 12 showed repeatable-looking benefit across all four local movies in Session 1, but it should remain experimental until Session 2 confirms the pattern.
+- Odd counts matter: `9` was consistently important; `5`, `7`, and `11` mostly sat inside plateaus.
