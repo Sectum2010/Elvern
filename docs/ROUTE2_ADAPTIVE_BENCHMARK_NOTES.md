@@ -181,3 +181,117 @@ Avatar: The Way of Water:
 - Keep treating cloud SOURCE_BOUND evidence as a hard blocker for thread promotion.
 - If cloud source probes/e2e source metrics are healthy, low supply plus CPU-active workers can still be CPU_BOUND for cloud items.
 - Run the full 2-12 thread matrix with at least 2 repeats before changing the shadow adaptive default or promotion ladder again.
+
+## Cloud End-to-End Full Matrix: The Green Mile + Avatar Way of Water
+
+### 20260430T053156Z - Full cloud ffmpeg e2e matrix attempt
+
+- Benchmark run id/date-time: `20260430T053156Z`
+- Resume/failure-confirmation run id/date-time: `20260430T061530Z`
+- Benchmark script: `scripts/route2-cloud-benchmark.py`
+- Mode: `ffmpeg-e2e`
+- Path measured: Google Drive API -> temporary Elvern benchmark localhost proxy -> ffmpeg -> isolated HLS/fMP4 output
+- Thread counts requested: `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `11`, `12`
+- Repeat count requested: `2`
+- Profile: `mobile_2160p`
+- Sample duration: `150s`
+- Artifact paths:
+  - `dev/artifacts/route2-cloud-benchmark/20260430T053156Z/summary.json`
+  - `dev/artifacts/route2-cloud-benchmark/20260430T053156Z/summary.csv`
+  - `dev/artifacts/route2-cloud-benchmark/20260430T061530Z/summary.json`
+  - `dev/artifacts/route2-cloud-benchmark/20260430T061530Z/summary.csv`
+
+This run stayed benchmark-only. It did not create normal Route2/native playback sessions and did not write production Route2 cache. ffmpeg consumed tokenless localhost benchmark proxy URLs; OAuth/provider details stayed inside the benchmark proxy.
+
+### Media Items
+
+| Media ID | Title | Source | File Size |
+|---:|---|---|---:|
+| 102 | The Green Mile (1999) | Google Drive cloud | 34,215,479,539 bytes / 31.87 GiB |
+| 935 | Avatar.The.Way.of.Water.2022.2160p.REPACK.UHD.BluRay.REMUX.DV.HDR.HEVC.Atmos-TRiToN | Google Drive cloud | 76,167,796,686 bytes / 70.94 GiB |
+
+### Completion / Failure Notes
+
+- The Green Mile completed the full `2-12` thread matrix with `2` repeats per thread: `22/22` successful runs.
+- Avatar completed `2-9` threads with `2` repeats per thread: `16/16` successful runs through thread `9`.
+- Avatar thread `10` repeat `1` in the full run aborted after provider/auth errors: proxy status counts included `401`, `403`, and repeated `416` reconnect-at-EOF responses.
+- A fresh resume attempt for Avatar threads `10`, `11`, and `12` failed immediately with Google Drive `403 downloadQuotaExceeded`.
+- Treat Avatar `10-12` as missing for the full-matrix aggregate. Do not infer thread scaling from the failed rows.
+
+### Aggregated Successful Results
+
+| Movie | Threads | Runs | Avg Wall | Median Wall | Avg 45s Runway | Median 45s Runway | Avg 120s Runway | Median 120s Runway | Avg Supply | Median Supply | Avg CPU Cores | Max Peak CPU | Max Peak RSS | 120s Repeat Diff |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| The Green Mile | 2 | 2 | 82.076s | 82.076s | 25.023s | 25.023s | 65.811s | 65.811s | 1.828x | 1.828x | 5.348 | 7.470 | 2.86 GiB | 0.497s |
+| The Green Mile | 3 | 2 | 59.057s | 59.057s | 19.017s | 19.017s | 47.546s | 47.546s | 2.540x | 2.540x | 7.599 | 10.410 | 2.89 GiB | 0.002s |
+| The Green Mile | 4 | 2 | 47.794s | 47.794s | 15.764s | 15.764s | 38.035s | 38.035s | 3.139x | 3.139x | 9.604 | 13.907 | 2.97 GiB | 0.000s |
+| The Green Mile | 5 | 2 | 41.042s | 41.042s | 14.017s | 14.017s | 33.035s | 33.035s | 3.655x | 3.655x | 11.373 | 14.785 | 2.98 GiB | 0.003s |
+| The Green Mile | 6 | 2 | 39.290s | 39.290s | 13.763s | 13.763s | 32.282s | 32.282s | 3.819x | 3.819x | 12.016 | 15.049 | 3.06 GiB | 0.505s |
+| The Green Mile | 7 | 2 | 38.791s | 38.791s | 13.514s | 13.514s | 31.532s | 31.532s | 3.867x | 3.867x | 12.195 | 15.309 | 3.15 GiB | 0.001s |
+| The Green Mile | 8 | 2 | 38.291s | 38.291s | 13.263s | 13.263s | 31.283s | 31.283s | 3.918x | 3.918x | 12.384 | 15.263 | 3.06 GiB | 0.498s |
+| The Green Mile | 9 | 2 | 38.543s | 38.543s | 13.264s | 13.264s | 31.532s | 31.532s | 3.893x | 3.893x | 12.302 | 15.549 | 3.11 GiB | 0.003s |
+| The Green Mile | 10 | 2 | 38.790s | 38.790s | 13.764s | 13.764s | 31.782s | 31.782s | 3.868x | 3.868x | 12.264 | 15.187 | 3.12 GiB | 0.499s |
+| The Green Mile | 11 | 2 | 38.540s | 38.540s | 13.514s | 13.514s | 31.532s | 31.532s | 3.893x | 3.893x | 12.366 | 15.404 | 3.33 GiB | 0.002s |
+| The Green Mile | 12 | 2 | 38.541s | 38.541s | 13.514s | 13.514s | 31.534s | 31.534s | 3.893x | 3.893x | 12.418 | 15.248 | 3.21 GiB | 0.003s |
+| Avatar Way of Water | 2 | 2 | 124.369s | 124.369s | 31.779s | 31.779s | 99.094s | 99.094s | 1.207x | 1.207x | 4.188 | 6.296 | 2.92 GiB | 0.008s |
+| Avatar Way of Water | 3 | 2 | 83.078s | 83.078s | 22.520s | 22.520s | 66.562s | 66.562s | 1.806x | 1.806x | 6.388 | 9.232 | 2.96 GiB | 0.002s |
+| Avatar Way of Water | 4 | 2 | 71.821s | 71.821s | 20.269s | 20.269s | 57.557s | 57.557s | 2.089x | 2.089x | 7.449 | 9.849 | 3.10 GiB | 0.002s |
+| Avatar Way of Water | 5 | 2 | 59.058s | 59.058s | 18.018s | 18.018s | 47.546s | 47.546s | 2.540x | 2.540x | 9.268 | 12.251 | 3.09 GiB | 1.001s |
+| Avatar Way of Water | 6 | 2 | 56.059s | 56.059s | 17.267s | 17.267s | 45.047s | 45.047s | 2.676x | 2.676x | 9.935 | 12.108 | 3.17 GiB | 1.008s |
+| Avatar Way of Water | 7 | 2 | 51.553s | 51.553s | 15.766s | 15.766s | 41.543s | 41.543s | 2.910x | 2.910x | 10.979 | 13.883 | 3.27 GiB | 0.006s |
+| Avatar Way of Water | 8 | 2 | 48.053s | 48.053s | 15.016s | 15.016s | 38.542s | 38.542s | 3.122x | 3.122x | 11.872 | 15.006 | 3.38 GiB | 0.002s |
+| Avatar Way of Water | 9 | 2 | 45.556s | 45.556s | 15.518s | 15.518s | 36.793s | 36.793s | 3.295x | 3.295x | 12.613 | 15.675 | 3.34 GiB | 1.508s |
+
+### Failed / Incomplete Rows
+
+| Run ID | Movie | Threads | Repeat | Result | Provider Evidence |
+|---|---|---:|---:|---|---|
+| 20260430T053156Z | Avatar Way of Water | 10 | 1 | failed after 487.449s | `CloudSourceAbort`; status counts included `206`, `401`, `403`, `416` |
+| 20260430T061530Z | Avatar Way of Water | 10 | 1 | failed immediately | Google Drive `403 downloadQuotaExceeded` |
+| 20260430T061530Z | Avatar Way of Water | 10 | 2 | failed immediately | Google Drive `403 downloadQuotaExceeded` |
+| 20260430T061530Z | Avatar Way of Water | 11 | 1 | failed immediately | Google Drive `403 downloadQuotaExceeded` |
+| 20260430T061530Z | Avatar Way of Water | 11 | 2 | failed immediately | Google Drive `403 downloadQuotaExceeded` |
+| 20260430T061530Z | Avatar Way of Water | 12 | 1 | failed immediately | Google Drive `403 downloadQuotaExceeded` |
+| 20260430T061530Z | Avatar Way of Water | 12 | 2 | failed immediately | Google Drive `403 downloadQuotaExceeded` |
+
+### Per-Movie Interpretation
+
+The Green Mile:
+
+- 5 materially improved over 4: average 120s runway improved from 38.035s to 33.035s.
+- 6 improved only slightly over 5: average 120s runway improved from 33.035s to 32.282s.
+- 7 and 8 produced small additional gains; 8 was the fastest successful average 120s runway at 31.283s.
+- 9, 10, 11, and 12 were effectively flat or slightly worse than 8.
+- Diminishing returns begin around 6, with a practical plateau around 7-8.
+- Peak CPU never approached the 18-core Route2 upbound; max peak CPU was 15.549 cores.
+- Peak RSS remained safe, maxing at 3.33 GiB.
+- This title looks strongly thread-beneficial from 2 -> 5 and modestly beneficial through 8, then flat.
+
+Avatar: The Way of Water:
+
+- 5 materially improved over 4: average 120s runway improved from 57.557s to 47.546s.
+- 6 improved only modestly over 5: average 120s runway improved from 47.546s to 45.047s.
+- 7, 8, and 9 continued to improve repeatably, with thread 9 reaching 36.793s average 120s runway.
+- The full-matrix run could not measure 10-12 because the provider path hit auth/quota failures. The earlier small cloud e2e run did show 10 and 12 improving this title, but that needs a fresh full repeat after quota resets.
+- Peak CPU stayed below the 18-core Route2 upbound; max successful peak CPU through thread 9 was 15.675 cores.
+- Peak RSS remained safe, maxing at 3.38 GiB in the successful rows.
+- Successful 2-9 rows look CPU/thread-beneficial rather than source-bound, but the provider quota failure is a hard SOURCE/provider guard for this benchmark window.
+
+### Cross-Movie Interpretation
+
+- 6 remains a strong first promotion target across local LOTR, the small cloud e2e run, and this full cloud attempt.
+- The new Green Mile full matrix suggests some cloud titles plateau earlier, around 7-8, even when source reads are healthy.
+- Avatar remains the heavier cloud sample: successful rows improved through 9 here, and the earlier small run improved through 12.
+- Odd thread counts matter: 5 was a large improvement over 4 for both cloud titles; 7 and 9 were meaningful for Avatar, while Green Mile flattened after 7-8.
+- 10 remains a reasonable conservative high-performance shadow ceiling from the combined local LOTR plus Avatar evidence, but this run does not strengthen the case for making 12 default.
+- 12 should remain experimental/configurable until a quota-clean full repeat captures Avatar 10-12 and additional titles.
+- Cloud behavior differs from local behavior because provider/auth/quota can become the hard limiter independently of CPU/RAM. Adaptive promotion must keep provider/SOURCE_BOUND guards ahead of CPU-bound promotion.
+
+### Policy Implication
+
+- Do not change real playback behavior from this benchmark.
+- Do not change adaptive policy solely from this partial full matrix.
+- Keep 6 as the safest first CPU-bound promotion target.
+- Keep 10 as the conservative shadow high-performance ceiling for now.
+- Treat 12 as experimental until more full-repeat data exists.
+- For cloud media, provider/auth/quota failures must block thread promotion even if prior rows showed CPU/thread scaling.
