@@ -642,3 +642,72 @@ Interpretation:
 - Cloud provider/source instability must continue to block promotion regardless of apparent CPU headroom.
 
 These results are for relative thread-scaling shape only and should not be used as absolute live Full Playback ready-time measurements.
+
+## Final Legacy Cloud Benchmark Stage - Failure Investigation and Completion Attempt
+
+Timestamp: `20260502T012814Z` through `20260502T012851Z`
+
+This follow-up inspected the failed rows from the final legacy cloud benchmark stage and reran only the incomplete rows after small quota-safe source probes. This remains old/legacy benchmark data. It is not live-parity data and must not be used as an absolute live Full Playback ready-time measurement.
+
+Inspected artifact roots:
+
+- `dev/artifacts/route2-cloud-benchmark/20260502T002600Z/`
+- `dev/artifacts/route2-cloud-benchmark/20260502T002612Z/`
+- `dev/artifacts/route2-cloud-benchmark/final-old-cloud-benchmark-20260502T002612Z/`
+
+New rerun artifacts:
+
+- `dev/artifacts/route2-cloud-benchmark/failure-rerun-20260502/fight-club-source-probe/20260502T012814Z/`
+- `dev/artifacts/route2-cloud-benchmark/failure-rerun-20260502/crimes-source-probe/20260502T012822Z/`
+- `dev/artifacts/route2-cloud-benchmark/failure-rerun-20260502/fight-club-thread-01/20260502T012838Z/`
+- `dev/artifacts/route2-cloud-benchmark/failure-rerun-20260502/crimes-thread-09/20260502T012851Z/`
+
+### Failed Row Evidence
+
+| Movie | Media ID | Failed Thread | Failure | Source Status Counts | Bytes Proxied | Timing | Evidence |
+|---|---:|---:|---|---|---:|---:|---|
+| Fight Club 1999 | 103 | 1 | `CloudSourceAbort` | `{"206": 2, "403": 2}` | 3,161,069 | 1.012s | Partial source transfer followed by provider/proxy `403`; no generated seconds. |
+| Fantastic.Beasts.The.Crimes.of.Grindelwald.2018..4K.HDR.DV.2160p.BDRemux Ita Eng x265-NAHOM | 1453 | 9 | `FFmpegError`, ffmpeg exit code `8` | `{"403": 2}` | 0 | 0.501s | Immediate `403 Forbidden` opening the proxy URL; no first segment. |
+
+Fight Club thread `1` did not fail at the beginning of the movie-level benchmark. Threads `2,9,8,12,11,4,3,10,5,6,7` had already succeeded before the thread `1` failure. That points to either a transient provider/proxy problem or an ffmpeg request pattern that became blocked at that moment, not a simple file-not-found condition.
+
+Crimes of Grindelwald had a clean one-point source probe in the original run, but the first E2E row failed immediately. That points to a difference between the explicit source-probe request pattern and ffmpeg's E2E open/seek request pattern through the benchmark proxy.
+
+### Source Probe Reruns
+
+Both failed movies were re-probed with `8 MiB` ranges at `start`, `middle`, and `near_end`.
+
+| Movie | Media ID | Start | Middle | Near End | Result |
+|---|---:|---:|---:|---:|---|
+| Fight Club 1999 | 103 | HTTP `206`, 10.516 MiB/s | HTTP `206`, 11.704 MiB/s | HTTP `206`, 13.089 MiB/s | Source probe clean |
+| Crimes of Grindelwald | 1453 | HTTP `206`, 13.155 MiB/s | HTTP `206`, 9.057 MiB/s | HTTP `206`, 13.189 MiB/s | Source probe clean |
+
+The source probes use explicit fixed `Range` GET requests. The E2E benchmark feeds ffmpeg through the benchmark localhost proxy; ffmpeg may issue HEAD/GET/range/seek patterns that are not identical to these small direct probe windows. The proxy records status counts and bytes, but it does not currently persist each individual method/range header, so the exact rejected E2E range request is not captured in the artifact.
+
+### E2E Rerun Results
+
+| Movie | Media ID | Rerun Thread | Result | Source Status Counts | Bytes Proxied | Notes |
+|---|---:|---:|---|---|---:|---|
+| Fight Club 1999 | 103 | 1 | failed: `FFmpegError`, ffmpeg exit code `8` | `{"403": 2}` | 0 | Immediate provider/proxy `403`; rerun stopped for this movie. |
+| Crimes of Grindelwald | 1453 | 9 | failed: `FFmpegError`, ffmpeg exit code `8` | `{"403": 2}` | 0 | Immediate provider/proxy `403`; full matrix was not attempted. |
+
+Fight Club thread `1` remains incomplete. Crimes of Grindelwald remains blocked and has no usable E2E matrix. Do not infer scaling from these failed rows.
+
+### Failure Interpretation
+
+- The clean source probes show that small explicit Google Drive range reads were allowed at multiple positions.
+- The E2E failures show that ffmpeg's benchmark-proxy open/seek request pattern can still receive immediate `403 Forbidden`.
+- Fight Club's original failure transferred partial data before provider/proxy errors, but the rerun failed immediately, so the safest interpretation is provider/source instability around the E2E access pattern rather than a stable thread-count performance result.
+- Crimes of Grindelwald repeatedly failed immediately on E2E despite clean probes, so it should be treated as provider/source blocked for this legacy benchmark path.
+- Provider/source instability must remain a hard blocker for adaptive promotion, independent of CPU headroom.
+
+### Benchmark Contract Note
+
+The old local and old cloud benchmark timings are not directly comparable:
+
+- Old local results used `scripts/route2-thread-benchmark.py`, a simpler isolated local ffmpeg benchmark command.
+- Legacy cloud E2E uses `scripts/route2-cloud-benchmark.py --mode ffmpeg-e2e`, which uses a benchmark localhost proxy and a more live-ish mobile-profile command shape.
+- The cloud E2E command uses superfast/mobile-profile settings, while the older local script had a different command contract.
+- Source media complexity, source path, provider behavior, and sampled position differ.
+
+Use these legacy results only for relative scaling shape inside the same benchmark family, not for absolute cross-family timing or live Full Playback readiness.
