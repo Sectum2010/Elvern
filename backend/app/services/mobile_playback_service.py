@@ -341,6 +341,21 @@ class _Route2RealThreadAssignmentDecision:
 
 
 @dataclass(slots=True)
+class _Route2LimitingFactorDecision:
+    primary: str
+    confidence: float
+    scores: dict[str, float]
+    supporting_signals: list[str]
+    blocking_signals: list[str]
+    missing_metrics: list[str]
+    published_rate_x: float | None
+    encoder_rate_x: float | None
+    source_feed_rate_x: float | None
+    publish_efficiency_gap: float | None
+    client_delivery_rate_x: float | None
+
+
+@dataclass(slots=True)
 class _Route2ActivePlaybackHealth:
     status: str
     reason: str
@@ -379,6 +394,7 @@ class _Route2ClosedLoopDryRunDecision:
     boost_blocked: bool
     boost_blockers: list[str]
     boost_warning_reasons: list[str]
+    limiting_factor: _Route2LimitingFactorDecision
     primary_bottleneck: str
     donor_score: float = 0.0
 
@@ -3131,6 +3147,367 @@ class MobilePlaybackManager:
                 reasons.append("cgroup_io_pressure_high")
         return reasons
 
+    def _route2_estimated_source_bytes_per_media_second_locked(
+        self,
+        session: MobilePlaybackSession,
+        record: Route2WorkerRecord,
+    ) -> float | None:
+        duration_seconds = float(session.duration_seconds or 0.0)
+        if duration_seconds <= 0.0:
+            return None
+        file_size = 0
+        try:
+            item = get_media_item_record(self.settings, item_id=record.media_item_id)
+        except Exception:  # noqa: BLE001 - diagnostic-only helper must not break status.
+            item = None
+        if item is not None:
+            try:
+                file_size = int(item.get("file_size") or 0)
+            except (TypeError, ValueError):
+                file_size = 0
+        if file_size <= 0 and record.source_kind == "local":
+            try:
+                candidate = Path(session.source_locator)
+                if candidate.is_file():
+                    file_size = int(candidate.stat().st_size)
+            except OSError:
+                file_size = 0
+        if file_size <= 0:
+            return None
+        return max(0.0, float(file_size) / duration_seconds)
+
+    def _route2_source_feed_rate_x_locked(
+        self,
+        session: MobilePlaybackSession,
+        record: Route2WorkerRecord,
+    ) -> tuple[float | None, list[str]]:
+        missing: list[str] = []
+        if not record.io_sample_mature or record.io_sample_stale:
+            missing.append("route2_source_observation_mature")
+            return None, missing
+        source_bytes_per_second = record.io_read_bytes_per_second
+        if source_bytes_per_second is None:
+            missing.append("route2_source_bytes_per_second")
+            return None, missing
+        estimated_source_bytes_per_media_second = self._route2_estimated_source_bytes_per_media_second_locked(
+            session,
+            record,
+        )
+        if estimated_source_bytes_per_media_second is None or estimated_source_bytes_per_media_second <= 0.0:
+            missing.append("estimated_source_bytes_per_media_second")
+            return None, missing
+        return max(0.0, float(source_bytes_per_second) / estimated_source_bytes_per_media_second), missing
+
+    def _route2_client_delivery_rate_x_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> tuple[float | None, list[str]]:
+        missing: list[str] = []
+        client_goodput = self._route2_client_goodput_locked(session)
+        if not bool(client_goodput.get("confident")):
+            missing.append("client_goodput")
+            return None, missing
+        server_goodput = self._route2_server_byte_goodput_locked(epoch)
+        if not bool(server_goodput.get("confident")) or float(server_goodput.get("safe_rate") or 0.0) <= 0.0:
+            missing.append("server_goodput")
+            return None, missing
+        client_rate = max(0.0, float(client_goodput.get("safe_rate") or 0.0))
+        server_rate = max(0.0, float(server_goodput.get("safe_rate") or 0.0))
+        return client_rate / server_rate if server_rate > 0.0 else None, missing
+
+    def _route2_publish_efficiency_gap_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        progress: _Route2FfmpegProgressSnapshot | None,
+    ) -> float | None:
+        if progress is None or progress.out_time_seconds is None or progress.stale:
+            return None
+        progress_ready_end_seconds = epoch.epoch_start_seconds + float(progress.out_time_seconds)
+        actual_ready_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
+        return max(0.0, progress_ready_end_seconds - actual_ready_end_seconds)
+
+    def _route2_limiting_factor_payload(self, decision: _Route2LimitingFactorDecision) -> dict[str, object]:
+        return {
+            "limiting_factor_primary": decision.primary,
+            "limiting_factor_confidence": round(decision.confidence, 3),
+            "limiting_factor_scores": {
+                key: round(float(value), 3)
+                for key, value in decision.scores.items()
+            },
+            "limiting_factor_supporting_signals": list(decision.supporting_signals),
+            "limiting_factor_blocking_signals": list(decision.blocking_signals),
+            "limiting_factor_missing_metrics": list(decision.missing_metrics),
+            "published_rate_x": round(float(decision.published_rate_x), 3)
+            if decision.published_rate_x is not None
+            else None,
+            "encoder_rate_x": round(float(decision.encoder_rate_x), 3)
+            if decision.encoder_rate_x is not None
+            else None,
+            "source_feed_rate_x": round(float(decision.source_feed_rate_x), 3)
+            if decision.source_feed_rate_x is not None
+            else None,
+            "publish_efficiency_gap": round(float(decision.publish_efficiency_gap), 3)
+            if decision.publish_efficiency_gap is not None
+            else None,
+            "client_delivery_rate_x": round(float(decision.client_delivery_rate_x), 3)
+            if decision.client_delivery_rate_x is not None
+            else None,
+        }
+
+    def _empty_route2_limiting_factor_decision(self, *, reason: str) -> _Route2LimitingFactorDecision:
+        return _Route2LimitingFactorDecision(
+            primary="metrics_immature",
+            confidence=0.5,
+            scores={
+                "cpu_thread_score": 0.0,
+                "source_score": 0.0,
+                "io_publish_score": 0.0,
+                "client_score": 0.0,
+                "host_pressure_score": 0.0,
+                "provider_error_score": 0.0,
+                "metrics_immature_score": 0.8,
+            },
+            supporting_signals=[],
+            blocking_signals=[],
+            missing_metrics=[reason],
+            published_rate_x=None,
+            encoder_rate_x=None,
+            source_feed_rate_x=None,
+            publish_efficiency_gap=None,
+            client_delivery_rate_x=None,
+        )
+
+    def _evaluate_route2_limiting_factor_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        record: Route2WorkerRecord,
+        *,
+        progress: _Route2FfmpegProgressSnapshot | None = None,
+        host_cpu_pressure: _HostCpuPressureSnapshot | None = None,
+        psi_snapshot: _LinuxPressureSnapshot | None = None,
+        cgroup_snapshot: _CgroupTelemetrySnapshot | None = None,
+        adaptive_bottleneck_class: str | None = None,
+        route2_cpu_cores_used_total: float | None = None,
+        route2_cpu_upbound_cores: int | None = None,
+        total_memory_bytes: int | None = None,
+        route2_memory_bytes_total: int | None = None,
+    ) -> _Route2LimitingFactorDecision:
+        (
+            _published_end_seconds,
+            _effective_playhead_seconds,
+            runway_seconds,
+            supply_rate_x,
+            observation_seconds,
+            manifest_complete,
+            refill_in_progress,
+        ) = self._route2_runtime_supply_metrics_locked(session, epoch)
+        reserve_status = self._route2_bad_condition_reserve_status_locked(session, epoch)
+        runway_delta_per_second = reserve_status["runway_delta_per_second"]
+        runway_delta_mature = bool(reserve_status["runway_delta_mature"])
+        metrics_mature = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+        required_runway_seconds = self._route2_closed_loop_required_runway_seconds(record.playback_mode)
+        source_feed_rate_x, source_missing = self._route2_source_feed_rate_x_locked(session, record)
+        client_delivery_rate_x, client_missing = self._route2_client_delivery_rate_x_locked(session, epoch)
+        encoder_rate_x = (
+            float(progress.speed_x)
+            if progress is not None and progress.speed_x is not None and not progress.stale
+            else None
+        )
+        publish_efficiency_gap = self._route2_publish_efficiency_gap_locked(session, epoch, progress)
+        io_publish_reasons = self._route2_closed_loop_io_publish_limited(
+            session=session,
+            epoch=epoch,
+            progress=progress,
+            psi_snapshot=psi_snapshot,
+            cgroup_snapshot=cgroup_snapshot,
+        )
+        host_pressure_reasons = self._route2_closed_loop_host_pressure_limited(
+            host_cpu_pressure=host_cpu_pressure,
+            psi_snapshot=psi_snapshot,
+            cgroup_snapshot=cgroup_snapshot,
+        )
+        provider_error = bool(record.non_retryable_error or session.last_error)
+        assigned_threads = max(1, int(record.assigned_threads or 1))
+        cpu_thread_pressure = (
+            record.cpu_cores_used is not None and float(record.cpu_cores_used) >= max(1.0, assigned_threads * 0.75)
+        ) or adaptive_bottleneck_class in {"CPU_BOUND", "UNDER_SUPPLIED_BUT_CPU_LIMITED"}
+        source_kind_factor = "cloud_source" if record.source_kind == "cloud" else "local_source" if record.source_kind == "local" else "source"
+        supply_below_floor = supply_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        runway_declining = bool(
+            runway_delta_mature
+            and runway_delta_per_second is not None
+            and float(runway_delta_per_second) < 0.0
+        )
+        boost_window_below_target = bool(refill_in_progress and runway_seconds < required_runway_seconds)
+        memory_pressure = False
+        if total_memory_bytes and route2_memory_bytes_total is not None:
+            memory_pressure = (float(route2_memory_bytes_total) / float(total_memory_bytes)) >= 0.90
+        pressure_primary = "host_pressure"
+        if any(reason.startswith("external_") for reason in host_pressure_reasons):
+            pressure_primary = "external_pressure"
+        if any("cgroup_cpu" in reason for reason in host_pressure_reasons):
+            pressure_primary = "cgroup_throttle"
+        if memory_pressure or any("memory" in reason for reason in host_pressure_reasons):
+            pressure_primary = "memory_pressure"
+        source_confident_low = source_feed_rate_x is not None and source_feed_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        source_confident_healthy = source_feed_rate_x is not None and source_feed_rate_x >= ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        client_limited = self._route2_client_limited_locked(session, epoch)
+        route2_headroom_cores = (
+            float(route2_cpu_upbound_cores) - float(route2_cpu_cores_used_total)
+            if route2_cpu_upbound_cores is not None and route2_cpu_cores_used_total is not None
+            else None
+        )
+        headroom_available = route2_headroom_cores is None or route2_headroom_cores >= 1.0
+
+        scores = {
+            "cpu_thread_score": 0.0,
+            "source_score": 0.0,
+            "io_publish_score": 0.0,
+            "client_score": 0.0,
+            "host_pressure_score": 0.0,
+            "provider_error_score": 0.0,
+            "metrics_immature_score": 0.0,
+        }
+        supporting_signals: list[str] = []
+        blocking_signals: list[str] = []
+        missing_metrics = [*source_missing, *client_missing]
+        if progress is None or progress.stale or progress.speed_x is None:
+            missing_metrics.append("ffmpeg_progress_speed_x")
+        if source_feed_rate_x is None and record.source_kind == "cloud":
+            missing_metrics.append("cloud_source_feed_rate_x")
+        if route2_headroom_cores is None:
+            missing_metrics.append("route2_cpu_headroom")
+
+        if provider_error:
+            scores["provider_error_score"] = 1.0
+            supporting_signals.append("provider_or_source_error_present")
+            return _Route2LimitingFactorDecision(
+                primary="provider_error",
+                confidence=0.98,
+                scores=scores,
+                supporting_signals=supporting_signals,
+                blocking_signals=blocking_signals,
+                missing_metrics=missing_metrics,
+                published_rate_x=supply_rate_x,
+                encoder_rate_x=encoder_rate_x,
+                source_feed_rate_x=source_feed_rate_x,
+                publish_efficiency_gap=publish_efficiency_gap,
+                client_delivery_rate_x=client_delivery_rate_x,
+            )
+        if manifest_complete:
+            supporting_signals.append("manifest_complete_or_fully_published")
+            return _Route2LimitingFactorDecision(
+                primary="manifest_complete",
+                confidence=0.95,
+                scores=scores,
+                supporting_signals=supporting_signals,
+                blocking_signals=blocking_signals,
+                missing_metrics=missing_metrics,
+                published_rate_x=supply_rate_x,
+                encoder_rate_x=encoder_rate_x,
+                source_feed_rate_x=source_feed_rate_x,
+                publish_efficiency_gap=publish_efficiency_gap,
+                client_delivery_rate_x=client_delivery_rate_x,
+            )
+        if not metrics_mature:
+            scores["metrics_immature_score"] = 0.9
+            supporting_signals.append("supply_observation_immature")
+            return _Route2LimitingFactorDecision(
+                primary="metrics_immature",
+                confidence=0.85,
+                scores=scores,
+                supporting_signals=supporting_signals,
+                blocking_signals=blocking_signals,
+                missing_metrics=missing_metrics,
+                published_rate_x=supply_rate_x,
+                encoder_rate_x=encoder_rate_x,
+                source_feed_rate_x=source_feed_rate_x,
+                publish_efficiency_gap=publish_efficiency_gap,
+                client_delivery_rate_x=client_delivery_rate_x,
+            )
+
+        if client_limited:
+            scores["client_score"] = 0.86
+            supporting_signals.append("client_goodput_below_server_goodput")
+        if source_confident_low and not cpu_thread_pressure:
+            scores["source_score"] = 0.86
+            supporting_signals.append(f"{source_kind_factor}_feed_below_1_05")
+        elif source_confident_low:
+            scores["source_score"] = 0.62
+            supporting_signals.append(f"{source_kind_factor}_feed_low_with_cpu_pressure")
+        elif (
+            source_feed_rate_x is None
+            and record.source_kind == "cloud"
+            and supply_below_floor
+            and not cpu_thread_pressure
+        ):
+            scores["source_score"] = 0.6
+            supporting_signals.append("cloud_source_feed_missing_with_low_supply_and_low_cpu")
+        if io_publish_reasons:
+            scores["io_publish_score"] = 0.88
+            supporting_signals.extend(io_publish_reasons)
+        if host_pressure_reasons or memory_pressure:
+            scores["host_pressure_score"] = 0.82 if (supply_below_floor or boost_window_below_target or runway_declining) else 0.55
+            blocking_signals.extend(host_pressure_reasons)
+            if memory_pressure:
+                blocking_signals.append("route2_memory_hard_pressure")
+        if (supply_below_floor or boost_window_below_target or runway_declining) and cpu_thread_pressure:
+            if not source_confident_low and not client_limited and not io_publish_reasons:
+                scores["cpu_thread_score"] = 0.86 if source_confident_healthy or record.source_kind == "local" else 0.68
+                supporting_signals.append("cpu_thread_pressure_with_supply_or_prepare_need")
+                if not headroom_available:
+                    blocking_signals.append("route2_cpu_headroom_insufficient")
+                    scores["host_pressure_score"] = max(scores["host_pressure_score"], 0.72)
+        healthy_supply = (
+            supply_rate_x >= ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+            and (not runway_delta_mature or runway_delta_per_second is None or float(runway_delta_per_second) >= 0.0)
+            and not self._starvation_risk(session)
+            and not self._stalled_recovery_needed(session)
+        )
+        if healthy_supply and not client_limited and not io_publish_reasons and not source_confident_low:
+            if not boost_window_below_target or not host_pressure_reasons:
+                primary = "not_limited"
+                confidence = 0.78
+            else:
+                primary = pressure_primary
+                confidence = 0.78
+        else:
+            primary = "unknown"
+            confidence = 0.55
+            ranked: list[tuple[float, str]] = [
+                (scores["provider_error_score"], "provider_error"),
+                (scores["client_score"], "client"),
+                (scores["source_score"], source_kind_factor if source_kind_factor in {"cloud_source", "local_source"} else "source"),
+                (scores["io_publish_score"], "io_publish"),
+                (scores["host_pressure_score"], pressure_primary),
+                (scores["cpu_thread_score"], "cpu_thread"),
+                (scores["metrics_immature_score"], "metrics_immature"),
+            ]
+            best_score, best_factor = max(ranked, key=lambda value: value[0])
+            if best_score > 0.0:
+                primary = best_factor
+                confidence = best_score
+        if primary == "not_limited":
+            supporting_signals.append("supply_at_or_above_1_05_and_runway_not_declining")
+        if primary == "cpu_thread" and record.source_kind == "cloud" and source_confident_healthy:
+            supporting_signals.append("cloud_source_feed_healthy_cpu_thread_limited")
+        return _Route2LimitingFactorDecision(
+            primary=primary,
+            confidence=confidence,
+            scores=scores,
+            supporting_signals=supporting_signals,
+            blocking_signals=blocking_signals,
+            missing_metrics=list(dict.fromkeys(missing_metrics)),
+            published_rate_x=supply_rate_x,
+            encoder_rate_x=encoder_rate_x,
+            source_feed_rate_x=source_feed_rate_x,
+            publish_efficiency_gap=publish_efficiency_gap,
+            client_delivery_rate_x=client_delivery_rate_x,
+        )
+
     def _evaluate_route2_closed_loop_dry_run_locked(
         self,
         session: MobilePlaybackSession,
@@ -3143,6 +3520,10 @@ class MobilePlaybackManager:
         psi_snapshot: _LinuxPressureSnapshot | None = None,
         cgroup_snapshot: _CgroupTelemetrySnapshot | None = None,
         adaptive_bottleneck_class: str | None = None,
+        route2_cpu_cores_used_total: float | None = None,
+        route2_cpu_upbound_cores: int | None = None,
+        total_memory_bytes: int | None = None,
+        route2_memory_bytes_total: int | None = None,
     ) -> _Route2ClosedLoopDryRunDecision:
         assigned_threads = max(0, int(record.assigned_threads or 0))
         protected_floor = self._route2_protected_min_threads_per_active_user()
@@ -3161,17 +3542,27 @@ class MobilePlaybackManager:
         runway_delta_mature = bool(reserve_status["runway_delta_mature"])
         required_runway_seconds = self._route2_closed_loop_required_runway_seconds(record.playback_mode)
         comfortable_runway_seconds = self._route2_closed_loop_comfortable_runway_seconds(record.playback_mode)
-        cpu_thread_limited = self._route2_record_cpu_thread_limited(record) or adaptive_bottleneck_class in {
+        limiting_factor = self._evaluate_route2_limiting_factor_locked(
+            session,
+            epoch,
+            record,
+            progress=progress,
+            host_cpu_pressure=host_cpu_pressure,
+            psi_snapshot=psi_snapshot,
+            cgroup_snapshot=cgroup_snapshot,
+            adaptive_bottleneck_class=adaptive_bottleneck_class,
+            route2_cpu_cores_used_total=route2_cpu_cores_used_total,
+            route2_cpu_upbound_cores=route2_cpu_upbound_cores,
+            total_memory_bytes=total_memory_bytes,
+            route2_memory_bytes_total=route2_memory_bytes_total,
+        )
+        cpu_thread_pressure = self._route2_record_cpu_thread_limited(record) or adaptive_bottleneck_class in {
             "CPU_BOUND",
             "UNDER_SUPPLIED_BUT_CPU_LIMITED",
         }
-        provider_error = bool(record.non_retryable_error or session.last_error)
-        client_limited = self._route2_client_limited_locked(session, epoch)
-        source_limited = self._route2_source_limited_locked(
-            session,
-            epoch,
-            cpu_thread_limited=cpu_thread_limited,
-        )
+        provider_error = limiting_factor.primary == "provider_error"
+        client_limited = limiting_factor.primary == "client"
+        source_limited = limiting_factor.primary in {"source", "cloud_source", "local_source"}
         io_publish_reasons = self._route2_closed_loop_io_publish_limited(
             session=session,
             epoch=epoch,
@@ -3179,13 +3570,19 @@ class MobilePlaybackManager:
             psi_snapshot=psi_snapshot,
             cgroup_snapshot=cgroup_snapshot,
         )
-        io_publish_limited = bool(io_publish_reasons)
+        io_publish_limited = limiting_factor.primary == "io_publish"
         host_pressure_reasons = self._route2_closed_loop_host_pressure_limited(
             host_cpu_pressure=host_cpu_pressure,
             psi_snapshot=psi_snapshot,
             cgroup_snapshot=cgroup_snapshot,
         )
-        host_pressure_limited = bool(host_pressure_reasons)
+        host_pressure_limited = limiting_factor.primary in {
+            "host_pressure",
+            "external_pressure",
+            "memory_pressure",
+            "cgroup_throttle",
+        }
+        cpu_thread_limited = cpu_thread_pressure and not source_limited and not client_limited and not io_publish_limited
         starvation_risk = self._starvation_risk(session)
         stalled_recovery_needed = self._stalled_recovery_needed(session)
         below_health_floor = supply_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
@@ -3278,9 +3675,9 @@ class MobilePlaybackManager:
                 reasons.extend(io_publish_reasons)
             elif host_pressure_limited:
                 role = "host_pressure_limited"
-                primary_bottleneck = "host_pressure"
+                primary_bottleneck = limiting_factor.primary
                 needs_resource_reason = "host_pressure_limited_supply_below_1_05"
-                reasons.extend(host_pressure_reasons)
+                reasons.extend(limiting_factor.blocking_signals or host_pressure_reasons)
             elif cpu_thread_limited:
                 role = "needs_resource"
                 primary_bottleneck = "cpu_thread"
@@ -3305,12 +3702,12 @@ class MobilePlaybackManager:
         elif runway_seconds < required_runway_seconds and refill_in_progress and cpu_thread_limited and not source_limited and not client_limited:
             if host_pressure_limited:
                 role = "host_pressure_limited"
-                primary_bottleneck = "host_pressure"
+                primary_bottleneck = limiting_factor.primary
                 prepare_boost_needed = False
                 boost_blocked = True
-                boost_blockers.extend(["host_pressure_blocks_prepare_boost", *host_pressure_reasons])
+                boost_blockers.extend(["host_pressure_blocks_prepare_boost", *(limiting_factor.blocking_signals or host_pressure_reasons)])
                 reasons.append("host_pressure_blocks_prepare_boost")
-                reasons.extend(host_pressure_reasons)
+                reasons.extend(limiting_factor.blocking_signals or host_pressure_reasons)
                 confidence = 0.8
             elif io_publish_limited:
                 role = "io_or_publish_bound"
@@ -3336,10 +3733,10 @@ class MobilePlaybackManager:
             role = "steady_state_maintenance"
             primary_bottleneck = "unknown"
             reasons.append("supply_at_or_above_1_05_and_runway_not_declining")
-            if host_pressure_limited:
+            if host_pressure_reasons:
                 reasons.append("host_pressure_warning")
-                reasons.extend(host_pressure_reasons)
-                boost_warning_reasons.extend(host_pressure_reasons)
+                reasons.extend(limiting_factor.blocking_signals or host_pressure_reasons)
+                boost_warning_reasons.extend(limiting_factor.blocking_signals or host_pressure_reasons)
             confidence = 0.72
             if (
                 not host_pressure_limited
@@ -3419,6 +3816,7 @@ class MobilePlaybackManager:
             boost_blocked=boost_blocked,
             boost_blockers=boost_blockers,
             boost_warning_reasons=boost_warning_reasons,
+            limiting_factor=limiting_factor,
             primary_bottleneck=primary_bottleneck,
             donor_score=donor_score,
         )
@@ -3446,6 +3844,7 @@ class MobilePlaybackManager:
             "closed_loop_boost_blockers": list(decision.boost_blockers),
             "closed_loop_boost_warning_reasons": list(decision.boost_warning_reasons),
             "closed_loop_primary_bottleneck": decision.primary_bottleneck,
+            **self._route2_limiting_factor_payload(decision.limiting_factor),
         }
 
     def _closed_loop_runtime_rebalance_payload(self, decision: _Route2ClosedLoopDryRunDecision) -> dict[str, object]:
@@ -4657,6 +5056,10 @@ class MobilePlaybackManager:
                         psi_snapshot=psi_snapshot,
                         cgroup_snapshot=cgroup_snapshot,
                         adaptive_bottleneck_class=adaptive_decision.bottleneck_class,
+                        route2_cpu_cores_used_total=route2_cpu_cores_used if any_cpu_sampled else None,
+                        route2_cpu_upbound_cores=int(budget["route2_cpu_upbound_cores"]),
+                        total_memory_bytes=total_memory_bytes,
+                        route2_memory_bytes_total=route2_memory_bytes if any_memory_sampled else None,
                     )
                 else:
                     closed_loop_decision = _Route2ClosedLoopDryRunDecision(
@@ -4678,6 +5081,9 @@ class MobilePlaybackManager:
                         boost_blocked=False,
                         boost_blockers=[],
                         boost_warning_reasons=[],
+                        limiting_factor=self._empty_route2_limiting_factor_decision(
+                            reason="route2_session_or_epoch_missing",
+                        ),
                         primary_bottleneck="metrics_immature",
                     )
                 payload.update(self._closed_loop_dry_run_payload(closed_loop_decision))

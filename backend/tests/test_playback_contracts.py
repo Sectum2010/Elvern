@@ -4898,6 +4898,17 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "closed_loop_boost_blocked" in item_payload
     assert "closed_loop_boost_blockers" in item_payload
     assert "closed_loop_boost_warning_reasons" in item_payload
+    assert "limiting_factor_primary" in item_payload
+    assert "limiting_factor_confidence" in item_payload
+    assert "limiting_factor_scores" in item_payload
+    assert "limiting_factor_supporting_signals" in item_payload
+    assert "limiting_factor_blocking_signals" in item_payload
+    assert "limiting_factor_missing_metrics" in item_payload
+    assert "published_rate_x" in item_payload
+    assert "encoder_rate_x" in item_payload
+    assert "source_feed_rate_x" in item_payload
+    assert "publish_efficiency_gap" in item_payload
+    assert "client_delivery_rate_x" in item_payload
     assert len(started_workers) == 1
 
 
@@ -6669,6 +6680,8 @@ def test_route2_closed_loop_marks_healthy_mature_supply_as_steady_state(
     assert decision.admission_should_block_new_users is False
     assert decision.admission_block_reason is None
     assert decision.boost_blocked is False
+    assert decision.limiting_factor.primary == "not_limited"
+    assert decision.limiting_factor.published_rate_x == pytest.approx(1.05)
 
 
 def test_route2_closed_loop_healthy_full_below_startup_target_is_prepare_boost_not_admission_block(
@@ -6692,6 +6705,7 @@ def test_route2_closed_loop_healthy_full_below_startup_target_is_prepare_boost_n
     assert decision.admission_block_reason is None
     assert decision.admission_block_reasons == []
     assert decision.boost_blocked is False
+    assert decision.limiting_factor.primary == "not_limited"
 
 
 def test_route2_closed_loop_marks_stable_surplus_as_downshift_candidate(
@@ -6738,6 +6752,7 @@ def test_route2_closed_loop_marks_high_surplus_as_theoretical_donor_only(
     assert decision.theoretical_donate_threads == 2
     assert decision.admission_should_block_new_users is False
     assert decision.admission_block_reason is None
+    assert decision.limiting_factor.primary == "not_limited"
     assert record.assigned_threads == 4
 
 
@@ -6806,10 +6821,48 @@ def test_route2_closed_loop_low_supply_cpu_thread_limited_needs_resource(
     assert decision.admission_should_block_new_users is True
     assert decision.admission_block_reason == "active_stream_health_protection"
     assert decision.admission_block_reasons == ["active_stream_health_protection"]
+    assert decision.limiting_factor.primary == "cpu_thread"
+    assert decision.limiting_factor.scores["cpu_thread_score"] > 0.0
+
+
+def test_route2_limiting_factor_cloud_can_be_cpu_thread_bound_when_source_feed_is_healthy(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=20.0,
+        cpu_cores_used=4.0,
+    )
+    record.io_sample_mature = True
+    record.io_sample_stale = False
+    record.io_read_bytes_per_second = 2_000_000.0
+    monkeypatch.setattr(
+        manager,
+        "_route2_estimated_source_bytes_per_media_second_locked",
+        lambda _session, _record: 1_000_000.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.limiting_factor.primary == "cpu_thread"
+    assert decision.limiting_factor.source_feed_rate_x == pytest.approx(2.0)
+    assert "cloud_source_feed_healthy_cpu_thread_limited" in decision.limiting_factor.supporting_signals
+    assert decision.role == "needs_resource"
+    assert decision.primary_bottleneck == "cpu_thread"
 
 
 def test_route2_closed_loop_source_bound_low_supply_does_not_request_cpu_boost(
     initialized_settings,
+    monkeypatch,
 ) -> None:
     manager, session, epoch, record = _make_route2_closed_loop_inputs(
         initialized_settings,
@@ -6824,6 +6877,14 @@ def test_route2_closed_loop_source_bound_low_supply_does_not_request_cpu_boost(
         runway_seconds=20.0,
         cpu_cores_used=0.4,
     )
+    record.io_sample_mature = True
+    record.io_sample_stale = False
+    record.io_read_bytes_per_second = 500_000.0
+    monkeypatch.setattr(
+        manager,
+        "_route2_estimated_source_bytes_per_media_second_locked",
+        lambda _session, _record: 1_000_000.0,
+    )
 
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
 
@@ -6832,6 +6893,9 @@ def test_route2_closed_loop_source_bound_low_supply_does_not_request_cpu_boost(
     assert decision.prepare_boost_needed is False
     assert decision.admission_should_block_new_users is False
     assert decision.admission_block_reason is None
+    assert decision.limiting_factor.primary == "cloud_source"
+    assert decision.limiting_factor.source_feed_rate_x == pytest.approx(0.5)
+    assert decision.limiting_factor.scores["source_score"] > 0.0
 
 
 def test_route2_closed_loop_client_bound_low_supply_stays_client_bound(
@@ -6869,6 +6933,35 @@ def test_route2_closed_loop_client_bound_low_supply_stays_client_bound(
     assert decision.prepare_boost_needed is False
     assert decision.admission_should_block_new_users is False
     assert decision.admission_block_reason is None
+    assert decision.limiting_factor.primary == "client"
+    assert decision.limiting_factor.client_delivery_rate_x is not None
+
+
+def test_route2_closed_loop_cloud_provider_error_dominates_limiting_factor(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+    )
+    record.non_retryable_error = "provider_auth_required"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.4,
+        runway_seconds=4.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "provider_error"
+    assert decision.primary_bottleneck == "provider"
+    assert decision.limiting_factor.primary == "provider_error"
+    assert decision.limiting_factor.scores["provider_error_score"] == pytest.approx(1.0)
+    assert decision.admission_should_block_new_users is False
 
 
 def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
@@ -6893,6 +6986,7 @@ def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
     assert decision.admission_block_reasons == ["active_bad_condition_reserve_protection"]
     assert decision.donor_candidate is False
     assert decision.theoretical_donate_threads == 0
+    assert decision.limiting_factor.primary == "cpu_thread"
     rebalance = manager._closed_loop_runtime_rebalance_payload(decision)
     assert rebalance["runtime_rebalance_role"] == "needs_resource"
     assert rebalance["runtime_rebalance_can_donate_threads"] == 0
@@ -6922,6 +7016,7 @@ def test_route2_closed_loop_full_source_bound_reserve_does_not_request_cpu_boost
     assert decision.admission_should_block_new_users is True
     assert decision.admission_block_reason == "active_bad_condition_reserve_protection"
     assert decision.donor_candidate is False
+    assert decision.limiting_factor.primary == "cloud_source"
 
 
 def test_route2_closed_loop_lite_does_not_use_full_bad_condition_reserve(
@@ -6969,6 +7064,7 @@ def test_route2_closed_loop_manifest_complete_is_complete_not_resource_need(
     assert decision.needs_resource is False
     assert decision.admission_should_block_new_users is False
     assert decision.admission_block_reason is None
+    assert decision.limiting_factor.primary == "manifest_complete"
 
 
 def test_route2_closed_loop_ffmpeg_ahead_publish_lag_is_io_publish_bound(
@@ -7003,6 +7099,8 @@ def test_route2_closed_loop_ffmpeg_ahead_publish_lag_is_io_publish_bound(
     assert decision.primary_bottleneck == "io_publish"
     assert decision.prepare_boost_needed is False
     assert "ffmpeg_progress_ahead_of_publish_frontier_with_high_publish_latency" in decision.reasons
+    assert decision.limiting_factor.primary == "io_publish"
+    assert decision.limiting_factor.publish_efficiency_gap is not None
 
 
 def test_route2_closed_loop_healthy_supply_with_cgroup_pressure_is_steady_with_warning(
@@ -7048,6 +7146,8 @@ def test_route2_closed_loop_healthy_supply_with_cgroup_pressure_is_steady_with_w
     assert decision.admission_should_block_new_users is False
     assert decision.boost_blocked is False
     assert "cgroup_cpu_throttling" in decision.boost_warning_reasons
+    assert decision.limiting_factor.primary == "not_limited"
+    assert "cgroup_cpu_throttling" in decision.limiting_factor.blocking_signals
 
 
 def test_route2_closed_loop_host_pressure_blocks_prepare_boost(
@@ -7089,6 +7189,7 @@ def test_route2_closed_loop_host_pressure_blocks_prepare_boost(
     assert decision.boost_blocked is True
     assert "host_pressure_blocks_prepare_boost" in decision.boost_blockers
     assert "psi_cpu_pressure" in decision.boost_blockers
+    assert decision.limiting_factor.primary == "host_pressure"
 
 
 def test_route2_closed_loop_recovery_flag_with_healthy_supply_uses_prepare_boost_not_needs_resource(
@@ -7114,6 +7215,7 @@ def test_route2_closed_loop_recovery_flag_with_healthy_supply_uses_prepare_boost
     assert decision.admission_should_block_new_users is False
     assert decision.admission_block_reason is None
     assert decision.boost_blocked is False
+    assert decision.limiting_factor.primary == "cpu_thread"
     assert "mature_supply_below_1_05_cpu_thread_limited" not in decision.reasons
 
 
@@ -7171,6 +7273,7 @@ def test_route2_closed_loop_immature_metrics_do_not_claim_donor_or_downshift(
     assert decision.primary_bottleneck == "metrics_immature"
     assert decision.donor_candidate is False
     assert decision.downshift_candidate is False
+    assert decision.limiting_factor.primary == "metrics_immature"
 
 
 def test_route2_closed_loop_status_runtime_rebalance_follows_prepare_boost_role(

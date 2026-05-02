@@ -1350,6 +1350,17 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     closed_loop_boost_blockers: list[str] = Field(default_factory=list)
     closed_loop_boost_warning_reasons: list[str] = Field(default_factory=list)
     closed_loop_primary_bottleneck: str | None = None
+    limiting_factor_primary: str | None = None
+    limiting_factor_confidence: float | None = Field(default=None, ge=0, le=1)
+    limiting_factor_scores: dict[str, float] = Field(default_factory=dict)
+    limiting_factor_supporting_signals: list[str] = Field(default_factory=list)
+    limiting_factor_blocking_signals: list[str] = Field(default_factory=list)
+    limiting_factor_missing_metrics: list[str] = Field(default_factory=list)
+    published_rate_x: float | None = Field(default=None, ge=0)
+    encoder_rate_x: float | None = Field(default=None, ge=0)
+    source_feed_rate_x: float | None = Field(default=None, ge=0)
+    publish_efficiency_gap: float | None = Field(default=None, ge=0)
+    client_delivery_rate_x: float | None = Field(default=None, ge=0)
     route2_transcode_strategy: str | None = None
     route2_transcode_strategy_confidence: str | None = None
     route2_transcode_strategy_reason: str | None = None
