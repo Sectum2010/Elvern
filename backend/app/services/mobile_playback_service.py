@@ -187,7 +187,10 @@ from .route2_shared_output_store import (
     build_shared_store_write_plan,
     count_shared_output_init_records,
     count_shared_output_metadata_records,
+    count_shared_output_ranges_media_bytes_present_records,
+    count_shared_output_segment_records,
     write_shared_output_init_media,
+    write_shared_output_segment_media,
     write_shared_output_store_metadata,
 )
 
@@ -1198,6 +1201,7 @@ class MobilePlaybackManager:
         self._route2_resource_snapshot: _Route2ResourceSnapshot | None = None
         self._shared_output_metadata_write_errors: list[str] = []
         self._shared_output_init_write_errors: list[str] = []
+        self._shared_output_segment_write_errors: list[str] = []
         self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
         self._manager_thread: threading.Thread | None = None
@@ -4543,7 +4547,10 @@ class MobilePlaybackManager:
                 published_segment_indices = list(range(0, int(epoch.contiguous_published_through_segment) + 1))
             elif epoch.published_segments:
                 published_segment_indices = sorted(epoch.published_segments)
-        return build_shared_store_write_plan(
+        segment_writer_enabled = bool(
+            getattr(self.settings, "route2_shared_output_segment_writer_enabled", False)
+        )
+        write_plan = build_shared_store_write_plan(
             route2_root=self._route2_root,
             shared_output_key=workload.group_key,
             epoch_id=workload.epoch_id,
@@ -4556,10 +4563,17 @@ class MobilePlaybackManager:
             init_compatibility_validated=False,
             init_compatibility_status=init_compatibility_status,
             permission_status=workload.permission_status,
-            metadata_only=True,
-            segment_writer_enabled=False,
+            metadata_only=not segment_writer_enabled,
+            segment_writer_enabled=segment_writer_enabled,
             shared_manifest_enabled=False,
         )
+        if epoch is not None:
+            for segment_plan in write_plan.get("segment_plans") or []:
+                if not isinstance(segment_plan, dict):
+                    continue
+                segment_index = int(segment_plan["epoch_relative_segment_index"])
+                segment_plan["source_segment_path"] = str(self._route2_segment_destination(epoch, segment_index))
+        return write_plan
 
     def _write_route2_shared_output_metadata_locked(
         self,
@@ -4585,8 +4599,19 @@ class MobilePlaybackManager:
                 "shared_init_hash_sha256": None,
                 "shared_init_size_bytes": None,
                 "shared_init_path_present": False,
-                "shared_segments_writer_enabled": False,
+                "shared_segments_writer_enabled": bool(getattr(self.settings, "route2_shared_output_segment_writer_enabled", False)),
+                "shared_segment_write_attempted": False,
+                "shared_segment_write_status": "not_ready",
+                "shared_segment_write_count": 0,
+                "shared_segment_write_already_present_count": 0,
+                "shared_segment_write_conflict_count": 0,
+                "shared_segment_write_blockers": ["missing_shared_output_key"],
+                "shared_segment_write_last_index": None,
+                "shared_segment_write_last_hash": None,
+                "shared_segment_write_range_start_index": None,
+                "shared_segment_write_range_end_index_exclusive": None,
                 "shared_init_write_errors": [],
+                "shared_output_segment_write_errors": [],
             }
         if workload.output_contract_missing_fields:
             return {
@@ -4607,8 +4632,19 @@ class MobilePlaybackManager:
                 "shared_init_hash_sha256": None,
                 "shared_init_size_bytes": None,
                 "shared_init_path_present": False,
-                "shared_segments_writer_enabled": False,
+                "shared_segments_writer_enabled": bool(getattr(self.settings, "route2_shared_output_segment_writer_enabled", False)),
+                "shared_segment_write_attempted": False,
+                "shared_segment_write_status": "not_ready",
+                "shared_segment_write_count": 0,
+                "shared_segment_write_already_present_count": 0,
+                "shared_segment_write_conflict_count": 0,
+                "shared_segment_write_blockers": ["output_contract_incomplete"],
+                "shared_segment_write_last_index": None,
+                "shared_segment_write_last_hash": None,
+                "shared_segment_write_range_start_index": None,
+                "shared_segment_write_range_end_index_exclusive": None,
                 "shared_init_write_errors": [],
+                "shared_output_segment_write_errors": [],
             }
         contract_metadata = build_shared_output_contract_metadata(
             shared_output_key=workload.group_key,
@@ -4692,10 +4728,55 @@ class MobilePlaybackManager:
                 "shared_init_hash_sha256": None,
                 "shared_init_size_bytes": None,
                 "shared_init_path_present": False,
-                "shared_segments_writer_enabled": False,
                 "shared_init_write_errors": [f"shared_init_write_failed:{type(exc).__name__}"],
             }
-        return {**metadata_result, **init_result}
+        try:
+            segment_result = write_shared_output_segment_media(
+                route2_root=self._route2_root,
+                shared_output_key=workload.group_key,
+                segment_plans=write_plan.get("segment_plans") or [],
+                writer_enabled=bool(getattr(self.settings, "route2_shared_output_segment_writer_enabled", False)),
+                output_contract_fingerprint=workload.output_contract_fingerprint,
+                metadata_ready=bool(metadata_result["shared_output_metadata_written"]),
+                contract_status=str(metadata_result["shared_output_contract_status"]),
+                init_compatibility_status=init_compatibility_status,
+                segment_duration_seconds=SEGMENT_DURATION_SECONDS,
+                precondition_blockers=workload.blockers,
+                writer_id=workload.worker_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            segment_result = {
+                "shared_segments_writer_enabled": bool(getattr(self.settings, "route2_shared_output_segment_writer_enabled", False)),
+                "shared_segment_write_attempted": True,
+                "shared_segment_write_status": "failed",
+                "shared_segment_write_count": 0,
+                "shared_segment_write_already_present_count": 0,
+                "shared_segment_write_conflict_count": 0,
+                "shared_segment_write_blockers": ["shared_segment_write_failed"],
+                "shared_segment_write_last_index": None,
+                "shared_segment_write_last_hash": None,
+                "shared_segment_write_range_start_index": None,
+                "shared_segment_write_range_end_index_exclusive": None,
+                "shared_output_media_bytes_present": bool(metadata_result.get("shared_output_media_bytes_present")),
+                "shared_output_segment_write_errors": [f"shared_segment_write_failed:{type(exc).__name__}"],
+            }
+        if metadata_result.get("shared_output_media_bytes_present") and not segment_result.get(
+            "shared_output_media_bytes_present"
+        ):
+            segment_result["shared_output_media_bytes_present"] = True
+        if bool(getattr(self.settings, "route2_shared_output_segment_writer_enabled", False)):
+            store_blockers = {
+                str(item) for item in metadata_result.get("shared_output_store_blockers") or []
+            }
+            store_blockers.discard("no_segment_writer")
+            store_blockers.discard("metadata_only")
+            if segment_result.get("shared_output_media_bytes_present"):
+                store_blockers.discard("media_bytes_not_present")
+            store_blockers.update(str(item) for item in segment_result.get("shared_segment_write_blockers") or [])
+            metadata_result["shared_output_store_blockers"] = [
+                blocker for blocker in SHARED_OUTPUT_STORE_BLOCKERS if blocker in store_blockers
+            ] + sorted(store_blockers - set(SHARED_OUTPUT_STORE_BLOCKERS))
+        return {**metadata_result, **init_result, **segment_result}
 
     def _apply_route2_shared_supply_status_locked(
         self,
@@ -4703,6 +4784,7 @@ class MobilePlaybackManager:
     ) -> list[dict[str, object]]:
         metadata_write_errors: list[str] = []
         init_write_errors: list[str] = []
+        segment_write_errors: list[str] = []
         workloads = {
             record.worker_id: self._route2_shared_supply_workload_locked(record)
             for record in self._route2_workers.values()
@@ -4790,6 +4872,9 @@ class MobilePlaybackManager:
             init_write_errors.extend(
                 str(item) for item in metadata_write_result.get("shared_init_write_errors") or []
             )
+            segment_write_errors.extend(
+                str(item) for item in metadata_write_result.get("shared_output_segment_write_errors") or []
+            )
             payload["shared_supply_candidate"] = bool(compatible_workloads)
             payload["shared_supply_group_key"] = workload.group_key
             payload["shared_output_key"] = workload.group_key
@@ -4815,6 +4900,26 @@ class MobilePlaybackManager:
             payload["shared_init_size_bytes"] = metadata_write_result["shared_init_size_bytes"]
             payload["shared_init_path_present"] = bool(metadata_write_result["shared_init_path_present"])
             payload["shared_segments_writer_enabled"] = bool(metadata_write_result["shared_segments_writer_enabled"])
+            payload["shared_segment_write_attempted"] = bool(
+                metadata_write_result["shared_segment_write_attempted"]
+            )
+            payload["shared_segment_write_status"] = metadata_write_result["shared_segment_write_status"]
+            payload["shared_segment_write_count"] = metadata_write_result["shared_segment_write_count"]
+            payload["shared_segment_write_already_present_count"] = metadata_write_result[
+                "shared_segment_write_already_present_count"
+            ]
+            payload["shared_segment_write_conflict_count"] = metadata_write_result[
+                "shared_segment_write_conflict_count"
+            ]
+            payload["shared_segment_write_blockers"] = list(metadata_write_result["shared_segment_write_blockers"])
+            payload["shared_segment_write_last_index"] = metadata_write_result["shared_segment_write_last_index"]
+            payload["shared_segment_write_last_hash"] = metadata_write_result["shared_segment_write_last_hash"]
+            payload["shared_segment_write_range_start_index"] = metadata_write_result[
+                "shared_segment_write_range_start_index"
+            ]
+            payload["shared_segment_write_range_end_index_exclusive"] = metadata_write_result[
+                "shared_segment_write_range_end_index_exclusive"
+            ]
             payload["route2_init_available"] = bool(workload.init_metadata["route2_init_available"])
             payload["route2_init_hash_sha256"] = workload.init_metadata["route2_init_hash_sha256"]
             payload["route2_init_hash_available"] = bool(workload.init_metadata["route2_init_hash_available"])
@@ -4897,6 +5002,7 @@ class MobilePlaybackManager:
             )
         self._shared_output_metadata_write_errors = metadata_write_errors
         self._shared_output_init_write_errors = init_write_errors
+        self._shared_output_segment_write_errors = segment_write_errors
         return summaries
 
     def _evaluate_route2_active_playback_health_locked(
@@ -6150,6 +6256,11 @@ class MobilePlaybackManager:
                 "shared_output_metadata_write_errors": list(self._shared_output_metadata_write_errors),
                 "shared_output_init_records_count": count_shared_output_init_records(self._route2_root),
                 "shared_output_init_write_errors": list(self._shared_output_init_write_errors),
+                "shared_output_segments_records_count": count_shared_output_segment_records(self._route2_root),
+                "shared_output_ranges_media_bytes_present_count": (
+                    count_shared_output_ranges_media_bytes_present_records(self._route2_root)
+                ),
+                "shared_output_segment_write_errors": list(self._shared_output_segment_write_errors),
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_cores_used_total": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_percent_of_total": route2_cpu_percent_of_total,

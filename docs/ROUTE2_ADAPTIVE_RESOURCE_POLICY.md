@@ -181,7 +181,7 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Route2 hashes only the already-published epoch-local `init.mp4` file. It does not hash source media, does not expose local init paths, and does not expose source paths, command lines, URLs, tokens, or cookies.
 - Per-worker status may report init availability, SHA-256 hash availability, init size, and compatibility state. Shared-supply group status compares hashes for workloads with the same output contract.
 - If all active group hashes are available and match, the group reports `compatible_by_hash`. If any hash differs, the group reports `mismatch` and blocks future sharing with `init_mismatch`. If any init is unavailable, the group remains pending with `pending_init_compatibility`.
-- A matching init hash removes only the init-specific write-plan blocker. Real sharing remains blocked by `metadata_only`, `no_segment_writer`, `no_shared_manifest`, and future checksum/lease/permission work.
+- A matching init hash removes only the init-specific write-plan blocker. Real sharing remains blocked by `no_shared_manifest`, disabled-by-default writer flags, and future lease/permission-checked serving work.
 
 ## Phase 1K-3A Shared Output Metadata Writer
 
@@ -200,6 +200,15 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Existing shared init bytes are idempotent when hashes match. Hash mismatches report `shared_init_hash_conflict` and must not overwrite the finalized `init.mp4`.
 - Matching init hash is compatibility evidence only. It is not permission to serve or reuse shared media. Segment writing, manifests, leases, permission-checked serving, and shared attach remain future phases.
 - Shared init write failures are status-only and must not break normal playback.
+
+## Phase 1K-3C Segment Writer
+
+- The shared output segment writer is controlled by `ELVERN_ROUTE2_SHARED_OUTPUT_SEGMENT_WRITER_ENABLED` and is disabled by default.
+- When enabled, the writer may copy eligible completed epoch-local `segment_*.m4s` files into `shared_outputs/<shared_output_key>/segments/abs_*.m4s` by using copy-to-staging, SHA-256 verification, and atomic publish. Symlinks, hardlinks, reflinks, serving, attach, and reuse remain out of scope.
+- A segment is eligible only when the shared output key and output contract are valid, shared init compatibility is available, the published session segment exists, the epoch-relative segment maps to a canonical absolute segment index, and the segment is not private preroll.
+- Existing finalized shared segments are idempotent when hashes match. Hash mismatches report `segment_hash_conflict` and must never overwrite the finalized file.
+- `segments.json` records per-segment index, absolute time range, filename, size, hash, and writer metadata. `ranges.json` may set `media_bytes_present=true` only for contiguous ranges whose segment bytes exist and validate.
+- Segment writer failure is status-only and must not break normal playback. Shared-store serving, sparse manifests, leases, permission-checked reuse, shared attach, and shared workers remain future phases.
 
 ## Current State
 

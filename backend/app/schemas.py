@@ -1401,6 +1401,16 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     shared_init_size_bytes: int | None = Field(default=None, ge=0)
     shared_init_path_present: bool = False
     shared_segments_writer_enabled: bool = False
+    shared_segment_write_attempted: bool = False
+    shared_segment_write_status: str | None = None
+    shared_segment_write_count: int = Field(default=0, ge=0)
+    shared_segment_write_already_present_count: int = Field(default=0, ge=0)
+    shared_segment_write_conflict_count: int = Field(default=0, ge=0)
+    shared_segment_write_blockers: list[str] = Field(default_factory=list)
+    shared_segment_write_last_index: int | None = Field(default=None, ge=0)
+    shared_segment_write_last_hash: str | None = None
+    shared_segment_write_range_start_index: int | None = Field(default=None, ge=0)
+    shared_segment_write_range_end_index_exclusive: int | None = Field(default=None, ge=0)
     route2_init_available: bool = False
     route2_init_hash_sha256: str | None = None
     route2_init_hash_available: bool = False
@@ -1466,6 +1476,9 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     shared_output_metadata_write_errors: list[str] = Field(default_factory=list)
     shared_output_init_records_count: int = Field(default=0, ge=0)
     shared_output_init_write_errors: list[str] = Field(default_factory=list)
+    shared_output_segments_records_count: int = Field(default=0, ge=0)
+    shared_output_ranges_media_bytes_present_count: int = Field(default=0, ge=0)
+    shared_output_segment_write_errors: list[str] = Field(default_factory=list)
     cpu_upbound_percent: int = Field(ge=0)
     cpu_budget_percent: int = Field(ge=0)
     total_cpu_cores: int = Field(ge=1)

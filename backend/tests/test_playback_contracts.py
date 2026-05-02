@@ -113,6 +113,8 @@ from backend.app.services.route2_shared_output_store import (
     build_shared_store_write_plan,
     count_shared_output_init_records,
     count_shared_output_metadata_records,
+    count_shared_output_ranges_media_bytes_present_records,
+    count_shared_output_segment_records,
     find_contiguous_range_covering,
     find_gaps_for_requested_range,
     merge_contiguous_ranges,
@@ -120,6 +122,7 @@ from backend.app.services.route2_shared_output_store import (
     shared_segment_filename,
     validate_shared_output_lease_metadata,
     write_shared_output_init_media,
+    write_shared_output_segment_media,
     write_shared_output_store_metadata,
 )
 from backend.app.services.playback_service import build_playback_decision
@@ -3468,6 +3471,7 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_core
     assert settings.route2_adaptive_thread_control_cloud_enabled is False
     assert settings.route2_adaptive_thread_control_strict_12_enabled is False
     assert settings.route2_shared_output_init_writer_enabled is False
+    assert settings.route2_shared_output_segment_writer_enabled is False
 
 
 def test_route2_protected_min_threads_env_override_still_works(monkeypatch, test_settings) -> None:
@@ -3533,6 +3537,23 @@ def test_route2_shared_output_init_writer_flag_is_disabled_by_default(
     enabled_settings = refresh_settings()
 
     assert enabled_settings.route2_shared_output_init_writer_enabled is True
+
+
+def test_route2_shared_output_segment_writer_flag_is_disabled_by_default(
+    monkeypatch,
+    test_settings,
+) -> None:
+    monkeypatch.delenv("ELVERN_ROUTE2_SHARED_OUTPUT_SEGMENT_WRITER_ENABLED", raising=False)
+
+    default_settings = refresh_settings()
+
+    assert default_settings.route2_shared_output_segment_writer_enabled is False
+
+    monkeypatch.setenv("ELVERN_ROUTE2_SHARED_OUTPUT_SEGMENT_WRITER_ENABLED", "true")
+
+    enabled_settings = refresh_settings()
+
+    assert enabled_settings.route2_shared_output_segment_writer_enabled is True
 
 
 def test_route2_max_worker_threads_validation_still_rejects_invalid_values(monkeypatch, test_settings) -> None:
@@ -5189,6 +5210,16 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "shared_init_size_bytes" in item_payload
     assert "shared_init_path_present" in item_payload
     assert "shared_segments_writer_enabled" in item_payload
+    assert "shared_segment_write_attempted" in item_payload
+    assert "shared_segment_write_status" in item_payload
+    assert "shared_segment_write_count" in item_payload
+    assert "shared_segment_write_already_present_count" in item_payload
+    assert "shared_segment_write_conflict_count" in item_payload
+    assert "shared_segment_write_blockers" in item_payload
+    assert "shared_segment_write_last_index" in item_payload
+    assert "shared_segment_write_last_hash" in item_payload
+    assert "shared_segment_write_range_start_index" in item_payload
+    assert "shared_segment_write_range_end_index_exclusive" in item_payload
     assert "route2_init_available" in item_payload
     assert "route2_init_hash_available" in item_payload
     assert "route2_init_hash_sha256" in item_payload
@@ -5222,6 +5253,9 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "shared_output_metadata_write_errors" in status
     assert "shared_output_init_records_count" in status
     assert "shared_output_init_write_errors" in status
+    assert "shared_output_segments_records_count" in status
+    assert "shared_output_ranges_media_bytes_present_count" in status
+    assert "shared_output_segment_write_errors" in status
     assert "shared_supply_groups" in status
     assert len(started_workers) == 1
 
@@ -8969,6 +9003,50 @@ def _prepare_shared_output_metadata_record(
     return shared_output_directory(manager._route2_root, shared_output_key)
 
 
+def _prepare_shared_output_record_with_init(
+    manager: MobilePlaybackManager,
+    *,
+    shared_output_key: str = "r2ss:v2:abcdef1234567890",
+    fingerprint: str = "contract-fingerprint",
+    init_payload: bytes = b"shared-init",
+) -> Path:
+    output_dir = _prepare_shared_output_metadata_record(
+        manager,
+        shared_output_key=shared_output_key,
+        fingerprint=fingerprint,
+    )
+    expected_hash = hashlib.sha256(init_payload).hexdigest()
+    (output_dir / "init.mp4").write_bytes(init_payload)
+    (output_dir / "init.sha256").write_text(f"{expected_hash}\n", encoding="utf-8")
+    return output_dir
+
+
+def _shared_segment_plan(
+    source_segment_path: Path,
+    *,
+    index: int = 0,
+    blockers: list[str] | None = None,
+) -> dict[str, object]:
+    start_seconds = index * 2.0
+    return {
+        "epoch_id": "epoch-1",
+        "epoch_start_seconds": 0.0,
+        "epoch_relative_segment_index": index,
+        "epoch_relative_start_seconds": start_seconds,
+        "epoch_relative_end_seconds": start_seconds + 2.0,
+        "absolute_start_seconds": start_seconds,
+        "absolute_end_seconds": start_seconds + 2.0,
+        "absolute_segment_index_candidate": index,
+        "expected_shared_segment_filename": shared_segment_filename(index),
+        "canonical_alignment_status": "aligned",
+        "mapping_confidence": "high",
+        "mapping_blockers": [],
+        "shared_store_write_candidate": True,
+        "shared_store_write_blockers": blockers or ["no_shared_manifest", "serving_disabled"],
+        "source_segment_path": str(source_segment_path),
+    }
+
+
 def test_route2_shared_output_init_writer_disabled_does_not_copy_init(
     initialized_settings,
 ) -> None:
@@ -9184,6 +9262,255 @@ def test_route2_shared_output_init_writer_blocks_missing_init_and_contract_confl
     assert "shared_contract_conflict" in conflict_result["shared_init_write_blockers"]
 
 
+def test_route2_shared_output_segment_writer_disabled_does_not_copy_segments(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_record_with_init(manager)
+    source_segment = output_dir / "source-segment.m4s"
+    source_segment.write_bytes(b"segment-0")
+
+    result = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_plans=[_shared_segment_plan(source_segment)],
+        writer_enabled=False,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+    )
+
+    assert result["shared_segment_write_status"] == "disabled"
+    assert result["shared_segments_writer_enabled"] is False
+    assert result["shared_segment_write_attempted"] is False
+    assert "segment_writer_disabled" in result["shared_segment_write_blockers"]
+    assert not (output_dir / "segments").exists()
+    assert not (output_dir / "segments.json").exists()
+    assert list(output_dir.rglob("abs_*.m4s")) == []
+    assert count_shared_output_segment_records(manager._route2_root) == 0
+
+
+def test_route2_shared_output_segment_writer_enabled_writes_segments_and_ranges(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_record_with_init(manager)
+    source_segment_a = output_dir / "source-segment-a.m4s"
+    source_segment_b = output_dir / "source-segment-b.m4s"
+    source_segment_a.write_bytes(b"segment-0")
+    source_segment_b.write_bytes(b"segment-1")
+
+    result = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_plans=[
+            _shared_segment_plan(source_segment_a, index=0),
+            _shared_segment_plan(source_segment_b, index=1),
+        ],
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+        writer_id="writer-1",
+        updated_at="2026-05-02T00:00:03Z",
+    )
+    segments = json.loads((output_dir / "segments.json").read_text(encoding="utf-8"))
+    ranges = json.loads((output_dir / "ranges.json").read_text(encoding="utf-8"))
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+    segment_a = output_dir / "segments" / "abs_000000000000.m4s"
+    segment_b = output_dir / "segments" / "abs_000000000001.m4s"
+
+    assert result["shared_segment_write_status"] == "written"
+    assert result["shared_segments_writer_enabled"] is True
+    assert result["shared_segment_write_attempted"] is True
+    assert result["shared_segment_write_count"] == 2
+    assert result["shared_segment_write_already_present_count"] == 0
+    assert result["shared_segment_write_conflict_count"] == 0
+    assert result["shared_segment_write_range_start_index"] == 0
+    assert result["shared_segment_write_range_end_index_exclusive"] == 2
+    assert result["shared_output_media_bytes_present"] is True
+    assert segment_a.read_bytes() == b"segment-0"
+    assert segment_b.read_bytes() == b"segment-1"
+    assert segment_a.is_file() and not segment_a.is_symlink()
+    assert segment_b.is_file() and not segment_b.is_symlink()
+    assert not list((output_dir / "staging").glob("*.tmp"))
+    assert [item["index"] for item in segments["segments"]] == [0, 1]
+    assert segments["segments"][0]["sha256"] == hashlib.sha256(b"segment-0").hexdigest()
+    assert ranges["media_bytes_present"] is True
+    assert ranges["serving_enabled"] is False
+    assert [(item["start_index"], item["end_index_exclusive"]) for item in ranges["confirmed_ranges"]] == [(0, 2)]
+    assert all(item["media_bytes_present"] is True for item in ranges["confirmed_ranges"])
+    assert metadata["serving_enabled"] is False
+    assert metadata["shared_manifest_enabled"] is False
+    assert metadata["segment_writer_enabled"] is True
+    assert metadata["media_bytes_present"] is True
+    assert count_shared_output_segment_records(manager._route2_root) == 1
+    assert count_shared_output_ranges_media_bytes_present_records(manager._route2_root) == 1
+
+
+def test_route2_shared_output_segment_writer_is_idempotent_for_same_hash(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_record_with_init(manager)
+    source_segment = output_dir / "source-segment.m4s"
+    source_segment.write_bytes(b"segment-0")
+    kwargs = dict(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_plans=[_shared_segment_plan(source_segment)],
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+    )
+
+    first = write_shared_output_segment_media(**kwargs)
+    second = write_shared_output_segment_media(**kwargs)
+
+    assert first["shared_segment_write_status"] == "written"
+    assert second["shared_segment_write_status"] == "already_present"
+    assert second["shared_segment_write_count"] == 0
+    assert second["shared_segment_write_already_present_count"] == 1
+    assert (output_dir / "segments" / "abs_000000000000.m4s").read_bytes() == b"segment-0"
+
+
+def test_route2_shared_output_segment_writer_blocks_hash_conflict(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_record_with_init(manager)
+    source_segment = output_dir / "source-segment.m4s"
+    source_segment.write_bytes(b"new-segment")
+    final_segment = output_dir / "segments" / "abs_000000000000.m4s"
+    final_segment.parent.mkdir(parents=True, exist_ok=True)
+    final_segment.write_bytes(b"old-segment")
+
+    result = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_plans=[_shared_segment_plan(source_segment)],
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+    )
+
+    assert result["shared_segment_write_status"] == "conflict"
+    assert result["shared_segment_write_conflict_count"] == 1
+    assert "segment_hash_conflict" in result["shared_segment_write_blockers"]
+    assert final_segment.read_bytes() == b"old-segment"
+    assert not list((output_dir / "staging").glob("*.tmp"))
+
+
+def test_route2_shared_output_segment_writer_blocks_missing_init_noncanonical_preroll_and_contract(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_metadata_record(manager)
+    source_segment = output_dir / "source-segment.m4s"
+    source_segment.write_bytes(b"segment-0")
+
+    missing_init = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_plans=[_shared_segment_plan(source_segment)],
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="pending_init",
+        segment_duration_seconds=2.0,
+    )
+    with_init_dir = _prepare_shared_output_record_with_init(manager, shared_output_key="r2ss:v2:abcdef1234567891")
+    source_segment_2 = with_init_dir / "source-segment.m4s"
+    source_segment_2.write_bytes(b"segment-0")
+    noncanonical = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567891",
+        segment_plans=[_shared_segment_plan(source_segment_2, blockers=["non_canonical_segment_boundary"])],
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+    )
+    preroll = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567891",
+        segment_plans=[_shared_segment_plan(source_segment_2, blockers=["epoch_private_preroll"])],
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+    )
+    missing_contract = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567891",
+        segment_plans=[_shared_segment_plan(source_segment_2)],
+        writer_enabled=True,
+        output_contract_fingerprint=None,
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+    )
+
+    assert missing_init["shared_segment_write_status"] == "not_ready"
+    assert "pending_init_compatibility" in missing_init["shared_segment_write_blockers"]
+    assert "shared_init_missing" in missing_init["shared_segment_write_blockers"]
+    assert noncanonical["shared_segment_write_status"] == "not_ready"
+    assert "non_canonical_segment_boundary" in noncanonical["shared_segment_write_blockers"]
+    assert preroll["shared_segment_write_status"] == "not_ready"
+    assert "epoch_private_preroll" in preroll["shared_segment_write_blockers"]
+    assert missing_contract["shared_segment_write_status"] == "not_ready"
+    assert "missing_output_contract" in missing_contract["shared_segment_write_blockers"]
+    assert list(with_init_dir.rglob("abs_*.m4s")) == []
+
+
+def test_route2_shared_output_segment_writer_failure_is_status_only(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_record_with_init(manager)
+    source_segment = output_dir / "source-segment.m4s"
+    source_segment.write_bytes(b"segment-0")
+
+    def _raise_copy(*_args, **_kwargs):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr("backend.app.services.route2_shared_output_store.shutil.copyfile", _raise_copy)
+
+    result = write_shared_output_segment_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_plans=[_shared_segment_plan(source_segment)],
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        segment_duration_seconds=2.0,
+    )
+
+    assert result["shared_segment_write_status"] == "failed"
+    assert "shared_segment_write_failed" in result["shared_segment_write_blockers"]
+    assert result["shared_output_segment_write_errors"] == ["shared_segment_write_failed:OSError"]
+    assert not list(output_dir.rglob("abs_*.m4s"))
+
+
 def test_route2_shared_output_metadata_only_ranges_merge_and_remain_unplayable() -> None:
     metadata = build_metadata_only_ranges_metadata(
         shared_output_key="r2ss:v2:abcdef1234567890",
@@ -9274,6 +9601,9 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert status["shared_output_metadata_write_errors"] == []
     assert status["shared_output_init_records_count"] == 0
     assert status["shared_output_init_write_errors"] == []
+    assert status["shared_output_segments_records_count"] == 0
+    assert status["shared_output_ranges_media_bytes_present_count"] == 0
+    assert status["shared_output_segment_write_errors"] == []
     assert status["shared_output_root"].endswith("browser_playback_route2/shared_outputs")
     assert item_a["shared_output_key"] == item_a["shared_supply_group_key"]
     assert item_a["absolute_segment_index_start_candidate"] == 0
@@ -9291,6 +9621,14 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert item_a["shared_init_size_bytes"] is None
     assert item_a["shared_init_path_present"] is False
     assert item_a["shared_segments_writer_enabled"] is False
+    assert item_a["shared_segment_write_attempted"] is False
+    assert item_a["shared_segment_write_status"] == "disabled"
+    assert item_a["shared_segment_write_count"] == 0
+    assert item_a["shared_segment_write_already_present_count"] == 0
+    assert item_a["shared_segment_write_conflict_count"] == 0
+    assert "segment_writer_disabled" in item_a["shared_segment_write_blockers"]
+    assert item_a["shared_segment_write_last_index"] is None
+    assert item_a["shared_segment_write_last_hash"] is None
     assert item_a["shared_output_store_blockers"] == SHARED_OUTPUT_STORE_BLOCKERS
     assert "metadata_only" in item_a["shared_output_store_blockers"]
     assert "media_bytes_not_present" in item_a["shared_output_store_blockers"]
@@ -9361,13 +9699,83 @@ def test_route2_shared_output_init_writer_admin_status_enabled_writes_only_init(
     assert item_payload["shared_init_size_bytes"] == len(b"admin-status-init")
     assert item_payload["shared_init_path_present"] is True
     assert item_payload["shared_segments_writer_enabled"] is False
+    assert item_payload["shared_segment_write_attempted"] is False
+    assert item_payload["shared_segment_write_status"] == "disabled"
+    assert item_payload["shared_segment_write_count"] == 0
+    assert "segment_writer_disabled" in item_payload["shared_segment_write_blockers"]
     assert status["shared_output_init_records_count"] == 1
     assert status["shared_output_init_write_errors"] == []
+    assert status["shared_output_segments_records_count"] == 0
+    assert status["shared_output_ranges_media_bytes_present_count"] == 0
+    assert status["shared_output_segment_write_errors"] == []
     assert (output_dir / "init.mp4").read_bytes() == b"admin-status-init"
     assert (output_dir / "init.sha256").read_text(encoding="utf-8").strip() == expected_hash
     assert not (output_dir / "segments").exists()
     assert list(output_dir.rglob("*.m4s")) == []
     assert manager._route2_workers["init-writer-a"].assigned_threads == 4
+
+
+def test_route2_shared_output_segment_writer_admin_status_enabled_writes_segments_without_serving(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_shared_output_init_writer_enabled=True,
+        route2_shared_output_segment_writer_enabled=True,
+    )
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=438, relative_name="route2/shared-supply/segment-writer.mp4"),
+    )
+    _session, epoch, _record = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="segment-writer-a",
+        username="alice",
+        prepared_ranges=[[0.0, 4.0]],
+    )
+    epoch.published_init_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch.published_init_path.write_bytes(b"admin-status-init")
+    epoch.published_segments = {0, 1}
+    epoch.contiguous_published_through_segment = 1
+    for index, payload in ((0, b"segment-0"), (1, b"segment-1")):
+        segment_path = epoch.published_dir / f"segment_{index:06d}.m4s"
+        segment_path.parent.mkdir(parents=True, exist_ok=True)
+        segment_path.write_bytes(payload)
+
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, "segment-writer-a")
+    output_dir = shared_output_directory(manager._route2_root, item_payload["shared_output_key"])
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+    segments = json.loads((output_dir / "segments.json").read_text(encoding="utf-8"))
+    ranges = json.loads((output_dir / "ranges.json").read_text(encoding="utf-8"))
+
+    assert item_payload["shared_segments_writer_enabled"] is True
+    assert item_payload["shared_segment_write_attempted"] is True
+    assert item_payload["shared_segment_write_status"] == "written"
+    assert item_payload["shared_segment_write_count"] == 2
+    assert item_payload["shared_segment_write_conflict_count"] == 0
+    assert item_payload["shared_segment_write_blockers"] == []
+    assert item_payload["shared_segment_write_range_start_index"] == 0
+    assert item_payload["shared_segment_write_range_end_index_exclusive"] == 2
+    assert item_payload["shared_output_media_bytes_present"] is True
+    assert item_payload["shared_init_write_status"] == "written"
+    assert status["shared_output_segments_records_count"] == 1
+    assert status["shared_output_ranges_media_bytes_present_count"] == 1
+    assert status["shared_output_segment_write_errors"] == []
+    assert (output_dir / "segments" / "abs_000000000000.m4s").read_bytes() == b"segment-0"
+    assert (output_dir / "segments" / "abs_000000000001.m4s").read_bytes() == b"segment-1"
+    assert segments["media_bytes_present"] is True
+    assert [entry["index"] for entry in segments["segments"]] == [0, 1]
+    assert ranges["media_bytes_present"] is True
+    assert ranges["serving_enabled"] is False
+    assert [(entry["start_index"], entry["end_index_exclusive"]) for entry in ranges["confirmed_ranges"]] == [(0, 2)]
+    assert metadata["segment_writer_enabled"] is True
+    assert metadata["serving_enabled"] is False
+    assert metadata["shared_manifest_enabled"] is False
+    assert manager._route2_workers["segment-writer-a"].assigned_threads == 4
 
 
 def test_route2_shared_output_init_writer_failure_is_status_only(
