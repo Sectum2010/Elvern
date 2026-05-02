@@ -452,21 +452,21 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "publish_latency_avg_seconds": 0.0029,
                         "publish_latency_max_seconds": 0.0062,
                         "last_publish_kind": "segment",
-                        "closed_loop_role": "donor_candidate",
-                        "closed_loop_reasons": ["high_supply_and_runway_theoretical_donor"],
-                        "closed_loop_confidence": 0.86,
-                        "closed_loop_prepare_boost_needed": False,
-                        "closed_loop_prepare_boost_target_threads": None,
-                        "closed_loop_downshift_candidate": True,
-                        "closed_loop_downshift_target_threads": 2,
+                        "closed_loop_role": "protected_bad_condition_reserve",
+                        "closed_loop_reasons": ["full_bad_condition_reserve_required_unsatisfied"],
+                        "closed_loop_confidence": 0.9,
+                        "closed_loop_prepare_boost_needed": True,
+                        "closed_loop_prepare_boost_target_threads": 9,
+                        "closed_loop_downshift_candidate": False,
+                        "closed_loop_downshift_target_threads": None,
                         "closed_loop_needs_resource": False,
                         "closed_loop_needs_resource_reason": None,
-                        "closed_loop_donor_candidate": True,
-                        "closed_loop_donor_rank": 1,
-                        "closed_loop_theoretical_donate_threads": 4,
-                        "closed_loop_protected_reason": None,
-                        "closed_loop_admission_should_block_new_users": False,
-                        "closed_loop_primary_bottleneck": "unknown",
+                        "closed_loop_donor_candidate": False,
+                        "closed_loop_donor_rank": None,
+                        "closed_loop_theoretical_donate_threads": 0,
+                        "closed_loop_protected_reason": "mature_supply_below_1_05",
+                        "closed_loop_admission_should_block_new_users": True,
+                        "closed_loop_primary_bottleneck": "cpu_thread",
                         "telemetry_sampled": True,
                         "last_sampled_at": "2026-04-26T12:00:06+00:00",
                         "failure_reason": None,
@@ -478,16 +478,16 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "adaptive_safe_to_decrease_threads": False,
                         "adaptive_reason": "Benchmark-informed ladder selected 9 as the next useful tier.",
                         "adaptive_missing_metrics": [],
-                        "runtime_playback_health": "healthy",
-                        "runtime_playback_health_reason": "Existing active playback is sustaining real-time supply with margin.",
-                        "runtime_supply_rate_x": 1.42,
+                        "runtime_playback_health": "cpu_thread_starved",
+                        "runtime_playback_health_reason": "Existing active playback is not sustaining real-time supply and appears CPU/thread limited.",
+                        "runtime_supply_rate_x": 0.92,
                         "runtime_supply_observation_seconds": 12.0,
                         "runtime_runway_seconds": 84.0,
-                        "runtime_rebalance_role": "donor_candidate",
-                        "runtime_rebalance_reason": "Playback has healthy supply/runway above the protected floor; it is only a theoretical future donor.",
-                        "runtime_rebalance_target_threads": 2,
-                        "runtime_rebalance_can_donate_threads": 4,
-                        "runtime_rebalance_priority": 20,
+                        "runtime_rebalance_role": "needs_resource",
+                        "runtime_rebalance_reason": "Closed-loop dry-run protects this workload's unsatisfied Full bad-condition reserve.",
+                        "runtime_rebalance_target_threads": 9,
+                        "runtime_rebalance_can_donate_threads": 0,
+                        "runtime_rebalance_priority": 90,
                         "bad_condition_reserve_required": True,
                         "bad_condition_reason": "mature_supply_below_1_05",
                         "bad_condition_supply_floor": 1.05,
@@ -1450,11 +1450,11 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["assigned_threads_source"] == "adaptive_local_initial_6"
     assert first_item["adaptive_bottleneck_class"] == "CPU_BOUND"
     assert first_item["adaptive_recommended_threads"] == 9
-    assert first_item["runtime_playback_health"] == "healthy"
-    assert first_item["runtime_supply_rate_x"] == 1.42
+    assert first_item["runtime_playback_health"] == "cpu_thread_starved"
+    assert first_item["runtime_supply_rate_x"] == 0.92
     assert first_item["runtime_runway_seconds"] == 84.0
-    assert first_item["runtime_rebalance_role"] == "donor_candidate"
-    assert first_item["runtime_rebalance_can_donate_threads"] == 4
+    assert first_item["runtime_rebalance_role"] == "needs_resource"
+    assert first_item["runtime_rebalance_can_donate_threads"] == 0
     assert first_item["bad_condition_reserve_required"] is True
     assert first_item["bad_condition_reason"] == "mature_supply_below_1_05"
     assert first_item["reserve_target_ready_end_seconds"] == 2637.01
@@ -1478,12 +1478,12 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["last_publish_latency_seconds"] == 0.0034
     assert first_item["publish_latency_avg_seconds"] == 0.0029
     assert first_item["publish_latency_max_seconds"] == 0.0062
-    assert first_item["closed_loop_role"] == "donor_candidate"
-    assert first_item["closed_loop_donor_candidate"] is True
-    assert first_item["closed_loop_donor_rank"] == 1
-    assert first_item["closed_loop_theoretical_donate_threads"] == 4
-    assert first_item["closed_loop_admission_should_block_new_users"] is False
-    assert first_item["closed_loop_primary_bottleneck"] == "unknown"
+    assert first_item["closed_loop_role"] == "protected_bad_condition_reserve"
+    assert first_item["closed_loop_donor_candidate"] is False
+    assert first_item["closed_loop_donor_rank"] is None
+    assert first_item["closed_loop_theoretical_donate_threads"] == 0
+    assert first_item["closed_loop_admission_should_block_new_users"] is True
+    assert first_item["closed_loop_primary_bottleneck"] == "cpu_thread"
     serialized_payload = response.text.lower()
     assert "access_token" not in serialized_payload
     assert "full_command_line" not in serialized_payload

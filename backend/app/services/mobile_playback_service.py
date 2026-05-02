@@ -2983,6 +2983,41 @@ class MobilePlaybackManager:
         }
         return rounded_payload
 
+    def _route2_bad_condition_reserve_protections_locked(self) -> list[dict[str, object]]:
+        protections: list[dict[str, object]] = []
+        for record in self._route2_workers.values():
+            if record.state not in {"running", "stopping"}:
+                continue
+            session = self._sessions.get(record.session_id)
+            if session is None or session.browser_playback.engine_mode != "route2":
+                continue
+            epoch = session.browser_playback.epochs.get(record.epoch_id)
+            if epoch is None:
+                continue
+            status = self._route2_bad_condition_reserve_status_locked(session, epoch)
+            if not bool(status["reserve_blocks_admission"]):
+                continue
+            (
+                _published_end_seconds,
+                _effective_playhead_seconds,
+                _runway_seconds,
+                _supply_rate_x,
+                _observation_seconds,
+                manifest_complete,
+                _refill_in_progress,
+            ) = self._route2_runtime_supply_metrics_locked(session, epoch)
+            if manifest_complete:
+                continue
+            protections.append(
+                {
+                    "worker_id": record.worker_id,
+                    "session_id": session.session_id,
+                    "reason": status["bad_condition_reason"],
+                    "reserve_remaining_seconds": status["reserve_remaining_seconds"],
+                }
+            )
+        return protections
+
     def _route2_client_limited_locked(self, session: MobilePlaybackSession, epoch: PlaybackEpoch) -> bool:
         client_goodput = self._route2_client_goodput_locked(session)
         if not bool(client_goodput.get("confident")):
@@ -3599,6 +3634,15 @@ class MobilePlaybackManager:
             raise PlaybackAdmissionError(
                 self._build_server_max_capacity_detail_locked(
                     reason_code="per_user_budget_below_protected_floor",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
+
+        if self._route2_bad_condition_reserve_protections_locked():
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="active_bad_condition_reserve_protection",
                     active_user_count_after_admission=active_user_count_after_admission,
                     admission_min_threads=admission_min_threads,
                 )

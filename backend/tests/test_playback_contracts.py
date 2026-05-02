@@ -6021,6 +6021,305 @@ def test_route2_active_playback_healthy_with_spare_capacity_admits_new_user(
     assert len(manager._route2_session_ids_by_user[2]) == 1
 
 
+def test_route2_full_bad_condition_reserve_blocks_new_route2_admission(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=382, relative_name="route2/reserve-protected-a.mp4")
+    item_b = _make_local_item(settings, item_id=383, relative_name="route2/reserve-protected-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=998,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.04,
+        runway_seconds=120.0,
+        cpu_cores_used=4.0,
+    )
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(
+            item_b,
+            user_id=2,
+            auth_session_id=999,
+            username="bob",
+            engine_mode="route2",
+            playback_mode="full",
+        )
+
+    detail = exc.value.detail
+    assert detail["code"] == "server_max_capacity"
+    assert detail["reason_code"] == "active_bad_condition_reserve_protection"
+    assert manager._route2_bad_condition_reserve_protections_locked()[0]["session_id"] == first["session_id"]
+
+
+def test_route2_full_strong_bad_condition_reserve_blocks_new_admission(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=384, relative_name="route2/reserve-strong-a.mp4")
+    item_b = _make_local_item(settings, item_id=385, relative_name="route2/reserve-strong-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=1000,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=120.0,
+        cpu_cores_used=4.0,
+    )
+    assert manager._route2_bad_condition_reserve_status_locked(session, epoch)["bad_condition_strong"] is True
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(
+            item_b,
+            user_id=2,
+            auth_session_id=1001,
+            username="bob",
+            engine_mode="route2",
+            playback_mode="full",
+        )
+
+    assert exc.value.detail["reason_code"] == "active_bad_condition_reserve_protection"
+
+
+def test_route2_full_reserve_satisfied_does_not_block_new_admission(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=386, relative_name="route2/reserve-satisfied-a.mp4")
+    item_b = _make_local_item(settings, item_id=387, relative_name="route2/reserve-satisfied-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=1002,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    session.source_kind = "cloud"
+    record.source_kind = "cloud"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=1810.0,
+        cpu_cores_used=0.4,
+    )
+    assert manager._route2_bad_condition_reserve_status_locked(session, epoch)["reserve_satisfied"] is True
+
+    second = manager.create_session(
+        item_b,
+        user_id=2,
+        auth_session_id=1003,
+        username="bob",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+
+    assert second["session_id"] != first["session_id"]
+
+
+def test_route2_full_manifest_complete_reserve_does_not_block_new_admission(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=388, relative_name="route2/reserve-complete-a.mp4")
+    item_b = _make_local_item(settings, item_id=389, relative_name="route2/reserve-complete-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=1004,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.0,
+        runway_seconds=float(session.duration_seconds),
+        cpu_cores_used=0.0,
+        manifest_complete=True,
+        refill_in_progress=False,
+    )
+
+    second = manager.create_session(
+        item_b,
+        user_id=2,
+        auth_session_id=1005,
+        username="bob",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+
+    assert second["session_id"] != first["session_id"]
+
+
+def test_route2_lite_low_supply_does_not_trigger_full_reserve_admission_block(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=390, relative_name="route2/lite-no-reserve-a.mp4")
+    item_b = _make_local_item(settings, item_id=391, relative_name="route2/lite-no-reserve-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=1006,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    session.source_kind = "cloud"
+    record.source_kind = "cloud"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=20.0,
+        cpu_cores_used=0.4,
+    )
+    assert manager._route2_bad_condition_reserve_status_locked(session, epoch)["bad_condition_reason"] == "not_full_playback"
+
+    second = manager.create_session(
+        item_b,
+        user_id=2,
+        auth_session_id=1007,
+        username="bob",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+
+    assert second["session_id"] != first["session_id"]
+
+
+def test_route2_protected_reserve_same_compatible_session_can_reattach(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item = _make_local_item(settings, item_id=392, relative_name="route2/reserve-reattach.mp4")
+
+    first = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=1008,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+        start_position_seconds=0.0,
+    )
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=120.0,
+        cpu_cores_used=4.0,
+    )
+    assert manager._route2_bad_condition_reserve_protections_locked()
+
+    second = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=1008,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+        start_position_seconds=0.0,
+    )
+
+    assert second["session_id"] == first["session_id"]
+    assert len({record.worker_id for record in manager._route2_workers.values() if record.session_id == first["session_id"]}) == 1
+
+
 def test_route2_active_playback_at_floor_low_cpu_supply_blocks_new_admission(
     initialized_settings,
     monkeypatch,
@@ -6504,6 +6803,34 @@ def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
     assert decision.admission_should_block_new_users is True
     assert decision.donor_candidate is False
     assert decision.theoretical_donate_threads == 0
+    rebalance = manager._closed_loop_runtime_rebalance_payload(decision)
+    assert rebalance["runtime_rebalance_role"] == "needs_resource"
+    assert rebalance["runtime_rebalance_can_donate_threads"] == 0
+
+
+def test_route2_closed_loop_full_source_bound_reserve_does_not_request_cpu_boost(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        source_kind="cloud",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=260.0,
+        cpu_cores_used=0.4,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "protected_bad_condition_reserve"
+    assert decision.primary_bottleneck == "unknown"
+    assert decision.prepare_boost_needed is False
+    assert decision.admission_should_block_new_users is True
+    assert decision.donor_candidate is False
 
 
 def test_route2_closed_loop_lite_does_not_use_full_bad_condition_reserve(
