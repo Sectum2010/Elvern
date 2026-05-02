@@ -53,6 +53,7 @@ from backend.app.services.mobile_playback_service import (
     _HostCpuPressureSnapshot,
     _Route2AdaptiveSpawnDryRunDecision,
     _Route2ResourceSnapshot,
+    _Route2SourceFeedRate,
     MobilePlaybackManager,
     PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
@@ -4907,6 +4908,10 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "published_rate_x" in item_payload
     assert "encoder_rate_x" in item_payload
     assert "source_feed_rate_x" in item_payload
+    assert "source_feed_rate_available" in item_payload
+    assert "source_feed_rate_mature" in item_payload
+    assert "source_feed_rate_reason" in item_payload
+    assert "source_feed_rate_missing_reason" in item_payload
     assert "publish_efficiency_gap" in item_payload
     assert "client_delivery_rate_x" in item_payload
     assert len(started_workers) == 1
@@ -6708,6 +6713,98 @@ def test_route2_closed_loop_healthy_full_below_startup_target_is_prepare_boost_n
     assert decision.limiting_factor.primary == "not_limited"
 
 
+def test_route2_limiting_factor_healthy_local_full_ignores_missing_source_feed_from_page_cache(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=2.0,
+        runway_seconds=80.0,
+        cpu_cores_used=4.0,
+    )
+    record.io_sample_mature = True
+    record.io_sample_stale = False
+    record.io_read_bytes_per_second = 0.0
+    monkeypatch.setattr(
+        manager,
+        "_route2_estimated_source_bytes_per_media_second_locked",
+        lambda _session, _record: 1_000_000.0,
+    )
+    progress = _parse_ffmpeg_progress_payload(
+        "frame=600\nfps=80\nout_time_us=90000000\nspeed=3.0x\nprogress=continue\n",
+        updated_at_ts=100.0,
+        now_ts=101.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        progress=progress,
+    )
+
+    assert decision.role == "prepare_boost_needed"
+    assert decision.limiting_factor.primary == "not_limited"
+    assert decision.limiting_factor.source_feed_rate_x is None
+    assert decision.limiting_factor.source_feed_rate_available is False
+    assert decision.limiting_factor.source_feed_rate_mature is True
+    assert decision.limiting_factor.source_feed_rate_missing_reason == "local_proc_io_zero_page_cache_ambiguous"
+    assert "source_feed_rate" in decision.limiting_factor.missing_metrics
+
+
+def test_route2_limiting_factor_healthy_local_lite_ignores_missing_source_feed_from_page_cache(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.4,
+        observation_seconds=18.0,
+        runway_seconds=50.0,
+        cpu_cores_used=1.0,
+    )
+    record.io_sample_mature = True
+    record.io_sample_stale = False
+    record.io_read_bytes_per_second = 0.0
+    monkeypatch.setattr(
+        manager,
+        "_route2_estimated_source_bytes_per_media_second_locked",
+        lambda _session, _record: 1_000_000.0,
+    )
+    epoch.publish_segment_count = 12
+    epoch.publish_latency_total_seconds = 0.12
+    epoch.publish_latency_max_seconds = 0.03
+    progress = _parse_ffmpeg_progress_payload(
+        "frame=600\nfps=80\nout_time_us=56000000\nspeed=3.0x\nprogress=continue\n",
+        updated_at_ts=100.0,
+        now_ts=101.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        progress=progress,
+    )
+
+    assert decision.role == "steady_state_maintenance"
+    assert decision.limiting_factor.primary == "not_limited"
+    assert decision.limiting_factor.primary not in {"local_source", "io_publish"}
+    assert decision.limiting_factor.source_feed_rate_x is None
+    assert decision.limiting_factor.source_feed_rate_available is False
+    assert decision.limiting_factor.source_feed_rate_missing_reason == "local_proc_io_zero_page_cache_ambiguous"
+
+
 def test_route2_closed_loop_marks_stable_surplus_as_downshift_candidate(
     initialized_settings,
 ) -> None:
@@ -6792,6 +6889,7 @@ def test_route2_closed_loop_healthy_lite_low_publish_latency_is_not_io_bound(
     assert decision.primary_bottleneck == "unknown"
     assert decision.donor_candidate is False
     assert decision.prepare_boost_needed is False
+    assert decision.limiting_factor.primary == "not_limited"
 
 
 def test_route2_closed_loop_low_supply_cpu_thread_limited_needs_resource(
@@ -6823,6 +6921,45 @@ def test_route2_closed_loop_low_supply_cpu_thread_limited_needs_resource(
     assert decision.admission_block_reasons == ["active_stream_health_protection"]
     assert decision.limiting_factor.primary == "cpu_thread"
     assert decision.limiting_factor.scores["cpu_thread_score"] > 0.0
+
+
+def test_route2_limiting_factor_local_measured_zero_can_be_source_bound_when_output_blocked(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=20.0,
+        cpu_cores_used=0.4,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_route2_source_feed_rate_locked",
+        lambda _session, _record: _Route2SourceFeedRate(
+            rate_x=0.0,
+            available=True,
+            mature=True,
+            reason="explicit_source_feed_measured_zero",
+            missing_reason=None,
+            missing_metrics=[],
+        ),
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "source_bound"
+    assert decision.primary_bottleneck == "source"
+    assert decision.limiting_factor.primary == "local_source"
+    assert decision.limiting_factor.source_feed_rate_x == pytest.approx(0.0)
+    assert decision.limiting_factor.source_feed_rate_available is True
+    assert decision.limiting_factor.source_feed_rate_mature is True
 
 
 def test_route2_limiting_factor_cloud_can_be_cpu_thread_bound_when_source_feed_is_healthy(
@@ -6898,6 +7035,35 @@ def test_route2_closed_loop_source_bound_low_supply_does_not_request_cpu_boost(
     assert decision.limiting_factor.scores["source_score"] > 0.0
 
 
+def test_route2_limiting_factor_cloud_missing_source_feed_does_not_overclaim_cpu_thread(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=20.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.limiting_factor.primary == "unknown"
+    assert decision.limiting_factor.confidence < 0.6
+    assert decision.limiting_factor.source_feed_rate_x is None
+    assert decision.limiting_factor.source_feed_rate_available is False
+    assert "source_feed_rate" in decision.limiting_factor.missing_metrics
+    assert "cloud_source_feed_rate_x" in decision.limiting_factor.missing_metrics
+    assert "cloud_source_feed_missing_limits_cpu_confidence" in decision.limiting_factor.blocking_signals
+    assert decision.primary_bottleneck == "unknown"
+
+
 def test_route2_closed_loop_client_bound_low_supply_stays_client_bound(
     initialized_settings,
 ) -> None:
@@ -6964,6 +7130,32 @@ def test_route2_closed_loop_cloud_provider_error_dominates_limiting_factor(
     assert decision.admission_should_block_new_users is False
 
 
+def test_route2_closed_loop_cloud_provider_quota_dominates_limiting_factor(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+    )
+    record.non_retryable_error = "provider_quota_exceeded"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.4,
+        runway_seconds=4.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "provider_error"
+    assert decision.primary_bottleneck == "provider"
+    assert decision.limiting_factor.primary == "provider_error"
+    assert decision.limiting_factor.scores["provider_error_score"] == pytest.approx(1.0)
+
+
 def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
     initialized_settings,
 ) -> None:
@@ -6994,6 +7186,7 @@ def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
 
 def test_route2_closed_loop_full_source_bound_reserve_does_not_request_cpu_boost(
     initialized_settings,
+    monkeypatch,
 ) -> None:
     manager, session, epoch, record = _make_route2_closed_loop_inputs(
         initialized_settings,
@@ -7006,6 +7199,14 @@ def test_route2_closed_loop_full_source_bound_reserve_does_not_request_cpu_boost
         supply_rate_x=0.9,
         runway_seconds=260.0,
         cpu_cores_used=0.4,
+    )
+    record.io_sample_mature = True
+    record.io_sample_stale = False
+    record.io_read_bytes_per_second = 500_000.0
+    monkeypatch.setattr(
+        manager,
+        "_route2_estimated_source_bytes_per_media_second_locked",
+        lambda _session, _record: 1_000_000.0,
     )
 
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)

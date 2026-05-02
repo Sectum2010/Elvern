@@ -341,6 +341,16 @@ class _Route2RealThreadAssignmentDecision:
 
 
 @dataclass(slots=True)
+class _Route2SourceFeedRate:
+    rate_x: float | None
+    available: bool
+    mature: bool
+    reason: str | None
+    missing_reason: str | None
+    missing_metrics: list[str]
+
+
+@dataclass(slots=True)
 class _Route2LimitingFactorDecision:
     primary: str
     confidence: float
@@ -351,6 +361,10 @@ class _Route2LimitingFactorDecision:
     published_rate_x: float | None
     encoder_rate_x: float | None
     source_feed_rate_x: float | None
+    source_feed_rate_available: bool
+    source_feed_rate_mature: bool
+    source_feed_rate_reason: str | None
+    source_feed_rate_missing_reason: str | None
     publish_efficiency_gap: float | None
     client_delivery_rate_x: float | None
 
@@ -3176,27 +3190,68 @@ class MobilePlaybackManager:
             return None
         return max(0.0, float(file_size) / duration_seconds)
 
-    def _route2_source_feed_rate_x_locked(
+    def _route2_source_feed_rate_locked(
         self,
         session: MobilePlaybackSession,
         record: Route2WorkerRecord,
-    ) -> tuple[float | None, list[str]]:
+    ) -> _Route2SourceFeedRate:
         missing: list[str] = []
         if not record.io_sample_mature or record.io_sample_stale:
-            missing.append("route2_source_observation_mature")
-            return None, missing
+            missing.extend(["source_feed_rate", "route2_source_observation_mature"])
+            return _Route2SourceFeedRate(
+                rate_x=None,
+                available=False,
+                mature=False,
+                reason=None,
+                missing_reason="route2_source_observation_not_mature",
+                missing_metrics=missing,
+            )
         source_bytes_per_second = record.io_read_bytes_per_second
         if source_bytes_per_second is None:
-            missing.append("route2_source_bytes_per_second")
-            return None, missing
+            missing.extend(["source_feed_rate", "route2_source_bytes_per_second"])
+            return _Route2SourceFeedRate(
+                rate_x=None,
+                available=False,
+                mature=True,
+                reason=None,
+                missing_reason="route2_source_bytes_per_second_unavailable",
+                missing_metrics=missing,
+            )
         estimated_source_bytes_per_media_second = self._route2_estimated_source_bytes_per_media_second_locked(
             session,
             record,
         )
         if estimated_source_bytes_per_media_second is None or estimated_source_bytes_per_media_second <= 0.0:
-            missing.append("estimated_source_bytes_per_media_second")
-            return None, missing
-        return max(0.0, float(source_bytes_per_second) / estimated_source_bytes_per_media_second), missing
+            missing.extend(["source_feed_rate", "estimated_source_bytes_per_media_second"])
+            return _Route2SourceFeedRate(
+                rate_x=None,
+                available=False,
+                mature=True,
+                reason=None,
+                missing_reason="estimated_source_bytes_per_media_second_unavailable",
+                missing_metrics=missing,
+            )
+        measured_bytes_per_second = max(0.0, float(source_bytes_per_second))
+        if record.source_kind == "local" and measured_bytes_per_second <= 0.0:
+            # Linux /proc/<pid>/io counts physical storage reads. Local media served from page cache can
+            # legitimately report zero physical reads while ffmpeg and the published frontier advance.
+            missing.extend(["source_feed_rate", "local_proc_io_read_bytes_zero_page_cache_ambiguous"])
+            return _Route2SourceFeedRate(
+                rate_x=None,
+                available=False,
+                mature=True,
+                reason=None,
+                missing_reason="local_proc_io_zero_page_cache_ambiguous",
+                missing_metrics=missing,
+            )
+        return _Route2SourceFeedRate(
+            rate_x=measured_bytes_per_second / estimated_source_bytes_per_media_second,
+            available=True,
+            mature=True,
+            reason="source_feed_measured_zero" if measured_bytes_per_second <= 0.0 else "source_feed_measured",
+            missing_reason=None,
+            missing_metrics=[],
+        )
 
     def _route2_client_delivery_rate_x_locked(
         self,
@@ -3248,6 +3303,10 @@ class MobilePlaybackManager:
             "source_feed_rate_x": round(float(decision.source_feed_rate_x), 3)
             if decision.source_feed_rate_x is not None
             else None,
+            "source_feed_rate_available": decision.source_feed_rate_available,
+            "source_feed_rate_mature": decision.source_feed_rate_mature,
+            "source_feed_rate_reason": decision.source_feed_rate_reason,
+            "source_feed_rate_missing_reason": decision.source_feed_rate_missing_reason,
             "publish_efficiency_gap": round(float(decision.publish_efficiency_gap), 3)
             if decision.publish_efficiency_gap is not None
             else None,
@@ -3275,6 +3334,10 @@ class MobilePlaybackManager:
             published_rate_x=None,
             encoder_rate_x=None,
             source_feed_rate_x=None,
+            source_feed_rate_available=False,
+            source_feed_rate_mature=False,
+            source_feed_rate_reason=None,
+            source_feed_rate_missing_reason=reason,
             publish_efficiency_gap=None,
             client_delivery_rate_x=None,
         )
@@ -3309,7 +3372,8 @@ class MobilePlaybackManager:
         runway_delta_mature = bool(reserve_status["runway_delta_mature"])
         metrics_mature = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
         required_runway_seconds = self._route2_closed_loop_required_runway_seconds(record.playback_mode)
-        source_feed_rate_x, source_missing = self._route2_source_feed_rate_x_locked(session, record)
+        source_feed = self._route2_source_feed_rate_locked(session, record)
+        source_feed_rate_x = source_feed.rate_x
         client_delivery_rate_x, client_missing = self._route2_client_delivery_rate_x_locked(session, epoch)
         encoder_rate_x = (
             float(progress.speed_x)
@@ -3352,8 +3416,18 @@ class MobilePlaybackManager:
             pressure_primary = "cgroup_throttle"
         if memory_pressure or any("memory" in reason for reason in host_pressure_reasons):
             pressure_primary = "memory_pressure"
-        source_confident_low = source_feed_rate_x is not None and source_feed_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
-        source_confident_healthy = source_feed_rate_x is not None and source_feed_rate_x >= ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        source_confident_low = (
+            source_feed.available
+            and source_feed.mature
+            and source_feed_rate_x is not None
+            and source_feed_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        )
+        source_confident_healthy = (
+            source_feed.available
+            and source_feed.mature
+            and source_feed_rate_x is not None
+            and source_feed_rate_x >= ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        )
         client_limited = self._route2_client_limited_locked(session, epoch)
         route2_headroom_cores = (
             float(route2_cpu_upbound_cores) - float(route2_cpu_cores_used_total)
@@ -3373,13 +3447,17 @@ class MobilePlaybackManager:
         }
         supporting_signals: list[str] = []
         blocking_signals: list[str] = []
-        missing_metrics = [*source_missing, *client_missing]
+        missing_metrics = [*source_feed.missing_metrics, *client_missing]
         if progress is None or progress.stale or progress.speed_x is None:
             missing_metrics.append("ffmpeg_progress_speed_x")
-        if source_feed_rate_x is None and record.source_kind == "cloud":
+        if not source_feed.available and record.source_kind == "cloud":
             missing_metrics.append("cloud_source_feed_rate_x")
         if route2_headroom_cores is None:
             missing_metrics.append("route2_cpu_headroom")
+        if source_feed.reason:
+            supporting_signals.append(source_feed.reason)
+        if source_feed.missing_reason:
+            supporting_signals.append(source_feed.missing_reason)
 
         if provider_error:
             scores["provider_error_score"] = 1.0
@@ -3394,6 +3472,10 @@ class MobilePlaybackManager:
                 published_rate_x=supply_rate_x,
                 encoder_rate_x=encoder_rate_x,
                 source_feed_rate_x=source_feed_rate_x,
+                source_feed_rate_available=source_feed.available,
+                source_feed_rate_mature=source_feed.mature,
+                source_feed_rate_reason=source_feed.reason,
+                source_feed_rate_missing_reason=source_feed.missing_reason,
                 publish_efficiency_gap=publish_efficiency_gap,
                 client_delivery_rate_x=client_delivery_rate_x,
             )
@@ -3409,6 +3491,10 @@ class MobilePlaybackManager:
                 published_rate_x=supply_rate_x,
                 encoder_rate_x=encoder_rate_x,
                 source_feed_rate_x=source_feed_rate_x,
+                source_feed_rate_available=source_feed.available,
+                source_feed_rate_mature=source_feed.mature,
+                source_feed_rate_reason=source_feed.reason,
+                source_feed_rate_missing_reason=source_feed.missing_reason,
                 publish_efficiency_gap=publish_efficiency_gap,
                 client_delivery_rate_x=client_delivery_rate_x,
             )
@@ -3425,26 +3511,45 @@ class MobilePlaybackManager:
                 published_rate_x=supply_rate_x,
                 encoder_rate_x=encoder_rate_x,
                 source_feed_rate_x=source_feed_rate_x,
+                source_feed_rate_available=source_feed.available,
+                source_feed_rate_mature=source_feed.mature,
+                source_feed_rate_reason=source_feed.reason,
+                source_feed_rate_missing_reason=source_feed.missing_reason,
                 publish_efficiency_gap=publish_efficiency_gap,
                 client_delivery_rate_x=client_delivery_rate_x,
             )
 
+        encoder_healthy = encoder_rate_x is not None and encoder_rate_x >= ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        runway_not_declining = (
+            not runway_delta_mature
+            or runway_delta_per_second is None
+            or float(runway_delta_per_second) >= 0.0
+        )
+        local_output_healthy = (
+            record.source_kind == "local"
+            and supply_rate_x >= ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+            and runway_not_declining
+            and (encoder_rate_x is None or encoder_healthy)
+            and not io_publish_reasons
+        )
+        source_feed_can_explain_limiter = source_confident_low and not local_output_healthy
         if client_limited:
             scores["client_score"] = 0.86
             supporting_signals.append("client_goodput_below_server_goodput")
-        if source_confident_low and not cpu_thread_pressure:
+        if source_feed_can_explain_limiter and not cpu_thread_pressure:
             scores["source_score"] = 0.86
             supporting_signals.append(f"{source_kind_factor}_feed_below_1_05")
-        elif source_confident_low:
+        elif source_feed_can_explain_limiter:
             scores["source_score"] = 0.62
             supporting_signals.append(f"{source_kind_factor}_feed_low_with_cpu_pressure")
+        elif source_confident_low and local_output_healthy:
+            supporting_signals.append("local_source_feed_low_ignored_because_output_healthy")
         elif (
-            source_feed_rate_x is None
+            not source_feed.available
             and record.source_kind == "cloud"
             and supply_below_floor
             and not cpu_thread_pressure
         ):
-            scores["source_score"] = 0.6
             supporting_signals.append("cloud_source_feed_missing_with_low_supply_and_low_cpu")
         if io_publish_reasons:
             scores["io_publish_score"] = 0.88
@@ -3455,8 +3560,16 @@ class MobilePlaybackManager:
             if memory_pressure:
                 blocking_signals.append("route2_memory_hard_pressure")
         if (supply_below_floor or boost_window_below_target or runway_declining) and cpu_thread_pressure:
-            if not source_confident_low and not client_limited and not io_publish_reasons:
-                scores["cpu_thread_score"] = 0.86 if source_confident_healthy or record.source_kind == "local" else 0.68
+            if not source_feed_can_explain_limiter and not client_limited and not io_publish_reasons:
+                if source_confident_healthy:
+                    scores["cpu_thread_score"] = 0.86
+                elif record.source_kind == "local":
+                    scores["cpu_thread_score"] = 0.74
+                elif not source_feed.available:
+                    scores["cpu_thread_score"] = 0.45
+                    blocking_signals.append("cloud_source_feed_missing_limits_cpu_confidence")
+                else:
+                    scores["cpu_thread_score"] = 0.68
                 supporting_signals.append("cpu_thread_pressure_with_supply_or_prepare_need")
                 if not headroom_available:
                     blocking_signals.append("route2_cpu_headroom_insufficient")
@@ -3467,7 +3580,7 @@ class MobilePlaybackManager:
             and not self._starvation_risk(session)
             and not self._stalled_recovery_needed(session)
         )
-        if healthy_supply and not client_limited and not io_publish_reasons and not source_confident_low:
+        if healthy_supply and not client_limited and not io_publish_reasons and not source_feed_can_explain_limiter:
             if not boost_window_below_target or not host_pressure_reasons:
                 primary = "not_limited"
                 confidence = 0.78
@@ -3487,7 +3600,7 @@ class MobilePlaybackManager:
                 (scores["metrics_immature_score"], "metrics_immature"),
             ]
             best_score, best_factor = max(ranked, key=lambda value: value[0])
-            if best_score > 0.0:
+            if best_score >= 0.55:
                 primary = best_factor
                 confidence = best_score
         if primary == "not_limited":
@@ -3504,6 +3617,10 @@ class MobilePlaybackManager:
             published_rate_x=supply_rate_x,
             encoder_rate_x=encoder_rate_x,
             source_feed_rate_x=source_feed_rate_x,
+            source_feed_rate_available=source_feed.available,
+            source_feed_rate_mature=source_feed.mature,
+            source_feed_rate_reason=source_feed.reason,
+            source_feed_rate_missing_reason=source_feed.missing_reason,
             publish_efficiency_gap=publish_efficiency_gap,
             client_delivery_rate_x=client_delivery_rate_x,
         )
@@ -3582,7 +3699,10 @@ class MobilePlaybackManager:
             "memory_pressure",
             "cgroup_throttle",
         }
-        cpu_thread_limited = cpu_thread_pressure and not source_limited and not client_limited and not io_publish_limited
+        cpu_thread_factor_plausible = limiting_factor.primary == "cpu_thread" or (
+            limiting_factor.primary == "not_limited" and cpu_thread_pressure
+        )
+        cpu_thread_limited = cpu_thread_factor_plausible and not source_limited and not client_limited and not io_publish_limited
         starvation_risk = self._starvation_risk(session)
         stalled_recovery_needed = self._stalled_recovery_needed(session)
         below_health_floor = supply_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
@@ -3699,7 +3819,13 @@ class MobilePlaybackManager:
                 needs_resource_reason = "supply_below_1_05_or_declining_runway"
                 reasons.append("mature_supply_below_1_05_without_specific_limiter")
             confidence = 0.82
-        elif runway_seconds < required_runway_seconds and refill_in_progress and cpu_thread_limited and not source_limited and not client_limited:
+        elif (
+            runway_seconds < required_runway_seconds
+            and refill_in_progress
+            and (cpu_thread_limited or (host_pressure_limited and cpu_thread_pressure))
+            and not source_limited
+            and not client_limited
+        ):
             if host_pressure_limited:
                 role = "host_pressure_limited"
                 primary_bottleneck = limiting_factor.primary

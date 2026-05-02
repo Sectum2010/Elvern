@@ -1359,6 +1359,10 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     published_rate_x: float | None = Field(default=None, ge=0)
     encoder_rate_x: float | None = Field(default=None, ge=0)
     source_feed_rate_x: float | None = Field(default=None, ge=0)
+    source_feed_rate_available: bool = False
+    source_feed_rate_mature: bool = False
+    source_feed_rate_reason: str | None = None
+    source_feed_rate_missing_reason: str | None = None
     publish_efficiency_gap: float | None = Field(default=None, ge=0)
     client_delivery_rate_x: float | None = Field(default=None, ge=0)
     route2_transcode_strategy: str | None = None
