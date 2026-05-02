@@ -97,6 +97,21 @@ from backend.app.services.route2_ffmpeg_command_adapter import (
     Route2FFmpegCommandAdapterInput,
     build_route2_ffmpeg_command_preview,
 )
+from backend.app.services.route2_shared_output_store import (
+    SHARED_OUTPUT_STORE_BLOCKERS,
+    SHARED_OUTPUT_STORE_METADATA_VERSION,
+    absolute_segment_index_from_seconds,
+    absolute_segment_time_range,
+    add_confirmed_range,
+    build_ranges_metadata,
+    build_shared_output_contract_metadata,
+    build_shared_output_lease_metadata,
+    find_contiguous_range_covering,
+    find_gaps_for_requested_range,
+    merge_contiguous_ranges,
+    shared_segment_filename,
+    validate_shared_output_lease_metadata,
+)
 from backend.app.services.playback_service import build_playback_decision
 from fastapi import HTTPException
 
@@ -8327,6 +8342,164 @@ def test_route2_shared_supply_level0_admin_multi_playback_counts_separate_worklo
     assert item_a["compatible_existing_worker_ids"] == ["admin-b"]
     assert manager._route2_workers["admin-a"].assigned_threads == 4
     assert manager._route2_workers["admin-b"].assigned_threads == 4
+
+
+def test_route2_shared_output_absolute_segment_helpers() -> None:
+    assert absolute_segment_index_from_seconds(0.0, 2.0) == 0
+    assert absolute_segment_index_from_seconds(1.9, 2.0) == 0
+    assert absolute_segment_index_from_seconds(2.0, 2.0) == 1
+    assert absolute_segment_index_from_seconds(30.0, 2.0) == 15
+    assert absolute_segment_time_range(15, 2.0) == (30.0, 32.0)
+    assert shared_segment_filename(0) == "abs_000000000000.m4s"
+    assert shared_segment_filename(123456789) == "abs_000123456789.m4s"
+
+
+def test_route2_shared_output_range_helpers_merge_and_find_gaps() -> None:
+    merged = merge_contiguous_ranges(
+        [(0, 3), (3, 5), (8, 10), (9, 12)],
+        segment_duration_seconds=2.0,
+    )
+
+    assert [(item["start_index"], item["end_index_exclusive"]) for item in merged] == [(0, 5), (8, 12)]
+    assert merged[0]["start_seconds"] == 0.0
+    assert merged[0]["end_seconds"] == 10.0
+    assert find_contiguous_range_covering(merged, 4, segment_duration_seconds=2.0) == merged[0]
+    assert find_contiguous_range_covering(merged, 6, segment_duration_seconds=2.0) is None
+    assert find_gaps_for_requested_range(merged, 0, 5, segment_duration_seconds=2.0) == []
+
+    partial_gaps = find_gaps_for_requested_range(merged, 2, 10, segment_duration_seconds=2.0)
+    assert [(item["start_index"], item["end_index_exclusive"]) for item in partial_gaps] == [(5, 8)]
+
+    no_coverage_gaps = find_gaps_for_requested_range([], 12, 15, segment_duration_seconds=2.0)
+    assert [(item["start_index"], item["end_index_exclusive"]) for item in no_coverage_gaps] == [(12, 15)]
+
+    metadata = build_ranges_metadata(
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_duration_seconds=2.0,
+        confirmed_ranges=[(0, 2)],
+        updated_at="2026-05-02T00:00:00Z",
+    )
+    updated = add_confirmed_range(
+        metadata,
+        2,
+        4,
+        segment_duration_seconds=2.0,
+        updated_at="2026-05-02T00:00:01Z",
+    )
+    assert [(item["start_index"], item["end_index_exclusive"]) for item in updated["confirmed_ranges"]] == [(0, 4)]
+
+
+def test_route2_shared_output_contract_metadata_is_sanitized() -> None:
+    metadata = build_shared_output_contract_metadata(
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        output_contract_fingerprint="contract-fingerprint",
+        output_contract_version="route2-output-contract-v1",
+        profile="mobile_2160p",
+        playback_mode="full",
+        source_fingerprint="source-fingerprint",
+        source_kind="cloud",
+        segment_duration_seconds=2.0,
+        output_contract_summary={
+            "source_path": "/private/source/movie.mkv",
+            "cloud_url": "https://drive.example/file?access_token=secret-token",
+            "session_id": "secret-session",
+            "epoch_id": "secret-epoch",
+            "video": {
+                "codec": "libx264",
+                "preset": "superfast",
+                "crf": 22,
+                "private_path": "/tmp/private-output",
+            },
+            "audio": {"codec": "aac", "channels": 2, "token": "secret-token"},
+            "hls": {"segment_duration_seconds": 2.0, "segment_type": "fmp4", "url": "https://secret"},
+            "timeline": "epoch_relative_zero_offset",
+        },
+        created_at="2026-05-02T00:00:00Z",
+        updated_at="2026-05-02T00:00:00Z",
+    )
+
+    serialized = json.dumps(metadata, sort_keys=True)
+    assert metadata["version"] == SHARED_OUTPUT_STORE_METADATA_VERSION
+    assert metadata["status"] == "metadata_only"
+    assert metadata["init"]["init_sha256"] is None
+    assert metadata["gop_keyframe_contract"]["keyframe_alignment"] == "future_absolute_segment_identity_required"
+    assert "superfast" in serialized
+    assert "secret-token" not in serialized
+    assert "/private/source" not in serialized
+    assert "secret-session" not in serialized
+    assert "secret-epoch" not in serialized
+    assert "/tmp/private-output" not in serialized
+
+
+def test_route2_shared_output_lease_metadata_validates_required_fields() -> None:
+    lease = build_shared_output_lease_metadata(
+        lease_id="lease-1",
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        session_id="session-1",
+        user_id=1,
+        media_item_id=420,
+        purpose="reader",
+        start_index=10,
+        end_index_exclusive=20,
+        created_at="2026-05-02T00:00:00Z",
+        expires_at="2026-05-02T00:10:00Z",
+        heartbeat_at="2026-05-02T00:00:05Z",
+        status="active",
+    )
+
+    assert validate_shared_output_lease_metadata(lease) == lease
+    assert lease["purpose"] == "reader"
+    assert lease["start_index"] == 10
+    assert lease["end_index_exclusive"] == 20
+
+    incomplete = dict(lease)
+    incomplete.pop("session_id")
+    with pytest.raises(ValueError):
+        validate_shared_output_lease_metadata(incomplete)
+
+
+def test_route2_shared_output_store_metadata_only_admin_status(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=432, relative_name="route2/shared-supply/metadata-only.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="metadata-a",
+        username="alice",
+        prepared_ranges=[[0.0, 140.0]],
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="metadata-b",
+        username="bob",
+        target_position_seconds=10.0,
+        prepared_ranges=[[0.0, 120.0]],
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "metadata-a")
+
+    assert status["shared_output_store_enabled"] == "metadata_only"
+    assert status["shared_output_metadata_version"] == SHARED_OUTPUT_STORE_METADATA_VERSION
+    assert status["shared_output_store_ready_for_segments"] is False
+    assert status["shared_output_root"].endswith("browser_playback_route2/shared_outputs")
+    assert item_a["shared_output_key"] == item_a["shared_supply_group_key"]
+    assert item_a["absolute_segment_index_start_candidate"] == 0
+    assert item_a["absolute_segment_index_end_candidate"] == 70
+    assert item_a["shared_output_store_blockers"] == SHARED_OUTPUT_STORE_BLOCKERS
+    assert "metadata_only" in item_a["shared_output_store_blockers"]
+    assert item_a["shared_supply_candidate"] is True
+    assert manager._route2_workers["metadata-a"].assigned_threads == 4
+    assert manager._route2_workers["metadata-b"].assigned_threads == 4
 
 
 def test_route2_stop_then_start_new_movie_allows_replacement_movie(initialized_settings) -> None:

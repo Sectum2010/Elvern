@@ -156,6 +156,15 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Attach-from-anywhere remains future work and requires global absolute segment identity, sparse manifest reconstruction, per-user permission checks, active leases/reference tracking, and cleanup rules that skip active shared segments.
 - Shared attach, once implemented later, should not be treated as free: it may avoid a new ffmpeg worker, but it still consumes network serving bandwidth, file IO, session tracking, and player resources.
 
+## Phase 1K-2A Shared Output Store Metadata
+
+- Phase 1K-2A is metadata/schema only. Route2 still does not serve from a shared output store, does not write shared media segments, and does not copy, hardlink, symlink, move, attach, or reuse session/epoch output.
+- The shared output store status is `metadata_only`; admin/status can report the future shared output root, metadata version, per-worker `shared_output_key`, absolute segment index candidates, and blockers such as `no_global_segment_store`, `no_segment_writer`, and `no_shared_manifest`.
+- Absolute segment identity is prepared with helpers for canonical absolute segment indexes, absolute time ranges, padded `abs_*.m4s` names, sparse/contiguous range metadata, gap detection, and lease metadata shapes.
+- Contract metadata is built from the existing sanitized Route2 output contract fingerprint. It must not include source file paths, cloud URLs, access tokens, refresh tokens, cookies, session ids, epoch ids, output directories, staging/published paths, or full command lines.
+- `contract.json`, `metadata.json`, `ranges.json`, `init.sha256`, `staging/`, and `leases/` are future metadata shapes in this phase. `init.mp4` and `segments/abs_*.m4s` remain future artifacts and are not written by Phase 1K-2A.
+- Attach-from-anywhere still requires future segment writing, init compatibility validation, sparse manifest construction, active lease enforcement, cleanup protection, and per-user permission checks at attach/fetch time.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

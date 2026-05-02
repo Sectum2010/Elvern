@@ -176,6 +176,12 @@ from .route2_transcode_strategy import (
     Route2TranscodeStrategyInput,
     select_route2_transcode_strategy,
 )
+from .route2_shared_output_store import (
+    SHARED_OUTPUT_STORE_BLOCKERS,
+    absolute_segment_end_index_exclusive_from_seconds,
+    absolute_segment_index_from_seconds,
+    build_shared_output_store_capability,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -4506,8 +4512,30 @@ class MobilePlaybackManager:
                 if not saw_same_media:
                     blockers.add("no_matching_active_route2_workload")
                 level_candidate = "same_group_only" if workload.group_key else None
+            absolute_start_candidate = None
+            absolute_end_candidate = None
+            if workload.epoch_start_seconds is not None:
+                absolute_start_candidate = absolute_segment_index_from_seconds(
+                    workload.epoch_start_seconds,
+                    SEGMENT_DURATION_SECONDS,
+                )
+            prepared_range_ends = [
+                float(prepared_range[1])
+                for prepared_range in workload.prepared_ranges
+                if len(prepared_range) >= 2
+            ]
+            if prepared_range_ends:
+                prepared_end_seconds = max(prepared_range_ends)
+                absolute_end_candidate = absolute_segment_end_index_exclusive_from_seconds(
+                    prepared_end_seconds,
+                    SEGMENT_DURATION_SECONDS,
+                )
             payload["shared_supply_candidate"] = bool(compatible_workloads)
             payload["shared_supply_group_key"] = workload.group_key
+            payload["shared_output_key"] = workload.group_key
+            payload["absolute_segment_index_start_candidate"] = absolute_start_candidate
+            payload["absolute_segment_index_end_candidate"] = absolute_end_candidate
+            payload["shared_output_store_blockers"] = list(SHARED_OUTPUT_STORE_BLOCKERS)
             payload["route2_output_contract_fingerprint"] = workload.output_contract_fingerprint
             payload["route2_output_contract_version"] = workload.output_contract_version
             payload["route2_output_contract_missing_fields"] = list(workload.output_contract_missing_fields)
@@ -5796,6 +5824,7 @@ class MobilePlaybackManager:
             )
             return {
                 **budget,
+                **build_shared_output_store_capability(self._route2_root),
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_cores_used_total": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_percent_of_total": route2_cpu_percent_of_total,

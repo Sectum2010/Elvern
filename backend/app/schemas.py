@@ -1384,6 +1384,10 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     route2_output_contract_summary: dict[str, object] = Field(default_factory=dict)
     shared_supply_candidate: bool = False
     shared_supply_group_key: str | None = None
+    shared_output_key: str | None = None
+    absolute_segment_index_start_candidate: int | None = Field(default=None, ge=0)
+    absolute_segment_index_end_candidate: int | None = Field(default=None, ge=0)
+    shared_output_store_blockers: list[str] = Field(default_factory=list)
     shared_supply_group_size: int = Field(default=1, ge=0)
     shared_supply_level_candidate: str | None = None
     compatible_existing_workload_ids: list[str] = Field(default_factory=list)
@@ -1420,6 +1424,10 @@ class AdminPlaybackWorkersUserSummaryResponse(BaseModel):
 
 
 class AdminPlaybackWorkersStatusResponse(BaseModel):
+    shared_output_store_enabled: str | bool = "metadata_only"
+    shared_output_root: str | None = None
+    shared_output_metadata_version: str | None = None
+    shared_output_store_ready_for_segments: bool = False
     cpu_upbound_percent: int = Field(ge=0)
     cpu_budget_percent: int = Field(ge=0)
     total_cpu_cores: int = Field(ge=1)
