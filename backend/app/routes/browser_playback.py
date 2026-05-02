@@ -42,6 +42,8 @@ def _get_browser_manager(request: Request):
 
 
 def _coerce_session_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
     if isinstance(exc, KeyError | PermissionError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Browser playback session not found")
     if isinstance(exc, ActivePlaybackWorkerConflictError):

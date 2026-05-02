@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.error import HTTPError
 from urllib.request import Request
 
+from fastapi import HTTPException
 import pytest
 
 from backend.app.auth import authenticate_user, create_session as create_auth_session, destroy_session, get_user_by_session_token
@@ -52,6 +53,7 @@ from backend.app.services.mobile_playback_service import (
     MobilePlaybackManager,
     PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
+    _is_non_retryable_cloud_source_error,
     _build_host_cpu_pressure_snapshot,
     _count_external_ffmpeg_processes,
     _host_cpu_pressure_from_resource_snapshot,
@@ -2655,6 +2657,52 @@ def test_google_drive_stream_proxy_maps_auth_error_to_provider_auth(monkeypatch)
         raise AssertionError("Expected proxy_google_drive_file_response to raise HTTPException")
 
 
+def test_cloud_stream_response_marks_shared_provider_auth_as_admin_required(initialized_settings, monkeypatch) -> None:
+    from backend.app.services.cloud_stream_access_service import build_cloud_stream_response
+
+    def _raise_provider_auth(*args, **kwargs):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "provider_auth_required",
+                "provider": "google_drive",
+                "provider_reason": "token_expired_or_revoked",
+                "message": "Reconnect Google Drive to continue this action.",
+                "allow_reconnect": True,
+                "requires_admin": False,
+            },
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.cloud_stream_access_service.resolve_media_stream_target",
+        _raise_provider_auth,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.cloud_stream_access_service._load_cloud_media_item_provider_context",
+        lambda *args, **kwargs: {
+            "source_kind": "cloud",
+            "owner_user_id": 1,
+            "google_account_id": 1,
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        build_cloud_stream_response(
+            initialized_settings,
+            user_id=2,
+            item_id=70,
+            range_header="bytes=0-0",
+            stream_validator=None,
+            get_access_token_by_account_id=lambda *args, **kwargs: "token",
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "provider_auth_required"
+    assert exc.value.detail["provider_reason"] == "token_expired_or_revoked"
+    assert exc.value.detail["allow_reconnect"] is False
+    assert exc.value.detail["requires_admin"] is True
+
+
 def test_google_drive_stream_proxy_maps_forbidden_source_error(monkeypatch) -> None:
     request = Request("https://www.googleapis.com/drive/v3/files/demo?alt=media")
     payload = (
@@ -2718,6 +2766,13 @@ def test_probe_worker_source_input_error_uses_head_and_stream_error_headers(monk
     assert seen["method"] == "HEAD"
     assert seen["range"] == "bytes=0-0"
     assert detail == "The download quota for this file has been exceeded."
+
+
+def test_route2_non_retryable_cloud_source_error_includes_provider_auth() -> None:
+    assert _is_non_retryable_cloud_source_error("provider_auth_required")
+    assert _is_non_retryable_cloud_source_error("token_expired_or_revoked")
+    assert _is_non_retryable_cloud_source_error("Reconnect Google Drive to continue this action.")
+    assert _is_non_retryable_cloud_source_error("provider_source_error")
 
 
 def test_google_drive_stream_proxy_forwards_range_header(monkeypatch) -> None:
@@ -5402,6 +5457,66 @@ def test_route2_browser_cooldown_is_not_enforced_by_generic_session_create(initi
     )
 
     assert payload["media_item_id"] == int(item["id"])
+
+
+def test_route2_cloud_create_session_preflights_provider_auth_before_worker(initialized_settings, monkeypatch) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    item = {
+        "id": 348,
+        "title": "Cloud Auth Required",
+        "original_filename": "cloud-auth-required.mkv",
+        "file_path": "gdrive://library/file/cloud-auth-required.mkv",
+        "source_kind": "cloud",
+        "duration_seconds": 120.0,
+        "container": "mkv",
+        "video_codec": "hevc",
+        "audio_codec": "truehd",
+        "width": 3840,
+        "height": 2160,
+        "pixel_format": None,
+        "bit_depth": None,
+        "audio_channels": None,
+        "hdr_flag": None,
+        "dolby_vision_flag": None,
+        "resume_position_seconds": 0.0,
+        "subtitles": [],
+    }
+    calls: list[tuple[int, int]] = []
+
+    def _raise_provider_auth(settings, *, user_id: int, item_id: int) -> None:
+        del settings
+        calls.append((user_id, item_id))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "provider_auth_required",
+                "provider": "google_drive",
+                "provider_reason": "token_expired_or_revoked",
+                "message": "Reconnect Google Drive to continue this action.",
+            },
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service.ensure_cloud_media_item_provider_access",
+        _raise_provider_auth,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        manager.create_session(
+            item,
+            user_id=2,
+            auth_session_id=930,
+            username="bob",
+            engine_mode="route2",
+            playback_mode="full",
+        )
+
+    assert calls == [(2, 348)]
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "provider_auth_required"
+    with manager._lock:
+        assert manager._sessions == {}
+        assert manager._route2_workers == {}
 
 
 def test_route2_admin_terminate_worker_stops_matching_owned_session(initialized_settings) -> None:

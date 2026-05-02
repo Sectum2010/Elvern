@@ -467,6 +467,15 @@ export function DetailPage() {
     progress,
     iosMobile,
     onProgressChange: setProgress,
+    onProviderAuthRequired: (requirement, { playbackMode = "lite" } = {}) => {
+      const actionType = playbackMode === "full"
+        ? PROVIDER_ACTION_BROWSER_FULL
+        : PROVIDER_ACTION_BROWSER_LITE;
+      openProviderReconnectModal(requirement, actionType, {
+        secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
+        onSecondaryAction: () => beginBrowserPlaybackFlow(playbackMode, { skipReconnectGuard: true }),
+      });
+    },
   });
   const activeLibraryReturn = useMemo(() => {
     const fromLocation = extractLibraryReturnState(location.state);

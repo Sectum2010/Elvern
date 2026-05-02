@@ -121,12 +121,36 @@ def build_cloud_stream_response(
     validated_chunk_size: int | None = None,
     get_access_token_by_account_id: Callable[..., str],
 ):
-    target = resolve_media_stream_target(
-        settings,
-        user_id=user_id,
-        item_id=item_id,
-        get_access_token_by_account_id=get_access_token_by_account_id,
-    )
+    try:
+        target = resolve_media_stream_target(
+            settings,
+            user_id=user_id,
+            item_id=item_id,
+            get_access_token_by_account_id=get_access_token_by_account_id,
+        )
+    except HTTPException as exc:
+        detail = exc.detail
+        if isinstance(detail, dict) and detail.get("code") == "provider_auth_required":
+            provider_context = _load_cloud_media_item_provider_context(
+                settings,
+                user_id=user_id,
+                item_id=item_id,
+            )
+            if provider_context is not None and not _current_user_can_manage_cloud_provider_connection(
+                provider_context,
+                user_id=user_id,
+            ):
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=build_google_drive_provider_auth_required_detail(
+                        reason=str(detail.get("provider_reason") or "reauth_required"),
+                        title="Google Drive connection needs administrator attention",
+                        message="Ask an administrator to reconnect Google Drive to continue this action.",
+                        allow_reconnect=False,
+                        requires_admin=True,
+                    ),
+                ) from exc
+        raise
     if target is None:
         return None
     if target["source_kind"] == "local":

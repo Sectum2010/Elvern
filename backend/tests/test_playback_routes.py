@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app.auth import authenticate_user, destroy_session
 from backend.app.db import get_connection, utcnow_iso
@@ -1004,6 +1005,44 @@ def test_browser_playback_create_route_returns_structured_server_max_capacity(
     }
 
 
+def test_browser_playback_create_route_preserves_provider_auth_required_http_exception(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/route2-provider-auth-required.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.create_exception = HTTPException(
+        status_code=409,
+        detail={
+            "code": "provider_auth_required",
+            "provider": "google_drive",
+            "provider_reason": "token_expired_or_revoked",
+            "message": "Reconnect Google Drive to continue this action.",
+        },
+    )
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_2160p",
+            "client_device_class": "desktop",
+            "playback_mode": "full",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"]["code"] == "provider_auth_required"
+    assert create_response.json()["detail"]["provider_reason"] == "token_expired_or_revoked"
+
+
 def test_mobile_playback_create_route_passes_standard_user_role(
     initialized_settings,
     client,
@@ -1091,6 +1130,43 @@ def test_mobile_playback_create_route_returns_same_user_active_playback_limit(
 
     assert create_response.status_code == 409
     assert create_response.json()["detail"]["code"] == "same_user_active_playback_limit"
+
+
+def test_mobile_playback_create_route_preserves_provider_auth_required_http_exception(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="mobile/route2-provider-auth-required.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.create_exception = HTTPException(
+        status_code=409,
+        detail={
+            "code": "provider_auth_required",
+            "provider": "google_drive",
+            "provider_reason": "token_expired_or_revoked",
+            "message": "Reconnect Google Drive to continue this action.",
+        },
+    )
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/mobile-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_1080p",
+            "playback_mode": "lite",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"]["code"] == "provider_auth_required"
+    assert create_response.json()["detail"]["provider_reason"] == "token_expired_or_revoked"
 
 
 @pytest.mark.parametrize("playback_mode", ["lite", "full"])

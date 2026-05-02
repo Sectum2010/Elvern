@@ -18,6 +18,7 @@ from pathlib import Path
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..media_stream import ensure_media_path_within_root
+from .cloud_library_service import ensure_cloud_media_item_provider_access
 from .mobile_playback_models import (
     BACKGROUND_EXPANSION_FORWARD_SECONDS,
     FRONTIER_WAIT_SECONDS,
@@ -608,7 +609,12 @@ def _is_non_retryable_cloud_source_error(error: str | None) -> bool:
     if not normalized:
         return False
     return (
-        "download quota" in normalized
+        "provider_auth_required" in normalized
+        or "token_expired_or_revoked" in normalized
+        or "reauth_required" in normalized
+        or "reconnect google drive" in normalized
+        or "provider_source_error" in normalized
+        or "download quota" in normalized
         or "quota exceeded" in normalized
         or "downloadquotaexceeded" in normalized
         or "provider_quota_exceeded" in normalized
@@ -792,6 +798,12 @@ class MobilePlaybackManager:
             if conflicting_session is not None and normalized_user_role != ADMIN_USER_ROLE:
                 raise ActivePlaybackWorkerConflictError(
                     self._build_same_user_active_playback_limit_detail_locked(conflicting_session)
+                )
+            if source_kind == "cloud":
+                ensure_cloud_media_item_provider_access(
+                    self.settings,
+                    user_id=user_id,
+                    item_id=int(item["id"]),
                 )
             with self._lock:
                 self._raise_if_route2_admission_denied_locked(

@@ -14,6 +14,7 @@ import {
   getPlaybackAdmissionError,
   getPlaybackWorkerCooldown,
 } from "../../lib/playbackWorkerOwnership";
+import { getProviderAuthRequirement } from "../../lib/providerAuth";
 import {
   isBrowserPlaybackAbsolutePositionReady,
   toBrowserPlaybackAbsoluteSeconds,
@@ -92,6 +93,7 @@ export function useBrowserPlaybackController({
   progress,
   iosMobile,
   onProgressChange,
+  onProviderAuthRequired,
 }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
@@ -609,6 +611,20 @@ export function useBrowserPlaybackController({
       });
     } catch (requestError) {
       clearOptimizedPlaybackPending();
+      const providerAuthRequirement = getProviderAuthRequirement(requestError);
+      if (providerAuthRequirement) {
+        setSeekNotice("");
+        setPlaybackStatus(`${browserPlaybackLabelTitle} blocked`);
+        setPlaybackError("");
+        if (typeof onProviderAuthRequired === "function") {
+          onProviderAuthRequired(providerAuthRequirement, {
+            playbackMode: playbackModeIntentRef.current,
+          });
+        } else {
+          setPlaybackError(providerAuthRequirement.message || requestError.message || "Google Drive reconnect is required.");
+        }
+        return false;
+      }
       const playbackAdmission = getPlaybackAdmissionError(requestError);
       if (playbackAdmission) {
         setSeekNotice("");
