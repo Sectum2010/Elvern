@@ -1388,6 +1388,16 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     absolute_segment_index_start_candidate: int | None = Field(default=None, ge=0)
     absolute_segment_index_end_candidate: int | None = Field(default=None, ge=0)
     shared_output_store_blockers: list[str] = Field(default_factory=list)
+    shared_store_write_plan_available: bool = False
+    shared_store_candidate_range_start_index: int | None = Field(default=None, ge=0)
+    shared_store_candidate_range_end_index_exclusive: int | None = Field(default=None, ge=0)
+    shared_store_candidate_range_start_seconds: float | None = Field(default=None, ge=0)
+    shared_store_candidate_range_end_seconds: float | None = Field(default=None, ge=0)
+    shared_store_candidate_segment_count: int = Field(default=0, ge=0)
+    shared_store_write_candidate_count: int = Field(default=0, ge=0)
+    shared_store_write_blockers: list[str] = Field(default_factory=list)
+    shared_store_mapping_confidence: str | None = None
+    shared_store_mapping_notes: list[str] = Field(default_factory=list)
     shared_supply_group_size: int = Field(default=1, ge=0)
     shared_supply_level_candidate: str | None = None
     compatible_existing_workload_ids: list[str] = Field(default_factory=list)

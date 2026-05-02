@@ -17,6 +17,7 @@ SHARED_OUTPUT_STORE_BLOCKERS = [
     "no_segment_writer",
     "no_shared_manifest",
 ]
+SHARED_OUTPUT_MAPPING_TOLERANCE_SECONDS = 0.001
 
 _SHARED_OUTPUT_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,160}$")
 
@@ -90,6 +91,69 @@ def shared_segment_filename(index: int) -> str:
     if segment_index < 0:
         raise ValueError("Segment index must be non-negative")
     return f"abs_{segment_index:012d}.m4s"
+
+
+def _canonical_segment_index_candidate(
+    absolute_seconds: float,
+    segment_duration_seconds: float,
+    *,
+    tolerance_seconds: float = SHARED_OUTPUT_MAPPING_TOLERANCE_SECONDS,
+) -> tuple[int, bool]:
+    duration = _validate_segment_duration(segment_duration_seconds)
+    seconds = max(0.0, float(absolute_seconds))
+    ratio = seconds / duration
+    nearest_index = max(0, int(round(ratio)))
+    nearest_boundary_seconds = nearest_index * duration
+    if abs(seconds - nearest_boundary_seconds) <= max(0.0, float(tolerance_seconds)):
+        return nearest_index, True
+    return absolute_segment_index_from_seconds(seconds, duration), False
+
+
+def build_epoch_relative_segment_mapping(
+    *,
+    epoch_id: str,
+    epoch_start_seconds: float,
+    epoch_relative_segment_index: int,
+    segment_duration_seconds: float,
+    target_position_seconds: float | None = None,
+    tolerance_seconds: float = SHARED_OUTPUT_MAPPING_TOLERANCE_SECONDS,
+) -> dict[str, object]:
+    segment_index = int(epoch_relative_segment_index)
+    if segment_index < 0:
+        raise ValueError("Epoch-relative segment index must be non-negative")
+    duration = _validate_segment_duration(segment_duration_seconds)
+    epoch_start = max(0.0, float(epoch_start_seconds))
+    relative_start_seconds = round(segment_index * duration, 6)
+    relative_end_seconds = round((segment_index + 1) * duration, 6)
+    absolute_start_seconds = round(epoch_start + relative_start_seconds, 6)
+    absolute_end_seconds = round(epoch_start + relative_end_seconds, 6)
+    absolute_index, start_aligned = _canonical_segment_index_candidate(
+        absolute_start_seconds,
+        duration,
+        tolerance_seconds=tolerance_seconds,
+    )
+    expected_end = round((absolute_index + 1) * duration, 6)
+    end_aligned = abs(absolute_end_seconds - expected_end) <= max(0.0, float(tolerance_seconds))
+    blockers: list[str] = []
+    if not start_aligned or not end_aligned:
+        blockers.append("non_canonical_segment_boundary")
+    if target_position_seconds is not None and absolute_start_seconds < float(target_position_seconds):
+        blockers.extend(["epoch_private_preroll", "preroll_not_shareable"])
+    canonical_alignment_status = "aligned" if not blockers or "non_canonical_segment_boundary" not in blockers else "non_canonical_segment_boundary"
+    return {
+        "epoch_id": str(epoch_id),
+        "epoch_start_seconds": round(epoch_start, 6),
+        "epoch_relative_segment_index": segment_index,
+        "epoch_relative_start_seconds": relative_start_seconds,
+        "epoch_relative_end_seconds": relative_end_seconds,
+        "absolute_start_seconds": absolute_start_seconds,
+        "absolute_end_seconds": absolute_end_seconds,
+        "absolute_segment_index_candidate": absolute_index,
+        "expected_shared_segment_filename": shared_segment_filename(absolute_index),
+        "canonical_alignment_status": canonical_alignment_status,
+        "mapping_confidence": "high" if not blockers else "low",
+        "mapping_blockers": sorted(set(blockers)),
+    }
 
 
 def _coerce_range_indexes(value: object) -> tuple[int, int]:
@@ -269,6 +333,156 @@ def add_confirmed_range(
         ),
         "sparse_segments": sorted({max(0, int(value)) for value in ranges_metadata.get("sparse_segments") or []}),
         "updated_at": updated_at or utcnow_iso(),
+    }
+
+
+def build_shared_store_write_plan(
+    *,
+    route2_root: Path,
+    shared_output_key: str | None,
+    epoch_id: str,
+    epoch_start_seconds: float,
+    target_position_seconds: float | None,
+    published_segment_indices: Iterable[int],
+    segment_duration_seconds: float,
+    output_contract_fingerprint: str | None,
+    output_contract_missing_fields: Iterable[str] = (),
+    init_compatibility_validated: bool = False,
+    permission_status: str | None = None,
+    metadata_only: bool = True,
+    segment_writer_enabled: bool = False,
+    shared_manifest_enabled: bool = False,
+) -> dict[str, object]:
+    duration = _validate_segment_duration(segment_duration_seconds)
+    segment_indices = sorted({max(0, int(value)) for value in published_segment_indices})
+    blockers: set[str] = set()
+    notes = {
+        "dry_run_only",
+        "no_shared_bytes_written",
+        "epoch_relative_to_absolute_mapping_candidate",
+    }
+    sanitized_key: str | None = None
+    shared_output_path: str | None = None
+    expected_init_path: str | None = None
+    if shared_output_key:
+        sanitized_key = validate_shared_output_key(shared_output_key)
+        output_dir = shared_output_directory(route2_root, sanitized_key)
+        shared_output_path = str(output_dir)
+        expected_init_path = str(output_dir / "init.mp4")
+    else:
+        blockers.add("missing_shared_output_key")
+    if not str(output_contract_fingerprint or "").strip():
+        blockers.add("missing_output_contract")
+    if list(output_contract_missing_fields):
+        blockers.add("output_contract_incomplete")
+    if not init_compatibility_validated:
+        blockers.add("missing_init_compatibility")
+    if permission_status not in {"verified_local", "verified_cloud"}:
+        blockers.add("permission_context_unverified")
+    if metadata_only:
+        blockers.add("metadata_only")
+    if not segment_writer_enabled:
+        blockers.add("no_segment_writer")
+    if not shared_manifest_enabled:
+        blockers.add("no_shared_manifest")
+    if not segment_indices:
+        blockers.add("no_published_segments")
+
+    segment_plans: list[dict[str, object]] = []
+    shareable_index_candidates: list[int] = []
+    mapping_blockers: set[str] = set()
+    for segment_index in segment_indices:
+        mapping = build_epoch_relative_segment_mapping(
+            epoch_id=epoch_id,
+            epoch_start_seconds=epoch_start_seconds,
+            epoch_relative_segment_index=segment_index,
+            segment_duration_seconds=duration,
+            target_position_seconds=target_position_seconds,
+        )
+        segment_blockers = set(blockers)
+        segment_mapping_blockers = {str(item) for item in mapping["mapping_blockers"]}
+        segment_blockers.update(segment_mapping_blockers)
+        mapping_blockers.update(segment_mapping_blockers)
+        absolute_index = int(mapping["absolute_segment_index_candidate"])
+        expected_shared_segment_path = None
+        if sanitized_key:
+            expected_shared_segment_path = str(
+                shared_output_directory(route2_root, sanitized_key)
+                / "segments"
+                / shared_segment_filename(absolute_index)
+            )
+        if not segment_mapping_blockers:
+            shareable_index_candidates.append(absolute_index)
+        segment_plans.append(
+            {
+                **mapping,
+                "shared_store_write_candidate": not segment_blockers,
+                "shared_store_write_blockers": sorted(segment_blockers),
+                "shared_output_key": sanitized_key,
+                "shared_output_contract_fingerprint": output_contract_fingerprint,
+                "expected_shared_output_path": shared_output_path,
+                "expected_shared_segment_path": expected_shared_segment_path,
+                "expected_init_path": expected_init_path,
+            }
+        )
+
+    candidate_ranges = merge_contiguous_ranges(
+        [(index, index + 1) for index in shareable_index_candidates],
+        segment_duration_seconds=duration,
+        source="dry_run_candidate",
+    )
+    candidate_range = candidate_ranges[0] if candidate_ranges else None
+    range_blockers = set(blockers)
+    range_blockers.update(mapping_blockers)
+    if candidate_range is None:
+        range_blockers.add("no_shareable_segments")
+    expected_ranges_update = None
+    if sanitized_key and candidate_range is not None:
+        expected_ranges_update = add_confirmed_range(
+            build_ranges_metadata(
+                shared_output_key=sanitized_key,
+                segment_duration_seconds=duration,
+                confirmed_ranges=[],
+            ),
+            int(candidate_range["start_index"]),
+            int(candidate_range["end_index_exclusive"]),
+            segment_duration_seconds=duration,
+            source="dry_run_candidate",
+        )
+    if mapping_blockers:
+        mapping_confidence = "low"
+    elif segment_indices:
+        mapping_confidence = "high"
+    else:
+        mapping_confidence = "unavailable"
+    return {
+        "shared_store_write_plan_available": sanitized_key is not None and bool(segment_indices),
+        "shared_output_key": sanitized_key,
+        "shared_output_contract_fingerprint": output_contract_fingerprint,
+        "expected_shared_output_path": shared_output_path,
+        "expected_init_path": expected_init_path,
+        "segment_plans": segment_plans,
+        "expected_ranges_update": expected_ranges_update,
+        "candidate_confirmed_range_start_index": (
+            int(candidate_range["start_index"]) if candidate_range is not None else None
+        ),
+        "candidate_confirmed_range_end_index_exclusive": (
+            int(candidate_range["end_index_exclusive"]) if candidate_range is not None else None
+        ),
+        "candidate_confirmed_range_start_seconds": (
+            float(candidate_range["start_seconds"]) if candidate_range is not None else None
+        ),
+        "candidate_confirmed_range_end_seconds": (
+            float(candidate_range["end_seconds"]) if candidate_range is not None else None
+        ),
+        "candidate_range_segment_count": int(candidate_range["segment_count"]) if candidate_range is not None else 0,
+        "candidate_range_blockers": sorted(range_blockers),
+        "shared_store_write_candidate_count": sum(
+            1 for segment_plan in segment_plans if bool(segment_plan["shared_store_write_candidate"])
+        ),
+        "shared_store_write_blockers": sorted(range_blockers),
+        "shared_store_mapping_confidence": mapping_confidence,
+        "shared_store_mapping_notes": sorted(notes),
     }
 
 

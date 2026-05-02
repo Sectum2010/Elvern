@@ -165,6 +165,15 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - `contract.json`, `metadata.json`, `ranges.json`, `init.sha256`, `staging/`, and `leases/` are future metadata shapes in this phase. `init.mp4` and `segments/abs_*.m4s` remain future artifacts and are not written by Phase 1K-2A.
 - Attach-from-anywhere still requires future segment writing, init compatibility validation, sparse manifest construction, active lease enforcement, cleanup protection, and per-user permission checks at attach/fetch time.
 
+## Phase 1K-2B Shared Store Write-Plan Dry Run
+
+- Phase 1K-2B is write-plan and absolute-mapping dry-run only. It still does not write shared media segments, copy, hardlink, symlink, move, reuse, serve from the shared store, attach sessions to other sessions, or create shared workers/output.
+- Route2 epoch-relative segments can be mapped to absolute segment candidates with `absolute_start_seconds = epoch_start_seconds + epoch_relative_segment_index * segment_duration_seconds`. The candidate shared filename uses the absolute segment index, for example `abs_000000000015.m4s`.
+- A segment is not considered canonically mappable unless its absolute start and end are aligned to the Route2 segment-duration grid within a small floating-point tolerance. Non-aligned output is blocked with `non_canonical_segment_boundary`.
+- Current epochs often include private preroll before the requested target because the worker starts near `target_position_seconds - 20s`. Segments whose absolute start is before the target are marked with `epoch_private_preroll` / `preroll_not_shareable` and are not future write candidates by default.
+- Admin/status may expose a proposed shared confirmed range from the currently published contiguous frontier, but this remains a proposal only. Current write candidates remain blocked by phase guards such as `metadata_only`, `no_segment_writer`, `no_shared_manifest`, and `missing_init_compatibility`.
+- No `ranges.json`, `init.mp4`, or `segments/abs_*.m4s` files are created or updated in this phase.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

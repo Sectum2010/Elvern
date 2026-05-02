@@ -181,6 +181,7 @@ from .route2_shared_output_store import (
     absolute_segment_end_index_exclusive_from_seconds,
     absolute_segment_index_from_seconds,
     build_shared_output_store_capability,
+    build_shared_store_write_plan,
 )
 
 
@@ -4468,6 +4469,43 @@ class MobilePlaybackManager:
             return "same_group_only", ["insufficient_frontier_data", "shared_store_missing"]
         return "same_group_only", ["epoch_window_mismatch", "non_overlapping_window", "shared_store_missing"]
 
+    def _route2_shared_store_write_plan_locked(
+        self,
+        workload: _Route2SharedSupplyWorkload,
+    ) -> dict[str, object]:
+        session = self._sessions.get(workload.session_id)
+        epoch = (
+            session.browser_playback.epochs.get(workload.epoch_id)
+            if session is not None and session.browser_playback.engine_mode == "route2"
+            else None
+        )
+        published_segment_indices: list[int] = []
+        epoch_start_seconds = workload.epoch_start_seconds or 0.0
+        target_position_seconds = workload.target_position_seconds
+        if epoch is not None:
+            epoch_start_seconds = float(epoch.epoch_start_seconds)
+            target_position_seconds = float(epoch.target_position_seconds)
+            if epoch.contiguous_published_through_segment is not None:
+                published_segment_indices = list(range(0, int(epoch.contiguous_published_through_segment) + 1))
+            elif epoch.published_segments:
+                published_segment_indices = sorted(epoch.published_segments)
+        return build_shared_store_write_plan(
+            route2_root=self._route2_root,
+            shared_output_key=workload.group_key,
+            epoch_id=workload.epoch_id,
+            epoch_start_seconds=epoch_start_seconds,
+            target_position_seconds=target_position_seconds,
+            published_segment_indices=published_segment_indices,
+            segment_duration_seconds=SEGMENT_DURATION_SECONDS,
+            output_contract_fingerprint=workload.output_contract_fingerprint,
+            output_contract_missing_fields=workload.output_contract_missing_fields,
+            init_compatibility_validated=False,
+            permission_status=workload.permission_status,
+            metadata_only=True,
+            segment_writer_enabled=False,
+            shared_manifest_enabled=False,
+        )
+
     def _apply_route2_shared_supply_status_locked(
         self,
         payloads_by_worker_id: dict[str, dict[str, object]],
@@ -4530,12 +4568,31 @@ class MobilePlaybackManager:
                     prepared_end_seconds,
                     SEGMENT_DURATION_SECONDS,
                 )
+            write_plan = self._route2_shared_store_write_plan_locked(workload)
             payload["shared_supply_candidate"] = bool(compatible_workloads)
             payload["shared_supply_group_key"] = workload.group_key
             payload["shared_output_key"] = workload.group_key
             payload["absolute_segment_index_start_candidate"] = absolute_start_candidate
             payload["absolute_segment_index_end_candidate"] = absolute_end_candidate
             payload["shared_output_store_blockers"] = list(SHARED_OUTPUT_STORE_BLOCKERS)
+            payload["shared_store_write_plan_available"] = bool(write_plan["shared_store_write_plan_available"])
+            payload["shared_store_candidate_range_start_index"] = write_plan[
+                "candidate_confirmed_range_start_index"
+            ]
+            payload["shared_store_candidate_range_end_index_exclusive"] = write_plan[
+                "candidate_confirmed_range_end_index_exclusive"
+            ]
+            payload["shared_store_candidate_range_start_seconds"] = write_plan[
+                "candidate_confirmed_range_start_seconds"
+            ]
+            payload["shared_store_candidate_range_end_seconds"] = write_plan[
+                "candidate_confirmed_range_end_seconds"
+            ]
+            payload["shared_store_candidate_segment_count"] = write_plan["candidate_range_segment_count"]
+            payload["shared_store_write_candidate_count"] = write_plan["shared_store_write_candidate_count"]
+            payload["shared_store_write_blockers"] = list(write_plan["shared_store_write_blockers"])
+            payload["shared_store_mapping_confidence"] = write_plan["shared_store_mapping_confidence"]
+            payload["shared_store_mapping_notes"] = list(write_plan["shared_store_mapping_notes"])
             payload["route2_output_contract_fingerprint"] = workload.output_contract_fingerprint
             payload["route2_output_contract_version"] = workload.output_contract_version
             payload["route2_output_contract_missing_fields"] = list(workload.output_contract_missing_fields)

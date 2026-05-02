@@ -103,9 +103,11 @@ from backend.app.services.route2_shared_output_store import (
     absolute_segment_index_from_seconds,
     absolute_segment_time_range,
     add_confirmed_range,
+    build_epoch_relative_segment_mapping,
     build_ranges_metadata,
     build_shared_output_contract_metadata,
     build_shared_output_lease_metadata,
+    build_shared_store_write_plan,
     find_contiguous_range_covering,
     find_gaps_for_requested_range,
     merge_contiguous_ranges,
@@ -5144,6 +5146,20 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "route2_output_contract_missing_fields" in item_payload
     assert "route2_output_contract_summary" in item_payload
     assert "shared_supply_group_key" in item_payload
+    assert "shared_output_key" in item_payload
+    assert "absolute_segment_index_start_candidate" in item_payload
+    assert "absolute_segment_index_end_candidate" in item_payload
+    assert "shared_output_store_blockers" in item_payload
+    assert "shared_store_write_plan_available" in item_payload
+    assert "shared_store_candidate_range_start_index" in item_payload
+    assert "shared_store_candidate_range_end_index_exclusive" in item_payload
+    assert "shared_store_candidate_range_start_seconds" in item_payload
+    assert "shared_store_candidate_range_end_seconds" in item_payload
+    assert "shared_store_candidate_segment_count" in item_payload
+    assert "shared_store_write_candidate_count" in item_payload
+    assert "shared_store_write_blockers" in item_payload
+    assert "shared_store_mapping_confidence" in item_payload
+    assert "shared_store_mapping_notes" in item_payload
     assert "shared_supply_group_size" in item_payload
     assert "shared_supply_level_candidate" in item_payload
     assert "compatible_existing_workload_ids" in item_payload
@@ -5152,6 +5168,9 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "shared_supply_permission_status" in item_payload
     assert "estimated_duplicate_workers_avoided" in item_payload
     assert "shared_supply_notes" in item_payload
+    assert "shared_output_store_enabled" in status
+    assert "shared_output_metadata_version" in status
+    assert "shared_output_store_ready_for_segments" in status
     assert "shared_supply_groups" in status
     assert len(started_workers) == 1
 
@@ -8354,6 +8373,54 @@ def test_route2_shared_output_absolute_segment_helpers() -> None:
     assert shared_segment_filename(123456789) == "abs_000123456789.m4s"
 
 
+def test_route2_shared_store_epoch_relative_mapping_alignment_and_preroll() -> None:
+    first = build_epoch_relative_segment_mapping(
+        epoch_id="epoch-a",
+        epoch_start_seconds=0.0,
+        epoch_relative_segment_index=0,
+        segment_duration_seconds=2.0,
+        target_position_seconds=0.0,
+    )
+    assert first["absolute_segment_index_candidate"] == 0
+    assert first["absolute_start_seconds"] == 0.0
+    assert first["canonical_alignment_status"] == "aligned"
+    assert first["mapping_blockers"] == []
+
+    offset = build_epoch_relative_segment_mapping(
+        epoch_id="epoch-b",
+        epoch_start_seconds=20.0,
+        epoch_relative_segment_index=5,
+        segment_duration_seconds=2.0,
+        target_position_seconds=20.0,
+    )
+    assert offset["absolute_start_seconds"] == 30.0
+    assert offset["absolute_segment_index_candidate"] == 15
+    assert offset["expected_shared_segment_filename"] == "abs_000000000015.m4s"
+    assert offset["mapping_blockers"] == []
+
+    noncanonical = build_epoch_relative_segment_mapping(
+        epoch_id="epoch-c",
+        epoch_start_seconds=19.5,
+        epoch_relative_segment_index=0,
+        segment_duration_seconds=2.0,
+        target_position_seconds=19.5,
+    )
+    assert noncanonical["absolute_start_seconds"] == 19.5
+    assert "non_canonical_segment_boundary" in noncanonical["mapping_blockers"]
+    assert noncanonical["mapping_confidence"] == "low"
+
+    preroll = build_epoch_relative_segment_mapping(
+        epoch_id="epoch-d",
+        epoch_start_seconds=0.0,
+        epoch_relative_segment_index=3,
+        segment_duration_seconds=2.0,
+        target_position_seconds=10.0,
+    )
+    assert preroll["absolute_start_seconds"] == 6.0
+    assert "epoch_private_preroll" in preroll["mapping_blockers"]
+    assert "preroll_not_shareable" in preroll["mapping_blockers"]
+
+
 def test_route2_shared_output_range_helpers_merge_and_find_gaps() -> None:
     merged = merge_contiguous_ranges(
         [(0, 3), (3, 5), (8, 10), (9, 12)],
@@ -8387,6 +8454,101 @@ def test_route2_shared_output_range_helpers_merge_and_find_gaps() -> None:
         updated_at="2026-05-02T00:00:01Z",
     )
     assert [(item["start_index"], item["end_index_exclusive"]) for item in updated["confirmed_ranges"]] == [(0, 4)]
+
+
+def test_route2_shared_store_write_plan_blocks_current_metadata_only_phase(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    output_root = settings.transcode_dir / "browser_playback_route2" / "shared_outputs" / "r2ss:v2:abcdef1234567890"
+    plan = build_shared_store_write_plan(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        epoch_id="epoch-write-plan",
+        epoch_start_seconds=0.0,
+        target_position_seconds=10.0,
+        published_segment_indices=range(0, 8),
+        segment_duration_seconds=2.0,
+        output_contract_fingerprint="contract-fingerprint",
+        output_contract_missing_fields=[],
+        init_compatibility_validated=False,
+        permission_status="verified_local",
+        metadata_only=True,
+        segment_writer_enabled=False,
+        shared_manifest_enabled=False,
+    )
+
+    assert plan["shared_store_write_plan_available"] is True
+    assert plan["candidate_confirmed_range_start_index"] == 5
+    assert plan["candidate_confirmed_range_end_index_exclusive"] == 8
+    assert plan["candidate_confirmed_range_start_seconds"] == 10.0
+    assert plan["candidate_confirmed_range_end_seconds"] == 16.0
+    assert plan["candidate_range_segment_count"] == 3
+    assert plan["shared_store_write_candidate_count"] == 0
+    assert "epoch_private_preroll" in plan["shared_store_write_blockers"]
+    assert "missing_init_compatibility" in plan["shared_store_write_blockers"]
+    assert "metadata_only" in plan["shared_store_write_blockers"]
+    assert "no_segment_writer" in plan["shared_store_write_blockers"]
+    assert "no_shared_manifest" in plan["shared_store_write_blockers"]
+    assert plan["expected_ranges_update"]["confirmed_ranges"][0]["start_index"] == 5
+    assert not output_root.exists()
+
+
+def test_route2_shared_store_write_plan_can_mark_future_aligned_segment_candidate(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    plan = build_shared_store_write_plan(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        epoch_id="epoch-future-writer",
+        epoch_start_seconds=20.0,
+        target_position_seconds=20.0,
+        published_segment_indices=[5],
+        segment_duration_seconds=2.0,
+        output_contract_fingerprint="contract-fingerprint",
+        output_contract_missing_fields=[],
+        init_compatibility_validated=True,
+        permission_status="verified_local",
+        metadata_only=False,
+        segment_writer_enabled=True,
+        shared_manifest_enabled=True,
+    )
+
+    assert plan["shared_store_write_candidate_count"] == 1
+    assert plan["segment_plans"][0]["shared_store_write_candidate"] is True
+    assert plan["segment_plans"][0]["absolute_segment_index_candidate"] == 15
+    assert plan["segment_plans"][0]["expected_shared_segment_path"].endswith(
+        "shared_outputs/r2ss:v2:abcdef1234567890/segments/abs_000000000015.m4s"
+    )
+
+
+def test_route2_shared_store_write_plan_blocks_missing_contract_and_init(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    plan = build_shared_store_write_plan(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        epoch_id="epoch-missing-contract",
+        epoch_start_seconds=0.0,
+        target_position_seconds=0.0,
+        published_segment_indices=[0],
+        segment_duration_seconds=2.0,
+        output_contract_fingerprint=None,
+        output_contract_missing_fields=["profile"],
+        init_compatibility_validated=False,
+        permission_status="permission_unverified",
+        metadata_only=False,
+        segment_writer_enabled=True,
+        shared_manifest_enabled=True,
+    )
+
+    assert plan["shared_store_write_candidate_count"] == 0
+    assert "missing_output_contract" in plan["shared_store_write_blockers"]
+    assert "output_contract_incomplete" in plan["shared_store_write_blockers"]
+    assert "missing_init_compatibility" in plan["shared_store_write_blockers"]
+    assert "permission_context_unverified" in plan["shared_store_write_blockers"]
 
 
 def test_route2_shared_output_contract_metadata_is_sanitized() -> None:
@@ -8465,7 +8627,7 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
         settings,
         _make_local_item(settings, item_id=432, relative_name="route2/shared-supply/metadata-only.mp4"),
     )
-    _add_route2_shared_supply_workload(
+    session_a, epoch_a, _record_a = _add_route2_shared_supply_workload(
         manager,
         settings,
         item,
@@ -8474,7 +8636,7 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
         username="alice",
         prepared_ranges=[[0.0, 140.0]],
     )
-    _add_route2_shared_supply_workload(
+    _session_b, epoch_b, _record_b = _add_route2_shared_supply_workload(
         manager,
         settings,
         item,
@@ -8484,6 +8646,8 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
         target_position_seconds=10.0,
         prepared_ranges=[[0.0, 120.0]],
     )
+    epoch_a.contiguous_published_through_segment = 69
+    epoch_b.contiguous_published_through_segment = 59
 
     status = manager.get_route2_worker_status()
     item_a = _route2_status_item(status, "metadata-a")
@@ -8497,7 +8661,19 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert item_a["absolute_segment_index_end_candidate"] == 70
     assert item_a["shared_output_store_blockers"] == SHARED_OUTPUT_STORE_BLOCKERS
     assert "metadata_only" in item_a["shared_output_store_blockers"]
+    assert item_a["shared_store_write_plan_available"] is True
+    assert item_a["shared_store_candidate_range_start_index"] == 0
+    assert item_a["shared_store_candidate_range_end_index_exclusive"] == 70
+    assert item_a["shared_store_candidate_range_start_seconds"] == 0.0
+    assert item_a["shared_store_candidate_range_end_seconds"] == 140.0
+    assert item_a["shared_store_candidate_segment_count"] == 70
+    assert item_a["shared_store_write_candidate_count"] == 0
+    assert "metadata_only" in item_a["shared_store_write_blockers"]
+    assert "missing_init_compatibility" in item_a["shared_store_write_blockers"]
+    assert item_a["shared_store_mapping_confidence"] == "high"
+    assert "no_shared_bytes_written" in item_a["shared_store_mapping_notes"]
     assert item_a["shared_supply_candidate"] is True
+    assert session_a.browser_playback.epochs[epoch_a.epoch_id] is epoch_a
     assert manager._route2_workers["metadata-a"].assigned_threads == 4
     assert manager._route2_workers["metadata-b"].assigned_threads == 4
 
