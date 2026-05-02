@@ -340,6 +340,27 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
         "external_pressure_level": "moderate",
         "external_pressure_reason": "external_ffmpeg_detected",
         "route2_resource_missing_metrics": [],
+        "psi_sample_available": True,
+        "psi_cpu_some_avg10": 0.45,
+        "psi_cpu_full_avg10": 0.0,
+        "psi_io_some_avg10": 0.12,
+        "psi_io_full_avg10": 0.0,
+        "psi_memory_some_avg10": 0.03,
+        "psi_memory_full_avg10": 0.0,
+        "psi_missing_metrics": [],
+        "cgroup_pressure_available": True,
+        "cgroup_cpu_nr_periods": 120,
+        "cgroup_cpu_nr_throttled": 2,
+        "cgroup_cpu_throttled_usec": 4567,
+        "cgroup_cpu_throttled_delta": 1,
+        "cgroup_cpu_throttled_usec_delta": 1234,
+        "cgroup_cpu_some_avg10": 0.38,
+        "cgroup_cpu_full_avg10": 0.0,
+        "cgroup_io_some_avg10": 0.08,
+        "cgroup_io_full_avg10": 0.0,
+        "cgroup_memory_some_avg10": 0.02,
+        "cgroup_memory_full_avg10": 0.0,
+        "cgroup_missing_metrics": [],
         "total_memory_bytes": 32 * 1024 * 1024 * 1024,
         "route2_memory_bytes": 2 * 1024 * 1024 * 1024,
         "route2_memory_bytes_total": 2 * 1024 * 1024 * 1024,
@@ -405,6 +426,32 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "cpu_percent": 36.0,
                         "memory_bytes": int(1.2 * 1024 * 1024 * 1024),
                         "memory_percent_of_total": 3.75,
+                        "io_read_bytes": 104857600,
+                        "io_write_bytes": 52428800,
+                        "io_read_bytes_per_second": 8388608.0,
+                        "io_write_bytes_per_second": 4194304.0,
+                        "io_observation_seconds": 6.0,
+                        "io_sample_mature": True,
+                        "io_sample_stale": False,
+                        "io_missing_metrics": [],
+                        "route2_source_bytes_per_second": 8388608.0,
+                        "route2_source_observation_seconds": 6.0,
+                        "route2_source_status": "proc_io_read_bytes",
+                        "ffmpeg_progress_out_time_seconds": 144.25,
+                        "ffmpeg_progress_speed_x": 1.42,
+                        "ffmpeg_progress_fps": 59.94,
+                        "ffmpeg_progress_frame": 3462,
+                        "ffmpeg_progress_updated_at": "2026-04-26T12:00:06+00:00",
+                        "ffmpeg_progress_state": "continue",
+                        "ffmpeg_progress_stale": False,
+                        "ffmpeg_progress_missing_metrics": [],
+                        "publish_segment_count": 72,
+                        "segment_publish_count": 72,
+                        "publish_init_latency_seconds": 0.0021,
+                        "last_publish_latency_seconds": 0.0034,
+                        "publish_latency_avg_seconds": 0.0029,
+                        "publish_latency_max_seconds": 0.0062,
+                        "last_publish_kind": "segment",
                         "telemetry_sampled": True,
                         "last_sampled_at": "2026-04-26T12:00:06+00:00",
                         "failure_reason": None,
@@ -1357,6 +1404,15 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert payload["external_pressure_level"] == "moderate"
     assert payload["external_pressure_reason"] == "external_ffmpeg_detected"
     assert payload["route2_resource_missing_metrics"] == []
+    assert payload["psi_sample_available"] is True
+    assert payload["psi_cpu_some_avg10"] == 0.45
+    assert payload["psi_io_some_avg10"] == 0.12
+    assert payload["psi_memory_some_avg10"] == 0.03
+    assert payload["cgroup_pressure_available"] is True
+    assert payload["cgroup_cpu_nr_periods"] == 120
+    assert payload["cgroup_cpu_throttled_delta"] == 1
+    assert payload["cgroup_cpu_throttled_usec_delta"] == 1234
+    assert payload["cgroup_io_some_avg10"] == 0.08
     assert payload["route2_memory_bytes"] == 2147483648
     assert payload["route2_memory_bytes_total"] == 2147483648
     assert payload["active_worker_count"] == 1
@@ -1392,6 +1448,21 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["reserve_blocks_admission"] is True
     assert first_item["runway_delta_per_second"] == 0.42
     assert first_item["cpu_cores_used"] == 7.2
+    assert first_item["io_read_bytes"] == 104857600
+    assert first_item["io_read_bytes_per_second"] == 8388608.0
+    assert first_item["io_sample_mature"] is True
+    assert first_item["route2_source_bytes_per_second"] == 8388608.0
+    assert first_item["route2_source_status"] == "proc_io_read_bytes"
+    assert first_item["ffmpeg_progress_out_time_seconds"] == 144.25
+    assert first_item["ffmpeg_progress_speed_x"] == 1.42
+    assert first_item["ffmpeg_progress_frame"] == 3462
+    assert first_item["ffmpeg_progress_state"] == "continue"
+    assert first_item["ffmpeg_progress_stale"] is False
+    assert first_item["publish_segment_count"] == 72
+    assert first_item["publish_init_latency_seconds"] == 0.0021
+    assert first_item["last_publish_latency_seconds"] == 0.0034
+    assert first_item["publish_latency_avg_seconds"] == 0.0029
+    assert first_item["publish_latency_max_seconds"] == 0.0062
     serialized_payload = response.text.lower()
     assert "access_token" not in serialized_payload
     assert "full_command_line" not in serialized_payload

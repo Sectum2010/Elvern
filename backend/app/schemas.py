@@ -1267,6 +1267,17 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     cpu_percent: float | None = Field(default=None, ge=0)
     memory_bytes: int | None = Field(default=None, ge=0)
     memory_percent_of_total: float | None = Field(default=None, ge=0)
+    io_read_bytes: int | None = Field(default=None, ge=0)
+    io_write_bytes: int | None = Field(default=None, ge=0)
+    io_read_bytes_per_second: float | None = Field(default=None, ge=0)
+    io_write_bytes_per_second: float | None = Field(default=None, ge=0)
+    io_observation_seconds: float | None = Field(default=None, ge=0)
+    io_sample_mature: bool = False
+    io_sample_stale: bool = True
+    io_missing_metrics: list[str] = Field(default_factory=list)
+    route2_source_bytes_per_second: float | None = Field(default=None, ge=0)
+    route2_source_observation_seconds: float | None = Field(default=None, ge=0)
+    route2_source_status: str | None = None
     telemetry_sampled: bool = False
     last_sampled_at: str | None = None
     failure_reason: str | None = None
@@ -1303,6 +1314,21 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     runway_delta_per_second: float | None = None
     runway_delta_observation_seconds: float | None = Field(default=None, ge=0)
     runway_delta_mature: bool = False
+    ffmpeg_progress_out_time_seconds: float | None = Field(default=None, ge=0)
+    ffmpeg_progress_speed_x: float | None = Field(default=None, ge=0)
+    ffmpeg_progress_fps: float | None = Field(default=None, ge=0)
+    ffmpeg_progress_frame: int | None = Field(default=None, ge=0)
+    ffmpeg_progress_updated_at: str | None = None
+    ffmpeg_progress_state: str = "unknown"
+    ffmpeg_progress_stale: bool = True
+    ffmpeg_progress_missing_metrics: list[str] = Field(default_factory=list)
+    publish_segment_count: int = Field(default=0, ge=0)
+    segment_publish_count: int = Field(default=0, ge=0)
+    publish_init_latency_seconds: float | None = Field(default=None, ge=0)
+    last_publish_latency_seconds: float | None = Field(default=None, ge=0)
+    publish_latency_avg_seconds: float | None = Field(default=None, ge=0)
+    publish_latency_max_seconds: float | None = Field(default=None, ge=0)
+    last_publish_kind: str | None = None
     route2_transcode_strategy: str | None = None
     route2_transcode_strategy_confidence: str | None = None
     route2_transcode_strategy_reason: str | None = None
@@ -1361,6 +1387,27 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     external_pressure_level: str = "unknown"
     external_pressure_reason: str | None = None
     route2_resource_missing_metrics: list[str] = Field(default_factory=list)
+    psi_sample_available: bool = False
+    psi_cpu_some_avg10: float | None = Field(default=None, ge=0)
+    psi_cpu_full_avg10: float | None = Field(default=None, ge=0)
+    psi_io_some_avg10: float | None = Field(default=None, ge=0)
+    psi_io_full_avg10: float | None = Field(default=None, ge=0)
+    psi_memory_some_avg10: float | None = Field(default=None, ge=0)
+    psi_memory_full_avg10: float | None = Field(default=None, ge=0)
+    psi_missing_metrics: list[str] = Field(default_factory=list)
+    cgroup_pressure_available: bool = False
+    cgroup_cpu_nr_periods: int | None = Field(default=None, ge=0)
+    cgroup_cpu_nr_throttled: int | None = Field(default=None, ge=0)
+    cgroup_cpu_throttled_usec: int | None = Field(default=None, ge=0)
+    cgroup_cpu_throttled_delta: int | None = Field(default=None, ge=0)
+    cgroup_cpu_throttled_usec_delta: int | None = Field(default=None, ge=0)
+    cgroup_cpu_some_avg10: float | None = Field(default=None, ge=0)
+    cgroup_cpu_full_avg10: float | None = Field(default=None, ge=0)
+    cgroup_io_some_avg10: float | None = Field(default=None, ge=0)
+    cgroup_io_full_avg10: float | None = Field(default=None, ge=0)
+    cgroup_memory_some_avg10: float | None = Field(default=None, ge=0)
+    cgroup_memory_full_avg10: float | None = Field(default=None, ge=0)
+    cgroup_missing_metrics: list[str] = Field(default_factory=list)
     total_memory_bytes: int | None = Field(default=None, ge=0)
     route2_memory_bytes: int | None = Field(default=None, ge=0)
     route2_memory_bytes_total: int | None = Field(default=None, ge=0)

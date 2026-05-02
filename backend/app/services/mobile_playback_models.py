@@ -169,6 +169,12 @@ class PlaybackEpoch:
     last_media_access_at_ts: float = field(default_factory=time.time)
     frontier_samples: list[tuple[float, float]] = field(default_factory=list, repr=False)
     byte_samples: list[tuple[float, int]] = field(default_factory=list, repr=False)
+    publish_segment_count: int = 0
+    publish_init_latency_seconds: float | None = None
+    last_publish_latency_seconds: float | None = None
+    publish_latency_total_seconds: float = 0.0
+    publish_latency_max_seconds: float | None = None
+    last_publish_kind: str | None = None
     under_supply_started_at_ts: float | None = None
     display_eta_seconds: float | None = None
     display_eta_updated_at_ts: float = 0.0
@@ -226,6 +232,18 @@ class Route2WorkerRecord:
     last_cpu_sample_monotonic: float | None = field(default=None, repr=False)
     last_process_cpu_seconds: float | None = field(default=None, repr=False)
     last_cpu_sample_pid: int | None = field(default=None, repr=False)
+    io_read_bytes: int | None = None
+    io_write_bytes: int | None = None
+    io_read_bytes_per_second: float | None = None
+    io_write_bytes_per_second: float | None = None
+    io_observation_seconds: float | None = None
+    io_sample_mature: bool = False
+    io_sample_stale: bool = True
+    io_missing_metrics: list[str] = field(default_factory=list)
+    last_io_sample_pid: int | None = field(default=None, repr=False)
+    last_io_sample_monotonic: float | None = field(default=None, repr=False)
+    last_io_read_bytes: int | None = field(default=None, repr=False)
+    last_io_write_bytes: int | None = field(default=None, repr=False)
     process: subprocess.Popen[str] | None = field(default=None, repr=False)
 
 

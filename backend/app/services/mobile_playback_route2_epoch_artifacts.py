@@ -30,6 +30,16 @@ def _write_route2_epoch_metadata_locked(
             "staging_dir": str(epoch.staging_dir),
             "published_dir": str(epoch.published_dir),
             "published_total_bytes": epoch.published_total_bytes,
+            "publish_segment_count": epoch.publish_segment_count,
+            "publish_init_latency_seconds": epoch.publish_init_latency_seconds,
+            "last_publish_latency_seconds": epoch.last_publish_latency_seconds,
+            "publish_latency_avg_seconds": (
+                epoch.publish_latency_total_seconds / epoch.publish_segment_count
+                if epoch.publish_segment_count > 0
+                else None
+            ),
+            "publish_latency_max_seconds": epoch.publish_latency_max_seconds,
+            "last_publish_kind": epoch.last_publish_kind,
             "transcoder_completed": epoch.transcoder_completed,
             "active_worker_id": epoch.active_worker_id,
             "drain_started_at_ts": epoch.drain_started_at_ts,
@@ -62,6 +72,9 @@ def _write_route2_frontier_locked(
             "published_ranges": compress_ranges(epoch.published_segments),
             "contiguous_published_through_segment": epoch.contiguous_published_through_segment,
             "published_total_bytes": epoch.published_total_bytes,
+            "publish_segment_count": epoch.publish_segment_count,
+            "last_publish_latency_seconds": epoch.last_publish_latency_seconds,
+            "publish_latency_max_seconds": epoch.publish_latency_max_seconds,
             "published_ready_start_seconds": round(epoch.epoch_start_seconds, 2)
             if epoch.init_published and epoch.contiguous_published_through_segment is not None
             else 0.0,

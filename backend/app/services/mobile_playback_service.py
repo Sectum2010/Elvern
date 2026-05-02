@@ -243,6 +243,49 @@ class _Route2WorkerTelemetryReadResult:
     pid: int
     cpu_seconds: float | None
     memory_bytes: int | None
+    io_read_bytes: int | None = None
+    io_write_bytes: int | None = None
+
+
+@dataclass(slots=True)
+class _Route2FfmpegProgressSnapshot:
+    out_time_seconds: float | None = None
+    speed_x: float | None = None
+    fps: float | None = None
+    frame: int | None = None
+    progress_state: str = "unknown"
+    updated_at_ts: float | None = None
+    stale: bool = True
+    missing_metrics: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _LinuxPressureSnapshot:
+    sample_available: bool
+    missing_metrics: list[str] = field(default_factory=list)
+    cpu_some_avg10: float | None = None
+    cpu_full_avg10: float | None = None
+    io_some_avg10: float | None = None
+    io_full_avg10: float | None = None
+    memory_some_avg10: float | None = None
+    memory_full_avg10: float | None = None
+
+
+@dataclass(slots=True)
+class _CgroupTelemetrySnapshot:
+    pressure_available: bool
+    missing_metrics: list[str] = field(default_factory=list)
+    cpu_nr_periods: int | None = None
+    cpu_nr_throttled: int | None = None
+    cpu_throttled_usec: int | None = None
+    cpu_throttled_delta: int | None = None
+    cpu_throttled_usec_delta: int | None = None
+    cpu_some_avg10: float | None = None
+    cpu_full_avg10: float | None = None
+    io_some_avg10: float | None = None
+    io_full_avg10: float | None = None
+    memory_some_avg10: float | None = None
+    memory_full_avg10: float | None = None
 
 
 @dataclass(slots=True)
@@ -340,6 +383,107 @@ def _read_text_tail(path: Path, *, max_lines: int = 100) -> str | None:
     if not lines:
         return None
     return "\n".join(lines[-max_lines:])
+
+
+def _parse_ffmpeg_progress_time_seconds(value: str | None) -> float | None:
+    normalized = str(value or "").strip()
+    if not normalized or normalized.upper() == "N/A":
+        return None
+    try:
+        if ":" not in normalized:
+            return max(0.0, float(normalized) / 1_000_000.0)
+        hours_text, minutes_text, seconds_text = normalized.split(":", 2)
+        return max(0.0, (int(hours_text) * 3600) + (int(minutes_text) * 60) + float(seconds_text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_ffmpeg_progress_speed_x(value: str | None) -> float | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized or normalized == "n/a":
+        return None
+    if normalized.endswith("x"):
+        normalized = normalized[:-1]
+    try:
+        return max(0.0, float(normalized))
+    except ValueError:
+        return None
+
+
+def _parse_ffmpeg_progress_payload(
+    payload: str,
+    *,
+    updated_at_ts: float | None = None,
+    now_ts: float | None = None,
+    stale_after_seconds: float = 5.0,
+) -> _Route2FfmpegProgressSnapshot:
+    values: dict[str, str] = {}
+    for raw_line in str(payload or "").splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    missing: list[str] = []
+    out_time_value = values.get("out_time_us") or values.get("out_time_ms") or values.get("out_time")
+    out_time_seconds = _parse_ffmpeg_progress_time_seconds(out_time_value)
+    if out_time_seconds is None:
+        missing.append("ffmpeg_progress_out_time")
+    speed_x = _parse_ffmpeg_progress_speed_x(values.get("speed"))
+    if speed_x is None:
+        missing.append("ffmpeg_progress_speed")
+    fps = None
+    try:
+        fps = max(0.0, float(values["fps"])) if "fps" in values else None
+    except ValueError:
+        fps = None
+    if fps is None:
+        missing.append("ffmpeg_progress_fps")
+    frame = None
+    try:
+        frame = max(0, int(float(values["frame"]))) if "frame" in values else None
+    except ValueError:
+        frame = None
+    if frame is None:
+        missing.append("ffmpeg_progress_frame")
+    progress_state = values.get("progress") or "unknown"
+    now_value = time.time() if now_ts is None else now_ts
+    stale = True
+    if updated_at_ts is not None:
+        stale = bool(progress_state != "end" and now_value - updated_at_ts > stale_after_seconds)
+    return _Route2FfmpegProgressSnapshot(
+        out_time_seconds=out_time_seconds,
+        speed_x=speed_x,
+        fps=fps,
+        frame=frame,
+        progress_state=progress_state,
+        updated_at_ts=updated_at_ts,
+        stale=stale,
+        missing_metrics=missing,
+    )
+
+
+def _read_ffmpeg_progress_snapshot(
+    progress_path: Path,
+    *,
+    now_ts: float | None = None,
+    stale_after_seconds: float = 5.0,
+) -> _Route2FfmpegProgressSnapshot:
+    try:
+        payload = progress_path.read_text(encoding="utf-8", errors="replace")
+        updated_at_ts = progress_path.stat().st_mtime
+    except OSError:
+        return _Route2FfmpegProgressSnapshot(
+            progress_state="unknown",
+            stale=True,
+            missing_metrics=["ffmpeg_progress_file"],
+        )
+    return _parse_ffmpeg_progress_payload(
+        payload,
+        updated_at_ts=updated_at_ts,
+        now_ts=now_ts,
+        stale_after_seconds=stale_after_seconds,
+    )
 
 
 def _detect_total_cpu_cores() -> int:
@@ -719,6 +863,181 @@ def _read_process_rss_bytes(pid: int) -> int | None:
     return _parse_proc_statm_rss_bytes(statm_payload)
 
 
+def _parse_proc_io_bytes(payload: str) -> tuple[int | None, int | None]:
+    read_bytes: int | None = None
+    write_bytes: int | None = None
+    for raw_line in str(payload or "").splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized_key = key.strip()
+        try:
+            parsed_value = max(0, int(value.strip()))
+        except ValueError:
+            continue
+        if normalized_key == "read_bytes":
+            read_bytes = parsed_value
+        elif normalized_key == "write_bytes":
+            write_bytes = parsed_value
+    return read_bytes, write_bytes
+
+
+def _read_process_io_bytes(pid: int) -> tuple[int | None, int | None]:
+    if not isinstance(pid, int) or pid <= 0:
+        return None, None
+    io_path = Path("/proc") / str(pid) / "io"
+    try:
+        payload = io_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None
+    return _parse_proc_io_bytes(payload)
+
+
+def _parse_linux_pressure_payload(payload: str) -> dict[str, dict[str, float]]:
+    parsed: dict[str, dict[str, float]] = {}
+    for raw_line in str(payload or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        category = parts[0]
+        values: dict[str, float] = {}
+        for token in parts[1:]:
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            try:
+                values[key] = max(0.0, float(value))
+            except ValueError:
+                continue
+        parsed[category] = values
+    return parsed
+
+
+def _read_linux_pressure_file(path: Path) -> tuple[float | None, float | None, list[str]]:
+    try:
+        payload = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None, [path.name]
+    parsed = _parse_linux_pressure_payload(payload)
+    missing: list[str] = []
+    some_avg10 = parsed.get("some", {}).get("avg10")
+    full_avg10 = parsed.get("full", {}).get("avg10")
+    if some_avg10 is None:
+        missing.append(f"{path.name}_some")
+    if full_avg10 is None:
+        missing.append(f"{path.name}_full")
+    return some_avg10, full_avg10, missing
+
+
+def _read_linux_psi_snapshot(*, pressure_root: Path = Path("/proc/pressure")) -> _LinuxPressureSnapshot:
+    missing: list[str] = []
+    cpu_some, cpu_full, cpu_missing = _read_linux_pressure_file(pressure_root / "cpu")
+    io_some, io_full, io_missing = _read_linux_pressure_file(pressure_root / "io")
+    memory_some, memory_full, memory_missing = _read_linux_pressure_file(pressure_root / "memory")
+    missing.extend(f"psi_{item}" for item in cpu_missing)
+    missing.extend(f"psi_{item}" for item in io_missing)
+    missing.extend(f"psi_{item}" for item in memory_missing)
+    sample_available = any(
+        value is not None
+        for value in (cpu_some, cpu_full, io_some, io_full, memory_some, memory_full)
+    )
+    return _LinuxPressureSnapshot(
+        sample_available=sample_available,
+        missing_metrics=missing,
+        cpu_some_avg10=cpu_some,
+        cpu_full_avg10=cpu_full,
+        io_some_avg10=io_some,
+        io_full_avg10=io_full,
+        memory_some_avg10=memory_some,
+        memory_full_avg10=memory_full,
+    )
+
+
+def _parse_cgroup_cpu_stat(payload: str) -> dict[str, int]:
+    parsed: dict[str, int] = {}
+    for raw_line in str(payload or "").splitlines():
+        parts = raw_line.strip().split()
+        if len(parts) != 2:
+            continue
+        try:
+            parsed[parts[0]] = max(0, int(parts[1]))
+        except ValueError:
+            continue
+    return parsed
+
+
+def _detect_cgroup_v2_path(
+    *,
+    proc_self_cgroup: Path = Path("/proc/self/cgroup"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> Path | None:
+    try:
+        payload = proc_self_cgroup.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for raw_line in payload.splitlines():
+        parts = raw_line.strip().split(":", 2)
+        if len(parts) != 3:
+            continue
+        hierarchy_id, controllers, relative_path = parts
+        if hierarchy_id == "0" and controllers == "":
+            return cgroup_root / relative_path.lstrip("/")
+    return None
+
+
+def _read_cgroup_telemetry_snapshot(
+    *,
+    cgroup_path: Path | None = None,
+    previous_cpu_stat: dict[str, int] | None = None,
+) -> tuple[_CgroupTelemetrySnapshot, dict[str, int] | None]:
+    resolved_path = cgroup_path or _detect_cgroup_v2_path()
+    if resolved_path is None:
+        return _CgroupTelemetrySnapshot(pressure_available=False, missing_metrics=["cgroup_v2_path"]), None
+    missing: list[str] = []
+    cpu_stat: dict[str, int] | None = None
+    try:
+        cpu_stat = _parse_cgroup_cpu_stat((resolved_path / "cpu.stat").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        missing.append("cgroup_cpu_stat")
+    cpu_some, cpu_full, cpu_missing = _read_linux_pressure_file(resolved_path / "cpu.pressure")
+    io_some, io_full, io_missing = _read_linux_pressure_file(resolved_path / "io.pressure")
+    memory_some, memory_full, memory_missing = _read_linux_pressure_file(resolved_path / "memory.pressure")
+    missing.extend(f"cgroup_{item}" for item in cpu_missing)
+    missing.extend(f"cgroup_{item}" for item in io_missing)
+    missing.extend(f"cgroup_{item}" for item in memory_missing)
+    nr_throttled = cpu_stat.get("nr_throttled") if cpu_stat is not None else None
+    throttled_usec = cpu_stat.get("throttled_usec") if cpu_stat is not None else None
+    cpu_throttled_delta = None
+    cpu_throttled_usec_delta = None
+    if previous_cpu_stat is not None and cpu_stat is not None:
+        if nr_throttled is not None and "nr_throttled" in previous_cpu_stat:
+            cpu_throttled_delta = max(0, nr_throttled - previous_cpu_stat["nr_throttled"])
+        if throttled_usec is not None and "throttled_usec" in previous_cpu_stat:
+            cpu_throttled_usec_delta = max(0, throttled_usec - previous_cpu_stat["throttled_usec"])
+    return (
+        _CgroupTelemetrySnapshot(
+            pressure_available=not all(value is None for value in (cpu_some, cpu_full, io_some, io_full, memory_some, memory_full)),
+            missing_metrics=missing,
+            cpu_nr_periods=cpu_stat.get("nr_periods") if cpu_stat is not None else None,
+            cpu_nr_throttled=nr_throttled,
+            cpu_throttled_usec=throttled_usec,
+            cpu_throttled_delta=cpu_throttled_delta,
+            cpu_throttled_usec_delta=cpu_throttled_usec_delta,
+            cpu_some_avg10=cpu_some,
+            cpu_full_avg10=cpu_full,
+            io_some_avg10=io_some,
+            io_full_avg10=io_full,
+            memory_some_avg10=memory_some,
+            memory_full_avg10=memory_full,
+        ),
+        cpu_stat,
+    )
+
+
 def _read_total_memory_bytes() -> int | None:
     meminfo_path = Path("/proc/meminfo")
     try:
@@ -775,6 +1094,7 @@ class MobilePlaybackManager:
         self._last_host_cpu_jiffy_sample: _HostCpuJiffySample | None = None
         self._last_elvern_owned_ffmpeg_cpu_seconds_by_pid: dict[int, float] = {}
         self._last_elvern_owned_ffmpeg_cpu_sample_monotonic: float | None = None
+        self._last_cgroup_cpu_stat: dict[str, int] | None = None
         self._route2_resource_snapshot: _Route2ResourceSnapshot | None = None
         self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
@@ -1992,6 +2312,18 @@ class MobilePlaybackManager:
         record.last_cpu_sample_monotonic = None
         record.last_process_cpu_seconds = None
         record.last_cpu_sample_pid = None
+        record.io_read_bytes = None
+        record.io_write_bytes = None
+        record.io_read_bytes_per_second = None
+        record.io_write_bytes_per_second = None
+        record.io_observation_seconds = None
+        record.io_sample_mature = False
+        record.io_sample_stale = True
+        record.io_missing_metrics = ["proc_io_unavailable"]
+        record.last_io_sample_pid = None
+        record.last_io_sample_monotonic = None
+        record.last_io_read_bytes = None
+        record.last_io_write_bytes = None
 
     def _mark_route2_worker_unavailable_locked(
         self,
@@ -2011,6 +2343,8 @@ class MobilePlaybackManager:
         pid: int,
         cpu_seconds: float | None,
         memory_bytes: int | None,
+        io_read_bytes: int | None,
+        io_write_bytes: int | None,
         total_cpu_cores: int,
         total_memory_bytes: int | None,
         sample_monotonic: float,
@@ -2051,6 +2385,42 @@ class MobilePlaybackManager:
         record.last_cpu_sample_pid = pid
         record.last_cpu_sample_monotonic = sample_monotonic
         record.last_process_cpu_seconds = cpu_seconds
+        io_missing_metrics: list[str] = []
+        if io_read_bytes is None:
+            io_missing_metrics.append("proc_io_read_bytes")
+        if io_write_bytes is None:
+            io_missing_metrics.append("proc_io_write_bytes")
+        io_sample_mature = (
+            not io_missing_metrics
+            and record.last_io_sample_pid == pid
+            and record.last_io_sample_monotonic is not None
+            and record.last_io_read_bytes is not None
+            and record.last_io_write_bytes is not None
+            and sample_monotonic > record.last_io_sample_monotonic
+        )
+        io_read_rate = None
+        io_write_rate = None
+        io_observation_seconds = None
+        if io_sample_mature:
+            delta_wall_seconds = sample_monotonic - float(record.last_io_sample_monotonic)
+            if delta_wall_seconds > 0:
+                io_observation_seconds = delta_wall_seconds
+                io_read_rate = max(0.0, float(io_read_bytes - record.last_io_read_bytes) / delta_wall_seconds)
+                io_write_rate = max(0.0, float(io_write_bytes - record.last_io_write_bytes) / delta_wall_seconds)
+            else:
+                io_sample_mature = False
+        record.io_read_bytes = io_read_bytes
+        record.io_write_bytes = io_write_bytes
+        record.io_read_bytes_per_second = io_read_rate
+        record.io_write_bytes_per_second = io_write_rate
+        record.io_observation_seconds = io_observation_seconds
+        record.io_sample_mature = bool(io_sample_mature)
+        record.io_sample_stale = bool(io_missing_metrics)
+        record.io_missing_metrics = io_missing_metrics
+        record.last_io_sample_pid = pid
+        record.last_io_sample_monotonic = sample_monotonic
+        record.last_io_read_bytes = io_read_bytes
+        record.last_io_write_bytes = io_write_bytes
 
     def _sample_route2_worker_telemetry_locked(
         self,
@@ -2082,6 +2452,7 @@ class MobilePlaybackManager:
 
         cpu_seconds = _read_process_cpu_seconds(pid)
         memory_bytes = _read_process_rss_bytes(pid)
+        io_read_bytes, io_write_bytes = _read_process_io_bytes(pid)
         if cpu_seconds is None and process.poll() is not None:
             self._mark_route2_worker_unavailable_locked(record, sampled_at=sampled_at)
             return
@@ -2091,6 +2462,8 @@ class MobilePlaybackManager:
             pid=pid,
             cpu_seconds=cpu_seconds,
             memory_bytes=memory_bytes,
+            io_read_bytes=io_read_bytes,
+            io_write_bytes=io_write_bytes,
             total_cpu_cores=total_cpu_cores,
             total_memory_bytes=total_memory_bytes,
             sample_monotonic=sample_monotonic,
@@ -2123,11 +2496,14 @@ class MobilePlaybackManager:
     ) -> dict[str, _Route2WorkerTelemetryReadResult]:
         results: dict[str, _Route2WorkerTelemetryReadResult] = {}
         for target in targets:
+            io_read_bytes, io_write_bytes = _read_process_io_bytes(target.pid)
             results[target.worker_id] = _Route2WorkerTelemetryReadResult(
                 worker_id=target.worker_id,
                 pid=target.pid,
                 cpu_seconds=_read_process_cpu_seconds(target.pid),
                 memory_bytes=_read_process_rss_bytes(target.pid),
+                io_read_bytes=io_read_bytes,
+                io_write_bytes=io_write_bytes,
             )
         return results
 
@@ -2302,6 +2678,8 @@ class MobilePlaybackManager:
                     pid=result.pid,
                     cpu_seconds=result.cpu_seconds,
                     memory_bytes=result.memory_bytes,
+                    io_read_bytes=result.io_read_bytes,
+                    io_write_bytes=result.io_write_bytes,
                     total_cpu_cores=total_cpu_cores,
                     total_memory_bytes=total_memory_bytes,
                     sample_monotonic=sample_monotonic,
@@ -3515,6 +3893,41 @@ class MobilePlaybackManager:
                     "cpu_percent": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
                     "memory_bytes": record.memory_bytes,
                     "memory_percent_of_total": round(record.memory_percent_of_total, 3) if record.memory_percent_of_total is not None else None,
+                    "io_read_bytes": record.io_read_bytes,
+                    "io_write_bytes": record.io_write_bytes,
+                    "io_read_bytes_per_second": (
+                        round(record.io_read_bytes_per_second, 3)
+                        if record.io_read_bytes_per_second is not None
+                        else None
+                    ),
+                    "io_write_bytes_per_second": (
+                        round(record.io_write_bytes_per_second, 3)
+                        if record.io_write_bytes_per_second is not None
+                        else None
+                    ),
+                    "io_observation_seconds": (
+                        round(record.io_observation_seconds, 3)
+                        if record.io_observation_seconds is not None
+                        else None
+                    ),
+                    "io_sample_mature": record.io_sample_mature,
+                    "io_sample_stale": record.io_sample_stale,
+                    "io_missing_metrics": list(record.io_missing_metrics),
+                    "route2_source_bytes_per_second": (
+                        round(record.io_read_bytes_per_second, 3)
+                        if record.io_sample_mature and record.io_read_bytes_per_second is not None
+                        else None
+                    ),
+                    "route2_source_observation_seconds": (
+                        round(record.io_observation_seconds, 3)
+                        if record.io_sample_mature and record.io_observation_seconds is not None
+                        else None
+                    ),
+                    "route2_source_status": (
+                        "proc_io_read_bytes"
+                        if record.io_sample_mature and record.io_read_bytes_per_second is not None
+                        else "source_throughput_unavailable"
+                    ),
                     "telemetry_sampled": record.telemetry_sampled,
                     "last_sampled_at": record.last_sampled_at,
                     "failure_reason": record.non_retryable_error,
@@ -3528,6 +3941,58 @@ class MobilePlaybackManager:
                     else None
                 )
                 if session is not None and epoch is not None:
+                    progress = _read_ffmpeg_progress_snapshot(
+                        epoch.epoch_dir / "ffmpeg.progress.log",
+                        now_ts=now_ts,
+                    )
+                    progress_updated_at = (
+                        datetime.fromtimestamp(progress.updated_at_ts).astimezone().isoformat()
+                        if progress.updated_at_ts is not None
+                        else None
+                    )
+                    payload["ffmpeg_progress_out_time_seconds"] = (
+                        round(progress.out_time_seconds, 3)
+                        if progress.out_time_seconds is not None
+                        else None
+                    )
+                    payload["ffmpeg_progress_speed_x"] = (
+                        round(progress.speed_x, 3)
+                        if progress.speed_x is not None
+                        else None
+                    )
+                    payload["ffmpeg_progress_fps"] = (
+                        round(progress.fps, 3)
+                        if progress.fps is not None
+                        else None
+                    )
+                    payload["ffmpeg_progress_frame"] = progress.frame
+                    payload["ffmpeg_progress_updated_at"] = progress_updated_at
+                    payload["ffmpeg_progress_state"] = progress.progress_state
+                    payload["ffmpeg_progress_stale"] = progress.stale
+                    payload["ffmpeg_progress_missing_metrics"] = list(progress.missing_metrics)
+                    payload["publish_segment_count"] = epoch.publish_segment_count
+                    payload["segment_publish_count"] = epoch.publish_segment_count
+                    payload["publish_init_latency_seconds"] = (
+                        round(epoch.publish_init_latency_seconds, 6)
+                        if epoch.publish_init_latency_seconds is not None
+                        else None
+                    )
+                    payload["last_publish_latency_seconds"] = (
+                        round(epoch.last_publish_latency_seconds, 6)
+                        if epoch.last_publish_latency_seconds is not None
+                        else None
+                    )
+                    payload["publish_latency_avg_seconds"] = (
+                        round(epoch.publish_latency_total_seconds / epoch.publish_segment_count, 6)
+                        if epoch.publish_segment_count > 0
+                        else None
+                    )
+                    payload["publish_latency_max_seconds"] = (
+                        round(epoch.publish_latency_max_seconds, 6)
+                        if epoch.publish_latency_max_seconds is not None
+                        else None
+                    )
+                    payload["last_publish_kind"] = epoch.last_publish_kind
                     active_health = self._evaluate_route2_active_playback_health_locked(session, epoch, record)
                     payload["runtime_playback_health"] = active_health.status
                     payload["runtime_playback_health_reason"] = active_health.reason
@@ -3578,6 +4043,21 @@ class MobilePlaybackManager:
                     payload["runway_delta_per_second"] = None
                     payload["runway_delta_observation_seconds"] = None
                     payload["runway_delta_mature"] = False
+                    payload["ffmpeg_progress_out_time_seconds"] = None
+                    payload["ffmpeg_progress_speed_x"] = None
+                    payload["ffmpeg_progress_fps"] = None
+                    payload["ffmpeg_progress_frame"] = None
+                    payload["ffmpeg_progress_updated_at"] = None
+                    payload["ffmpeg_progress_state"] = "unknown"
+                    payload["ffmpeg_progress_stale"] = True
+                    payload["ffmpeg_progress_missing_metrics"] = ["ffmpeg_progress_epoch_missing"]
+                    payload["publish_segment_count"] = 0
+                    payload["segment_publish_count"] = 0
+                    payload["publish_init_latency_seconds"] = None
+                    payload["last_publish_latency_seconds"] = None
+                    payload["publish_latency_avg_seconds"] = None
+                    payload["publish_latency_max_seconds"] = None
+                    payload["last_publish_kind"] = None
                 group["items"].append(payload)
                 payloads_by_worker_id[record.worker_id] = payload
             for group in grouped_users.values():
@@ -3679,6 +4159,12 @@ class MobilePlaybackManager:
                 if any_cpu_sampled and int(budget["route2_cpu_upbound_cores"]) > 0
                 else None
             )
+            psi_snapshot = _read_linux_psi_snapshot()
+            cgroup_snapshot, latest_cgroup_cpu_stat = _read_cgroup_telemetry_snapshot(
+                previous_cpu_stat=self._last_cgroup_cpu_stat,
+            )
+            if latest_cgroup_cpu_stat is not None:
+                self._last_cgroup_cpu_stat = latest_cgroup_cpu_stat
             return {
                 **budget,
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
@@ -3752,6 +4238,27 @@ class MobilePlaybackManager:
                 "route2_resource_missing_metrics": (
                     resource_snapshot.missing_metrics if resource_snapshot is not None else ["resource_snapshot"]
                 ),
+                "psi_sample_available": psi_snapshot.sample_available,
+                "psi_cpu_some_avg10": psi_snapshot.cpu_some_avg10,
+                "psi_cpu_full_avg10": psi_snapshot.cpu_full_avg10,
+                "psi_io_some_avg10": psi_snapshot.io_some_avg10,
+                "psi_io_full_avg10": psi_snapshot.io_full_avg10,
+                "psi_memory_some_avg10": psi_snapshot.memory_some_avg10,
+                "psi_memory_full_avg10": psi_snapshot.memory_full_avg10,
+                "psi_missing_metrics": psi_snapshot.missing_metrics,
+                "cgroup_pressure_available": cgroup_snapshot.pressure_available,
+                "cgroup_cpu_nr_periods": cgroup_snapshot.cpu_nr_periods,
+                "cgroup_cpu_nr_throttled": cgroup_snapshot.cpu_nr_throttled,
+                "cgroup_cpu_throttled_usec": cgroup_snapshot.cpu_throttled_usec,
+                "cgroup_cpu_throttled_delta": cgroup_snapshot.cpu_throttled_delta,
+                "cgroup_cpu_throttled_usec_delta": cgroup_snapshot.cpu_throttled_usec_delta,
+                "cgroup_cpu_some_avg10": cgroup_snapshot.cpu_some_avg10,
+                "cgroup_cpu_full_avg10": cgroup_snapshot.cpu_full_avg10,
+                "cgroup_io_some_avg10": cgroup_snapshot.io_some_avg10,
+                "cgroup_io_full_avg10": cgroup_snapshot.io_full_avg10,
+                "cgroup_memory_some_avg10": cgroup_snapshot.memory_some_avg10,
+                "cgroup_memory_full_avg10": cgroup_snapshot.memory_full_avg10,
+                "cgroup_missing_metrics": cgroup_snapshot.missing_metrics,
                 "total_memory_bytes": total_memory_bytes,
                 "route2_memory_bytes": route2_memory_bytes if any_memory_sampled else None,
                 "route2_memory_bytes_total": route2_memory_bytes if any_memory_sampled else None,
@@ -4735,12 +5242,20 @@ class MobilePlaybackManager:
         return _route2_segment_destination_impl(epoch, segment_index)
 
     def _route2_publish_init_locked(self, epoch: PlaybackEpoch, staged_init_path: Path) -> Path:
-        return _route2_publish_init_locked_impl(
+        already_published = epoch.published_init_path.exists()
+        started_at = time.monotonic()
+        result = _route2_publish_init_locked_impl(
             epoch,
             staged_init_path,
             rebuild_route2_published_frontier_locked=self._rebuild_route2_published_frontier_locked,
             write_route2_epoch_metadata_locked=self._write_route2_epoch_metadata_locked,
         )
+        if not already_published:
+            latency_seconds = max(0.0, time.monotonic() - started_at)
+            epoch.publish_init_latency_seconds = latency_seconds
+            epoch.last_publish_latency_seconds = latency_seconds
+            epoch.last_publish_kind = "init"
+        return result
 
     def _route2_publish_segment_locked(
         self,
@@ -4748,7 +5263,10 @@ class MobilePlaybackManager:
         segment_index: int,
         staged_segment_path: Path,
     ) -> Path:
-        return _route2_publish_segment_locked_impl(
+        destination = self._route2_segment_destination(epoch, segment_index)
+        already_published = destination.exists()
+        started_at = time.monotonic()
+        result = _route2_publish_segment_locked_impl(
             epoch,
             segment_index,
             staged_segment_path,
@@ -4756,6 +5274,17 @@ class MobilePlaybackManager:
             rebuild_route2_published_frontier_locked=self._rebuild_route2_published_frontier_locked,
             write_route2_epoch_metadata_locked=self._write_route2_epoch_metadata_locked,
         )
+        if not already_published:
+            latency_seconds = max(0.0, time.monotonic() - started_at)
+            epoch.publish_segment_count += 1
+            epoch.publish_latency_total_seconds += latency_seconds
+            epoch.publish_latency_max_seconds = max(
+                latency_seconds,
+                epoch.publish_latency_max_seconds or 0.0,
+            )
+            epoch.last_publish_latency_seconds = latency_seconds
+            epoch.last_publish_kind = "segment"
+        return result
 
     def _publish_route2_epoch_outputs_locked(self, epoch: PlaybackEpoch) -> None:
         _publish_route2_epoch_outputs_locked_impl(
@@ -4789,6 +5318,10 @@ class MobilePlaybackManager:
             "warning",
             "-nostdin",
             "-y",
+            "-stats_period",
+            "1",
+            "-progress",
+            str(epoch.epoch_dir / "ffmpeg.progress.log"),
             "-threads",
             str(max(1, int(thread_budget))),
         ]
@@ -4936,6 +5469,11 @@ class MobilePlaybackManager:
                 self._refresh_route2_session_authority_locked(session)
                 return
             stderr_path = epoch.epoch_dir / "ffmpeg.stderr.log"
+            progress_path = epoch.epoch_dir / "ffmpeg.progress.log"
+            try:
+                progress_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         logger.info(
             "Starting Browser Playback Route 2 epoch session=%s epoch=%s target=%.2f threads=%s command=%s",
             session_id,

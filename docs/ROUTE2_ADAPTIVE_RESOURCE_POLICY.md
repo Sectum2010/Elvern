@@ -93,6 +93,18 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Explicitly stopped or expired orphan session directories may still be cleaned according to policy.
 - Backend restart recovery is not guaranteed yet. A future durable guarantee needs session-level metadata for user id, media item id, profile, playback mode, source fingerprint, cache key, active epoch id, reserve state, explicit stop state, expiry, and last activity.
 
+## Phase 1J-1B Measurement Instrumentation
+
+- The contiguous published Route2 frontier remains the source of truth for `ready-to-serve` playback. FFmpeg progress can show encoder output time, but it does not prove that HLS/fMP4 segments are published and attachable.
+- FFmpeg `-progress` telemetry is diagnostic only in this phase. It may help distinguish encoder progress from publication/frontier lag, but it must not change Full/Lite readiness, admission, or real `assigned_threads`.
+- Per-worker `/proc/<pid>/io` counters are sampled when Linux exposes them. These rates are a local diagnostic proxy for worker read/write pressure; missing or permission-denied counters should be reported as missing metrics and must not fail playback.
+- Route2 publish latency fields measure init/segment publication overhead without changing the staging-to-published segment contract.
+- Linux PSI and cgroup pressure/throttling telemetry are manager-level diagnostics only. They are not required for current control decisions, and unavailable files must be represented as missing metrics.
+- Source throughput telemetry must not create extra cloud provider requests. Cloud/provider byte visibility should only use bytes already flowing through existing paths.
+- Lite behavior remains unchanged: the existing healthy 15s fast-start path and 45s slow path are not modified by this measurement phase.
+- Full bad-condition 30-minute reserve remains instrumentation-only; it is not enforced in startup readiness or admission in this phase.
+- Real 9/12 assignment, downshift, reclaim, shared supply, and coalescing remain future work.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

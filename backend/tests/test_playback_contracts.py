@@ -66,6 +66,13 @@ from backend.app.services.mobile_playback_service import (
     _parse_proc_stat_cpu_seconds,
     _parse_proc_stat_parent_pid,
     _parse_proc_status_rss_bytes,
+    _parse_cgroup_cpu_stat,
+    _parse_ffmpeg_progress_payload,
+    _parse_ffmpeg_progress_time_seconds,
+    _parse_linux_pressure_payload,
+    _parse_proc_io_bytes,
+    _read_cgroup_telemetry_snapshot,
+    _read_linux_psi_snapshot,
 )
 from backend.app.services.mobile_playback_route2_full_gate import _route2_full_mode_gate_locked
 from backend.app.services.mobile_playback_route2_preflight_service import _ensure_route2_full_preflight_locked
@@ -973,6 +980,9 @@ def test_route2_epoch_ffmpeg_command_keeps_resumed_media_timeline_local(initiali
     assert command[offset_index + 1] == "0.000"
     assert command[command.index("-ss") + 1] == "3307.200"
     assert command[command.index("-threads") + 1] == "4"
+    assert command[command.index("-preset") + 1] == "superfast"
+    assert command[command.index("-stats_period") + 1] == "1"
+    assert command[command.index("-progress") + 1].endswith("ffmpeg.progress.log")
 
 
 def test_route2_transcode_strategy_shadow_classifies_safe_h264_aac_as_stream_copy() -> None:
@@ -3037,6 +3047,48 @@ def test_lite_route2_does_not_start_full_preflight_worker(monkeypatch) -> None:
     assert session.browser_playback.full_preflight_error is None
 
 
+def test_route2_publish_latency_metrics_update_on_init_and_segments(
+    initialized_settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = MobilePlaybackManager(initialized_settings)
+    epoch_root = tmp_path / "epoch"
+    epoch = PlaybackEpoch(
+        epoch_id="epoch-latency",
+        session_id="session-latency",
+        created_at=utcnow_iso(),
+        target_position_seconds=0.0,
+        epoch_start_seconds=0.0,
+        attach_position_seconds=0.0,
+        epoch_dir=epoch_root,
+        staging_dir=epoch_root / "staging",
+        published_dir=epoch_root / "published",
+        staging_manifest_path=epoch_root / "staging" / "ffmpeg.m3u8",
+        metadata_path=epoch_root / "epoch.json",
+        frontier_path=epoch_root / "published" / "frontier.json",
+        published_init_path=epoch_root / "published" / "init.mp4",
+    )
+    epoch.staging_dir.mkdir(parents=True)
+    (epoch.staging_dir / "init.mp4").write_bytes(b"init")
+    (epoch.staging_dir / "segment_000000.m4s").write_bytes(b"segment")
+    ticks = iter([10.0, 10.125, 20.0, 20.25])
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service.time.monotonic",
+        lambda: next(ticks),
+    )
+
+    manager._route2_publish_init_locked(epoch, epoch.staging_dir / "init.mp4")
+    manager._route2_publish_segment_locked(epoch, 0, epoch.staging_dir / "segment_000000.m4s")
+
+    assert epoch.publish_init_latency_seconds == pytest.approx(0.125)
+    assert epoch.publish_segment_count == 1
+    assert epoch.publish_latency_total_seconds == pytest.approx(0.25)
+    assert epoch.publish_latency_max_seconds == pytest.approx(0.25)
+    assert epoch.last_publish_latency_seconds == pytest.approx(0.25)
+    assert epoch.last_publish_kind == "segment"
+
+
 def test_route2_non_retryable_quota_error_does_not_create_replacement_epoch(initialized_settings, monkeypatch) -> None:
     manager = MobilePlaybackManager(initialized_settings)
     session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
@@ -3933,6 +3985,145 @@ def test_route2_rss_parser_reads_vmrss_kib() -> None:
     payload = "Name:\tffmpeg\nVmRSS:\t  524288 kB\nThreads:\t8\n"
 
     assert _parse_proc_status_rss_bytes(payload) == 524288 * 1024
+
+
+def test_route2_ffmpeg_progress_time_parser_handles_microseconds_and_clock() -> None:
+    assert _parse_ffmpeg_progress_time_seconds("120125000") == pytest.approx(120.125)
+    assert _parse_ffmpeg_progress_time_seconds("00:02:00.125000") == pytest.approx(120.125)
+    assert _parse_ffmpeg_progress_time_seconds("N/A") is None
+    assert _parse_ffmpeg_progress_time_seconds("not-a-time") is None
+
+
+def test_route2_ffmpeg_progress_parser_reads_latest_progress_payload() -> None:
+    payload = "\n".join(
+        [
+            "frame=1440",
+            "fps=59.94",
+            "out_time_us=120125000",
+            "speed=1.23x",
+            "progress=continue",
+        ]
+    )
+
+    progress = _parse_ffmpeg_progress_payload(payload, updated_at_ts=100.0, now_ts=102.0)
+
+    assert progress.out_time_seconds == pytest.approx(120.125)
+    assert progress.speed_x == pytest.approx(1.23)
+    assert progress.fps == pytest.approx(59.94)
+    assert progress.frame == 1440
+    assert progress.progress_state == "continue"
+    assert progress.stale is False
+    assert progress.missing_metrics == []
+
+
+def test_route2_ffmpeg_progress_parser_handles_end_and_malformed_lines() -> None:
+    payload = "\n".join(
+        [
+            "frame=bad",
+            "fps=bad",
+            "out_time_ms=bad",
+            "speed=N/A",
+            "progress=end",
+            "not a key value line",
+        ]
+    )
+
+    progress = _parse_ffmpeg_progress_payload(payload, updated_at_ts=100.0, now_ts=999.0)
+
+    assert progress.out_time_seconds is None
+    assert progress.speed_x is None
+    assert progress.fps is None
+    assert progress.frame is None
+    assert progress.progress_state == "end"
+    assert progress.stale is False
+    assert "ffmpeg_progress_out_time" in progress.missing_metrics
+    assert "ffmpeg_progress_speed" in progress.missing_metrics
+    assert "ffmpeg_progress_fps" in progress.missing_metrics
+    assert "ffmpeg_progress_frame" in progress.missing_metrics
+
+
+def test_route2_proc_io_parser_reads_read_and_write_bytes() -> None:
+    payload = "\n".join(
+        [
+            "rchar: 4096",
+            "wchar: 8192",
+            "read_bytes: 123456",
+            "write_bytes: 7890",
+            "cancelled_write_bytes: 0",
+        ]
+    )
+
+    assert _parse_proc_io_bytes(payload) == (123456, 7890)
+    assert _parse_proc_io_bytes("read_bytes: nope\nwrite_bytes: 55\n") == (None, 55)
+
+
+def test_route2_linux_psi_parser_reads_pressure_lines(tmp_path: Path) -> None:
+    payload = "some avg10=1.23 avg60=0.50 avg300=0.10 total=12345\nfull avg10=0.12 avg60=0.05 avg300=0.01 total=456\n"
+
+    parsed = _parse_linux_pressure_payload(payload)
+
+    assert parsed["some"]["avg10"] == pytest.approx(1.23)
+    assert parsed["full"]["avg60"] == pytest.approx(0.05)
+
+    pressure_root = tmp_path / "pressure"
+    pressure_root.mkdir()
+    for name in ("cpu", "io", "memory"):
+        (pressure_root / name).write_text(payload, encoding="utf-8")
+
+    snapshot = _read_linux_psi_snapshot(pressure_root=pressure_root)
+
+    assert snapshot.sample_available is True
+    assert snapshot.cpu_some_avg10 == pytest.approx(1.23)
+    assert snapshot.io_full_avg10 == pytest.approx(0.12)
+    assert snapshot.memory_some_avg10 == pytest.approx(1.23)
+    assert snapshot.missing_metrics == []
+
+
+def test_route2_linux_psi_snapshot_handles_unavailable_files(tmp_path: Path) -> None:
+    snapshot = _read_linux_psi_snapshot(pressure_root=tmp_path / "missing-pressure")
+
+    assert snapshot.sample_available is False
+    assert "psi_cpu" in snapshot.missing_metrics
+    assert "psi_io" in snapshot.missing_metrics
+    assert "psi_memory" in snapshot.missing_metrics
+
+
+def test_route2_cgroup_cpu_stat_parser_and_snapshot(tmp_path: Path) -> None:
+    cgroup_path = tmp_path / "cgroup"
+    cgroup_path.mkdir()
+    (cgroup_path / "cpu.stat").write_text(
+        "usage_usec 100000\nnr_periods 20\nnr_throttled 3\nthrottled_usec 7500\n",
+        encoding="utf-8",
+    )
+    pressure_payload = "some avg10=2.50 avg60=1.00 avg300=0.50 total=111\nfull avg10=0.25 avg60=0.10 avg300=0.05 total=22\n"
+    for name in ("cpu.pressure", "io.pressure", "memory.pressure"):
+        (cgroup_path / name).write_text(pressure_payload, encoding="utf-8")
+
+    parsed = _parse_cgroup_cpu_stat((cgroup_path / "cpu.stat").read_text(encoding="utf-8"))
+    snapshot, latest = _read_cgroup_telemetry_snapshot(
+        cgroup_path=cgroup_path,
+        previous_cpu_stat={"nr_throttled": 1, "throttled_usec": 2500},
+    )
+
+    assert parsed["nr_throttled"] == 3
+    assert latest == parsed
+    assert snapshot.pressure_available is True
+    assert snapshot.cpu_nr_periods == 20
+    assert snapshot.cpu_nr_throttled == 3
+    assert snapshot.cpu_throttled_usec == 7500
+    assert snapshot.cpu_throttled_delta == 2
+    assert snapshot.cpu_throttled_usec_delta == 5000
+    assert snapshot.cpu_some_avg10 == pytest.approx(2.5)
+    assert snapshot.io_full_avg10 == pytest.approx(0.25)
+    assert snapshot.missing_metrics == []
+
+
+def test_route2_cgroup_snapshot_handles_unavailable_path(tmp_path: Path) -> None:
+    snapshot, latest = _read_cgroup_telemetry_snapshot(cgroup_path=tmp_path / "missing-cgroup")
+
+    assert latest is None
+    assert snapshot.pressure_available is False
+    assert "cgroup_cpu_stat" in snapshot.missing_metrics
 
 
 def test_route2_cpu_stat_parser_reads_user_and_system_ticks(monkeypatch) -> None:
