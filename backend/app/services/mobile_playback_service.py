@@ -3030,25 +3030,30 @@ class MobilePlaybackManager:
         host_cpu_pressure: _HostCpuPressureSnapshot | None,
         psi_snapshot: _LinuxPressureSnapshot | None,
         cgroup_snapshot: _CgroupTelemetrySnapshot | None,
-    ) -> bool:
+    ) -> list[str]:
+        reasons: list[str] = []
         if host_cpu_pressure is not None:
             if host_cpu_pressure.external_ffmpeg_process_count > 0:
-                return True
+                reasons.append("external_ffmpeg_process_present")
             external_cpu_cores = host_cpu_pressure.external_cpu_cores_used_estimate
             external_cpu_percent = host_cpu_pressure.external_cpu_percent_estimate
             if external_cpu_cores is not None and external_cpu_cores >= 4.0:
-                return True
+                reasons.append("external_cpu_pressure")
             if external_cpu_percent is not None and external_cpu_percent >= 0.20:
-                return True
+                reasons.append("external_cpu_percent_pressure")
         if psi_snapshot is not None:
-            if (psi_snapshot.cpu_some_avg10 or 0.0) >= 5.0 or (psi_snapshot.memory_some_avg10 or 0.0) >= 5.0:
-                return True
+            if (psi_snapshot.cpu_some_avg10 or 0.0) >= 5.0:
+                reasons.append("psi_cpu_pressure")
+            if (psi_snapshot.memory_some_avg10 or 0.0) >= 5.0:
+                reasons.append("psi_memory_pressure")
         if cgroup_snapshot is not None:
             if (cgroup_snapshot.cpu_throttled_delta or 0) > 0 or (cgroup_snapshot.cpu_throttled_usec_delta or 0) > 0:
-                return True
-            if (cgroup_snapshot.cpu_some_avg10 or 0.0) >= 5.0 or (cgroup_snapshot.memory_some_avg10 or 0.0) >= 5.0:
-                return True
-        return False
+                reasons.append("cgroup_cpu_throttling")
+            if (cgroup_snapshot.cpu_some_avg10 or 0.0) >= 5.0:
+                reasons.append("cgroup_cpu_pressure")
+            if (cgroup_snapshot.memory_some_avg10 or 0.0) >= 5.0:
+                reasons.append("cgroup_memory_pressure")
+        return reasons
 
     def _route2_closed_loop_io_publish_limited(
         self,
@@ -3057,12 +3062,17 @@ class MobilePlaybackManager:
         epoch: PlaybackEpoch,
         progress: _Route2FfmpegProgressSnapshot | None,
         psi_snapshot: _LinuxPressureSnapshot | None,
-    ) -> bool:
+        cgroup_snapshot: _CgroupTelemetrySnapshot | None,
+    ) -> list[str]:
         actual_ready_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
-        progress_ahead = False
+        progress_gap_seconds = 0.0
         if progress is not None and progress.out_time_seconds is not None and not progress.stale:
             progress_ready_end_seconds = epoch.epoch_start_seconds + float(progress.out_time_seconds)
-            progress_ahead = progress_ready_end_seconds > actual_ready_end_seconds + (SEGMENT_DURATION_SECONDS * 2)
+            progress_gap_seconds = max(0.0, progress_ready_end_seconds - actual_ready_end_seconds)
+        # Normal HLS/fMP4 publication can lag ffmpeg progress by a few segments.
+        # Treat it as IO/publish-bound only with a larger gap plus slow publish,
+        # or with independently high host/cgroup IO pressure.
+        progress_significantly_ahead = progress_gap_seconds >= max(12.0, SEGMENT_DURATION_SECONDS * 6)
         publish_latency_high = (
             (epoch.publish_latency_max_seconds is not None and epoch.publish_latency_max_seconds >= 1.0)
             or (
@@ -3070,14 +3080,16 @@ class MobilePlaybackManager:
                 and (epoch.publish_latency_total_seconds / max(1, epoch.publish_segment_count)) >= 0.5
             )
         )
-        psi_io_high = bool(
-            psi_snapshot is not None
-            and (
-                (psi_snapshot.io_some_avg10 or 0.0) >= 2.0
-                or (psi_snapshot.io_full_avg10 or 0.0) > 0.0
-            )
-        )
-        return bool((progress_ahead and publish_latency_high) or psi_io_high)
+        reasons: list[str] = []
+        if progress_significantly_ahead and publish_latency_high:
+            reasons.append("ffmpeg_progress_ahead_of_publish_frontier_with_high_publish_latency")
+        if psi_snapshot is not None:
+            if (psi_snapshot.io_some_avg10 or 0.0) >= 5.0 or (psi_snapshot.io_full_avg10 or 0.0) >= 1.0:
+                reasons.append("psi_io_pressure_high")
+        if cgroup_snapshot is not None:
+            if (cgroup_snapshot.io_some_avg10 or 0.0) >= 5.0 or (cgroup_snapshot.io_full_avg10 or 0.0) >= 1.0:
+                reasons.append("cgroup_io_pressure_high")
+        return reasons
 
     def _evaluate_route2_closed_loop_dry_run_locked(
         self,
@@ -3120,19 +3132,34 @@ class MobilePlaybackManager:
             epoch,
             cpu_thread_limited=cpu_thread_limited,
         )
-        io_publish_limited = self._route2_closed_loop_io_publish_limited(
+        io_publish_reasons = self._route2_closed_loop_io_publish_limited(
             session=session,
             epoch=epoch,
             progress=progress,
             psi_snapshot=psi_snapshot,
+            cgroup_snapshot=cgroup_snapshot,
         )
-        host_pressure_limited = self._route2_closed_loop_host_pressure_limited(
+        io_publish_limited = bool(io_publish_reasons)
+        host_pressure_reasons = self._route2_closed_loop_host_pressure_limited(
             host_cpu_pressure=host_cpu_pressure,
             psi_snapshot=psi_snapshot,
             cgroup_snapshot=cgroup_snapshot,
         )
+        host_pressure_limited = bool(host_pressure_reasons)
         starvation_risk = self._starvation_risk(session)
         stalled_recovery_needed = self._stalled_recovery_needed(session)
+        below_health_floor = supply_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        declining_low_runway = bool(
+            runway_delta_mature
+            and runway_delta_per_second is not None
+            and float(runway_delta_per_second) < 0.0
+            and runway_seconds <= WATCH_REFILL_TARGET_SECONDS
+        )
+        recovery_at_risk = bool(
+            (starvation_risk or stalled_recovery_needed)
+            and runway_seconds <= WATCH_LOW_WATERMARK_SECONDS
+            and supply_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X
+        )
         reasons: list[str] = []
         role = "neutral"
         confidence = 0.55
@@ -3176,22 +3203,7 @@ class MobilePlaybackManager:
             )
             reasons.append("full_bad_condition_reserve_required_unsatisfied")
             confidence = 0.9
-        elif host_pressure_limited:
-            role = "host_pressure_limited"
-            primary_bottleneck = "host_pressure"
-            reasons.append("host_external_psi_or_cgroup_pressure")
-            confidence = 0.8
-        elif io_publish_limited:
-            role = "io_or_publish_bound"
-            primary_bottleneck = "io_publish"
-            reasons.append("ffmpeg_progress_or_psi_indicates_publish_io_lag")
-            confidence = 0.78
-        elif supply_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X or (
-            runway_delta_mature
-            and runway_delta_per_second is not None
-            and float(runway_delta_per_second) < 0.0
-            and runway_seconds <= WATCH_REFILL_TARGET_SECONDS
-        ) or starvation_risk or stalled_recovery_needed:
+        elif below_health_floor or declining_low_runway or recovery_at_risk:
             needs_resource = True
             admission_should_block_new_users = True
             if client_limited:
@@ -3206,13 +3218,31 @@ class MobilePlaybackManager:
                 needs_resource_reason = "source_limited"
                 admission_should_block_new_users = False
                 reasons.append("source_provider_throughput_limiter")
+            elif io_publish_limited:
+                role = "io_or_publish_bound"
+                primary_bottleneck = "io_publish"
+                needs_resource_reason = "io_or_publish_limited_supply_below_1_05"
+                reasons.extend(io_publish_reasons)
+            elif host_pressure_limited:
+                role = "host_pressure_limited"
+                primary_bottleneck = "host_pressure"
+                needs_resource_reason = "host_pressure_limited_supply_below_1_05"
+                reasons.extend(host_pressure_reasons)
             elif cpu_thread_limited:
                 role = "needs_resource"
                 primary_bottleneck = "cpu_thread"
-                needs_resource_reason = "cpu_thread_limited_supply_below_1_05"
-                prepare_boost_needed = not host_pressure_limited
+                needs_resource_reason = (
+                    "cpu_thread_limited_supply_below_1_05"
+                    if below_health_floor
+                    else "cpu_thread_limited_runway_declining_or_recovery"
+                )
+                prepare_boost_needed = True
                 prepare_boost_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
-                reasons.append("mature_supply_below_1_05_cpu_thread_limited")
+                reasons.append(
+                    "mature_supply_below_1_05_cpu_thread_limited"
+                    if below_health_floor
+                    else "runway_declining_or_recovery_cpu_thread_limited"
+                )
             else:
                 role = "needs_resource"
                 primary_bottleneck = "unknown"
@@ -3220,19 +3250,42 @@ class MobilePlaybackManager:
                 reasons.append("mature_supply_below_1_05_without_specific_limiter")
             confidence = 0.82
         elif runway_seconds < required_runway_seconds and refill_in_progress and cpu_thread_limited and not source_limited and not client_limited:
-            role = "prepare_boost_needed"
-            primary_bottleneck = "cpu_thread"
-            prepare_boost_needed = True
-            prepare_boost_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
-            reasons.append("runway_below_startup_target_and_cpu_thread_limited")
+            if host_pressure_limited:
+                role = "host_pressure_limited"
+                primary_bottleneck = "host_pressure"
+                prepare_boost_needed = False
+                reasons.append("host_pressure_blocks_prepare_boost")
+                reasons.extend(host_pressure_reasons)
+                confidence = 0.8
+            elif io_publish_limited:
+                role = "io_or_publish_bound"
+                primary_bottleneck = "io_publish"
+                prepare_boost_needed = False
+                reasons.extend(io_publish_reasons)
+                confidence = 0.78
+            else:
+                role = "prepare_boost_needed"
+                primary_bottleneck = "cpu_thread"
+                prepare_boost_needed = True
+                prepare_boost_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
+                reasons.append("runway_below_startup_target_and_cpu_thread_limited")
+                confidence = 0.78
+        elif io_publish_limited:
+            role = "io_or_publish_bound"
+            primary_bottleneck = "io_publish"
+            reasons.extend(io_publish_reasons)
             confidence = 0.78
         else:
             role = "steady_state_maintenance"
             primary_bottleneck = "unknown"
             reasons.append("supply_at_or_above_1_05_and_runway_not_declining")
+            if host_pressure_limited:
+                reasons.append("host_pressure_warning")
+                reasons.extend(host_pressure_reasons)
             confidence = 0.72
             if (
-                supply_rate_x >= ROUTE2_CLOSED_LOOP_DOWNSHIFT_RATE_X
+                not host_pressure_limited
+                and supply_rate_x >= ROUTE2_CLOSED_LOOP_DOWNSHIFT_RATE_X
                 and observation_seconds >= 20.0
                 and runway_seconds >= comfortable_runway_seconds
                 and (
@@ -3250,7 +3303,8 @@ class MobilePlaybackManager:
                 reasons.append("supply_above_1_10_with_comfortable_runway")
                 confidence = 0.82
             if (
-                supply_rate_x >= ROUTE2_CLOSED_LOOP_DONOR_RATE_X
+                not host_pressure_limited
+                and supply_rate_x >= ROUTE2_CLOSED_LOOP_DONOR_RATE_X
                 and runway_seconds >= comfortable_runway_seconds
                 and assigned_threads > protected_floor
                 and not bool(reserve_status["bad_condition_reserve_required"] and not reserve_status["reserve_satisfied"])
@@ -3320,6 +3374,47 @@ class MobilePlaybackManager:
             "closed_loop_protected_reason": decision.protected_reason,
             "closed_loop_admission_should_block_new_users": decision.admission_should_block_new_users,
             "closed_loop_primary_bottleneck": decision.primary_bottleneck,
+        }
+
+    def _closed_loop_runtime_rebalance_payload(self, decision: _Route2ClosedLoopDryRunDecision) -> dict[str, object]:
+        if decision.role == "prepare_boost_needed":
+            return {
+                "runtime_rebalance_role": "needs_resource",
+                "runtime_rebalance_reason": "Closed-loop dry-run says this workload would benefit from prepare boost.",
+                "runtime_rebalance_target_threads": decision.prepare_boost_target_threads,
+                "runtime_rebalance_can_donate_threads": 0,
+                "runtime_rebalance_priority": 70,
+            }
+        if decision.role == "needs_resource":
+            return {
+                "runtime_rebalance_role": "needs_resource",
+                "runtime_rebalance_reason": "Closed-loop dry-run says this workload needs resource protection.",
+                "runtime_rebalance_target_threads": decision.prepare_boost_target_threads,
+                "runtime_rebalance_can_donate_threads": 0,
+                "runtime_rebalance_priority": 80,
+            }
+        if decision.role == "protected_bad_condition_reserve":
+            return {
+                "runtime_rebalance_role": "needs_resource",
+                "runtime_rebalance_reason": "Closed-loop dry-run protects this workload's unsatisfied Full bad-condition reserve.",
+                "runtime_rebalance_target_threads": decision.prepare_boost_target_threads,
+                "runtime_rebalance_can_donate_threads": 0,
+                "runtime_rebalance_priority": 90,
+            }
+        if decision.role in {"downshift_candidate", "donor_candidate"}:
+            return {
+                "runtime_rebalance_role": "donor_candidate",
+                "runtime_rebalance_reason": "Closed-loop dry-run says this workload is only a theoretical future donor.",
+                "runtime_rebalance_target_threads": decision.downshift_target_threads,
+                "runtime_rebalance_can_donate_threads": decision.theoretical_donate_threads,
+                "runtime_rebalance_priority": 20,
+            }
+        return {
+            "runtime_rebalance_role": "neutral",
+            "runtime_rebalance_reason": "Closed-loop dry-run does not mark this workload as a donor or recipient.",
+            "runtime_rebalance_target_threads": None,
+            "runtime_rebalance_can_donate_threads": 0,
+            "runtime_rebalance_priority": 0,
         }
 
     def _evaluate_route2_active_playback_health_locked(
@@ -4500,6 +4595,7 @@ class MobilePlaybackManager:
                         primary_bottleneck="metrics_immature",
                     )
                 payload.update(self._closed_loop_dry_run_payload(closed_loop_decision))
+                payload.update(self._closed_loop_runtime_rebalance_payload(closed_loop_decision))
                 if closed_loop_decision.donor_candidate:
                     closed_loop_donors.append((closed_loop_decision.donor_score, record.worker_id))
                 strategy_input, strategy_metadata_source, strategy_metadata_trusted = (

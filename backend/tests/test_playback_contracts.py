@@ -6358,6 +6358,44 @@ def test_route2_closed_loop_marks_high_surplus_as_theoretical_donor_only(
     assert record.assigned_threads == 4
 
 
+def test_route2_closed_loop_healthy_lite_low_publish_latency_is_not_io_bound(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.4,
+        observation_seconds=18.0,
+        runway_seconds=50.0,
+        cpu_cores_used=1.0,
+    )
+    epoch.publish_segment_count = 12
+    epoch.publish_latency_total_seconds = 0.12
+    epoch.publish_latency_max_seconds = 0.03
+    progress = _parse_ffmpeg_progress_payload(
+        "frame=600\nfps=80\nout_time_us=56000000\nspeed=3.0x\nprogress=continue\n",
+        updated_at_ts=100.0,
+        now_ts=101.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        progress=progress,
+    )
+
+    assert decision.role == "steady_state_maintenance"
+    assert decision.primary_bottleneck == "unknown"
+    assert decision.donor_candidate is False
+    assert decision.prepare_boost_needed is False
+
+
 def test_route2_closed_loop_low_supply_cpu_thread_limited_needs_resource(
     initialized_settings,
 ) -> None:
@@ -6545,9 +6583,10 @@ def test_route2_closed_loop_ffmpeg_ahead_publish_lag_is_io_publish_bound(
     assert decision.role == "io_or_publish_bound"
     assert decision.primary_bottleneck == "io_publish"
     assert decision.prepare_boost_needed is False
+    assert "ffmpeg_progress_ahead_of_publish_frontier_with_high_publish_latency" in decision.reasons
 
 
-def test_route2_closed_loop_cgroup_throttling_is_host_pressure_limited(
+def test_route2_closed_loop_healthy_supply_with_cgroup_pressure_is_steady_with_warning(
     initialized_settings,
     tmp_path,
 ) -> None:
@@ -6582,9 +6621,104 @@ def test_route2_closed_loop_cgroup_throttling_is_host_pressure_limited(
         cgroup_snapshot=cgroup_snapshot,
     )
 
+    assert decision.role == "steady_state_maintenance"
+    assert decision.primary_bottleneck == "unknown"
+    assert "host_pressure_warning" in decision.reasons
+    assert "cgroup_cpu_throttling" in decision.reasons
+    assert decision.prepare_boost_needed is False
+
+
+def test_route2_closed_loop_host_pressure_blocks_prepare_boost(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=2.0,
+        runway_seconds=80.0,
+        cpu_cores_used=4.0,
+    )
+    pressure_root = tmp_path / "pressure"
+    pressure_root.mkdir()
+    high_cpu = "some avg10=6.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    normal = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    (pressure_root / "cpu").write_text(high_cpu, encoding="utf-8")
+    (pressure_root / "io").write_text(normal, encoding="utf-8")
+    (pressure_root / "memory").write_text(normal, encoding="utf-8")
+    psi_snapshot = _read_linux_psi_snapshot(pressure_root=pressure_root)
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        psi_snapshot=psi_snapshot,
+    )
+
     assert decision.role == "host_pressure_limited"
     assert decision.primary_bottleneck == "host_pressure"
     assert decision.prepare_boost_needed is False
+    assert "host_pressure_blocks_prepare_boost" in decision.reasons
+    assert "psi_cpu_pressure" in decision.reasons
+
+
+def test_route2_closed_loop_recovery_flag_with_healthy_supply_uses_prepare_boost_not_needs_resource(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    session.stalled_recovery_requested = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=2.0,
+        runway_seconds=100.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "prepare_boost_needed"
+    assert decision.needs_resource is False
+    assert decision.prepare_boost_needed is True
+    assert decision.prepare_boost_target_threads == 6
+    assert "mature_supply_below_1_05_cpu_thread_limited" not in decision.reasons
+
+
+def test_route2_closed_loop_high_psi_io_is_io_publish_bound(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.4,
+        runway_seconds=150.0,
+        cpu_cores_used=1.0,
+    )
+    pressure_root = tmp_path / "pressure"
+    pressure_root.mkdir()
+    normal = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    high_io = "some avg10=6.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=1.25 avg60=0.00 avg300=0.00 total=0\n"
+    (pressure_root / "cpu").write_text(normal, encoding="utf-8")
+    (pressure_root / "io").write_text(high_io, encoding="utf-8")
+    (pressure_root / "memory").write_text(normal, encoding="utf-8")
+    psi_snapshot = _read_linux_psi_snapshot(pressure_root=pressure_root)
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        psi_snapshot=psi_snapshot,
+    )
+
+    assert decision.role == "io_or_publish_bound"
+    assert decision.primary_bottleneck == "io_publish"
+    assert "psi_io_pressure_high" in decision.reasons
 
 
 def test_route2_closed_loop_immature_metrics_do_not_claim_donor_or_downshift(
@@ -6607,6 +6741,76 @@ def test_route2_closed_loop_immature_metrics_do_not_claim_donor_or_downshift(
     assert decision.primary_bottleneck == "metrics_immature"
     assert decision.donor_candidate is False
     assert decision.downshift_candidate is False
+
+
+def test_route2_closed_loop_status_runtime_rebalance_follows_prepare_boost_role(
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    monkeypatch.setattr(manager, "_sample_route2_worker_telemetry_locked", lambda *args, **kwargs: None)
+    _capture_route2_worker_threads(monkeypatch)
+    pressure_root = tmp_path / "pressure"
+    pressure_root.mkdir()
+    pressure_payload = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    for pressure_name in ("cpu", "io", "memory"):
+        (pressure_root / pressure_name).write_text(pressure_payload, encoding="utf-8")
+    psi_snapshot = _read_linux_psi_snapshot(pressure_root=pressure_root)
+    cgroup_root = tmp_path / "cgroup-neutral"
+    cgroup_root.mkdir()
+    (cgroup_root / "cpu.stat").write_text(
+        "nr_periods 20\nnr_throttled 0\nthrottled_usec 0\n",
+        encoding="utf-8",
+    )
+    for pressure_name in ("cpu.pressure", "io.pressure", "memory.pressure"):
+        (cgroup_root / pressure_name).write_text(pressure_payload, encoding="utf-8")
+    cgroup_snapshot, _latest_cgroup = _read_cgroup_telemetry_snapshot(
+        cgroup_path=cgroup_root,
+        previous_cpu_stat={"nr_periods": 10, "nr_throttled": 0, "throttled_usec": 0},
+    )
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_linux_psi_snapshot",
+        lambda: psi_snapshot,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_cgroup_telemetry_snapshot",
+        lambda **_kwargs: (cgroup_snapshot, None),
+    )
+    item = _make_local_item(settings, item_id=381, relative_name="route2/closed-loop-prepare-runtime.mp4")
+
+    first = manager.create_session(item, user_id=1, auth_session_id=995, username="alice", engine_mode="route2", playback_mode="full")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=2.0,
+        observation_seconds=18.0,
+        runway_seconds=100.0,
+        cpu_cores_used=4.0,
+    )
+
+    status = manager.get_route2_worker_status()
+    item_payload = next(
+        item
+        for group in status["workers_by_user"]
+        for item in group["items"]
+        if item["worker_id"] == record.worker_id
+    )
+
+    assert item_payload["closed_loop_role"] == "prepare_boost_needed"
+    assert item_payload["runtime_rebalance_role"] == "needs_resource"
+    assert item_payload["runtime_rebalance_target_threads"] == 6
+    assert item_payload["runtime_rebalance_can_donate_threads"] == 0
 
 
 def test_route2_closed_loop_status_ranks_theoretical_donors_without_changing_threads(
@@ -6689,6 +6893,8 @@ def test_route2_closed_loop_status_ranks_theoretical_donors_without_changing_thr
     assert items[record_b.worker_id]["closed_loop_donor_rank"] == 1
     assert items[record_a.worker_id]["closed_loop_donor_rank"] == 2
     assert items[record_a.worker_id]["closed_loop_theoretical_donate_threads"] == 2
+    assert items[record_b.worker_id]["runtime_rebalance_role"] == "donor_candidate"
+    assert items[record_a.worker_id]["runtime_rebalance_role"] == "donor_candidate"
     assert record_a.assigned_threads == 4
     assert record_b.assigned_threads == 4
 
