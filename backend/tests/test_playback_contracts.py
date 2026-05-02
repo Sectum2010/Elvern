@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import json
+import os
 import subprocess
 import time
 from pathlib import Path, PureWindowsPath
@@ -335,6 +336,38 @@ def _mark_route2_runtime_supply(
     session.client_is_playing = client_is_playing
     record.cpu_cores_used = cpu_cores_used
     record.telemetry_sampled = cpu_cores_used is not None
+
+
+def _make_route2_reserve_inputs(
+    *,
+    playback_mode: str = "full",
+    duration_seconds: float = 3600.0,
+    target_position_seconds: float = 0.0,
+) -> tuple[MobilePlaybackSession, PlaybackEpoch, Route2WorkerRecord]:
+    session = _make_route2_session(playback_mode=playback_mode)
+    session.duration_seconds = duration_seconds
+    session.target_position_seconds = target_position_seconds
+    epoch = _make_route2_epoch()
+    epoch.target_position_seconds = target_position_seconds
+    epoch.attach_position_seconds = target_position_seconds
+    epoch.epoch_start_seconds = 0.0
+    record = Route2WorkerRecord(
+        worker_id="reserve-worker",
+        session_id=session.session_id,
+        epoch_id=epoch.epoch_id,
+        user_id=session.user_id,
+        username=session.username,
+        auth_session_id=session.auth_session_id,
+        media_item_id=session.media_item_id,
+        title=session.media_title,
+        playback_mode=playback_mode,
+        profile=session.profile,
+        source_kind=session.source_kind,
+        target_position_seconds=target_position_seconds,
+        state="running",
+        assigned_threads=4,
+    )
+    return session, epoch, record
 
 
 def _make_route2_worker_record_for_spawn_dry_run(*, source_kind: str = "local", user_id: int = 1) -> Route2WorkerRecord:
@@ -4641,7 +4674,310 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "runtime_supply_rate_x" in item_payload
     assert "runtime_runway_seconds" in item_payload
     assert "runtime_rebalance_role" in item_payload
+    assert "bad_condition_reserve_required" in item_payload
+    assert "reserve_target_ready_end_seconds" in item_payload
+    assert "reserve_actual_ready_end_seconds" in item_payload
+    assert "reserve_remaining_seconds" in item_payload
+    assert "reserve_blocks_admission" in item_payload
+    assert "runway_delta_per_second" in item_payload
     assert len(started_workers) == 1
+
+
+def test_route2_full_bad_condition_reserve_not_required_for_healthy_supply(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="full")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.05,
+        runway_seconds=240.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["bad_condition_reserve_required"] is False
+    assert status["bad_condition_reason"] is None
+    assert status["bad_condition_supply_floor"] == pytest.approx(1.05)
+    assert status["reserve_blocks_admission"] is False
+
+
+def test_route2_full_bad_condition_reserve_required_for_mature_supply_below_floor(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="full")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.04,
+        runway_seconds=120.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["bad_condition_reserve_required"] is True
+    assert status["bad_condition_reason"] == "mature_supply_below_1_05"
+    assert status["bad_condition_strong"] is False
+    assert status["reserve_target_ready_end_seconds"] == pytest.approx(1800.0)
+    assert status["reserve_blocks_admission"] is True
+
+
+def test_route2_full_bad_condition_reserve_marks_strong_below_realtime(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="full")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=120.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["bad_condition_reserve_required"] is True
+    assert status["bad_condition_reason"] == "mature_supply_below_1_0"
+    assert status["bad_condition_strong"] is True
+
+
+def test_route2_immature_supply_does_not_trigger_full_bad_condition_reserve(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="full")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.7,
+        observation_seconds=3.0,
+        runway_seconds=30.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["bad_condition_reserve_required"] is False
+    assert status["bad_condition_reason"] == "metrics_immature"
+    assert status["runway_delta_per_second"] is None
+    assert status["runway_delta_mature"] is False
+
+
+def test_route2_lite_does_not_use_full_bad_condition_reserve(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="lite")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.7,
+        runway_seconds=30.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["bad_condition_reserve_required"] is False
+    assert status["bad_condition_reason"] == "not_full_playback"
+    assert status["reserve_required_seconds"] == 0.0
+
+
+def test_route2_full_bad_condition_reserve_satisfied_requires_actual_ready_frontier(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="full")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=200.0,
+        effective_playhead_seconds=0.0,
+    )
+    epoch.byte_samples = [(0.0, 0), (12.0, 2_000_000_000)]
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["bad_condition_reserve_required"] is True
+    assert status["reserve_satisfied"] is False
+    assert status["reserve_remaining_seconds"] == pytest.approx(1600.0)
+
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=1810.0,
+        effective_playhead_seconds=0.0,
+    )
+    satisfied_status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert satisfied_status["bad_condition_reserve_required"] is True
+    assert satisfied_status["reserve_satisfied"] is True
+    assert satisfied_status["reserve_blocks_admission"] is False
+
+
+def test_route2_full_bad_condition_reserve_manifest_complete_near_end_satisfies(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(
+        playback_mode="full",
+        duration_seconds=600.0,
+        target_position_seconds=300.0,
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=300.0,
+        effective_playhead_seconds=300.0,
+        manifest_complete=True,
+        refill_in_progress=False,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["reserve_start_seconds"] == pytest.approx(300.0)
+    assert status["reserve_target_ready_end_seconds"] == pytest.approx(600.0)
+    assert status["bad_condition_reserve_required"] is True
+    assert status["reserve_satisfied"] is True
+    assert status["reserve_remaining_seconds"] == pytest.approx(0.0)
+
+
+def test_route2_full_bad_condition_reserve_remaining_and_runway_delta(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="full")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=100.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["reserve_remaining_seconds"] == pytest.approx(1700.0)
+    assert status["runway_delta_per_second"] == pytest.approx(-0.2)
+
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        runway_seconds=100.0,
+        effective_playhead_seconds=0.0,
+    )
+    positive_status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert positive_status["runway_delta_per_second"] == pytest.approx(0.2)
+
+
+def test_route2_orphan_cleanup_preserves_active_in_memory_session_dir(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    now_ts = time.time()
+    route2_sessions_root = settings.transcode_dir / "browser_playback_route2" / "sessions"
+    session = _make_route2_session(playback_mode="full")
+    session_dir = route2_sessions_root / session.session_id
+    session_dir.mkdir(parents=True)
+    old_ts = now_ts - (settings.mobile_session_ttl_minutes * 60) - 60
+    os.utime(session_dir, (old_ts, old_ts))
+    manager._sessions[session.session_id] = session
+
+    manager._cleanup_orphaned_cache_dirs_locked(now_ts)
+
+    assert session_dir.exists()
+
+
+def test_route2_orphan_cleanup_preserves_active_session_despite_nested_published_writes(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    now_ts = time.time()
+    route2_sessions_root = settings.transcode_dir / "browser_playback_route2" / "sessions"
+    session = _make_route2_session(playback_mode="full")
+    session_dir = route2_sessions_root / session.session_id
+    published_dir = session_dir / "epoch-a" / "published"
+    published_dir.mkdir(parents=True)
+    (published_dir / "segment-1.m4s").write_bytes(b"segment")
+    old_ts = now_ts - (settings.mobile_session_ttl_minutes * 60) - 60
+    os.utime(session_dir, (old_ts, old_ts))
+    manager._sessions[session.session_id] = session
+
+    manager._cleanup_orphaned_cache_dirs_locked(now_ts)
+
+    assert session_dir.exists()
+    assert (published_dir / "segment-1.m4s").exists()
+
+
+def test_route2_orphan_cleanup_preserves_queued_or_running_worker_session_dir(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    now_ts = time.time()
+    route2_sessions_root = settings.transcode_dir / "browser_playback_route2" / "sessions"
+    session_dir = route2_sessions_root / "worker-session"
+    session_dir.mkdir(parents=True)
+    old_ts = now_ts - (settings.mobile_session_ttl_minutes * 60) - 60
+    os.utime(session_dir, (old_ts, old_ts))
+    manager._route2_workers["worker-protected"] = Route2WorkerRecord(
+        worker_id="worker-protected",
+        session_id="worker-session",
+        epoch_id="epoch-protected",
+        user_id=1,
+        username="alice",
+        auth_session_id=101,
+        media_item_id=401,
+        title="Protected Worker",
+        playback_mode="full",
+        profile="mobile_2160p",
+        source_kind="local",
+        target_position_seconds=0.0,
+        state="queued",
+        assigned_threads=4,
+    )
+
+    manager._cleanup_orphaned_cache_dirs_locked(now_ts)
+
+    assert session_dir.exists()
+
+
+def test_route2_orphan_cleanup_removes_stopped_and_true_orphan_session_dirs(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    now_ts = time.time()
+    route2_sessions_root = settings.transcode_dir / "browser_playback_route2" / "sessions"
+    old_ts = now_ts - (settings.mobile_session_ttl_minutes * 60) - 60
+    stopped_session = _make_route2_session(playback_mode="full")
+    stopped_session.state = "stopped"
+    stopped_dir = route2_sessions_root / stopped_session.session_id
+    orphan_dir = route2_sessions_root / "true-orphan"
+    stopped_dir.mkdir(parents=True)
+    orphan_dir.mkdir(parents=True)
+    os.utime(stopped_dir, (old_ts, old_ts))
+    os.utime(orphan_dir, (old_ts, old_ts))
+    manager._sessions[stopped_session.session_id] = stopped_session
+
+    manager._cleanup_orphaned_cache_dirs_locked(now_ts)
+
+    assert not stopped_dir.exists()
+    assert not orphan_dir.exists()
 
 
 def test_route2_dispatch_adaptive_enabled_local_single_user_can_assign_six(

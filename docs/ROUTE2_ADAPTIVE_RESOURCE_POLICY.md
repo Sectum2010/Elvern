@@ -79,6 +79,20 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Cloud, stale telemetry, pressure, RAM, active-stream protection, exceptions, or unsupported targets must fall back to the fixed assignment instead of failing playback.
 - No reclaim/downshift is implemented. The dispatcher must not count theoretical reclaimable capacity as current capacity.
 
+## Phase 1J-1A Bad-Condition Reserve Instrumentation
+
+- Full Playback's normal healthy startup target remains `120s`; this phase does not change the Full attach/readiness gate.
+- Lite Playback behavior is unchanged in this phase, including the existing 45s slow-start path and pre-existing 15s fast-start path.
+- The future Full bad-condition contract is `target_position_seconds + 30 minutes` of actual contiguous published Route2 content, bounded by media duration.
+- The 30-minute reserve must be satisfied by the published frontier; projected goodput or ETA estimates must not mark the reserve as satisfied.
+- Phase 1J-1A only exposes reserve status and runway-delta instrumentation in admin/status payloads. It does not enforce the reserve in startup readiness or admission.
+- The reserve status uses the epoch attach/target position as the reserve start so the first reserve window for a Full epoch is stable while the user watches.
+- Mature Full supply below `1.05x` is a bad-condition signal; mature supply below `1.0x` is marked as a stronger bad condition. Immature samples must report immature rather than false-trigger the reserve.
+- Background and paused users remain protected. A background/preparing Full session under bad conditions should not be considered a donor until its future reserve contract is satisfied and ongoing health is safe.
+- Active in-memory Route2 session directories and queued/running/stopping Route2 worker session directories must be excluded from orphan cleanup, even if the parent session directory mtime is old while nested epoch/published files are being written.
+- Explicitly stopped or expired orphan session directories may still be cleaned according to policy.
+- Backend restart recovery is not guaranteed yet. A future durable guarantee needs session-level metadata for user id, media item id, profile, playback mode, source fingerprint, cache key, active epoch id, reserve state, explicit stop state, expiry, and last activity.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

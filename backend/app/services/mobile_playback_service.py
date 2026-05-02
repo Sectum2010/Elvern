@@ -192,6 +192,9 @@ ROUTE2_ACTIVE_SUPPLY_HEALTHY_RATE_X = 1.05
 ROUTE2_ACTIVE_SUPPLY_LOW_RATE_X = 1.0
 ROUTE2_ACTIVE_SUPPLY_STRONGLY_LOW_RATE_X = 0.95
 ROUTE2_RUNTIME_DONOR_SUPPLY_RATE_X = 1.2
+ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS = 1800.0
+ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X = ROUTE2_STARTUP_MIN_SUPPLY_RATE_X
+ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X = 1.0
 
 
 @dataclass(slots=True)
@@ -2444,6 +2447,142 @@ class MobilePlaybackManager:
             or cpu_cores_used >= max(1.0, current_threads * 0.85)
         )
 
+    def _route2_runway_delta_status_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> dict[str, object]:
+        supply_model = self._route2_supply_model_locked(epoch)
+        observation_seconds = max(0.0, float(supply_model["observation_seconds"]))
+        mature = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+        if not mature:
+            return {
+                "runway_delta_per_second": None,
+                "runway_delta_observation_seconds": observation_seconds,
+                "runway_delta_mature": False,
+            }
+        supply_rate_x = max(0.0, float(supply_model["effective_rate_x"]))
+        demand_rate_x = 1.0 if session.client_is_playing else 0.0
+        return {
+            "runway_delta_per_second": supply_rate_x - demand_rate_x,
+            "runway_delta_observation_seconds": observation_seconds,
+            "runway_delta_mature": True,
+        }
+
+    def _route2_bad_condition_reserve_status_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> dict[str, object]:
+        actual_ready_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
+        duration_seconds = max(0.0, float(session.duration_seconds or 0.0))
+        reserve_start_seconds = min(
+            max(0.0, float(epoch.attach_position_seconds or session.target_position_seconds or 0.0)),
+            duration_seconds,
+        )
+        reserve_target_ready_end_seconds = min(
+            duration_seconds,
+            reserve_start_seconds + ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS,
+        )
+        reserve_required_seconds = max(0.0, reserve_target_ready_end_seconds - reserve_start_seconds)
+        reserve_remaining_seconds = max(0.0, reserve_target_ready_end_seconds - actual_ready_end_seconds)
+        runway_delta = self._route2_runway_delta_status_locked(session, epoch)
+        supply_model = self._route2_supply_model_locked(epoch)
+        supply_rate_x = max(0.0, float(supply_model["effective_rate_x"]))
+        observation_seconds = max(0.0, float(supply_model["observation_seconds"]))
+        metrics_mature = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+        is_full_route2 = (
+            session.browser_playback.engine_mode == "route2"
+            and session.browser_playback.playback_mode == "full"
+        )
+        coverage_starts_at_reserve = (
+            epoch.init_published
+            and epoch.contiguous_published_through_segment is not None
+            and epoch.epoch_start_seconds <= reserve_start_seconds + 0.001
+        )
+        manifest_fully_published = (
+            duration_seconds <= 0.0
+            or actual_ready_end_seconds + 0.001 >= duration_seconds
+        )
+        reserve_satisfied = bool(
+            is_full_route2
+            and coverage_starts_at_reserve
+            and (
+                actual_ready_end_seconds + 0.001 >= reserve_target_ready_end_seconds
+                or manifest_fully_published
+            )
+        )
+        bad_condition_required = False
+        bad_condition_reason: str | None = None
+        if not is_full_route2:
+            bad_condition_reason = "not_full_playback"
+        elif not metrics_mature:
+            bad_condition_reason = "metrics_immature"
+        elif supply_rate_x < ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X:
+            bad_condition_required = True
+            bad_condition_reason = (
+                "mature_supply_below_1_0"
+                if supply_rate_x < ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X
+                else "mature_supply_below_1_05"
+            )
+        reserve_eta_seconds = None
+        if bad_condition_required and not reserve_satisfied and supply_rate_x > 0.001:
+            reserve_eta_seconds = reserve_remaining_seconds / supply_rate_x
+        return {
+            "bad_condition_reserve_required": bad_condition_required,
+            "bad_condition_reason": bad_condition_reason,
+            "bad_condition_supply_floor": ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X,
+            "bad_condition_strong": bool(
+                is_full_route2
+                and metrics_mature
+                and supply_rate_x < ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X
+            ),
+            "reserve_start_seconds": reserve_start_seconds,
+            "reserve_target_ready_end_seconds": reserve_target_ready_end_seconds,
+            "reserve_actual_ready_end_seconds": actual_ready_end_seconds,
+            "reserve_required_seconds": reserve_required_seconds if is_full_route2 else 0.0,
+            "reserve_remaining_seconds": reserve_remaining_seconds if is_full_route2 else 0.0,
+            "reserve_satisfied": reserve_satisfied,
+            "reserve_blocks_admission": bool(bad_condition_required and not reserve_satisfied),
+            "reserve_eta_seconds": reserve_eta_seconds,
+            "runway_delta_per_second": runway_delta["runway_delta_per_second"],
+            "runway_delta_observation_seconds": runway_delta["runway_delta_observation_seconds"],
+            "runway_delta_mature": runway_delta["runway_delta_mature"],
+        }
+
+    def _route2_bad_condition_reserve_payload_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+    ) -> dict[str, object]:
+        status = self._route2_bad_condition_reserve_status_locked(session, epoch)
+        rounded_payload: dict[str, object] = {
+            "bad_condition_reserve_required": status["bad_condition_reserve_required"],
+            "bad_condition_reason": status["bad_condition_reason"],
+            "bad_condition_supply_floor": round(float(status["bad_condition_supply_floor"]), 3),
+            "bad_condition_strong": status["bad_condition_strong"],
+            "reserve_start_seconds": round(float(status["reserve_start_seconds"]), 2),
+            "reserve_target_ready_end_seconds": round(float(status["reserve_target_ready_end_seconds"]), 2),
+            "reserve_actual_ready_end_seconds": round(float(status["reserve_actual_ready_end_seconds"]), 2),
+            "reserve_required_seconds": round(float(status["reserve_required_seconds"]), 2),
+            "reserve_remaining_seconds": round(float(status["reserve_remaining_seconds"]), 2),
+            "reserve_satisfied": status["reserve_satisfied"],
+            "reserve_blocks_admission": status["reserve_blocks_admission"],
+            "reserve_eta_seconds": (
+                round(float(status["reserve_eta_seconds"]), 2)
+                if status["reserve_eta_seconds"] is not None
+                else None
+            ),
+            "runway_delta_per_second": (
+                round(float(status["runway_delta_per_second"]), 3)
+                if status["runway_delta_per_second"] is not None
+                else None
+            ),
+            "runway_delta_observation_seconds": round(float(status["runway_delta_observation_seconds"]), 2),
+            "runway_delta_mature": status["runway_delta_mature"],
+        }
+        return rounded_payload
+
     def _route2_client_limited_locked(self, session: MobilePlaybackSession, epoch: PlaybackEpoch) -> bool:
         client_goodput = self._route2_client_goodput_locked(session)
         if not bool(client_goodput.get("confident")):
@@ -3412,6 +3551,7 @@ class MobilePlaybackManager:
                     payload["runtime_rebalance_target_threads"] = active_health.runtime_rebalance_target_threads
                     payload["runtime_rebalance_can_donate_threads"] = active_health.runtime_rebalance_can_donate_threads
                     payload["runtime_rebalance_priority"] = active_health.runtime_rebalance_priority
+                    payload.update(self._route2_bad_condition_reserve_payload_locked(session, epoch))
                 else:
                     payload["runtime_playback_health"] = None
                     payload["runtime_playback_health_reason"] = None
@@ -3423,6 +3563,21 @@ class MobilePlaybackManager:
                     payload["runtime_rebalance_target_threads"] = None
                     payload["runtime_rebalance_can_donate_threads"] = 0
                     payload["runtime_rebalance_priority"] = 0
+                    payload["bad_condition_reserve_required"] = False
+                    payload["bad_condition_reason"] = None
+                    payload["bad_condition_supply_floor"] = ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X
+                    payload["bad_condition_strong"] = False
+                    payload["reserve_start_seconds"] = None
+                    payload["reserve_target_ready_end_seconds"] = None
+                    payload["reserve_actual_ready_end_seconds"] = None
+                    payload["reserve_required_seconds"] = None
+                    payload["reserve_remaining_seconds"] = None
+                    payload["reserve_satisfied"] = False
+                    payload["reserve_blocks_admission"] = False
+                    payload["reserve_eta_seconds"] = None
+                    payload["runway_delta_per_second"] = None
+                    payload["runway_delta_observation_seconds"] = None
+                    payload["runway_delta_mature"] = False
                 group["items"].append(payload)
                 payloads_by_worker_id[record.worker_id] = payload
             for group in grouped_users.values():
@@ -6362,22 +6517,34 @@ class MobilePlaybackManager:
         self._cleanup_orphaned_cache_dirs_locked(time.time())
 
     def _cleanup_orphaned_cache_dirs_locked(self, now_ts: float) -> None:
-        if not self._cache_root.exists():
-            return
-        cutoff = now_ts - (self.settings.mobile_cache_ttl_hours * 3600)
-        for child in self._cache_root.iterdir():
-            if not child.is_dir():
-                continue
-            if child.stat().st_mtime >= cutoff:
-                continue
-            logger.info("Removing stale mobile cache directory %s", child)
-            shutil.rmtree(child, ignore_errors=True)
+        if self._cache_root.exists():
+            cutoff = now_ts - (self.settings.mobile_cache_ttl_hours * 3600)
+            for child in self._cache_root.iterdir():
+                if not child.is_dir():
+                    continue
+                if child.stat().st_mtime >= cutoff:
+                    continue
+                logger.info("Removing stale mobile cache directory %s", child)
+                shutil.rmtree(child, ignore_errors=True)
         route2_sessions_root = self._route2_root / "sessions"
         if not route2_sessions_root.exists():
             return
         route2_cutoff = now_ts - (self.settings.mobile_session_ttl_minutes * 60)
+        protected_route2_session_ids = {
+            session.session_id
+            for session in self._sessions.values()
+            if session.browser_playback.engine_mode == "route2"
+            and session.state not in {"stopped", "expired"}
+        }
+        protected_route2_session_ids.update(
+            record.session_id
+            for record in self._route2_workers.values()
+            if record.state in {"queued", "running", "stopping"}
+        )
         for child in route2_sessions_root.iterdir():
             if not child.is_dir():
+                continue
+            if child.name in protected_route2_session_ids:
                 continue
             if child.stat().st_mtime >= route2_cutoff:
                 continue

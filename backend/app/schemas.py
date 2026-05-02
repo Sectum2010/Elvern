@@ -1288,6 +1288,21 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     runtime_rebalance_target_threads: int | None = Field(default=None, ge=0)
     runtime_rebalance_can_donate_threads: int = Field(default=0, ge=0)
     runtime_rebalance_priority: int = Field(default=0, ge=0)
+    bad_condition_reserve_required: bool = False
+    bad_condition_reason: str | None = None
+    bad_condition_supply_floor: float | None = Field(default=None, ge=0)
+    bad_condition_strong: bool = False
+    reserve_start_seconds: float | None = Field(default=None, ge=0)
+    reserve_target_ready_end_seconds: float | None = Field(default=None, ge=0)
+    reserve_actual_ready_end_seconds: float | None = Field(default=None, ge=0)
+    reserve_required_seconds: float | None = Field(default=None, ge=0)
+    reserve_remaining_seconds: float | None = Field(default=None, ge=0)
+    reserve_satisfied: bool = False
+    reserve_blocks_admission: bool = False
+    reserve_eta_seconds: float | None = Field(default=None, ge=0)
+    runway_delta_per_second: float | None = None
+    runway_delta_observation_seconds: float | None = Field(default=None, ge=0)
+    runway_delta_mature: bool = False
     route2_transcode_strategy: str | None = None
     route2_transcode_strategy_confidence: str | None = None
     route2_transcode_strategy_reason: str | None = None

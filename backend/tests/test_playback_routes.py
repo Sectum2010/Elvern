@@ -426,6 +426,21 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "runtime_rebalance_target_threads": 2,
                         "runtime_rebalance_can_donate_threads": 4,
                         "runtime_rebalance_priority": 20,
+                        "bad_condition_reserve_required": True,
+                        "bad_condition_reason": "mature_supply_below_1_05",
+                        "bad_condition_supply_floor": 1.05,
+                        "bad_condition_strong": False,
+                        "reserve_start_seconds": 837.01,
+                        "reserve_target_ready_end_seconds": 2637.01,
+                        "reserve_actual_ready_end_seconds": 957.01,
+                        "reserve_required_seconds": 1800.0,
+                        "reserve_remaining_seconds": 1680.0,
+                        "reserve_satisfied": False,
+                        "reserve_blocks_admission": True,
+                        "reserve_eta_seconds": 1615.38,
+                        "runway_delta_per_second": 0.42,
+                        "runway_delta_observation_seconds": 12.0,
+                        "runway_delta_mature": True,
                         "access_token": "must-not-leak",
                         "full_command_line": "ffmpeg -headers Authorization: Bearer secret",
                         "private_provider_url": "https://drive.google.invalid/file?access_token=secret",
@@ -1369,6 +1384,13 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["runtime_runway_seconds"] == 84.0
     assert first_item["runtime_rebalance_role"] == "donor_candidate"
     assert first_item["runtime_rebalance_can_donate_threads"] == 4
+    assert first_item["bad_condition_reserve_required"] is True
+    assert first_item["bad_condition_reason"] == "mature_supply_below_1_05"
+    assert first_item["reserve_target_ready_end_seconds"] == 2637.01
+    assert first_item["reserve_actual_ready_end_seconds"] == 957.01
+    assert first_item["reserve_remaining_seconds"] == 1680.0
+    assert first_item["reserve_blocks_admission"] is True
+    assert first_item["runway_delta_per_second"] == 0.42
     assert first_item["cpu_cores_used"] == 7.2
     serialized_payload = response.text.lower()
     assert "access_token" not in serialized_payload
