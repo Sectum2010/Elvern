@@ -2599,15 +2599,6 @@ def test_google_drive_stream_proxy_preserves_provider_error_detail(monkeypatch) 
         b'"errors":[{"reason":"downloadQuotaExceeded"}]}}'
     )
 
-    def _raise_http_error(_request, timeout=30):
-        raise HTTPError(
-            request.full_url,
-            403,
-            "Forbidden",
-            hdrs=None,
-            fp=None,
-        )
-
     error = HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
     monkeypatch.setattr(error, "read", lambda: payload)
     monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
@@ -2622,8 +2613,77 @@ def test_google_drive_stream_proxy_preserves_provider_error_detail(monkeypatch) 
         )
     except HTTPException as exc:
         assert exc.status_code == 403
-        assert exc.detail == "The download quota for this file has been exceeded."
+        assert exc.detail == {
+            "code": "provider_quota_exceeded",
+            "provider": "google_drive",
+            "reason_code": "downloadQuotaExceeded",
+            "message": "The download quota for this file has been exceeded.",
+        }
         assert exc.headers["X-Elvern-Stream-Error-Detail"] == "The download quota for this file has been exceeded."
+        assert exc.headers["X-Elvern-Provider-Error-Code"] == "provider_quota_exceeded"
+        assert exc.headers["X-Elvern-Provider-Source-Reason"] == "downloadQuotaExceeded"
+    else:
+        raise AssertionError("Expected proxy_google_drive_file_response to raise HTTPException")
+
+
+def test_google_drive_stream_proxy_maps_auth_error_to_provider_auth(monkeypatch) -> None:
+    request = Request("https://www.googleapis.com/drive/v3/files/demo?alt=media")
+    payload = (
+        b'{'
+        b'"error":{"code":401,"status":"UNAUTHENTICATED","message":"Invalid Credentials",'
+        b'"errors":[{"reason":"authError"}]}}'
+    )
+
+    error = HTTPError(request.full_url, 401, "Unauthorized", hdrs=None, fp=None)
+    monkeypatch.setattr(error, "read", lambda: payload)
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
+
+    try:
+        proxy_google_drive_file_response(
+            "token",
+            file_id="demo",
+            filename="inside-out.mkv",
+            resource_key=None,
+            range_header="bytes=0-0",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["code"] == "provider_auth_required"
+        assert exc.detail["provider_reason"] == "token_expired_or_revoked"
+    else:
+        raise AssertionError("Expected proxy_google_drive_file_response to raise HTTPException")
+
+
+def test_google_drive_stream_proxy_maps_forbidden_source_error(monkeypatch) -> None:
+    request = Request("https://www.googleapis.com/drive/v3/files/demo?alt=media")
+    payload = (
+        b'{'
+        b'"error":{"code":403,"message":"File is not accessible with the supplied resource key.",'
+        b'"errors":[{"reason":"fileNotDownloadable"}]}}'
+    )
+
+    error = HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
+    monkeypatch.setattr(error, "read", lambda: payload)
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
+
+    try:
+        proxy_google_drive_file_response(
+            "token",
+            file_id="demo",
+            filename="inside-out.mkv",
+            resource_key="wrong-resource-key",
+            range_header="bytes=0-0",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert exc.detail == {
+            "code": "provider_source_error",
+            "provider": "google_drive",
+            "reason_code": "fileNotDownloadable",
+            "message": "File is not accessible with the supplied resource key.",
+        }
+        assert exc.headers["X-Elvern-Provider-Error-Code"] == "provider_source_error"
+        assert exc.headers["X-Elvern-Provider-Source-Reason"] == "fileNotDownloadable"
     else:
         raise AssertionError("Expected proxy_google_drive_file_response to raise HTTPException")
 
@@ -2634,11 +2694,15 @@ def test_probe_worker_source_input_error_uses_head_and_stream_error_headers(monk
 
     def _raise_http_error(http_request, timeout=15):
         seen["method"] = http_request.get_method()
+        seen["range"] = http_request.headers.get("Range")
         error = HTTPError(
             request.full_url,
             403,
             "Forbidden",
-            hdrs={"X-Elvern-Stream-Error-Detail": "The download quota for this file has been exceeded."},
+            hdrs={
+                "X-Elvern-Stream-Error-Detail": "The download quota for this file has been exceeded.",
+                "X-Elvern-Provider-Error-Code": "provider_quota_exceeded",
+            },
             fp=None,
         )
         raise error
@@ -2651,6 +2715,7 @@ def test_probe_worker_source_input_error_uses_head_and_stream_error_headers(monk
     detail = _probe_worker_source_input_error(request.full_url)
 
     assert seen["method"] == "HEAD"
+    assert seen["range"] == "bytes=0-0"
     assert detail == "The download quota for this file has been exceeded."
 
 
@@ -2685,6 +2750,74 @@ def test_google_drive_stream_proxy_forwards_range_header(monkeypatch) -> None:
 
     assert seen["range"] == "bytes=0-0"
     assert response.status_code == 206
+
+
+def test_google_drive_stream_proxy_uses_bounded_fallback_range_when_missing(monkeypatch) -> None:
+    seen: dict[str, str | None] = {}
+
+    class _FakeResponse:
+        status = 206
+        headers = {
+            "Content-Length": "65536",
+            "Content-Range": "bytes 0-65535/1000000",
+            "Content-Type": "video/mp4",
+            "Accept-Ranges": "bytes",
+        }
+
+        def read(self, _size=-1):
+            return b""
+
+    def _open(request, timeout=30):
+        seen["range"] = request.headers.get("Range")
+        return _FakeResponse()
+
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+
+    response = proxy_google_drive_file_response(
+        "token",
+        file_id="demo",
+        filename="demo.mp4",
+        resource_key=None,
+        range_header=None,
+        validated_chunk_size=64 * 1024,
+    )
+
+    assert seen["range"] == "bytes=0-65535"
+    assert response.status_code == 206
+    assert response.headers["X-Elvern-Cloud-Range-Fallback"] == "bytes=0-65535"
+
+
+def test_google_drive_stream_proxy_includes_resource_key(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    class _FakeResponse:
+        status = 206
+        headers = {
+            "Content-Length": "1",
+            "Content-Range": "bytes 0-0/1",
+            "Content-Type": "video/mp4",
+            "Accept-Ranges": "bytes",
+        }
+
+        def read(self, _size=-1):
+            return b""
+
+    def _open(request, timeout=30):
+        seen["url"] = request.full_url
+        return _FakeResponse()
+
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+
+    proxy_google_drive_file_response(
+        "token",
+        file_id="demo",
+        filename="demo.mp4",
+        resource_key="resource-key",
+        range_header="bytes=0-0",
+    )
+
+    assert "supportsAllDrives=true" in seen["url"]
+    assert "resourceKey=resource-key" in seen["url"]
 
 
 def test_lite_route2_does_not_start_full_preflight_worker(monkeypatch) -> None:

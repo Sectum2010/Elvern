@@ -114,6 +114,21 @@ test("playback admission helper does not map provider source fallback to server 
 });
 
 
+test("playback admission helper normalizes provider quota without server busy", () => {
+  const detail = getPlaybackAdmissionError({
+    detail: {
+      code: "provider_quota_exceeded",
+      reason_code: "downloadQuotaExceeded",
+    },
+  });
+  assert.deepEqual(detail, {
+    code: "provider_quota_exceeded",
+    reasonCode: "downloadQuotaExceeded",
+    message: "The download quota for this file has been exceeded. Try again later or choose another source.",
+  });
+});
+
+
 test("playback admission helper ignores provider auth requirement details", () => {
   assert.equal(
     getPlaybackAdmissionError({

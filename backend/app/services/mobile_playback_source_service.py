@@ -184,7 +184,7 @@ def _probe_worker_source_input_error(source_input: str) -> str | None:
     parsed = urlsplit(source_input)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
-    request = Request(source_input, method="HEAD")
+    request = Request(source_input, headers={"Range": "bytes=0-0"}, method="HEAD")
     try:
         with urlopen(request, timeout=15):
             return None
@@ -195,9 +195,17 @@ def _probe_worker_source_input_error(source_input: str) -> str | None:
         if header_detail:
             detail = str(header_detail).strip() or None
         if not detail:
+            provider_error_code = error_headers.get("X-Elvern-Provider-Error-Code")
+            if provider_error_code:
+                detail = str(provider_error_code).strip() or None
+        if not detail:
             provider_reason = error_headers.get("X-Elvern-Provider-Reason")
             if provider_reason:
                 detail = str(provider_reason).strip() or None
+        if not detail:
+            provider_source_reason = error_headers.get("X-Elvern-Provider-Source-Reason")
+            if provider_source_reason:
+                detail = str(provider_source_reason).strip() or None
         try:
             if not detail:
                 payload = json.loads(exc.read().decode("utf-8"))

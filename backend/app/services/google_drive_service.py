@@ -34,6 +34,8 @@ GOOGLE_DRIVE_SCOPES = (
 )
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 PROVIDER_AUTH_REQUIRED_CODE = "provider_auth_required"
+PROVIDER_QUOTA_EXCEEDED_CODE = "provider_quota_exceeded"
+PROVIDER_SOURCE_ERROR_CODE = "provider_source_error"
 VALIDATED_UPSTREAM_STREAM_DEFAULT_CHUNK_SIZE = 64 * 1024
 
 
@@ -156,6 +158,8 @@ def _google_provider_auth_reason_from_error(
         return None
     if "invalid_grant" in combined or "invalid_token" in combined:
         return "token_expired_or_revoked"
+    if "unauthenticated" in combined or "invalid credentials" in combined or "autherror" in combined:
+        return "token_expired_or_revoked"
     if "expired" in combined:
         return "token_expired_or_revoked"
     if "revoked" in combined:
@@ -169,9 +173,10 @@ def _parse_google_drive_http_error(
     exc: HTTPError,
     *,
     default_detail: str,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     detail = default_detail
     provider_auth_reason = None
+    provider_source_reason = None
     try:
         payload = json.loads(exc.read().decode("utf-8"))
         error = payload.get("error") if isinstance(payload, dict) else None
@@ -181,6 +186,22 @@ def _parse_google_drive_http_error(
                 error_code=error.get("status") or error.get("code"),
                 error_description=error.get("message"),
             )
+            errors = error.get("errors")
+            if isinstance(errors, list):
+                for entry in errors:
+                    if not isinstance(entry, dict):
+                        continue
+                    reason = str(entry.get("reason") or "").strip()
+                    if reason:
+                        if not provider_auth_reason:
+                            provider_auth_reason = _google_provider_auth_reason_from_error(
+                                error_code=reason,
+                                error_description=detail,
+                            )
+                        if provider_auth_reason:
+                            break
+                        provider_source_reason = reason
+                        break
         elif isinstance(error, str):
             detail = error
             provider_auth_reason = _google_provider_auth_reason_from_error(
@@ -189,19 +210,43 @@ def _parse_google_drive_http_error(
             )
     except Exception:
         pass
-    return detail, provider_auth_reason
+    return detail, provider_auth_reason, provider_source_reason
+
+
+def _google_drive_provider_source_code(provider_source_reason: str | None) -> str:
+    normalized = str(provider_source_reason or "").strip().lower()
+    if normalized == "downloadquotaexceeded":
+        return PROVIDER_QUOTA_EXCEEDED_CODE
+    return PROVIDER_SOURCE_ERROR_CODE
+
+
+def build_google_drive_provider_source_error_detail(
+    *,
+    message: str,
+    reason_code: str | None = None,
+) -> dict[str, object]:
+    return {
+        "code": _google_drive_provider_source_code(reason_code),
+        "provider": "google_drive",
+        "reason_code": reason_code or "provider_source_error",
+        "message": message,
+    }
 
 
 def _stream_error_headers(
     *,
     detail: str,
     provider_auth_reason: str | None = None,
+    provider_source_reason: str | None = None,
 ) -> dict[str, str]:
     headers = {
         "X-Elvern-Stream-Error-Detail": detail,
     }
     if provider_auth_reason:
         headers["X-Elvern-Provider-Reason"] = provider_auth_reason
+    if provider_source_reason:
+        headers["X-Elvern-Provider-Source-Reason"] = provider_source_reason
+        headers["X-Elvern-Provider-Error-Code"] = _google_drive_provider_source_code(provider_source_reason)
     return headers
 
 
@@ -332,8 +377,17 @@ def proxy_google_drive_file_response(
     stream_validator: Callable[[], bool] | None = None,
 ) -> StreamingResponse:
     headers = {"Authorization": f"Bearer {access_token}"}
-    if range_header:
-        headers["Range"] = range_header
+    requested_range_header = str(range_header or "").strip()
+    fallback_range_header = None
+    if requested_range_header:
+        headers["Range"] = requested_range_header
+    else:
+        # Google Drive often rejects unbounded alt=media opens for large videos
+        # as download-quota failures. Keep cloud playback probes bounded and let
+        # media clients continue with explicit Range requests.
+        fallback_size = max(1, int(validated_chunk_size or chunk_size or VALIDATED_UPSTREAM_STREAM_DEFAULT_CHUNK_SIZE))
+        fallback_range_header = f"bytes=0-{fallback_size - 1}"
+        headers["Range"] = fallback_range_header
     query = {
         "alt": "media",
         "supportsAllDrives": "true",
@@ -347,7 +401,7 @@ def proxy_google_drive_file_response(
     try:
         upstream = urlopen(request, timeout=30)
     except HTTPError as exc:
-        detail, provider_auth_reason = _parse_google_drive_http_error(
+        detail, provider_auth_reason, provider_source_reason = _parse_google_drive_http_error(
             exc,
             default_detail="Cloud media file could not be streamed.",
         )
@@ -360,10 +414,18 @@ def proxy_google_drive_file_response(
             detail = "Cloud media file not found."
         raise HTTPException(
             status_code=exc.code,
-            detail=detail,
+            detail=(
+                build_google_drive_provider_source_error_detail(
+                    message=detail,
+                    reason_code=provider_source_reason,
+                )
+                if provider_source_reason
+                else detail
+            ),
             headers=_stream_error_headers(
                 detail=detail,
                 provider_auth_reason=provider_auth_reason,
+                provider_source_reason=provider_source_reason,
             ),
         ) from exc
     except URLError as exc:
@@ -377,6 +439,8 @@ def proxy_google_drive_file_response(
         "Accept-Ranges": upstream_headers.get("Accept-Ranges", "bytes"),
         "Cache-Control": "private, max-age=0, must-revalidate",
     }
+    if fallback_range_header:
+        response_headers["X-Elvern-Cloud-Range-Fallback"] = fallback_range_header
     for header_name in ("Content-Length", "Content-Range"):
         header_value = upstream_headers.get(header_name)
         if header_value:
@@ -595,7 +659,7 @@ def _get_json(
         with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        detail, provider_auth_reason = _parse_google_drive_http_error(
+        detail, provider_auth_reason, _provider_source_reason = _parse_google_drive_http_error(
             exc,
             default_detail="Google Drive request failed.",
         )

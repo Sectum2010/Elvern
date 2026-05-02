@@ -611,6 +611,7 @@ def _is_non_retryable_cloud_source_error(error: str | None) -> bool:
         "download quota" in normalized
         or "quota exceeded" in normalized
         or "downloadquotaexceeded" in normalized
+        or "provider_quota_exceeded" in normalized
     )
 
 

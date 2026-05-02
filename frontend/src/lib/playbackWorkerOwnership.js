@@ -43,13 +43,15 @@ export function getPlaybackAdmissionError(error) {
     return null;
   }
   const code = typeof detail.code === "string" ? detail.code : "";
-  if (!["same_user_active_playback_limit", "server_max_capacity", "provider_source_error"].includes(code)) {
+  if (!["same_user_active_playback_limit", "server_max_capacity", "provider_source_error", "provider_quota_exceeded"].includes(code)) {
     return null;
   }
   const fallbackMessage = code === "same_user_active_playback_limit"
     ? "You already have an active playback. Stop it or switch before starting another."
-    : code === "provider_source_error"
-      ? "Playback source is unavailable. Reconnect the provider or try again later."
+    : code === "provider_quota_exceeded"
+      ? "The download quota for this file has been exceeded. Try again later or choose another source."
+      : code === "provider_source_error"
+        ? "Playback source is unavailable. Reconnect the provider or try again later."
       : "Server is busy. Please try again later.";
   const message = typeof detail.message === "string" && detail.message.trim()
     ? detail.message.trim()

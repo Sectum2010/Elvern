@@ -195,3 +195,47 @@ Keep platform/install status behavior honest: no installed label without a real 
 - Do not reintroduce fake Installed labels from blur/pagehide/visibilitychange.
 - Do not collapse helper installed, helper verified, VLC installed, and VLC launch worked into one state.
 - Failed scheme-open must downgrade stale Installed state.
+
+## Google Drive Cloud Playback Range / Provider Error Regression
+
+### Status
+Fixed with service-level tiny-range validation. Full live playback was not stress-tested as part of the fix.
+
+### Affected Platforms
+All cloud movie playback paths that depend on the Google Drive cloud stream proxy, including browser playback, Route2 source resolution, and native/VLC cloud stream handoff.
+
+### Symptoms
+Cloud movies could fail with Google Drive quota-looking errors even when the cloud item and bounded range reads were still accessible. The visible message could be "The download quota for this file has been exceeded."
+
+### Wrong Or Incomplete Hypotheses
+Treating this only as a real Google Drive quota problem was incomplete. Treating it only as frontend copy was also incomplete. Source probes that use small explicit ranges can pass while playback/proxy paths still fail if those paths make a different upstream request shape.
+
+### Evidence That Identified The Real Cause
+Tiny direct Google Drive metadata and bounded range probes worked for multiple cloud items. For one large cloud item, direct no-range media access returned Google Drive `downloadQuotaExceeded`, while direct bounded ranges such as `bytes=0-0` and `bytes=0-1048575` returned `206`.
+
+The Elvern cloud stream path could forward no client `Range` as an unbounded Google Drive media request. Route2 source validation also used a no-range `HEAD` probe. Those request shapes can hit provider quota behavior even when bounded byte ranges are still usable.
+
+### Real Root Cause
+The production cloud proxy/source-validation path allowed unbounded or open-ended Google Drive media opens for large cloud files. Google Drive can reject those with quota errors even when small bounded byte ranges work. Provider errors were also not normalized precisely enough across stream paths.
+
+### Correct Fix
+When the client supplies a `Range`, preserve it exactly. When the client does not supply a `Range`, use a small bounded fallback upstream range instead of an unbounded full-file media request. Route2 source validation should probe cloud stream inputs with `Range: bytes=0-0`. Google Drive provider errors should keep structured source taxonomy, including `provider_quota_exceeded`, without mapping them to server capacity or same-user playback conflicts.
+
+### Regression Guards
+Keep tests that verify:
+
+- Elvern forwards explicit client `Range` headers to Google Drive.
+- Elvern includes `supportsAllDrives=true`.
+- Elvern includes `resourceKey` when present.
+- Elvern cloud stream tiny range returns `206` when mocked Drive returns `206`.
+- Missing client `Range` becomes a bounded fallback range, not a full-file upstream request.
+- Google Drive `downloadQuotaExceeded` maps to `provider_quota_exceeded`, not `provider_auth_required`.
+- Provider/source errors are not mapped to `server_max_capacity` or `same_user_active_playback_limit`.
+- Non-retryable provider/source errors do not create Route2 replacement loops.
+
+### Do Not Regress
+- Do not debug live cloud playback failures by running benchmark matrices first.
+- Do not assume source-probe success proves playback path success; compare the exact proxy/request shape.
+- Do not make unbounded Google Drive media requests for large cloud files from playback/proxy validation.
+- Do not log access tokens, refresh tokens, cookies, signed URLs, or full private provider URLs.
+- Do not hide cloud provider/source errors as server busy or generic playback failures.
