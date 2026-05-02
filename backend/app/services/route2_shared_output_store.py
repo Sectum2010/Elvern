@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -91,6 +92,60 @@ def shared_segment_filename(index: int) -> str:
     if segment_index < 0:
         raise ValueError("Segment index must be non-negative")
     return f"abs_{segment_index:012d}.m4s"
+
+
+def build_route2_init_metadata(init_path: Path | None) -> dict[str, object]:
+    if init_path is None:
+        return {
+            "route2_init_available": False,
+            "route2_init_hash_sha256": None,
+            "route2_init_hash_available": False,
+            "route2_init_hash_reason": "pending_init",
+            "route2_init_size_bytes": None,
+            "route2_init_metadata_available": False,
+            "route2_init_compatibility_status": "pending_init",
+            "route2_init_compatibility_blockers": ["pending_init_compatibility"],
+        }
+    path = Path(init_path)
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return {
+            "route2_init_available": False,
+            "route2_init_hash_sha256": None,
+            "route2_init_hash_available": False,
+            "route2_init_hash_reason": "pending_init",
+            "route2_init_size_bytes": None,
+            "route2_init_metadata_available": False,
+            "route2_init_compatibility_status": "pending_init",
+            "route2_init_compatibility_blockers": ["pending_init_compatibility"],
+        }
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return {
+            "route2_init_available": True,
+            "route2_init_hash_sha256": None,
+            "route2_init_hash_available": False,
+            "route2_init_hash_reason": "hash_unavailable",
+            "route2_init_size_bytes": stat_result.st_size,
+            "route2_init_metadata_available": False,
+            "route2_init_compatibility_status": "unavailable",
+            "route2_init_compatibility_blockers": ["init_hash_unavailable"],
+        }
+    return {
+        "route2_init_available": True,
+        "route2_init_hash_sha256": digest.hexdigest(),
+        "route2_init_hash_available": True,
+        "route2_init_hash_reason": "hash_available",
+        "route2_init_size_bytes": stat_result.st_size,
+        "route2_init_metadata_available": True,
+        "route2_init_compatibility_status": "hash_available",
+        "route2_init_compatibility_blockers": [],
+    }
 
 
 def _canonical_segment_index_candidate(
@@ -348,6 +403,7 @@ def build_shared_store_write_plan(
     output_contract_fingerprint: str | None,
     output_contract_missing_fields: Iterable[str] = (),
     init_compatibility_validated: bool = False,
+    init_compatibility_status: str | None = None,
     permission_status: str | None = None,
     metadata_only: bool = True,
     segment_writer_enabled: bool = False,
@@ -375,7 +431,13 @@ def build_shared_store_write_plan(
         blockers.add("missing_output_contract")
     if list(output_contract_missing_fields):
         blockers.add("output_contract_incomplete")
-    if not init_compatibility_validated:
+    normalized_init_status = str(init_compatibility_status or "").strip()
+    init_compatible = bool(init_compatibility_validated or normalized_init_status == "compatible_by_hash")
+    if normalized_init_status == "mismatch":
+        blockers.add("init_mismatch")
+    elif normalized_init_status in {"pending", "pending_init", "unavailable"}:
+        blockers.add("pending_init_compatibility")
+    elif not init_compatible:
         blockers.add("missing_init_compatibility")
     if permission_status not in {"verified_local", "verified_cloud"}:
         blockers.add("permission_context_unverified")

@@ -180,6 +180,7 @@ from .route2_shared_output_store import (
     SHARED_OUTPUT_STORE_BLOCKERS,
     absolute_segment_end_index_exclusive_from_seconds,
     absolute_segment_index_from_seconds,
+    build_route2_init_metadata,
     build_shared_output_store_capability,
     build_shared_store_write_plan,
 )
@@ -438,6 +439,7 @@ class _Route2SharedSupplyWorkload:
     output_contract_version: str
     output_contract_missing_fields: list[str]
     output_contract_summary: dict[str, object]
+    init_metadata: dict[str, object]
     group_key: str | None
     permission_status: str
     blockers: list[str]
@@ -4316,6 +4318,7 @@ class MobilePlaybackManager:
         output_contract_missing_fields: list[str] = []
         output_contract_summary: dict[str, object] = {}
         output_contract_version = ROUTE2_OUTPUT_CONTRACT_VERSION
+        init_metadata = build_route2_init_metadata(None)
         source_fingerprint = ""
         source_kind = record.source_kind
         profile = record.profile
@@ -4353,6 +4356,7 @@ class MobilePlaybackManager:
             epoch_start_seconds = float(epoch.epoch_start_seconds)
             if not prepared_ranges:
                 prepared_ranges = self._route2_epoch_prepared_ranges_locked(session, epoch) if session is not None else []
+            init_metadata = build_route2_init_metadata(epoch.published_init_path if epoch.init_published else None)
             if epoch.stop_requested:
                 blockers.append("explicit_stop_requested")
             if _is_non_retryable_cloud_source_error(epoch.last_error):
@@ -4375,6 +4379,7 @@ class MobilePlaybackManager:
             output_contract_version=output_contract_version,
             output_contract_missing_fields=sorted(set(output_contract_missing_fields)),
             output_contract_summary=output_contract_summary,
+            init_metadata=init_metadata,
             group_key=group_key,
             permission_status=permission_status,
             blockers=sorted(set(blockers)),
@@ -4469,9 +4474,50 @@ class MobilePlaybackManager:
             return "same_group_only", ["insufficient_frontier_data", "shared_store_missing"]
         return "same_group_only", ["epoch_window_mismatch", "non_overlapping_window", "shared_store_missing"]
 
+    def _route2_shared_supply_init_group_status(
+        self,
+        members: list[_Route2SharedSupplyWorkload],
+    ) -> dict[str, object]:
+        if not members:
+            return {
+                "status": "unknown",
+                "hashes_match": False,
+                "blockers": ["pending_init_compatibility"],
+            }
+        available_hashes = [
+            str(member.init_metadata.get("route2_init_hash_sha256") or "")
+            for member in members
+            if bool(member.init_metadata.get("route2_init_hash_available"))
+            and str(member.init_metadata.get("route2_init_hash_sha256") or "").strip()
+        ]
+        if len(available_hashes) < len(members):
+            pending_blockers = sorted({
+                str(blocker)
+                for member in members
+                for blocker in (member.init_metadata.get("route2_init_compatibility_blockers") or [])
+            })
+            return {
+                "status": "pending" if any(available_hashes) else "pending_init",
+                "hashes_match": False,
+                "blockers": pending_blockers or ["pending_init_compatibility"],
+            }
+        if len(set(available_hashes)) == 1:
+            return {
+                "status": "compatible_by_hash" if len(members) > 1 else "hash_available",
+                "hashes_match": True,
+                "blockers": [],
+            }
+        return {
+            "status": "mismatch",
+            "hashes_match": False,
+            "blockers": ["init_mismatch"],
+        }
+
     def _route2_shared_store_write_plan_locked(
         self,
         workload: _Route2SharedSupplyWorkload,
+        *,
+        init_compatibility_status: str | None = None,
     ) -> dict[str, object]:
         session = self._sessions.get(workload.session_id)
         epoch = (
@@ -4500,6 +4546,7 @@ class MobilePlaybackManager:
             output_contract_fingerprint=workload.output_contract_fingerprint,
             output_contract_missing_fields=workload.output_contract_missing_fields,
             init_compatibility_validated=False,
+            init_compatibility_status=init_compatibility_status,
             permission_status=workload.permission_status,
             metadata_only=True,
             segment_writer_enabled=False,
@@ -4520,6 +4567,12 @@ class MobilePlaybackManager:
             "same_group_only": 1,
             "cached_region_candidate": 2,
             "overlapping_epoch_candidate": 3,
+        }
+        init_status_by_group_key = {
+            group_key: self._route2_shared_supply_init_group_status(
+                [item for item in workloads.values() if item.group_key == group_key]
+            )
+            for group_key in sorted({item.group_key for item in workloads.values() if item.group_key})
         }
         for worker_id, payload in payloads_by_worker_id.items():
             workload = workloads.get(worker_id)
@@ -4568,13 +4621,34 @@ class MobilePlaybackManager:
                     prepared_end_seconds,
                     SEGMENT_DURATION_SECONDS,
                 )
-            write_plan = self._route2_shared_store_write_plan_locked(workload)
+            init_group_status = (
+                init_status_by_group_key.get(workload.group_key)
+                if workload.group_key
+                else self._route2_shared_supply_init_group_status([workload])
+            ) or {}
+            init_status = str(init_group_status.get("status") or workload.init_metadata.get("route2_init_compatibility_status") or "unknown")
+            init_blockers = [str(item) for item in init_group_status.get("blockers") or []]
+            blockers.update(init_blockers)
+            write_plan = self._route2_shared_store_write_plan_locked(
+                workload,
+                init_compatibility_status=init_status,
+            )
             payload["shared_supply_candidate"] = bool(compatible_workloads)
             payload["shared_supply_group_key"] = workload.group_key
             payload["shared_output_key"] = workload.group_key
             payload["absolute_segment_index_start_candidate"] = absolute_start_candidate
             payload["absolute_segment_index_end_candidate"] = absolute_end_candidate
             payload["shared_output_store_blockers"] = list(SHARED_OUTPUT_STORE_BLOCKERS)
+            payload["route2_init_available"] = bool(workload.init_metadata["route2_init_available"])
+            payload["route2_init_hash_sha256"] = workload.init_metadata["route2_init_hash_sha256"]
+            payload["route2_init_hash_available"] = bool(workload.init_metadata["route2_init_hash_available"])
+            payload["route2_init_hash_reason"] = workload.init_metadata["route2_init_hash_reason"]
+            payload["route2_init_size_bytes"] = workload.init_metadata["route2_init_size_bytes"]
+            payload["route2_init_metadata_available"] = bool(workload.init_metadata["route2_init_metadata_available"])
+            payload["route2_init_compatibility_status"] = init_status
+            payload["route2_init_compatibility_blockers"] = init_blockers or list(
+                workload.init_metadata["route2_init_compatibility_blockers"]
+            )
             payload["shared_store_write_plan_available"] = bool(write_plan["shared_store_write_plan_available"])
             payload["shared_store_candidate_range_start_index"] = write_plan[
                 "candidate_confirmed_range_start_index"
@@ -4618,12 +4692,14 @@ class MobilePlaybackManager:
                 for item in members
                 if item.worker_id in payloads_by_worker_id
             ]
+            init_group_status = init_status_by_group_key.get(group_key) or {}
             candidate_count = sum(1 for item in member_payloads if bool(item.get("shared_supply_candidate")))
             blockers = sorted({
                 blocker
                 for item in member_payloads
                 for blocker in (item.get("shared_supply_blockers") or [])
             })
+            blockers = sorted(set(blockers) | {str(item) for item in init_group_status.get("blockers") or []})
             summaries.append(
                 {
                     "group_key": group_key,
@@ -4631,6 +4707,9 @@ class MobilePlaybackManager:
                     "candidate_count": candidate_count,
                     "blockers": blockers,
                     "estimated_duplicate_workers_avoided": max(0, candidate_count - 1),
+                    "shared_supply_group_init_compatibility_status": init_group_status.get("status"),
+                    "shared_supply_group_init_hashes_match": bool(init_group_status.get("hashes_match")),
+                    "shared_supply_group_init_blockers": list(init_group_status.get("blockers") or []),
                 }
             )
         return summaries

@@ -174,6 +174,15 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Admin/status may expose a proposed shared confirmed range from the currently published contiguous frontier, but this remains a proposal only. Current write candidates remain blocked by phase guards such as `metadata_only`, `no_segment_writer`, `no_shared_manifest`, and `missing_init_compatibility`.
 - No `ranges.json`, `init.mp4`, or `segments/abs_*.m4s` files are created or updated in this phase.
 
+## Phase 1K-2C Route2 Init Compatibility Dry Run
+
+- Phase 1K-2C adds admin/status-only `init.mp4` compatibility evidence. It does not write shared media bytes, serve from a shared store, copy, hardlink, symlink, move, reuse, attach sessions, or create shared workers/output.
+- Matching output contracts are necessary but not sufficient for future segment reuse. A future writer must also prove that fMP4 `init.mp4` is compatible before any shared segment can be trusted.
+- Route2 hashes only the already-published epoch-local `init.mp4` file. It does not hash source media, does not expose local init paths, and does not expose source paths, command lines, URLs, tokens, or cookies.
+- Per-worker status may report init availability, SHA-256 hash availability, init size, and compatibility state. Shared-supply group status compares hashes for workloads with the same output contract.
+- If all active group hashes are available and match, the group reports `compatible_by_hash`. If any hash differs, the group reports `mismatch` and blocks future sharing with `init_mismatch`. If any init is unavailable, the group remains pending with `pending_init_compatibility`.
+- A matching init hash removes only the init-specific write-plan blocker. Real sharing remains blocked by `metadata_only`, `no_segment_writer`, `no_shared_manifest`, and future checksum/lease/permission work.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

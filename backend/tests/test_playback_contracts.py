@@ -105,6 +105,7 @@ from backend.app.services.route2_shared_output_store import (
     add_confirmed_range,
     build_epoch_relative_segment_mapping,
     build_ranges_metadata,
+    build_route2_init_metadata,
     build_shared_output_contract_metadata,
     build_shared_output_lease_metadata,
     build_shared_store_write_plan,
@@ -5150,6 +5151,14 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "absolute_segment_index_start_candidate" in item_payload
     assert "absolute_segment_index_end_candidate" in item_payload
     assert "shared_output_store_blockers" in item_payload
+    assert "route2_init_available" in item_payload
+    assert "route2_init_hash_available" in item_payload
+    assert "route2_init_hash_sha256" in item_payload
+    assert "route2_init_hash_reason" in item_payload
+    assert "route2_init_size_bytes" in item_payload
+    assert "route2_init_metadata_available" in item_payload
+    assert "route2_init_compatibility_status" in item_payload
+    assert "route2_init_compatibility_blockers" in item_payload
     assert "shared_store_write_plan_available" in item_payload
     assert "shared_store_candidate_range_start_index" in item_payload
     assert "shared_store_candidate_range_end_index_exclusive" in item_payload
@@ -8494,6 +8503,27 @@ def test_route2_shared_store_write_plan_blocks_current_metadata_only_phase(
     assert not output_root.exists()
 
 
+def test_route2_init_hash_helper_handles_available_and_missing_init(tmp_path: Path) -> None:
+    init_path = tmp_path / "init.mp4"
+    init_path.write_bytes(b"route2-init-payload")
+
+    metadata = build_route2_init_metadata(init_path)
+    expected_hash = hashlib.sha256(b"route2-init-payload").hexdigest()
+
+    assert metadata["route2_init_available"] is True
+    assert metadata["route2_init_hash_available"] is True
+    assert metadata["route2_init_hash_sha256"] == expected_hash
+    assert metadata["route2_init_size_bytes"] == len(b"route2-init-payload")
+    assert metadata["route2_init_compatibility_status"] == "hash_available"
+    assert str(init_path) not in json.dumps(metadata, sort_keys=True)
+
+    missing = build_route2_init_metadata(tmp_path / "missing-init.mp4")
+    assert missing["route2_init_available"] is False
+    assert missing["route2_init_hash_available"] is False
+    assert missing["route2_init_compatibility_status"] == "pending_init"
+    assert "pending_init_compatibility" in missing["route2_init_compatibility_blockers"]
+
+
 def test_route2_shared_store_write_plan_can_mark_future_aligned_segment_candidate(
     initialized_settings,
 ) -> None:
@@ -8508,7 +8538,7 @@ def test_route2_shared_store_write_plan_can_mark_future_aligned_segment_candidat
         segment_duration_seconds=2.0,
         output_contract_fingerprint="contract-fingerprint",
         output_contract_missing_fields=[],
-        init_compatibility_validated=True,
+        init_compatibility_status="compatible_by_hash",
         permission_status="verified_local",
         metadata_only=False,
         segment_writer_enabled=True,
@@ -8516,6 +8546,7 @@ def test_route2_shared_store_write_plan_can_mark_future_aligned_segment_candidat
     )
 
     assert plan["shared_store_write_candidate_count"] == 1
+    assert "missing_init_compatibility" not in plan["shared_store_write_blockers"]
     assert plan["segment_plans"][0]["shared_store_write_candidate"] is True
     assert plan["segment_plans"][0]["absolute_segment_index_candidate"] == 15
     assert plan["segment_plans"][0]["expected_shared_segment_path"].endswith(
@@ -8549,6 +8580,139 @@ def test_route2_shared_store_write_plan_blocks_missing_contract_and_init(
     assert "output_contract_incomplete" in plan["shared_store_write_blockers"]
     assert "missing_init_compatibility" in plan["shared_store_write_blockers"]
     assert "permission_context_unverified" in plan["shared_store_write_blockers"]
+
+
+def test_route2_shared_supply_group_same_init_hash_is_compatible_by_hash(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=433, relative_name="route2/shared-supply/init-same.mp4"),
+    )
+    _session_a, epoch_a, _record_a = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="init-same-a",
+        username="alice",
+        prepared_ranges=[[0.0, 20.0]],
+    )
+    _session_b, epoch_b, _record_b = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="init-same-b",
+        username="bob",
+        prepared_ranges=[[0.0, 20.0]],
+    )
+    epoch_a.published_init_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch_b.published_init_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch_a.published_init_path.write_bytes(b"same-init")
+    epoch_b.published_init_path.write_bytes(b"same-init")
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "init-same-a")
+    group = status["shared_supply_groups"][0]
+
+    assert item_a["route2_init_available"] is True
+    assert item_a["route2_init_hash_available"] is True
+    assert item_a["route2_init_hash_sha256"] == hashlib.sha256(b"same-init").hexdigest()
+    assert item_a["route2_init_compatibility_status"] == "compatible_by_hash"
+    assert item_a["route2_init_compatibility_blockers"] == []
+    assert group["shared_supply_group_init_compatibility_status"] == "compatible_by_hash"
+    assert group["shared_supply_group_init_hashes_match"] is True
+    assert group["shared_supply_group_init_blockers"] == []
+    assert "missing_init_compatibility" not in item_a["shared_store_write_blockers"]
+    assert "pending_init_compatibility" not in item_a["shared_store_write_blockers"]
+    assert "metadata_only" in item_a["shared_store_write_blockers"]
+    assert item_a["shared_store_write_candidate_count"] == 0
+
+
+def test_route2_shared_supply_group_different_init_hash_blocks_candidate(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=434, relative_name="route2/shared-supply/init-different.mp4"),
+    )
+    _session_a, epoch_a, _record_a = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="init-diff-a",
+        username="alice",
+        prepared_ranges=[[0.0, 20.0]],
+    )
+    _session_b, epoch_b, _record_b = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="init-diff-b",
+        username="bob",
+        prepared_ranges=[[0.0, 20.0]],
+    )
+    epoch_a.published_init_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch_b.published_init_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch_a.published_init_path.write_bytes(b"init-a")
+    epoch_b.published_init_path.write_bytes(b"init-b")
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "init-diff-a")
+    group = status["shared_supply_groups"][0]
+
+    assert item_a["route2_init_compatibility_status"] == "mismatch"
+    assert "init_mismatch" in item_a["route2_init_compatibility_blockers"]
+    assert "init_mismatch" in item_a["shared_supply_blockers"]
+    assert "init_mismatch" in item_a["shared_store_write_blockers"]
+    assert group["shared_supply_group_init_compatibility_status"] == "mismatch"
+    assert group["shared_supply_group_init_hashes_match"] is False
+    assert "init_mismatch" in group["shared_supply_group_init_blockers"]
+
+
+def test_route2_shared_supply_group_pending_init_keeps_pending_blocker(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=435, relative_name="route2/shared-supply/init-pending.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="init-pending-a",
+        username="alice",
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="init-pending-b",
+        username="bob",
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "init-pending-a")
+    group = status["shared_supply_groups"][0]
+
+    assert item_a["route2_init_available"] is False
+    assert item_a["route2_init_compatibility_status"] == "pending_init"
+    assert "pending_init_compatibility" in item_a["route2_init_compatibility_blockers"]
+    assert "pending_init_compatibility" in item_a["shared_store_write_blockers"]
+    assert group["shared_supply_group_init_compatibility_status"] == "pending_init"
+    assert "pending_init_compatibility" in group["shared_supply_group_init_blockers"]
 
 
 def test_route2_shared_output_contract_metadata_is_sanitized() -> None:
@@ -8669,9 +8833,13 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert item_a["shared_store_candidate_segment_count"] == 70
     assert item_a["shared_store_write_candidate_count"] == 0
     assert "metadata_only" in item_a["shared_store_write_blockers"]
-    assert "missing_init_compatibility" in item_a["shared_store_write_blockers"]
+    assert "pending_init_compatibility" in item_a["shared_store_write_blockers"]
     assert item_a["shared_store_mapping_confidence"] == "high"
     assert "no_shared_bytes_written" in item_a["shared_store_mapping_notes"]
+    assert item_a["route2_init_available"] is False
+    assert item_a["route2_init_hash_available"] is False
+    assert item_a["route2_init_hash_sha256"] is None
+    assert item_a["route2_init_compatibility_status"] == "pending_init"
     assert item_a["shared_supply_candidate"] is True
     assert session_a.browser_playback.epochs[epoch_a.epoch_id] is epoch_a
     assert manager._route2_workers["metadata-a"].assigned_threads == 4

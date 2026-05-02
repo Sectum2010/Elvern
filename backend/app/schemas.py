@@ -1388,6 +1388,14 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     absolute_segment_index_start_candidate: int | None = Field(default=None, ge=0)
     absolute_segment_index_end_candidate: int | None = Field(default=None, ge=0)
     shared_output_store_blockers: list[str] = Field(default_factory=list)
+    route2_init_available: bool = False
+    route2_init_hash_sha256: str | None = None
+    route2_init_hash_available: bool = False
+    route2_init_hash_reason: str | None = None
+    route2_init_size_bytes: int | None = Field(default=None, ge=0)
+    route2_init_metadata_available: bool = False
+    route2_init_compatibility_status: str | None = None
+    route2_init_compatibility_blockers: list[str] = Field(default_factory=list)
     shared_store_write_plan_available: bool = False
     shared_store_candidate_range_start_index: int | None = Field(default=None, ge=0)
     shared_store_candidate_range_end_index_exclusive: int | None = Field(default=None, ge=0)
@@ -1416,6 +1424,9 @@ class AdminPlaybackWorkersSharedSupplyGroupResponse(BaseModel):
     candidate_count: int = Field(default=0, ge=0)
     blockers: list[str] = Field(default_factory=list)
     estimated_duplicate_workers_avoided: int = Field(default=0, ge=0)
+    shared_supply_group_init_compatibility_status: str | None = None
+    shared_supply_group_init_hashes_match: bool = False
+    shared_supply_group_init_blockers: list[str] = Field(default_factory=list)
 
 
 class AdminPlaybackWorkersUserSummaryResponse(BaseModel):
