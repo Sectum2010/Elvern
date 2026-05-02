@@ -42,6 +42,8 @@ from backend.app.services.media_technical_metadata_service import (
 )
 from backend.app.services.mobile_playback_models import (
     BrowserPlaybackSession,
+    MOBILE_PROFILES,
+    MobileProfile,
     MobilePlaybackSession,
     PlaybackEpoch,
     Route2WorkerRecord,
@@ -5122,6 +5124,10 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "publish_efficiency_gap" in item_payload
     assert "client_delivery_rate_x" in item_payload
     assert "shared_supply_candidate" in item_payload
+    assert "route2_output_contract_fingerprint" in item_payload
+    assert "route2_output_contract_version" in item_payload
+    assert "route2_output_contract_missing_fields" in item_payload
+    assert "route2_output_contract_summary" in item_payload
     assert "shared_supply_group_key" in item_payload
     assert "shared_supply_group_size" in item_payload
     assert "shared_supply_level_candidate" in item_payload
@@ -7851,6 +7857,97 @@ def test_route2_closed_loop_status_ranks_theoretical_donors_without_changing_thr
     assert record_b.assigned_threads == 4
 
 
+def test_route2_output_contract_fingerprint_is_stable_and_safe(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=429, relative_name="route2/shared-supply/contract-safe.mp4"),
+    )
+    session_a, _epoch_a, _record_a = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="contract-a",
+        username="alice",
+    )
+    session_b, _epoch_b, _record_b = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="contract-b",
+        username="alice",
+    )
+    session_a.source_locator = "/private/source/path/secret-movie.mkv"
+    session_b.source_locator = "https://drive.example/media?access_token=secret-token&sig=secret-signature"
+
+    contract_a = manager._route2_shared_supply_output_contract_fingerprint_locked(session_a)
+    contract_b = manager._route2_shared_supply_output_contract_fingerprint_locked(session_b)
+
+    assert contract_a["fingerprint"] == contract_b["fingerprint"]
+    assert contract_a["version"] == "route2-output-contract-v1"
+    assert contract_a["missing_fields"] == []
+    assert contract_a["summary"]["video"]["preset"] == "superfast"
+    serialized = json.dumps(contract_a, sort_keys=True)
+    assert "secret-movie" not in serialized
+    assert "secret-token" not in serialized
+    assert "secret-signature" not in serialized
+    assert session_a.session_id not in serialized
+    assert session_b.session_id not in serialized
+    assert "contract-a-epoch" not in serialized
+    assert "contract-b-epoch" not in serialized
+
+
+def test_route2_output_contract_fingerprint_changes_for_profile_and_encoder_contract(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=430, relative_name="route2/shared-supply/contract-diff.mp4"),
+    )
+    session_1080, _epoch_1080, _record_1080 = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="contract-1080",
+        username="alice",
+        profile="mobile_1080p",
+    )
+    session_2160, _epoch_2160, _record_2160 = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="contract-2160",
+        username="alice",
+        profile="mobile_2160p",
+    )
+
+    fingerprint_1080 = manager._route2_shared_supply_output_contract_fingerprint_locked(session_1080)["fingerprint"]
+    fingerprint_2160 = manager._route2_shared_supply_output_contract_fingerprint_locked(session_2160)["fingerprint"]
+
+    patched_profile = MobileProfile(
+        key="mobile_1080p",
+        max_width=MOBILE_PROFILES["mobile_1080p"].max_width,
+        max_height=MOBILE_PROFILES["mobile_1080p"].max_height,
+        level=MOBILE_PROFILES["mobile_1080p"].level,
+        crf=MOBILE_PROFILES["mobile_1080p"].crf + 1,
+        maxrate=MOBILE_PROFILES["mobile_1080p"].maxrate,
+        bufsize=MOBILE_PROFILES["mobile_1080p"].bufsize,
+    )
+    monkeypatch.setitem(MOBILE_PROFILES, "mobile_1080p", patched_profile)
+    patched_fingerprint_1080 = manager._route2_shared_supply_output_contract_fingerprint_locked(session_1080)[
+        "fingerprint"
+    ]
+
+    assert fingerprint_1080 != fingerprint_2160
+    assert patched_fingerprint_1080 != fingerprint_1080
+
+
 def test_route2_shared_supply_level0_same_movie_profile_is_candidate(initialized_settings) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
     _insert_test_user(settings, user_id=2, username="bob")
@@ -7889,10 +7986,58 @@ def test_route2_shared_supply_level0_same_movie_profile_is_candidate(initialized
     assert item_a["compatible_existing_worker_ids"] == ["shared-b"]
     assert item_a["estimated_duplicate_workers_avoided"] == 1
     assert item_a["shared_supply_permission_status"] == "verified_local"
-    assert "missing_command_fingerprint" in item_a["shared_supply_blockers"]
+    assert item_a["route2_output_contract_fingerprint"]
+    assert item_a["route2_output_contract_version"] == "route2-output-contract-v1"
+    assert item_a["route2_output_contract_missing_fields"] == []
+    assert item_a["route2_output_contract_summary"]["video"]["preset"] == "superfast"
+    assert "missing_command_fingerprint" not in item_a["shared_supply_blockers"]
     assert "no_copy_hardlink_symlink_attach_or_reuse_implemented" in item_a["shared_supply_notes"]
     assert status["shared_supply_groups"][0]["workload_count"] == 2
     assert status["shared_supply_groups"][0]["candidate_count"] == 2
+
+
+def test_route2_shared_supply_output_contract_mismatch_blocks_candidate(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=431, relative_name="route2/shared-supply/output-mismatch.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="output-a",
+        username="alice",
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="output-b",
+        username="bob",
+    )
+    original = manager._route2_shared_supply_output_contract_fingerprint_locked
+
+    def _fake_contract(session):
+        contract = dict(original(session))
+        if session.session_id == "output-b-session":
+            contract["fingerprint"] = "different-output-contract"
+        return contract
+
+    monkeypatch.setattr(manager, "_route2_shared_supply_output_contract_fingerprint_locked", _fake_contract)
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "output-a")
+
+    assert item_a["shared_supply_candidate"] is False
+    assert "output_contract_mismatch" in item_a["shared_supply_blockers"]
+    assert item_a["estimated_duplicate_workers_avoided"] == 0
 
 
 @pytest.mark.parametrize(

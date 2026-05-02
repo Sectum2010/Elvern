@@ -1498,6 +1498,10 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["closed_loop_boost_warning_reasons"] == []
     assert first_item["closed_loop_primary_bottleneck"] == "cpu_thread"
     assert first_item["shared_supply_candidate"] is False
+    assert first_item["route2_output_contract_fingerprint"] is None
+    assert first_item["route2_output_contract_version"] is None
+    assert first_item["route2_output_contract_missing_fields"] == []
+    assert first_item["route2_output_contract_summary"] == {}
     assert first_item["shared_supply_group_key"] is None
     assert first_item["compatible_existing_worker_ids"] == []
     assert first_item["shared_supply_blockers"] == []

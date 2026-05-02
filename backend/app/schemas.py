@@ -1378,6 +1378,10 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     route2_command_adapter_active: bool = False
     route2_command_adapter_summary: str | None = None
     route2_command_adapter_fallback_reason: str | None = None
+    route2_output_contract_fingerprint: str | None = None
+    route2_output_contract_version: str | None = None
+    route2_output_contract_missing_fields: list[str] = Field(default_factory=list)
+    route2_output_contract_summary: dict[str, object] = Field(default_factory=dict)
     shared_supply_candidate: bool = False
     shared_supply_group_key: str | None = None
     shared_supply_group_size: int = Field(default=1, ge=0)

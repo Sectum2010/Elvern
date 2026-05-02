@@ -198,6 +198,8 @@ ROUTE2_CLOSED_LOOP_DONOR_RATE_X = 1.50
 ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS = 1800.0
 ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X = ROUTE2_STARTUP_MIN_SUPPLY_RATE_X
 ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X = 1.0
+ROUTE2_OUTPUT_CONTRACT_VERSION = "route2-output-contract-v1"
+ROUTE2_SHARED_SUPPLY_GROUP_VERSION = "route2-shared-supply-group-v2"
 
 
 @dataclass(slots=True)
@@ -425,6 +427,10 @@ class _Route2SharedSupplyWorkload:
     source_kind: str
     profile: str
     playback_mode: str
+    output_contract_fingerprint: str | None
+    output_contract_version: str
+    output_contract_missing_fields: list[str]
+    output_contract_summary: dict[str, object]
     group_key: str | None
     permission_status: str
     blockers: list[str]
@@ -4039,43 +4045,140 @@ class MobilePlaybackManager:
     def _route2_shared_supply_output_contract_fingerprint_locked(
         self,
         session: MobilePlaybackSession,
-    ) -> tuple[str | None, list[str], list[str]]:
-        blockers = ["missing_command_fingerprint"]
-        notes = ["output_contract_fingerprint_uses_safe_route2_params_not_full_command"]
+    ) -> dict[str, object]:
+        missing_fields: list[str] = []
+        notes = ["output_contract_fingerprint_uses_sanitized_route2_output_contract"]
         profile = MOBILE_PROFILES.get(session.profile)
         if profile is None:
-            return None, ["missing_output_contract", *blockers], notes
+            missing_fields.append("profile")
+        playback_mode = str(session.browser_playback.playback_mode or session.playback_mode or "").strip()
+        if playback_mode not in {"full", "lite"}:
+            missing_fields.append("playback_mode")
+        if missing_fields:
+            summary = {
+                "version": ROUTE2_OUTPUT_CONTRACT_VERSION,
+                "profile": str(session.profile or ""),
+                "playback_mode": playback_mode,
+                "status": "incomplete",
+            }
+            return {
+                "fingerprint": None,
+                "version": ROUTE2_OUTPUT_CONTRACT_VERSION,
+                "missing_fields": sorted(set(missing_fields)),
+                "summary": summary,
+                "blockers": ["output_contract_incomplete"],
+                "notes": notes,
+            }
         keyframe_interval = int(SEGMENT_DURATION_SECONDS * 24)
-        contract = {
-            "version": "route2-shared-supply-output-contract-v1",
-            "engine_mode": "route2",
-            "profile": session.profile,
-            "playback_mode": session.browser_playback.playback_mode,
-            "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
-            "gop_frames": keyframe_interval,
-            "keyint_min": keyframe_interval,
-            "force_key_frames": f"expr:gte(t,n_forced*{SEGMENT_DURATION_SECONDS})",
-            "hls_segment_type": "fmp4",
-            "hls_flags": "independent_segments+temp_file",
-            "timeline_policy": "epoch_relative_zero_offset",
-            "segment_numbering": "epoch_relative_start_number_0",
-            "video_codec": "libx264",
-            "video_preset": "superfast",
-            "video_profile": "high",
-            "video_level": profile.level,
-            "pixel_format": "yuv420p",
+        scale_filter_contract = {
+            "max_width": profile.max_width,
+            "max_height": profile.max_height,
+            "force_original_aspect_ratio": "decrease",
+        }
+        video_contract = {
+            "codec": "libx264",
+            "preset": "superfast",
+            "profile": "high",
+            "level": profile.level,
+            "pix_fmt": "yuv420p",
             "crf": profile.crf,
             "maxrate": profile.maxrate,
             "bufsize": profile.bufsize,
-            "max_width": profile.max_width,
-            "max_height": profile.max_height,
-            "audio_codec": "aac",
-            "audio_channels": 2,
-            "audio_sample_rate": 48000,
-            "audio_bitrate": "160k",
+            "scale": scale_filter_contract,
+            "gop_frames": keyframe_interval,
+            "keyint_min": keyframe_interval,
+            "sc_threshold": 0,
+            "force_key_frames": f"expr:gte(t,n_forced*{SEGMENT_DURATION_SECONDS})",
+        }
+        audio_contract = {
+            "codec": "aac",
+            "channels": 2,
+            "sample_rate": 48000,
+            "bitrate": "160k",
+        }
+        hls_contract = {
+            "format": "hls",
+            "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
+            "list_size": 0,
+            "segment_type": "fmp4",
+            "init_filename": "init.mp4",
+            "flags": "independent_segments+temp_file",
+            "start_number": 0,
+        }
+        contract = {
+            "version": ROUTE2_OUTPUT_CONTRACT_VERSION,
+            "engine_mode": "route2",
+            "profile": session.profile,
+            "playback_mode": playback_mode,
+            "active_strategy": "full_transcode",
+            "copy_or_remux_active": False,
+            "video": video_contract,
+            "audio": audio_contract,
+            "hls": hls_contract,
+            "timestamp_policy": {
+                "epoch_seek": "input_ss_before_decode",
+                "output_ts_offset": "0.000",
+                "muxpreload": "0",
+                "muxdelay": "0",
+                "timeline_policy": "epoch_relative_zero_offset",
+                "segment_numbering": "epoch_relative_start_number_0",
+            },
+            "stream_selection": {
+                "video": "0:v:0",
+                "audio": "0:a:0?",
+                "subtitles": "disabled",
+                "data": "disabled",
+            },
+            "ffmpeg_progress_telemetry": "enabled_out_of_band",
+            "source_identity": "covered_by_media_item_and_source_fingerprint",
         }
         encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()[:24], blockers, notes
+        fingerprint = hashlib.sha256(encoded).hexdigest()[:24]
+        summary = {
+            "version": ROUTE2_OUTPUT_CONTRACT_VERSION,
+            "profile": session.profile,
+            "playback_mode": playback_mode,
+            "active_strategy": "full_transcode",
+            "video": {
+                "codec": video_contract["codec"],
+                "preset": video_contract["preset"],
+                "profile": video_contract["profile"],
+                "level": video_contract["level"],
+                "pix_fmt": video_contract["pix_fmt"],
+                "crf": video_contract["crf"],
+                "maxrate": video_contract["maxrate"],
+                "bufsize": video_contract["bufsize"],
+                "max_width": profile.max_width,
+                "max_height": profile.max_height,
+            },
+            "audio": audio_contract,
+            "hls": {
+                "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
+                "segment_type": hls_contract["segment_type"],
+                "init_filename": hls_contract["init_filename"],
+                "flags": hls_contract["flags"],
+            },
+            "timeline": "epoch_relative_zero_offset",
+            "source_identity": "media_item_and_source_fingerprint",
+            "excluded": [
+                "source_path",
+                "cloud_url",
+                "tokens",
+                "cookies",
+                "session_id",
+                "epoch_id",
+                "output_paths",
+                "complete_ffmpeg_invocation",
+            ],
+        }
+        return {
+            "fingerprint": fingerprint,
+            "version": ROUTE2_OUTPUT_CONTRACT_VERSION,
+            "missing_fields": [],
+            "summary": summary,
+            "blockers": [],
+            "notes": notes,
+        }
 
     def _route2_shared_supply_group_key_locked(
         self,
@@ -4085,15 +4188,19 @@ class MobilePlaybackManager:
         notes = ["level_0_detection_only", "route2_output_is_session_epoch_scoped"]
         if not str(session.source_fingerprint or "").strip():
             blockers.append("missing_source_fingerprint")
-        output_contract_fingerprint, output_blockers, output_notes = (
-            self._route2_shared_supply_output_contract_fingerprint_locked(session)
-        )
-        blockers.extend(output_blockers)
-        notes.extend(output_notes)
+        output_contract = self._route2_shared_supply_output_contract_fingerprint_locked(session)
+        output_contract_fingerprint = output_contract.get("fingerprint")
+        output_contract_blockers = [str(item) for item in output_contract.get("blockers") or []]
+        output_contract_notes = [str(item) for item in output_contract.get("notes") or []]
+        output_contract_missing_fields = [str(item) for item in output_contract.get("missing_fields") or []]
+        blockers.extend(output_contract_blockers)
+        if output_contract_missing_fields:
+            blockers.append("output_contract_incomplete")
+        notes.extend(output_contract_notes)
         if output_contract_fingerprint is None or "missing_source_fingerprint" in blockers:
             return None, sorted(set(blockers)), sorted(set(notes))
         group_payload = {
-            "version": "route2-shared-supply-group-v1",
+            "version": ROUTE2_SHARED_SUPPLY_GROUP_VERSION,
             "media_item_id": int(session.media_item_id),
             "source_fingerprint": str(session.source_fingerprint),
             "source_kind": str(session.source_kind),
@@ -4104,7 +4211,7 @@ class MobilePlaybackManager:
             "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
         }
         encoded = json.dumps(group_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return f"r2ss:v1:{hashlib.sha256(encoded).hexdigest()[:32]}", sorted(set(blockers)), sorted(set(notes))
+        return f"r2ss:v2:{hashlib.sha256(encoded).hexdigest()[:32]}", sorted(set(blockers)), sorted(set(notes))
 
     def _route2_shared_supply_cloud_provider_blockers_locked(
         self,
@@ -4198,6 +4305,10 @@ class MobilePlaybackManager:
         notes: list[str] = []
         permission_status = "permission_unverified"
         group_key = None
+        output_contract_fingerprint = None
+        output_contract_missing_fields: list[str] = []
+        output_contract_summary: dict[str, object] = {}
+        output_contract_version = ROUTE2_OUTPUT_CONTRACT_VERSION
         source_fingerprint = ""
         source_kind = record.source_kind
         profile = record.profile
@@ -4218,6 +4329,13 @@ class MobilePlaybackManager:
             media_item_id = int(session.media_item_id)
             permission_status, permission_blockers = self._route2_shared_supply_permission_status_locked(session)
             blockers.extend(permission_blockers)
+            output_contract = self._route2_shared_supply_output_contract_fingerprint_locked(session)
+            output_contract_fingerprint = (
+                str(output_contract.get("fingerprint")) if output_contract.get("fingerprint") else None
+            )
+            output_contract_missing_fields = [str(item) for item in output_contract.get("missing_fields") or []]
+            output_contract_summary = dict(output_contract.get("summary") or {})
+            output_contract_version = str(output_contract.get("version") or ROUTE2_OUTPUT_CONTRACT_VERSION)
             group_key, group_blockers, group_notes = self._route2_shared_supply_group_key_locked(session)
             blockers.extend(group_blockers)
             notes.extend(group_notes)
@@ -4246,6 +4364,10 @@ class MobilePlaybackManager:
             source_kind=source_kind,
             profile=profile,
             playback_mode=playback_mode,
+            output_contract_fingerprint=output_contract_fingerprint,
+            output_contract_version=output_contract_version,
+            output_contract_missing_fields=sorted(set(output_contract_missing_fields)),
+            output_contract_summary=output_contract_summary,
             group_key=group_key,
             permission_status=permission_status,
             blockers=sorted(set(blockers)),
@@ -4272,6 +4394,14 @@ class MobilePlaybackManager:
             blockers.append("profile_mismatch")
         if first.playback_mode != second.playback_mode:
             blockers.append("playback_mode_mismatch")
+        if first.output_contract_missing_fields or second.output_contract_missing_fields:
+            blockers.append("output_contract_incomplete")
+        if (
+            first.output_contract_fingerprint
+            and second.output_contract_fingerprint
+            and first.output_contract_fingerprint != second.output_contract_fingerprint
+        ):
+            blockers.append("output_contract_mismatch")
         if first.group_key is None or second.group_key is None or first.group_key != second.group_key:
             blockers.append("shared_supply_group_key_mismatch")
         if first.stopped_or_expired or second.stopped_or_expired:
@@ -4378,6 +4508,10 @@ class MobilePlaybackManager:
                 level_candidate = "same_group_only" if workload.group_key else None
             payload["shared_supply_candidate"] = bool(compatible_workloads)
             payload["shared_supply_group_key"] = workload.group_key
+            payload["route2_output_contract_fingerprint"] = workload.output_contract_fingerprint
+            payload["route2_output_contract_version"] = workload.output_contract_version
+            payload["route2_output_contract_missing_fields"] = list(workload.output_contract_missing_fields)
+            payload["route2_output_contract_summary"] = dict(workload.output_contract_summary)
             payload["shared_supply_group_size"] = (
                 sum(1 for item in workloads.values() if item.group_key and item.group_key == workload.group_key)
                 if workload.group_key
