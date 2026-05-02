@@ -185,7 +185,9 @@ from .route2_shared_output_store import (
     build_shared_output_metadata,
     build_shared_output_store_capability,
     build_shared_store_write_plan,
+    count_shared_output_init_records,
     count_shared_output_metadata_records,
+    write_shared_output_init_media,
     write_shared_output_store_metadata,
 )
 
@@ -1195,6 +1197,7 @@ class MobilePlaybackManager:
         self._last_cgroup_cpu_stat: dict[str, int] | None = None
         self._route2_resource_snapshot: _Route2ResourceSnapshot | None = None
         self._shared_output_metadata_write_errors: list[str] = []
+        self._shared_output_init_write_errors: list[str] = []
         self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
         self._manager_thread: threading.Thread | None = None
@@ -4575,6 +4578,15 @@ class MobilePlaybackManager:
                 "shared_output_media_bytes_present": False,
                 "shared_output_store_blockers": list(SHARED_OUTPUT_STORE_BLOCKERS),
                 "shared_output_metadata_write_errors": [],
+                "shared_init_write_enabled": bool(getattr(self.settings, "route2_shared_output_init_writer_enabled", False)),
+                "shared_init_write_attempted": False,
+                "shared_init_write_status": "not_ready",
+                "shared_init_write_blockers": ["missing_shared_output_key"],
+                "shared_init_hash_sha256": None,
+                "shared_init_size_bytes": None,
+                "shared_init_path_present": False,
+                "shared_segments_writer_enabled": False,
+                "shared_init_write_errors": [],
             }
         if workload.output_contract_missing_fields:
             return {
@@ -4588,6 +4600,15 @@ class MobilePlaybackManager:
                     set(SHARED_OUTPUT_STORE_BLOCKERS) | {"output_contract_incomplete"}
                 ),
                 "shared_output_metadata_write_errors": [],
+                "shared_init_write_enabled": bool(getattr(self.settings, "route2_shared_output_init_writer_enabled", False)),
+                "shared_init_write_attempted": False,
+                "shared_init_write_status": "not_ready",
+                "shared_init_write_blockers": ["output_contract_incomplete"],
+                "shared_init_hash_sha256": None,
+                "shared_init_size_bytes": None,
+                "shared_init_path_present": False,
+                "shared_segments_writer_enabled": False,
+                "shared_init_write_errors": [],
             }
         contract_metadata = build_shared_output_contract_metadata(
             shared_output_key=workload.group_key,
@@ -4627,7 +4648,7 @@ class MobilePlaybackManager:
                 "start_index": int(write_plan["candidate_confirmed_range_start_index"]),
                 "end_index_exclusive": int(write_plan["candidate_confirmed_range_end_index_exclusive"]),
             }
-        return write_shared_output_store_metadata(
+        metadata_result = write_shared_output_store_metadata(
             route2_root=self._route2_root,
             contract_metadata=contract_metadata,
             metadata=store_metadata,
@@ -4635,12 +4656,53 @@ class MobilePlaybackManager:
             source_session_id=workload.session_id,
             source_epoch_id=workload.epoch_id,
         )
+        source_init_path = None
+        session = self._sessions.get(workload.session_id)
+        epoch = (
+            session.browser_playback.epochs.get(workload.epoch_id)
+            if session is not None and session.browser_playback.engine_mode == "route2"
+            else None
+        )
+        if epoch is not None and epoch.init_published:
+            source_init_path = epoch.published_init_path
+        try:
+            init_result = write_shared_output_init_media(
+                route2_root=self._route2_root,
+                shared_output_key=workload.group_key,
+                source_init_path=source_init_path,
+                writer_enabled=bool(getattr(self.settings, "route2_shared_output_init_writer_enabled", False)),
+                output_contract_fingerprint=workload.output_contract_fingerprint,
+                metadata_ready=bool(metadata_result["shared_output_metadata_written"]),
+                contract_status=str(metadata_result["shared_output_contract_status"]),
+                init_compatibility_status=init_compatibility_status,
+                expected_init_sha256=(
+                    str(workload.init_metadata.get("route2_init_hash_sha256") or "")
+                    if workload.init_metadata.get("route2_init_hash_available")
+                    else None
+                ),
+                precondition_blockers=workload.blockers,
+                writer_id=workload.worker_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            init_result = {
+                "shared_init_write_enabled": bool(getattr(self.settings, "route2_shared_output_init_writer_enabled", False)),
+                "shared_init_write_attempted": True,
+                "shared_init_write_status": "failed",
+                "shared_init_write_blockers": ["shared_init_write_failed"],
+                "shared_init_hash_sha256": None,
+                "shared_init_size_bytes": None,
+                "shared_init_path_present": False,
+                "shared_segments_writer_enabled": False,
+                "shared_init_write_errors": [f"shared_init_write_failed:{type(exc).__name__}"],
+            }
+        return {**metadata_result, **init_result}
 
     def _apply_route2_shared_supply_status_locked(
         self,
         payloads_by_worker_id: dict[str, dict[str, object]],
     ) -> list[dict[str, object]]:
         metadata_write_errors: list[str] = []
+        init_write_errors: list[str] = []
         workloads = {
             record.worker_id: self._route2_shared_supply_workload_locked(record)
             for record in self._route2_workers.values()
@@ -4725,6 +4787,9 @@ class MobilePlaybackManager:
             metadata_write_errors.extend(
                 str(item) for item in metadata_write_result.get("shared_output_metadata_write_errors") or []
             )
+            init_write_errors.extend(
+                str(item) for item in metadata_write_result.get("shared_init_write_errors") or []
+            )
             payload["shared_supply_candidate"] = bool(compatible_workloads)
             payload["shared_supply_group_key"] = workload.group_key
             payload["shared_output_key"] = workload.group_key
@@ -4742,6 +4807,14 @@ class MobilePlaybackManager:
             payload["shared_output_store_blockers"] = list(
                 metadata_write_result["shared_output_store_blockers"]
             )
+            payload["shared_init_write_enabled"] = bool(metadata_write_result["shared_init_write_enabled"])
+            payload["shared_init_write_attempted"] = bool(metadata_write_result["shared_init_write_attempted"])
+            payload["shared_init_write_status"] = metadata_write_result["shared_init_write_status"]
+            payload["shared_init_write_blockers"] = list(metadata_write_result["shared_init_write_blockers"])
+            payload["shared_init_hash_sha256"] = metadata_write_result["shared_init_hash_sha256"]
+            payload["shared_init_size_bytes"] = metadata_write_result["shared_init_size_bytes"]
+            payload["shared_init_path_present"] = bool(metadata_write_result["shared_init_path_present"])
+            payload["shared_segments_writer_enabled"] = bool(metadata_write_result["shared_segments_writer_enabled"])
             payload["route2_init_available"] = bool(workload.init_metadata["route2_init_available"])
             payload["route2_init_hash_sha256"] = workload.init_metadata["route2_init_hash_sha256"]
             payload["route2_init_hash_available"] = bool(workload.init_metadata["route2_init_hash_available"])
@@ -4823,6 +4896,7 @@ class MobilePlaybackManager:
                 }
             )
         self._shared_output_metadata_write_errors = metadata_write_errors
+        self._shared_output_init_write_errors = init_write_errors
         return summaries
 
     def _evaluate_route2_active_playback_health_locked(
@@ -6074,6 +6148,8 @@ class MobilePlaybackManager:
                 **build_shared_output_store_capability(self._route2_root),
                 "shared_output_store_records_count": count_shared_output_metadata_records(self._route2_root),
                 "shared_output_metadata_write_errors": list(self._shared_output_metadata_write_errors),
+                "shared_output_init_records_count": count_shared_output_init_records(self._route2_root),
+                "shared_output_init_write_errors": list(self._shared_output_init_write_errors),
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_cores_used_total": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_percent_of_total": route2_cpu_percent_of_total,

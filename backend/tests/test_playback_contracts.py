@@ -111,6 +111,7 @@ from backend.app.services.route2_shared_output_store import (
     build_shared_output_lease_metadata,
     build_shared_output_metadata,
     build_shared_store_write_plan,
+    count_shared_output_init_records,
     count_shared_output_metadata_records,
     find_contiguous_range_covering,
     find_gaps_for_requested_range,
@@ -118,6 +119,7 @@ from backend.app.services.route2_shared_output_store import (
     shared_output_directory,
     shared_segment_filename,
     validate_shared_output_lease_metadata,
+    write_shared_output_init_media,
     write_shared_output_store_metadata,
 )
 from backend.app.services.playback_service import build_playback_decision
@@ -3465,6 +3467,7 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_core
     assert settings.route2_adaptive_thread_control_local_only is True
     assert settings.route2_adaptive_thread_control_cloud_enabled is False
     assert settings.route2_adaptive_thread_control_strict_12_enabled is False
+    assert settings.route2_shared_output_init_writer_enabled is False
 
 
 def test_route2_protected_min_threads_env_override_still_works(monkeypatch, test_settings) -> None:
@@ -3513,6 +3516,23 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     assert disabled_settings.route2_adaptive_thread_control_local_only is True
     assert disabled_settings.route2_adaptive_thread_control_cloud_enabled is False
     assert disabled_settings.route2_adaptive_thread_control_strict_12_enabled is False
+
+
+def test_route2_shared_output_init_writer_flag_is_disabled_by_default(
+    monkeypatch,
+    test_settings,
+) -> None:
+    monkeypatch.delenv("ELVERN_ROUTE2_SHARED_OUTPUT_INIT_WRITER_ENABLED", raising=False)
+
+    default_settings = refresh_settings()
+
+    assert default_settings.route2_shared_output_init_writer_enabled is False
+
+    monkeypatch.setenv("ELVERN_ROUTE2_SHARED_OUTPUT_INIT_WRITER_ENABLED", "true")
+
+    enabled_settings = refresh_settings()
+
+    assert enabled_settings.route2_shared_output_init_writer_enabled is True
 
 
 def test_route2_max_worker_threads_validation_still_rejects_invalid_values(monkeypatch, test_settings) -> None:
@@ -5155,7 +5175,20 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "shared_output_key" in item_payload
     assert "absolute_segment_index_start_candidate" in item_payload
     assert "absolute_segment_index_end_candidate" in item_payload
+    assert "shared_output_metadata_written" in item_payload
+    assert "shared_output_contract_status" in item_payload
+    assert "shared_output_ranges_status" in item_payload
+    assert "shared_output_range_count" in item_payload
+    assert "shared_output_media_bytes_present" in item_payload
     assert "shared_output_store_blockers" in item_payload
+    assert "shared_init_write_enabled" in item_payload
+    assert "shared_init_write_attempted" in item_payload
+    assert "shared_init_write_status" in item_payload
+    assert "shared_init_write_blockers" in item_payload
+    assert "shared_init_hash_sha256" in item_payload
+    assert "shared_init_size_bytes" in item_payload
+    assert "shared_init_path_present" in item_payload
+    assert "shared_segments_writer_enabled" in item_payload
     assert "route2_init_available" in item_payload
     assert "route2_init_hash_available" in item_payload
     assert "route2_init_hash_sha256" in item_payload
@@ -5185,6 +5218,10 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "shared_output_store_enabled" in status
     assert "shared_output_metadata_version" in status
     assert "shared_output_store_ready_for_segments" in status
+    assert "shared_output_store_records_count" in status
+    assert "shared_output_metadata_write_errors" in status
+    assert "shared_output_init_records_count" in status
+    assert "shared_output_init_write_errors" in status
     assert "shared_supply_groups" in status
     assert len(started_workers) == 1
 
@@ -8913,6 +8950,240 @@ def test_route2_shared_output_metadata_writer_is_idempotent_and_blocks_conflicts
     assert persisted_contract["output_contract_fingerprint"] != "different-contract"
 
 
+def _prepare_shared_output_metadata_record(
+    manager: MobilePlaybackManager,
+    *,
+    shared_output_key: str = "r2ss:v2:abcdef1234567890",
+    fingerprint: str = "contract-fingerprint",
+) -> Path:
+    contract, metadata = _shared_output_writer_payloads(
+        shared_output_key=shared_output_key,
+        fingerprint=fingerprint,
+    )
+    write_shared_output_store_metadata(
+        route2_root=manager._route2_root,
+        contract_metadata=contract,
+        metadata=metadata,
+        updated_at="2026-05-02T00:00:01Z",
+    )
+    return shared_output_directory(manager._route2_root, shared_output_key)
+
+
+def test_route2_shared_output_init_writer_disabled_does_not_copy_init(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_metadata_record(manager)
+    source_init = output_dir / "source-init.mp4"
+    source_init.write_bytes(b"shared-init")
+
+    result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=source_init,
+        writer_enabled=False,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        expected_init_sha256=hashlib.sha256(b"shared-init").hexdigest(),
+    )
+
+    assert result["shared_init_write_status"] == "disabled"
+    assert result["shared_init_write_enabled"] is False
+    assert result["shared_init_write_attempted"] is False
+    assert not (output_dir / "init.mp4").exists()
+    assert not (output_dir / "init.sha256").exists()
+    assert count_shared_output_init_records(manager._route2_root) == 0
+
+
+def test_route2_shared_output_init_writer_enabled_writes_init_only(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_metadata_record(manager)
+    source_init = output_dir / "source-init.mp4"
+    source_init.write_bytes(b"shared-init")
+    expected_hash = hashlib.sha256(b"shared-init").hexdigest()
+
+    result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=source_init,
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        expected_init_sha256=expected_hash,
+        writer_id="writer-1",
+        updated_at="2026-05-02T00:00:02Z",
+    )
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+
+    assert result["shared_init_write_status"] == "written"
+    assert result["shared_init_write_attempted"] is True
+    assert result["shared_init_hash_sha256"] == expected_hash
+    assert result["shared_init_size_bytes"] == len(b"shared-init")
+    assert result["shared_init_path_present"] is True
+    assert result["shared_segments_writer_enabled"] is False
+    assert (output_dir / "init.mp4").read_bytes() == b"shared-init"
+    assert (output_dir / "init.sha256").read_text(encoding="utf-8").strip() == expected_hash
+    assert metadata["init_status"] == "present"
+    assert metadata["init_hash_sha256"] == expected_hash
+    assert metadata["init_size_bytes"] == len(b"shared-init")
+    assert metadata["serving_enabled"] is False
+    assert metadata["media_bytes_present"] is False
+    assert not (output_dir / "segments").exists()
+    assert list(output_dir.rglob("*.m4s")) == []
+    assert count_shared_output_init_records(manager._route2_root) == 1
+
+
+def test_route2_shared_output_init_writer_is_idempotent_for_same_hash(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_metadata_record(manager)
+    source_init = output_dir / "source-init.mp4"
+    source_init.write_bytes(b"shared-init")
+    expected_hash = hashlib.sha256(b"shared-init").hexdigest()
+    (output_dir / "init.mp4").write_bytes(b"shared-init")
+    (output_dir / "init.sha256").write_text(f"{expected_hash}\n", encoding="utf-8")
+
+    result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=source_init,
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="compatible_by_hash",
+        expected_init_sha256=expected_hash,
+    )
+
+    assert result["shared_init_write_status"] == "already_present"
+    assert result["shared_init_hash_sha256"] == expected_hash
+    assert (output_dir / "init.mp4").read_bytes() == b"shared-init"
+
+
+def test_route2_shared_output_init_writer_blocks_hash_conflict(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_metadata_record(manager)
+    source_init = output_dir / "source-init.mp4"
+    source_init.write_bytes(b"new-init")
+    old_hash = hashlib.sha256(b"old-init").hexdigest()
+    (output_dir / "init.mp4").write_bytes(b"old-init")
+    (output_dir / "init.sha256").write_text(f"{old_hash}\n", encoding="utf-8")
+
+    result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=source_init,
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        expected_init_sha256=hashlib.sha256(b"new-init").hexdigest(),
+    )
+
+    assert result["shared_init_write_status"] == "conflict"
+    assert "shared_init_hash_conflict" in result["shared_init_write_blockers"]
+    assert (output_dir / "init.mp4").read_bytes() == b"old-init"
+    assert (output_dir / "init.sha256").read_text(encoding="utf-8").strip() == old_hash
+
+
+def test_route2_shared_output_init_writer_repairs_matching_missing_sha(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_metadata_record(manager)
+    source_init = output_dir / "source-init.mp4"
+    source_init.write_bytes(b"shared-init")
+    expected_hash = hashlib.sha256(b"shared-init").hexdigest()
+    (output_dir / "init.mp4").write_bytes(b"shared-init")
+
+    result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=source_init,
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        expected_init_sha256=expected_hash,
+    )
+
+    assert result["shared_init_write_status"] == "already_present"
+    assert (output_dir / "init.sha256").read_text(encoding="utf-8").strip() == expected_hash
+
+
+def test_route2_shared_output_init_writer_blocks_existing_init_without_sha_mismatch(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_metadata_record(manager)
+    source_init = output_dir / "source-init.mp4"
+    source_init.write_bytes(b"new-init")
+    (output_dir / "init.mp4").write_bytes(b"old-init")
+
+    result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=source_init,
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="hash_available",
+        expected_init_sha256=hashlib.sha256(b"new-init").hexdigest(),
+    )
+
+    assert result["shared_init_write_status"] == "conflict"
+    assert "shared_init_hash_conflict" in result["shared_init_write_blockers"]
+    assert not (output_dir / "init.sha256").exists()
+    assert (output_dir / "init.mp4").read_bytes() == b"old-init"
+
+
+def test_route2_shared_output_init_writer_blocks_missing_init_and_contract_conflict(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    _prepare_shared_output_metadata_record(manager)
+
+    missing_result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=manager._route2_root / "missing-init.mp4",
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="written",
+        init_compatibility_status="pending_init",
+    )
+    conflict_result = write_shared_output_init_media(
+        route2_root=manager._route2_root,
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        source_init_path=manager._route2_root / "missing-init.mp4",
+        writer_enabled=True,
+        output_contract_fingerprint="contract-fingerprint",
+        metadata_ready=True,
+        contract_status="conflict",
+        init_compatibility_status="hash_available",
+        precondition_blockers=["shared_contract_conflict"],
+    )
+
+    assert missing_result["shared_init_write_status"] == "not_ready"
+    assert "pending_init" in missing_result["shared_init_write_blockers"]
+    assert "init_missing" in missing_result["shared_init_write_blockers"]
+    assert conflict_result["shared_init_write_status"] == "conflict"
+    assert "shared_contract_conflict" in conflict_result["shared_init_write_blockers"]
+
+
 def test_route2_shared_output_metadata_only_ranges_merge_and_remain_unplayable() -> None:
     metadata = build_metadata_only_ranges_metadata(
         shared_output_key="r2ss:v2:abcdef1234567890",
@@ -9001,6 +9272,8 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert status["shared_output_store_ready_for_segments"] is False
     assert status["shared_output_store_records_count"] == 1
     assert status["shared_output_metadata_write_errors"] == []
+    assert status["shared_output_init_records_count"] == 0
+    assert status["shared_output_init_write_errors"] == []
     assert status["shared_output_root"].endswith("browser_playback_route2/shared_outputs")
     assert item_a["shared_output_key"] == item_a["shared_supply_group_key"]
     assert item_a["absolute_segment_index_start_candidate"] == 0
@@ -9010,6 +9283,14 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert item_a["shared_output_ranges_status"] == "metadata_only_written"
     assert item_a["shared_output_range_count"] == 0
     assert item_a["shared_output_media_bytes_present"] is False
+    assert item_a["shared_init_write_enabled"] is False
+    assert item_a["shared_init_write_attempted"] is False
+    assert item_a["shared_init_write_status"] == "disabled"
+    assert "init_writer_disabled" in item_a["shared_init_write_blockers"]
+    assert item_a["shared_init_hash_sha256"] is None
+    assert item_a["shared_init_size_bytes"] is None
+    assert item_a["shared_init_path_present"] is False
+    assert item_a["shared_segments_writer_enabled"] is False
     assert item_a["shared_output_store_blockers"] == SHARED_OUTPUT_STORE_BLOCKERS
     assert "metadata_only" in item_a["shared_output_store_blockers"]
     assert "media_bytes_not_present" in item_a["shared_output_store_blockers"]
@@ -9042,6 +9323,92 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert session_a.browser_playback.epochs[epoch_a.epoch_id] is epoch_a
     assert manager._route2_workers["metadata-a"].assigned_threads == 4
     assert manager._route2_workers["metadata-b"].assigned_threads == 4
+
+
+def test_route2_shared_output_init_writer_admin_status_enabled_writes_only_init(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_shared_output_init_writer_enabled=True,
+    )
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=436, relative_name="route2/shared-supply/init-writer.mp4"),
+    )
+    _session, epoch, _record = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="init-writer-a",
+        username="alice",
+        prepared_ranges=[[0.0, 20.0]],
+    )
+    epoch.published_init_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch.published_init_path.write_bytes(b"admin-status-init")
+
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, "init-writer-a")
+    output_dir = shared_output_directory(manager._route2_root, item_payload["shared_output_key"])
+    expected_hash = hashlib.sha256(b"admin-status-init").hexdigest()
+
+    assert item_payload["shared_init_write_enabled"] is True
+    assert item_payload["shared_init_write_attempted"] is True
+    assert item_payload["shared_init_write_status"] == "written"
+    assert item_payload["shared_init_write_blockers"] == []
+    assert item_payload["shared_init_hash_sha256"] == expected_hash
+    assert item_payload["shared_init_size_bytes"] == len(b"admin-status-init")
+    assert item_payload["shared_init_path_present"] is True
+    assert item_payload["shared_segments_writer_enabled"] is False
+    assert status["shared_output_init_records_count"] == 1
+    assert status["shared_output_init_write_errors"] == []
+    assert (output_dir / "init.mp4").read_bytes() == b"admin-status-init"
+    assert (output_dir / "init.sha256").read_text(encoding="utf-8").strip() == expected_hash
+    assert not (output_dir / "segments").exists()
+    assert list(output_dir.rglob("*.m4s")) == []
+    assert manager._route2_workers["init-writer-a"].assigned_threads == 4
+
+
+def test_route2_shared_output_init_writer_failure_is_status_only(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_shared_output_init_writer_enabled=True,
+    )
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=437, relative_name="route2/shared-supply/init-writer-fail.mp4"),
+    )
+    _session, epoch, _record = _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="init-writer-fail",
+        username="alice",
+        prepared_ranges=[[0.0, 20.0]],
+    )
+    epoch.published_init_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch.published_init_path.write_bytes(b"admin-status-init")
+
+    def _raise_init_writer(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service.write_shared_output_init_media",
+        _raise_init_writer,
+    )
+
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, "init-writer-fail")
+
+    assert item_payload["shared_init_write_status"] == "failed"
+    assert "shared_init_write_failed" in item_payload["shared_init_write_blockers"]
+    assert status["shared_output_init_write_errors"] == ["shared_init_write_failed:RuntimeError"]
+    assert manager._route2_workers["init-writer-fail"].assigned_threads == 4
 
 
 def test_route2_stop_then_start_new_movie_allows_replacement_movie(initialized_settings) -> None:

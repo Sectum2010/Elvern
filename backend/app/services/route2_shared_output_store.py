@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +82,19 @@ def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
             pass
 
 
+def _write_text_atomic(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(payload, encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _read_json_mapping(path: Path) -> dict[str, object] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -104,6 +118,24 @@ def _ordered_store_blockers(blockers: Iterable[str]) -> list[str]:
     ordered = [blocker for blocker in SHARED_OUTPUT_STORE_BLOCKERS if blocker in values]
     ordered.extend(sorted(values - set(ordered)))
     return ordered
+
+
+def _hash_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            size_bytes += len(chunk)
+            digest.update(chunk)
+    return digest.hexdigest(), size_bytes
+
+
+def _read_sha256_file(path: Path) -> str | None:
+    try:
+        payload = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return payload.split()[0].strip().lower() if payload else None
 
 
 def _validate_segment_duration(segment_duration_seconds: float) -> float:
@@ -821,6 +853,246 @@ def count_shared_output_metadata_records(route2_root: Path) -> int:
     if not root.exists():
         return 0
     return sum(1 for child in root.iterdir() if child.is_dir() and (child / "metadata.json").exists())
+
+
+def count_shared_output_init_records(route2_root: Path) -> int:
+    root = shared_output_store_root(route2_root)
+    if not root.exists():
+        return 0
+    return sum(
+        1
+        for child in root.iterdir()
+        if child.is_dir()
+        and (child / "init.mp4").is_file()
+        and (child / "init.sha256").is_file()
+    )
+
+
+def _shared_init_result(
+    *,
+    enabled: bool,
+    attempted: bool,
+    status: str,
+    blockers: Iterable[str] = (),
+    init_hash_sha256: str | None = None,
+    init_size_bytes: int | None = None,
+    path_present: bool = False,
+    errors: Iterable[str] = (),
+) -> dict[str, object]:
+    return {
+        "shared_init_write_enabled": bool(enabled),
+        "shared_init_write_attempted": bool(attempted),
+        "shared_init_write_status": status,
+        "shared_init_write_blockers": sorted({str(item) for item in blockers}),
+        "shared_init_hash_sha256": init_hash_sha256,
+        "shared_init_size_bytes": init_size_bytes,
+        "shared_init_path_present": bool(path_present),
+        "shared_segments_writer_enabled": False,
+        "shared_init_write_errors": [str(item) for item in errors],
+    }
+
+
+def _update_metadata_for_shared_init(
+    *,
+    metadata_path: Path,
+    init_hash_sha256: str,
+    init_size_bytes: int,
+    updated_at: str,
+) -> None:
+    metadata = _read_json_mapping(metadata_path) or {}
+    metadata.update(
+        {
+            "init_status": "present",
+            "init_hash_sha256": init_hash_sha256,
+            "init_size_bytes": int(init_size_bytes),
+            "init_written_at": updated_at,
+            "serving_enabled": False,
+            "shared_manifest_enabled": False,
+            "media_bytes_present": False,
+            "segment_writer_enabled": False,
+            "writer_policy": "init_writer_only",
+            "updated_at": updated_at,
+        }
+    )
+    _write_json_atomic(metadata_path, metadata)
+
+
+def write_shared_output_init_media(
+    *,
+    route2_root: Path,
+    shared_output_key: str | None,
+    source_init_path: Path | None,
+    writer_enabled: bool,
+    output_contract_fingerprint: str | None,
+    metadata_ready: bool,
+    contract_status: str | None,
+    init_compatibility_status: str | None,
+    expected_init_sha256: str | None = None,
+    precondition_blockers: Iterable[str] = (),
+    writer_id: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    if not writer_enabled:
+        return _shared_init_result(
+            enabled=False,
+            attempted=False,
+            status="disabled",
+            blockers=["init_writer_disabled"],
+        )
+    blockers = {str(item) for item in precondition_blockers if str(item)}
+    if not shared_output_key:
+        blockers.add("missing_shared_output_key")
+    if not str(output_contract_fingerprint or "").strip():
+        blockers.add("missing_output_contract")
+    if not metadata_ready:
+        blockers.add("shared_metadata_missing")
+    if str(contract_status or "") == "conflict":
+        blockers.add("shared_contract_conflict")
+    normalized_init_status = str(init_compatibility_status or "").strip()
+    if normalized_init_status == "mismatch":
+        blockers.add("init_mismatch")
+    elif normalized_init_status in {"pending", "pending_init", "unavailable"}:
+        blockers.add("pending_init")
+    elif normalized_init_status not in {"hash_available", "compatible_by_hash"}:
+        blockers.add("missing_init_compatibility")
+    source_path = Path(source_init_path) if source_init_path is not None else None
+    if source_path is None or not source_path.is_file():
+        blockers.add("init_missing")
+    hard_blockers = blockers & {
+        "missing_shared_output_key",
+        "missing_output_contract",
+        "output_contract_incomplete",
+        "shared_metadata_missing",
+        "shared_contract_conflict",
+        "init_mismatch",
+        "pending_init",
+        "missing_init_compatibility",
+        "init_missing",
+        "provider_access_unavailable",
+    }
+    if hard_blockers:
+        return _shared_init_result(
+            enabled=True,
+            attempted=False,
+            status="conflict" if {"shared_contract_conflict", "init_mismatch"} & hard_blockers else "not_ready",
+            blockers=blockers,
+            path_present=bool(shared_output_key and (shared_output_directory(route2_root, shared_output_key) / "init.mp4").exists()),
+        )
+
+    timestamp = updated_at or utcnow_iso()
+    writer_token = re.sub(r"[^A-Za-z0-9_.-]", "_", str(writer_id or uuid.uuid4().hex))[:80] or uuid.uuid4().hex
+    try:
+        sanitized_key = validate_shared_output_key(str(shared_output_key))
+        output_dir = shared_output_directory(route2_root, sanitized_key)
+        metadata_path = output_dir / "metadata.json"
+        if not metadata_path.exists():
+            return _shared_init_result(
+                enabled=True,
+                attempted=False,
+                status="not_ready",
+                blockers=sorted(blockers | {"shared_metadata_missing"}),
+            )
+        staging_dir = output_dir / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_path = staging_dir / f"init.{writer_token}.tmp"
+        final_init_path = output_dir / "init.mp4"
+        final_sha_path = output_dir / "init.sha256"
+        shutil.copyfile(source_path, staging_path)
+        staged_hash, staged_size = _hash_file(staging_path)
+        expected_hash = str(expected_init_sha256 or "").strip().lower()
+        if expected_hash and expected_hash != staged_hash:
+            staging_path.unlink(missing_ok=True)
+            return _shared_init_result(
+                enabled=True,
+                attempted=True,
+                status="failed",
+                blockers=sorted(blockers | {"init_hash_mismatch_source"}),
+                path_present=final_init_path.exists(),
+            )
+
+        existing_sha = _read_sha256_file(final_sha_path)
+        if final_init_path.exists():
+            final_hash, final_size = _hash_file(final_init_path)
+            if existing_sha is not None and existing_sha != staged_hash:
+                staging_path.unlink(missing_ok=True)
+                return _shared_init_result(
+                    enabled=True,
+                    attempted=True,
+                    status="conflict",
+                    blockers=sorted(blockers | {"shared_init_hash_conflict"}),
+                    init_hash_sha256=existing_sha,
+                    init_size_bytes=final_size,
+                    path_present=True,
+                )
+            if final_hash != staged_hash:
+                staging_path.unlink(missing_ok=True)
+                return _shared_init_result(
+                    enabled=True,
+                    attempted=True,
+                    status="conflict",
+                    blockers=sorted(blockers | {"shared_init_hash_conflict"}),
+                    init_hash_sha256=final_hash,
+                    init_size_bytes=final_size,
+                    path_present=True,
+                )
+            if existing_sha is None:
+                _write_text_atomic(final_sha_path, f"{staged_hash}\n")
+            staging_path.unlink(missing_ok=True)
+            _update_metadata_for_shared_init(
+                metadata_path=metadata_path,
+                init_hash_sha256=staged_hash,
+                init_size_bytes=final_size,
+                updated_at=timestamp,
+            )
+            return _shared_init_result(
+                enabled=True,
+                attempted=True,
+                status="already_present",
+                blockers=blockers,
+                init_hash_sha256=staged_hash,
+                init_size_bytes=final_size,
+                path_present=True,
+            )
+
+        if existing_sha is not None and existing_sha != staged_hash:
+            staging_path.unlink(missing_ok=True)
+            return _shared_init_result(
+                enabled=True,
+                attempted=True,
+                status="conflict",
+                blockers=sorted(blockers | {"shared_init_hash_conflict"}),
+                init_hash_sha256=existing_sha,
+                path_present=False,
+            )
+        staging_path.rename(final_init_path)
+        _write_text_atomic(final_sha_path, f"{staged_hash}\n")
+        _update_metadata_for_shared_init(
+            metadata_path=metadata_path,
+            init_hash_sha256=staged_hash,
+            init_size_bytes=staged_size,
+            updated_at=timestamp,
+        )
+        return _shared_init_result(
+            enabled=True,
+            attempted=True,
+            status="written",
+            blockers=blockers,
+            init_hash_sha256=staged_hash,
+            init_size_bytes=staged_size,
+            path_present=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        try:
+            staging_path.unlink(missing_ok=True)  # type: ignore[name-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        return _shared_init_result(
+            enabled=True,
+            attempted=True,
+            status="failed",
+            blockers=sorted(blockers | {"shared_init_write_failed"}),
+            errors=[f"shared_init_write_failed:{type(exc).__name__}"],
+        )
 
 
 def write_shared_output_store_metadata(

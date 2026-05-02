@@ -1393,6 +1393,14 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     shared_output_range_count: int = Field(default=0, ge=0)
     shared_output_media_bytes_present: bool = False
     shared_output_store_blockers: list[str] = Field(default_factory=list)
+    shared_init_write_enabled: bool = False
+    shared_init_write_attempted: bool = False
+    shared_init_write_status: str | None = None
+    shared_init_write_blockers: list[str] = Field(default_factory=list)
+    shared_init_hash_sha256: str | None = None
+    shared_init_size_bytes: int | None = Field(default=None, ge=0)
+    shared_init_path_present: bool = False
+    shared_segments_writer_enabled: bool = False
     route2_init_available: bool = False
     route2_init_hash_sha256: str | None = None
     route2_init_hash_available: bool = False
@@ -1456,6 +1464,8 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     shared_output_store_ready_for_segments: bool = False
     shared_output_store_records_count: int = Field(default=0, ge=0)
     shared_output_metadata_write_errors: list[str] = Field(default_factory=list)
+    shared_output_init_records_count: int = Field(default=0, ge=0)
+    shared_output_init_write_errors: list[str] = Field(default_factory=list)
     cpu_upbound_percent: int = Field(ge=0)
     cpu_budget_percent: int = Field(ge=0)
     total_cpu_cores: int = Field(ge=1)

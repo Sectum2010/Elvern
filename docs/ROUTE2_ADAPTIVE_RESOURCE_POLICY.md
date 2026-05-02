@@ -192,6 +192,15 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - `ranges.json` can record absolute range metadata only after canonical mapping and init hash evidence are available. These ranges use `media_bytes_present=false` / `metadata_only_confirmed_source_session`; they are not playable and must not be treated as shared cached media.
 - Active shared output metadata directories are outside the existing Route2 session orphan cleanup path. Shared-store TTL, lease enforcement, segment cleanup, and serving cleanup policy remain future work.
 
+## Phase 1K-3B Init Writer
+
+- The shared output init writer is controlled by `ELVERN_ROUTE2_SHARED_OUTPUT_INIT_WRITER_ENABLED` and is disabled by default.
+- When enabled, the writer may copy only the epoch-local published `init.mp4` into the shared output directory by using a staging temp file, SHA-256 verification, and atomic publish to `init.mp4` plus `init.sha256`.
+- The init writer never writes `segments/*.m4s`, never creates a segment writer, never serves from the shared store, never attaches sessions to shared output, and never changes Route2 worker assignment, spawn policy, ffmpeg command paths, or the live `superfast` preset.
+- Existing shared init bytes are idempotent when hashes match. Hash mismatches report `shared_init_hash_conflict` and must not overwrite the finalized `init.mp4`.
+- Matching init hash is compatibility evidence only. It is not permission to serve or reuse shared media. Segment writing, manifests, leases, permission-checked serving, and shared attach remain future phases.
+- Shared init write failures are status-only and must not break normal playback.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.
