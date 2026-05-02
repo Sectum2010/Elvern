@@ -1378,8 +1378,26 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     route2_command_adapter_active: bool = False
     route2_command_adapter_summary: str | None = None
     route2_command_adapter_fallback_reason: str | None = None
+    shared_supply_candidate: bool = False
+    shared_supply_group_key: str | None = None
+    shared_supply_group_size: int = Field(default=1, ge=0)
+    shared_supply_level_candidate: str | None = None
+    compatible_existing_workload_ids: list[str] = Field(default_factory=list)
+    compatible_existing_worker_ids: list[str] = Field(default_factory=list)
+    shared_supply_blockers: list[str] = Field(default_factory=list)
+    shared_supply_permission_status: str | None = None
+    estimated_duplicate_workers_avoided: int = Field(default=0, ge=0)
+    shared_supply_notes: list[str] = Field(default_factory=list)
     started_at: str | None = None
     last_seen_at: str
+
+
+class AdminPlaybackWorkersSharedSupplyGroupResponse(BaseModel):
+    group_key: str
+    workload_count: int = Field(default=0, ge=0)
+    candidate_count: int = Field(default=0, ge=0)
+    blockers: list[str] = Field(default_factory=list)
+    estimated_duplicate_workers_avoided: int = Field(default=0, ge=0)
 
 
 class AdminPlaybackWorkersUserSummaryResponse(BaseModel):
@@ -1448,6 +1466,7 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     route2_memory_bytes: int | None = Field(default=None, ge=0)
     route2_memory_bytes_total: int | None = Field(default=None, ge=0)
     route2_memory_percent_of_total: float | None = Field(default=None, ge=0)
+    shared_supply_groups: list[AdminPlaybackWorkersSharedSupplyGroupResponse] = Field(default_factory=list)
     active_worker_count: int = Field(default=0, ge=0)
     queued_worker_count: int = Field(default=0, ge=0)
     active_decoding_user_count: int = Field(default=0, ge=0)

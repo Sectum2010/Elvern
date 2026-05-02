@@ -162,7 +162,7 @@ from .mobile_playback_source_service import (
     _resolve_duration_seconds as _resolve_duration_seconds_impl,
     _resolve_worker_source_input as _resolve_worker_source_input_impl,
 )
-from .library_service import get_media_item_record
+from .library_service import get_media_item_detail, get_media_item_record
 from .media_technical_metadata_service import resolve_trusted_technical_metadata
 from .route2_ffmpeg_command_adapter import (
     Route2FFmpegCommandAdapterInput,
@@ -411,6 +411,28 @@ class _Route2ClosedLoopDryRunDecision:
     limiting_factor: _Route2LimitingFactorDecision
     primary_bottleneck: str
     donor_score: float = 0.0
+
+
+@dataclass(slots=True)
+class _Route2SharedSupplyWorkload:
+    worker_id: str
+    workload_id: str
+    session_id: str
+    epoch_id: str
+    user_id: int
+    media_item_id: int
+    source_fingerprint: str
+    source_kind: str
+    profile: str
+    playback_mode: str
+    group_key: str | None
+    permission_status: str
+    blockers: list[str]
+    notes: list[str]
+    epoch_start_seconds: float | None
+    target_position_seconds: float
+    prepared_ranges: list[list[float]]
+    stopped_or_expired: bool
 
 
 class ActivePlaybackWorkerConflictError(Exception):
@@ -4014,6 +4036,386 @@ class MobilePlaybackManager:
             "runtime_rebalance_priority": 0,
         }
 
+    def _route2_shared_supply_output_contract_fingerprint_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> tuple[str | None, list[str], list[str]]:
+        blockers = ["missing_command_fingerprint"]
+        notes = ["output_contract_fingerprint_uses_safe_route2_params_not_full_command"]
+        profile = MOBILE_PROFILES.get(session.profile)
+        if profile is None:
+            return None, ["missing_output_contract", *blockers], notes
+        keyframe_interval = int(SEGMENT_DURATION_SECONDS * 24)
+        contract = {
+            "version": "route2-shared-supply-output-contract-v1",
+            "engine_mode": "route2",
+            "profile": session.profile,
+            "playback_mode": session.browser_playback.playback_mode,
+            "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
+            "gop_frames": keyframe_interval,
+            "keyint_min": keyframe_interval,
+            "force_key_frames": f"expr:gte(t,n_forced*{SEGMENT_DURATION_SECONDS})",
+            "hls_segment_type": "fmp4",
+            "hls_flags": "independent_segments+temp_file",
+            "timeline_policy": "epoch_relative_zero_offset",
+            "segment_numbering": "epoch_relative_start_number_0",
+            "video_codec": "libx264",
+            "video_preset": "superfast",
+            "video_profile": "high",
+            "video_level": profile.level,
+            "pixel_format": "yuv420p",
+            "crf": profile.crf,
+            "maxrate": profile.maxrate,
+            "bufsize": profile.bufsize,
+            "max_width": profile.max_width,
+            "max_height": profile.max_height,
+            "audio_codec": "aac",
+            "audio_channels": 2,
+            "audio_sample_rate": 48000,
+            "audio_bitrate": "160k",
+        }
+        encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:24], blockers, notes
+
+    def _route2_shared_supply_group_key_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> tuple[str | None, list[str], list[str]]:
+        blockers: list[str] = []
+        notes = ["level_0_detection_only", "route2_output_is_session_epoch_scoped"]
+        if not str(session.source_fingerprint or "").strip():
+            blockers.append("missing_source_fingerprint")
+        output_contract_fingerprint, output_blockers, output_notes = (
+            self._route2_shared_supply_output_contract_fingerprint_locked(session)
+        )
+        blockers.extend(output_blockers)
+        notes.extend(output_notes)
+        if output_contract_fingerprint is None or "missing_source_fingerprint" in blockers:
+            return None, sorted(set(blockers)), sorted(set(notes))
+        group_payload = {
+            "version": "route2-shared-supply-group-v1",
+            "media_item_id": int(session.media_item_id),
+            "source_fingerprint": str(session.source_fingerprint),
+            "source_kind": str(session.source_kind),
+            "profile": str(session.profile),
+            "playback_mode": str(session.browser_playback.playback_mode),
+            "cache_key": str(session.cache_key),
+            "output_contract_fingerprint": output_contract_fingerprint,
+            "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
+        }
+        encoded = json.dumps(group_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return f"r2ss:v1:{hashlib.sha256(encoded).hexdigest()[:32]}", sorted(set(blockers)), sorted(set(notes))
+
+    def _route2_shared_supply_cloud_provider_blockers_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> list[str]:
+        with get_connection(self.settings) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    s.last_error,
+                    account.id AS google_account_id,
+                    account.refresh_token
+                FROM media_items m
+                LEFT JOIN library_sources s
+                  ON s.id = m.library_source_id
+                LEFT JOIN google_drive_accounts account
+                  ON account.id = s.google_drive_account_id
+                WHERE m.id = ?
+                LIMIT 1
+                """,
+                (session.media_item_id,),
+            ).fetchone()
+        if row is None:
+            return ["permission_unverified"]
+        google_account_id = int(row["google_account_id"] or 0)
+        if google_account_id <= 0 or not str(row["refresh_token"] or "").strip():
+            return ["provider_access_unavailable"]
+        last_error = str(row["last_error"] or "").strip()
+        if _is_non_retryable_cloud_source_error(last_error):
+            return ["provider_access_unavailable"]
+        return []
+
+    def _route2_shared_supply_permission_status_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> tuple[str, list[str]]:
+        try:
+            detail = get_media_item_detail(
+                self.settings,
+                user_id=session.user_id,
+                item_id=session.media_item_id,
+            )
+        except Exception:  # noqa: BLE001
+            detail = None
+        if detail is None:
+            with get_connection(self.settings) as connection:
+                exists = connection.execute(
+                    "SELECT 1 FROM media_items WHERE id = ? LIMIT 1",
+                    (session.media_item_id,),
+                ).fetchone()
+            if exists is None:
+                return "permission_unverified", ["permission_unverified"]
+            return "permission_blocked", ["permission_blocked"]
+        with get_connection(self.settings) as connection:
+            hidden_source = connection.execute(
+                """
+                SELECT 1
+                FROM media_items m
+                JOIN user_hidden_library_sources h
+                  ON h.library_source_id = m.library_source_id
+                 AND h.user_id = ?
+                WHERE m.id = ?
+                LIMIT 1
+                """,
+                (session.user_id, session.media_item_id),
+            ).fetchone()
+        if hidden_source is not None:
+            return "permission_blocked", ["permission_blocked"]
+        if bool(detail.get("hidden_for_user")) or bool(detail.get("hidden_globally")):
+            return "permission_blocked", ["permission_blocked"]
+        if session.source_kind == "cloud":
+            provider_blockers = self._route2_shared_supply_cloud_provider_blockers_locked(session)
+            if provider_blockers:
+                if "permission_unverified" in provider_blockers:
+                    return "permission_unverified", provider_blockers
+                return "provider_access_unavailable", provider_blockers
+            return "verified_cloud", []
+        return "verified_local", []
+
+    def _route2_shared_supply_workload_locked(
+        self,
+        record: Route2WorkerRecord,
+    ) -> _Route2SharedSupplyWorkload:
+        session = self._sessions.get(record.session_id)
+        epoch = (
+            session.browser_playback.epochs.get(record.epoch_id)
+            if session is not None and session.browser_playback.engine_mode == "route2"
+            else None
+        )
+        blockers: list[str] = []
+        notes: list[str] = []
+        permission_status = "permission_unverified"
+        group_key = None
+        source_fingerprint = ""
+        source_kind = record.source_kind
+        profile = record.profile
+        playback_mode = record.playback_mode
+        epoch_start_seconds = None
+        prepared_ranges = list(record.prepared_ranges)
+        stopped_or_expired = record.state in {"stopped", "expired", "failed"}
+        target_position_seconds = float(record.target_position_seconds or 0.0)
+        media_item_id = int(record.media_item_id)
+        if session is None:
+            blockers.append("route2_session_missing")
+        else:
+            source_fingerprint = str(session.source_fingerprint or "")
+            source_kind = str(session.source_kind or record.source_kind)
+            profile = str(session.profile or record.profile)
+            playback_mode = str(session.browser_playback.playback_mode or record.playback_mode)
+            target_position_seconds = float(session.target_position_seconds or record.target_position_seconds or 0.0)
+            media_item_id = int(session.media_item_id)
+            permission_status, permission_blockers = self._route2_shared_supply_permission_status_locked(session)
+            blockers.extend(permission_blockers)
+            group_key, group_blockers, group_notes = self._route2_shared_supply_group_key_locked(session)
+            blockers.extend(group_blockers)
+            notes.extend(group_notes)
+            stopped_or_expired = stopped_or_expired or session.state in {"stopped", "expired", "failed"}
+        if epoch is None:
+            blockers.append("route2_epoch_missing")
+        else:
+            epoch_start_seconds = float(epoch.epoch_start_seconds)
+            if not prepared_ranges:
+                prepared_ranges = self._route2_epoch_prepared_ranges_locked(session, epoch) if session is not None else []
+            if epoch.stop_requested:
+                blockers.append("explicit_stop_requested")
+            if _is_non_retryable_cloud_source_error(epoch.last_error):
+                blockers.append("provider_access_unavailable")
+                permission_status = "provider_access_unavailable"
+        if stopped_or_expired:
+            blockers.append("stopped_or_expired_workload")
+        return _Route2SharedSupplyWorkload(
+            worker_id=record.worker_id,
+            workload_id=f"{record.session_id}:{record.epoch_id}",
+            session_id=record.session_id,
+            epoch_id=record.epoch_id,
+            user_id=record.user_id,
+            media_item_id=media_item_id,
+            source_fingerprint=source_fingerprint,
+            source_kind=source_kind,
+            profile=profile,
+            playback_mode=playback_mode,
+            group_key=group_key,
+            permission_status=permission_status,
+            blockers=sorted(set(blockers)),
+            notes=sorted(set(notes)),
+            epoch_start_seconds=epoch_start_seconds,
+            target_position_seconds=target_position_seconds,
+            prepared_ranges=prepared_ranges,
+            stopped_or_expired=stopped_or_expired,
+        )
+
+    def _route2_shared_supply_pair_blockers(
+        self,
+        first: _Route2SharedSupplyWorkload,
+        second: _Route2SharedSupplyWorkload,
+    ) -> list[str]:
+        blockers: list[str] = []
+        if first.media_item_id != second.media_item_id:
+            blockers.append("media_item_mismatch")
+        if first.source_fingerprint != second.source_fingerprint:
+            blockers.append("source_fingerprint_mismatch")
+        if first.source_kind != second.source_kind:
+            blockers.append("source_kind_mismatch")
+        if first.profile != second.profile:
+            blockers.append("profile_mismatch")
+        if first.playback_mode != second.playback_mode:
+            blockers.append("playback_mode_mismatch")
+        if first.group_key is None or second.group_key is None or first.group_key != second.group_key:
+            blockers.append("shared_supply_group_key_mismatch")
+        if first.stopped_or_expired or second.stopped_or_expired:
+            blockers.append("stopped_or_expired_workload")
+        if first.permission_status not in {"verified_local", "verified_cloud"}:
+            blockers.append(first.permission_status)
+        if second.permission_status not in {"verified_local", "verified_cloud"}:
+            blockers.append(second.permission_status)
+        return sorted(set(blockers))
+
+    def _route2_shared_supply_prepared_overlap_seconds(
+        self,
+        first: _Route2SharedSupplyWorkload,
+        second: _Route2SharedSupplyWorkload,
+    ) -> float:
+        overlap = 0.0
+        for first_range in first.prepared_ranges:
+            if len(first_range) < 2:
+                continue
+            first_start = float(first_range[0])
+            first_end = float(first_range[1])
+            for second_range in second.prepared_ranges:
+                if len(second_range) < 2:
+                    continue
+                second_start = float(second_range[0])
+                second_end = float(second_range[1])
+                overlap = max(overlap, min(first_end, second_end) - max(first_start, second_start))
+        return max(0.0, overlap)
+
+    def _route2_shared_supply_range_covers_target(
+        self,
+        prepared_ranges: list[list[float]],
+        target_position_seconds: float,
+    ) -> bool:
+        target = float(target_position_seconds)
+        return any(
+            len(prepared_range) >= 2
+            and float(prepared_range[0]) <= target <= float(prepared_range[1])
+            for prepared_range in prepared_ranges
+        )
+
+    def _route2_shared_supply_pair_level(
+        self,
+        first: _Route2SharedSupplyWorkload,
+        second: _Route2SharedSupplyWorkload,
+    ) -> tuple[str, list[str]]:
+        if first.epoch_start_seconds is not None and second.epoch_start_seconds is not None:
+            if abs(first.epoch_start_seconds - second.epoch_start_seconds) <= 30.0:
+                return "overlapping_epoch_candidate", []
+        overlap_seconds = self._route2_shared_supply_prepared_overlap_seconds(first, second)
+        if overlap_seconds >= 60.0:
+            return "overlapping_epoch_candidate", []
+        if self._route2_shared_supply_range_covers_target(second.prepared_ranges, first.target_position_seconds) or (
+            self._route2_shared_supply_range_covers_target(first.prepared_ranges, second.target_position_seconds)
+        ):
+            return "cached_region_candidate", ["shared_store_missing"]
+        if not first.prepared_ranges or not second.prepared_ranges:
+            return "same_group_only", ["insufficient_frontier_data", "shared_store_missing"]
+        return "same_group_only", ["epoch_window_mismatch", "non_overlapping_window", "shared_store_missing"]
+
+    def _apply_route2_shared_supply_status_locked(
+        self,
+        payloads_by_worker_id: dict[str, dict[str, object]],
+    ) -> list[dict[str, object]]:
+        workloads = {
+            record.worker_id: self._route2_shared_supply_workload_locked(record)
+            for record in self._route2_workers.values()
+            if record.worker_id in payloads_by_worker_id
+        }
+        level_order = {
+            None: 0,
+            "same_group_only": 1,
+            "cached_region_candidate": 2,
+            "overlapping_epoch_candidate": 3,
+        }
+        for worker_id, payload in payloads_by_worker_id.items():
+            workload = workloads.get(worker_id)
+            if workload is None:
+                continue
+            compatible_workloads: list[_Route2SharedSupplyWorkload] = []
+            blockers = set(workload.blockers)
+            notes = set(workload.notes)
+            notes.add("no_copy_hardlink_symlink_attach_or_reuse_implemented")
+            level_candidate: str | None = None
+            saw_same_media = False
+            for other in workloads.values():
+                if other.worker_id == worker_id:
+                    continue
+                pair_blockers = self._route2_shared_supply_pair_blockers(workload, other)
+                if pair_blockers:
+                    if other.media_item_id == workload.media_item_id:
+                        saw_same_media = True
+                        blockers.update(pair_blockers)
+                    continue
+                saw_same_media = True
+                compatible_workloads.append(other)
+                pair_level, pair_level_blockers = self._route2_shared_supply_pair_level(workload, other)
+                blockers.update(pair_level_blockers)
+                if level_order[pair_level] > level_order[level_candidate]:
+                    level_candidate = pair_level
+            if not compatible_workloads:
+                if not saw_same_media:
+                    blockers.add("no_matching_active_route2_workload")
+                level_candidate = "same_group_only" if workload.group_key else None
+            payload["shared_supply_candidate"] = bool(compatible_workloads)
+            payload["shared_supply_group_key"] = workload.group_key
+            payload["shared_supply_group_size"] = (
+                sum(1 for item in workloads.values() if item.group_key and item.group_key == workload.group_key)
+                if workload.group_key
+                else 1
+            )
+            payload["shared_supply_level_candidate"] = level_candidate
+            payload["compatible_existing_workload_ids"] = sorted(item.workload_id for item in compatible_workloads)
+            payload["compatible_existing_worker_ids"] = sorted(item.worker_id for item in compatible_workloads)
+            payload["shared_supply_blockers"] = sorted(blockers)
+            payload["shared_supply_permission_status"] = workload.permission_status
+            payload["estimated_duplicate_workers_avoided"] = len(compatible_workloads)
+            payload["shared_supply_notes"] = sorted(notes)
+
+        summaries: list[dict[str, object]] = []
+        for group_key in sorted({item.group_key for item in workloads.values() if item.group_key}):
+            members = [item for item in workloads.values() if item.group_key == group_key]
+            member_payloads = [
+                payloads_by_worker_id[item.worker_id]
+                for item in members
+                if item.worker_id in payloads_by_worker_id
+            ]
+            candidate_count = sum(1 for item in member_payloads if bool(item.get("shared_supply_candidate")))
+            blockers = sorted({
+                blocker
+                for item in member_payloads
+                for blocker in (item.get("shared_supply_blockers") or [])
+            })
+            summaries.append(
+                {
+                    "group_key": group_key,
+                    "workload_count": len(members),
+                    "candidate_count": candidate_count,
+                    "blockers": blockers,
+                    "estimated_duplicate_workers_avoided": max(0, candidate_count - 1),
+                }
+            )
+        return summaries
+
     def _evaluate_route2_active_playback_health_locked(
         self,
         session: MobilePlaybackSession,
@@ -5247,6 +5649,7 @@ class MobilePlaybackManager:
                 donor_payload = payloads_by_worker_id.get(worker_id)
                 if donor_payload is not None:
                     donor_payload["closed_loop_donor_rank"] = rank
+            shared_supply_groups = self._apply_route2_shared_supply_status_locked(payloads_by_worker_id)
             route2_cpu_percent_of_total = (
                 round((route2_cpu_cores_used / int(budget["total_cpu_cores"])) * 100, 3)
                 if any_cpu_sampled
@@ -5359,6 +5762,7 @@ class MobilePlaybackManager:
                     if any_memory_sampled and total_memory_bytes
                     else None
                 ),
+                "shared_supply_groups": shared_supply_groups,
                 "workers_by_user": sorted(grouped_users.values(), key=lambda value: ((value["username"] or ""), value["user_id"])),
             }
 

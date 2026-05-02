@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import hashlib
 import json
 import os
 import subprocess
@@ -77,6 +78,7 @@ from backend.app.services.mobile_playback_service import (
 )
 from backend.app.services.mobile_playback_route2_full_gate import _route2_full_mode_gate_locked
 from backend.app.services.mobile_playback_route2_preflight_service import _ensure_route2_full_preflight_locked
+from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
 from backend.app.services.mobile_playback_route2_gates import (
     _route2_epoch_startup_attach_gate_locked,
     _route2_epoch_startup_attach_ready_locked,
@@ -397,6 +399,211 @@ def _make_route2_closed_loop_inputs(
     record.assigned_threads = assigned_threads
     epoch.active_worker_id = record.worker_id
     return manager, session, epoch, record
+
+
+def _insert_test_user(settings, *, user_id: int, username: str) -> None:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO users (
+                id,
+                username,
+                password_hash,
+                role,
+                enabled,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, 'test-hash', 'standard_user', 1, ?, ?)
+            """,
+            (user_id, username, now, now),
+        )
+        connection.commit()
+
+
+def _add_route2_shared_supply_workload(
+    manager: MobilePlaybackManager,
+    settings,
+    item: dict[str, object],
+    *,
+    user_id: int,
+    worker_id: str,
+    username: str,
+    profile: str = "mobile_2160p",
+    playback_mode: str = "full",
+    source_kind: str = "local",
+    source_fingerprint: str | None = None,
+    cache_key: str | None = None,
+    target_position_seconds: float = 0.0,
+    prepared_ranges: list[list[float]] | None = None,
+) -> tuple[MobilePlaybackSession, PlaybackEpoch, Route2WorkerRecord]:
+    session_id = f"{worker_id}-session"
+    epoch_id = f"{worker_id}-epoch"
+    fingerprint = source_fingerprint or str(item.get("source_fingerprint") or "shared-source-fingerprint")
+    route2_root = settings.transcode_dir / "route2-shared-supply-tests" / worker_id
+    browser_session = BrowserPlaybackSession(engine_mode="route2", playback_mode=playback_mode)
+    epoch = PlaybackEpoch(
+        epoch_id=epoch_id,
+        session_id=session_id,
+        created_at=utcnow_iso(),
+        target_position_seconds=target_position_seconds,
+        epoch_start_seconds=max(0.0, round(target_position_seconds - 20.0, 2)),
+        attach_position_seconds=target_position_seconds,
+        epoch_dir=route2_root,
+        staging_dir=route2_root / "staging",
+        published_dir=route2_root / "published",
+        staging_manifest_path=route2_root / "staging" / "ffmpeg.m3u8",
+        metadata_path=route2_root / "epoch.json",
+        frontier_path=route2_root / "published" / "frontier.json",
+        published_init_path=route2_root / "published" / "init.mp4",
+        state="starting",
+        init_published=True,
+        contiguous_published_through_segment=0,
+    )
+    browser_session.active_epoch_id = epoch_id
+    browser_session.epochs[epoch_id] = epoch
+    session = MobilePlaybackSession(
+        session_id=session_id,
+        user_id=user_id,
+        auth_session_id=None,
+        username=username,
+        media_item_id=int(item["id"]),
+        media_title=str(item.get("title") or f"Shared Supply {item['id']}"),
+        profile=profile,
+        source_kind=source_kind,
+        duration_seconds=float(item.get("duration_seconds") or 3600.0),
+        cache_key=cache_key or hashlib.sha256(f"{fingerprint}:{profile}".encode("utf-8")).hexdigest()[:20],
+        source_locator=str(item.get("file_path") or f"gdrive://{item['id']}"),
+        source_input_kind="url" if source_kind == "cloud" else "path",
+        source_fingerprint=fingerprint,
+        created_at=utcnow_iso(),
+        last_client_seen_at=utcnow_iso(),
+        last_media_access_at=utcnow_iso(),
+        state="preparing",
+        target_position_seconds=target_position_seconds,
+        browser_playback=browser_session,
+    )
+    record = Route2WorkerRecord(
+        worker_id=worker_id,
+        session_id=session_id,
+        epoch_id=epoch_id,
+        user_id=user_id,
+        username=username,
+        auth_session_id=None,
+        media_item_id=int(item["id"]),
+        title=session.media_title,
+        playback_mode=playback_mode,
+        profile=profile,
+        source_kind=source_kind,
+        target_position_seconds=target_position_seconds,
+        state="queued",
+        prepared_ranges=prepared_ranges or [],
+        assigned_threads=4,
+    )
+    with manager._lock:
+        manager._sessions[session_id] = session
+        manager._route2_workers[worker_id] = record
+    return session, epoch, record
+
+
+def _insert_cloud_shared_media_item(
+    settings,
+    *,
+    item_id: int,
+    source_id: int,
+    owner_user_id: int = 1,
+    shared: bool = True,
+    provider_auth_error: bool = False,
+    refresh_token: str = "refresh-token",
+) -> dict[str, object]:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO google_drive_accounts (
+                id,
+                user_id,
+                google_account_id,
+                email,
+                display_name,
+                refresh_token,
+                access_token,
+                access_token_expires_at,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, 'owner@example.test', 'Owner', ?, NULL, NULL, ?, ?)
+            """,
+            (source_id, owner_user_id, f"drive-account-{source_id}", refresh_token, now, now),
+        )
+        last_error = (
+            json.dumps({"code": "provider_auth_required", "message": "Reconnect Google Drive."})
+            if provider_auth_error
+            else None
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO library_sources (
+                id,
+                owner_user_id,
+                provider,
+                google_drive_account_id,
+                resource_type,
+                resource_id,
+                display_name,
+                local_path,
+                is_shared,
+                created_at,
+                updated_at,
+                last_synced_at,
+                last_error
+            ) VALUES (?, ?, 'google_drive', ?, 'folder', ?, 'Shared Drive', NULL, ?, ?, ?, ?, ?)
+            """,
+            (source_id, owner_user_id, source_id, f"drive-folder-{source_id}", int(shared), now, now, now, last_error),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO media_items (
+                id,
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                library_source_id,
+                external_media_id,
+                cloud_mime_type,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, 'Cloud Shared', 'cloud-shared.mp4', ?, 'cloud', ?, ?, 'video/mp4', 100000, 1, 3600, 1920, 1080, 'h264', 'aac', 'mp4', 2024, ?, ?, ?)
+            """,
+            (item_id, f"gdrive://source-{source_id}/file-{item_id}", source_id, f"drive-file-{item_id}", now, now, now),
+        )
+        connection.commit()
+    return {
+        "id": item_id,
+        "title": "Cloud Shared",
+        "file_path": f"gdrive://source-{source_id}/file-{item_id}",
+        "source_kind": "cloud",
+        "duration_seconds": 3600.0,
+    }
+
+
+def _route2_status_item(status: dict[str, object], worker_id: str) -> dict[str, object]:
+    return next(
+        item
+        for group in status["workers_by_user"]
+        for item in group["items"]
+        if item["worker_id"] == worker_id
+    )
 
 
 def _make_route2_worker_record_for_spawn_dry_run(*, source_kind: str = "local", user_id: int = 1) -> Route2WorkerRecord:
@@ -4914,6 +5121,17 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "source_feed_rate_missing_reason" in item_payload
     assert "publish_efficiency_gap" in item_payload
     assert "client_delivery_rate_x" in item_payload
+    assert "shared_supply_candidate" in item_payload
+    assert "shared_supply_group_key" in item_payload
+    assert "shared_supply_group_size" in item_payload
+    assert "shared_supply_level_candidate" in item_payload
+    assert "compatible_existing_workload_ids" in item_payload
+    assert "compatible_existing_worker_ids" in item_payload
+    assert "shared_supply_blockers" in item_payload
+    assert "shared_supply_permission_status" in item_payload
+    assert "estimated_duplicate_workers_avoided" in item_payload
+    assert "shared_supply_notes" in item_payload
+    assert "shared_supply_groups" in status
     assert len(started_workers) == 1
 
 
@@ -7631,6 +7849,339 @@ def test_route2_closed_loop_status_ranks_theoretical_donors_without_changing_thr
     assert items[record_a.worker_id]["runtime_rebalance_role"] == "donor_candidate"
     assert record_a.assigned_threads == 4
     assert record_b.assigned_threads == 4
+
+
+def test_route2_shared_supply_level0_same_movie_profile_is_candidate(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=420, relative_name="route2/shared-supply/same.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="shared-a",
+        username="alice",
+        prepared_ranges=[[0.0, 140.0]],
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="shared-b",
+        username="bob",
+        target_position_seconds=10.0,
+        prepared_ranges=[[0.0, 120.0]],
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "shared-a")
+    item_b = _route2_status_item(status, "shared-b")
+
+    assert item_a["shared_supply_candidate"] is True
+    assert item_a["shared_supply_group_key"] == item_b["shared_supply_group_key"]
+    assert item_a["shared_supply_group_size"] == 2
+    assert item_a["shared_supply_level_candidate"] == "overlapping_epoch_candidate"
+    assert item_a["compatible_existing_worker_ids"] == ["shared-b"]
+    assert item_a["estimated_duplicate_workers_avoided"] == 1
+    assert item_a["shared_supply_permission_status"] == "verified_local"
+    assert "missing_command_fingerprint" in item_a["shared_supply_blockers"]
+    assert "no_copy_hardlink_symlink_attach_or_reuse_implemented" in item_a["shared_supply_notes"]
+    assert status["shared_supply_groups"][0]["workload_count"] == 2
+    assert status["shared_supply_groups"][0]["candidate_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("first_overrides", "second_overrides", "expected_blocker"),
+    [
+        ({}, {"profile": "mobile_1080p"}, "profile_mismatch"),
+        ({}, {"source_fingerprint": "different-source-fingerprint"}, "source_fingerprint_mismatch"),
+        ({}, {"playback_mode": "lite"}, "playback_mode_mismatch"),
+    ],
+)
+def test_route2_shared_supply_level0_reports_identity_mismatch_blockers(
+    initialized_settings,
+    first_overrides: dict[str, object],
+    second_overrides: dict[str, object],
+    expected_blocker: str,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=421, relative_name=f"route2/shared-supply/{expected_blocker}.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="mismatch-a",
+        username="alice",
+        **first_overrides,
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="mismatch-b",
+        username="bob",
+        **second_overrides,
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "mismatch-a")
+
+    assert item_a["shared_supply_candidate"] is False
+    assert expected_blocker in item_a["shared_supply_blockers"]
+    assert item_a["estimated_duplicate_workers_avoided"] == 0
+
+
+def test_route2_shared_supply_level0_same_group_non_overlapping_windows_stays_future_only(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=422, relative_name="route2/shared-supply/non-overlap.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="window-a",
+        username="alice",
+        target_position_seconds=0.0,
+        prepared_ranges=[[0.0, 90.0]],
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="window-b",
+        username="bob",
+        target_position_seconds=600.0,
+        prepared_ranges=[[580.0, 660.0]],
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "window-a")
+
+    assert item_a["shared_supply_candidate"] is True
+    assert item_a["shared_supply_level_candidate"] == "same_group_only"
+    assert "epoch_window_mismatch" in item_a["shared_supply_blockers"]
+    assert "shared_store_missing" in item_a["shared_supply_blockers"]
+
+
+def test_route2_shared_supply_level0_cached_region_candidate_requires_future_store(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=423, relative_name="route2/shared-supply/cached-region.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="cached-a",
+        username="alice",
+        target_position_seconds=0.0,
+        prepared_ranges=[[500.0, 700.0]],
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="cached-b",
+        username="bob",
+        target_position_seconds=600.0,
+        prepared_ranges=[[580.0, 620.0]],
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "cached-a")
+
+    assert item_a["shared_supply_candidate"] is True
+    assert item_a["shared_supply_level_candidate"] == "cached_region_candidate"
+    assert "shared_store_missing" in item_a["shared_supply_blockers"]
+
+
+def test_route2_shared_supply_level0_hidden_movie_blocks_candidate(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=424, relative_name="route2/shared-supply/hidden.mp4"),
+    )
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_hidden_media_items (user_id, media_item_id, hidden_at)
+            VALUES (?, ?, ?)
+            """,
+            (2, int(item["id"]), utcnow_iso()),
+        )
+        connection.commit()
+    _add_route2_shared_supply_workload(manager, settings, item, user_id=1, worker_id="hidden-a", username="alice")
+    _add_route2_shared_supply_workload(manager, settings, item, user_id=2, worker_id="hidden-b", username="bob")
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "hidden-a")
+    item_b = _route2_status_item(status, "hidden-b")
+
+    assert item_a["shared_supply_candidate"] is False
+    assert "permission_blocked" in item_a["shared_supply_blockers"]
+    assert item_b["shared_supply_permission_status"] == "permission_blocked"
+
+
+def test_route2_shared_supply_level0_hidden_library_source_blocks_candidate(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=425, relative_name="route2/shared-supply/hidden-source.mp4"),
+    )
+    with get_connection(settings) as connection:
+        source_id = ensure_current_shared_local_source_binding(settings, connection=connection)
+        connection.execute(
+            """
+            INSERT INTO user_hidden_library_sources (user_id, library_source_id, hidden_at)
+            VALUES (?, ?, ?)
+            """,
+            (2, source_id, utcnow_iso()),
+        )
+        connection.commit()
+    _add_route2_shared_supply_workload(manager, settings, item, user_id=1, worker_id="source-a", username="alice")
+    _add_route2_shared_supply_workload(manager, settings, item, user_id=2, worker_id="source-b", username="bob")
+
+    status = manager.get_route2_worker_status()
+    item_b = _route2_status_item(status, "source-b")
+
+    assert item_b["shared_supply_candidate"] is False
+    assert item_b["shared_supply_permission_status"] == "permission_blocked"
+
+
+def test_route2_shared_supply_level0_cloud_shared_source_can_be_candidate(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_cloud_shared_media_item(settings, item_id=426, source_id=426)
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="cloud-a",
+        username="alice",
+        source_kind="cloud",
+        source_fingerprint="cloud-shared-fingerprint",
+        prepared_ranges=[[0.0, 120.0]],
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="cloud-b",
+        username="bob",
+        source_kind="cloud",
+        source_fingerprint="cloud-shared-fingerprint",
+        prepared_ranges=[[0.0, 100.0]],
+    )
+
+    status = manager.get_route2_worker_status()
+    item_b = _route2_status_item(status, "cloud-b")
+
+    assert item_b["shared_supply_candidate"] is True
+    assert item_b["shared_supply_permission_status"] == "verified_cloud"
+
+
+def test_route2_shared_supply_level0_cloud_provider_error_blocks_candidate(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    _insert_test_user(settings, user_id=2, username="bob")
+    item = _insert_cloud_shared_media_item(
+        settings,
+        item_id=427,
+        source_id=427,
+        provider_auth_error=True,
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="cloud-error-a",
+        username="alice",
+        source_kind="cloud",
+        source_fingerprint="cloud-error-fingerprint",
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=2,
+        worker_id="cloud-error-b",
+        username="bob",
+        source_kind="cloud",
+        source_fingerprint="cloud-error-fingerprint",
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "cloud-error-a")
+
+    assert item_a["shared_supply_candidate"] is False
+    assert item_a["shared_supply_permission_status"] == "provider_access_unavailable"
+    assert "provider_access_unavailable" in item_a["shared_supply_blockers"]
+
+
+def test_route2_shared_supply_level0_admin_multi_playback_counts_separate_workloads(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=428, relative_name="route2/shared-supply/admin.mp4"),
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="admin-a",
+        username="admin",
+        prepared_ranges=[[0.0, 120.0]],
+    )
+    _add_route2_shared_supply_workload(
+        manager,
+        settings,
+        item,
+        user_id=1,
+        worker_id="admin-b",
+        username="admin",
+        target_position_seconds=5.0,
+        prepared_ranges=[[0.0, 120.0]],
+    )
+
+    status = manager.get_route2_worker_status()
+    item_a = _route2_status_item(status, "admin-a")
+
+    assert item_a["shared_supply_candidate"] is True
+    assert item_a["compatible_existing_workload_ids"] == ["admin-b-session:admin-b-epoch"]
+    assert item_a["compatible_existing_worker_ids"] == ["admin-b"]
+    assert manager._route2_workers["admin-a"].assigned_threads == 4
+    assert manager._route2_workers["admin-b"].assigned_threads == 4
 
 
 def test_route2_stop_then_start_new_movie_allows_replacement_movie(initialized_settings) -> None:

@@ -140,6 +140,19 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Mature active stream health below the `1.05x` floor is a hard protection signal (`active_stream_health_protection`). Boost warnings and boost blockers must not be reported as hard admission blocks unless an actual reserve, health, capacity, RAM, provider/source, or external-pressure guard is unsafe.
 - The actual Full 30-minute startup gate, real 9/12 assignment, downshift, reclaim, re-supply, and shared supply remain future work.
 
+## Phase 1K-1A Shared Supply Level 0 Detection
+
+- Level 0 shared supply is admin/status dry-run detection only.
+- Current Route2 output remains session/epoch scoped under `browser_playback_route2/sessions/<session_id>/epochs/<epoch_id>/`; published fMP4 segments are not copied, hardlinked, symlinked, reused, or attached across sessions.
+- Candidate detection does not imply that reuse is safe today. It only identifies active Route2 workloads that have the same media item, source fingerprint, source kind, profile, playback mode, cache key, segment duration, and a safe output-contract fingerprint.
+- The group key is a sanitized hash of compatibility fields and a safe Route2 output contract. It must not include access tokens, refresh tokens, cookies, tokenized URLs, private cloud URLs, or full command lines.
+- The current dry-run still reports `missing_command_fingerprint` because a future implementation needs a normalized full output command fingerprint before real sharing.
+- Permission status is part of the dry-run result. Hidden media, hidden library sources, global hidden entries, unverified access, and unavailable cloud provider access must block a candidate.
+- Cloud shared-supply candidates require independent provider/source access for the requesting user/source context. Detection must not make extra Drive media requests.
+- Level 0 can classify future potential as `same_group_only`, `overlapping_epoch_candidate`, or `cached_region_candidate`, but `shared_store_missing` remains a blocker because there is no global absolute segment store.
+- Attach-from-anywhere remains future work and requires global absolute segment identity, sparse manifest reconstruction, per-user permission checks, active leases/reference tracking, and cleanup rules that skip active shared segments.
+- Shared attach, once implemented later, should not be treated as free: it may avoid a new ffmpeg worker, but it still consumes network serving bandwidth, file IO, session tracking, and player resources.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

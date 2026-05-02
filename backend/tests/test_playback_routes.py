@@ -1436,6 +1436,7 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert payload["cgroup_io_some_avg10"] == 0.08
     assert payload["route2_memory_bytes"] == 2147483648
     assert payload["route2_memory_bytes_total"] == 2147483648
+    assert payload["shared_supply_groups"] == []
     assert payload["active_worker_count"] == 1
     assert payload["queued_worker_count"] == 2
     assert payload["active_decoding_user_count"] == 2
@@ -1496,6 +1497,11 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["closed_loop_boost_blockers"] == []
     assert first_item["closed_loop_boost_warning_reasons"] == []
     assert first_item["closed_loop_primary_bottleneck"] == "cpu_thread"
+    assert first_item["shared_supply_candidate"] is False
+    assert first_item["shared_supply_group_key"] is None
+    assert first_item["compatible_existing_worker_ids"] == []
+    assert first_item["shared_supply_blockers"] == []
+    assert first_item["estimated_duplicate_workers_avoided"] == 0
     serialized_payload = response.text.lower()
     assert "access_token" not in serialized_payload
     assert "full_command_line" not in serialized_payload
