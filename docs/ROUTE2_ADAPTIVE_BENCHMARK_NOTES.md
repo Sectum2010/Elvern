@@ -504,3 +504,141 @@ Current dry-run startup policy:
 - Dry-run advice never changes real `assigned_threads`.
 
 This is intentionally a status/metadata step. Future real adaptive control may use this advisor after live validation, feature flags, and rollback behavior are mature.
+
+## Final Legacy Cloud Benchmark Stage
+
+Timestamp: `20260502T002612Z`
+
+This is the final old/legacy cloud benchmark stage. These results are not live-parity Full Playback readiness measurements. They use the existing benchmark-only cloud ffmpeg path and are useful only for relative cloud thread-scaling shape.
+
+Generated artifacts:
+
+- Avatar completion: `dev/artifacts/route2-cloud-benchmark/20260502T002612Z/`
+- New cloud pass: `dev/artifacts/route2-cloud-benchmark/final-old-cloud-benchmark-20260502T002612Z/`
+
+### Avatar Way of Water 10-12 Completion
+
+Reason for run: completing Avatar high-thread rows that were previously blocked by Google Drive quota/provider errors.
+
+Media item: `935`
+
+Title: `Avatar.The.Way.of.Water.2022.2160p.REPACK.UHD.BluRay.REMUX.DV.HDR.HEVC.Atmos-TRiToN`
+
+File size: `76,167,796,686 bytes / 70.94 GiB`
+
+Quota/auth sanity check: a minimal `8 MiB` start-range source probe succeeded with HTTP `206`.
+
+| Threads | Repeat | Wall | First Segment | 45s Runway | 120s Runway | Avg CPU | Peak CPU | Peak RSS | Supply | Result |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 44.047s | 4.005s | 15.017s | 35.539s | 12.901 | 15.765 | 3.45 GiB | 3.406x | success |
+| 10 | 2 | 44.551s | 3.504s | 15.515s | 36.543s | 12.762 | 15.865 | 3.48 GiB | 3.368x | success |
+| 11 | 1 | 44.051s | 4.006s | 14.519s | 35.542s | 13.033 | 16.185 | 3.33 GiB | 3.406x | success |
+| 11 | 2 | 43.551s | 3.504s | 14.014s | 35.042s | 13.212 | 15.966 | 3.33 GiB | 3.445x | success |
+| 12 | 1 | 44.551s | 4.004s | 15.016s | 35.540s | 12.963 | 15.715 | 3.46 GiB | 3.367x | success |
+| 12 | 2 | 44.046s | 4.005s | 15.016s | 35.537s | 13.096 | 16.047 | 3.39 GiB | 3.406x | success |
+
+| Threads | Avg 120s | Median 120s | Avg Supply | Median Supply | Avg CPU | Max Peak CPU | Max RSS | Repeat Diff |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 36.041s | 36.041s | 3.387x | 3.387x | 12.832 | 15.865 | 3.48 GiB | 1.004s |
+| 11 | 35.292s | 35.292s | 3.425x | 3.425x | 13.122 | 16.185 | 3.33 GiB | 0.500s |
+| 12 | 35.538s | 35.538s | 3.386x | 3.386x | 13.029 | 16.047 | 3.46 GiB | 0.003s |
+
+Interpretation:
+
+- Avatar high-thread completion was quota-clear for this run.
+- `10`, `11`, and `12` were effectively clustered, with `11` slightly fastest by 120s runway average.
+- CPU/RAM remained safe; peak CPU stayed below an 18-core Route2 upbound and peak RSS stayed below 3.5 GiB.
+- This does not change policy by itself. It reinforces that cloud high-thread gains can flatten and that provider/quota guards remain mandatory.
+
+### New Cloud Movies
+
+Random seed: `elvern-cloud-final-old-benchmark-20260502`
+
+| Movie | Media ID | Size | Randomized Order |
+|---|---:|---:|---|
+| The Godfather Part III (1990) | 536 | 41,285,409,624 bytes / 38.45 GiB | `6,12,9,11,4,8,2,7,3,1,10,5` |
+| Fight Club 1999 | 103 | 27,687,779,237 bytes / 25.79 GiB | `2,9,8,12,11,4,3,10,5,6,7,1` |
+| Fantastic.Beasts.The.Crimes.of.Grindelwald.2018..4K.HDR.DV.2160p.BDRemux Ita Eng x265-NAHOM | 1453 | 54,691,468,577 bytes / 50.94 GiB | `9,8,10,1,3,2,11,4,12,6,5,7` |
+
+All three movie source sanity probes succeeded with HTTP `206` before e2e attempts.
+
+#### The Godfather Part III
+
+| Thread | Order | Wall | First Segment | 45s Runway | 120s Runway | Avg CPU | Peak CPU | Peak RSS | Supply | Source MiB/s | Result |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 10 | 50.043s | 2.504s | 14.013s | 39.534s | 2.456 | 3.498 | 0.78 GiB | 2.998x | 8.417 | success |
+| 2 | 7 | 34.031s | 2.002s | 10.009s | 26.523s | 3.574 | 5.136 | 0.79 GiB | 4.408x | 12.347 | success |
+| 3 | 9 | 22.021s | 2.002s | 7.007s | 17.516s | 5.470 | 8.930 | 0.81 GiB | 6.813x | 19.127 | success |
+| 4 | 5 | 20.518s | 2.002s | 7.006s | 16.514s | 5.850 | 9.554 | 0.81 GiB | 7.312x | 20.479 | success |
+| 5 | 12 | 18.517s | 2.002s | 7.006s | 15.514s | 6.520 | 10.318 | 0.82 GiB | 8.102x | 22.801 | success |
+| 6 | 1 | 22.020s | 2.502s | 7.507s | 18.017s | 5.547 | 11.093 | 0.83 GiB | 6.813x | 19.173 | success |
+| 7 | 8 | 18.016s | 2.502s | 7.006s | 15.012s | 6.742 | 11.552 | 0.84 GiB | 8.327x | 23.324 | success |
+| 8 | 6 | 17.517s | 2.003s | 6.507s | 14.514s | 6.961 | 11.550 | 0.84 GiB | 8.564x | 24.216 | success |
+| 9 | 3 | 21.021s | 2.503s | 7.007s | 17.017s | 5.897 | 11.768 | 0.85 GiB | 7.137x | 20.180 | success |
+| 10 | 11 | 18.018s | 2.002s | 7.007s | 14.514s | 6.833 | 11.829 | 0.85 GiB | 8.326x | 23.487 | success |
+| 11 | 4 | 18.018s | 2.002s | 7.007s | 15.015s | 6.805 | 12.090 | 0.86 GiB | 8.326x | 23.487 | success |
+| 12 | 2 | 21.020s | 2.002s | 7.007s | 17.016s | 5.831 | 12.007 | 0.87 GiB | 7.137x | 20.275 | success |
+
+Interpretation:
+
+- `1 -> 2` improved strongly.
+- `2 -> 3` improved strongly.
+- `4 -> 5` improved slightly.
+- `5 -> 6` regressed in this randomized pass, likely noise/source interaction.
+- `6 -> 7 -> 8` improved again, with `8` tied for fastest 120s runway.
+- `8 -> 9` regressed.
+- `9 -> 10` improved; `10 -> 11` was nearly flat.
+- `11 -> 12` regressed.
+- No provider instability appeared for this movie. CPU and memory stayed safe.
+
+#### Fight Club
+
+| Thread | Order | Wall | First Segment | 45s Runway | 120s Runway | Avg CPU | Peak CPU | Peak RSS | Supply | Source MiB/s | Result |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 12 | 1.012s |  |  |  | 0.020 | 0.020 | 0.05 GiB | 0.000x | 2.980 | failed: CloudSourceAbort |
+| 2 | 1 | 56.557s | 5.505s | 20.521s | 45.546s | 6.375 | 9.890 | 2.23 GiB | 2.653x | 5.295 | success |
+| 3 | 7 | 40.040s | 4.004s | 14.515s | 32.032s | 9.258 | 13.523 | 2.27 GiB | 3.747x | 7.529 | success |
+| 4 | 6 | 33.535s | 3.504s | 12.011s | 27.027s | 11.165 | 14.586 | 2.33 GiB | 4.474x | 8.959 | success |
+| 5 | 9 | 31.032s | 3.504s | 11.012s | 25.527s | 12.191 | 15.202 | 2.37 GiB | 4.835x | 9.714 | success |
+| 6 | 10 | 31.034s | 3.504s | 11.011s | 25.528s | 12.255 | 15.841 | 2.36 GiB | 4.834x | 9.746 | success |
+| 7 | 11 | 30.537s | 3.503s | 10.511s | 25.027s | 12.543 | 15.888 | 2.41 GiB | 4.913x | 9.872 | success |
+| 8 | 3 | 30.532s | 3.504s | 11.011s | 25.526s | 12.582 | 15.805 | 2.40 GiB | 4.914x | 9.841 | success |
+| 9 | 2 | 30.532s | 3.503s | 11.011s | 25.526s | 12.590 | 15.967 | 2.45 GiB | 4.914x | 9.841 | success |
+| 10 | 8 | 30.033s | 3.504s | 11.014s | 25.027s | 12.834 | 16.134 | 2.54 GiB | 4.995x | 10.004 | success |
+| 11 | 5 | 30.031s | 3.504s | 11.011s | 25.027s | 12.878 | 16.305 | 2.59 GiB | 4.996x | 10.038 | success |
+| 12 | 4 | 30.037s | 3.504s | 10.513s | 25.030s | 12.933 | 16.148 | 2.51 GiB | 4.995x | 10.069 | success |
+
+Interpretation:
+
+- `2 -> 3`, `3 -> 4`, and `4 -> 5` improved.
+- `5 -> 6` was flat.
+- `6 -> 7 -> 8` mostly plateaued.
+- `8 -> 9` was flat.
+- `9 -> 10 -> 11 -> 12` mostly plateaued.
+- Thread `1` failed at the end of the randomized pass after source/proxy reported provider/auth/quota/server errors. The row had two `206` and two `403` source responses before aborting.
+- CPU peaked around 16.3 cores on successful high-thread rows, still below an 18-core Route2 upbound. RSS stayed below 2.6 GiB.
+
+#### Fantastic Beasts: The Crimes of Grindelwald
+
+| Thread | Order | Wall | First Segment | 45s Runway | 120s Runway | Avg CPU | Peak CPU | Peak RSS | Supply | Source MiB/s | Result |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 9 | 1 | 0.501s |  |  |  | 0.000 | 0.000 | 0.00 GiB | 0.000x | 0.000 | failed: ffmpeg exited with code 8 |
+
+Interpretation:
+
+- The source sanity probe succeeded with HTTP `206`, but the first e2e row immediately failed with HTTP `403 Forbidden` from the benchmark proxy path.
+- No matrix was collected for this movie.
+- This is provider/source instability evidence, not CPU/thread scaling evidence.
+
+### Cross-Cloud Interpretation
+
+- Avatar completion confirms the previously missing `10/11/12` rows are now available, but those rows are essentially flat.
+- Godfather was extremely fast in this legacy cloud path. It showed useful low-thread gains but noisy/regressive high-thread behavior.
+- Fight Club showed a clearer ladder up to about `5`, then a broad plateau from roughly `5-12`.
+- Crimes of Grindelwald could not collect e2e scaling data due to immediate provider/source `403` despite a successful small source probe.
+- Across Green Mile, Avatar, Godfather, and Fight Club, `6` remains a reasonable first useful promotion tier in relative legacy data.
+- `9` remains a reasonable second useful tier when a workload actually remains CPU/thread limited.
+- `12` should remain strict/experimental. It can be safe in CPU/RAM terms, but cloud provider/source instability and repeated plateaus argue against broad default use.
+- Cloud provider/source instability must continue to block promotion regardless of apparent CPU headroom.
+
+These results are for relative thread-scaling shape only and should not be used as absolute live Full Playback ready-time measurements.
