@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Callable, Iterator
@@ -37,6 +38,9 @@ PROVIDER_AUTH_REQUIRED_CODE = "provider_auth_required"
 PROVIDER_QUOTA_EXCEEDED_CODE = "provider_quota_exceeded"
 PROVIDER_SOURCE_ERROR_CODE = "provider_source_error"
 VALIDATED_UPSTREAM_STREAM_DEFAULT_CHUNK_SIZE = 64 * 1024
+GOOGLE_DRIVE_BOUNDED_STREAM_RANGE_CHUNK_SIZE = 8 * 1024 * 1024
+OPEN_ENDED_BYTE_RANGE_RE = re.compile(r"^bytes=(\d+)-$")
+CONTENT_RANGE_RE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", re.IGNORECASE)
 
 
 def google_drive_enabled(settings: Settings) -> bool:
@@ -233,6 +237,65 @@ def build_google_drive_provider_source_error_detail(
     }
 
 
+def _parse_open_ended_byte_range(range_header: str | None) -> int | None:
+    candidate = str(range_header or "").strip()
+    if not candidate:
+        return 0
+    match = OPEN_ENDED_BYTE_RANGE_RE.fullmatch(candidate)
+    if match is None:
+        return None
+    try:
+        return max(int(match.group(1)), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_content_range(value: object) -> tuple[int, int, int] | None:
+    match = CONTENT_RANGE_RE.fullmatch(str(value or "").strip())
+    if match is None or match.group(3) == "*":
+        return None
+    try:
+        start = int(match.group(1))
+        end = int(match.group(2))
+        total = int(match.group(3))
+    except (TypeError, ValueError):
+        return None
+    if start < 0 or end < start or total <= 0:
+        return None
+    return start, end, total
+
+
+def _bounded_google_drive_range(*, start: int, total: int | None, window_size: int) -> str:
+    safe_start = max(int(start), 0)
+    safe_window_size = max(int(window_size), 1)
+    end = safe_start + safe_window_size - 1
+    if total is not None:
+        end = min(end, max(total - 1, safe_start))
+    return f"bytes={safe_start}-{end}"
+
+
+def _build_google_drive_media_request(
+    access_token: str,
+    *,
+    file_id: str,
+    resource_key: str | None,
+    range_header: str,
+) -> Request:
+    query = {
+        "alt": "media",
+        "supportsAllDrives": "true",
+    }
+    if resource_key:
+        query["resourceKey"] = resource_key
+    return Request(
+        f"{GOOGLE_DRIVE_FILES_ENDPOINT}/{file_id}?{urlencode(query)}",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Range": range_header,
+        },
+    )
+
+
 def _stream_error_headers(
     *,
     detail: str,
@@ -248,6 +311,36 @@ def _stream_error_headers(
         headers["X-Elvern-Provider-Source-Reason"] = provider_source_reason
         headers["X-Elvern-Provider-Error-Code"] = _google_drive_provider_source_code(provider_source_reason)
     return headers
+
+
+def _raise_google_drive_stream_http_exception(exc: HTTPError) -> None:
+    detail, provider_auth_reason, provider_source_reason = _parse_google_drive_http_error(
+        exc,
+        default_detail="Cloud media file could not be streamed.",
+    )
+    if exc.code == 401 or provider_auth_reason:
+        _raise_google_drive_provider_auth_required(
+            reason=provider_auth_reason or "reauth_required",
+            message="Reconnect Google Drive to continue this action.",
+        )
+    if exc.code == 404 and detail == "Cloud media file could not be streamed.":
+        detail = "Cloud media file not found."
+    raise HTTPException(
+        status_code=exc.code,
+        detail=(
+            build_google_drive_provider_source_error_detail(
+                message=detail,
+                reason_code=provider_source_reason,
+            )
+            if provider_source_reason
+            else detail
+        ),
+        headers=_stream_error_headers(
+            detail=detail,
+            provider_auth_reason=provider_auth_reason,
+            provider_source_reason=provider_source_reason,
+        ),
+    ) from exc
 
 
 def get_google_token_expiry_iso(expires_in: object) -> str | None:
@@ -376,58 +469,28 @@ def proxy_google_drive_file_response(
     validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
 ) -> StreamingResponse:
-    headers = {"Authorization": f"Bearer {access_token}"}
     requested_range_header = str(range_header or "").strip()
-    fallback_range_header = None
-    if requested_range_header:
-        headers["Range"] = requested_range_header
-    else:
-        # Google Drive often rejects unbounded alt=media opens for large videos
-        # as download-quota failures. Keep cloud playback probes bounded and let
-        # media clients continue with explicit Range requests.
-        fallback_size = max(1, int(validated_chunk_size or chunk_size or VALIDATED_UPSTREAM_STREAM_DEFAULT_CHUNK_SIZE))
-        fallback_range_header = f"bytes=0-{fallback_size - 1}"
-        headers["Range"] = fallback_range_header
-    query = {
-        "alt": "media",
-        "supportsAllDrives": "true",
-    }
-    if resource_key:
-        query["resourceKey"] = resource_key
-    request = Request(
-        f"{GOOGLE_DRIVE_FILES_ENDPOINT}/{file_id}?{urlencode(query)}",
-        headers=headers,
+    stitch_start = _parse_open_ended_byte_range(requested_range_header)
+    range_window_size = max(
+        int(chunk_size or 0),
+        int(validated_chunk_size or 0),
+        GOOGLE_DRIVE_BOUNDED_STREAM_RANGE_CHUNK_SIZE,
+    )
+    upstream_range_header = (
+        _bounded_google_drive_range(start=stitch_start, total=None, window_size=range_window_size)
+        if stitch_start is not None
+        else requested_range_header
+    )
+    request = _build_google_drive_media_request(
+        access_token,
+        file_id=file_id,
+        resource_key=resource_key,
+        range_header=upstream_range_header,
     )
     try:
         upstream = urlopen(request, timeout=30)
     except HTTPError as exc:
-        detail, provider_auth_reason, provider_source_reason = _parse_google_drive_http_error(
-            exc,
-            default_detail="Cloud media file could not be streamed.",
-        )
-        if exc.code == 401 or provider_auth_reason:
-            _raise_google_drive_provider_auth_required(
-                reason=provider_auth_reason or "reauth_required",
-                message="Reconnect Google Drive to continue this action.",
-            )
-        if exc.code == 404 and detail == "Cloud media file could not be streamed.":
-            detail = "Cloud media file not found."
-        raise HTTPException(
-            status_code=exc.code,
-            detail=(
-                build_google_drive_provider_source_error_detail(
-                    message=detail,
-                    reason_code=provider_source_reason,
-                )
-                if provider_source_reason
-                else detail
-            ),
-            headers=_stream_error_headers(
-                detail=detail,
-                provider_auth_reason=provider_auth_reason,
-                provider_source_reason=provider_source_reason,
-            ),
-        ) from exc
+        _raise_google_drive_stream_http_exception(exc)
     except URLError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -435,25 +498,47 @@ def proxy_google_drive_file_response(
         ) from exc
 
     upstream_headers = getattr(upstream, "headers", {})
+    content_range = _parse_content_range(upstream_headers.get("Content-Range"))
     response_headers = {
         "Accept-Ranges": upstream_headers.get("Accept-Ranges", "bytes"),
         "Cache-Control": "private, max-age=0, must-revalidate",
     }
-    if fallback_range_header:
-        response_headers["X-Elvern-Cloud-Range-Fallback"] = fallback_range_header
-    for header_name in ("Content-Length", "Content-Range"):
-        header_value = upstream_headers.get(header_name)
-        if header_value:
-            response_headers[header_name] = header_value
+    if stitch_start is not None:
+        response_headers["X-Elvern-Cloud-Range-Fallback"] = upstream_range_header
+    if stitch_start is not None and content_range is not None:
+        _first_start, _first_end, total_size = content_range
+        response_headers["Content-Range"] = f"bytes {stitch_start}-{total_size - 1}/{total_size}"
+        response_headers["Content-Length"] = str(max(total_size - stitch_start, 0))
+    else:
+        for header_name in ("Content-Length", "Content-Range"):
+            header_value = upstream_headers.get(header_name)
+            if header_value:
+                response_headers[header_name] = header_value
     media_type = upstream_headers.get("Content-Type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
     status_code = getattr(upstream, "status", status.HTTP_200_OK)
-    return StreamingResponse(
-        _iter_upstream_response(
+    iterator = (
+        _iter_stitched_google_drive_ranges(
+            first_upstream=upstream,
+            access_token=access_token,
+            file_id=file_id,
+            resource_key=resource_key,
+            start_byte=stitch_start,
+            first_content_range=content_range,
+            range_window_size=range_window_size,
+            chunk_size=chunk_size,
+            validated_chunk_size=validated_chunk_size,
+            stream_validator=stream_validator,
+        )
+        if stitch_start is not None and content_range is not None
+        else _iter_upstream_response(
             upstream,
             chunk_size=chunk_size,
             validated_chunk_size=validated_chunk_size,
             stream_validator=stream_validator,
-        ),
+        )
+    )
+    return StreamingResponse(
+        iterator,
         media_type=media_type,
         headers=response_headers,
         status_code=status_code,
@@ -487,6 +572,57 @@ def _iter_upstream_response(
             if stream_validator and not stream_validator():
                 break
             yield chunk
+
+
+def _iter_stitched_google_drive_ranges(
+    *,
+    first_upstream,
+    access_token: str,
+    file_id: str,
+    resource_key: str | None,
+    start_byte: int,
+    first_content_range: tuple[int, int, int],
+    range_window_size: int,
+    chunk_size: int = 1024 * 1024,
+    validated_chunk_size: int | None = None,
+    stream_validator: Callable[[], bool] | None = None,
+) -> Iterator[bytes]:
+    current_upstream = first_upstream
+    current_start, current_end, total_size = first_content_range
+    next_start = current_end + 1
+    while True:
+        yield from _iter_upstream_response(
+            current_upstream,
+            chunk_size=chunk_size,
+            validated_chunk_size=validated_chunk_size,
+            stream_validator=stream_validator,
+        )
+        if stream_validator and not stream_validator():
+            break
+        if next_start >= total_size:
+            break
+        range_header = _bounded_google_drive_range(
+            start=next_start,
+            total=total_size,
+            window_size=range_window_size,
+        )
+        request = _build_google_drive_media_request(
+            access_token,
+            file_id=file_id,
+            resource_key=resource_key,
+            range_header=range_header,
+        )
+        try:
+            current_upstream = urlopen(request, timeout=30)
+        except (HTTPError, URLError):
+            break
+        content_range = _parse_content_range(getattr(current_upstream, "headers", {}).get("Content-Range"))
+        if content_range is None:
+            break
+        current_start, current_end, total_size = content_range
+        if current_start != next_start:
+            break
+        next_start = current_end + 1
 
 
 def resolve_effective_upstream_chunk_size(

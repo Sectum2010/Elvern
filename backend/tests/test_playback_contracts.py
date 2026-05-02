@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 import subprocess
@@ -2758,8 +2759,8 @@ def test_google_drive_stream_proxy_uses_bounded_fallback_range_when_missing(monk
     class _FakeResponse:
         status = 206
         headers = {
-            "Content-Length": "65536",
-            "Content-Range": "bytes 0-65535/1000000",
+            "Content-Length": "1000000",
+            "Content-Range": "bytes 0-999999/1000000",
             "Content-Type": "video/mp4",
             "Accept-Ranges": "bytes",
         }
@@ -2782,9 +2783,109 @@ def test_google_drive_stream_proxy_uses_bounded_fallback_range_when_missing(monk
         validated_chunk_size=64 * 1024,
     )
 
-    assert seen["range"] == "bytes=0-65535"
+    assert seen["range"] == "bytes=0-8388607"
     assert response.status_code == 206
-    assert response.headers["X-Elvern-Cloud-Range-Fallback"] == "bytes=0-65535"
+    assert response.headers["X-Elvern-Cloud-Range-Fallback"] == "bytes=0-8388607"
+    assert response.headers["Content-Range"] == "bytes 0-999999/1000000"
+    assert response.headers["Content-Length"] == "1000000"
+
+
+def test_google_drive_stream_proxy_bounds_open_ended_range(monkeypatch) -> None:
+    seen: dict[str, str | None] = {}
+
+    class _FakeResponse:
+        status = 206
+        headers = {
+            "Content-Length": "900",
+            "Content-Range": "bytes 100-999/1000",
+            "Content-Type": "video/mp4",
+            "Accept-Ranges": "bytes",
+        }
+
+        def read(self, _size=-1):
+            return b""
+
+    def _open(request, timeout=30):
+        seen["range"] = request.headers.get("Range")
+        return _FakeResponse()
+
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+
+    response = proxy_google_drive_file_response(
+        "token",
+        file_id="demo",
+        filename="demo.mp4",
+        resource_key=None,
+        range_header="bytes=100-",
+    )
+
+    assert seen["range"] == "bytes=100-8388707"
+    assert response.status_code == 206
+    assert response.headers["X-Elvern-Cloud-Range-Fallback"] == "bytes=100-8388707"
+    assert response.headers["Content-Range"] == "bytes 100-999/1000"
+    assert response.headers["Content-Length"] == "900"
+
+
+def test_google_drive_stream_proxy_stitches_open_ended_range(monkeypatch) -> None:
+    seen_ranges: list[str | None] = []
+
+    class _FakeResponse:
+        status = 206
+
+        def __init__(self, *, content_range: str, body: bytes) -> None:
+            self.headers = {
+                "Content-Length": str(len(body)),
+                "Content-Range": content_range,
+                "Content-Type": "video/mp4",
+                "Accept-Ranges": "bytes",
+            }
+            self._body = body
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self, _size=-1):
+            if self._sent:
+                return b""
+            self._sent = True
+            return self._body
+
+    def _open(request, timeout=30):
+        range_header = request.headers.get("Range")
+        seen_ranges.append(range_header)
+        if range_header == "bytes=0-8388607":
+            return _FakeResponse(content_range="bytes 0-3/8", body=b"abcd")
+        if range_header == "bytes=4-7":
+            return _FakeResponse(content_range="bytes 4-7/8", body=b"efgh")
+        raise AssertionError(f"Unexpected upstream range: {range_header}")
+
+    async def _read_body(response):
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+
+    response = proxy_google_drive_file_response(
+        "token",
+        file_id="demo",
+        filename="demo.mp4",
+        resource_key=None,
+        range_header="bytes=0-",
+        chunk_size=4,
+    )
+
+    body = asyncio.run(_read_body(response))
+
+    assert body == b"abcdefgh"
+    assert seen_ranges == ["bytes=0-8388607", "bytes=4-7"]
+    assert response.headers["Content-Range"] == "bytes 0-7/8"
+    assert response.headers["Content-Length"] == "8"
 
 
 def test_google_drive_stream_proxy_includes_resource_key(monkeypatch) -> None:
