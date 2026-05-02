@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   buildProviderAuthReturnPath,
+  getGoogleDriveStatusFromLocation,
   getProviderAuthRequirement,
   getProviderAuthRequirementFromStatus,
+  shouldResetProviderReconnectPending,
   shouldShowProviderAuthActionModal,
   shouldShowProviderAuthBootstrapModal,
 } from "./providerAuth.js";
@@ -136,4 +138,64 @@ test("provider reconnect return path preserves page while dropping callback para
   );
 
   assert.equal(returnPath, "/library/70?view=cloud#player");
+});
+
+
+test("provider reconnect status helper reads callback status", () => {
+  assert.equal(
+    getGoogleDriveStatusFromLocation("https://example.test/detail/70?googleDriveStatus=connected"),
+    "connected",
+  );
+  assert.equal(
+    getGoogleDriveStatusFromLocation("https://example.test/detail/70?view=cloud"),
+    "",
+  );
+});
+
+
+test("provider reconnect pending resets when page returns without completed auth", () => {
+  assert.equal(
+    shouldResetProviderReconnectPending({
+      reconnectPending: true,
+      googleDriveStatus: "",
+      visibilityState: "visible",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldResetProviderReconnectPending({
+      reconnectPending: true,
+      googleDriveStatus: "error",
+      visibilityState: "visible",
+    }),
+    true,
+  );
+});
+
+
+test("provider reconnect pending does not reset while hidden or after connected callback", () => {
+  assert.equal(
+    shouldResetProviderReconnectPending({
+      reconnectPending: true,
+      googleDriveStatus: "connected",
+      visibilityState: "visible",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldResetProviderReconnectPending({
+      reconnectPending: true,
+      googleDriveStatus: "",
+      visibilityState: "hidden",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldResetProviderReconnectPending({
+      reconnectPending: false,
+      googleDriveStatus: "",
+      visibilityState: "visible",
+    }),
+    false,
+  );
 });

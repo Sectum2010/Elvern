@@ -3,6 +3,8 @@ import { apiRequest } from "./api.js";
 
 const PROVIDER_AUTH_INTENT_KEY = "elvern:provider-auth-intent";
 const PROVIDER_AUTH_INTENT_MAX_AGE_MS = 30 * 60 * 1000;
+export const PROVIDER_RECONNECT_CANCELLED_MESSAGE = "Reconnect was not completed.";
+export const PROVIDER_RECONNECT_PENDING_RESET_MS = 10000;
 
 
 export function normalizeProviderAuthDetail(detail) {
@@ -83,6 +85,32 @@ export function buildProviderAuthReturnPath(currentLocation) {
   const search = searchParams.toString();
   const hash = currentLocation?.hash || "";
   return `${pathname}${search ? `?${search}` : ""}${hash}`;
+}
+
+
+export function getGoogleDriveStatusFromLocation(currentLocation) {
+  if (typeof currentLocation === "string") {
+    try {
+      currentLocation = new URL(currentLocation, "http://elvern.local");
+    } catch {
+      return "";
+    }
+  }
+  const searchParams = new URLSearchParams(currentLocation?.search || "");
+  return searchParams.get("googleDriveStatus") || "";
+}
+
+
+export function shouldResetProviderReconnectPending({
+  reconnectPending,
+  googleDriveStatus = "",
+  visibilityState = "visible",
+} = {}) {
+  return (
+    reconnectPending === true
+    && googleDriveStatus !== "connected"
+    && visibilityState !== "hidden"
+  );
 }
 
 

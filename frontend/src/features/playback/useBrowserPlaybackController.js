@@ -571,7 +571,10 @@ export function useBrowserPlaybackController({
   async function startBrowserPlaybackFrom(
     startPositionSeconds,
     playbackMode = "lite",
-    { onActivePlaybackConflict = null } = {},
+    {
+      onActivePlaybackConflict = null,
+      suppressProviderAuthModal = false,
+    } = {},
   ) {
     playbackFlowRef.current += 1;
     currentItemIdRef.current = itemId;
@@ -616,6 +619,10 @@ export function useBrowserPlaybackController({
         setSeekNotice("");
         setPlaybackStatus(`${browserPlaybackLabelTitle} blocked`);
         setPlaybackError("");
+        if (suppressProviderAuthModal) {
+          setPlaybackError(providerAuthRequirement.message || requestError.message || "Google Drive reconnect is required.");
+          return false;
+        }
         if (typeof onProviderAuthRequired === "function") {
           onProviderAuthRequired(providerAuthRequirement, {
             playbackMode: playbackModeIntentRef.current,

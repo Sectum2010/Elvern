@@ -4,8 +4,12 @@ import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
 import { apiRequest } from "../lib/api";
 import {
   buildProviderAuthReturnPath,
+  getGoogleDriveStatusFromLocation,
   getProviderAuthRequirementFromStatus,
+  PROVIDER_RECONNECT_CANCELLED_MESSAGE,
+  PROVIDER_RECONNECT_PENDING_RESET_MS,
   shouldShowProviderAuthBootstrapModal,
+  shouldResetProviderReconnectPending,
   startGoogleDriveReconnect,
 } from "../lib/providerAuth";
 import { useAuth } from "./AuthContext";
@@ -24,10 +28,44 @@ export function ProviderAuthProvider({ children }) {
   const [modalError, setModalError] = useState("");
   const laterContinuationRef = useRef(null);
   const requirementRef = useRef(null);
+  const reconnectPendingRef = useRef(false);
 
   useEffect(() => {
     requirementRef.current = requirement;
   }, [requirement]);
+
+  useEffect(() => {
+    reconnectPendingRef.current = reconnectPending;
+  }, [reconnectPending]);
+
+  function resetReconnectPendingAfterReturn() {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const googleDriveStatus = getGoogleDriveStatusFromLocation(window.location);
+    if (googleDriveStatus === "connected") {
+      reconnectPendingRef.current = false;
+      setReconnectPending(false);
+      setModalError("");
+      return;
+    }
+    const visibilityState = typeof document === "undefined"
+      ? "visible"
+      : document.visibilityState;
+    if (!shouldResetProviderReconnectPending({
+      reconnectPending: reconnectPendingRef.current,
+      googleDriveStatus,
+      visibilityState,
+    })) {
+      return;
+    }
+    reconnectPendingRef.current = false;
+    setReconnectPending(false);
+    if (requirementRef.current) {
+      setModalOpen(true);
+      setModalError(PROVIDER_RECONNECT_CANCELLED_MESSAGE);
+    }
+  }
 
   async function refreshProviderAuthStatus({ signal, ignoreDismissal = false } = {}) {
     if (!user) {
@@ -92,6 +130,7 @@ export function ProviderAuthProvider({ children }) {
     if (reconnectPending || !currentRequirement || currentRequirement.allowReconnect === false) {
       return;
     }
+    reconnectPendingRef.current = true;
     setReconnectPending(true);
     setModalError("");
     try {
@@ -100,6 +139,7 @@ export function ProviderAuthProvider({ children }) {
       });
     } catch (requestError) {
       setModalError(requestError.message || "Failed to start Google Drive reconnect.");
+      reconnectPendingRef.current = false;
       setReconnectPending(false);
     }
   }
@@ -116,6 +156,44 @@ export function ProviderAuthProvider({ children }) {
       controller.abort();
     };
   }, [user?.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const handlePageReturn = () => {
+      resetReconnectPendingAfterReturn();
+    };
+    const handleVisibilityChange = () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") {
+        resetReconnectPendingAfterReturn();
+      }
+    };
+    window.addEventListener("pageshow", handlePageReturn);
+    window.addEventListener("focus", handlePageReturn);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
+    return () => {
+      window.removeEventListener("pageshow", handlePageReturn);
+      window.removeEventListener("focus", handlePageReturn);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!reconnectPending || typeof window === "undefined") {
+      return undefined;
+    }
+    const resetTimer = window.setTimeout(() => {
+      resetReconnectPendingAfterReturn();
+    }, PROVIDER_RECONNECT_PENDING_RESET_MS);
+    return () => {
+      window.clearTimeout(resetTimer);
+    };
+  }, [reconnectPending]);
 
   useEffect(() => {
     if (!requirement) {

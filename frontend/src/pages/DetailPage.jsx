@@ -31,11 +31,15 @@ import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
   clearProviderAuthIntent,
+  getGoogleDriveStatusFromLocation,
   getProviderAuthRequirement,
+  PROVIDER_RECONNECT_CANCELLED_MESSAGE,
+  PROVIDER_RECONNECT_PENDING_RESET_MS,
   readProviderAuthIntent,
   saveProviderAuthIntent,
   shouldShowProviderAuthActionModal,
   shouldGuardGoogleDriveAction,
+  shouldResetProviderReconnectPending,
   startGoogleDriveReconnect,
 } from "../lib/providerAuth";
 import {
@@ -317,6 +321,8 @@ export function DetailPage() {
     refreshProviderAuthStatus,
   } = useProviderAuth();
   const providerReconnectContinuationRef = useRef(null);
+  const providerReconnectPendingRef = useRef(false);
+  const providerReconnectModalRef = useRef(null);
   const [item, setItem] = useState(null);
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState("");
@@ -374,6 +380,82 @@ export function DetailPage() {
   const localDevLoopback = isLocalDevelopmentLoopback(desktopPlatform);
   const desktopDeviceId = useMemo(() => getOrCreateDeviceId(), []);
   const isAdmin = user?.role === "admin";
+
+  useEffect(() => {
+    providerReconnectPendingRef.current = providerReconnectPending;
+  }, [providerReconnectPending]);
+
+  useEffect(() => {
+    providerReconnectModalRef.current = providerReconnectModal;
+  }, [providerReconnectModal]);
+
+  function resetLocalProviderReconnectPendingAfterReturn() {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const googleDriveStatus = getGoogleDriveStatusFromLocation(window.location);
+    if (googleDriveStatus === "connected") {
+      providerReconnectPendingRef.current = false;
+      setProviderReconnectPending(false);
+      return;
+    }
+    const visibilityState = typeof document === "undefined"
+      ? "visible"
+      : document.visibilityState;
+    if (!shouldResetProviderReconnectPending({
+      reconnectPending: providerReconnectPendingRef.current,
+      googleDriveStatus,
+      visibilityState,
+    })) {
+      return;
+    }
+    providerReconnectPendingRef.current = false;
+    setProviderReconnectPending(false);
+    if (providerReconnectModalRef.current?.open) {
+      setProviderReconnectModal((current) => ({
+        ...current,
+        errorMessage: PROVIDER_RECONNECT_CANCELLED_MESSAGE,
+      }));
+    }
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const handlePageReturn = () => {
+      resetLocalProviderReconnectPendingAfterReturn();
+    };
+    const handleVisibilityChange = () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") {
+        resetLocalProviderReconnectPendingAfterReturn();
+      }
+    };
+    window.addEventListener("pageshow", handlePageReturn);
+    window.addEventListener("focus", handlePageReturn);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
+    return () => {
+      window.removeEventListener("pageshow", handlePageReturn);
+      window.removeEventListener("focus", handlePageReturn);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!providerReconnectPending || typeof window === "undefined") {
+      return undefined;
+    }
+    const resetTimer = window.setTimeout(() => {
+      resetLocalProviderReconnectPendingAfterReturn();
+    }, PROVIDER_RECONNECT_PENDING_RESET_MS);
+    return () => {
+      window.clearTimeout(resetTimer);
+    };
+  }, [providerReconnectPending]);
 
   useEffect(() => {
     if (typeof document === "undefined") {
@@ -479,14 +561,20 @@ export function DetailPage() {
         ? PROVIDER_ACTION_BROWSER_FULL
         : PROVIDER_ACTION_BROWSER_LITE;
       const handled = showProviderAuthPrompt(requirement, {
-        onLater: () => beginBrowserPlaybackFlow(playbackMode, { skipReconnectGuard: true }),
+        onLater: () => beginBrowserPlaybackFlow(playbackMode, {
+          skipReconnectGuard: true,
+          suppressProviderAuthModal: true,
+        }),
       });
       if (handled) {
         return;
       }
       openProviderReconnectModal(requirement, actionType, {
         secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
-        onSecondaryAction: () => beginBrowserPlaybackFlow(playbackMode, { skipReconnectGuard: true }),
+        onSecondaryAction: () => beginBrowserPlaybackFlow(playbackMode, {
+          skipReconnectGuard: true,
+          suppressProviderAuthModal: true,
+        }),
       });
     },
   });
@@ -520,6 +608,7 @@ export function DetailPage() {
   function closeProviderReconnectModal() {
     providerReconnectContinuationRef.current = null;
     clearProviderAuthIntent();
+    providerReconnectPendingRef.current = false;
     setProviderReconnectModal({
       open: false,
       provider: "",
@@ -857,12 +946,14 @@ export function DetailPage() {
       || pendingIntent.provider !== "google_drive"
       || Number(pendingIntent.mediaItemId ?? pendingIntent.itemId) !== Number(itemId)
     ) {
+      providerReconnectPendingRef.current = false;
       setProviderReconnectPending(false);
       setProviderReconnectResult(null);
       return;
     }
     const actionType = String(pendingIntent.actionType || "");
     if (providerReconnectResult.status !== "connected") {
+      providerReconnectPendingRef.current = false;
       setProviderReconnectPending(false);
       openProviderReconnectModal(
         {
@@ -1070,9 +1161,14 @@ export function DetailPage() {
     setPlaybackConflictModal(null);
   }
 
-  async function beginRequestedBrowserPlayback(startPositionSeconds, playbackMode) {
+  async function beginRequestedBrowserPlayback(
+    startPositionSeconds,
+    playbackMode,
+    { suppressProviderAuthModal = false } = {},
+  ) {
     const requestedMovieTitle = getMovieCardTitle(item);
     await startBrowserPlaybackFrom(startPositionSeconds, playbackMode, {
+      suppressProviderAuthModal,
       onActivePlaybackConflict: (activeConflict) => {
         setPlaybackConflictModal({
           ...activeConflict,
@@ -1116,7 +1212,13 @@ export function DetailPage() {
     }
   }
 
-  async function beginBrowserPlaybackFlow(playbackMode = "lite", { skipReconnectGuard = false } = {}) {
+  async function beginBrowserPlaybackFlow(
+    playbackMode = "lite",
+    {
+      skipReconnectGuard = false,
+      suppressProviderAuthModal = false,
+    } = {},
+  ) {
     const actionType =
       playbackMode === "full"
         ? PROVIDER_ACTION_BROWSER_FULL
@@ -1124,7 +1226,10 @@ export function DetailPage() {
     if (!skipReconnectGuard) {
       const blocked = await maybeGuardCloudProviderAction({
         actionType,
-        onContinue: () => beginBrowserPlaybackFlow(playbackMode, { skipReconnectGuard: true }),
+        onContinue: () => beginBrowserPlaybackFlow(playbackMode, {
+          skipReconnectGuard: true,
+          suppressProviderAuthModal: true,
+        }),
       });
       if (blocked) {
         return;
@@ -1156,7 +1261,7 @@ export function DetailPage() {
     setBrowserResumePromptPosition(0);
     setBrowserResumeModalOpen(false);
     setBrowserStopModalOpen(false);
-    void beginRequestedBrowserPlayback(0, playbackMode);
+    void beginRequestedBrowserPlayback(0, playbackMode, { suppressProviderAuthModal });
   }
 
   function handleStartLitePlayback() {
@@ -1207,9 +1312,11 @@ export function DetailPage() {
       platform: desktopPlayback?.platform || desktopPlatform || null,
       returnPath,
     });
+    providerReconnectPendingRef.current = true;
     try {
       await startGoogleDriveReconnect({ returnPath });
     } catch (requestError) {
+      providerReconnectPendingRef.current = false;
       setProviderReconnectPending(false);
       setProviderReconnectModal((current) => ({
         ...current,
