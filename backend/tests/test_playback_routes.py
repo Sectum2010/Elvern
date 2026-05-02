@@ -11,6 +11,7 @@ from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.admin_service import create_user, update_user
 from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
+    PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
 )
 
@@ -475,6 +476,31 @@ def _make_active_playback_worker_conflict_detail(
     }
 
 
+def _make_same_user_active_playback_limit_detail(
+    *,
+    title: str = "Coco",
+    media_item_id: int = 70,
+    playback_mode: str = "full",
+    worker_id: str = "worker-1",
+    session_id: str = "session-1",
+) -> dict[str, object]:
+    detail = _make_active_playback_worker_conflict_detail(
+        title=title,
+        media_item_id=media_item_id,
+        playback_mode=playback_mode,
+        worker_id=worker_id,
+        session_id=session_id,
+    )
+    detail.update(
+        {
+            "code": "same_user_active_playback_limit",
+            "legacy_code": "active_playback_worker_exists",
+            "message": "You already have an active playback. Stop it or switch before starting another.",
+        }
+    )
+    return detail
+
+
 def _make_playback_worker_cooldown_detail(
     *,
     media_item_id: int = 70,
@@ -763,6 +789,7 @@ def test_browser_playback_routes_accept_full_fast_start_estimate_source(
     assert create_response.status_code == 200
     assert create_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
     assert create_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+    assert client.app.state.mobile_playback_manager.create_kwargs[-1]["user_role"] == "admin"
 
     session_response = client.get(f"/api/browser-playback/sessions/{payload['session_id']}")
     assert session_response.status_code == 200
@@ -893,6 +920,177 @@ def test_browser_playback_create_route_returns_structured_active_worker_conflict
         worker_id="worker-1",
         session_id="session-1",
     )
+
+
+def test_browser_playback_create_route_returns_same_user_active_playback_limit(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/route2-same-user-active-limit.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.create_exception = ActivePlaybackWorkerConflictError(
+        _make_same_user_active_playback_limit_detail(
+            title="Coco",
+            media_item_id=70,
+            playback_mode="full",
+            worker_id="worker-1",
+            session_id="session-1",
+        )
+    )
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_2160p",
+            "client_device_class": "desktop",
+            "playback_mode": "full",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"] == _make_same_user_active_playback_limit_detail(
+        title="Coco",
+        media_item_id=70,
+        playback_mode="full",
+        worker_id="worker-1",
+        session_id="session-1",
+    )
+
+
+def test_browser_playback_create_route_returns_structured_server_max_capacity(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/route2-server-max-capacity.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.create_exception = PlaybackAdmissionError(
+        {
+            "code": "server_max_capacity",
+            "reason_code": "no_spare_protected_worker_capacity",
+            "message": "Server is busy. Please try again later.",
+        }
+    )
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/browser-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_2160p",
+            "client_device_class": "desktop",
+            "playback_mode": "full",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"] == {
+        "code": "server_max_capacity",
+        "reason_code": "no_spare_protected_worker_capacity",
+        "message": "Server is busy. Please try again later.",
+    }
+
+
+def test_mobile_playback_create_route_passes_standard_user_role(
+    initialized_settings,
+    client,
+) -> None:
+    created_user = _create_standard_user(initialized_settings, username="mobile-route-standard-user")
+    _login(client, username=created_user["username"], password="family-password")
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="mobile/route-role-standard.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/mobile-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_1080p",
+            "playback_mode": "lite",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 200
+    assert stub.create_kwargs[-1]["user_role"] == "standard_user"
+
+
+def test_mobile_playback_create_route_returns_structured_server_max_capacity(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="mobile/route2-server-max-capacity.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.create_exception = PlaybackAdmissionError(
+        {
+            "code": "server_max_capacity",
+            "reason_code": "no_spare_protected_worker_capacity",
+            "message": "Server is busy. Please try again later.",
+        }
+    )
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/mobile-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_1080p",
+            "playback_mode": "lite",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"]["code"] == "server_max_capacity"
+
+
+def test_mobile_playback_create_route_returns_same_user_active_playback_limit(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="mobile/route2-same-user-active-limit.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    stub.create_exception = ActivePlaybackWorkerConflictError(_make_same_user_active_playback_limit_detail())
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/mobile-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_1080p",
+            "playback_mode": "lite",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 409
+    assert create_response.json()["detail"]["code"] == "same_user_active_playback_limit"
 
 
 @pytest.mark.parametrize("playback_mode", ["lite", "full"])

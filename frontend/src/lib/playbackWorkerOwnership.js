@@ -37,6 +37,30 @@ export function getPlaybackWorkerCooldown(error) {
   };
 }
 
+export function getPlaybackAdmissionError(error) {
+  const detail = error?.detail || error?.payload?.detail || null;
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+  const code = typeof detail.code === "string" ? detail.code : "";
+  if (!["same_user_active_playback_limit", "server_max_capacity", "provider_source_error"].includes(code)) {
+    return null;
+  }
+  const fallbackMessage = code === "same_user_active_playback_limit"
+    ? "You already have an active playback. Stop it or switch before starting another."
+    : code === "provider_source_error"
+      ? "Playback source is unavailable. Reconnect the provider or try again later."
+      : "Server is busy. Please try again later.";
+  const message = typeof detail.message === "string" && detail.message.trim()
+    ? detail.message.trim()
+    : fallbackMessage;
+  return {
+    code,
+    reasonCode: typeof detail.reason_code === "string" ? detail.reason_code : "",
+    message,
+  };
+}
+
 export function buildActivePlaybackConflictPrompt(activeMovieTitle, newMovieTitle) {
   const activeTitle = normalizeTitle(activeMovieTitle);
   const requestedTitle = normalizeTitle(newMovieTitle);

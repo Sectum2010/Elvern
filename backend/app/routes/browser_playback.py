@@ -17,6 +17,7 @@ from ..schemas import (
 from ..services.library_service import get_media_item_record
 from ..services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
+    PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
 )
 
@@ -44,6 +45,8 @@ def _coerce_session_error(exc: Exception) -> HTTPException:
     if isinstance(exc, KeyError | PermissionError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Browser playback session not found")
     if isinstance(exc, ActivePlaybackWorkerConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
+    if isinstance(exc, PlaybackAdmissionError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
     if isinstance(exc, PlaybackWorkerCooldownError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
@@ -90,6 +93,7 @@ def create_browser_playback_session(
             start_position_seconds=float(payload.start_position_seconds or 0.0),
             engine_mode=payload.engine_mode,
             playback_mode=payload.playback_mode,
+            user_role=user.role,
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc

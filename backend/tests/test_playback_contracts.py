@@ -49,6 +49,7 @@ from backend.app.services.mobile_playback_service import (
     _HostCpuPressureSnapshot,
     _Route2ResourceSnapshot,
     MobilePlaybackManager,
+    PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
     _build_host_cpu_pressure_snapshot,
     _count_external_ffmpeg_processes,
@@ -213,6 +214,7 @@ def _set_route2_resource_snapshot(
     external_cpu_cores_used_estimate: float | None = 0.0,
     external_cpu_percent_estimate: float | None = 0.0,
     external_ffmpeg_process_count: int = 0,
+    external_ffmpeg_cpu_cores_estimate: float | None = None,
     external_pressure_level: str = "none",
 ) -> None:
     if sampled_at_ts is None:
@@ -242,10 +244,27 @@ def _set_route2_resource_snapshot(
         external_cpu_cores_used_estimate=external_cpu_cores_used_estimate,
         external_cpu_percent_estimate=external_cpu_percent_estimate,
         external_ffmpeg_process_count=external_ffmpeg_process_count,
-        external_ffmpeg_cpu_cores_estimate=None,
+        external_ffmpeg_cpu_cores_estimate=external_ffmpeg_cpu_cores_estimate,
         external_pressure_level=external_pressure_level,
         missing_metrics=[],
     )
+
+
+def _capture_route2_worker_threads(monkeypatch) -> list[tuple[str, str, str]]:
+    started_workers: list[tuple[str, str, str]] = []
+
+    class _FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+            self.name = name
+
+        def start(self) -> None:
+            started_workers.append(self.args)
+
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.threading.Thread", _FakeThread)
+    return started_workers
 
 
 def _make_route2_worker_record_for_spawn_dry_run(*, source_kind: str = "local", user_id: int = 1) -> Route2WorkerRecord:
@@ -2746,6 +2765,15 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_core
 
     assert settings.route2_max_worker_threads == 4
     assert settings.route2_adaptive_max_worker_threads == 10
+    assert settings.route2_protected_min_threads_per_active_user == 2
+
+
+def test_route2_protected_min_threads_env_override_still_works(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_PROTECTED_MIN_THREADS_PER_ACTIVE_USER", "3")
+
+    settings = refresh_settings()
+
+    assert settings.route2_protected_min_threads_per_active_user == 3
 
 
 def test_route2_adaptive_max_worker_threads_env_override_is_shadow_only_config(monkeypatch, test_settings) -> None:
@@ -2764,6 +2792,22 @@ def test_route2_max_worker_threads_validation_still_rejects_invalid_values(monke
     monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 4)
 
     with pytest.raises(ConfigError, match="ELVERN_ROUTE2_MAX_WORKER_THREADS"):
+        refresh_settings()
+
+
+def test_route2_protected_min_threads_validation_rejects_invalid_values(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_PROTECTED_MIN_THREADS_PER_ACTIVE_USER", "0")
+
+    with pytest.raises(ConfigError, match="ELVERN_ROUTE2_PROTECTED_MIN_THREADS_PER_ACTIVE_USER"):
+        refresh_settings()
+
+
+def test_route2_protected_min_threads_validation_rejects_floor_above_real_max(monkeypatch, test_settings) -> None:
+    monkeypatch.setenv("ELVERN_ROUTE2_MAX_WORKER_THREADS", "2")
+    monkeypatch.setenv("ELVERN_ROUTE2_PROTECTED_MIN_THREADS_PER_ACTIVE_USER", "3")
+    monkeypatch.setattr("backend.app.config.os.cpu_count", lambda: 8)
+
+    with pytest.raises(ConfigError, match="ELVERN_ROUTE2_PROTECTED_MIN_THREADS_PER_ACTIVE_USER"):
         refresh_settings()
 
 
@@ -4020,7 +4064,9 @@ def test_route2_user_with_many_jobs_queues_instead_of_rejecting(initialized_sett
         )
 
     detail = conflict.value.detail
-    assert detail["code"] == "active_playback_worker_exists"
+    assert detail["code"] == "same_user_active_playback_limit"
+    assert detail["legacy_code"] == "active_playback_worker_exists"
+    assert detail["message"] == "You already have an active playback. Stop it or switch before starting another."
     assert detail["active_media_item_id"] == int(item_a["id"])
     assert detail["active_session_id"] == first["session_id"]
     assert len(manager._route2_session_ids_by_user[1]) == 1
@@ -4035,6 +4081,7 @@ def test_route2_worker_scheduler_does_not_exceed_budget_derived_capacity(initial
         route2_cpu_budget_percent=50,
         route2_min_worker_threads=1,
         route2_max_worker_threads=1,
+        route2_protected_min_threads_per_active_user=1,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 4)
 
@@ -4051,11 +4098,9 @@ def test_route2_worker_scheduler_does_not_exceed_budget_derived_capacity(initial
 
     item_a = _make_local_item(settings, item_id=321, relative_name="route2/fair-a.mp4")
     item_b = _make_local_item(settings, item_id=322, relative_name="route2/fair-b.mp4")
-    item_c = _make_local_item(settings, item_id=323, relative_name="route2/fair-c.mp4")
 
     manager.create_session(item_a, user_id=1, auth_session_id=501, username="alice", engine_mode="route2", playback_mode="lite")
     manager.create_session(item_b, user_id=2, auth_session_id=601, username="bob", engine_mode="route2", playback_mode="lite")
-    manager.create_session(item_c, user_id=3, auth_session_id=701, username="carol", engine_mode="route2", playback_mode="lite")
 
     manager._dispatch_waiting_sessions()
 
@@ -4064,7 +4109,7 @@ def test_route2_worker_scheduler_does_not_exceed_budget_derived_capacity(initial
 
     assert len(started_workers) == 2
     assert len(running_workers) == 2
-    assert len(queued_workers) == 1
+    assert len(queued_workers) == 0
     assert sum(record.assigned_threads for record in running_workers) <= 2
 
 
@@ -4240,6 +4285,247 @@ def test_route2_another_user_is_not_blocked_by_active_preparation(initialized_se
     assert first["session_id"] != second["session_id"]
     assert len(manager._route2_session_ids_by_user[1]) == 1
     assert len(manager._route2_session_ids_by_user[2]) == 1
+
+
+def test_route2_admin_can_start_multiple_playbacks_when_capacity_exists(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 8)
+    item_a = _make_local_item(settings, item_id=346, relative_name="route2/admin-a.mp4")
+    item_b = _make_local_item(settings, item_id=347, relative_name="route2/admin-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=960,
+        username="admin",
+        engine_mode="route2",
+        playback_mode="lite",
+        user_role="admin",
+    )
+    second = manager.create_session(
+        item_b,
+        user_id=1,
+        auth_session_id=960,
+        username="admin",
+        engine_mode="route2",
+        playback_mode="lite",
+        user_role="admin",
+    )
+
+    assert first["session_id"] != second["session_id"]
+    assert len(manager._route2_session_ids_by_user[1]) == 2
+
+
+def test_route2_new_user_is_admitted_when_protected_floor_capacity_exists(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 8)
+    item_a = _make_local_item(settings, item_id=348, relative_name="route2/floor-user-a.mp4")
+    item_b = _make_local_item(settings, item_id=349, relative_name="route2/floor-user-b.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=961, username="alice", engine_mode="route2", playback_mode="lite")
+    second = manager.create_session(item_b, user_id=2, auth_session_id=962, username="bob", engine_mode="route2", playback_mode="lite")
+
+    assert first["session_id"] != second["session_id"]
+    assert len(manager._route2_session_ids_by_user[1]) == 1
+    assert len(manager._route2_session_ids_by_user[2]) == 1
+
+
+def test_route2_capacity_exactly_equal_to_existing_protected_floors_blocks_new_user(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    item_a = _make_local_item(settings, item_id=355, relative_name="route2/exact-floor-a.mp4")
+    item_b = _make_local_item(settings, item_id=356, relative_name="route2/exact-floor-b.mp4")
+    item_c = _make_local_item(settings, item_id=357, relative_name="route2/exact-floor-c.mp4")
+
+    manager.create_session(item_a, user_id=1, auth_session_id=971, username="alice", engine_mode="route2", playback_mode="lite")
+    manager.create_session(item_b, user_id=2, auth_session_id=972, username="bob", engine_mode="route2", playback_mode="lite")
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item_c, user_id=3, auth_session_id=973, username="carol", engine_mode="route2", playback_mode="lite")
+
+    assert exc.value.detail["code"] == "server_max_capacity"
+
+
+def test_route2_capacity_just_enough_two_spare_threads_admits_new_user(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    item_a = _make_local_item(settings, item_id=358, relative_name="route2/just-enough-a.mp4")
+    item_b = _make_local_item(settings, item_id=359, relative_name="route2/just-enough-b.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=974, username="alice", engine_mode="route2", playback_mode="lite")
+    second = manager.create_session(item_b, user_id=2, auth_session_id=975, username="bob", engine_mode="route2", playback_mode="lite")
+
+    assert first["session_id"] != second["session_id"]
+    assert len(manager._route2_session_ids_by_user[1]) == 1
+    assert len(manager._route2_session_ids_by_user[2]) == 1
+
+
+def test_route2_capacity_one_thread_short_blocks_new_user(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 4)
+    item_a = _make_local_item(settings, item_id=360, relative_name="route2/one-short-a.mp4")
+    item_b = _make_local_item(settings, item_id=363, relative_name="route2/one-short-b.mp4")
+
+    manager.create_session(item_a, user_id=1, auth_session_id=976, username="alice", engine_mode="route2", playback_mode="lite")
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item_b, user_id=2, auth_session_id=977, username="bob", engine_mode="route2", playback_mode="lite")
+
+    assert exc.value.detail["code"] == "server_max_capacity"
+
+
+def test_route2_reclaimable_threads_are_not_counted_as_available_for_admission(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 6)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=364, relative_name="route2/reclaimable-a.mp4")
+    item_b = _make_local_item(settings, item_id=365, relative_name="route2/reclaimable-b.mp4")
+
+    manager.create_session(item_a, user_id=1, auth_session_id=978, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    running_record = next(record for record in manager._route2_workers.values() if record.user_id == 1)
+    assert running_record.state == "running"
+    assert running_record.assigned_threads == 4
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item_b, user_id=2, auth_session_id=979, username="bob", engine_mode="route2", playback_mode="lite")
+
+    detail = exc.value.detail
+    assert detail["code"] == "server_max_capacity"
+    assert detail["reason_code"] == "no_spare_protected_worker_capacity"
+    assert detail["available_reserved_threads"] == 1
+
+
+def test_route2_server_max_capacity_when_protected_floor_cannot_be_preserved(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 4)
+    item_a = _make_local_item(settings, item_id=350, relative_name="route2/capacity-a.mp4")
+    item_b = _make_local_item(settings, item_id=351, relative_name="route2/capacity-b.mp4")
+
+    manager.create_session(item_a, user_id=1, auth_session_id=963, username="alice", engine_mode="route2", playback_mode="lite")
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item_b, user_id=2, auth_session_id=964, username="bob", engine_mode="route2", playback_mode="lite")
+
+    detail = exc.value.detail
+    assert detail["code"] == "server_max_capacity"
+    assert detail["reason_code"] == "per_user_budget_below_protected_floor"
+    assert detail["message"] == "Server is busy. Please try again later."
+
+
+def test_route2_external_cpu_pressure_blocks_new_admission(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 8)
+    _set_route2_resource_snapshot(
+        manager,
+        external_cpu_cores_used_estimate=5.0,
+        external_cpu_percent_estimate=0.625,
+        external_pressure_level="high",
+    )
+    item = _make_local_item(settings, item_id=352, relative_name="route2/external-pressure.mp4")
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item, user_id=1, auth_session_id=965, username="alice", engine_mode="route2", playback_mode="lite")
+
+    assert exc.value.detail["code"] == "server_max_capacity"
+    assert exc.value.detail["reason_code"] == "external_host_cpu_pressure_high"
+    assert exc.value.detail["message"] == "Server is busy with another task. Please try again later."
+
+
+def test_route2_external_ffmpeg_pressure_blocks_new_admission(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 8)
+    _set_route2_resource_snapshot(
+        manager,
+        external_ffmpeg_process_count=1,
+        external_ffmpeg_cpu_cores_estimate=1.25,
+        external_pressure_level="moderate",
+    )
+    item = _make_local_item(settings, item_id=353, relative_name="route2/external-ffmpeg.mp4")
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item, user_id=1, auth_session_id=966, username="alice", engine_mode="route2", playback_mode="lite")
+
+    assert exc.value.detail["code"] == "server_max_capacity"
+    assert exc.value.detail["reason_code"] == "external_ffmpeg_pressure"
+
+
+def test_route2_hard_ram_pressure_blocks_new_admission(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 8)
+    _set_route2_resource_snapshot(
+        manager,
+        total_memory_bytes=100,
+        route2_memory_bytes_total=91,
+    )
+    item = _make_local_item(settings, item_id=354, relative_name="route2/ram-pressure.mp4")
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item, user_id=1, auth_session_id=967, username="alice", engine_mode="route2", playback_mode="lite")
+
+    assert exc.value.detail["code"] == "server_max_capacity"
+    assert exc.value.detail["reason_code"] == "route2_memory_hard_pressure"
 
 
 def test_route2_stop_then_start_new_movie_allows_replacement_movie(initialized_settings) -> None:

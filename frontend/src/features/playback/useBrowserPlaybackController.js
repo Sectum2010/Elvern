@@ -11,6 +11,7 @@ import {
 import { resolveBrowserHlsEngine } from "../../lib/browserHlsEngine";
 import {
   getActivePlaybackWorkerConflict,
+  getPlaybackAdmissionError,
   getPlaybackWorkerCooldown,
 } from "../../lib/playbackWorkerOwnership";
 import {
@@ -608,6 +609,13 @@ export function useBrowserPlaybackController({
       });
     } catch (requestError) {
       clearOptimizedPlaybackPending();
+      const playbackAdmission = getPlaybackAdmissionError(requestError);
+      if (playbackAdmission) {
+        setSeekNotice("");
+        setPlaybackStatus(`${browserPlaybackLabelTitle} blocked`);
+        setPlaybackError(playbackAdmission.message);
+        return false;
+      }
       const activePlaybackConflict = getActivePlaybackWorkerConflict(requestError);
       if (activePlaybackConflict && typeof onActivePlaybackConflict === "function") {
         setPlaybackError("");

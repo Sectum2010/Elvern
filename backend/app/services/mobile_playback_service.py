@@ -181,6 +181,11 @@ ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
 ROUTE2_RESOURCE_TELEMETRY_INTERVAL_SECONDS = 1.0
 ROUTE2_RESOURCE_SNAPSHOT_STALE_SECONDS = 5.0
 ADMIN_TERMINATED_BROWSER_PLAYBACK_COOLDOWN_SECONDS = 30.0
+SAME_USER_ACTIVE_PLAYBACK_LIMIT_CODE = "same_user_active_playback_limit"
+SERVER_MAX_CAPACITY_CODE = "server_max_capacity"
+ACTIVE_WORKER_CONFLICT_CODE = "active_playback_worker_exists"
+STANDARD_USER_ROLE = "standard_user"
+ADMIN_USER_ROLE = "admin"
 
 
 @dataclass(slots=True)
@@ -254,6 +259,12 @@ class ActivePlaybackWorkerConflictError(Exception):
     def __init__(self, detail: dict[str, object]) -> None:
         self.detail = dict(detail)
         super().__init__(str(self.detail.get("message") or "An active playback worker already exists"))
+
+
+class PlaybackAdmissionError(Exception):
+    def __init__(self, detail: dict[str, object]) -> None:
+        self.detail = dict(detail)
+        super().__init__(str(self.detail.get("message") or "Playback admission failed"))
 
 
 class PlaybackWorkerCooldownError(Exception):
@@ -659,11 +670,13 @@ class MobilePlaybackManager:
         start_position_seconds: float = 0.0,
         engine_mode: str | None = None,
         playback_mode: str | None = None,
+        user_role: str | None = None,
     ) -> dict[str, object]:
         self._validate_transcoding()
         profile_key = self._normalize_profile(profile)
         selected_engine_mode = self._select_engine_mode(engine_mode)
         selected_playback_mode = self._select_playback_mode(playback_mode)
+        normalized_user_role = self._normalize_user_role(user_role)
         if selected_engine_mode != "route2" and selected_playback_mode != "lite":
             raise ValueError("Full Playback requires Browser Playback Route 2")
         source_kind = str(item.get("source_kind") or "local")
@@ -751,9 +764,15 @@ class MobilePlaybackManager:
                     username=username,
                 )
             conflicting_session = same_movie_conflicting_session or other_movie_conflicting_session
-            if conflicting_session is not None:
+            if conflicting_session is not None and normalized_user_role != ADMIN_USER_ROLE:
                 raise ActivePlaybackWorkerConflictError(
-                    self._build_active_playback_worker_conflict_detail_locked(conflicting_session)
+                    self._build_same_user_active_playback_limit_detail_locked(conflicting_session)
+                )
+            with self._lock:
+                self._raise_if_route2_admission_denied_locked(
+                    incoming_user_id=user_id,
+                    incoming_user_role=normalized_user_role,
+                    source_kind=source_kind,
                 )
         else:
             with self._lock:
@@ -1547,13 +1566,46 @@ class MobilePlaybackManager:
     ) -> dict[str, object]:
         title = session.media_title or f"Media Item {session.media_item_id}"
         return {
-            "code": "active_playback_worker_exists",
+            "code": ACTIVE_WORKER_CONFLICT_CODE,
             "active_movie_title": title,
             "active_media_item_id": session.media_item_id,
             "active_playback_mode": session.browser_playback.playback_mode,
             "active_worker_id": self._route2_conflict_worker_id_locked(session),
             "active_session_id": session.session_id,
             "message": f"{title} is still preparing.",
+        }
+
+    def _build_same_user_active_playback_limit_detail_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> dict[str, object]:
+        detail = self._build_active_playback_worker_conflict_detail_locked(session)
+        detail.update(
+            {
+                "code": SAME_USER_ACTIVE_PLAYBACK_LIMIT_CODE,
+                "legacy_code": ACTIVE_WORKER_CONFLICT_CODE,
+                "message": "You already have an active playback. Stop it or switch before starting another.",
+            }
+        )
+        return detail
+
+    def _build_server_max_capacity_detail_locked(
+        self,
+        *,
+        reason_code: str,
+        message: str | None = None,
+        active_user_count_after_admission: int | None = None,
+        available_reserved_threads: int | None = None,
+        admission_min_threads: int | None = None,
+    ) -> dict[str, object]:
+        return {
+            "code": SERVER_MAX_CAPACITY_CODE,
+            "reason_code": reason_code,
+            "message": message or "Server is busy. Please try again later.",
+            "active_route2_user_count_after_admission": active_user_count_after_admission,
+            "available_reserved_threads": available_reserved_threads,
+            "required_min_threads": admission_min_threads,
+            "protected_min_threads_per_active_user": self._route2_protected_min_threads_per_active_user(),
         }
 
     def _cleanup_browser_playback_cooldowns_locked(self, now_ts: float | None = None) -> None:
@@ -2115,6 +2167,143 @@ class MobilePlaybackManager:
             "active_worker_count": len(self._route2_running_workers_locked()),
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
+
+    def _route2_protected_min_threads_per_active_user(self) -> int:
+        return max(1, int(getattr(self.settings, "route2_protected_min_threads_per_active_user", 2) or 2))
+
+    def _route2_admission_min_worker_threads(self) -> int:
+        return max(
+            int(self.settings.route2_min_worker_threads),
+            self._route2_protected_min_threads_per_active_user(),
+        )
+
+    def _route2_reserved_threads_for_admission_locked(self, record: Route2WorkerRecord) -> int:
+        admission_min_threads = self._route2_admission_min_worker_threads()
+        protected_floor = self._route2_protected_min_threads_per_active_user()
+        if record.state == "queued":
+            return admission_min_threads
+        if record.state in {"running", "stopping"}:
+            return max(int(record.assigned_threads or 0), protected_floor)
+        return 0
+
+    def _raise_if_route2_admission_denied_locked(
+        self,
+        *,
+        incoming_user_id: int,
+        incoming_user_role: str,
+        source_kind: str,
+    ) -> None:
+        del incoming_user_role, source_kind
+        protected_floor = self._route2_protected_min_threads_per_active_user()
+        admission_min_threads = self._route2_admission_min_worker_threads()
+        budget = self._route2_budget_summary_locked()
+        total_route2_budget_cores = int(budget["total_route2_budget_cores"])
+        active_records = [
+            record
+            for record in self._route2_workers.values()
+            if record.state in {"queued", "running", "stopping"}
+        ]
+        active_user_ids = {record.user_id for record in active_records}
+        active_user_count_after_admission = len(active_user_ids | {int(incoming_user_id)})
+        per_user_budget_after_admission = (
+            max(1, math.floor(total_route2_budget_cores / active_user_count_after_admission))
+            if active_user_count_after_admission > 0
+            else total_route2_budget_cores
+        )
+
+        if int(self.settings.route2_max_worker_threads) < admission_min_threads:
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="route2_max_worker_threads_below_protected_floor",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
+        if total_route2_budget_cores < admission_min_threads:
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="route2_cpu_upbound_below_protected_floor",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
+        if per_user_budget_after_admission < protected_floor:
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="per_user_budget_below_protected_floor",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
+
+        reserved_total_threads = 0
+        reserved_incoming_user_threads = 0
+        for record in active_records:
+            reserved_threads = self._route2_reserved_threads_for_admission_locked(record)
+            reserved_total_threads += reserved_threads
+            if record.user_id == int(incoming_user_id):
+                reserved_incoming_user_threads += reserved_threads
+
+        available_reserved_threads = total_route2_budget_cores - reserved_total_threads
+        if available_reserved_threads < admission_min_threads:
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="no_spare_protected_worker_capacity",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    available_reserved_threads=available_reserved_threads,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
+
+        user_remaining_reserved_threads = per_user_budget_after_admission - reserved_incoming_user_threads
+        if user_remaining_reserved_threads < admission_min_threads:
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="user_budget_protected_capacity_exhausted",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    available_reserved_threads=user_remaining_reserved_threads,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
+
+        snapshot = self._latest_route2_resource_snapshot_locked()
+        if snapshot is None or snapshot.sample_stale:
+            return
+        if snapshot.total_memory_bytes and snapshot.route2_memory_bytes_total is not None:
+            memory_pressure = snapshot.route2_memory_bytes_total / snapshot.total_memory_bytes
+            if memory_pressure >= 0.90:
+                raise PlaybackAdmissionError(
+                    self._build_server_max_capacity_detail_locked(
+                        reason_code="route2_memory_hard_pressure",
+                        active_user_count_after_admission=active_user_count_after_admission,
+                        available_reserved_threads=available_reserved_threads,
+                        admission_min_threads=admission_min_threads,
+                    )
+                )
+        if snapshot.external_pressure_level == "high":
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="external_host_cpu_pressure_high",
+                    message="Server is busy with another task. Please try again later.",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    available_reserved_threads=available_reserved_threads,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
+        if (
+            snapshot.external_ffmpeg_process_count > 0
+            and snapshot.external_ffmpeg_cpu_cores_estimate is not None
+            and snapshot.external_ffmpeg_cpu_cores_estimate >= 1.0
+        ):
+            raise PlaybackAdmissionError(
+                self._build_server_max_capacity_detail_locked(
+                    reason_code="external_ffmpeg_pressure",
+                    message="Server is busy with another task. Please try again later.",
+                    active_user_count_after_admission=active_user_count_after_admission,
+                    available_reserved_threads=available_reserved_threads,
+                    admission_min_threads=admission_min_threads,
+                )
+            )
 
     def _route2_conservative_spawn_target_locked(
         self,
@@ -2877,6 +3066,10 @@ class MobilePlaybackManager:
         if candidate not in {"lite", "full"}:
             raise ValueError("Unsupported browser playback mode")
         return candidate
+
+    def _normalize_user_role(self, value: str | None) -> str:
+        candidate = (value or "").strip().lower()
+        return ADMIN_USER_ROLE if candidate == ADMIN_USER_ROLE else STANDARD_USER_ROLE
 
     def _build_browser_playback_session(self, *, engine_mode: str, playback_mode: str) -> BrowserPlaybackSession:
         return BrowserPlaybackSession(
