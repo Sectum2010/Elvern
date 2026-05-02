@@ -12,6 +12,7 @@ from ..schemas import (
     GoogleDriveConnectRequest,
     GoogleDriveConnectResponse,
     MessageResponse,
+    ProviderAuthStatusResponse,
 )
 from ..services.cloud_library_service import (
     add_google_drive_library_source,
@@ -19,6 +20,7 @@ from ..services.cloud_library_service import (
     build_google_drive_connect_response,
     complete_google_drive_connect,
     get_cloud_libraries_payload,
+    get_google_drive_provider_auth_status_payload,
     hide_shared_library_source_for_user,
     move_google_drive_library_source,
     resolve_google_connect_state,
@@ -33,6 +35,12 @@ router = APIRouter(prefix="/api/cloud-libraries", tags=["cloud-libraries"])
 def read_cloud_libraries(request: Request, user=CurrentUser) -> CloudLibrariesResponse:
     payload = get_cloud_libraries_payload(request.app.state.settings, user=user)
     return CloudLibrariesResponse(**payload)
+
+
+@router.get("/google/provider-auth-status", response_model=ProviderAuthStatusResponse)
+def read_google_provider_auth_status(request: Request, user=CurrentUser) -> ProviderAuthStatusResponse:
+    payload = get_google_drive_provider_auth_status_payload(request.app.state.settings, user=user)
+    return ProviderAuthStatusResponse(**payload)
 
 
 @router.post("/google/connect", response_model=GoogleDriveConnectResponse)

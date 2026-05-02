@@ -1,28 +1,22 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { useProviderAuth } from "../auth/ProviderAuthContext";
 import { EmptyState } from "../components/EmptyState";
 import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
-import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
 import { SeriesRail } from "../components/SeriesRail";
 import { apiRequest } from "../lib/api";
 import { useActiveBrowserPlaybackItemId } from "../lib/browserPlayback";
 import {
-  clearLibraryCloudReconnectDismissal,
-  dismissLibraryCloudReconnectPrompt,
   formatCompletedRescanWarning,
   formatRescanBannerText,
-  getCloudReconnectPrompt,
   hasCloudSyncWarning,
-  isCloudReconnectRequired,
-  readLibraryCloudReconnectDismissed,
 } from "../lib/cloudSyncStatus";
 import {
   clearLibraryReturnPending,
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
-import { startGoogleDriveReconnect } from "../lib/providerAuth";
 import { detectClientDeviceClass, detectClientPlatform } from "../lib/platformDetection";
 import {
   packIpadPortraitSeriesRailRows,
@@ -110,6 +104,13 @@ function useIpadPortraitLibraryLayout() {
 
 export function LibraryPage() {
   const { refreshAuth } = useAuth();
+  const {
+    providerAuthRequirement,
+    providerAuthDismissedThisSession,
+    providerAuthReconnectPending,
+    refreshProviderAuthStatus,
+    startProviderReconnect,
+  } = useProviderAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
@@ -121,23 +122,8 @@ export function LibraryPage() {
   });
   const [loading, setLoading] = useState(true);
   const [rescanPending, setRescanPending] = useState(false);
-  const [providerReconnectPending, setProviderReconnectPending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [cloudLibraries, setCloudLibraries] = useState({
-    google: {
-      enabled: false,
-      connected: false,
-      connection_status: "not_configured",
-      reconnect_required: false,
-      provider_auth_required: false,
-      stale_state_warning: null,
-      status_message: "",
-    },
-    my_libraries: [],
-    shared_libraries: [],
-  });
-  const [showCloudReconnectModal, setShowCloudReconnectModal] = useState(false);
   const [library, setLibrary] = useState({
     items: [],
     series_rails: [],
@@ -224,10 +210,17 @@ export function LibraryPage() {
       : packSeriesRailRows(visibleSeriesRails)),
     [useIpadPortraitSeriesPacking, visibleSeriesRails],
   );
-  const cloudReconnectPrompt = useMemo(
-    () => getCloudReconnectPrompt(cloudLibraries),
-    [cloudLibraries],
-  );
+  const cloudReconnectPrompt = useMemo(() => {
+    if (!providerAuthRequirement) {
+      return null;
+    }
+    return {
+      title: providerAuthRequirement.title,
+      message: providerAuthRequirement.message,
+      allowReconnect: providerAuthRequirement.allowReconnect !== false,
+      requiresAdmin: providerAuthRequirement.requiresAdmin === true,
+    };
+  }, [providerAuthRequirement]);
 
   async function loadLibrary({ signal, silent = false } = {}) {
     if (!silent) {
@@ -295,50 +288,6 @@ export function LibraryPage() {
     }
   }
 
-  async function loadCloudLibrariesHealth({ signal } = {}) {
-    try {
-      const payload = await apiRequest("/api/cloud-libraries", { signal });
-      setCloudLibraries(payload);
-      if (isCloudReconnectRequired(payload)) {
-        setShowCloudReconnectModal(!readLibraryCloudReconnectDismissed());
-      } else {
-        clearLibraryCloudReconnectDismissal();
-        setShowCloudReconnectModal(false);
-      }
-    } catch (requestError) {
-      if (requestError.name === "AbortError") {
-        return;
-      }
-      if (requestError.status === 401) {
-        await refreshAuth();
-      }
-    }
-  }
-
-  async function handleCloudReconnect() {
-    if (providerReconnectPending) {
-      return;
-    }
-    setProviderReconnectPending(true);
-    setError("");
-    try {
-      const currentUrl = new URL(window.location.href);
-      currentUrl.searchParams.delete("googleDriveStatus");
-      currentUrl.searchParams.delete("googleDriveMessage");
-      const returnPath = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
-      await startGoogleDriveReconnect({ returnPath });
-    } catch (requestError) {
-      setError(requestError.message || "Failed to start Google Drive reconnect");
-    } finally {
-      setProviderReconnectPending(false);
-    }
-  }
-
-  function handleDismissCloudReconnectPrompt() {
-    dismissLibraryCloudReconnectPrompt();
-    setShowCloudReconnectModal(false);
-  }
-
   useEffect(() => {
     const controller = new AbortController();
     loadLibrarySettings({ signal: controller.signal });
@@ -349,14 +298,6 @@ export function LibraryPage() {
   }, [deferredQuery]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    loadCloudLibrariesHealth({ signal: controller.signal });
-    return () => {
-      controller.abort();
-    };
-  }, []);
-
-  useEffect(() => {
     const params = new URLSearchParams(location.search);
     const statusValue = params.get("googleDriveStatus");
     const statusMessage = params.get("googleDriveMessage");
@@ -364,11 +305,9 @@ export function LibraryPage() {
       return;
     }
     if (statusValue === "connected") {
-      clearLibraryCloudReconnectDismissal();
-      setShowCloudReconnectModal(false);
       setNotice(statusMessage || "Google Drive connected.");
       setError("");
-      void loadCloudLibrariesHealth();
+      void refreshProviderAuthStatus();
     } else {
       setError(statusMessage || "Google Drive reconnect failed.");
       setNotice("");
@@ -910,8 +849,8 @@ export function LibraryPage() {
         ? String(payload.cloud_sync?.message || "").trim()
         : "";
       cloudSyncWarningRef.current = nextCloudSyncWarning;
-      if (payload?.cloud_sync?.reconnect_required && !readLibraryCloudReconnectDismissed()) {
-        setShowCloudReconnectModal(true);
+      if (payload?.cloud_sync?.reconnect_required) {
+        void refreshProviderAuthStatus();
       }
       if (nextCloudSyncWarning) {
         setError(formatRescanBannerText(payload));
@@ -939,19 +878,6 @@ export function LibraryPage() {
       data-device-class={libraryDeviceClass}
       data-library-device={libraryDevice}
     >
-      <ProviderReconnectModal
-        allowReconnect
-        message={cloudReconnectPrompt?.message || ""}
-        onClose={handleDismissCloudReconnectPrompt}
-        onReconnect={handleCloudReconnect}
-        onSecondary={handleDismissCloudReconnectPrompt}
-        open={showCloudReconnectModal && Boolean(cloudReconnectPrompt)}
-        reconnectLabel="Reconnect Google Drive"
-        reconnectPending={providerReconnectPending}
-        secondaryLabel="Later"
-        title={cloudReconnectPrompt?.title || "Reconnect Google Drive"}
-      />
-
       <div className="topbar library-desktop-hero" aria-label="Library overview">
         <p className="eyebrow library-desktop-hero__eyebrow">Private Media Library</p>
         <div className="library-desktop-hero__row">
@@ -1004,22 +930,24 @@ export function LibraryPage() {
         </Link>
       </div>
 
-      {cloudReconnectPrompt ? (
-        <section className="content-section">
+      {cloudReconnectPrompt && providerAuthDismissedThisSession ? (
+        <section className="content-section cloud-auth-warning">
           <div className="section-header section-header--compact">
-            <h2>Google Drive reconnect required</h2>
+            <h2>{cloudReconnectPrompt.title}</h2>
           </div>
           <p className="form-error">{cloudReconnectPrompt.message}</p>
-          <div className="player-actions">
-            <button
-              className="primary-button"
-              disabled={providerReconnectPending}
-              onClick={handleCloudReconnect}
-              type="button"
-            >
-              {providerReconnectPending ? "Connecting..." : "Reconnect Google Drive"}
-            </button>
-          </div>
+          {cloudReconnectPrompt.allowReconnect ? (
+            <div className="player-actions">
+              <button
+                className="ghost-button"
+                disabled={providerAuthReconnectPending}
+                onClick={startProviderReconnect}
+                type="button"
+              >
+                {providerAuthReconnectPending ? "Connecting..." : "Reconnect Google Drive"}
+              </button>
+            </div>
+          ) : null}
         </section>
       ) : null}
 

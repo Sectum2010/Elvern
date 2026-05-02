@@ -1,5 +1,6 @@
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
+import { ProviderAuthProvider } from "./auth/ProviderAuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { ShellLayout } from "./components/ShellLayout";
 import { DetailPage } from "./pages/DetailPage";
@@ -29,7 +30,7 @@ function ProtectedShell() {
 export default function App() {
   return (
     <AuthProvider>
-      <>
+      <ProviderAuthProvider>
         <div aria-hidden="true" className="app-viewport-backdrop" />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -78,7 +79,7 @@ export default function App() {
           </Route>
           <Route path="*" element={<Navigate to="/library" replace />} />
         </Routes>
-      </>
+      </ProviderAuthProvider>
     </AuthProvider>
   );
 }

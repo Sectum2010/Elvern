@@ -11,6 +11,7 @@ from ..db import get_connection, utcnow_iso
 from ..models import AuthenticatedUser
 from .google_drive_service import (
     PROVIDER_AUTH_REQUIRED_CODE,
+    build_google_drive_provider_auth_required_detail,
     fetch_drive_resource_metadata,
     google_drive_enabled,
 )
@@ -161,6 +162,91 @@ def _build_google_connection_status(
         "reconnect_required": False,
         "stale_state_warning": None,
         "status_message": message,
+    }
+
+
+def get_google_drive_provider_auth_status_payload(
+    settings: Settings,
+    *,
+    user: AuthenticatedUser,
+    provider: str,
+    get_access_token_by_account_id: Callable[..., str],
+) -> dict[str, object]:
+    if not google_drive_enabled(settings):
+        return {
+            "provider": provider,
+            "provider_auth_required": False,
+            "reconnect_required": False,
+            "requirement": None,
+            "sources_checked": 0,
+        }
+
+    with get_connection(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                s.id,
+                s.display_name,
+                s.owner_user_id,
+                s.is_shared,
+                s.google_drive_account_id,
+                CASE WHEN h.id IS NULL THEN 0 ELSE 1 END AS hidden_for_user
+            FROM library_sources s
+            LEFT JOIN user_hidden_library_sources h
+              ON h.library_source_id = s.id
+             AND h.user_id = ?
+            WHERE s.provider = ?
+              AND s.google_drive_account_id IS NOT NULL
+              AND (
+                s.owner_user_id = ?
+                OR s.is_shared = 1
+              )
+            ORDER BY s.is_shared ASC, datetime(s.created_at) DESC, lower(s.display_name) ASC
+            """,
+            (user.id, provider, user.id),
+        ).fetchall()
+
+    visible_rows = [row for row in rows if not bool(row["hidden_for_user"])]
+    for row in visible_rows:
+        try:
+            get_access_token_by_account_id(
+                settings,
+                google_account_id=int(row["google_drive_account_id"]),
+            )
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            if str(detail.get("code") or "") != PROVIDER_AUTH_REQUIRED_CODE:
+                continue
+            allow_reconnect = int(row["owner_user_id"]) == int(user.id)
+            requirement = build_google_drive_provider_auth_required_detail(
+                reason=str(detail.get("provider_reason") or detail.get("reason") or "reauth_required"),
+                title=(
+                    "Google Drive connection expired"
+                    if allow_reconnect
+                    else "Google Drive connection needs administrator attention"
+                ),
+                message=(
+                    "Reconnect Google Drive to continue cloud playback."
+                    if allow_reconnect
+                    else "Ask an administrator to reconnect Google Drive to continue cloud playback."
+                ),
+                allow_reconnect=allow_reconnect,
+                requires_admin=not allow_reconnect,
+            )
+            return {
+                "provider": provider,
+                "provider_auth_required": True,
+                "reconnect_required": True,
+                "requirement": requirement,
+                "sources_checked": len(visible_rows),
+            }
+
+    return {
+        "provider": provider,
+        "provider_auth_required": False,
+        "reconnect_required": False,
+        "requirement": None,
+        "sources_checked": len(visible_rows),
     }
 
 

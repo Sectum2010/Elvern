@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { useProviderAuth } from "../auth/ProviderAuthContext";
 import { LoadingView } from "../components/LoadingView";
 import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
 import { apiRequest } from "../lib/api";
@@ -33,6 +34,7 @@ import {
   getProviderAuthRequirement,
   readProviderAuthIntent,
   saveProviderAuthIntent,
+  shouldShowProviderAuthActionModal,
   shouldGuardGoogleDriveAction,
   startGoogleDriveReconnect,
 } from "../lib/providerAuth";
@@ -309,6 +311,11 @@ export function DetailPage() {
   const { itemId } = useParams();
   const location = useLocation();
   const { user } = useAuth();
+  const {
+    providerAuthRequirement,
+    showProviderAuthPrompt,
+    refreshProviderAuthStatus,
+  } = useProviderAuth();
   const providerReconnectContinuationRef = useRef(null);
   const [item, setItem] = useState(null);
   const [progress, setProgress] = useState(null);
@@ -471,6 +478,12 @@ export function DetailPage() {
       const actionType = playbackMode === "full"
         ? PROVIDER_ACTION_BROWSER_FULL
         : PROVIDER_ACTION_BROWSER_LITE;
+      const handled = showProviderAuthPrompt(requirement, {
+        onLater: () => beginBrowserPlaybackFlow(playbackMode, { skipReconnectGuard: true }),
+      });
+      if (handled) {
+        return;
+      }
       openProviderReconnectModal(requirement, actionType, {
         secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
         onSecondaryAction: () => beginBrowserPlaybackFlow(playbackMode, { skipReconnectGuard: true }),
@@ -561,6 +574,21 @@ export function DetailPage() {
   async function maybeGuardCloudProviderAction({ actionType, onContinue }) {
     if (!item) {
       return false;
+    }
+    let currentProviderAuthRequirement = providerAuthRequirement;
+    if (!currentProviderAuthRequirement && item.source_kind === "cloud") {
+      currentProviderAuthRequirement = await refreshProviderAuthStatus();
+    }
+    if (
+      shouldShowProviderAuthActionModal({
+        itemSourceKind: item.source_kind,
+        requirement: currentProviderAuthRequirement,
+      })
+    ) {
+      showProviderAuthPrompt(currentProviderAuthRequirement, {
+        onLater: onContinue,
+      });
+      return true;
     }
     let nextCloudLibraries = cloudLibraries;
     if (!cloudLibrariesLoaded) {

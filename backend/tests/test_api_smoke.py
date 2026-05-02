@@ -88,6 +88,18 @@ def _insert_google_drive_source(settings) -> int:
         return int(source_cursor.lastrowid)
 
 
+def _configure_google_drive_oauth(client) -> None:
+    response = client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": "secret123",
+        },
+    )
+    assert response.status_code == 200
+
+
 def _build_fake_google_drive_video_row(*, file_id: str, name: str) -> dict[str, object]:
     return {
         "id": file_id,
@@ -1851,6 +1863,123 @@ def test_cloud_libraries_distinguish_oauth_ready_from_reconnect_required_source_
     assert source_payload["last_error_message"] == "Reconnect Google Drive to continue this action."
     assert "refresh_token" not in cloud_response.text
     assert "access_token" not in cloud_response.text
+
+
+def test_google_provider_auth_status_reports_healthy_visible_source(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    _configure_google_drive_oauth(client)
+    _insert_google_drive_source(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE google_drive_accounts
+            SET access_token = ?, access_token_expires_at = ?
+            """,
+            ("healthy-token", "2999-01-01T00:00:00+00:00"),
+        )
+        connection.commit()
+
+    response = client.get("/api/cloud-libraries/google/provider-auth-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider_auth_required"] is False
+    assert payload["reconnect_required"] is False
+    assert payload["requirement"] is None
+    assert payload["sources_checked"] == 1
+    assert "healthy-token" not in response.text
+
+
+def test_google_provider_auth_status_allows_owner_reconnect(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    _configure_google_drive_oauth(client)
+    _insert_google_drive_source(initialized_settings)
+
+    def _raise_provider_auth_required(*args, **kwargs):
+        del args, kwargs
+        raise HTTPException(
+            status_code=409,
+            detail=build_google_drive_provider_auth_required_detail(reason="token_expired_or_revoked"),
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.cloud_provider_auth_service.refresh_google_access_token",
+        _raise_provider_auth_required,
+    )
+
+    response = client.get("/api/cloud-libraries/google/provider-auth-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider_auth_required"] is True
+    assert payload["reconnect_required"] is True
+    assert payload["sources_checked"] == 1
+    assert payload["requirement"]["code"] == "provider_auth_required"
+    assert payload["requirement"]["provider_reason"] == "token_expired_or_revoked"
+    assert payload["requirement"]["allow_reconnect"] is True
+    assert payload["requirement"]["requires_admin"] is False
+    assert payload["requirement"]["message"] == "Reconnect Google Drive to continue cloud playback."
+
+
+def test_google_provider_auth_status_requires_admin_for_shared_source_user(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    _configure_google_drive_oauth(client)
+    _create_standard_user_via_admin(client, username="shared-cloud-user", password="family-password")
+    _insert_google_drive_source(initialized_settings)
+    _logout(client)
+    _login(client, username="shared-cloud-user", password="family-password")
+
+    def _raise_provider_auth_required(*args, **kwargs):
+        del args, kwargs
+        raise HTTPException(
+            status_code=409,
+            detail=build_google_drive_provider_auth_required_detail(reason="token_expired_or_revoked"),
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.cloud_provider_auth_service.refresh_google_access_token",
+        _raise_provider_auth_required,
+    )
+
+    response = client.get("/api/cloud-libraries/google/provider-auth-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider_auth_required"] is True
+    assert payload["reconnect_required"] is True
+    assert payload["sources_checked"] == 1
+    assert payload["requirement"]["allow_reconnect"] is False
+    assert payload["requirement"]["requires_admin"] is True
+    assert payload["requirement"]["title"] == "Google Drive connection needs administrator attention"
+    assert payload["requirement"]["message"] == (
+        "Ask an administrator to reconnect Google Drive to continue cloud playback."
+    )
 
 
 def test_admin_google_drive_setup_validation_surfaces_specific_error(client, admin_credentials) -> None:

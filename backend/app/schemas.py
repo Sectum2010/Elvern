@@ -369,6 +369,25 @@ class GoogleDriveConnectionResponse(BaseModel):
     status_message: str = ""
 
 
+class ProviderAuthRequirementResponse(BaseModel):
+    code: Literal["provider_auth_required"] = "provider_auth_required"
+    provider: str = "google_drive"
+    provider_reason: str = ""
+    title: str = "Google Drive connection expired"
+    message: str = "Reconnect Google Drive to continue cloud playback."
+    reauth_required: bool = True
+    allow_reconnect: bool = True
+    requires_admin: bool = False
+
+
+class ProviderAuthStatusResponse(BaseModel):
+    provider_auth_required: bool = False
+    reconnect_required: bool = False
+    provider: str = "google_drive"
+    requirement: ProviderAuthRequirementResponse | None = None
+    sources_checked: int = 0
+
+
 class CloudLibrarySourceSummary(BaseModel):
     id: int
     provider: Literal["google_drive"] = "google_drive"

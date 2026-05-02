@@ -7,6 +7,7 @@ from ..models import AuthenticatedUser
 from .cloud_library_source_service import (
     add_google_drive_library_source as _add_google_drive_library_source_impl,
     get_cloud_libraries_payload as _get_cloud_libraries_payload_impl,
+    get_google_drive_provider_auth_status_payload as _get_google_drive_provider_auth_status_payload_impl,
     hide_shared_library_source_for_user as _hide_shared_library_source_for_user_impl,
     move_google_drive_library_source as _move_google_drive_library_source_impl,
     show_shared_library_source_for_user as _show_shared_library_source_for_user_impl,
@@ -44,6 +45,19 @@ def get_cloud_libraries_payload(settings: Settings, *, user: AuthenticatedUser) 
         settings,
         user=user,
         provider=GOOGLE_DRIVE_PROVIDER,
+    )
+
+
+def get_google_drive_provider_auth_status_payload(
+    settings: Settings,
+    *,
+    user: AuthenticatedUser,
+) -> dict[str, object]:
+    return _get_google_drive_provider_auth_status_payload_impl(
+        settings,
+        user=user,
+        provider=GOOGLE_DRIVE_PROVIDER,
+        get_access_token_by_account_id=get_google_drive_account_access_token_by_account_id,
     )
 
 

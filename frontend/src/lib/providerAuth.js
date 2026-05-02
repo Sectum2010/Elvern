@@ -5,7 +5,7 @@ const PROVIDER_AUTH_INTENT_KEY = "elvern:provider-auth-intent";
 const PROVIDER_AUTH_INTENT_MAX_AGE_MS = 30 * 60 * 1000;
 
 
-function normalizeProviderAuthDetail(detail) {
+export function normalizeProviderAuthDetail(detail) {
   if (!detail || typeof detail !== "object") {
     return null;
   }
@@ -29,6 +29,60 @@ export function getProviderAuthRequirement(error) {
     return null;
   }
   return normalizeProviderAuthDetail(error.detail || error?.payload?.detail || null);
+}
+
+
+export function getProviderAuthRequirementFromStatus(status) {
+  if (!status || typeof status !== "object") {
+    return null;
+  }
+  const detail = status.requirement || status.detail || null;
+  if (detail) {
+    return normalizeProviderAuthDetail(detail);
+  }
+  if (status.provider_auth_required === true || status.reconnect_required === true) {
+    return normalizeProviderAuthDetail({
+      code: "provider_auth_required",
+      provider: status.provider || "google_drive",
+      provider_reason: status.provider_reason || status.reason || "",
+      title: status.title || "Google Drive connection expired",
+      message: status.message || "Reconnect Google Drive to continue cloud playback.",
+      allow_reconnect: status.allow_reconnect,
+      requires_admin: status.requires_admin,
+    });
+  }
+  return null;
+}
+
+
+export function shouldShowProviderAuthBootstrapModal({ requirement, dismissed }) {
+  return Boolean(requirement) && dismissed !== true;
+}
+
+
+export function shouldShowProviderAuthActionModal({ itemSourceKind, requirement }) {
+  return shouldGuardGoogleDriveAction({
+    itemSourceKind,
+    reconnectRequired: Boolean(requirement),
+  });
+}
+
+
+export function buildProviderAuthReturnPath(currentLocation) {
+  if (typeof currentLocation === "string") {
+    try {
+      currentLocation = new URL(currentLocation, "http://elvern.local");
+    } catch {
+      return "/";
+    }
+  }
+  const pathname = currentLocation?.pathname || "/";
+  const searchParams = new URLSearchParams(currentLocation?.search || "");
+  searchParams.delete("googleDriveStatus");
+  searchParams.delete("googleDriveMessage");
+  const search = searchParams.toString();
+  const hash = currentLocation?.hash || "";
+  return `${pathname}${search ? `?${search}` : ""}${hash}`;
 }
 
 
