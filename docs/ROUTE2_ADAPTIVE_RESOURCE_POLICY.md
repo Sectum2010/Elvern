@@ -9,6 +9,22 @@ This document records resource-admission constraints for future Route2 real adap
 - The protected floor must not exceed `ELVERN_ROUTE2_MAX_WORKER_THREADS`; that configuration would make admission impossible.
 - Current admission is conservative: it uses current real spare capacity only.
 - Current admission must not count theoretical reclaimable threads from already-running workers as available capacity.
+- The protected floor is a minimum service guarantee, not a proof that 2 threads is always enough for real-time playback health.
+
+## Active Playback Health Before New Admission
+
+- Active playback health has priority over admitting new users.
+- When CPU/thread is the limiting factor, an active playback should keep producing more than 1 second of ready runway per 1 second of watching.
+- Mature runtime supply below real time is a protection signal. If an already-watching Route2 stream is CPU/thread-starved or otherwise real-time supply-at-risk, new admission should be blocked with `server_max_capacity` and an internal reason such as `active_stream_protection`.
+- Manifest-complete or non-refilling sessions should not be treated as unhealthy merely because supply rate is zero.
+- Immature supply metrics should be treated conservatively when capacity is tight; missing data must not be interpreted as healthy stream capacity.
+- Source, provider, and client bottlenecks must remain distinct from CPU/thread starvation. Provider/source failures should not be mislabeled as generic CPU busy.
+
+## Rebalance Dry-Run Only
+
+- Runtime rebalance advice may identify active streams that need resources and theoretical donor candidates with surplus runway/supply above the protected floor.
+- Donor capacity is not admission capacity until a future implementation actually reclaims it and fresh telemetry proves the host has released enough CPU/RAM/headroom.
+- Current rebalance advice is metadata only. It must not change `assigned_threads`, mutate running ffmpeg, or admit a new user based on hypothetical donation.
 
 ## Reclaim Is Future Work
 

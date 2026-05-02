@@ -267,6 +267,60 @@ def _capture_route2_worker_threads(monkeypatch) -> list[tuple[str, str, str]]:
     return started_workers
 
 
+def _active_route2_record_for_session(
+    manager: MobilePlaybackManager,
+    session_payload: dict[str, object],
+) -> tuple[MobilePlaybackSession, PlaybackEpoch, Route2WorkerRecord]:
+    session = manager._sessions[str(session_payload["session_id"])]
+    active_epoch_id = session.browser_playback.active_epoch_id
+    assert active_epoch_id is not None
+    epoch = session.browser_playback.epochs[active_epoch_id]
+    assert epoch.active_worker_id is not None
+    record = manager._route2_workers[epoch.active_worker_id]
+    return session, epoch, record
+
+
+def _mark_route2_runtime_supply(
+    session: MobilePlaybackSession,
+    epoch: PlaybackEpoch,
+    record: Route2WorkerRecord,
+    *,
+    supply_rate_x: float,
+    observation_seconds: float = 12.0,
+    runway_seconds: float = 60.0,
+    effective_playhead_seconds: float = 40.0,
+    cpu_cores_used: float | None = None,
+    client_is_playing: bool = True,
+    manifest_complete: bool = False,
+    refill_in_progress: bool = True,
+) -> None:
+    ready_end_seconds = effective_playhead_seconds + runway_seconds
+    epoch.epoch_start_seconds = 0.0
+    epoch.attach_position_seconds = min(epoch.attach_position_seconds, effective_playhead_seconds)
+    epoch.init_published = True
+    epoch.contiguous_published_through_segment = max(0, int((ready_end_seconds / 2.0) - 1))
+    epoch.transcoder_completed = manifest_complete
+    if refill_in_progress:
+        epoch.active_worker_id = record.worker_id
+    else:
+        epoch.active_worker_id = None
+    epoch.frontier_samples = [
+        (0.0, 20.0),
+        (float(observation_seconds), 20.0 + (float(supply_rate_x) * float(observation_seconds))),
+    ]
+    session.ready_start_seconds = 0.0
+    session.ready_end_seconds = ready_end_seconds
+    session.target_position_seconds = 0.0
+    session.last_stable_position_seconds = 0.0
+    session.committed_playhead_seconds = effective_playhead_seconds
+    session.actual_media_element_time_seconds = 0.0
+    session.pending_target_seconds = None
+    session.lifecycle_state = "attached"
+    session.client_is_playing = client_is_playing
+    record.cpu_cores_used = cpu_cores_used
+    record.telemetry_sampled = cpu_cores_used is not None
+
+
 def _make_route2_worker_record_for_spawn_dry_run(*, source_kind: str = "local", user_id: int = 1) -> Route2WorkerRecord:
     return Route2WorkerRecord(
         worker_id="spawn-dry-run-worker",
@@ -4526,6 +4580,308 @@ def test_route2_hard_ram_pressure_blocks_new_admission(initialized_settings, mon
 
     assert exc.value.detail["code"] == "server_max_capacity"
     assert exc.value.detail["reason_code"] == "route2_memory_hard_pressure"
+
+
+def test_route2_active_playback_healthy_with_spare_capacity_admits_new_user(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=366, relative_name="route2/healthy-runtime-a.mp4")
+    item_b = _make_local_item(settings, item_id=367, relative_name="route2/healthy-runtime-b.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=980, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    assert record.assigned_threads == 2
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        runway_seconds=70.0,
+        cpu_cores_used=1.0,
+    )
+
+    second = manager.create_session(item_b, user_id=2, auth_session_id=981, username="bob", engine_mode="route2", playback_mode="lite")
+
+    assert second["session_id"] != first["session_id"]
+    assert len(manager._route2_session_ids_by_user[2]) == 1
+
+
+def test_route2_active_playback_at_floor_low_cpu_supply_blocks_new_admission(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=368, relative_name="route2/starved-runtime-a.mp4")
+    item_b = _make_local_item(settings, item_id=369, relative_name="route2/starved-runtime-b.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=982, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    assert record.assigned_threads == 2
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        runway_seconds=10.0,
+        cpu_cores_used=2.0,
+    )
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item_b, user_id=2, auth_session_id=983, username="bob", engine_mode="route2", playback_mode="lite")
+
+    detail = exc.value.detail
+    assert detail["code"] == "server_max_capacity"
+    assert detail["reason_code"] == "active_stream_protection"
+
+
+def test_route2_active_playback_manifest_complete_does_not_block_on_zero_supply(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=370, relative_name="route2/complete-runtime-a.mp4")
+    item_b = _make_local_item(settings, item_id=371, relative_name="route2/complete-runtime-b.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=984, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.0,
+        runway_seconds=0.0,
+        cpu_cores_used=0.0,
+        manifest_complete=True,
+        refill_in_progress=False,
+    )
+
+    second = manager.create_session(item_b, user_id=2, auth_session_id=985, username="bob", engine_mode="route2", playback_mode="lite")
+
+    assert second["session_id"] != first["session_id"]
+
+
+def test_route2_active_playback_immature_metrics_block_when_capacity_is_tight(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=372, relative_name="route2/immature-runtime-a.mp4")
+    item_b = _make_local_item(settings, item_id=373, relative_name="route2/immature-runtime-b.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=986, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.4,
+        observation_seconds=2.0,
+        runway_seconds=60.0,
+        cpu_cores_used=1.0,
+    )
+
+    with pytest.raises(PlaybackAdmissionError) as exc:
+        manager.create_session(item_b, user_id=2, auth_session_id=987, username="bob", engine_mode="route2", playback_mode="lite")
+
+    detail = exc.value.detail
+    assert detail["code"] == "server_max_capacity"
+    assert detail["reason_code"] == "active_stream_metrics_immature"
+
+
+def test_route2_source_bound_low_supply_is_not_classified_as_cpu_thread_starved(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    _capture_route2_worker_threads(monkeypatch)
+    item = _make_local_item(settings, item_id=374, relative_name="route2/source-bound-runtime.mp4")
+
+    first = manager.create_session(item, user_id=1, auth_session_id=988, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.source_kind = "cloud"
+    record.source_kind = "cloud"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=12.0,
+        cpu_cores_used=0.4,
+    )
+
+    health = manager._evaluate_route2_active_playback_health_locked(session, epoch, record)
+
+    assert health.status == "source_bound"
+    assert health.cpu_thread_limited is False
+    assert health.admission_blocking is False
+
+
+def test_route2_client_bound_low_supply_is_not_treated_as_thread_donor_problem(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    _capture_route2_worker_threads(monkeypatch)
+    item = _make_local_item(settings, item_id=377, relative_name="route2/client-bound-runtime.mp4")
+
+    first = manager.create_session(item, user_id=1, auth_session_id=991, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=12.0,
+        cpu_cores_used=2.0,
+    )
+    epoch.byte_samples = [
+        (0.0, 0),
+        (4.0, 16_000_000),
+        (8.0, 32_000_000),
+        (12.0, 48_000_000),
+    ]
+    session.browser_playback.client_probe_samples = [
+        (0.0, 1_000_000, 0.5),
+        (4.0, 1_000_000, 0.5),
+        (8.0, 1_000_000, 0.5),
+        (12.0, 1_000_000, 0.5),
+    ]
+
+    health = manager._evaluate_route2_active_playback_health_locked(session, epoch, record)
+
+    assert health.status == "client_bound"
+    assert health.admission_blocking is False
+    assert health.runtime_rebalance_role == "neutral"
+
+
+def test_route2_provider_error_health_is_not_mapped_to_active_stream_cpu_busy(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 5)
+    _capture_route2_worker_threads(monkeypatch)
+    item = _make_local_item(settings, item_id=378, relative_name="route2/provider-error-runtime.mp4")
+
+    first = manager.create_session(item, user_id=1, auth_session_id=992, username="alice", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    record.non_retryable_error = "Google Drive provider quota exceeded"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.4,
+        runway_seconds=4.0,
+        cpu_cores_used=2.0,
+    )
+
+    health = manager._evaluate_route2_active_playback_health_locked(session, epoch, record)
+
+    assert health.status == "provider_error"
+    assert health.cpu_thread_limited is True
+    assert health.admission_blocking is False
+
+
+def test_route2_runtime_rebalance_dry_run_marks_donor_and_recipient_without_changing_threads(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=375, relative_name="route2/donor-runtime.mp4")
+    item_b = _make_local_item(settings, item_id=376, relative_name="route2/recipient-runtime.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=989, username="alice", engine_mode="route2", playback_mode="lite")
+    second = manager.create_session(item_b, user_id=2, auth_session_id=990, username="bob", engine_mode="route2", playback_mode="lite")
+    manager._dispatch_waiting_sessions()
+    donor_session, donor_epoch, donor_record = _active_route2_record_for_session(manager, first)
+    recipient_session, recipient_epoch, recipient_record = _active_route2_record_for_session(manager, second)
+    assert donor_record.assigned_threads == 4
+    assert recipient_record.assigned_threads == 4
+    _mark_route2_runtime_supply(
+        donor_session,
+        donor_epoch,
+        donor_record,
+        supply_rate_x=1.5,
+        runway_seconds=95.0,
+        effective_playhead_seconds=10.0,
+        cpu_cores_used=1.0,
+    )
+    _mark_route2_runtime_supply(
+        recipient_session,
+        recipient_epoch,
+        recipient_record,
+        supply_rate_x=0.9,
+        runway_seconds=8.0,
+        cpu_cores_used=4.0,
+    )
+
+    donor_health = manager._evaluate_route2_active_playback_health_locked(donor_session, donor_epoch, donor_record)
+    recipient_health = manager._evaluate_route2_active_playback_health_locked(
+        recipient_session,
+        recipient_epoch,
+        recipient_record,
+    )
+
+    assert donor_health.runtime_rebalance_role == "donor_candidate"
+    assert donor_health.runtime_rebalance_can_donate_threads == 2
+    assert donor_health.runtime_rebalance_target_threads == 2
+    assert recipient_health.runtime_rebalance_role == "needs_resource"
+    assert recipient_health.runtime_rebalance_target_threads == 6
+    assert donor_record.assigned_threads == 4
+    assert recipient_record.assigned_threads == 4
 
 
 def test_route2_stop_then_start_new_movie_allows_replacement_movie(initialized_settings) -> None:

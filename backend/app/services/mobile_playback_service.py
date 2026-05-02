@@ -48,6 +48,7 @@ from .mobile_playback_models import (
     ROUTE2_STARTUP_MIN_SUPPLY_RATE_X,
     ROUTE2_STARTUP_PROJECTION_HORIZON_SECONDS,
     ROUTE2_SUPPLY_RATE_FAST_EMA_ALPHA,
+    ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS,
     ROUTE2_SUPPLY_RATE_SLOW_EMA_ALPHA,
     SEEK_PREROLL_SECONDS,
     SEGMENT_DURATION_SECONDS,
@@ -186,6 +187,10 @@ SERVER_MAX_CAPACITY_CODE = "server_max_capacity"
 ACTIVE_WORKER_CONFLICT_CODE = "active_playback_worker_exists"
 STANDARD_USER_ROLE = "standard_user"
 ADMIN_USER_ROLE = "admin"
+ROUTE2_ACTIVE_SUPPLY_HEALTHY_RATE_X = 1.05
+ROUTE2_ACTIVE_SUPPLY_LOW_RATE_X = 1.0
+ROUTE2_ACTIVE_SUPPLY_STRONGLY_LOW_RATE_X = 0.95
+ROUTE2_RUNTIME_DONOR_SUPPLY_RATE_X = 1.2
 
 
 @dataclass(slots=True)
@@ -253,6 +258,25 @@ class _Route2AdaptiveSpawnDryRunDecision:
     policy: str
     sample_age_seconds: float | None
     sample_mature: bool
+
+
+@dataclass(slots=True)
+class _Route2ActivePlaybackHealth:
+    status: str
+    reason: str
+    admission_blocking: bool
+    worker_id: str | None
+    session_id: str | None
+    supply_rate_x: float | None
+    supply_observation_seconds: float | None
+    runway_seconds: float | None
+    assigned_threads: int | None
+    cpu_thread_limited: bool
+    runtime_rebalance_role: str
+    runtime_rebalance_reason: str
+    runtime_rebalance_target_threads: int | None = None
+    runtime_rebalance_can_donate_threads: int = 0
+    runtime_rebalance_priority: int = 0
 
 
 class ActivePlaybackWorkerConflictError(Exception):
@@ -2186,6 +2210,197 @@ class MobilePlaybackManager:
             return max(int(record.assigned_threads or 0), protected_floor)
         return 0
 
+    def _route2_next_runtime_rebalance_target_threads(self, assigned_threads: int) -> int:
+        current_threads = max(1, int(assigned_threads or 0))
+        if current_threads <= 5:
+            return 6
+        if current_threads <= 8:
+            return 9
+        if current_threads <= 11:
+            return 12
+        return current_threads
+
+    def _route2_record_cpu_thread_limited(self, record: Route2WorkerRecord) -> bool:
+        if record.cpu_cores_used is None:
+            return False
+        current_threads = max(1, int(record.assigned_threads or 0))
+        cpu_cores_used = max(0.0, float(record.cpu_cores_used))
+        return (
+            cpu_cores_used / float(current_threads) >= 0.85
+            or cpu_cores_used >= max(1.0, current_threads * 0.85)
+        )
+
+    def _route2_client_limited_locked(self, session: MobilePlaybackSession, epoch: PlaybackEpoch) -> bool:
+        client_goodput = self._route2_client_goodput_locked(session)
+        if not bool(client_goodput.get("confident")):
+            return False
+        server_goodput = self._route2_server_byte_goodput_locked(epoch)
+        client_rate = float(client_goodput.get("safe_rate") or 0.0)
+        server_rate = float(server_goodput.get("safe_rate") or 0.0)
+        return (
+            bool(server_goodput.get("confident"))
+            and server_rate > 0.0
+            and client_rate > 0.0
+            and client_rate < (server_rate * 0.65)
+        )
+
+    def _route2_source_limited_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        *,
+        cpu_thread_limited: bool,
+    ) -> bool:
+        if cpu_thread_limited:
+            return False
+        server_goodput = self._route2_server_byte_goodput_locked(epoch)
+        client_goodput = self._route2_client_goodput_locked(session)
+        weak_server_goodput = (
+            bool(server_goodput.get("confident"))
+            and bool(client_goodput.get("confident"))
+            and float(server_goodput.get("safe_rate") or 0.0) > 0.0
+            and float(client_goodput.get("safe_rate") or 0.0) > 0.0
+            and float(server_goodput.get("safe_rate") or 0.0) <= float(client_goodput.get("safe_rate") or 0.0)
+        )
+        return session.source_kind == "cloud" or weak_server_goodput
+
+    def _evaluate_route2_active_playback_health_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        record: Route2WorkerRecord,
+    ) -> _Route2ActivePlaybackHealth:
+        assigned_threads = max(0, int(record.assigned_threads or 0))
+        protected_floor = self._route2_protected_min_threads_per_active_user()
+        (
+            _published_end_seconds,
+            _effective_playhead_seconds,
+            runway_seconds,
+            supply_rate_x,
+            observation_seconds,
+            manifest_complete,
+            refill_in_progress,
+        ) = self._route2_runtime_supply_metrics_locked(session, epoch)
+        cpu_thread_limited = self._route2_record_cpu_thread_limited(record)
+        is_active_watch = (
+            session.browser_playback.engine_mode == "route2"
+            and session.lifecycle_state == "attached"
+            and session.client_is_playing
+            and session.pending_target_seconds is None
+        )
+        metrics_mature = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+        starvation_risk = self._starvation_risk(session)
+        stalled_recovery_needed = self._stalled_recovery_needed(session)
+        runtime_rebalance_role = "neutral"
+        runtime_rebalance_reason = "No runtime rebalance action is suggested."
+        runtime_rebalance_target_threads: int | None = None
+        runtime_rebalance_can_donate_threads = 0
+        runtime_rebalance_priority = 0
+
+        if manifest_complete or not refill_in_progress or not is_active_watch:
+            status = "complete_or_not_refilling"
+            reason = "Playback is complete, not actively watching, or not actively refilling; supply rate is not an admission blocker."
+            admission_blocking = False
+        elif record.non_retryable_error or session.last_error:
+            status = "provider_error"
+            reason = "Existing playback has an explicit provider/source error; do not classify it as CPU/thread starvation."
+            admission_blocking = False
+        elif not metrics_mature:
+            status = "metrics_immature"
+            reason = "Runtime supply metrics are not mature enough to prove active playback health."
+            admission_blocking = False
+        elif self._route2_client_limited_locked(session, epoch):
+            status = "client_bound"
+            reason = "Existing playback appears limited by client goodput rather than Route2 transcode threads."
+            admission_blocking = False
+        elif (
+            supply_rate_x <= ROUTE2_ACTIVE_SUPPLY_LOW_RATE_X
+            and self._route2_source_limited_locked(session, epoch, cpu_thread_limited=cpu_thread_limited)
+        ):
+            status = "source_bound"
+            reason = "Existing playback supply is low, but source/provider throughput is the likely limiter rather than CPU threads."
+            admission_blocking = False
+        elif supply_rate_x <= ROUTE2_ACTIVE_SUPPLY_LOW_RATE_X and cpu_thread_limited:
+            status = "cpu_thread_starved"
+            reason = "Existing active playback is not sustaining real-time supply and appears CPU/thread limited."
+            admission_blocking = True
+            runtime_rebalance_role = "needs_resource"
+            runtime_rebalance_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
+            runtime_rebalance_reason = "CPU/thread-starved active playback would be a future rebalance recipient."
+            runtime_rebalance_priority = 100
+        elif (
+            supply_rate_x < ROUTE2_ACTIVE_SUPPLY_STRONGLY_LOW_RATE_X
+            or (
+                supply_rate_x <= ROUTE2_ACTIVE_SUPPLY_LOW_RATE_X
+                and (runway_seconds <= WATCH_LOW_WATERMARK_SECONDS or starvation_risk or stalled_recovery_needed)
+            )
+        ):
+            status = "watch_supply_at_risk"
+            reason = "Existing active playback has low real-time supply or low runway and needs protection before admitting more work."
+            admission_blocking = True
+            runtime_rebalance_role = "needs_resource"
+            runtime_rebalance_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
+            runtime_rebalance_reason = "At-risk active playback would be a future rebalance recipient."
+            runtime_rebalance_priority = 80
+        elif supply_rate_x > ROUTE2_ACTIVE_SUPPLY_HEALTHY_RATE_X and not starvation_risk and not stalled_recovery_needed:
+            status = "healthy"
+            reason = "Existing active playback is sustaining real-time supply with margin."
+            admission_blocking = False
+            if (
+                assigned_threads > protected_floor
+                and (
+                    supply_rate_x >= ROUTE2_RUNTIME_DONOR_SUPPLY_RATE_X
+                    or runway_seconds >= WATCH_REFILL_TARGET_SECONDS
+                )
+            ):
+                runtime_rebalance_role = "donor_candidate"
+                runtime_rebalance_can_donate_threads = max(0, assigned_threads - protected_floor)
+                runtime_rebalance_reason = (
+                    "Playback has healthy supply/runway above the protected floor; it is only a theoretical future donor."
+                )
+                runtime_rebalance_target_threads = protected_floor
+                runtime_rebalance_priority = 20
+        else:
+            status = "watch_supply_at_risk"
+            reason = "Existing active playback has not proven enough real-time supply margin for extra work."
+            admission_blocking = True
+            runtime_rebalance_role = "needs_resource"
+            runtime_rebalance_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
+            runtime_rebalance_reason = "Marginal active playback would be protected before admission."
+            runtime_rebalance_priority = 60
+
+        return _Route2ActivePlaybackHealth(
+            status=status,
+            reason=reason,
+            admission_blocking=admission_blocking,
+            worker_id=record.worker_id,
+            session_id=session.session_id,
+            supply_rate_x=supply_rate_x,
+            supply_observation_seconds=observation_seconds,
+            runway_seconds=runway_seconds,
+            assigned_threads=assigned_threads,
+            cpu_thread_limited=cpu_thread_limited,
+            runtime_rebalance_role=runtime_rebalance_role,
+            runtime_rebalance_reason=runtime_rebalance_reason,
+            runtime_rebalance_target_threads=runtime_rebalance_target_threads,
+            runtime_rebalance_can_donate_threads=runtime_rebalance_can_donate_threads,
+            runtime_rebalance_priority=runtime_rebalance_priority,
+        )
+
+    def _route2_active_playback_healths_locked(self) -> list[_Route2ActivePlaybackHealth]:
+        healths: list[_Route2ActivePlaybackHealth] = []
+        for record in self._route2_workers.values():
+            if record.state not in {"running", "stopping"}:
+                continue
+            session = self._sessions.get(record.session_id)
+            if session is None or session.browser_playback.engine_mode != "route2":
+                continue
+            epoch = session.browser_playback.epochs.get(record.epoch_id)
+            if epoch is None:
+                continue
+            healths.append(self._evaluate_route2_active_playback_health_locked(session, epoch, record))
+        return healths
+
     def _raise_if_route2_admission_denied_locked(
         self,
         *,
@@ -2265,6 +2480,29 @@ class MobilePlaybackManager:
                     admission_min_threads=admission_min_threads,
                 )
             )
+
+        for active_health in self._route2_active_playback_healths_locked():
+            if active_health.admission_blocking:
+                raise PlaybackAdmissionError(
+                    self._build_server_max_capacity_detail_locked(
+                        reason_code="active_stream_protection",
+                        active_user_count_after_admission=active_user_count_after_admission,
+                        available_reserved_threads=available_reserved_threads,
+                        admission_min_threads=admission_min_threads,
+                    )
+                )
+            if (
+                active_health.status == "metrics_immature"
+                and available_reserved_threads <= admission_min_threads
+            ):
+                raise PlaybackAdmissionError(
+                    self._build_server_max_capacity_detail_locked(
+                        reason_code="active_stream_metrics_immature",
+                        active_user_count_after_admission=active_user_count_after_admission,
+                        available_reserved_threads=available_reserved_threads,
+                        admission_min_threads=admission_min_threads,
+                    )
+                )
 
         snapshot = self._latest_route2_resource_snapshot_locked()
         if snapshot is None or snapshot.sample_stale:
@@ -2808,6 +3046,47 @@ class MobilePlaybackManager:
                     "started_at": record.started_at,
                     "last_seen_at": record.last_seen_at,
                 }
+                session = self._sessions.get(record.session_id)
+                epoch = (
+                    session.browser_playback.epochs.get(record.epoch_id)
+                    if session is not None and session.browser_playback.engine_mode == "route2"
+                    else None
+                )
+                if session is not None and epoch is not None:
+                    active_health = self._evaluate_route2_active_playback_health_locked(session, epoch, record)
+                    payload["runtime_playback_health"] = active_health.status
+                    payload["runtime_playback_health_reason"] = active_health.reason
+                    payload["runtime_supply_rate_x"] = (
+                        round(active_health.supply_rate_x, 3)
+                        if active_health.supply_rate_x is not None
+                        else None
+                    )
+                    payload["runtime_supply_observation_seconds"] = (
+                        round(active_health.supply_observation_seconds, 2)
+                        if active_health.supply_observation_seconds is not None
+                        else None
+                    )
+                    payload["runtime_runway_seconds"] = (
+                        round(active_health.runway_seconds, 2)
+                        if active_health.runway_seconds is not None
+                        else None
+                    )
+                    payload["runtime_rebalance_role"] = active_health.runtime_rebalance_role
+                    payload["runtime_rebalance_reason"] = active_health.runtime_rebalance_reason
+                    payload["runtime_rebalance_target_threads"] = active_health.runtime_rebalance_target_threads
+                    payload["runtime_rebalance_can_donate_threads"] = active_health.runtime_rebalance_can_donate_threads
+                    payload["runtime_rebalance_priority"] = active_health.runtime_rebalance_priority
+                else:
+                    payload["runtime_playback_health"] = None
+                    payload["runtime_playback_health_reason"] = None
+                    payload["runtime_supply_rate_x"] = None
+                    payload["runtime_supply_observation_seconds"] = None
+                    payload["runtime_runway_seconds"] = None
+                    payload["runtime_rebalance_role"] = "neutral"
+                    payload["runtime_rebalance_reason"] = None
+                    payload["runtime_rebalance_target_threads"] = None
+                    payload["runtime_rebalance_can_donate_threads"] = 0
+                    payload["runtime_rebalance_priority"] = 0
                 group["items"].append(payload)
                 payloads_by_worker_id[record.worker_id] = payload
             for group in grouped_users.values():
