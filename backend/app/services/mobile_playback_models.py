@@ -209,6 +209,13 @@ class Route2WorkerRecord:
     adaptive_spawn_dry_run_source: str | None = None
     adaptive_spawn_dry_run_sample_age_seconds: float | None = None
     adaptive_spawn_dry_run_sample_mature: bool | None = None
+    adaptive_thread_control_enabled: bool = False
+    adaptive_thread_control_applied: bool = False
+    adaptive_thread_assignment_policy: str | None = None
+    adaptive_thread_assignment_reason: str | None = None
+    adaptive_thread_assignment_blockers: list[str] = field(default_factory=list)
+    adaptive_thread_assignment_fallback_used: bool = False
+    assigned_threads_source: str = "fixed_disabled"
     process_exists: bool = False
     cpu_cores_used: float | None = None
     cpu_percent_of_total: float | None = None

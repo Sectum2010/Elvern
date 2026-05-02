@@ -143,6 +143,10 @@ class Settings:
     route2_max_worker_threads: int
     route2_protected_min_threads_per_active_user: int
     route2_adaptive_max_worker_threads: int
+    route2_adaptive_thread_control_enabled: bool
+    route2_adaptive_thread_control_local_only: bool
+    route2_adaptive_thread_control_cloud_enabled: bool
+    route2_adaptive_thread_control_strict_12_enabled: bool
     route2_max_replacement_epochs_per_session: int
     native_playback_enabled: bool
     native_playback_session_minutes: int
@@ -241,6 +245,22 @@ def load_settings() -> Settings:
         route2_adaptive_max_worker_threads=_get_int(
             "ELVERN_ROUTE2_ADAPTIVE_MAX_WORKER_THREADS",
             min(10, total_cpu_cores),
+        ),
+        route2_adaptive_thread_control_enabled=_get_bool(
+            "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED",
+            False,
+        ),
+        route2_adaptive_thread_control_local_only=_get_bool(
+            "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY",
+            True,
+        ),
+        route2_adaptive_thread_control_cloud_enabled=_get_bool(
+            "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED",
+            False,
+        ),
+        route2_adaptive_thread_control_strict_12_enabled=_get_bool(
+            "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED",
+            False,
         ),
         route2_max_replacement_epochs_per_session=_get_int(
             "ELVERN_ROUTE2_MAX_REPLACEMENT_EPOCHS_PER_SESSION",

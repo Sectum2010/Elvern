@@ -232,7 +232,6 @@ def _external_host_pressure_hold_reason(
     high_external_pressure = (
         external_cpu_cores >= 4.0
         or external_cpu_ratio >= 0.20
-        or (host_used_ratio >= 0.75 and external_cpu_cores >= 1.0)
     )
     if high_external_pressure:
         return (
@@ -253,9 +252,8 @@ def _external_host_pressure_hold_reason(
             )
 
     moderate_external_pressure = (
-        external_cpu_cores >= 1.0
-        or external_cpu_ratio >= 0.08
-        or host_used_ratio >= 0.60
+        external_cpu_cores >= 3.0
+        or external_cpu_ratio >= 0.15
     )
     if moderate_external_pressure and target_threads > 6:
         return (

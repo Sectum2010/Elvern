@@ -58,11 +58,37 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 
 - Non-Elvern CPU, ffmpeg, and system workload has priority over Elvern Route2 speed.
 - High external CPU pressure or meaningful external ffmpeg pressure must block or reduce future adaptive promotion.
+- Elvern-owned ffmpeg/ffprobe helpers are internal Elvern workload, not non-Elvern external workload.
+- The external ffmpeg detector must distinguish known Route2 workers, Elvern-owned helper children, and true external ffmpeg/ffprobe processes.
+- When measurable, Elvern-owned helper CPU should be subtracted from the external CPU residual so helper probes do not look like outside workload.
+- The detector must not read, expose, or log full command lines because media paths and provider URLs may be private.
+- High host CPU caused primarily by Route2 itself must not be misclassified as external pressure.
 - Elvern must never kill, pause, renice, throttle, or modify non-Elvern processes.
+
+## Real Adaptive Thread Control Flags
+
+- Real adaptive thread control is now wired behind feature flags and remains disabled by default.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED` defaults to `false`. When it is false, real `assigned_threads` must use the existing fixed dispatch calculation.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY` defaults to `true`. The first real-control phase is local-only.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED` defaults to `false`. Cloud real adaptive assignment remains deferred.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED` defaults to `false`. Real strict-12 assignment is not implemented in the first phase.
+- If the global flag is enabled, the only real adaptive assignment currently allowed is an initial local 6-thread spawn after mature telemetry, no external pressure, no external ffmpeg, RAM safety, active playback health, user/global headroom, protected-floor capacity, and adaptive ceiling checks all pass.
+- The initial 6-thread boost is gated on a single active Route2 playback workload, not merely a single account. Standard users usually map one-to-one with workloads because they are limited to one active playback, but an admin running multiple playbacks is running multiple Route2 workloads.
+- Admin multi-playback remains allowed when capacity permits. Only the first admin playback is eligible for the single-workload initial 6 boost; additional admin playbacks fall back to the conservative fixed assignment in this phase.
+- Real 9-thread and 12-thread tiers remain future phases. The benchmark-informed 4/6/9/strict-12 ladder is still available to shadow/runtime recommendations, but real assignment currently supports only the initial local 6 path.
+- Cloud, stale telemetry, pressure, RAM, active-stream protection, exceptions, or unsupported targets must fall back to the fixed assignment instead of failing playback.
+- No reclaim/downshift is implemented. The dispatcher must not count theoretical reclaimable capacity as current capacity.
 
 ## Current State
 
-- `assigned_threads` remains controlled by the fixed Route2 dispatch path.
-- Adaptive spawn/runtime decisions are still dry-run or shadow-only.
+- Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.
+- Adaptive spawn/runtime decisions remain dry-run or shadow-only in default configuration.
 - Reclaim/downshift is not implemented.
 - Admission failures use structured machine-readable codes such as `same_user_active_playback_limit` and `server_max_capacity`.
+
+## Worker Count Config Semantics
+
+- `max_concurrent_mobile_workers` is not currently a hard cap on active Route2 workers.
+- Current Route2 admission is governed by CPU budget, the protected 2-thread active-user floor, active playback health, RAM pressure, external host pressure, and provider/source guards.
+- Do not reinterpret `max_concurrent_mobile_workers` as a Route2 hard cap without an explicit product decision.
+- If a hard Route2 worker-count cap is needed later, add a separate clearly named setting such as `ELVERN_ROUTE2_MAX_ACTIVE_WORKERS`.

@@ -1245,6 +1245,22 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     failure_count: int = Field(default=0, ge=0)
     replacement_count: int = Field(default=0, ge=0)
     assigned_threads: int = Field(default=0, ge=0)
+    fixed_assigned_threads_at_dispatch: int | None = Field(default=None, ge=0)
+    adaptive_spawn_dry_run_enabled: bool = False
+    adaptive_spawn_dry_run_threads: int | None = Field(default=None, ge=0)
+    adaptive_spawn_dry_run_reason: str | None = None
+    adaptive_spawn_dry_run_blockers: list[str] = Field(default_factory=list)
+    adaptive_spawn_dry_run_policy: str | None = None
+    adaptive_spawn_dry_run_source: str | None = None
+    adaptive_spawn_dry_run_sample_age_seconds: float | None = Field(default=None, ge=0)
+    adaptive_spawn_dry_run_sample_mature: bool | None = None
+    adaptive_thread_control_enabled: bool = False
+    adaptive_thread_control_applied: bool = False
+    adaptive_thread_assignment_policy: str | None = None
+    adaptive_thread_assignment_reason: str | None = None
+    adaptive_thread_assignment_blockers: list[str] = Field(default_factory=list)
+    adaptive_thread_assignment_fallback_used: bool = False
+    assigned_threads_source: str = "fixed_disabled"
     process_exists: bool = False
     cpu_cores_used: float | None = Field(default=None, ge=0)
     cpu_percent_of_total: float | None = Field(default=None, ge=0)
@@ -1262,6 +1278,16 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     adaptive_safe_to_decrease_threads: bool = False
     adaptive_reason: str | None = None
     adaptive_missing_metrics: list[str] = Field(default_factory=list)
+    runtime_playback_health: str | None = None
+    runtime_playback_health_reason: str | None = None
+    runtime_supply_rate_x: float | None = Field(default=None, ge=0)
+    runtime_supply_observation_seconds: float | None = Field(default=None, ge=0)
+    runtime_runway_seconds: float | None = Field(default=None, ge=0)
+    runtime_rebalance_role: str | None = None
+    runtime_rebalance_reason: str | None = None
+    runtime_rebalance_target_threads: int | None = Field(default=None, ge=0)
+    runtime_rebalance_can_donate_threads: int = Field(default=0, ge=0)
+    runtime_rebalance_priority: int = Field(default=0, ge=0)
     route2_transcode_strategy: str | None = None
     route2_transcode_strategy_confidence: str | None = None
     route2_transcode_strategy_reason: str | None = None
@@ -1301,14 +1327,33 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     route2_cpu_upbound_cores: int = Field(ge=1)
     total_route2_budget_cores: int = Field(ge=1)
     route2_cpu_cores_used: float | None = Field(default=None, ge=0)
+    route2_cpu_cores_used_total: float | None = Field(default=None, ge=0)
     route2_cpu_percent_of_total: float | None = Field(default=None, ge=0)
     route2_cpu_percent_of_upbound: float | None = Field(default=None, ge=0)
+    route2_resource_sample_mature: bool = False
+    route2_resource_sample_stale: bool = True
+    route2_resource_sample_age_seconds: float | None = Field(default=None, ge=0)
+    host_cpu_total_cores: int | None = Field(default=None, ge=1)
+    host_cpu_used_cores: float | None = Field(default=None, ge=0)
+    host_cpu_used_percent: float | None = Field(default=None, ge=0)
+    external_cpu_cores_used_estimate: float | None = Field(default=None, ge=0)
+    external_cpu_percent_estimate: float | None = Field(default=None, ge=0)
+    external_ffmpeg_process_count: int = Field(default=0, ge=0)
+    route2_worker_ffmpeg_process_count: int = Field(default=0, ge=0)
+    elvern_owned_ffmpeg_process_count: int = Field(default=0, ge=0)
+    elvern_owned_ffmpeg_cpu_cores_estimate: float | None = Field(default=None, ge=0)
+    external_ffmpeg_cpu_cores_estimate: float | None = Field(default=None, ge=0)
+    external_pressure_level: str = "unknown"
+    external_pressure_reason: str | None = None
+    route2_resource_missing_metrics: list[str] = Field(default_factory=list)
     total_memory_bytes: int | None = Field(default=None, ge=0)
     route2_memory_bytes: int | None = Field(default=None, ge=0)
+    route2_memory_bytes_total: int | None = Field(default=None, ge=0)
     route2_memory_percent_of_total: float | None = Field(default=None, ge=0)
     active_worker_count: int = Field(default=0, ge=0)
     queued_worker_count: int = Field(default=0, ge=0)
     active_decoding_user_count: int = Field(default=0, ge=0)
+    active_route2_workload_count: int = Field(default=0, ge=0)
     per_user_budget_cores: int = Field(default=0, ge=0)
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
 

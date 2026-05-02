@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -212,6 +212,20 @@ class _HostCpuPressureSnapshot:
     external_ffmpeg_process_count: int
     external_ffmpeg_cpu_cores_estimate: float | None
     host_cpu_sample_mature: bool
+    route2_worker_ffmpeg_process_count: int = 0
+    elvern_owned_ffmpeg_process_count: int = 0
+    elvern_owned_ffmpeg_cpu_cores_estimate: float | None = None
+    external_pressure_reason: str | None = None
+
+
+@dataclass(slots=True)
+class _FfmpegProcessClassification:
+    route2_worker_process_count: int = 0
+    elvern_owned_process_count: int = 0
+    external_process_count: int = 0
+    route2_worker_pids: set[int] = field(default_factory=set)
+    elvern_owned_pids: set[int] = field(default_factory=set)
+    external_pids: set[int] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -249,6 +263,10 @@ class _Route2ResourceSnapshot:
     external_ffmpeg_cpu_cores_estimate: float | None
     external_pressure_level: str
     missing_metrics: list[str]
+    route2_worker_ffmpeg_process_count: int = 0
+    elvern_owned_ffmpeg_process_count: int = 0
+    elvern_owned_ffmpeg_cpu_cores_estimate: float | None = None
+    external_pressure_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -259,6 +277,18 @@ class _Route2AdaptiveSpawnDryRunDecision:
     policy: str
     sample_age_seconds: float | None
     sample_mature: bool
+
+
+@dataclass(slots=True)
+class _Route2RealThreadAssignmentDecision:
+    assigned_threads: int
+    assignment_policy: str
+    assignment_reason: str
+    assignment_blockers: list[str]
+    adaptive_control_enabled: bool
+    adaptive_control_applied: bool
+    assigned_threads_source: str
+    fallback_used: bool
 
 
 @dataclass(slots=True)
@@ -390,26 +420,107 @@ def _proc_comm_is_ffmpeg_like(comm: str | None) -> bool:
     return normalized in {"ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe"}
 
 
-def _count_external_ffmpeg_processes(*, proc_root: Path = Path("/proc"), owned_route2_pids: set[int] | None = None) -> int:
+def _parse_proc_stat_parent_pid(payload: str) -> int | None:
+    normalized = str(payload or "").strip()
+    if not normalized:
+        return None
+    close_index = normalized.rfind(")")
+    if close_index < 0 or close_index + 2 >= len(normalized):
+        return None
+    tail = normalized[close_index + 2 :].split()
+    if len(tail) < 2:
+        return None
+    try:
+        return int(tail[1])
+    except ValueError:
+        return None
+
+
+def _read_proc_parent_pid(proc_root: Path, pid: int) -> int | None:
+    try:
+        payload = (proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return _parse_proc_stat_parent_pid(payload)
+
+
+def _proc_pid_has_ancestor(
+    *,
+    proc_root: Path,
+    pid: int,
+    ancestor_pid: int | None,
+    max_depth: int = 8,
+) -> bool:
+    if ancestor_pid is None or ancestor_pid <= 0:
+        return False
+    current_pid = int(pid)
+    visited: set[int] = set()
+    for _ in range(max(1, int(max_depth))):
+        if current_pid in visited or current_pid <= 1:
+            return False
+        visited.add(current_pid)
+        parent_pid = _read_proc_parent_pid(proc_root, current_pid)
+        if parent_pid is None or parent_pid <= 0:
+            return False
+        if parent_pid == ancestor_pid:
+            return True
+        current_pid = parent_pid
+    return False
+
+
+def _classify_ffmpeg_processes(
+    *,
+    proc_root: Path = Path("/proc"),
+    owned_route2_pids: set[int] | None = None,
+    backend_pid: int | None = None,
+) -> _FfmpegProcessClassification:
     owned_pids = {int(pid) for pid in (owned_route2_pids or set()) if int(pid) > 0}
-    count = 0
+    resolved_backend_pid = os.getpid() if backend_pid is None else int(backend_pid)
+    classification = _FfmpegProcessClassification()
     try:
         entries = list(proc_root.iterdir())
     except OSError:
-        return 0
+        return classification
     for entry in entries:
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
-        if pid in owned_pids:
-            continue
         try:
             comm = (entry / "comm").read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if _proc_comm_is_ffmpeg_like(comm):
-            count += 1
-    return count
+        if not _proc_comm_is_ffmpeg_like(comm):
+            continue
+        if pid in owned_pids:
+            classification.route2_worker_process_count += 1
+            classification.route2_worker_pids.add(pid)
+        elif _proc_pid_has_ancestor(
+            proc_root=proc_root,
+            pid=pid,
+            ancestor_pid=resolved_backend_pid,
+        ):
+            classification.elvern_owned_process_count += 1
+            classification.elvern_owned_pids.add(pid)
+        else:
+            classification.external_process_count += 1
+            classification.external_pids.add(pid)
+    return classification
+
+
+def _count_external_ffmpeg_processes(*, proc_root: Path = Path("/proc"), owned_route2_pids: set[int] | None = None) -> int:
+    return _classify_ffmpeg_processes(
+        proc_root=proc_root,
+        owned_route2_pids=owned_route2_pids,
+    ).external_process_count
+
+
+def _read_process_cpu_seconds_for_pids(pids: set[int]) -> dict[int, float]:
+    readings: dict[int, float] = {}
+    for pid in sorted({int(pid) for pid in pids if int(pid) > 0}):
+        cpu_seconds = _read_process_cpu_seconds(pid)
+        if cpu_seconds is not None:
+            readings[pid] = cpu_seconds
+    return readings
 
 
 def _build_host_cpu_pressure_snapshot(
@@ -418,6 +529,9 @@ def _build_host_cpu_pressure_snapshot(
     current_sample: _HostCpuJiffySample | None,
     route2_cpu_cores_used_total: float | None,
     external_ffmpeg_process_count: int,
+    route2_worker_ffmpeg_process_count: int = 0,
+    elvern_owned_ffmpeg_process_count: int = 0,
+    elvern_owned_ffmpeg_cpu_cores_estimate: float | None = None,
 ) -> _HostCpuPressureSnapshot:
     if current_sample is None or previous_sample is None:
         return _HostCpuPressureSnapshot(
@@ -429,6 +543,10 @@ def _build_host_cpu_pressure_snapshot(
             external_ffmpeg_process_count=external_ffmpeg_process_count,
             external_ffmpeg_cpu_cores_estimate=None,
             host_cpu_sample_mature=False,
+            route2_worker_ffmpeg_process_count=route2_worker_ffmpeg_process_count,
+            elvern_owned_ffmpeg_process_count=elvern_owned_ffmpeg_process_count,
+            elvern_owned_ffmpeg_cpu_cores_estimate=elvern_owned_ffmpeg_cpu_cores_estimate,
+            external_pressure_reason="host_cpu_sample_immature",
         )
 
     delta_total_jiffies = current_sample.total_jiffies - previous_sample.total_jiffies
@@ -444,6 +562,10 @@ def _build_host_cpu_pressure_snapshot(
             external_ffmpeg_process_count=external_ffmpeg_process_count,
             external_ffmpeg_cpu_cores_estimate=None,
             host_cpu_sample_mature=False,
+            route2_worker_ffmpeg_process_count=route2_worker_ffmpeg_process_count,
+            elvern_owned_ffmpeg_process_count=elvern_owned_ffmpeg_process_count,
+            elvern_owned_ffmpeg_cpu_cores_estimate=elvern_owned_ffmpeg_cpu_cores_estimate,
+            external_pressure_reason="host_cpu_sample_immature",
         )
 
     used_jiffies = max(0, delta_total_jiffies - delta_idle_jiffies)
@@ -454,7 +576,13 @@ def _build_host_cpu_pressure_snapshot(
     external_cpu_cores_used_estimate = None
     external_cpu_percent_estimate = None
     if route2_cpu_cores_used_total is not None:
-        external_cpu_cores_used_estimate = max(0.0, host_cpu_used_cores - float(route2_cpu_cores_used_total))
+        elvern_helper_cores = (
+            max(0.0, float(elvern_owned_ffmpeg_cpu_cores_estimate))
+            if elvern_owned_ffmpeg_cpu_cores_estimate is not None
+            else 0.0
+        )
+        elvern_cpu_cores_used_total = float(route2_cpu_cores_used_total) + elvern_helper_cores
+        external_cpu_cores_used_estimate = max(0.0, host_cpu_used_cores - elvern_cpu_cores_used_total)
         external_cpu_percent_estimate = external_cpu_cores_used_estimate / total_cores
 
     return _HostCpuPressureSnapshot(
@@ -466,34 +594,39 @@ def _build_host_cpu_pressure_snapshot(
         external_ffmpeg_process_count=external_ffmpeg_process_count,
         external_ffmpeg_cpu_cores_estimate=None,
         host_cpu_sample_mature=True,
+        route2_worker_ffmpeg_process_count=route2_worker_ffmpeg_process_count,
+        elvern_owned_ffmpeg_process_count=elvern_owned_ffmpeg_process_count,
+        elvern_owned_ffmpeg_cpu_cores_estimate=elvern_owned_ffmpeg_cpu_cores_estimate,
+        external_pressure_reason=None,
     )
 
 
-def _classify_external_pressure_level(host_cpu_pressure: _HostCpuPressureSnapshot) -> str:
+def _classify_external_pressure(host_cpu_pressure: _HostCpuPressureSnapshot) -> tuple[str, str]:
     if not host_cpu_pressure.host_cpu_sample_mature:
-        return "unknown"
+        return "unknown", "host_cpu_sample_immature"
     external_cores = host_cpu_pressure.external_cpu_cores_used_estimate
     external_percent = host_cpu_pressure.external_cpu_percent_estimate
-    host_percent = host_cpu_pressure.host_cpu_used_percent
+    if external_cores is None or external_percent is None:
+        return "unknown", "external_cpu_estimate_missing"
     if (
-        (external_cores is not None and external_cores >= 4.0)
-        or (external_percent is not None and external_percent >= 0.20)
-        or (
-            host_percent is not None
-            and host_percent >= 0.75
-            and external_cores is not None
-            and external_cores >= 1.0
-        )
+        external_cores >= 4.0
+        or external_percent >= 0.20
     ):
-        return "high"
+        return "high", "external_cpu_high"
     if (
         host_cpu_pressure.external_ffmpeg_process_count > 0
-        or (external_cores is not None and external_cores >= 1.0)
-        or (external_percent is not None and external_percent >= 0.08)
-        or (host_percent is not None and host_percent >= 0.60)
+        or external_cores >= 3.0
+        or external_percent >= 0.15
     ):
-        return "moderate"
-    return "none"
+        if host_cpu_pressure.external_ffmpeg_process_count > 0:
+            return "moderate", "external_ffmpeg_detected"
+        return "moderate", "external_cpu_moderate"
+    return "none", "none"
+
+
+def _classify_external_pressure_level(host_cpu_pressure: _HostCpuPressureSnapshot) -> str:
+    level, _reason = _classify_external_pressure(host_cpu_pressure)
+    return level
 
 
 def _host_cpu_pressure_from_resource_snapshot(snapshot: _Route2ResourceSnapshot | None) -> _HostCpuPressureSnapshot:
@@ -507,6 +640,7 @@ def _host_cpu_pressure_from_resource_snapshot(snapshot: _Route2ResourceSnapshot 
             external_ffmpeg_process_count=0,
             external_ffmpeg_cpu_cores_estimate=None,
             host_cpu_sample_mature=False,
+            external_pressure_reason="resource_snapshot_missing",
         )
     return _HostCpuPressureSnapshot(
         host_cpu_total_cores=snapshot.host_cpu_total_cores,
@@ -517,6 +651,10 @@ def _host_cpu_pressure_from_resource_snapshot(snapshot: _Route2ResourceSnapshot 
         external_ffmpeg_process_count=snapshot.external_ffmpeg_process_count,
         external_ffmpeg_cpu_cores_estimate=snapshot.external_ffmpeg_cpu_cores_estimate,
         host_cpu_sample_mature=bool(snapshot.sample_mature and not snapshot.sample_stale),
+        route2_worker_ffmpeg_process_count=snapshot.route2_worker_ffmpeg_process_count,
+        elvern_owned_ffmpeg_process_count=snapshot.elvern_owned_ffmpeg_process_count,
+        elvern_owned_ffmpeg_cpu_cores_estimate=snapshot.elvern_owned_ffmpeg_cpu_cores_estimate,
+        external_pressure_reason=snapshot.external_pressure_reason,
     )
 
 
@@ -632,6 +770,8 @@ class MobilePlaybackManager:
         self._workers: dict[str, str] = {}
         self._route2_workers: dict[str, Route2WorkerRecord] = {}
         self._last_host_cpu_jiffy_sample: _HostCpuJiffySample | None = None
+        self._last_elvern_owned_ffmpeg_cpu_seconds_by_pid: dict[int, float] = {}
+        self._last_elvern_owned_ffmpeg_cpu_sample_monotonic: float | None = None
         self._route2_resource_snapshot: _Route2ResourceSnapshot | None = None
         self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
@@ -2001,6 +2141,38 @@ class MobilePlaybackManager:
             any_cpu_sampled = True
         return route2_cpu_cores_used_total if any_cpu_sampled else None
 
+    def _elvern_owned_ffmpeg_cpu_cores_for_host_pressure_locked(
+        self,
+        *,
+        current_cpu_seconds_by_pid: dict[int, float],
+        sample_monotonic: float,
+    ) -> float | None:
+        previous_sample_monotonic = self._last_elvern_owned_ffmpeg_cpu_sample_monotonic
+        previous_cpu_seconds_by_pid = self._last_elvern_owned_ffmpeg_cpu_seconds_by_pid
+        current_readings = {
+            int(pid): float(cpu_seconds)
+            for pid, cpu_seconds in current_cpu_seconds_by_pid.items()
+            if int(pid) > 0 and cpu_seconds is not None
+        }
+        self._last_elvern_owned_ffmpeg_cpu_seconds_by_pid = current_readings
+        self._last_elvern_owned_ffmpeg_cpu_sample_monotonic = sample_monotonic
+        if previous_sample_monotonic is None:
+            return None if current_readings else 0.0
+        delta_wall_seconds = sample_monotonic - previous_sample_monotonic
+        if delta_wall_seconds <= 0:
+            return None
+        total_cpu_delta_seconds = 0.0
+        any_matched_process = False
+        for pid, cpu_seconds in current_readings.items():
+            previous_cpu_seconds = previous_cpu_seconds_by_pid.get(pid)
+            if previous_cpu_seconds is None:
+                continue
+            total_cpu_delta_seconds += max(0.0, cpu_seconds - previous_cpu_seconds)
+            any_matched_process = True
+        if not current_readings:
+            return 0.0
+        return total_cpu_delta_seconds / delta_wall_seconds if any_matched_process else None
+
     def _store_route2_resource_snapshot_locked(
         self,
         *,
@@ -2051,6 +2223,7 @@ class MobilePlaybackManager:
             missing_metrics.append("route2_memory_bytes_total")
 
         host_total_cores = host_cpu_pressure.host_cpu_total_cores
+        external_pressure_level, external_pressure_reason = _classify_external_pressure(host_cpu_pressure)
         snapshot = _Route2ResourceSnapshot(
             sampled_at_ts=sampled_at_ts,
             sampled_at=sampled_at,
@@ -2077,8 +2250,12 @@ class MobilePlaybackManager:
             external_cpu_percent_estimate=host_cpu_pressure.external_cpu_percent_estimate,
             external_ffmpeg_process_count=host_cpu_pressure.external_ffmpeg_process_count,
             external_ffmpeg_cpu_cores_estimate=host_cpu_pressure.external_ffmpeg_cpu_cores_estimate,
-            external_pressure_level=_classify_external_pressure_level(host_cpu_pressure),
+            external_pressure_level=external_pressure_level,
             missing_metrics=missing_metrics,
+            route2_worker_ffmpeg_process_count=host_cpu_pressure.route2_worker_ffmpeg_process_count,
+            elvern_owned_ffmpeg_process_count=host_cpu_pressure.elvern_owned_ffmpeg_process_count,
+            elvern_owned_ffmpeg_cpu_cores_estimate=host_cpu_pressure.elvern_owned_ffmpeg_cpu_cores_estimate,
+            external_pressure_reason=external_pressure_reason,
         )
         self._route2_resource_snapshot = snapshot
         return snapshot
@@ -2102,7 +2279,8 @@ class MobilePlaybackManager:
 
         worker_results = self._read_route2_worker_telemetry_targets(targets)
         current_host_sample = _read_host_cpu_jiffy_sample(sample_monotonic=sample_monotonic)
-        external_ffmpeg_process_count = _count_external_ffmpeg_processes(owned_route2_pids=owned_route2_pids)
+        ffmpeg_processes = _classify_ffmpeg_processes(owned_route2_pids=owned_route2_pids)
+        elvern_owned_ffmpeg_cpu_seconds_by_pid = _read_process_cpu_seconds_for_pids(ffmpeg_processes.elvern_owned_pids)
 
         with self._lock:
             for worker_id, result in worker_results.items():
@@ -2130,11 +2308,18 @@ class MobilePlaybackManager:
             previous_host_sample = self._last_host_cpu_jiffy_sample
             if current_host_sample is not None:
                 self._last_host_cpu_jiffy_sample = current_host_sample
+            elvern_owned_ffmpeg_cpu_cores_estimate = self._elvern_owned_ffmpeg_cpu_cores_for_host_pressure_locked(
+                current_cpu_seconds_by_pid=elvern_owned_ffmpeg_cpu_seconds_by_pid,
+                sample_monotonic=sample_monotonic,
+            )
             host_cpu_pressure = _build_host_cpu_pressure_snapshot(
                 previous_sample=previous_host_sample,
                 current_sample=current_host_sample,
                 route2_cpu_cores_used_total=self._route2_cpu_total_for_host_pressure_locked(),
-                external_ffmpeg_process_count=external_ffmpeg_process_count,
+                external_ffmpeg_process_count=ffmpeg_processes.external_process_count,
+                route2_worker_ffmpeg_process_count=ffmpeg_processes.route2_worker_process_count,
+                elvern_owned_ffmpeg_process_count=ffmpeg_processes.elvern_owned_process_count,
+                elvern_owned_ffmpeg_cpu_cores_estimate=elvern_owned_ffmpeg_cpu_cores_estimate,
             )
             self._store_route2_resource_snapshot_locked(
                 sampled_at_ts=sampled_at_ts,
@@ -2159,16 +2344,24 @@ class MobilePlaybackManager:
         owned_route2_pids: set[int],
         sample_monotonic: float,
     ) -> _HostCpuPressureSnapshot:
-        external_ffmpeg_process_count = _count_external_ffmpeg_processes(owned_route2_pids=owned_route2_pids)
+        ffmpeg_processes = _classify_ffmpeg_processes(owned_route2_pids=owned_route2_pids)
+        elvern_owned_ffmpeg_cpu_seconds_by_pid = _read_process_cpu_seconds_for_pids(ffmpeg_processes.elvern_owned_pids)
         current_sample = _read_host_cpu_jiffy_sample(sample_monotonic=sample_monotonic)
         previous_sample = self._last_host_cpu_jiffy_sample
         if current_sample is not None:
             self._last_host_cpu_jiffy_sample = current_sample
+        elvern_owned_ffmpeg_cpu_cores_estimate = self._elvern_owned_ffmpeg_cpu_cores_for_host_pressure_locked(
+            current_cpu_seconds_by_pid=elvern_owned_ffmpeg_cpu_seconds_by_pid,
+            sample_monotonic=sample_monotonic,
+        )
         return _build_host_cpu_pressure_snapshot(
             previous_sample=previous_sample,
             current_sample=current_sample,
             route2_cpu_cores_used_total=route2_cpu_cores_used_total,
-            external_ffmpeg_process_count=external_ffmpeg_process_count,
+            external_ffmpeg_process_count=ffmpeg_processes.external_process_count,
+            route2_worker_ffmpeg_process_count=ffmpeg_processes.route2_worker_process_count,
+            elvern_owned_ffmpeg_process_count=ffmpeg_processes.elvern_owned_process_count,
+            elvern_owned_ffmpeg_cpu_cores_estimate=elvern_owned_ffmpeg_cpu_cores_estimate,
         )
 
     def _route2_budget_summary_locked(self) -> dict[str, object]:
@@ -2185,6 +2378,13 @@ class MobilePlaybackManager:
             }
         )
         active_decoding_user_count = len(active_user_ids)
+        active_route2_workload_count = len(
+            [
+                record
+                for record in self._route2_workers.values()
+                if record.state in {"queued", "running"}
+            ]
+        )
         per_user_budget_cores = (
             max(1, math.floor(total_route2_budget_cores / active_decoding_user_count))
             if active_decoding_user_count > 0
@@ -2197,6 +2397,7 @@ class MobilePlaybackManager:
             "route2_cpu_upbound_cores": total_route2_budget_cores,
             "total_route2_budget_cores": total_route2_budget_cores,
             "active_decoding_user_count": active_decoding_user_count,
+            "active_route2_workload_count": active_route2_workload_count,
             "active_user_ids": active_user_ids,
             "per_user_budget_cores": per_user_budget_cores,
             "max_worker_threads": self.settings.route2_max_worker_threads,
@@ -2586,10 +2787,16 @@ class MobilePlaybackManager:
         allocated_cpu_cores: int,
         route2_cpu_upbound_cores: int,
         active_route2_user_count: int,
+        active_route2_workload_count: int | None = None,
     ) -> _Route2AdaptiveSpawnDryRunDecision:
         snapshot = self._latest_route2_resource_snapshot_locked()
         sample_age_seconds = (time.time() - snapshot.sampled_at_ts) if snapshot is not None else None
         sample_mature = bool(snapshot is not None and snapshot.sample_mature and not snapshot.sample_stale)
+        effective_workload_count = (
+            int(active_route2_workload_count)
+            if active_route2_workload_count is not None
+            else int(active_route2_user_count)
+        )
         conservative_target = self._route2_conservative_spawn_target_locked(
             fixed_assigned_threads=fixed_assigned_threads,
             available_total_threads=available_total_threads,
@@ -2602,9 +2809,9 @@ class MobilePlaybackManager:
         if record.source_kind != "local":
             blockers.append("cloud_adaptive_spawn_deferred")
             reason_parts.append("cloud real adaptive initial spawn is deferred")
-        if active_route2_user_count != 1:
-            blockers.append("not_single_user_route2_workload")
-            reason_parts.append("Route2 is not a single-user workload")
+        if effective_workload_count != 1:
+            blockers.append("existing_route2_workload_present")
+            reason_parts.append("Route2 is not a single active playback workload")
         if not sample_mature:
             blockers.append("telemetry_missing_or_stale")
             reason_parts.append("resource telemetry is missing, immature, or stale")
@@ -2682,14 +2889,123 @@ class MobilePlaybackManager:
         return _Route2AdaptiveSpawnDryRunDecision(
             recommended_threads=dry_run_target,
             reason=(
-                f"Initial spawn dry-run would choose {dry_run_target} threads for a local single-user "
-                "Route2 workload with mature telemetry, no external pressure, RAM safe, and enough "
+                f"Initial spawn dry-run would choose {dry_run_target} threads for a local single active "
+                "Route2 playback workload with mature telemetry, no external pressure, RAM safe, and enough "
                 f"user/global CPU headroom.{capped_note} Real assigned_threads remains fixed."
             ),
             blockers=[],
             policy=policy,
             sample_age_seconds=sample_age_seconds,
             sample_mature=sample_mature,
+        )
+
+    def _fixed_route2_thread_assignment_decision(
+        self,
+        *,
+        fixed_assigned_threads: int,
+        policy: str,
+        reason: str,
+        blockers: list[str] | None = None,
+        source: str,
+        adaptive_enabled: bool,
+        fallback_used: bool,
+    ) -> _Route2RealThreadAssignmentDecision:
+        return _Route2RealThreadAssignmentDecision(
+            assigned_threads=max(0, int(fixed_assigned_threads)),
+            assignment_policy=policy,
+            assignment_reason=reason,
+            assignment_blockers=list(dict.fromkeys(blockers or [])),
+            adaptive_control_enabled=adaptive_enabled,
+            adaptive_control_applied=False,
+            assigned_threads_source=source,
+            fallback_used=fallback_used,
+        )
+
+    def _resolve_route2_real_assigned_threads_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        fixed_assigned_threads: int,
+        spawn_dry_run: _Route2AdaptiveSpawnDryRunDecision,
+    ) -> _Route2RealThreadAssignmentDecision:
+        adaptive_enabled = bool(getattr(self.settings, "route2_adaptive_thread_control_enabled", False))
+        if not adaptive_enabled:
+            return self._fixed_route2_thread_assignment_decision(
+                fixed_assigned_threads=fixed_assigned_threads,
+                policy="fixed_disabled",
+                reason="Adaptive real thread control is disabled; using fixed Route2 assignment.",
+                source="fixed_disabled",
+                adaptive_enabled=False,
+                fallback_used=True,
+            )
+
+        blockers: list[str] = []
+        reason_parts: list[str] = []
+        if record.source_kind == "cloud":
+            if bool(getattr(self.settings, "route2_adaptive_thread_control_local_only", True)):
+                blockers.append("cloud_adaptive_thread_control_local_only")
+                reason_parts.append("cloud real adaptive thread control is blocked by local-only rollout")
+            elif not bool(getattr(self.settings, "route2_adaptive_thread_control_cloud_enabled", False)):
+                blockers.append("cloud_adaptive_thread_control_disabled")
+                reason_parts.append("cloud real adaptive thread control is disabled/deferred")
+            else:
+                blockers.append("cloud_adaptive_thread_control_deferred")
+                reason_parts.append("cloud real adaptive thread control has no real assignment policy in this phase")
+        elif record.source_kind == "local":
+            pass
+        else:
+            blockers.append("unsupported_source_kind")
+            reason_parts.append("unsupported source kind for real adaptive thread control")
+
+        target_threads = int(spawn_dry_run.recommended_threads or 0)
+        if spawn_dry_run.blockers:
+            blockers.extend(spawn_dry_run.blockers)
+            reason_parts.append("spawn dry-run safety blockers did not pass")
+        if not bool(spawn_dry_run.sample_mature):
+            blockers.append("telemetry_missing_or_stale")
+            reason_parts.append("resource telemetry is missing, immature, or stale")
+        if target_threads != 6:
+            blockers.append("unsupported_real_adaptive_target")
+            reason_parts.append("this phase only permits an initial local 6-thread assignment")
+        if int(getattr(self.settings, "route2_adaptive_max_worker_threads", 0) or 0) < 6:
+            blockers.append("adaptive_max_below_first_tier")
+            reason_parts.append("adaptive max worker threads is below the 6-thread first tier")
+        if int(fixed_assigned_threads) < int(self.settings.route2_min_worker_threads):
+            blockers.append("fixed_assignment_below_min_worker_threads")
+            reason_parts.append("fixed assignment is below route2_min_worker_threads")
+
+        if blockers:
+            source = (
+                "cloud_disabled"
+                if any(blocker.startswith("cloud_adaptive_thread_control") for blocker in blockers)
+                else "safety_fallback"
+            )
+            return self._fixed_route2_thread_assignment_decision(
+                fixed_assigned_threads=fixed_assigned_threads,
+                policy="adaptive_enabled_fixed_fallback",
+                reason=(
+                    "Adaptive real thread control is enabled, but fixed assignment is used: "
+                    + "; ".join(dict.fromkeys(reason_parts or ["safety gates did not pass"]))
+                    + "."
+                ),
+                blockers=blockers,
+                source=source,
+                adaptive_enabled=True,
+                fallback_used=True,
+            )
+
+        return _Route2RealThreadAssignmentDecision(
+            assigned_threads=6,
+            assignment_policy="adaptive_local_initial_6",
+            assignment_reason=(
+                "Adaptive real thread control selected 6 threads for an initial local Route2 spawn "
+                "after strict telemetry, resource, and safety gates passed."
+            ),
+            assignment_blockers=[],
+            adaptive_control_enabled=True,
+            adaptive_control_applied=True,
+            assigned_threads_source="adaptive_local_initial_6",
+            fallback_used=False,
         )
 
     def _build_route2_adaptive_shadow_input_locked(
@@ -3047,6 +3363,13 @@ class MobilePlaybackManager:
                         else None
                     ),
                     "adaptive_spawn_dry_run_sample_mature": record.adaptive_spawn_dry_run_sample_mature,
+                    "adaptive_thread_control_enabled": record.adaptive_thread_control_enabled,
+                    "adaptive_thread_control_applied": record.adaptive_thread_control_applied,
+                    "adaptive_thread_assignment_policy": record.adaptive_thread_assignment_policy,
+                    "adaptive_thread_assignment_reason": record.adaptive_thread_assignment_reason,
+                    "adaptive_thread_assignment_blockers": list(record.adaptive_thread_assignment_blockers),
+                    "adaptive_thread_assignment_fallback_used": record.adaptive_thread_assignment_fallback_used,
+                    "assigned_threads_source": record.assigned_threads_source,
                     "process_exists": record.process_exists,
                     "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
                     "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
@@ -3204,6 +3527,7 @@ class MobilePlaybackManager:
             return {
                 **budget,
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
+                "route2_cpu_cores_used_total": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_percent_of_total": route2_cpu_percent_of_total,
                 "route2_cpu_percent_of_upbound": route2_cpu_percent_of_upbound,
                 "host_cpu_total_cores": host_cpu_pressure.host_cpu_total_cores,
@@ -3228,6 +3552,13 @@ class MobilePlaybackManager:
                     else None
                 ),
                 "external_ffmpeg_process_count": host_cpu_pressure.external_ffmpeg_process_count,
+                "route2_worker_ffmpeg_process_count": host_cpu_pressure.route2_worker_ffmpeg_process_count,
+                "elvern_owned_ffmpeg_process_count": host_cpu_pressure.elvern_owned_ffmpeg_process_count,
+                "elvern_owned_ffmpeg_cpu_cores_estimate": (
+                    round(host_cpu_pressure.elvern_owned_ffmpeg_cpu_cores_estimate, 3)
+                    if host_cpu_pressure.elvern_owned_ffmpeg_cpu_cores_estimate is not None
+                    else None
+                ),
                 "external_ffmpeg_cpu_cores_estimate": (
                     round(host_cpu_pressure.external_ffmpeg_cpu_cores_estimate, 3)
                     if host_cpu_pressure.external_ffmpeg_cpu_cores_estimate is not None
@@ -3239,18 +3570,36 @@ class MobilePlaybackManager:
                     if resource_snapshot is not None
                     else None
                 ),
+                "route2_resource_sample_age_seconds": (
+                    round(now_ts - resource_snapshot.sampled_at_ts, 3)
+                    if resource_snapshot is not None
+                    else None
+                ),
                 "resource_sample_mature": (
                     bool(resource_snapshot.sample_mature and not resource_snapshot.sample_stale)
                     if resource_snapshot is not None
                     else False
                 ),
+                "route2_resource_sample_mature": (
+                    bool(resource_snapshot.sample_mature and not resource_snapshot.sample_stale)
+                    if resource_snapshot is not None
+                    else False
+                ),
                 "resource_sample_stale": resource_snapshot.sample_stale if resource_snapshot is not None else True,
+                "route2_resource_sample_stale": resource_snapshot.sample_stale if resource_snapshot is not None else True,
                 "external_pressure_level": (
                     resource_snapshot.external_pressure_level if resource_snapshot is not None else "unknown"
                 ),
+                "external_pressure_reason": (
+                    resource_snapshot.external_pressure_reason if resource_snapshot is not None else "resource_snapshot_missing"
+                ),
                 "resource_missing_metrics": resource_snapshot.missing_metrics if resource_snapshot is not None else ["resource_snapshot"],
+                "route2_resource_missing_metrics": (
+                    resource_snapshot.missing_metrics if resource_snapshot is not None else ["resource_snapshot"]
+                ),
                 "total_memory_bytes": total_memory_bytes,
                 "route2_memory_bytes": route2_memory_bytes if any_memory_sampled else None,
+                "route2_memory_bytes_total": route2_memory_bytes if any_memory_sampled else None,
                 "route2_memory_percent_of_total": (
                     round((route2_memory_bytes / total_memory_bytes) * 100, 3)
                     if any_memory_sampled and total_memory_bytes
@@ -5883,9 +6232,34 @@ class MobilePlaybackManager:
                     allocated_cpu_cores=per_user_budget_cores,
                     route2_cpu_upbound_cores=int(budget["route2_cpu_upbound_cores"]),
                     active_route2_user_count=int(budget["active_decoding_user_count"]),
+                    active_route2_workload_count=int(budget["active_route2_workload_count"]),
                 )
+                try:
+                    thread_assignment = self._resolve_route2_real_assigned_threads_locked(
+                        record,
+                        fixed_assigned_threads=assigned_threads,
+                        spawn_dry_run=spawn_dry_run,
+                    )
+                except Exception:
+                    logger.debug("Route2 adaptive real assignment failed; falling back to fixed assignment", exc_info=True)
+                    thread_assignment = self._fixed_route2_thread_assignment_decision(
+                        fixed_assigned_threads=assigned_threads,
+                        policy="adaptive_assignment_exception_fallback",
+                        reason="Adaptive real thread assignment failed; using fixed Route2 assignment.",
+                        blockers=["adaptive_assignment_exception"],
+                        source="fixed_fallback",
+                        adaptive_enabled=bool(getattr(self.settings, "route2_adaptive_thread_control_enabled", False)),
+                        fallback_used=True,
+                    )
+                assigned_threads = thread_assignment.assigned_threads
+                if assigned_threads < self.settings.route2_min_worker_threads:
+                    continue
                 record.state = "running"
-                record.fixed_assigned_threads_at_dispatch = assigned_threads
+                record.fixed_assigned_threads_at_dispatch = min(
+                    self.settings.route2_max_worker_threads,
+                    available_total_threads,
+                    user_remaining_threads,
+                )
                 record.adaptive_spawn_dry_run_enabled = True
                 record.adaptive_spawn_dry_run_threads = spawn_dry_run.recommended_threads
                 record.adaptive_spawn_dry_run_reason = spawn_dry_run.reason
@@ -5894,6 +6268,13 @@ class MobilePlaybackManager:
                 record.adaptive_spawn_dry_run_source = "initial_spawn"
                 record.adaptive_spawn_dry_run_sample_age_seconds = spawn_dry_run.sample_age_seconds
                 record.adaptive_spawn_dry_run_sample_mature = spawn_dry_run.sample_mature
+                record.adaptive_thread_control_enabled = thread_assignment.adaptive_control_enabled
+                record.adaptive_thread_control_applied = thread_assignment.adaptive_control_applied
+                record.adaptive_thread_assignment_policy = thread_assignment.assignment_policy
+                record.adaptive_thread_assignment_reason = thread_assignment.assignment_reason
+                record.adaptive_thread_assignment_blockers = thread_assignment.assignment_blockers
+                record.adaptive_thread_assignment_fallback_used = thread_assignment.fallback_used
+                record.assigned_threads_source = thread_assignment.assigned_threads_source
                 record.assigned_threads = assigned_threads
                 if not record.started_at:
                     record.started_at = utcnow_iso()

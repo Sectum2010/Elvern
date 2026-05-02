@@ -321,14 +321,34 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
         "route2_cpu_upbound_cores": 18,
         "total_route2_budget_cores": 18,
         "route2_cpu_cores_used": 7.2,
+        "route2_cpu_cores_used_total": 7.2,
         "route2_cpu_percent_of_total": 36.0,
         "route2_cpu_percent_of_upbound": 40.0,
+        "route2_resource_sample_mature": True,
+        "route2_resource_sample_stale": False,
+        "route2_resource_sample_age_seconds": 1.25,
+        "host_cpu_total_cores": 20,
+        "host_cpu_used_cores": 8.4,
+        "host_cpu_used_percent": 0.42,
+        "external_cpu_cores_used_estimate": 1.2,
+        "external_cpu_percent_estimate": 0.06,
+        "external_ffmpeg_process_count": 1,
+        "route2_worker_ffmpeg_process_count": 1,
+        "elvern_owned_ffmpeg_process_count": 2,
+        "elvern_owned_ffmpeg_cpu_cores_estimate": 0.6,
+        "external_ffmpeg_cpu_cores_estimate": 0.4,
+        "external_pressure_level": "moderate",
+        "external_pressure_reason": "external_ffmpeg_detected",
+        "route2_resource_missing_metrics": [],
         "total_memory_bytes": 32 * 1024 * 1024 * 1024,
         "route2_memory_bytes": 2 * 1024 * 1024 * 1024,
+        "route2_memory_bytes_total": 2 * 1024 * 1024 * 1024,
         "route2_memory_percent_of_total": 6.25,
+        "access_token": "must-not-leak",
         "active_worker_count": 1,
         "queued_worker_count": 2,
         "active_decoding_user_count": 2,
+        "active_route2_workload_count": 3,
         "per_user_budget_cores": 9,
         "workers_by_user": [
             {
@@ -363,6 +383,22 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "failure_count": 0,
                         "replacement_count": 1,
                         "assigned_threads": 6,
+                        "fixed_assigned_threads_at_dispatch": 4,
+                        "adaptive_spawn_dry_run_enabled": True,
+                        "adaptive_spawn_dry_run_threads": 6,
+                        "adaptive_spawn_dry_run_reason": "Local single-user dry-run spawn would start at 6.",
+                        "adaptive_spawn_dry_run_blockers": [],
+                        "adaptive_spawn_dry_run_policy": "route2_initial_spawn_dry_run_v1",
+                        "adaptive_spawn_dry_run_source": "initial_spawn",
+                        "adaptive_spawn_dry_run_sample_age_seconds": 1.25,
+                        "adaptive_spawn_dry_run_sample_mature": True,
+                        "adaptive_thread_control_enabled": True,
+                        "adaptive_thread_control_applied": True,
+                        "adaptive_thread_assignment_policy": "adaptive_local_initial_6",
+                        "adaptive_thread_assignment_reason": "Adaptive real thread control selected 6 threads for an initial local Route2 spawn.",
+                        "adaptive_thread_assignment_blockers": [],
+                        "adaptive_thread_assignment_fallback_used": False,
+                        "assigned_threads_source": "adaptive_local_initial_6",
                         "process_exists": True,
                         "cpu_cores_used": 7.2,
                         "cpu_percent_of_total": 36.0,
@@ -372,6 +408,27 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "telemetry_sampled": True,
                         "last_sampled_at": "2026-04-26T12:00:06+00:00",
                         "failure_reason": None,
+                        "adaptive_bottleneck_class": "CPU_BOUND",
+                        "adaptive_bottleneck_confidence": 0.91,
+                        "adaptive_recommended_threads": 9,
+                        "adaptive_current_threads": 6,
+                        "adaptive_safe_to_increase_threads": True,
+                        "adaptive_safe_to_decrease_threads": False,
+                        "adaptive_reason": "Benchmark-informed ladder selected 9 as the next useful tier.",
+                        "adaptive_missing_metrics": [],
+                        "runtime_playback_health": "healthy",
+                        "runtime_playback_health_reason": "Existing active playback is sustaining real-time supply with margin.",
+                        "runtime_supply_rate_x": 1.42,
+                        "runtime_supply_observation_seconds": 12.0,
+                        "runtime_runway_seconds": 84.0,
+                        "runtime_rebalance_role": "donor_candidate",
+                        "runtime_rebalance_reason": "Playback has healthy supply/runway above the protected floor; it is only a theoretical future donor.",
+                        "runtime_rebalance_target_threads": 2,
+                        "runtime_rebalance_can_donate_threads": 4,
+                        "runtime_rebalance_priority": 20,
+                        "access_token": "must-not-leak",
+                        "full_command_line": "ffmpeg -headers Authorization: Bearer secret",
+                        "private_provider_url": "https://drive.google.invalid/file?access_token=secret",
                         "started_at": "2026-04-26T12:00:00+00:00",
                         "last_seen_at": "2026-04-26T12:00:05+00:00",
                     },
@@ -1271,15 +1328,66 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert payload["route2_cpu_upbound_cores"] == 18
     assert payload["total_route2_budget_cores"] == 18
     assert payload["route2_cpu_percent_of_total"] == 36.0
+    assert payload["route2_cpu_cores_used_total"] == 7.2
+    assert payload["route2_resource_sample_mature"] is True
+    assert payload["route2_resource_sample_stale"] is False
+    assert payload["route2_resource_sample_age_seconds"] == 1.25
+    assert payload["host_cpu_total_cores"] == 20
+    assert payload["host_cpu_used_cores"] == 8.4
+    assert payload["external_cpu_cores_used_estimate"] == 1.2
+    assert payload["external_ffmpeg_process_count"] == 1
+    assert payload["route2_worker_ffmpeg_process_count"] == 1
+    assert payload["elvern_owned_ffmpeg_process_count"] == 2
+    assert payload["elvern_owned_ffmpeg_cpu_cores_estimate"] == 0.6
+    assert payload["external_pressure_level"] == "moderate"
+    assert payload["external_pressure_reason"] == "external_ffmpeg_detected"
+    assert payload["route2_resource_missing_metrics"] == []
     assert payload["route2_memory_bytes"] == 2147483648
+    assert payload["route2_memory_bytes_total"] == 2147483648
     assert payload["active_worker_count"] == 1
     assert payload["queued_worker_count"] == 2
     assert payload["active_decoding_user_count"] == 2
+    assert payload["active_route2_workload_count"] == 3
     assert payload["per_user_budget_cores"] == 9
     assert len(payload["workers_by_user"]) == 2
     assert payload["workers_by_user"][0]["allocated_cpu_cores"] == 9
-    assert payload["workers_by_user"][0]["items"][0]["assigned_threads"] == 6
-    assert payload["workers_by_user"][0]["items"][0]["cpu_cores_used"] == 7.2
+    first_item = payload["workers_by_user"][0]["items"][0]
+    assert first_item["assigned_threads"] == 6
+    assert first_item["fixed_assigned_threads_at_dispatch"] == 4
+    assert first_item["adaptive_spawn_dry_run_enabled"] is True
+    assert first_item["adaptive_spawn_dry_run_threads"] == 6
+    assert first_item["adaptive_spawn_dry_run_source"] == "initial_spawn"
+    assert first_item["adaptive_thread_control_enabled"] is True
+    assert first_item["adaptive_thread_control_applied"] is True
+    assert first_item["adaptive_thread_assignment_policy"] == "adaptive_local_initial_6"
+    assert first_item["adaptive_thread_assignment_fallback_used"] is False
+    assert first_item["assigned_threads_source"] == "adaptive_local_initial_6"
+    assert first_item["adaptive_bottleneck_class"] == "CPU_BOUND"
+    assert first_item["adaptive_recommended_threads"] == 9
+    assert first_item["runtime_playback_health"] == "healthy"
+    assert first_item["runtime_supply_rate_x"] == 1.42
+    assert first_item["runtime_runway_seconds"] == 84.0
+    assert first_item["runtime_rebalance_role"] == "donor_candidate"
+    assert first_item["runtime_rebalance_can_donate_threads"] == 4
+    assert first_item["cpu_cores_used"] == 7.2
+    serialized_payload = response.text.lower()
+    assert "access_token" not in serialized_payload
+    assert "full_command_line" not in serialized_payload
+    assert "private_provider_url" not in serialized_payload
+
+
+def test_non_admin_cannot_read_playback_worker_operational_status(
+    initialized_settings,
+    client,
+) -> None:
+    created_user = _create_standard_user(initialized_settings, username="route2-status-non-admin")
+    _login(client, username=created_user["username"], password="family-password")
+    stub = AdminPlaybackWorkerManagerStub(_make_admin_playback_workers_payload())
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.get("/api/admin/playback-workers")
+
+    assert response.status_code == 403
 
 
 def test_admin_local_technical_metadata_enrich_route_returns_bounded_summary(
