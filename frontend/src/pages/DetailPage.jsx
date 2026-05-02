@@ -32,6 +32,7 @@ import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudS
 import {
   clearProviderAuthIntent,
   getGoogleDriveStatusFromLocation,
+  getProviderAuthPassiveNoticeMessage,
   getProviderAuthRequirement,
   PROVIDER_RECONNECT_CANCELLED_MESSAGE,
   PROVIDER_RECONNECT_PENDING_RESET_MS,
@@ -39,6 +40,7 @@ import {
   saveProviderAuthIntent,
   shouldShowProviderAuthActionModal,
   shouldGuardGoogleDriveAction,
+  shouldUseProviderAuthPassiveNotice,
   shouldResetProviderReconnectPending,
   startGoogleDriveReconnect,
 } from "../lib/providerAuth";
@@ -557,6 +559,10 @@ export function DetailPage() {
     iosMobile,
     onProgressChange: setProgress,
     onProviderAuthRequired: (requirement, { playbackMode = "lite" } = {}) => {
+      if (shouldUseProviderAuthPassiveNotice(requirement)) {
+        setError(getProviderAuthPassiveNoticeMessage(requirement));
+        return;
+      }
       const actionType = playbackMode === "full"
         ? PROVIDER_ACTION_BROWSER_FULL
         : PROVIDER_ACTION_BROWSER_LITE;
@@ -667,6 +673,12 @@ export function DetailPage() {
     let currentProviderAuthRequirement = providerAuthRequirement;
     if (!currentProviderAuthRequirement && item.source_kind === "cloud") {
       currentProviderAuthRequirement = await refreshProviderAuthStatus();
+    }
+    if (
+      item.source_kind === "cloud"
+      && shouldUseProviderAuthPassiveNotice(currentProviderAuthRequirement)
+    ) {
+      return false;
     }
     if (
       shouldShowProviderAuthActionModal({
@@ -1400,6 +1412,16 @@ export function DetailPage() {
     } catch (requestError) {
       const providerAuthRequirement = getProviderAuthRequirement(requestError);
       if (providerAuthRequirement) {
+        if (shouldUseProviderAuthPassiveNotice(providerAuthRequirement)) {
+          setVlcLaunchError(getProviderAuthPassiveNoticeMessage(providerAuthRequirement));
+          setVlcLaunchMessage("");
+          if (hadBrowserPlaybackSession && !isProviderRetry) {
+            restoreActiveBrowserPlaybackSession().catch(() => {
+              // Preserve the reconnect-required error if browser playback cannot be restored.
+            });
+          }
+          return;
+        }
         if (suppressProviderAuthModal) {
           setVlcLaunchError(providerAuthRequirement.message || requestError.message || "Google Drive reconnect is required.");
           setVlcLaunchMessage("");
@@ -1569,6 +1591,11 @@ export function DetailPage() {
       }
       setIosTransportDebug(null);
       if (providerAuthRequirement) {
+        if (shouldUseProviderAuthPassiveNotice(providerAuthRequirement)) {
+          setIosAppLaunchError(getProviderAuthPassiveNoticeMessage(providerAuthRequirement));
+          setIosAppLaunchMessage("");
+          return;
+        }
         if (suppressProviderAuthModal) {
           setIosAppLaunchError(providerAuthRequirement.message || requestError.message || `Failed to open ${appLabel}`);
           setIosAppLaunchMessage("");

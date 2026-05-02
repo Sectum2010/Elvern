@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 
 import {
   buildProviderAuthReturnPath,
+  getProviderAuthPassiveNoticeMessage,
   getGoogleDriveStatusFromLocation,
   getProviderAuthRequirement,
   getProviderAuthRequirementFromStatus,
+  isProviderAuthReconnectCapable,
+  PROVIDER_AUTH_ADMIN_NOTICE_MESSAGE,
   shouldResetProviderReconnectPending,
   shouldShowProviderAuthActionModal,
   shouldShowProviderAuthBootstrapModal,
+  shouldUseProviderAuthPassiveNotice,
 } from "./providerAuth.js";
 
 
@@ -129,6 +133,65 @@ test("admin-required provider auth keeps reconnect disabled", () => {
   assert.equal(requirement.requiresAdmin, true);
   assert.equal(requirement.allowReconnect, false);
   assert.equal(requirement.title, "Google Drive connection needs administrator attention");
+  assert.equal(isProviderAuthReconnectCapable(requirement), false);
+  assert.equal(shouldUseProviderAuthPassiveNotice(requirement), true);
+  assert.equal(getProviderAuthPassiveNoticeMessage(requirement), PROVIDER_AUTH_ADMIN_NOTICE_MESSAGE);
+  assert.equal(shouldShowProviderAuthBootstrapModal({ requirement, dismissed: false }), false);
+  assert.equal(
+    shouldShowProviderAuthActionModal({ itemSourceKind: "cloud", requirement }),
+    false,
+  );
+});
+
+
+test("non-reconnectable provider auth uses passive admin-contact notice", () => {
+  const requirement = getProviderAuthRequirementFromStatus({
+    provider_auth_required: true,
+    reconnect_required: true,
+    requirement: {
+      code: "provider_auth_required",
+      provider: "google_drive",
+      provider_reason: "token_expired_or_revoked",
+      title: "Google Drive connection expired",
+      message: "Reconnect Google Drive to continue cloud playback.",
+      allow_reconnect: false,
+      requires_admin: false,
+    },
+  });
+
+  assert.equal(isProviderAuthReconnectCapable(requirement), false);
+  assert.equal(shouldUseProviderAuthPassiveNotice(requirement), true);
+  assert.equal(
+    getProviderAuthPassiveNoticeMessage(requirement),
+    "Your cloud provider token has expired. Contact an admin to stream cloud-stored movies.",
+  );
+  assert.equal(shouldShowProviderAuthBootstrapModal({ requirement, dismissed: false }), false);
+});
+
+
+test("reconnect-capable provider auth keeps modal behavior", () => {
+  const requirement = getProviderAuthRequirementFromStatus({
+    provider_auth_required: true,
+    reconnect_required: true,
+    requirement: {
+      code: "provider_auth_required",
+      provider: "google_drive",
+      provider_reason: "token_expired_or_revoked",
+      title: "Google Drive connection expired",
+      message: "Reconnect Google Drive to continue cloud playback.",
+      allow_reconnect: true,
+      requires_admin: false,
+    },
+  });
+
+  assert.equal(isProviderAuthReconnectCapable(requirement), true);
+  assert.equal(shouldUseProviderAuthPassiveNotice(requirement), false);
+  assert.equal(getProviderAuthPassiveNoticeMessage(requirement), "");
+  assert.equal(shouldShowProviderAuthBootstrapModal({ requirement, dismissed: false }), true);
+  assert.equal(
+    shouldShowProviderAuthActionModal({ itemSourceKind: "cloud", requirement }),
+    true,
+  );
 });
 
 

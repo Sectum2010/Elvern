@@ -3,6 +3,7 @@ import { apiRequest } from "./api.js";
 
 const PROVIDER_AUTH_INTENT_KEY = "elvern:provider-auth-intent";
 const PROVIDER_AUTH_INTENT_MAX_AGE_MS = 30 * 60 * 1000;
+export const PROVIDER_AUTH_ADMIN_NOTICE_MESSAGE = "Your cloud provider token has expired. Contact an admin to stream cloud-stored movies.";
 export const PROVIDER_RECONNECT_CANCELLED_MESSAGE = "Reconnect was not completed.";
 export const PROVIDER_RECONNECT_PENDING_RESET_MS = 10000;
 
@@ -57,15 +58,39 @@ export function getProviderAuthRequirementFromStatus(status) {
 }
 
 
+export function isProviderAuthReconnectCapable(requirement) {
+  return Boolean(requirement)
+    && requirement.requiresAdmin !== true
+    && requirement.allowReconnect !== false;
+}
+
+
+export function shouldUseProviderAuthPassiveNotice(requirement) {
+  return Boolean(requirement)
+    && (
+      requirement.requiresAdmin === true
+      || requirement.allowReconnect === false
+    );
+}
+
+
+export function getProviderAuthPassiveNoticeMessage(requirement) {
+  if (!shouldUseProviderAuthPassiveNotice(requirement)) {
+    return "";
+  }
+  return PROVIDER_AUTH_ADMIN_NOTICE_MESSAGE;
+}
+
+
 export function shouldShowProviderAuthBootstrapModal({ requirement, dismissed }) {
-  return Boolean(requirement) && dismissed !== true;
+  return isProviderAuthReconnectCapable(requirement) && dismissed !== true;
 }
 
 
 export function shouldShowProviderAuthActionModal({ itemSourceKind, requirement }) {
   return shouldGuardGoogleDriveAction({
     itemSourceKind,
-    reconnectRequired: Boolean(requirement),
+    reconnectRequired: isProviderAuthReconnectCapable(requirement),
   });
 }
 

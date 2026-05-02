@@ -6,9 +6,11 @@ import {
   buildProviderAuthReturnPath,
   getGoogleDriveStatusFromLocation,
   getProviderAuthRequirementFromStatus,
+  isProviderAuthReconnectCapable,
   PROVIDER_RECONNECT_CANCELLED_MESSAGE,
   PROVIDER_RECONNECT_PENDING_RESET_MS,
   shouldShowProviderAuthBootstrapModal,
+  shouldUseProviderAuthPassiveNotice,
   shouldResetProviderReconnectPending,
   startGoogleDriveReconnect,
 } from "../lib/providerAuth";
@@ -108,6 +110,12 @@ export function ProviderAuthProvider({ children }) {
     }
     setRequirement(nextRequirement);
     requirementRef.current = nextRequirement;
+    if (shouldUseProviderAuthPassiveNotice(nextRequirement)) {
+      laterContinuationRef.current = null;
+      setModalOpen(false);
+      setModalError("");
+      return false;
+    }
     laterContinuationRef.current = typeof onLater === "function" ? onLater : null;
     setModalError("");
     setModalOpen(true);
@@ -224,7 +232,7 @@ export function ProviderAuthProvider({ children }) {
         onClose={dismissProviderAuthPrompt}
         onReconnect={handleReconnect}
         onSecondary={dismissProviderAuthPrompt}
-        open={modalOpen && Boolean(requirement)}
+        open={modalOpen && isProviderAuthReconnectCapable(requirement)}
         reconnectLabel="Reconnect"
         reconnectPending={reconnectPending}
         secondaryLabel="Later"

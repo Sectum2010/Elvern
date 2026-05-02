@@ -7,6 +7,10 @@ import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
 import { SeriesRail } from "../components/SeriesRail";
 import { apiRequest } from "../lib/api";
+import {
+  getProviderAuthPassiveNoticeMessage,
+  shouldUseProviderAuthPassiveNotice,
+} from "../lib/providerAuth";
 import { useActiveBrowserPlaybackItemId } from "../lib/browserPlayback";
 import {
   formatCompletedRescanWarning,
@@ -214,6 +218,9 @@ export function LibraryPage() {
     if (!providerAuthRequirement) {
       return null;
     }
+    if (shouldUseProviderAuthPassiveNotice(providerAuthRequirement)) {
+      return null;
+    }
     return {
       title: providerAuthRequirement.title,
       message: providerAuthRequirement.message,
@@ -221,6 +228,10 @@ export function LibraryPage() {
       requiresAdmin: providerAuthRequirement.requiresAdmin === true,
     };
   }, [providerAuthRequirement]);
+  const providerAuthPassiveNotice = useMemo(
+    () => getProviderAuthPassiveNoticeMessage(providerAuthRequirement),
+    [providerAuthRequirement],
+  );
 
   async function loadLibrary({ signal, silent = false } = {}) {
     if (!silent) {
@@ -949,6 +960,10 @@ export function LibraryPage() {
             </div>
           ) : null}
         </section>
+      ) : null}
+
+      {providerAuthPassiveNotice ? (
+        <p className="cloud-auth-passive-notice">{providerAuthPassiveNotice}</p>
       ) : null}
 
       {notice ? <p className="page-note">{notice}</p> : null}

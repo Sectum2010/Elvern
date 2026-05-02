@@ -424,6 +424,13 @@ button {
   display: block;
 }
 
+.cloud-auth-passive-notice {
+  margin: -0.15rem 0 0;
+  color: rgba(242, 229, 194, 0.78);
+  font-size: 0.94rem;
+  line-height: 1.45;
+}
+
 .library-focus-entry__link:hover,
 .library-focus-entry__link:focus-visible {
   transform: translateY(-1px);
