@@ -466,6 +466,12 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "closed_loop_theoretical_donate_threads": 0,
                         "closed_loop_protected_reason": "mature_supply_below_1_05",
                         "closed_loop_admission_should_block_new_users": True,
+                        "closed_loop_admission_hard_block": True,
+                        "closed_loop_admission_block_reason": "active_bad_condition_reserve_protection",
+                        "closed_loop_admission_block_reasons": ["active_bad_condition_reserve_protection"],
+                        "closed_loop_boost_blocked": False,
+                        "closed_loop_boost_blockers": [],
+                        "closed_loop_boost_warning_reasons": [],
                         "closed_loop_primary_bottleneck": "cpu_thread",
                         "telemetry_sampled": True,
                         "last_sampled_at": "2026-04-26T12:00:06+00:00",
@@ -1483,6 +1489,12 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["closed_loop_donor_rank"] is None
     assert first_item["closed_loop_theoretical_donate_threads"] == 0
     assert first_item["closed_loop_admission_should_block_new_users"] is True
+    assert first_item["closed_loop_admission_hard_block"] is True
+    assert first_item["closed_loop_admission_block_reason"] == "active_bad_condition_reserve_protection"
+    assert first_item["closed_loop_admission_block_reasons"] == ["active_bad_condition_reserve_protection"]
+    assert first_item["closed_loop_boost_blocked"] is False
+    assert first_item["closed_loop_boost_blockers"] == []
+    assert first_item["closed_loop_boost_warning_reasons"] == []
     assert first_item["closed_loop_primary_bottleneck"] == "cpu_thread"
     serialized_payload = response.text.lower()
     assert "access_token" not in serialized_payload

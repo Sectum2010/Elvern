@@ -1343,6 +1343,12 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     closed_loop_theoretical_donate_threads: int = Field(default=0, ge=0)
     closed_loop_protected_reason: str | None = None
     closed_loop_admission_should_block_new_users: bool = False
+    closed_loop_admission_hard_block: bool = False
+    closed_loop_admission_block_reason: str | None = None
+    closed_loop_admission_block_reasons: list[str] = Field(default_factory=list)
+    closed_loop_boost_blocked: bool = False
+    closed_loop_boost_blockers: list[str] = Field(default_factory=list)
+    closed_loop_boost_warning_reasons: list[str] = Field(default_factory=list)
     closed_loop_primary_bottleneck: str | None = None
     route2_transcode_strategy: str | None = None
     route2_transcode_strategy_confidence: str | None = None

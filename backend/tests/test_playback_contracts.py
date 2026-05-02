@@ -4892,6 +4892,12 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
     assert "reserve_remaining_seconds" in item_payload
     assert "reserve_blocks_admission" in item_payload
     assert "runway_delta_per_second" in item_payload
+    assert "closed_loop_admission_hard_block" in item_payload
+    assert "closed_loop_admission_block_reason" in item_payload
+    assert "closed_loop_admission_block_reasons" in item_payload
+    assert "closed_loop_boost_blocked" in item_payload
+    assert "closed_loop_boost_blockers" in item_payload
+    assert "closed_loop_boost_warning_reasons" in item_payload
     assert len(started_workers) == 1
 
 
@@ -6072,6 +6078,57 @@ def test_route2_full_bad_condition_reserve_blocks_new_route2_admission(
     assert manager._route2_bad_condition_reserve_protections_locked()[0]["session_id"] == first["session_id"]
 
 
+def test_route2_healthy_prepare_boost_warning_does_not_block_new_route2_admission(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 10)
+    _capture_route2_worker_threads(monkeypatch)
+    item_a = _make_local_item(settings, item_id=482, relative_name="route2/healthy-boost-warning-a.mp4")
+    item_b = _make_local_item(settings, item_id=483, relative_name="route2/healthy-boost-warning-b.mp4")
+
+    first = manager.create_session(
+        item_a,
+        user_id=1,
+        auth_session_id=1198,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+    manager._dispatch_waiting_sessions()
+    session, epoch, record = _active_route2_record_for_session(manager, first)
+    session.duration_seconds = 3600.0
+    record.state = "running"
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=2.0,
+        runway_seconds=80.0,
+        cpu_cores_used=4.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    assert decision.role == "prepare_boost_needed"
+    assert decision.admission_should_block_new_users is False
+
+    second = manager.create_session(
+        item_b,
+        user_id=2,
+        auth_session_id=1199,
+        username="bob",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+
+    assert second["session_id"] != first["session_id"]
+    assert len(manager._route2_session_ids_by_user[2]) == 1
+
+
 def test_route2_full_strong_bad_condition_reserve_blocks_new_admission(
     initialized_settings,
     monkeypatch,
@@ -6609,6 +6666,32 @@ def test_route2_closed_loop_marks_healthy_mature_supply_as_steady_state(
     assert decision.needs_resource is False
     assert decision.donor_candidate is False
     assert decision.downshift_candidate is False
+    assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
+    assert decision.boost_blocked is False
+
+
+def test_route2_closed_loop_healthy_full_below_startup_target_is_prepare_boost_not_admission_block(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=2.0,
+        runway_seconds=80.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "prepare_boost_needed"
+    assert decision.prepare_boost_needed is True
+    assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
+    assert decision.admission_block_reasons == []
+    assert decision.boost_blocked is False
 
 
 def test_route2_closed_loop_marks_stable_surplus_as_downshift_candidate(
@@ -6654,6 +6737,7 @@ def test_route2_closed_loop_marks_high_surplus_as_theoretical_donor_only(
     assert decision.donor_candidate is True
     assert decision.theoretical_donate_threads == 2
     assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
     assert record.assigned_threads == 4
 
 
@@ -6720,6 +6804,8 @@ def test_route2_closed_loop_low_supply_cpu_thread_limited_needs_resource(
     assert decision.prepare_boost_needed is True
     assert decision.prepare_boost_target_threads == 6
     assert decision.admission_should_block_new_users is True
+    assert decision.admission_block_reason == "active_stream_health_protection"
+    assert decision.admission_block_reasons == ["active_stream_health_protection"]
 
 
 def test_route2_closed_loop_source_bound_low_supply_does_not_request_cpu_boost(
@@ -6745,6 +6831,7 @@ def test_route2_closed_loop_source_bound_low_supply_does_not_request_cpu_boost(
     assert decision.primary_bottleneck == "source"
     assert decision.prepare_boost_needed is False
     assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
 
 
 def test_route2_closed_loop_client_bound_low_supply_stays_client_bound(
@@ -6781,6 +6868,7 @@ def test_route2_closed_loop_client_bound_low_supply_stays_client_bound(
     assert decision.primary_bottleneck == "client"
     assert decision.prepare_boost_needed is False
     assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
 
 
 def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
@@ -6801,6 +6889,8 @@ def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
     assert decision.role == "protected_bad_condition_reserve"
     assert decision.protected_reason == "mature_supply_below_1_0"
     assert decision.admission_should_block_new_users is True
+    assert decision.admission_block_reason == "active_bad_condition_reserve_protection"
+    assert decision.admission_block_reasons == ["active_bad_condition_reserve_protection"]
     assert decision.donor_candidate is False
     assert decision.theoretical_donate_threads == 0
     rebalance = manager._closed_loop_runtime_rebalance_payload(decision)
@@ -6830,6 +6920,7 @@ def test_route2_closed_loop_full_source_bound_reserve_does_not_request_cpu_boost
     assert decision.primary_bottleneck == "unknown"
     assert decision.prepare_boost_needed is False
     assert decision.admission_should_block_new_users is True
+    assert decision.admission_block_reason == "active_bad_condition_reserve_protection"
     assert decision.donor_candidate is False
 
 
@@ -6877,6 +6968,7 @@ def test_route2_closed_loop_manifest_complete_is_complete_not_resource_need(
     assert decision.primary_bottleneck == "complete"
     assert decision.needs_resource is False
     assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
 
 
 def test_route2_closed_loop_ffmpeg_ahead_publish_lag_is_io_publish_bound(
@@ -6953,6 +7045,9 @@ def test_route2_closed_loop_healthy_supply_with_cgroup_pressure_is_steady_with_w
     assert "host_pressure_warning" in decision.reasons
     assert "cgroup_cpu_throttling" in decision.reasons
     assert decision.prepare_boost_needed is False
+    assert decision.admission_should_block_new_users is False
+    assert decision.boost_blocked is False
+    assert "cgroup_cpu_throttling" in decision.boost_warning_reasons
 
 
 def test_route2_closed_loop_host_pressure_blocks_prepare_boost(
@@ -6989,6 +7084,11 @@ def test_route2_closed_loop_host_pressure_blocks_prepare_boost(
     assert decision.prepare_boost_needed is False
     assert "host_pressure_blocks_prepare_boost" in decision.reasons
     assert "psi_cpu_pressure" in decision.reasons
+    assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
+    assert decision.boost_blocked is True
+    assert "host_pressure_blocks_prepare_boost" in decision.boost_blockers
+    assert "psi_cpu_pressure" in decision.boost_blockers
 
 
 def test_route2_closed_loop_recovery_flag_with_healthy_supply_uses_prepare_boost_not_needs_resource(
@@ -7011,6 +7111,9 @@ def test_route2_closed_loop_recovery_flag_with_healthy_supply_uses_prepare_boost
     assert decision.needs_resource is False
     assert decision.prepare_boost_needed is True
     assert decision.prepare_boost_target_threads == 6
+    assert decision.admission_should_block_new_users is False
+    assert decision.admission_block_reason is None
+    assert decision.boost_blocked is False
     assert "mature_supply_below_1_05_cpu_thread_limited" not in decision.reasons
 
 

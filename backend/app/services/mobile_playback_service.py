@@ -374,6 +374,11 @@ class _Route2ClosedLoopDryRunDecision:
     theoretical_donate_threads: int
     protected_reason: str | None
     admission_should_block_new_users: bool
+    admission_block_reason: str | None
+    admission_block_reasons: list[str]
+    boost_blocked: bool
+    boost_blockers: list[str]
+    boost_warning_reasons: list[str]
     primary_bottleneck: str
     donor_score: float = 0.0
 
@@ -3209,6 +3214,11 @@ class MobilePlaybackManager:
         theoretical_donate_threads = 0
         protected_reason: str | None = None
         admission_should_block_new_users = False
+        admission_block_reason: str | None = None
+        admission_block_reasons: list[str] = []
+        boost_blocked = False
+        boost_blockers: list[str] = []
+        boost_warning_reasons: list[str] = []
 
         if provider_error:
             role = "provider_error"
@@ -3230,6 +3240,8 @@ class MobilePlaybackManager:
             primary_bottleneck = "cpu_thread" if cpu_thread_limited else "unknown"
             protected_reason = str(reserve_status["bad_condition_reason"] or "bad_condition_reserve_unsatisfied")
             admission_should_block_new_users = True
+            admission_block_reason = "active_bad_condition_reserve_protection"
+            admission_block_reasons.append("active_bad_condition_reserve_protection")
             prepare_boost_needed = bool(cpu_thread_limited and not host_pressure_limited and not source_limited and not client_limited)
             prepare_boost_target_threads = (
                 self._route2_next_runtime_rebalance_target_threads(assigned_threads)
@@ -3241,17 +3253,23 @@ class MobilePlaybackManager:
         elif below_health_floor or declining_low_runway or recovery_at_risk:
             needs_resource = True
             admission_should_block_new_users = True
+            admission_block_reason = "active_stream_health_protection"
+            admission_block_reasons.append("active_stream_health_protection")
             if client_limited:
                 role = "client_bound"
                 primary_bottleneck = "client"
                 needs_resource_reason = "client_limited"
                 admission_should_block_new_users = False
+                admission_block_reason = None
+                admission_block_reasons.clear()
                 reasons.append("client_goodput_or_stall_limiter")
             elif source_limited:
                 role = "source_bound"
                 primary_bottleneck = "source"
                 needs_resource_reason = "source_limited"
                 admission_should_block_new_users = False
+                admission_block_reason = None
+                admission_block_reasons.clear()
                 reasons.append("source_provider_throughput_limiter")
             elif io_publish_limited:
                 role = "io_or_publish_bound"
@@ -3289,6 +3307,8 @@ class MobilePlaybackManager:
                 role = "host_pressure_limited"
                 primary_bottleneck = "host_pressure"
                 prepare_boost_needed = False
+                boost_blocked = True
+                boost_blockers.extend(["host_pressure_blocks_prepare_boost", *host_pressure_reasons])
                 reasons.append("host_pressure_blocks_prepare_boost")
                 reasons.extend(host_pressure_reasons)
                 confidence = 0.8
@@ -3296,6 +3316,8 @@ class MobilePlaybackManager:
                 role = "io_or_publish_bound"
                 primary_bottleneck = "io_publish"
                 prepare_boost_needed = False
+                boost_blocked = True
+                boost_blockers.extend(io_publish_reasons)
                 reasons.extend(io_publish_reasons)
                 confidence = 0.78
             else:
@@ -3317,6 +3339,7 @@ class MobilePlaybackManager:
             if host_pressure_limited:
                 reasons.append("host_pressure_warning")
                 reasons.extend(host_pressure_reasons)
+                boost_warning_reasons.extend(host_pressure_reasons)
             confidence = 0.72
             if (
                 not host_pressure_limited
@@ -3363,6 +3386,9 @@ class MobilePlaybackManager:
 
         if active_health is not None and active_health.admission_blocking:
             admission_should_block_new_users = True
+            admission_block_reason = admission_block_reason or "active_stream_health_protection"
+            if "active_stream_health_protection" not in admission_block_reasons:
+                admission_block_reasons.append("active_stream_health_protection")
             if role in {"steady_state_maintenance", "downshift_candidate", "donor_candidate"}:
                 role = "needs_resource"
                 primary_bottleneck = "cpu_thread" if active_health.cpu_thread_limited else "unknown"
@@ -3388,6 +3414,11 @@ class MobilePlaybackManager:
             theoretical_donate_threads=theoretical_donate_threads,
             protected_reason=protected_reason,
             admission_should_block_new_users=admission_should_block_new_users,
+            admission_block_reason=admission_block_reason,
+            admission_block_reasons=admission_block_reasons,
+            boost_blocked=boost_blocked,
+            boost_blockers=boost_blockers,
+            boost_warning_reasons=boost_warning_reasons,
             primary_bottleneck=primary_bottleneck,
             donor_score=donor_score,
         )
@@ -3408,6 +3439,12 @@ class MobilePlaybackManager:
             "closed_loop_theoretical_donate_threads": decision.theoretical_donate_threads,
             "closed_loop_protected_reason": decision.protected_reason,
             "closed_loop_admission_should_block_new_users": decision.admission_should_block_new_users,
+            "closed_loop_admission_hard_block": decision.admission_should_block_new_users,
+            "closed_loop_admission_block_reason": decision.admission_block_reason,
+            "closed_loop_admission_block_reasons": list(decision.admission_block_reasons),
+            "closed_loop_boost_blocked": decision.boost_blocked,
+            "closed_loop_boost_blockers": list(decision.boost_blockers),
+            "closed_loop_boost_warning_reasons": list(decision.boost_warning_reasons),
             "closed_loop_primary_bottleneck": decision.primary_bottleneck,
         }
 
@@ -4636,6 +4673,11 @@ class MobilePlaybackManager:
                         theoretical_donate_threads=0,
                         protected_reason=None,
                         admission_should_block_new_users=False,
+                        admission_block_reason=None,
+                        admission_block_reasons=[],
+                        boost_blocked=False,
+                        boost_blockers=[],
+                        boost_warning_reasons=[],
                         primary_bottleneck="metrics_immature",
                     )
                 payload.update(self._closed_loop_dry_run_payload(closed_loop_decision))
