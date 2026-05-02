@@ -159,7 +159,7 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 ## Phase 1K-2A Shared Output Store Metadata
 
 - Phase 1K-2A is metadata/schema only. Route2 still does not serve from a shared output store, does not write shared media segments, and does not copy, hardlink, symlink, move, attach, or reuse session/epoch output.
-- The shared output store status is `metadata_only`; admin/status can report the future shared output root, metadata version, per-worker `shared_output_key`, absolute segment index candidates, and blockers such as `no_global_segment_store`, `no_segment_writer`, and `no_shared_manifest`.
+- The shared output store status is `metadata_only`; admin/status can report the future shared output root, metadata version, per-worker `shared_output_key`, absolute segment index candidates, and blockers such as `metadata_only`, `no_segment_writer`, `no_shared_manifest`, `media_bytes_not_present`, and `serving_disabled`.
 - Absolute segment identity is prepared with helpers for canonical absolute segment indexes, absolute time ranges, padded `abs_*.m4s` names, sparse/contiguous range metadata, gap detection, and lease metadata shapes.
 - Contract metadata is built from the existing sanitized Route2 output contract fingerprint. It must not include source file paths, cloud URLs, access tokens, refresh tokens, cookies, session ids, epoch ids, output directories, staging/published paths, or full command lines.
 - `contract.json`, `metadata.json`, `ranges.json`, `init.sha256`, `staging/`, and `leases/` are future metadata shapes in this phase. `init.mp4` and `segments/abs_*.m4s` remain future artifacts and are not written by Phase 1K-2A.
@@ -182,6 +182,15 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Per-worker status may report init availability, SHA-256 hash availability, init size, and compatibility state. Shared-supply group status compares hashes for workloads with the same output contract.
 - If all active group hashes are available and match, the group reports `compatible_by_hash`. If any hash differs, the group reports `mismatch` and blocks future sharing with `init_mismatch`. If any init is unavailable, the group remains pending with `pending_init_compatibility`.
 - A matching init hash removes only the init-specific write-plan blocker. Real sharing remains blocked by `metadata_only`, `no_segment_writer`, `no_shared_manifest`, and future checksum/lease/permission work.
+
+## Phase 1K-3A Shared Output Metadata Writer
+
+- Phase 1K-3A writes shared output metadata and ranges only. It may create `contract.json`, `metadata.json`, `ranges.json`, `leases/`, and `staging/` under `browser_playback_route2/shared_outputs/<shared_output_key>/`.
+- This phase still does not write `segments/*.m4s`, copy or serve `init.mp4`, copy, hardlink, symlink, move, reuse, attach to another epoch, serve from the shared store, or create shared workers/output.
+- `contract.json` is written atomically from the sanitized Route2 output contract. It excludes source paths, cloud/private URLs, tokens, cookies, session ids, epoch ids, output directories, staging/published paths, and full ffmpeg command lines. A conflicting existing contract for the same shared output key is not overwritten and reports `shared_contract_conflict`.
+- `metadata.json` remains `metadata_only` with `ready_for_segments=false`, `writer_policy=disabled`, `serving_enabled=false`, and `media_bytes_present=false`.
+- `ranges.json` can record absolute range metadata only after canonical mapping and init hash evidence are available. These ranges use `media_bytes_present=false` / `metadata_only_confirmed_source_session`; they are not playable and must not be treated as shared cached media.
+- Active shared output metadata directories are outside the existing Route2 session orphan cleanup path. Shared-store TTL, lease enforcement, segment cleanup, and serving cleanup policy remain future work.
 
 ## Current State
 

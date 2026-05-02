@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -14,11 +16,13 @@ SHARED_OUTPUT_STORE_METADATA_VERSION = "route2-shared-output-store-v1"
 SHARED_OUTPUT_STORE_STATUS = "metadata_only"
 SHARED_OUTPUT_STORE_BLOCKERS = [
     "metadata_only",
-    "no_global_segment_store",
     "no_segment_writer",
     "no_shared_manifest",
+    "media_bytes_not_present",
+    "serving_disabled",
 ]
 SHARED_OUTPUT_MAPPING_TOLERANCE_SECONDS = 0.001
+SHARED_OUTPUT_METADATA_ONLY_RANGE_STATUS = "metadata_only_confirmed_source_session"
 
 _SHARED_OUTPUT_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,160}$")
 
@@ -58,6 +62,48 @@ def validate_shared_output_key(value: str) -> str:
 
 def shared_output_directory(route2_root: Path, shared_output_key: str) -> Path:
     return shared_output_store_root(route2_root) / validate_shared_output_key(shared_output_key)
+
+
+def _safe_json_bytes(payload: Mapping[str, object]) -> bytes:
+    return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_bytes(_safe_json_bytes(payload))
+        temp_path.replace(path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _read_json_mapping(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError(f"Shared output metadata file is not a JSON object: {path.name}")
+    return dict(payload)
+
+
+def _contract_conflict_view(payload: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: payload.get(key)
+        for key in sorted(payload)
+        if key not in {"created_at", "updated_at"}
+    }
+
+
+def _ordered_store_blockers(blockers: Iterable[str]) -> list[str]:
+    values = {str(item) for item in blockers}
+    ordered = [blocker for blocker in SHARED_OUTPUT_STORE_BLOCKERS if blocker in values]
+    ordered.extend(sorted(values - set(ordered)))
+    return ordered
 
 
 def _validate_segment_duration(segment_duration_seconds: float) -> float:
@@ -432,7 +478,10 @@ def build_shared_store_write_plan(
     if list(output_contract_missing_fields):
         blockers.add("output_contract_incomplete")
     normalized_init_status = str(init_compatibility_status or "").strip()
-    init_compatible = bool(init_compatibility_validated or normalized_init_status == "compatible_by_hash")
+    init_compatible = bool(
+        init_compatibility_validated
+        or normalized_init_status in {"hash_available", "compatible_by_hash"}
+    )
     if normalized_init_status == "mismatch":
         blockers.add("init_mismatch")
     elif normalized_init_status in {"pending", "pending_init", "unavailable"}:
@@ -447,6 +496,10 @@ def build_shared_store_write_plan(
         blockers.add("no_segment_writer")
     if not shared_manifest_enabled:
         blockers.add("no_shared_manifest")
+    if metadata_only or not segment_writer_enabled:
+        blockers.add("media_bytes_not_present")
+    if metadata_only or not shared_manifest_enabled:
+        blockers.add("serving_disabled")
     if not segment_indices:
         blockers.add("no_published_segments")
 
@@ -624,19 +677,243 @@ def build_shared_output_contract_metadata(
 def build_shared_output_metadata(
     *,
     shared_output_key: str,
+    output_contract_fingerprint: str | None = None,
+    source_kind: str | None = None,
+    profile: str | None = None,
+    playback_mode: str | None = None,
+    segment_duration_seconds: float | None = None,
     status: str = SHARED_OUTPUT_STORE_STATUS,
     created_at: str | None = None,
     updated_at: str | None = None,
 ) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "version": SHARED_OUTPUT_STORE_METADATA_VERSION,
+        "shared_output_key": validate_shared_output_key(shared_output_key),
+        "output_contract_fingerprint": str(output_contract_fingerprint or "").strip(),
+        "metadata_version": SHARED_OUTPUT_STORE_METADATA_VERSION,
+        "status": str(status or SHARED_OUTPUT_STORE_STATUS),
+        "ready_for_segments": False,
+        "store_ready_for_segments": False,
+        "writer_policy": "disabled",
+        "segment_writer_enabled": False,
+        "shared_manifest_enabled": False,
+        "serving_enabled": False,
+        "media_bytes_present": False,
+        "created_at": created_at or utcnow_iso(),
+        "updated_at": updated_at or utcnow_iso(),
+    }
+    if source_kind is not None:
+        payload["source_kind"] = str(source_kind or "").strip()
+    if profile is not None:
+        payload["profile"] = str(profile or "").strip()
+    if playback_mode is not None:
+        payload["playback_mode"] = str(playback_mode or "").strip()
+    if segment_duration_seconds is not None:
+        payload["segment_duration_seconds"] = _validate_segment_duration(segment_duration_seconds)
+    return payload
+
+
+def _metadata_only_range_payload(
+    start_index: int,
+    end_index_exclusive: int,
+    *,
+    segment_duration_seconds: float,
+    source_session_id: str | None = None,
+    source_epoch_id: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    timestamp = updated_at or created_at or utcnow_iso()
+    payload = _range_payload(
+        start_index,
+        end_index_exclusive,
+        segment_duration_seconds=segment_duration_seconds,
+        source=SHARED_OUTPUT_METADATA_ONLY_RANGE_STATUS,
+    )
+    payload.update(
+        {
+            "range_status": SHARED_OUTPUT_METADATA_ONLY_RANGE_STATUS,
+            "media_bytes_present": False,
+            "created_at": created_at or timestamp,
+            "updated_at": timestamp,
+        }
+    )
+    if source_session_id:
+        payload["source_session_id"] = str(source_session_id)
+    if source_epoch_id:
+        payload["source_epoch_id"] = str(source_epoch_id)
+    return payload
+
+
+def build_metadata_only_ranges_metadata(
+    *,
+    shared_output_key: str,
+    segment_duration_seconds: float,
+    confirmed_ranges: Iterable[object] = (),
+    source_session_id: str | None = None,
+    source_epoch_id: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    timestamp = updated_at or utcnow_iso()
+    merged = merge_contiguous_ranges(
+        confirmed_ranges,
+        segment_duration_seconds=segment_duration_seconds,
+        source=SHARED_OUTPUT_METADATA_ONLY_RANGE_STATUS,
+    )
+    metadata_only_ranges = [
+        _metadata_only_range_payload(
+            int(item["start_index"]),
+            int(item["end_index_exclusive"]),
+            segment_duration_seconds=segment_duration_seconds,
+            source_session_id=source_session_id,
+            source_epoch_id=source_epoch_id,
+            created_at=created_at or timestamp,
+            updated_at=timestamp,
+        )
+        for item in merged
+    ]
     return {
         "version": SHARED_OUTPUT_STORE_METADATA_VERSION,
         "shared_output_key": validate_shared_output_key(shared_output_key),
-        "status": str(status or SHARED_OUTPUT_STORE_STATUS),
-        "store_ready_for_segments": False,
-        "segment_writer_enabled": False,
-        "shared_manifest_enabled": False,
-        "created_at": created_at or utcnow_iso(),
-        "updated_at": updated_at or utcnow_iso(),
+        "segment_duration_seconds": _validate_segment_duration(segment_duration_seconds),
+        "range_status": "metadata_only",
+        "media_bytes_present": False,
+        "serving_enabled": False,
+        "confirmed_ranges": metadata_only_ranges,
+        "sparse_segments": [],
+        "updated_at": timestamp,
+    }
+
+
+def add_metadata_only_confirmed_range(
+    ranges_metadata: Mapping[str, object],
+    start_index: int,
+    end_index_exclusive: int,
+    *,
+    segment_duration_seconds: float | None = None,
+    source_session_id: str | None = None,
+    source_epoch_id: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    shared_output_key = validate_shared_output_key(str(ranges_metadata["shared_output_key"]))
+    duration = _validate_segment_duration(
+        segment_duration_seconds
+        if segment_duration_seconds is not None
+        else float(ranges_metadata["segment_duration_seconds"])
+    )
+    existing = list(ranges_metadata.get("confirmed_ranges") or [])
+    existing.append((int(start_index), int(end_index_exclusive)))
+    created_at = str(ranges_metadata.get("created_at") or ranges_metadata.get("updated_at") or utcnow_iso())
+    return build_metadata_only_ranges_metadata(
+        shared_output_key=shared_output_key,
+        segment_duration_seconds=duration,
+        confirmed_ranges=existing,
+        source_session_id=source_session_id,
+        source_epoch_id=source_epoch_id,
+        created_at=created_at,
+        updated_at=updated_at or utcnow_iso(),
+    )
+
+
+def count_shared_output_metadata_records(route2_root: Path) -> int:
+    root = shared_output_store_root(route2_root)
+    if not root.exists():
+        return 0
+    return sum(1 for child in root.iterdir() if child.is_dir() and (child / "metadata.json").exists())
+
+
+def write_shared_output_store_metadata(
+    *,
+    route2_root: Path,
+    contract_metadata: Mapping[str, object],
+    metadata: Mapping[str, object],
+    candidate_range: Mapping[str, object] | None = None,
+    source_session_id: str | None = None,
+    source_epoch_id: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    blockers: set[str] = set(SHARED_OUTPUT_STORE_BLOCKERS)
+    errors: list[str] = []
+    range_count = 0
+    contract_status = "skipped"
+    metadata_status = "skipped"
+    ranges_status = "skipped"
+    metadata_written = False
+    shared_output_key = validate_shared_output_key(str(contract_metadata["shared_output_key"]))
+    output_dir = shared_output_directory(route2_root, shared_output_key)
+    contract_payload = dict(contract_metadata)
+    metadata_payload = dict(metadata)
+    timestamp = updated_at or utcnow_iso()
+    contract_payload["updated_at"] = timestamp
+    metadata_payload["updated_at"] = timestamp
+    contract_path = output_dir / "contract.json"
+    metadata_path = output_dir / "metadata.json"
+    ranges_path = output_dir / "ranges.json"
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "leases").mkdir(exist_ok=True)
+        (output_dir / "staging").mkdir(exist_ok=True)
+
+        existing_contract = _read_json_mapping(contract_path)
+        if existing_contract is not None and _contract_conflict_view(existing_contract) != _contract_conflict_view(
+            contract_payload
+        ):
+            blockers.add("shared_contract_conflict")
+            contract_status = "conflict"
+        else:
+            if existing_contract is None:
+                contract_status = "written"
+            else:
+                contract_status = "unchanged" if existing_contract == contract_payload else "updated"
+            _write_json_atomic(contract_path, contract_payload)
+            metadata_status = "written" if not metadata_path.exists() else "updated"
+            _write_json_atomic(metadata_path, metadata_payload)
+            metadata_written = True
+
+            existing_ranges = _read_json_mapping(ranges_path)
+            if existing_ranges is None:
+                ranges_payload = build_metadata_only_ranges_metadata(
+                    shared_output_key=shared_output_key,
+                    segment_duration_seconds=float(metadata_payload["segment_duration_seconds"]),
+                    confirmed_ranges=[],
+                    updated_at=timestamp,
+                )
+            else:
+                ranges_payload = dict(existing_ranges)
+            if candidate_range is not None:
+                ranges_payload = add_metadata_only_confirmed_range(
+                    ranges_payload,
+                    int(candidate_range["start_index"]),
+                    int(candidate_range["end_index_exclusive"]),
+                    segment_duration_seconds=float(metadata_payload["segment_duration_seconds"]),
+                    source_session_id=source_session_id,
+                    source_epoch_id=source_epoch_id,
+                    updated_at=timestamp,
+                )
+            else:
+                ranges_payload["updated_at"] = timestamp
+                ranges_payload["range_status"] = "metadata_only"
+                ranges_payload["media_bytes_present"] = False
+                ranges_payload["serving_enabled"] = False
+            _write_json_atomic(ranges_path, ranges_payload)
+            ranges_status = "metadata_only_updated" if existing_ranges is not None else "metadata_only_written"
+            range_count = len(ranges_payload.get("confirmed_ranges") or [])
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"shared_output_metadata_write_failed:{type(exc).__name__}")
+        blockers.add("shared_output_metadata_write_failed")
+        metadata_written = False
+
+    return {
+        "shared_output_metadata_written": metadata_written,
+        "shared_output_contract_status": contract_status,
+        "shared_output_metadata_status": metadata_status,
+        "shared_output_ranges_status": ranges_status,
+        "shared_output_range_count": range_count,
+        "shared_output_media_bytes_present": False,
+        "shared_output_store_blockers": _ordered_store_blockers(blockers),
+        "shared_output_metadata_write_errors": errors,
     }
 
 

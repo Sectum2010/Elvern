@@ -181,8 +181,12 @@ from .route2_shared_output_store import (
     absolute_segment_end_index_exclusive_from_seconds,
     absolute_segment_index_from_seconds,
     build_route2_init_metadata,
+    build_shared_output_contract_metadata,
+    build_shared_output_metadata,
     build_shared_output_store_capability,
     build_shared_store_write_plan,
+    count_shared_output_metadata_records,
+    write_shared_output_store_metadata,
 )
 
 
@@ -1190,6 +1194,7 @@ class MobilePlaybackManager:
         self._last_elvern_owned_ffmpeg_cpu_sample_monotonic: float | None = None
         self._last_cgroup_cpu_stat: dict[str, int] | None = None
         self._route2_resource_snapshot: _Route2ResourceSnapshot | None = None
+        self._shared_output_metadata_write_errors: list[str] = []
         self._browser_playback_cooldowns: dict[tuple[int, int], dict[str, object]] = {}
         self._manager_stop = threading.Event()
         self._manager_thread: threading.Thread | None = None
@@ -4553,10 +4558,89 @@ class MobilePlaybackManager:
             shared_manifest_enabled=False,
         )
 
+    def _write_route2_shared_output_metadata_locked(
+        self,
+        workload: _Route2SharedSupplyWorkload,
+        write_plan: Mapping[str, object],
+        *,
+        init_compatibility_status: str | None = None,
+    ) -> dict[str, object]:
+        if not workload.group_key or not workload.output_contract_fingerprint:
+            return {
+                "shared_output_metadata_written": False,
+                "shared_output_contract_status": "skipped",
+                "shared_output_metadata_status": "skipped",
+                "shared_output_ranges_status": "skipped",
+                "shared_output_range_count": 0,
+                "shared_output_media_bytes_present": False,
+                "shared_output_store_blockers": list(SHARED_OUTPUT_STORE_BLOCKERS),
+                "shared_output_metadata_write_errors": [],
+            }
+        if workload.output_contract_missing_fields:
+            return {
+                "shared_output_metadata_written": False,
+                "shared_output_contract_status": "skipped_output_contract_incomplete",
+                "shared_output_metadata_status": "skipped",
+                "shared_output_ranges_status": "skipped",
+                "shared_output_range_count": 0,
+                "shared_output_media_bytes_present": False,
+                "shared_output_store_blockers": sorted(
+                    set(SHARED_OUTPUT_STORE_BLOCKERS) | {"output_contract_incomplete"}
+                ),
+                "shared_output_metadata_write_errors": [],
+            }
+        contract_metadata = build_shared_output_contract_metadata(
+            shared_output_key=workload.group_key,
+            output_contract_fingerprint=workload.output_contract_fingerprint,
+            output_contract_version=workload.output_contract_version,
+            profile=workload.profile,
+            playback_mode=workload.playback_mode,
+            source_fingerprint=workload.source_fingerprint,
+            source_kind=workload.source_kind,
+            segment_duration_seconds=SEGMENT_DURATION_SECONDS,
+            output_contract_summary=workload.output_contract_summary,
+        )
+        store_metadata = build_shared_output_metadata(
+            shared_output_key=workload.group_key,
+            output_contract_fingerprint=workload.output_contract_fingerprint,
+            source_kind=workload.source_kind,
+            profile=workload.profile,
+            playback_mode=workload.playback_mode,
+            segment_duration_seconds=SEGMENT_DURATION_SECONDS,
+        )
+        phase_blockers = set(SHARED_OUTPUT_STORE_BLOCKERS)
+        hard_range_blockers = {
+            str(item)
+            for item in (write_plan.get("candidate_range_blockers") or [])
+            if str(item) not in phase_blockers
+        }
+        init_status = str(init_compatibility_status or "").strip()
+        init_allows_metadata_range = init_status in {"hash_available", "compatible_by_hash"}
+        candidate_range = None
+        if (
+            init_allows_metadata_range
+            and not hard_range_blockers
+            and write_plan.get("candidate_confirmed_range_start_index") is not None
+            and write_plan.get("candidate_confirmed_range_end_index_exclusive") is not None
+        ):
+            candidate_range = {
+                "start_index": int(write_plan["candidate_confirmed_range_start_index"]),
+                "end_index_exclusive": int(write_plan["candidate_confirmed_range_end_index_exclusive"]),
+            }
+        return write_shared_output_store_metadata(
+            route2_root=self._route2_root,
+            contract_metadata=contract_metadata,
+            metadata=store_metadata,
+            candidate_range=candidate_range,
+            source_session_id=workload.session_id,
+            source_epoch_id=workload.epoch_id,
+        )
+
     def _apply_route2_shared_supply_status_locked(
         self,
         payloads_by_worker_id: dict[str, dict[str, object]],
     ) -> list[dict[str, object]]:
+        metadata_write_errors: list[str] = []
         workloads = {
             record.worker_id: self._route2_shared_supply_workload_locked(record)
             for record in self._route2_workers.values()
@@ -4633,12 +4717,31 @@ class MobilePlaybackManager:
                 workload,
                 init_compatibility_status=init_status,
             )
+            metadata_write_result = self._write_route2_shared_output_metadata_locked(
+                workload,
+                write_plan,
+                init_compatibility_status=init_status,
+            )
+            metadata_write_errors.extend(
+                str(item) for item in metadata_write_result.get("shared_output_metadata_write_errors") or []
+            )
             payload["shared_supply_candidate"] = bool(compatible_workloads)
             payload["shared_supply_group_key"] = workload.group_key
             payload["shared_output_key"] = workload.group_key
             payload["absolute_segment_index_start_candidate"] = absolute_start_candidate
             payload["absolute_segment_index_end_candidate"] = absolute_end_candidate
-            payload["shared_output_store_blockers"] = list(SHARED_OUTPUT_STORE_BLOCKERS)
+            payload["shared_output_metadata_written"] = bool(
+                metadata_write_result["shared_output_metadata_written"]
+            )
+            payload["shared_output_contract_status"] = metadata_write_result["shared_output_contract_status"]
+            payload["shared_output_ranges_status"] = metadata_write_result["shared_output_ranges_status"]
+            payload["shared_output_range_count"] = metadata_write_result["shared_output_range_count"]
+            payload["shared_output_media_bytes_present"] = bool(
+                metadata_write_result["shared_output_media_bytes_present"]
+            )
+            payload["shared_output_store_blockers"] = list(
+                metadata_write_result["shared_output_store_blockers"]
+            )
             payload["route2_init_available"] = bool(workload.init_metadata["route2_init_available"])
             payload["route2_init_hash_sha256"] = workload.init_metadata["route2_init_hash_sha256"]
             payload["route2_init_hash_available"] = bool(workload.init_metadata["route2_init_hash_available"])
@@ -4664,7 +4767,14 @@ class MobilePlaybackManager:
             ]
             payload["shared_store_candidate_segment_count"] = write_plan["candidate_range_segment_count"]
             payload["shared_store_write_candidate_count"] = write_plan["shared_store_write_candidate_count"]
-            payload["shared_store_write_blockers"] = list(write_plan["shared_store_write_blockers"])
+            payload["shared_store_write_blockers"] = sorted(
+                set(str(item) for item in write_plan["shared_store_write_blockers"])
+                | {
+                    str(item)
+                    for item in metadata_write_result["shared_output_store_blockers"]
+                    if str(item) not in set(SHARED_OUTPUT_STORE_BLOCKERS)
+                }
+            )
             payload["shared_store_mapping_confidence"] = write_plan["shared_store_mapping_confidence"]
             payload["shared_store_mapping_notes"] = list(write_plan["shared_store_mapping_notes"])
             payload["route2_output_contract_fingerprint"] = workload.output_contract_fingerprint
@@ -4712,6 +4822,7 @@ class MobilePlaybackManager:
                     "shared_supply_group_init_blockers": list(init_group_status.get("blockers") or []),
                 }
             )
+        self._shared_output_metadata_write_errors = metadata_write_errors
         return summaries
 
     def _evaluate_route2_active_playback_health_locked(
@@ -5961,6 +6072,8 @@ class MobilePlaybackManager:
             return {
                 **budget,
                 **build_shared_output_store_capability(self._route2_root),
+                "shared_output_store_records_count": count_shared_output_metadata_records(self._route2_root),
+                "shared_output_metadata_write_errors": list(self._shared_output_metadata_write_errors),
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_cores_used_total": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
                 "route2_cpu_percent_of_total": route2_cpu_percent_of_total,

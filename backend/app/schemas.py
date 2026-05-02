@@ -1387,6 +1387,11 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     shared_output_key: str | None = None
     absolute_segment_index_start_candidate: int | None = Field(default=None, ge=0)
     absolute_segment_index_end_candidate: int | None = Field(default=None, ge=0)
+    shared_output_metadata_written: bool = False
+    shared_output_contract_status: str | None = None
+    shared_output_ranges_status: str | None = None
+    shared_output_range_count: int = Field(default=0, ge=0)
+    shared_output_media_bytes_present: bool = False
     shared_output_store_blockers: list[str] = Field(default_factory=list)
     route2_init_available: bool = False
     route2_init_hash_sha256: str | None = None
@@ -1449,6 +1454,8 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     shared_output_root: str | None = None
     shared_output_metadata_version: str | None = None
     shared_output_store_ready_for_segments: bool = False
+    shared_output_store_records_count: int = Field(default=0, ge=0)
+    shared_output_metadata_write_errors: list[str] = Field(default_factory=list)
     cpu_upbound_percent: int = Field(ge=0)
     cpu_budget_percent: int = Field(ge=0)
     total_cpu_cores: int = Field(ge=1)

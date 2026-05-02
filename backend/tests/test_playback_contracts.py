@@ -104,16 +104,21 @@ from backend.app.services.route2_shared_output_store import (
     absolute_segment_time_range,
     add_confirmed_range,
     build_epoch_relative_segment_mapping,
+    build_metadata_only_ranges_metadata,
     build_ranges_metadata,
     build_route2_init_metadata,
     build_shared_output_contract_metadata,
     build_shared_output_lease_metadata,
+    build_shared_output_metadata,
     build_shared_store_write_plan,
+    count_shared_output_metadata_records,
     find_contiguous_range_covering,
     find_gaps_for_requested_range,
     merge_contiguous_ranges,
+    shared_output_directory,
     shared_segment_filename,
     validate_shared_output_lease_metadata,
+    write_shared_output_store_metadata,
 )
 from backend.app.services.playback_service import build_playback_decision
 from fastapi import HTTPException
@@ -5481,6 +5486,28 @@ def test_route2_orphan_cleanup_removes_stopped_and_true_orphan_session_dirs(
     assert not orphan_dir.exists()
 
 
+def test_route2_orphan_cleanup_does_not_touch_shared_output_metadata_dirs(
+    initialized_settings,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    now_ts = time.time()
+    shared_dir = (
+        settings.transcode_dir
+        / "browser_playback_route2"
+        / "shared_outputs"
+        / "r2ss:v2:abcdef1234567890"
+    )
+    shared_dir.mkdir(parents=True)
+    (shared_dir / "metadata.json").write_text('{"status":"metadata_only"}\n', encoding="utf-8")
+    old_ts = now_ts - (settings.mobile_session_ttl_minutes * 60) - 60
+    os.utime(shared_dir, (old_ts, old_ts))
+
+    manager._cleanup_orphaned_cache_dirs_locked(now_ts)
+
+    assert shared_dir.exists()
+    assert (shared_dir / "metadata.json").exists()
+
+
 def test_route2_dispatch_adaptive_enabled_local_single_user_can_assign_six(
     initialized_settings,
     monkeypatch,
@@ -8757,6 +8784,159 @@ def test_route2_shared_output_contract_metadata_is_sanitized() -> None:
     assert "/tmp/private-output" not in serialized
 
 
+def _shared_output_writer_payloads(
+    *,
+    shared_output_key: str = "r2ss:v2:abcdef1234567890",
+    fingerprint: str = "contract-fingerprint",
+    source_fingerprint: str = "source-fingerprint",
+) -> tuple[dict[str, object], dict[str, object]]:
+    contract = build_shared_output_contract_metadata(
+        shared_output_key=shared_output_key,
+        output_contract_fingerprint=fingerprint,
+        output_contract_version="route2-output-contract-v1",
+        profile="mobile_2160p",
+        playback_mode="full",
+        source_fingerprint=source_fingerprint,
+        source_kind="local",
+        segment_duration_seconds=2.0,
+        output_contract_summary={
+            "source_path": "/private/source/movie.mkv",
+            "cloud_url": "https://drive.example/file?access_token=secret-token",
+            "session_id": "session-secret",
+            "epoch_id": "epoch-secret",
+            "video": {"codec": "libx264", "preset": "superfast", "crf": 22},
+            "audio": {"codec": "aac", "channels": 2},
+            "hls": {"segment_duration_seconds": 2.0, "segment_type": "fmp4"},
+        },
+        created_at="2026-05-02T00:00:00Z",
+        updated_at="2026-05-02T00:00:00Z",
+    )
+    metadata = build_shared_output_metadata(
+        shared_output_key=shared_output_key,
+        output_contract_fingerprint=fingerprint,
+        source_kind="local",
+        profile="mobile_2160p",
+        playback_mode="full",
+        segment_duration_seconds=2.0,
+        created_at="2026-05-02T00:00:00Z",
+        updated_at="2026-05-02T00:00:00Z",
+    )
+    return contract, metadata
+
+
+def test_route2_shared_output_metadata_writer_writes_safe_metadata_files(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    contract, metadata = _shared_output_writer_payloads()
+    result = write_shared_output_store_metadata(
+        route2_root=manager._route2_root,
+        contract_metadata=contract,
+        metadata=metadata,
+        candidate_range={"start_index": 10, "end_index_exclusive": 20},
+        source_session_id="session-1",
+        source_epoch_id="epoch-1",
+        updated_at="2026-05-02T00:00:01Z",
+    )
+    output_dir = shared_output_directory(manager._route2_root, str(contract["shared_output_key"]))
+
+    assert result["shared_output_metadata_written"] is True
+    assert result["shared_output_contract_status"] == "written"
+    assert result["shared_output_ranges_status"] == "metadata_only_written"
+    assert result["shared_output_range_count"] == 1
+    assert result["shared_output_media_bytes_present"] is False
+    assert (output_dir / "contract.json").exists()
+    assert (output_dir / "metadata.json").exists()
+    assert (output_dir / "ranges.json").exists()
+    assert (output_dir / "leases").is_dir()
+    assert (output_dir / "staging").is_dir()
+    assert not (output_dir / "segments").exists()
+    assert not (output_dir / "init.mp4").exists()
+    assert list(output_dir.rglob("*.m4s")) == []
+
+    serialized = json.dumps(
+        {
+            "contract": json.loads((output_dir / "contract.json").read_text(encoding="utf-8")),
+            "metadata": json.loads((output_dir / "metadata.json").read_text(encoding="utf-8")),
+            "ranges": json.loads((output_dir / "ranges.json").read_text(encoding="utf-8")),
+        },
+        sort_keys=True,
+    )
+    assert "secret-token" not in serialized
+    assert "/private/source" not in serialized
+    assert "session-secret" not in serialized
+    assert "epoch-secret" not in serialized
+    ranges = json.loads((output_dir / "ranges.json").read_text(encoding="utf-8"))
+    confirmed = ranges["confirmed_ranges"][0]
+    assert confirmed["range_status"] == "metadata_only_confirmed_source_session"
+    assert confirmed["media_bytes_present"] is False
+    assert ranges["media_bytes_present"] is False
+    assert ranges["serving_enabled"] is False
+    assert count_shared_output_metadata_records(manager._route2_root) == 1
+
+
+def test_route2_shared_output_metadata_writer_is_idempotent_and_blocks_conflicts(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    contract, metadata = _shared_output_writer_payloads()
+    first = write_shared_output_store_metadata(
+        route2_root=manager._route2_root,
+        contract_metadata=contract,
+        metadata=metadata,
+        updated_at="2026-05-02T00:00:01Z",
+    )
+    second_contract, second_metadata = _shared_output_writer_payloads()
+    second = write_shared_output_store_metadata(
+        route2_root=manager._route2_root,
+        contract_metadata=second_contract,
+        metadata=second_metadata,
+        updated_at="2026-05-02T00:00:02Z",
+    )
+    conflict_contract, conflict_metadata = _shared_output_writer_payloads(fingerprint="different-contract")
+    conflict = write_shared_output_store_metadata(
+        route2_root=manager._route2_root,
+        contract_metadata=conflict_contract,
+        metadata=conflict_metadata,
+        updated_at="2026-05-02T00:00:03Z",
+    )
+    output_dir = shared_output_directory(manager._route2_root, str(contract["shared_output_key"]))
+    persisted_contract = json.loads((output_dir / "contract.json").read_text(encoding="utf-8"))
+
+    assert first["shared_output_metadata_written"] is True
+    assert second["shared_output_metadata_written"] is True
+    assert second["shared_output_contract_status"] in {"updated", "unchanged"}
+    assert conflict["shared_output_metadata_written"] is False
+    assert conflict["shared_output_contract_status"] == "conflict"
+    assert "shared_contract_conflict" in conflict["shared_output_store_blockers"]
+    assert persisted_contract["output_contract_fingerprint"] == "contract-fingerprint"
+    assert persisted_contract["output_contract_fingerprint"] != "different-contract"
+
+
+def test_route2_shared_output_metadata_only_ranges_merge_and_remain_unplayable() -> None:
+    metadata = build_metadata_only_ranges_metadata(
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_duration_seconds=2.0,
+        confirmed_ranges=[(0, 2)],
+        updated_at="2026-05-02T00:00:00Z",
+    )
+    updated = build_metadata_only_ranges_metadata(
+        shared_output_key="r2ss:v2:abcdef1234567890",
+        segment_duration_seconds=2.0,
+        confirmed_ranges=[*metadata["confirmed_ranges"], (2, 4), (8, 10)],
+        updated_at="2026-05-02T00:00:01Z",
+    )
+
+    assert [(item["start_index"], item["end_index_exclusive"]) for item in updated["confirmed_ranges"]] == [
+        (0, 4),
+        (8, 10),
+    ]
+    assert updated["media_bytes_present"] is False
+    assert updated["serving_enabled"] is False
+    assert all(item["media_bytes_present"] is False for item in updated["confirmed_ranges"])
+    assert all(item["range_status"] == "metadata_only_confirmed_source_session" for item in updated["confirmed_ranges"])
+
+
 def test_route2_shared_output_lease_metadata_validates_required_fields() -> None:
     lease = build_shared_output_lease_metadata(
         lease_id="lease-1",
@@ -8819,12 +8999,21 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert status["shared_output_store_enabled"] == "metadata_only"
     assert status["shared_output_metadata_version"] == SHARED_OUTPUT_STORE_METADATA_VERSION
     assert status["shared_output_store_ready_for_segments"] is False
+    assert status["shared_output_store_records_count"] == 1
+    assert status["shared_output_metadata_write_errors"] == []
     assert status["shared_output_root"].endswith("browser_playback_route2/shared_outputs")
     assert item_a["shared_output_key"] == item_a["shared_supply_group_key"]
     assert item_a["absolute_segment_index_start_candidate"] == 0
     assert item_a["absolute_segment_index_end_candidate"] == 70
+    assert item_a["shared_output_metadata_written"] is True
+    assert item_a["shared_output_contract_status"] == "written"
+    assert item_a["shared_output_ranges_status"] == "metadata_only_written"
+    assert item_a["shared_output_range_count"] == 0
+    assert item_a["shared_output_media_bytes_present"] is False
     assert item_a["shared_output_store_blockers"] == SHARED_OUTPUT_STORE_BLOCKERS
     assert "metadata_only" in item_a["shared_output_store_blockers"]
+    assert "media_bytes_not_present" in item_a["shared_output_store_blockers"]
+    assert "serving_disabled" in item_a["shared_output_store_blockers"]
     assert item_a["shared_store_write_plan_available"] is True
     assert item_a["shared_store_candidate_range_start_index"] == 0
     assert item_a["shared_store_candidate_range_end_index_exclusive"] == 70
@@ -8833,6 +9022,8 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert item_a["shared_store_candidate_segment_count"] == 70
     assert item_a["shared_store_write_candidate_count"] == 0
     assert "metadata_only" in item_a["shared_store_write_blockers"]
+    assert "media_bytes_not_present" in item_a["shared_store_write_blockers"]
+    assert "serving_disabled" in item_a["shared_store_write_blockers"]
     assert "pending_init_compatibility" in item_a["shared_store_write_blockers"]
     assert item_a["shared_store_mapping_confidence"] == "high"
     assert "no_shared_bytes_written" in item_a["shared_store_mapping_notes"]
@@ -8841,6 +9032,13 @@ def test_route2_shared_output_store_metadata_only_admin_status(initialized_setti
     assert item_a["route2_init_hash_sha256"] is None
     assert item_a["route2_init_compatibility_status"] == "pending_init"
     assert item_a["shared_supply_candidate"] is True
+    shared_output_dir = shared_output_directory(manager._route2_root, item_a["shared_output_key"])
+    assert (shared_output_dir / "contract.json").exists()
+    assert (shared_output_dir / "metadata.json").exists()
+    assert (shared_output_dir / "ranges.json").exists()
+    assert not (shared_output_dir / "segments").exists()
+    assert not (shared_output_dir / "init.mp4").exists()
+    assert list(shared_output_dir.rglob("*.m4s")) == []
     assert session_a.browser_playback.epochs[epoch_a.epoch_id] is epoch_a
     assert manager._route2_workers["metadata-a"].assigned_threads == 4
     assert manager._route2_workers["metadata-b"].assigned_threads == 4
