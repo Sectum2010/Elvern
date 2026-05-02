@@ -105,6 +105,18 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Full bad-condition 30-minute reserve remains instrumentation-only; it is not enforced in startup readiness or admission in this phase.
 - Real 9/12 assignment, downshift, reclaim, shared supply, and coalescing remain future work.
 
+## Phase 1J-2 Closed-Loop Classification Dry-Run
+
+- Closed-loop classification is status/dry-run only. It must not change `assigned_threads`, worker spawn policy, Full/Lite readiness gates, admission, ffmpeg command paths, or live Route2 preset.
+- The real-time playback health floor is `1.05x` mature supply. Mature supply below `1.05x` is not healthy enough for future admission/downshift decisions, and `1.10x` is the comfortable threshold for future maintenance/downshift consideration.
+- The dry-run classifier can label workloads as `prepare_boost_needed`, `steady_state_maintenance`, `downshift_candidate`, `needs_resource`, `donor_candidate`, `protected_bad_condition_reserve`, `source_bound`, `client_bound`, `provider_error`, `io_or_publish_bound`, `host_pressure_limited`, `metrics_immature`, `manifest_complete`, or `neutral`.
+- `donor_candidate` is intentionally conservative and prefers mature supply at or above `1.50x`, comfortable runway, reserve satisfaction, and threads above the protected floor. Donor capacity remains theoretical only.
+- Full bad-condition reserve workloads with an unsatisfied reserve are protected and must not be donors. The Full `target + 30 minutes` reserve remains instrumentation-only in this phase and is not enforced.
+- Lite behavior remains unchanged: the healthy 15s fast-start path and 45s slow path are not modified, and Lite does not use the Full 30-minute reserve.
+- The classifier uses published frontier/runway/supply as readiness truth, with FFmpeg progress, `/proc/io`, publish latency, PSI, cgroup, host/external CPU, source, client, and provider signals as diagnostic bottleneck evidence.
+- IO/publish-bound, source-bound, client-bound, provider-error, and host-pressure-limited workloads must not be mislabeled as CPU-thread needs.
+- Future real phases may use this classification for 9/12 preparation boosts, maintenance downshift, transactional reclaim, and re-supply only after live validation. Reclaim/donation must remain two-phase, observed, reversible, and priority re-supplied if it fails.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

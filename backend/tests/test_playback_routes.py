@@ -452,6 +452,21 @@ def _make_admin_playback_workers_payload() -> dict[str, object]:
                         "publish_latency_avg_seconds": 0.0029,
                         "publish_latency_max_seconds": 0.0062,
                         "last_publish_kind": "segment",
+                        "closed_loop_role": "donor_candidate",
+                        "closed_loop_reasons": ["high_supply_and_runway_theoretical_donor"],
+                        "closed_loop_confidence": 0.86,
+                        "closed_loop_prepare_boost_needed": False,
+                        "closed_loop_prepare_boost_target_threads": None,
+                        "closed_loop_downshift_candidate": True,
+                        "closed_loop_downshift_target_threads": 2,
+                        "closed_loop_needs_resource": False,
+                        "closed_loop_needs_resource_reason": None,
+                        "closed_loop_donor_candidate": True,
+                        "closed_loop_donor_rank": 1,
+                        "closed_loop_theoretical_donate_threads": 4,
+                        "closed_loop_protected_reason": None,
+                        "closed_loop_admission_should_block_new_users": False,
+                        "closed_loop_primary_bottleneck": "unknown",
                         "telemetry_sampled": True,
                         "last_sampled_at": "2026-04-26T12:00:06+00:00",
                         "failure_reason": None,
@@ -1463,6 +1478,12 @@ def test_admin_playback_workers_route_returns_route2_worker_registry(
     assert first_item["last_publish_latency_seconds"] == 0.0034
     assert first_item["publish_latency_avg_seconds"] == 0.0029
     assert first_item["publish_latency_max_seconds"] == 0.0062
+    assert first_item["closed_loop_role"] == "donor_candidate"
+    assert first_item["closed_loop_donor_candidate"] is True
+    assert first_item["closed_loop_donor_rank"] == 1
+    assert first_item["closed_loop_theoretical_donate_threads"] == 4
+    assert first_item["closed_loop_admission_should_block_new_users"] is False
+    assert first_item["closed_loop_primary_bottleneck"] == "unknown"
     serialized_payload = response.text.lower()
     assert "access_token" not in serialized_payload
     assert "full_command_line" not in serialized_payload

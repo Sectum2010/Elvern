@@ -377,6 +377,27 @@ def _make_route2_reserve_inputs(
     return session, epoch, record
 
 
+def _make_route2_closed_loop_inputs(
+    initialized_settings,
+    *,
+    playback_mode: str = "full",
+    source_kind: str = "local",
+    assigned_threads: int = 4,
+    route2_max_worker_threads: int = 6,
+) -> tuple[MobilePlaybackManager, MobilePlaybackSession, PlaybackEpoch, Route2WorkerRecord]:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_max_worker_threads=route2_max_worker_threads,
+        route2_adaptive_max_worker_threads=12,
+    )
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode=playback_mode)
+    session.source_kind = source_kind
+    record.source_kind = source_kind
+    record.assigned_threads = assigned_threads
+    epoch.active_worker_id = record.worker_id
+    return manager, session, epoch, record
+
+
 def _make_route2_worker_record_for_spawn_dry_run(*, source_kind: str = "local", user_id: int = 1) -> Route2WorkerRecord:
     return Route2WorkerRecord(
         worker_id="spawn-dry-run-worker",
@@ -6267,6 +6288,409 @@ def test_route2_runtime_rebalance_dry_run_marks_donor_and_recipient_without_chan
     assert recipient_health.runtime_rebalance_target_threads == 6
     assert donor_record.assigned_threads == 4
     assert recipient_record.assigned_threads == 4
+
+
+def test_route2_closed_loop_marks_healthy_mature_supply_as_steady_state(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.05,
+        runway_seconds=150.0,
+        cpu_cores_used=1.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "steady_state_maintenance"
+    assert decision.primary_bottleneck == "unknown"
+    assert decision.needs_resource is False
+    assert decision.donor_candidate is False
+    assert decision.downshift_candidate is False
+
+
+def test_route2_closed_loop_marks_stable_surplus_as_downshift_candidate(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "downshift_candidate"
+    assert decision.downshift_candidate is True
+    assert decision.downshift_target_threads == 2
+    assert decision.donor_candidate is False
+    assert record.assigned_threads == 4
+
+
+def test_route2_closed_loop_marks_high_surplus_as_theoretical_donor_only(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.6,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "donor_candidate"
+    assert decision.donor_candidate is True
+    assert decision.theoretical_donate_threads == 2
+    assert decision.admission_should_block_new_users is False
+    assert record.assigned_threads == 4
+
+
+def test_route2_closed_loop_low_supply_cpu_thread_limited_needs_resource(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        runway_seconds=20.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "needs_resource"
+    assert decision.primary_bottleneck == "cpu_thread"
+    assert decision.needs_resource is True
+    assert decision.needs_resource_reason == "cpu_thread_limited_supply_below_1_05"
+    assert decision.prepare_boost_needed is True
+    assert decision.prepare_boost_target_threads == 6
+    assert decision.admission_should_block_new_users is True
+
+
+def test_route2_closed_loop_source_bound_low_supply_does_not_request_cpu_boost(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=20.0,
+        cpu_cores_used=0.4,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "source_bound"
+    assert decision.primary_bottleneck == "source"
+    assert decision.prepare_boost_needed is False
+    assert decision.admission_should_block_new_users is False
+
+
+def test_route2_closed_loop_client_bound_low_supply_stays_client_bound(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=20.0,
+        cpu_cores_used=4.0,
+    )
+    epoch.byte_samples = [
+        (0.0, 0),
+        (4.0, 16_000_000),
+        (8.0, 32_000_000),
+        (12.0, 48_000_000),
+    ]
+    session.browser_playback.client_probe_samples = [
+        (0.0, 1_000_000, 0.5),
+        (4.0, 1_000_000, 0.5),
+        (8.0, 1_000_000, 0.5),
+        (12.0, 1_000_000, 0.5),
+    ]
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "client_bound"
+    assert decision.primary_bottleneck == "client"
+    assert decision.prepare_boost_needed is False
+    assert decision.admission_should_block_new_users is False
+
+
+def test_route2_closed_loop_full_bad_condition_reserve_is_protected_not_donor(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=260.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "protected_bad_condition_reserve"
+    assert decision.protected_reason == "mature_supply_below_1_0"
+    assert decision.admission_should_block_new_users is True
+    assert decision.donor_candidate is False
+    assert decision.theoretical_donate_threads == 0
+
+
+def test_route2_closed_loop_lite_does_not_use_full_bad_condition_reserve(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+    )
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=20.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "needs_resource"
+    assert decision.protected_reason is None
+    assert "full_bad_condition_reserve_required_unsatisfied" not in decision.reasons
+
+
+def test_route2_closed_loop_manifest_complete_is_complete_not_resource_need(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.0,
+        runway_seconds=0.0,
+        cpu_cores_used=0.0,
+        manifest_complete=True,
+        refill_in_progress=False,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "manifest_complete"
+    assert decision.primary_bottleneck == "complete"
+    assert decision.needs_resource is False
+    assert decision.admission_should_block_new_users is False
+
+
+def test_route2_closed_loop_ffmpeg_ahead_publish_lag_is_io_publish_bound(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        runway_seconds=80.0,
+        cpu_cores_used=1.0,
+    )
+    epoch.publish_segment_count = 2
+    epoch.publish_latency_total_seconds = 2.0
+    epoch.publish_latency_max_seconds = 1.2
+    progress = _parse_ffmpeg_progress_payload(
+        "frame=1000\nfps=90\nout_time_us=200000000\nspeed=3.0x\nprogress=continue\n",
+        updated_at_ts=100.0,
+        now_ts=101.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        progress=progress,
+    )
+
+    assert decision.role == "io_or_publish_bound"
+    assert decision.primary_bottleneck == "io_publish"
+    assert decision.prepare_boost_needed is False
+
+
+def test_route2_closed_loop_cgroup_throttling_is_host_pressure_limited(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        runway_seconds=150.0,
+        cpu_cores_used=1.0,
+    )
+    cgroup_root = tmp_path / "cgroup"
+    cgroup_root.mkdir()
+    (cgroup_root / "cpu.stat").write_text(
+        "nr_periods 20\nnr_throttled 3\nthrottled_usec 5000\n",
+        encoding="utf-8",
+    )
+    pressure_payload = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    (cgroup_root / "cpu.pressure").write_text(pressure_payload, encoding="utf-8")
+    (cgroup_root / "io.pressure").write_text(pressure_payload, encoding="utf-8")
+    (cgroup_root / "memory.pressure").write_text(pressure_payload, encoding="utf-8")
+    cgroup_snapshot, _latest = _read_cgroup_telemetry_snapshot(
+        cgroup_path=cgroup_root,
+        previous_cpu_stat={"nr_periods": 10, "nr_throttled": 1, "throttled_usec": 1000},
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        cgroup_snapshot=cgroup_snapshot,
+    )
+
+    assert decision.role == "host_pressure_limited"
+    assert decision.primary_bottleneck == "host_pressure"
+    assert decision.prepare_boost_needed is False
+
+
+def test_route2_closed_loop_immature_metrics_do_not_claim_donor_or_downshift(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.8,
+        observation_seconds=3.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    assert decision.role == "metrics_immature"
+    assert decision.primary_bottleneck == "metrics_immature"
+    assert decision.donor_candidate is False
+    assert decision.downshift_candidate is False
+
+
+def test_route2_closed_loop_status_ranks_theoretical_donors_without_changing_threads(
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _capture_route2_worker_threads(monkeypatch)
+    pressure_root = tmp_path / "pressure"
+    pressure_root.mkdir()
+    pressure_payload = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    for pressure_name in ("cpu", "io", "memory"):
+        (pressure_root / pressure_name).write_text(pressure_payload, encoding="utf-8")
+    psi_snapshot = _read_linux_psi_snapshot(pressure_root=pressure_root)
+    cgroup_root = tmp_path / "cgroup-neutral"
+    cgroup_root.mkdir()
+    (cgroup_root / "cpu.stat").write_text(
+        "nr_periods 20\nnr_throttled 0\nthrottled_usec 0\n",
+        encoding="utf-8",
+    )
+    for pressure_name in ("cpu.pressure", "io.pressure", "memory.pressure"):
+        (cgroup_root / pressure_name).write_text(pressure_payload, encoding="utf-8")
+    cgroup_snapshot, _latest_cgroup = _read_cgroup_telemetry_snapshot(
+        cgroup_path=cgroup_root,
+        previous_cpu_stat={"nr_periods": 10, "nr_throttled": 0, "throttled_usec": 0},
+    )
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_linux_psi_snapshot",
+        lambda: psi_snapshot,
+    )
+    monkeypatch.setattr(
+        "backend.app.services.mobile_playback_service._read_cgroup_telemetry_snapshot",
+        lambda **_kwargs: (cgroup_snapshot, None),
+    )
+    item_a = _make_local_item(settings, item_id=379, relative_name="route2/closed-loop-donor-a.mp4")
+    item_b = _make_local_item(settings, item_id=380, relative_name="route2/closed-loop-donor-b.mp4")
+
+    first = manager.create_session(item_a, user_id=1, auth_session_id=993, username="alice", engine_mode="route2", playback_mode="full")
+    second = manager.create_session(item_b, user_id=2, auth_session_id=994, username="bob", engine_mode="route2", playback_mode="full")
+    manager._dispatch_waiting_sessions()
+    session_a, epoch_a, record_a = _active_route2_record_for_session(manager, first)
+    session_b, epoch_b, record_b = _active_route2_record_for_session(manager, second)
+    session_a.duration_seconds = 3600.0
+    session_b.duration_seconds = 3600.0
+    record_a.state = "running"
+    record_b.state = "running"
+    _mark_route2_runtime_supply(
+        session_a,
+        epoch_a,
+        record_a,
+        supply_rate_x=1.6,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    _mark_route2_runtime_supply(
+        session_b,
+        epoch_b,
+        record_b,
+        supply_rate_x=1.9,
+        observation_seconds=24.0,
+        runway_seconds=320.0,
+        cpu_cores_used=1.0,
+    )
+
+    status = manager.get_route2_worker_status()
+    items = {
+        item["worker_id"]: item
+        for group in status["workers_by_user"]
+        for item in group["items"]
+    }
+
+    assert items[record_b.worker_id]["closed_loop_role"] == "donor_candidate"
+    assert items[record_b.worker_id]["closed_loop_donor_rank"] == 1
+    assert items[record_a.worker_id]["closed_loop_donor_rank"] == 2
+    assert items[record_a.worker_id]["closed_loop_theoretical_donate_threads"] == 2
+    assert record_a.assigned_threads == 4
+    assert record_b.assigned_threads == 4
 
 
 def test_route2_stop_then_start_new_movie_allows_replacement_movie(initialized_settings) -> None:

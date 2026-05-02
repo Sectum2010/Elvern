@@ -1329,6 +1329,21 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     publish_latency_avg_seconds: float | None = Field(default=None, ge=0)
     publish_latency_max_seconds: float | None = Field(default=None, ge=0)
     last_publish_kind: str | None = None
+    closed_loop_role: str | None = None
+    closed_loop_reasons: list[str] = Field(default_factory=list)
+    closed_loop_confidence: float | None = Field(default=None, ge=0, le=1)
+    closed_loop_prepare_boost_needed: bool = False
+    closed_loop_prepare_boost_target_threads: int | None = Field(default=None, ge=0)
+    closed_loop_downshift_candidate: bool = False
+    closed_loop_downshift_target_threads: int | None = Field(default=None, ge=0)
+    closed_loop_needs_resource: bool = False
+    closed_loop_needs_resource_reason: str | None = None
+    closed_loop_donor_candidate: bool = False
+    closed_loop_donor_rank: int | None = Field(default=None, ge=1)
+    closed_loop_theoretical_donate_threads: int = Field(default=0, ge=0)
+    closed_loop_protected_reason: str | None = None
+    closed_loop_admission_should_block_new_users: bool = False
+    closed_loop_primary_bottleneck: str | None = None
     route2_transcode_strategy: str | None = None
     route2_transcode_strategy_confidence: str | None = None
     route2_transcode_strategy_reason: str | None = None

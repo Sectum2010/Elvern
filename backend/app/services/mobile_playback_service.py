@@ -192,6 +192,9 @@ ROUTE2_ACTIVE_SUPPLY_HEALTHY_RATE_X = 1.05
 ROUTE2_ACTIVE_SUPPLY_LOW_RATE_X = 1.0
 ROUTE2_ACTIVE_SUPPLY_STRONGLY_LOW_RATE_X = 0.95
 ROUTE2_RUNTIME_DONOR_SUPPLY_RATE_X = 1.2
+ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X = 1.05
+ROUTE2_CLOSED_LOOP_DOWNSHIFT_RATE_X = 1.10
+ROUTE2_CLOSED_LOOP_DONOR_RATE_X = 1.50
 ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS = 1800.0
 ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X = ROUTE2_STARTUP_MIN_SUPPLY_RATE_X
 ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X = 1.0
@@ -354,6 +357,25 @@ class _Route2ActivePlaybackHealth:
     runtime_rebalance_target_threads: int | None = None
     runtime_rebalance_can_donate_threads: int = 0
     runtime_rebalance_priority: int = 0
+
+
+@dataclass(slots=True)
+class _Route2ClosedLoopDryRunDecision:
+    role: str
+    reasons: list[str]
+    confidence: float
+    prepare_boost_needed: bool
+    prepare_boost_target_threads: int | None
+    downshift_candidate: bool
+    downshift_target_threads: int | None
+    needs_resource: bool
+    needs_resource_reason: str | None
+    donor_candidate: bool
+    theoretical_donate_threads: int
+    protected_reason: str | None
+    admission_should_block_new_users: bool
+    primary_bottleneck: str
+    donor_score: float = 0.0
 
 
 class ActivePlaybackWorkerConflictError(Exception):
@@ -2995,6 +3017,311 @@ class MobilePlaybackManager:
         )
         return session.source_kind == "cloud" or weak_server_goodput
 
+    def _route2_closed_loop_required_runway_seconds(self, playback_mode: str) -> float:
+        return 120.0 if playback_mode == "full" else 45.0
+
+    def _route2_closed_loop_comfortable_runway_seconds(self, playback_mode: str) -> float:
+        required = self._route2_closed_loop_required_runway_seconds(playback_mode)
+        return max(required * 1.5, required + (60.0 if playback_mode == "full" else 20.0))
+
+    def _route2_closed_loop_host_pressure_limited(
+        self,
+        *,
+        host_cpu_pressure: _HostCpuPressureSnapshot | None,
+        psi_snapshot: _LinuxPressureSnapshot | None,
+        cgroup_snapshot: _CgroupTelemetrySnapshot | None,
+    ) -> bool:
+        if host_cpu_pressure is not None:
+            if host_cpu_pressure.external_ffmpeg_process_count > 0:
+                return True
+            external_cpu_cores = host_cpu_pressure.external_cpu_cores_used_estimate
+            external_cpu_percent = host_cpu_pressure.external_cpu_percent_estimate
+            if external_cpu_cores is not None and external_cpu_cores >= 4.0:
+                return True
+            if external_cpu_percent is not None and external_cpu_percent >= 0.20:
+                return True
+        if psi_snapshot is not None:
+            if (psi_snapshot.cpu_some_avg10 or 0.0) >= 5.0 or (psi_snapshot.memory_some_avg10 or 0.0) >= 5.0:
+                return True
+        if cgroup_snapshot is not None:
+            if (cgroup_snapshot.cpu_throttled_delta or 0) > 0 or (cgroup_snapshot.cpu_throttled_usec_delta or 0) > 0:
+                return True
+            if (cgroup_snapshot.cpu_some_avg10 or 0.0) >= 5.0 or (cgroup_snapshot.memory_some_avg10 or 0.0) >= 5.0:
+                return True
+        return False
+
+    def _route2_closed_loop_io_publish_limited(
+        self,
+        *,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        progress: _Route2FfmpegProgressSnapshot | None,
+        psi_snapshot: _LinuxPressureSnapshot | None,
+    ) -> bool:
+        actual_ready_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
+        progress_ahead = False
+        if progress is not None and progress.out_time_seconds is not None and not progress.stale:
+            progress_ready_end_seconds = epoch.epoch_start_seconds + float(progress.out_time_seconds)
+            progress_ahead = progress_ready_end_seconds > actual_ready_end_seconds + (SEGMENT_DURATION_SECONDS * 2)
+        publish_latency_high = (
+            (epoch.publish_latency_max_seconds is not None and epoch.publish_latency_max_seconds >= 1.0)
+            or (
+                epoch.publish_segment_count > 0
+                and (epoch.publish_latency_total_seconds / max(1, epoch.publish_segment_count)) >= 0.5
+            )
+        )
+        psi_io_high = bool(
+            psi_snapshot is not None
+            and (
+                (psi_snapshot.io_some_avg10 or 0.0) >= 2.0
+                or (psi_snapshot.io_full_avg10 or 0.0) > 0.0
+            )
+        )
+        return bool((progress_ahead and publish_latency_high) or psi_io_high)
+
+    def _evaluate_route2_closed_loop_dry_run_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        record: Route2WorkerRecord,
+        *,
+        active_health: _Route2ActivePlaybackHealth | None = None,
+        progress: _Route2FfmpegProgressSnapshot | None = None,
+        host_cpu_pressure: _HostCpuPressureSnapshot | None = None,
+        psi_snapshot: _LinuxPressureSnapshot | None = None,
+        cgroup_snapshot: _CgroupTelemetrySnapshot | None = None,
+        adaptive_bottleneck_class: str | None = None,
+    ) -> _Route2ClosedLoopDryRunDecision:
+        assigned_threads = max(0, int(record.assigned_threads or 0))
+        protected_floor = self._route2_protected_min_threads_per_active_user()
+        (
+            _published_end_seconds,
+            _effective_playhead_seconds,
+            runway_seconds,
+            supply_rate_x,
+            observation_seconds,
+            manifest_complete,
+            refill_in_progress,
+        ) = self._route2_runtime_supply_metrics_locked(session, epoch)
+        metrics_mature = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+        reserve_status = self._route2_bad_condition_reserve_status_locked(session, epoch)
+        runway_delta_per_second = reserve_status["runway_delta_per_second"]
+        runway_delta_mature = bool(reserve_status["runway_delta_mature"])
+        required_runway_seconds = self._route2_closed_loop_required_runway_seconds(record.playback_mode)
+        comfortable_runway_seconds = self._route2_closed_loop_comfortable_runway_seconds(record.playback_mode)
+        cpu_thread_limited = self._route2_record_cpu_thread_limited(record) or adaptive_bottleneck_class in {
+            "CPU_BOUND",
+            "UNDER_SUPPLIED_BUT_CPU_LIMITED",
+        }
+        provider_error = bool(record.non_retryable_error or session.last_error)
+        client_limited = self._route2_client_limited_locked(session, epoch)
+        source_limited = self._route2_source_limited_locked(
+            session,
+            epoch,
+            cpu_thread_limited=cpu_thread_limited,
+        )
+        io_publish_limited = self._route2_closed_loop_io_publish_limited(
+            session=session,
+            epoch=epoch,
+            progress=progress,
+            psi_snapshot=psi_snapshot,
+        )
+        host_pressure_limited = self._route2_closed_loop_host_pressure_limited(
+            host_cpu_pressure=host_cpu_pressure,
+            psi_snapshot=psi_snapshot,
+            cgroup_snapshot=cgroup_snapshot,
+        )
+        starvation_risk = self._starvation_risk(session)
+        stalled_recovery_needed = self._stalled_recovery_needed(session)
+        reasons: list[str] = []
+        role = "neutral"
+        confidence = 0.55
+        primary_bottleneck = "unknown"
+        needs_resource = False
+        needs_resource_reason: str | None = None
+        prepare_boost_needed = False
+        prepare_boost_target_threads: int | None = None
+        downshift_candidate = False
+        downshift_target_threads: int | None = None
+        donor_candidate = False
+        theoretical_donate_threads = 0
+        protected_reason: str | None = None
+        admission_should_block_new_users = False
+
+        if provider_error:
+            role = "provider_error"
+            primary_bottleneck = "provider"
+            reasons.append("provider_or_source_error_present")
+            confidence = 0.95
+        elif manifest_complete:
+            role = "manifest_complete"
+            primary_bottleneck = "complete"
+            reasons.append("manifest_complete_or_fully_published")
+            confidence = 0.9
+        elif not metrics_mature:
+            role = "metrics_immature"
+            primary_bottleneck = "metrics_immature"
+            reasons.append("supply_observation_immature")
+            confidence = 0.8
+        elif bool(reserve_status["bad_condition_reserve_required"]) and not bool(reserve_status["reserve_satisfied"]):
+            role = "protected_bad_condition_reserve"
+            primary_bottleneck = "cpu_thread" if cpu_thread_limited else "unknown"
+            protected_reason = str(reserve_status["bad_condition_reason"] or "bad_condition_reserve_unsatisfied")
+            admission_should_block_new_users = True
+            prepare_boost_needed = bool(cpu_thread_limited and not host_pressure_limited and not source_limited and not client_limited)
+            prepare_boost_target_threads = (
+                self._route2_next_runtime_rebalance_target_threads(assigned_threads)
+                if prepare_boost_needed
+                else None
+            )
+            reasons.append("full_bad_condition_reserve_required_unsatisfied")
+            confidence = 0.9
+        elif host_pressure_limited:
+            role = "host_pressure_limited"
+            primary_bottleneck = "host_pressure"
+            reasons.append("host_external_psi_or_cgroup_pressure")
+            confidence = 0.8
+        elif io_publish_limited:
+            role = "io_or_publish_bound"
+            primary_bottleneck = "io_publish"
+            reasons.append("ffmpeg_progress_or_psi_indicates_publish_io_lag")
+            confidence = 0.78
+        elif supply_rate_x < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X or (
+            runway_delta_mature
+            and runway_delta_per_second is not None
+            and float(runway_delta_per_second) < 0.0
+            and runway_seconds <= WATCH_REFILL_TARGET_SECONDS
+        ) or starvation_risk or stalled_recovery_needed:
+            needs_resource = True
+            admission_should_block_new_users = True
+            if client_limited:
+                role = "client_bound"
+                primary_bottleneck = "client"
+                needs_resource_reason = "client_limited"
+                admission_should_block_new_users = False
+                reasons.append("client_goodput_or_stall_limiter")
+            elif source_limited:
+                role = "source_bound"
+                primary_bottleneck = "source"
+                needs_resource_reason = "source_limited"
+                admission_should_block_new_users = False
+                reasons.append("source_provider_throughput_limiter")
+            elif cpu_thread_limited:
+                role = "needs_resource"
+                primary_bottleneck = "cpu_thread"
+                needs_resource_reason = "cpu_thread_limited_supply_below_1_05"
+                prepare_boost_needed = not host_pressure_limited
+                prepare_boost_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
+                reasons.append("mature_supply_below_1_05_cpu_thread_limited")
+            else:
+                role = "needs_resource"
+                primary_bottleneck = "unknown"
+                needs_resource_reason = "supply_below_1_05_or_declining_runway"
+                reasons.append("mature_supply_below_1_05_without_specific_limiter")
+            confidence = 0.82
+        elif runway_seconds < required_runway_seconds and refill_in_progress and cpu_thread_limited and not source_limited and not client_limited:
+            role = "prepare_boost_needed"
+            primary_bottleneck = "cpu_thread"
+            prepare_boost_needed = True
+            prepare_boost_target_threads = self._route2_next_runtime_rebalance_target_threads(assigned_threads)
+            reasons.append("runway_below_startup_target_and_cpu_thread_limited")
+            confidence = 0.78
+        else:
+            role = "steady_state_maintenance"
+            primary_bottleneck = "unknown"
+            reasons.append("supply_at_or_above_1_05_and_runway_not_declining")
+            confidence = 0.72
+            if (
+                supply_rate_x >= ROUTE2_CLOSED_LOOP_DOWNSHIFT_RATE_X
+                and observation_seconds >= 20.0
+                and runway_seconds >= comfortable_runway_seconds
+                and (
+                    not runway_delta_mature
+                    or runway_delta_per_second is None
+                    or float(runway_delta_per_second) >= 0.0
+                )
+                and assigned_threads > protected_floor
+                and not starvation_risk
+                and not stalled_recovery_needed
+            ):
+                downshift_candidate = True
+                downshift_target_threads = protected_floor
+                role = "downshift_candidate"
+                reasons.append("supply_above_1_10_with_comfortable_runway")
+                confidence = 0.82
+            if (
+                supply_rate_x >= ROUTE2_CLOSED_LOOP_DONOR_RATE_X
+                and runway_seconds >= comfortable_runway_seconds
+                and assigned_threads > protected_floor
+                and not bool(reserve_status["bad_condition_reserve_required"] and not reserve_status["reserve_satisfied"])
+                and not source_limited
+                and not client_limited
+                and not provider_error
+            ):
+                donor_candidate = True
+                theoretical_donate_threads = max(0, assigned_threads - protected_floor)
+                role = "donor_candidate"
+                reasons.append("high_supply_and_runway_theoretical_donor")
+                confidence = 0.86
+
+        donor_score = 0.0
+        if donor_candidate:
+            donor_score = (
+                (max(0.0, supply_rate_x - ROUTE2_CLOSED_LOOP_DONOR_RATE_X) * 100.0)
+                + max(0.0, runway_seconds - comfortable_runway_seconds)
+                + (theoretical_donate_threads * 10.0)
+            )
+
+        if active_health is not None and active_health.admission_blocking:
+            admission_should_block_new_users = True
+            if role in {"steady_state_maintenance", "downshift_candidate", "donor_candidate"}:
+                role = "needs_resource"
+                primary_bottleneck = "cpu_thread" if active_health.cpu_thread_limited else "unknown"
+                needs_resource = True
+                needs_resource_reason = active_health.status
+                donor_candidate = False
+                theoretical_donate_threads = 0
+                downshift_candidate = False
+                downshift_target_threads = None
+                reasons.append("active_health_guard_blocks_admission")
+
+        return _Route2ClosedLoopDryRunDecision(
+            role=role,
+            reasons=reasons or ["no_specific_closed_loop_reason"],
+            confidence=confidence,
+            prepare_boost_needed=prepare_boost_needed,
+            prepare_boost_target_threads=prepare_boost_target_threads,
+            downshift_candidate=downshift_candidate,
+            downshift_target_threads=downshift_target_threads,
+            needs_resource=needs_resource,
+            needs_resource_reason=needs_resource_reason,
+            donor_candidate=donor_candidate,
+            theoretical_donate_threads=theoretical_donate_threads,
+            protected_reason=protected_reason,
+            admission_should_block_new_users=admission_should_block_new_users,
+            primary_bottleneck=primary_bottleneck,
+            donor_score=donor_score,
+        )
+
+    def _closed_loop_dry_run_payload(self, decision: _Route2ClosedLoopDryRunDecision) -> dict[str, object]:
+        return {
+            "closed_loop_role": decision.role,
+            "closed_loop_reasons": list(decision.reasons),
+            "closed_loop_confidence": round(decision.confidence, 3),
+            "closed_loop_prepare_boost_needed": decision.prepare_boost_needed,
+            "closed_loop_prepare_boost_target_threads": decision.prepare_boost_target_threads,
+            "closed_loop_downshift_candidate": decision.downshift_candidate,
+            "closed_loop_downshift_target_threads": decision.downshift_target_threads,
+            "closed_loop_needs_resource": decision.needs_resource,
+            "closed_loop_needs_resource_reason": decision.needs_resource_reason,
+            "closed_loop_donor_candidate": decision.donor_candidate,
+            "closed_loop_donor_rank": None,
+            "closed_loop_theoretical_donate_threads": decision.theoretical_donate_threads,
+            "closed_loop_protected_reason": decision.protected_reason,
+            "closed_loop_admission_should_block_new_users": decision.admission_should_block_new_users,
+            "closed_loop_primary_bottleneck": decision.primary_bottleneck,
+        }
+
     def _evaluate_route2_active_playback_health_locked(
         self,
         session: MobilePlaybackSession,
@@ -4094,6 +4421,13 @@ class MobilePlaybackManager:
             )
             resource_snapshot = self._latest_route2_resource_snapshot_locked(now_ts=now_ts)
             host_cpu_pressure = _host_cpu_pressure_from_resource_snapshot(resource_snapshot)
+            psi_snapshot = _read_linux_psi_snapshot()
+            cgroup_snapshot, latest_cgroup_cpu_stat = _read_cgroup_telemetry_snapshot(
+                previous_cpu_stat=self._last_cgroup_cpu_stat,
+            )
+            if latest_cgroup_cpu_stat is not None:
+                self._last_cgroup_cpu_stat = latest_cgroup_cpu_stat
+            closed_loop_donors: list[tuple[float, str]] = []
             for record in sorted(self._route2_workers.values(), key=lambda value: value.worker_id):
                 payload = payloads_by_worker_id.get(record.worker_id)
                 if payload is None:
@@ -4125,6 +4459,49 @@ class MobilePlaybackManager:
                 payload["adaptive_safe_to_decrease_threads"] = adaptive_decision.safe_to_decrease_threads
                 payload["adaptive_reason"] = adaptive_decision.reason
                 payload["adaptive_missing_metrics"] = adaptive_decision.missing_metrics
+                session = self._sessions.get(record.session_id)
+                epoch = (
+                    session.browser_playback.epochs.get(record.epoch_id)
+                    if session is not None and session.browser_playback.engine_mode == "route2"
+                    else None
+                )
+                if session is not None and epoch is not None:
+                    closed_loop_progress = _read_ffmpeg_progress_snapshot(
+                        epoch.epoch_dir / "ffmpeg.progress.log",
+                        now_ts=now_ts,
+                    )
+                    closed_loop_health = self._evaluate_route2_active_playback_health_locked(session, epoch, record)
+                    closed_loop_decision = self._evaluate_route2_closed_loop_dry_run_locked(
+                        session,
+                        epoch,
+                        record,
+                        active_health=closed_loop_health,
+                        progress=closed_loop_progress,
+                        host_cpu_pressure=host_cpu_pressure,
+                        psi_snapshot=psi_snapshot,
+                        cgroup_snapshot=cgroup_snapshot,
+                        adaptive_bottleneck_class=adaptive_decision.bottleneck_class,
+                    )
+                else:
+                    closed_loop_decision = _Route2ClosedLoopDryRunDecision(
+                        role="metrics_immature",
+                        reasons=["route2_session_or_epoch_missing"],
+                        confidence=0.5,
+                        prepare_boost_needed=False,
+                        prepare_boost_target_threads=None,
+                        downshift_candidate=False,
+                        downshift_target_threads=None,
+                        needs_resource=False,
+                        needs_resource_reason=None,
+                        donor_candidate=False,
+                        theoretical_donate_threads=0,
+                        protected_reason=None,
+                        admission_should_block_new_users=False,
+                        primary_bottleneck="metrics_immature",
+                    )
+                payload.update(self._closed_loop_dry_run_payload(closed_loop_decision))
+                if closed_loop_decision.donor_candidate:
+                    closed_loop_donors.append((closed_loop_decision.donor_score, record.worker_id))
                 strategy_input, strategy_metadata_source, strategy_metadata_trusted = (
                     self._build_route2_transcode_strategy_input_locked(record)
                 )
@@ -4149,6 +4526,13 @@ class MobilePlaybackManager:
                 payload["route2_command_adapter_active"] = command_adapter_preview.active_enabled
                 payload["route2_command_adapter_summary"] = command_adapter_preview.command_preview_summary
                 payload["route2_command_adapter_fallback_reason"] = command_adapter_preview.fallback_reason
+            for rank, (_score, worker_id) in enumerate(
+                sorted(closed_loop_donors, key=lambda value: (-value[0], value[1])),
+                start=1,
+            ):
+                donor_payload = payloads_by_worker_id.get(worker_id)
+                if donor_payload is not None:
+                    donor_payload["closed_loop_donor_rank"] = rank
             route2_cpu_percent_of_total = (
                 round((route2_cpu_cores_used / int(budget["total_cpu_cores"])) * 100, 3)
                 if any_cpu_sampled
@@ -4159,12 +4543,6 @@ class MobilePlaybackManager:
                 if any_cpu_sampled and int(budget["route2_cpu_upbound_cores"]) > 0
                 else None
             )
-            psi_snapshot = _read_linux_psi_snapshot()
-            cgroup_snapshot, latest_cgroup_cpu_stat = _read_cgroup_telemetry_snapshot(
-                previous_cpu_stat=self._last_cgroup_cpu_stat,
-            )
-            if latest_cgroup_cpu_stat is not None:
-                self._last_cgroup_cpu_stat = latest_cgroup_cpu_stat
             return {
                 **budget,
                 "route2_cpu_cores_used": round(route2_cpu_cores_used, 3) if any_cpu_sampled else None,
