@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import uuid
+from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -22,6 +23,7 @@ SHARED_OUTPUT_STORE_BLOCKERS = [
     "media_bytes_not_present",
     "serving_disabled",
 ]
+SHARED_OUTPUT_CANONICAL_GENERATION_STRATEGY = "required_for_serving"
 SHARED_OUTPUT_MAPPING_TOLERANCE_SECONDS = 0.001
 SHARED_OUTPUT_METADATA_ONLY_RANGE_STATUS = "metadata_only_confirmed_source_session"
 
@@ -118,6 +120,146 @@ def _ordered_store_blockers(blockers: Iterable[str]) -> list[str]:
     ordered = [blocker for blocker in SHARED_OUTPUT_STORE_BLOCKERS if blocker in values]
     ordered.extend(sorted(values - set(ordered)))
     return ordered
+
+
+def _normalize_conflict_record(value: object, *, updated_at: str | None = None) -> dict[str, object] | None:
+    if isinstance(value, Mapping):
+        try:
+            index = int(value.get("index", value.get("segment_index")))
+        except (TypeError, ValueError):
+            return None
+        first_conflict_at = str(value.get("first_conflict_at") or value.get("detected_at") or updated_at or utcnow_iso())
+        last_conflict_at = str(value.get("last_conflict_at") or value.get("detected_at") or updated_at or first_conflict_at)
+        record: dict[str, object] = {
+            "index": max(0, index),
+            "first_conflict_at": first_conflict_at,
+            "last_conflict_at": last_conflict_at,
+        }
+        for key in (
+            "existing_sha256",
+            "candidate_sha256",
+            "existing_size_bytes",
+            "candidate_size_bytes",
+        ):
+            if value.get(key) is not None:
+                record[key] = value[key]
+        return record
+    try:
+        index = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    timestamp = updated_at or utcnow_iso()
+    return {
+        "index": max(0, index),
+        "first_conflict_at": timestamp,
+        "last_conflict_at": timestamp,
+    }
+
+
+def _merge_conflict_records(*sources: object, updated_at: str | None = None) -> list[dict[str, object]]:
+    merged: dict[int, dict[str, object]] = {}
+    for source in sources:
+        if source is None:
+            continue
+        raw_records: list[object] = []
+        if isinstance(source, Mapping):
+            raw_records.extend(source.get("segment_hash_conflicts") or [])
+            raw_records.extend(source.get("conflict_indexes") or [])
+        else:
+            raw_records.extend(source if isinstance(source, IterableABC) and not isinstance(source, (str, bytes)) else [source])
+        for raw_record in raw_records:
+            record = _normalize_conflict_record(raw_record, updated_at=updated_at)
+            if record is None:
+                continue
+            index = int(record["index"])
+            existing = merged.get(index)
+            if existing is None:
+                merged[index] = record
+                continue
+            existing["last_conflict_at"] = record.get("last_conflict_at") or existing.get("last_conflict_at")
+            for key in ("existing_sha256", "candidate_sha256", "existing_size_bytes", "candidate_size_bytes"):
+                if record.get(key) is not None:
+                    existing[key] = record[key]
+    return [merged[index] for index in sorted(merged)]
+
+
+def _conflict_indexes(conflict_records: Iterable[Mapping[str, object]]) -> list[int]:
+    indexes: set[int] = set()
+    for record in conflict_records:
+        try:
+            indexes.add(max(0, int(record["index"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return sorted(indexes)
+
+
+def _servability_fields(
+    *,
+    media_bytes_present: bool,
+    byte_integrity_validated: bool,
+    conflict_records: Iterable[Mapping[str, object]] = (),
+    extra_reasons: Iterable[str] = (),
+) -> dict[str, object]:
+    records = _merge_conflict_records(list(conflict_records))
+    indexes = _conflict_indexes(records)
+    mixed_writer_conflict = bool(indexes)
+    reasons = {"serving_disabled", "canonical_generation_required", *{str(item) for item in extra_reasons if str(item)}}
+    if mixed_writer_conflict:
+        reasons.add("segment_hash_conflict")
+        primary_reason = "segment_hash_conflict"
+    elif not media_bytes_present:
+        reasons.add("media_bytes_not_present")
+        primary_reason = "media_bytes_not_present"
+    else:
+        reasons.add("stability_not_proven")
+        primary_reason = "canonical_generation_required"
+    first_conflict_at = None
+    last_conflict_at = None
+    if records:
+        first_conflict_at = min(str(record["first_conflict_at"]) for record in records if record.get("first_conflict_at"))
+        last_conflict_at = max(str(record["last_conflict_at"]) for record in records if record.get("last_conflict_at"))
+    return {
+        "byte_integrity_validated": bool(byte_integrity_validated),
+        "segment_bytes_stable": False,
+        "mixed_writer_conflict": mixed_writer_conflict,
+        "conflict_indexes": indexes,
+        "conflict_count": len(indexes),
+        "first_conflict_at": first_conflict_at,
+        "last_conflict_at": last_conflict_at,
+        "serving_allowed": False,
+        "serving_blocked": True,
+        "serving_blocked_reason": primary_reason,
+        "serving_blocked_reasons": sorted(reasons),
+        "canonical_generation_required": True,
+        "canonical_generation_strategy": SHARED_OUTPUT_CANONICAL_GENERATION_STRATEGY,
+        "segment_hash_conflicts": records,
+    }
+
+
+def _apply_servability_fields(
+    payload: dict[str, object],
+    *,
+    media_bytes_present: bool | None = None,
+    byte_integrity_validated: bool | None = None,
+    conflict_records: Iterable[Mapping[str, object]] = (),
+    extra_reasons: Iterable[str] = (),
+) -> dict[str, object]:
+    media_present = bool(payload.get("media_bytes_present")) if media_bytes_present is None else bool(media_bytes_present)
+    integrity_validated = (
+        bool(payload.get("byte_integrity_validated"))
+        if byte_integrity_validated is None
+        else bool(byte_integrity_validated)
+    )
+    existing_conflicts = _merge_conflict_records(payload, list(conflict_records))
+    payload.update(
+        _servability_fields(
+            media_bytes_present=media_present,
+            byte_integrity_validated=integrity_validated,
+            conflict_records=existing_conflicts,
+            extra_reasons=extra_reasons,
+        )
+    )
+    return payload
 
 
 def _hash_file(path: Path) -> tuple[str, int]:
@@ -747,7 +889,7 @@ def build_shared_output_metadata(
         payload["playback_mode"] = str(playback_mode or "").strip()
     if segment_duration_seconds is not None:
         payload["segment_duration_seconds"] = _validate_segment_duration(segment_duration_seconds)
-    return payload
+    return _apply_servability_fields(payload, media_bytes_present=False, byte_integrity_validated=False)
 
 
 def _metadata_only_range_payload(
@@ -779,7 +921,7 @@ def _metadata_only_range_payload(
         payload["source_session_id"] = str(source_session_id)
     if source_epoch_id:
         payload["source_epoch_id"] = str(source_epoch_id)
-    return payload
+    return _apply_servability_fields(payload, media_bytes_present=False, byte_integrity_validated=False)
 
 
 def build_metadata_only_ranges_metadata(
@@ -810,7 +952,7 @@ def build_metadata_only_ranges_metadata(
         )
         for item in merged
     ]
-    return {
+    payload = {
         "version": SHARED_OUTPUT_STORE_METADATA_VERSION,
         "shared_output_key": validate_shared_output_key(shared_output_key),
         "segment_duration_seconds": _validate_segment_duration(segment_duration_seconds),
@@ -821,6 +963,7 @@ def build_metadata_only_ranges_metadata(
         "sparse_segments": [],
         "updated_at": timestamp,
     }
+    return _apply_servability_fields(payload, media_bytes_present=False, byte_integrity_validated=False)
 
 
 def add_metadata_only_confirmed_range(
@@ -941,8 +1084,14 @@ def _shared_segment_result(
     range_start_index: int | None = None,
     range_end_index_exclusive: int | None = None,
     media_bytes_present: bool = False,
+    conflict_records: Iterable[Mapping[str, object]] = (),
     errors: Iterable[str] = (),
 ) -> dict[str, object]:
+    servability = _servability_fields(
+        media_bytes_present=bool(media_bytes_present),
+        byte_integrity_validated=bool(media_bytes_present),
+        conflict_records=conflict_records,
+    )
     return {
         "shared_segments_writer_enabled": bool(enabled),
         "shared_segment_write_attempted": bool(attempted),
@@ -955,7 +1104,20 @@ def _shared_segment_result(
         "shared_segment_write_last_hash": last_hash,
         "shared_segment_write_range_start_index": range_start_index,
         "shared_segment_write_range_end_index_exclusive": range_end_index_exclusive,
+        "shared_segment_write_conflict_indexes": list(servability["conflict_indexes"]),
+        "shared_segment_write_serving_blocked_reason": servability["serving_blocked_reason"],
         "shared_output_media_bytes_present": bool(media_bytes_present),
+        "shared_output_byte_integrity_validated": bool(servability["byte_integrity_validated"]),
+        "shared_output_segment_bytes_stable": bool(servability["segment_bytes_stable"]),
+        "shared_output_mixed_writer_conflict": bool(servability["mixed_writer_conflict"]),
+        "shared_output_conflict_count": int(servability["conflict_count"]),
+        "shared_output_conflict_indexes": list(servability["conflict_indexes"]),
+        "shared_output_serving_allowed": bool(servability["serving_allowed"]),
+        "shared_output_serving_blocked": bool(servability["serving_blocked"]),
+        "shared_output_serving_blocked_reason": servability["serving_blocked_reason"],
+        "shared_output_serving_blocked_reasons": list(servability["serving_blocked_reasons"]),
+        "shared_output_canonical_generation_required": bool(servability["canonical_generation_required"]),
+        "shared_output_canonical_generation_strategy": servability["canonical_generation_strategy"],
         "shared_output_segment_write_errors": [str(item) for item in errors],
     }
 
@@ -982,6 +1144,7 @@ def _update_metadata_for_shared_init(
             "updated_at": updated_at,
         }
     )
+    _apply_servability_fields(metadata, media_bytes_present=False, byte_integrity_validated=False)
     _write_json_atomic(metadata_path, metadata)
 
 
@@ -1014,6 +1177,7 @@ def _media_bytes_range_payload(
     *,
     segment_duration_seconds: float,
     updated_at: str,
+    conflict_records: Iterable[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     payload = _range_payload(
         start_index,
@@ -1028,7 +1192,17 @@ def _media_bytes_range_payload(
             "updated_at": updated_at,
         }
     )
-    return payload
+    range_conflicts = [
+        record
+        for record in _merge_conflict_records(list(conflict_records))
+        if start_index <= int(record["index"]) < end_index_exclusive
+    ]
+    return _apply_servability_fields(
+        payload,
+        media_bytes_present=True,
+        byte_integrity_validated=True,
+        conflict_records=range_conflicts,
+    )
 
 
 def _build_media_bytes_ranges_metadata(
@@ -1037,7 +1211,9 @@ def _build_media_bytes_ranges_metadata(
     segment_duration_seconds: float,
     segment_indices: Iterable[int],
     updated_at: str,
+    conflict_records: Iterable[Mapping[str, object]] = (),
 ) -> dict[str, object]:
+    conflicts = _merge_conflict_records(list(conflict_records))
     ranges = merge_contiguous_ranges(
         [(int(index), int(index) + 1) for index in segment_indices],
         segment_duration_seconds=segment_duration_seconds,
@@ -1049,10 +1225,11 @@ def _build_media_bytes_ranges_metadata(
             int(item["end_index_exclusive"]),
             segment_duration_seconds=segment_duration_seconds,
             updated_at=updated_at,
+            conflict_records=conflicts,
         )
         for item in ranges
     ]
-    return {
+    payload = {
         "version": SHARED_OUTPUT_STORE_METADATA_VERSION,
         "shared_output_key": validate_shared_output_key(shared_output_key),
         "segment_duration_seconds": _validate_segment_duration(segment_duration_seconds),
@@ -1063,6 +1240,12 @@ def _build_media_bytes_ranges_metadata(
         "sparse_segments": sorted({max(0, int(index)) for index in segment_indices}),
         "updated_at": updated_at,
     }
+    return _apply_servability_fields(
+        payload,
+        media_bytes_present=bool(confirmed_ranges),
+        byte_integrity_validated=bool(confirmed_ranges),
+        conflict_records=conflicts,
+    )
 
 
 def _update_shared_segment_metadata(
@@ -1072,8 +1255,16 @@ def _update_shared_segment_metadata(
     segment_duration_seconds: float,
     segment_records: Mapping[int, Mapping[str, object]],
     updated_at: str,
+    conflict_records: Iterable[Mapping[str, object]] = (),
 ) -> tuple[int | None, int | None]:
     ordered_records = [dict(segment_records[index]) for index in sorted(segment_records)]
+    conflicts = _merge_conflict_records(
+        _read_json_mapping(output_dir / "metadata.json"),
+        _read_json_mapping(output_dir / "ranges.json"),
+        _read_json_mapping(output_dir / "segments.json"),
+        list(conflict_records),
+        updated_at=updated_at,
+    )
     segments_payload = {
         "version": SHARED_OUTPUT_STORE_METADATA_VERSION,
         "shared_output_key": validate_shared_output_key(shared_output_key),
@@ -1084,12 +1275,19 @@ def _update_shared_segment_metadata(
         "segments": ordered_records,
         "updated_at": updated_at,
     }
+    _apply_servability_fields(
+        segments_payload,
+        media_bytes_present=bool(ordered_records),
+        byte_integrity_validated=bool(ordered_records),
+        conflict_records=conflicts,
+    )
     _write_json_atomic(output_dir / "segments.json", segments_payload)
     ranges_payload = _build_media_bytes_ranges_metadata(
         shared_output_key=shared_output_key,
         segment_duration_seconds=segment_duration_seconds,
         segment_indices=segment_records.keys(),
         updated_at=updated_at,
+        conflict_records=conflicts,
     )
     _write_json_atomic(output_dir / "ranges.json", ranges_payload)
     metadata = _read_json_mapping(output_dir / "metadata.json") or {}
@@ -1104,6 +1302,12 @@ def _update_shared_segment_metadata(
             "media_bytes_present": bool(ordered_records),
             "updated_at": updated_at,
         }
+    )
+    _apply_servability_fields(
+        metadata,
+        media_bytes_present=bool(ordered_records),
+        byte_integrity_validated=bool(ordered_records),
+        conflict_records=conflicts,
     )
     _write_json_atomic(output_dir / "metadata.json", metadata)
     if not ordered_records:
@@ -1368,6 +1572,7 @@ def write_shared_output_segment_media(
     errors: list[str] = []
     attempted = False
     segment_records: dict[int, dict[str, object]] = {}
+    conflict_records: list[dict[str, object]] = []
 
     try:
         if not shared_output_key:
@@ -1388,6 +1593,12 @@ def write_shared_output_segment_media(
             blockers.add("shared_init_missing")
 
         existing_segments = _read_json_mapping(output_dir / "segments.json") or {}
+        conflict_records = _merge_conflict_records(
+            _read_json_mapping(output_dir / "metadata.json"),
+            _read_json_mapping(output_dir / "ranges.json"),
+            existing_segments,
+            updated_at=timestamp,
+        )
         for item in existing_segments.get("segments") or []:
             if not isinstance(item, Mapping):
                 continue
@@ -1407,6 +1618,7 @@ def write_shared_output_segment_media(
                 else "not_ready",
                 blockers=blockers,
                 media_bytes_present=bool(segment_records),
+                conflict_records=conflict_records,
             )
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1425,6 +1637,7 @@ def write_shared_output_segment_media(
                 status="not_ready",
                 blockers=blockers,
                 media_bytes_present=bool(segment_records),
+                conflict_records=conflict_records,
             )
 
         for plan in candidate_plans:
@@ -1459,6 +1672,21 @@ def write_shared_output_segment_media(
                     if final_hash != staged_hash:
                         blockers.add("segment_hash_conflict")
                         conflict_count += 1
+                        conflict_records = _merge_conflict_records(
+                            conflict_records,
+                            [
+                                {
+                                    "index": absolute_index,
+                                    "existing_sha256": final_hash,
+                                    "candidate_sha256": staged_hash,
+                                    "existing_size_bytes": final_size,
+                                    "candidate_size_bytes": staged_size,
+                                    "first_conflict_at": timestamp,
+                                    "last_conflict_at": timestamp,
+                                }
+                            ],
+                            updated_at=timestamp,
+                        )
                         staging_path.unlink(missing_ok=True)
                         continue
                     staging_path.unlink(missing_ok=True)
@@ -1504,13 +1732,14 @@ def write_shared_output_segment_media(
                     pass
                 continue
 
-        if segment_records:
+        if segment_records or conflict_records:
             range_start_index, range_end_index_exclusive = _update_shared_segment_metadata(
                 output_dir=output_dir,
                 shared_output_key=sanitized_key,
                 segment_duration_seconds=segment_duration_seconds,
                 segment_records=segment_records,
                 updated_at=timestamp,
+                conflict_records=conflict_records,
             )
 
         if conflict_count:
@@ -1536,6 +1765,7 @@ def write_shared_output_segment_media(
             range_start_index=range_start_index,
             range_end_index_exclusive=range_end_index_exclusive,
             media_bytes_present=bool(segment_records),
+            conflict_records=conflict_records,
             errors=errors,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1582,7 +1812,10 @@ def write_shared_output_store_metadata(
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "leases").mkdir(exist_ok=True)
         (output_dir / "staging").mkdir(exist_ok=True)
+        existing_metadata = _read_json_mapping(metadata_path)
+        existing_ranges = _read_json_mapping(ranges_path)
         existing_segments = _read_json_mapping(segments_path)
+        existing_conflicts = _merge_conflict_records(existing_metadata, existing_ranges, existing_segments, updated_at=timestamp)
         if existing_segments is not None and list(existing_segments.get("segments") or []):
             media_bytes_present = True
             metadata_payload.update(
@@ -1593,6 +1826,12 @@ def write_shared_output_store_metadata(
                     "store_ready_for_segments": True,
                 }
             )
+        _apply_servability_fields(
+            metadata_payload,
+            media_bytes_present=media_bytes_present,
+            byte_integrity_validated=media_bytes_present,
+            conflict_records=existing_conflicts,
+        )
 
         existing_contract = _read_json_mapping(contract_path)
         if existing_contract is not None and _contract_conflict_view(existing_contract) != _contract_conflict_view(
@@ -1610,10 +1849,15 @@ def write_shared_output_store_metadata(
             _write_json_atomic(metadata_path, metadata_payload)
             metadata_written = True
 
-            existing_ranges = _read_json_mapping(ranges_path)
             if existing_ranges is not None and bool(existing_ranges.get("media_bytes_present")):
                 ranges_payload = dict(existing_ranges)
                 ranges_payload["updated_at"] = timestamp
+                _apply_servability_fields(
+                    ranges_payload,
+                    media_bytes_present=True,
+                    byte_integrity_validated=bool(ranges_payload.get("byte_integrity_validated", True)),
+                    conflict_records=existing_conflicts,
+                )
                 ranges_status = "media_bytes_preserved"
             elif existing_ranges is None:
                 ranges_payload = build_metadata_only_ranges_metadata(
@@ -1624,6 +1868,12 @@ def write_shared_output_store_metadata(
                 )
             else:
                 ranges_payload = dict(existing_ranges)
+                _apply_servability_fields(
+                    ranges_payload,
+                    media_bytes_present=bool(ranges_payload.get("media_bytes_present")),
+                    byte_integrity_validated=bool(ranges_payload.get("byte_integrity_validated")),
+                    conflict_records=existing_conflicts,
+                )
             if candidate_range is not None:
                 ranges_payload = add_metadata_only_confirmed_range(
                     ranges_payload,
@@ -1634,11 +1884,23 @@ def write_shared_output_store_metadata(
                     source_epoch_id=source_epoch_id,
                     updated_at=timestamp,
                 )
-            else:
+            elif ranges_status != "media_bytes_preserved":
                 ranges_payload["updated_at"] = timestamp
                 ranges_payload["range_status"] = "metadata_only"
                 ranges_payload["media_bytes_present"] = False
                 ranges_payload["serving_enabled"] = False
+                _apply_servability_fields(
+                    ranges_payload,
+                    media_bytes_present=False,
+                    byte_integrity_validated=False,
+                    conflict_records=existing_conflicts,
+                )
+            _apply_servability_fields(
+                ranges_payload,
+                media_bytes_present=bool(ranges_payload.get("media_bytes_present")),
+                byte_integrity_validated=bool(ranges_payload.get("byte_integrity_validated")),
+                conflict_records=existing_conflicts,
+            )
             _write_json_atomic(ranges_path, ranges_payload)
             if ranges_status != "media_bytes_preserved":
                 ranges_status = "metadata_only_updated" if existing_ranges is not None else "metadata_only_written"
@@ -1649,6 +1911,11 @@ def write_shared_output_store_metadata(
         blockers.add("shared_output_metadata_write_failed")
         metadata_written = False
 
+    servability = _servability_fields(
+        media_bytes_present=media_bytes_present,
+        byte_integrity_validated=media_bytes_present,
+        conflict_records=locals().get("existing_conflicts", []),
+    )
     return {
         "shared_output_metadata_written": metadata_written,
         "shared_output_contract_status": contract_status,
@@ -1656,6 +1923,17 @@ def write_shared_output_store_metadata(
         "shared_output_ranges_status": ranges_status,
         "shared_output_range_count": range_count,
         "shared_output_media_bytes_present": media_bytes_present,
+        "shared_output_byte_integrity_validated": bool(servability["byte_integrity_validated"]),
+        "shared_output_segment_bytes_stable": bool(servability["segment_bytes_stable"]),
+        "shared_output_mixed_writer_conflict": bool(servability["mixed_writer_conflict"]),
+        "shared_output_conflict_count": int(servability["conflict_count"]),
+        "shared_output_conflict_indexes": list(servability["conflict_indexes"]),
+        "shared_output_serving_allowed": bool(servability["serving_allowed"]),
+        "shared_output_serving_blocked": bool(servability["serving_blocked"]),
+        "shared_output_serving_blocked_reason": servability["serving_blocked_reason"],
+        "shared_output_serving_blocked_reasons": list(servability["serving_blocked_reasons"]),
+        "shared_output_canonical_generation_required": bool(servability["canonical_generation_required"]),
+        "shared_output_canonical_generation_strategy": servability["canonical_generation_strategy"],
         "shared_output_store_blockers": _ordered_store_blockers(blockers),
         "shared_output_metadata_write_errors": errors,
     }

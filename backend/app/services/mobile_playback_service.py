@@ -4889,6 +4889,39 @@ class MobilePlaybackManager:
             payload["shared_output_media_bytes_present"] = bool(
                 metadata_write_result["shared_output_media_bytes_present"]
             )
+            payload["shared_output_byte_integrity_validated"] = bool(
+                metadata_write_result.get("shared_output_byte_integrity_validated", False)
+            )
+            payload["shared_output_segment_bytes_stable"] = bool(
+                metadata_write_result.get("shared_output_segment_bytes_stable", False)
+            )
+            payload["shared_output_mixed_writer_conflict"] = bool(
+                metadata_write_result.get("shared_output_mixed_writer_conflict", False)
+            )
+            payload["shared_output_conflict_count"] = int(
+                metadata_write_result.get("shared_output_conflict_count", 0) or 0
+            )
+            payload["shared_output_conflict_indexes"] = list(
+                metadata_write_result.get("shared_output_conflict_indexes", [])
+            )
+            payload["shared_output_serving_allowed"] = bool(
+                metadata_write_result.get("shared_output_serving_allowed", False)
+            )
+            payload["shared_output_serving_blocked"] = bool(
+                metadata_write_result.get("shared_output_serving_blocked", True)
+            )
+            payload["shared_output_serving_blocked_reason"] = metadata_write_result.get(
+                "shared_output_serving_blocked_reason"
+            )
+            payload["shared_output_serving_blocked_reasons"] = list(
+                metadata_write_result.get("shared_output_serving_blocked_reasons", [])
+            )
+            payload["shared_output_canonical_generation_required"] = bool(
+                metadata_write_result.get("shared_output_canonical_generation_required", True)
+            )
+            payload["shared_output_canonical_generation_strategy"] = metadata_write_result.get(
+                "shared_output_canonical_generation_strategy"
+            )
             payload["shared_output_store_blockers"] = list(
                 metadata_write_result["shared_output_store_blockers"]
             )
@@ -4920,6 +4953,12 @@ class MobilePlaybackManager:
             payload["shared_segment_write_range_end_index_exclusive"] = metadata_write_result[
                 "shared_segment_write_range_end_index_exclusive"
             ]
+            payload["shared_segment_write_conflict_indexes"] = list(
+                metadata_write_result.get("shared_segment_write_conflict_indexes", [])
+            )
+            payload["shared_segment_write_serving_blocked_reason"] = metadata_write_result.get(
+                "shared_segment_write_serving_blocked_reason"
+            )
             payload["route2_init_available"] = bool(workload.init_metadata["route2_init_available"])
             payload["route2_init_hash_sha256"] = workload.init_metadata["route2_init_hash_sha256"]
             payload["route2_init_hash_available"] = bool(workload.init_metadata["route2_init_hash_available"])

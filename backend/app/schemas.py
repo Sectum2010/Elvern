@@ -1392,6 +1392,17 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     shared_output_ranges_status: str | None = None
     shared_output_range_count: int = Field(default=0, ge=0)
     shared_output_media_bytes_present: bool = False
+    shared_output_byte_integrity_validated: bool = False
+    shared_output_segment_bytes_stable: bool = False
+    shared_output_mixed_writer_conflict: bool = False
+    shared_output_conflict_count: int = Field(default=0, ge=0)
+    shared_output_conflict_indexes: list[int] = Field(default_factory=list)
+    shared_output_serving_allowed: bool = False
+    shared_output_serving_blocked: bool = True
+    shared_output_serving_blocked_reason: str | None = None
+    shared_output_serving_blocked_reasons: list[str] = Field(default_factory=list)
+    shared_output_canonical_generation_required: bool = True
+    shared_output_canonical_generation_strategy: str | None = None
     shared_output_store_blockers: list[str] = Field(default_factory=list)
     shared_init_write_enabled: bool = False
     shared_init_write_attempted: bool = False
@@ -1411,6 +1422,8 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     shared_segment_write_last_hash: str | None = None
     shared_segment_write_range_start_index: int | None = Field(default=None, ge=0)
     shared_segment_write_range_end_index_exclusive: int | None = Field(default=None, ge=0)
+    shared_segment_write_conflict_indexes: list[int] = Field(default_factory=list)
+    shared_segment_write_serving_blocked_reason: str | None = None
     route2_init_available: bool = False
     route2_init_hash_sha256: str | None = None
     route2_init_hash_available: bool = False

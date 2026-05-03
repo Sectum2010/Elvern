@@ -210,6 +210,16 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - `segments.json` records per-segment index, absolute time range, filename, size, hash, and writer metadata. `ranges.json` may set `media_bytes_present=true` only for contiguous ranges whose segment bytes exist and validate.
 - Segment writer failure is status-only and must not break normal playback. Shared-store serving, sparse manifests, leases, permission-checked reuse, shared attach, and shared workers remain future phases.
 
+## Phase 1K-3D-A Conflict Metadata And Servability Block
+
+- The long-term shared-output strategy is Strategy A: canonical absolute shared-output generation. Future shared output must be generated against canonical absolute segment boundaries and absolute segment identity instead of assuming independent current Route2 epoch outputs are byte-stable.
+- Current Route2 worker output is epoch-relative: epochs start near `target_position_seconds - 20s`, ffmpeg seeks with `-ss <epoch_start>`, the output timeline resets with `-output_ts_offset 0`, segment numbering restarts with `-start_number 0`, and forced keyframes are relative to the output timeline. These bytes are useful for normal session playback but are not a canonical shared-output contract.
+- `media_bytes_present=true` is a raw storage fact only. It means shared-store byte files and hashes exist; it does not mean the range is safe to serve, reuse, attach, or advertise in a shared manifest.
+- Shared-store metadata, ranges, and segments distinguish `media_bytes_present`, `byte_integrity_validated`, `segment_bytes_stable`, and `serving_allowed`. In the current phase, `serving_allowed=false` and `serving_blocked=true` remain mandatory.
+- If a segment writer observes `segment_hash_conflict`, it must never overwrite the finalized segment. It records conflict metadata such as `conflict_indexes`, `conflict_count`, `first_conflict_at`, `last_conflict_at`, `mixed_writer_conflict=true`, `segment_bytes_stable=false`, and `serving_blocked_reasons` including `segment_hash_conflict`.
+- Existing or legacy shared-store records that have `media_bytes_present=true` but no servability fields must default to `serving_allowed=false`. If no historical conflict metadata exists, stability is not assumed; serving remains blocked by `canonical_generation_required` / `stability_not_proven`.
+- Safe serving still requires future canonical generation, init compatibility, stable absolute segments, permission checks, active leases, cleanup protection, and sparse manifest correctness. This phase still serves nothing from the shared store and implements no reuse, attach, shared worker, downshift, reclaim, or adaptive control behavior.
+
 ## Current State
 
 - Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.

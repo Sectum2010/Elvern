@@ -9342,12 +9342,23 @@ def test_route2_shared_output_segment_writer_enabled_writes_segments_and_ranges(
     assert segments["segments"][0]["sha256"] == hashlib.sha256(b"segment-0").hexdigest()
     assert ranges["media_bytes_present"] is True
     assert ranges["serving_enabled"] is False
+    assert ranges["byte_integrity_validated"] is True
+    assert ranges["segment_bytes_stable"] is False
+    assert ranges["serving_allowed"] is False
+    assert ranges["serving_blocked"] is True
+    assert ranges["canonical_generation_required"] is True
+    assert ranges["canonical_generation_strategy"] == "required_for_serving"
     assert [(item["start_index"], item["end_index_exclusive"]) for item in ranges["confirmed_ranges"]] == [(0, 2)]
     assert all(item["media_bytes_present"] is True for item in ranges["confirmed_ranges"])
+    assert all(item["serving_allowed"] is False for item in ranges["confirmed_ranges"])
     assert metadata["serving_enabled"] is False
     assert metadata["shared_manifest_enabled"] is False
     assert metadata["segment_writer_enabled"] is True
     assert metadata["media_bytes_present"] is True
+    assert metadata["byte_integrity_validated"] is True
+    assert metadata["segment_bytes_stable"] is False
+    assert metadata["serving_allowed"] is False
+    assert metadata["serving_blocked_reason"] == "canonical_generation_required"
     assert count_shared_output_segment_records(manager._route2_root) == 1
     assert count_shared_output_ranges_media_bytes_present_records(manager._route2_root) == 1
 
@@ -9406,9 +9417,111 @@ def test_route2_shared_output_segment_writer_blocks_hash_conflict(
 
     assert result["shared_segment_write_status"] == "conflict"
     assert result["shared_segment_write_conflict_count"] == 1
+    assert result["shared_segment_write_conflict_indexes"] == [0]
+    assert result["shared_segment_write_serving_blocked_reason"] == "segment_hash_conflict"
+    assert result["shared_output_mixed_writer_conflict"] is True
+    assert result["shared_output_segment_bytes_stable"] is False
+    assert result["shared_output_serving_allowed"] is False
+    assert result["shared_output_conflict_count"] == 1
+    assert result["shared_output_conflict_indexes"] == [0]
     assert "segment_hash_conflict" in result["shared_segment_write_blockers"]
     assert final_segment.read_bytes() == b"old-segment"
     assert not list((output_dir / "staging").glob("*.tmp"))
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+    ranges = json.loads((output_dir / "ranges.json").read_text(encoding="utf-8"))
+    segments = json.loads((output_dir / "segments.json").read_text(encoding="utf-8"))
+    serialized = json.dumps({"metadata": metadata, "ranges": ranges, "segments": segments}, sort_keys=True)
+    assert metadata["mixed_writer_conflict"] is True
+    assert metadata["segment_bytes_stable"] is False
+    assert metadata["serving_allowed"] is False
+    assert metadata["serving_blocked_reason"] == "segment_hash_conflict"
+    assert "segment_hash_conflict" in metadata["serving_blocked_reasons"]
+    assert metadata["conflict_indexes"] == [0]
+    assert metadata["conflict_count"] == 1
+    assert ranges["serving_allowed"] is False
+    assert ranges["mixed_writer_conflict"] is True
+    assert segments["serving_allowed"] is False
+    assert segments["segment_hash_conflicts"][0]["index"] == 0
+    assert segments["segment_hash_conflicts"][0]["existing_sha256"] == hashlib.sha256(b"old-segment").hexdigest()
+    assert segments["segment_hash_conflicts"][0]["candidate_sha256"] == hashlib.sha256(b"new-segment").hexdigest()
+    assert "source-segment" not in serialized
+    assert str(source_segment) not in serialized
+
+
+def test_route2_shared_output_legacy_media_bytes_do_not_imply_servable(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    output_dir = _prepare_shared_output_record_with_init(manager)
+    (output_dir / "segments.json").write_text(
+        json.dumps(
+            {
+                "version": SHARED_OUTPUT_STORE_METADATA_VERSION,
+                "shared_output_key": "r2ss:v2:abcdef1234567890",
+                "segment_duration_seconds": 2.0,
+                "serving_enabled": False,
+                "media_bytes_present": True,
+                "segments": [
+                    {
+                        "index": 0,
+                        "start_seconds": 0.0,
+                        "end_seconds": 2.0,
+                        "filename": "abs_000000000000.m4s",
+                        "size_bytes": 8,
+                        "sha256": hashlib.sha256(b"legacy-0").hexdigest(),
+                        "written_at": "2026-05-02T00:00:00Z",
+                    }
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "ranges.json").write_text(
+        json.dumps(
+            {
+                "version": SHARED_OUTPUT_STORE_METADATA_VERSION,
+                "shared_output_key": "r2ss:v2:abcdef1234567890",
+                "segment_duration_seconds": 2.0,
+                "serving_enabled": False,
+                "media_bytes_present": True,
+                "confirmed_ranges": [
+                    {
+                        "start_index": 0,
+                        "end_index_exclusive": 1,
+                        "start_seconds": 0.0,
+                        "end_seconds": 2.0,
+                        "segment_count": 1,
+                        "media_bytes_present": True,
+                    }
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    contract, metadata_payload = _shared_output_writer_payloads()
+
+    result = write_shared_output_store_metadata(
+        route2_root=manager._route2_root,
+        contract_metadata=contract,
+        metadata=metadata_payload,
+        updated_at="2026-05-02T00:00:04Z",
+    )
+    metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+    ranges = json.loads((output_dir / "ranges.json").read_text(encoding="utf-8"))
+
+    assert result["shared_output_media_bytes_present"] is True
+    assert result["shared_output_serving_allowed"] is False
+    assert result["shared_output_segment_bytes_stable"] is False
+    assert result["shared_output_serving_blocked_reason"] == "canonical_generation_required"
+    assert "stability_not_proven" in result["shared_output_serving_blocked_reasons"]
+    assert metadata["media_bytes_present"] is True
+    assert metadata["serving_allowed"] is False
+    assert metadata["segment_bytes_stable"] is False
+    assert ranges["media_bytes_present"] is True
+    assert ranges["serving_allowed"] is False
+    assert ranges["serving_blocked"] is True
 
 
 def test_route2_shared_output_segment_writer_blocks_missing_init_noncanonical_preroll_and_contract(
