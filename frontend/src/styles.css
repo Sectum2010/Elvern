@@ -2075,17 +2075,22 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   justify-content: center;
   inline-size: 1.45rem;
   block-size: 1.45rem;
+  flex: 0 0 auto;
   border-radius: 999px;
   border: 1px solid rgba(242, 201, 116, 0.42);
   background: linear-gradient(180deg, rgba(255, 224, 142, 0.2), rgba(180, 116, 35, 0.14));
   color: #ffd778;
+  line-height: 1;
   box-shadow: 0 0 0.8rem rgba(242, 201, 116, 0.18);
+  pointer-events: none;
+  text-decoration: none;
 }
 
 .admin-user-crown svg {
-  inline-size: 1rem;
-  block-size: 1rem;
+  inline-size: 0.92rem;
+  block-size: 0.92rem;
   fill: currentColor;
+  display: block;
 }
 
 .user-status-pill {
@@ -2309,13 +2314,6 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   cursor: pointer;
 }
 
-.admin-user-workers__header-button:hover .admin-user-workers__collapse-hint,
-.admin-user-workers__header-button:focus-visible .admin-user-workers__collapse-hint {
-  color: #deedf7;
-  text-decoration: underline;
-  text-underline-offset: 0.18rem;
-}
-
 .admin-user-workers__header-button:focus-visible {
   outline: 2px solid rgba(143, 182, 218, 0.38);
   outline-offset: 4px;
@@ -2325,12 +2323,6 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   display: grid;
   gap: 0.3rem;
   min-width: 0;
-}
-
-.admin-user-workers__collapse-hint {
-  color: var(--text-muted);
-  font-size: 0.82rem;
-  transition: color 150ms ease;
 }
 
 .admin-user-workers__gauges {
@@ -2489,10 +2481,27 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .browser-resume-modal__card.detail-info-modal__card.admin-diagnostic-id-modal {
-  position: relative;
   width: min(calc(100vw - 32px), 34rem);
   max-width: 34rem;
-  padding: 2.8rem 1.4rem 1.4rem;
+  padding: 1.2rem 1.25rem 1.25rem;
+  gap: 1rem;
+}
+
+.admin-diagnostic-id-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.admin-diagnostic-id-modal__title {
+  margin: 0;
+  text-transform: lowercase;
+}
+
+.admin-diagnostic-id-modal__close {
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 
 .admin-diagnostic-id-modal__value {

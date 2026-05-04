@@ -148,7 +148,7 @@ function AdminCrownIcon() {
   return (
     <span aria-label="Admin" className="admin-user-crown" role="img" title="Admin">
       <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
-        <path d="M4.4 18.4h15.2l1.1-10.1-5.2 3.7L12 4.8 8.5 12 3.3 8.3l1.1 10.1Zm1.1 2.1h13v1.8h-13v-1.8Z" />
+        <path d="M4.4 18.4h15.2l1.1-10.1-5.2 3.7L12 4.8 8.5 12 3.3 8.3l1.1 10.1Z" />
       </svg>
     </span>
   );
@@ -1184,9 +1184,6 @@ export function AdminPage() {
                         <p className="page-subnote">
                           Route2 background preparation for this user.
                         </p>
-                        <span className="admin-user-workers__collapse-hint">
-                          {isWorkerGroupCollapsed ? "Show worker cards" : "Hide worker cards"}
-                        </span>
                       </div>
                       {workerGroup.hasRunningWorkers ? (
                         <div className="admin-user-workers__gauges">
@@ -1700,9 +1697,10 @@ export function AdminPage() {
     </div>
   ) : null;
 
+  const diagnosticIdTitle = diagnosticIdModal ? `${diagnosticIdModal.label} id` : "";
   const diagnosticIdPopup = diagnosticIdModal ? (
     <div
-      aria-label="Full diagnostic ID"
+      aria-labelledby="admin-diagnostic-id-modal-title"
       aria-modal="true"
       className="browser-resume-modal"
       role="dialog"
@@ -1713,14 +1711,19 @@ export function AdminPage() {
         onClick={closeDiagnosticIdModal}
       />
       <div className="browser-resume-modal__card detail-info-modal__card admin-diagnostic-id-modal">
-        <button
-          aria-label="Close"
-          className="ghost-button detail-info-modal__close"
-          onClick={closeDiagnosticIdModal}
-          type="button"
-        >
-          X
-        </button>
+        <div className="admin-diagnostic-id-modal__header">
+          <p id="admin-diagnostic-id-modal-title" className="detail-info-modal__title admin-diagnostic-id-modal__title">
+            {diagnosticIdTitle}
+          </p>
+          <button
+            aria-label="Close"
+            className="ghost-button detail-info-modal__close admin-diagnostic-id-modal__close"
+            onClick={closeDiagnosticIdModal}
+            type="button"
+          >
+            X
+          </button>
+        </div>
         <code className="admin-diagnostic-id-modal__value">{diagnosticIdModal.value}</code>
       </div>
     </div>
