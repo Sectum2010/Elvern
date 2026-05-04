@@ -2526,22 +2526,31 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   color: #deedf7;
   font-size: 0.8rem;
   font-weight: 700;
-  text-transform: capitalize;
+  text-transform: none;
 }
 
+.admin-worker-state--success,
 .admin-worker-state--running {
   border-color: rgba(109, 210, 163, 0.24);
   background: rgba(109, 210, 163, 0.14);
   color: #c6f1db;
 }
 
+.admin-worker-state--info,
 .admin-worker-state--queued,
 .admin-worker-state--stopping {
+  border-color: rgba(132, 169, 255, 0.24);
+  background: rgba(132, 169, 255, 0.12);
+  color: #d4e0ff;
+}
+
+.admin-worker-state--warning {
   border-color: rgba(227, 197, 94, 0.24);
   background: rgba(227, 197, 94, 0.14);
   color: #f5e6ab;
 }
 
+.admin-worker-state--danger,
 .admin-worker-state--failed {
   border-color: rgba(235, 107, 107, 0.24);
   background: rgba(235, 107, 107, 0.12);
@@ -2549,11 +2558,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .admin-worker-state--completed {
-  border-color: rgba(132, 169, 255, 0.24);
-  background: rgba(132, 169, 255, 0.12);
-  color: #d4e0ff;
+  border-color: rgba(109, 210, 163, 0.24);
+  background: rgba(109, 210, 163, 0.14);
+  color: #c6f1db;
 }
 
+.admin-worker-state--neutral,
 .admin-worker-state--unknown {
   color: var(--text-muted);
 }

@@ -152,6 +152,55 @@ export function canTerminatePlaybackWorker(workerState) {
   return normalizedState === "running" || normalizedState === "queued";
 }
 
+const STATUS_TONE_CLASSES = new Set(["success", "info", "warning", "danger", "neutral"]);
+
+const RAW_WORKER_STATE_DISPLAY = {
+  completed: { status: "complete", label: "Complete", tone: "success" },
+  failed: { status: "failed", label: "Failed", tone: "danger" },
+  interrupted: { status: "failed", label: "Failed", tone: "danger" },
+  queued: { status: "waiting", label: "Waiting", tone: "info" },
+  running: { status: "running", label: "Running", tone: "success" },
+  stopped: { status: "stopped", label: "Stopped", tone: "neutral" },
+  stopping: { status: "stopping", label: "Stopping", tone: "warning" },
+};
+
+export function buildWorkerDisplayStatus(worker) {
+  const backendLabel = typeof worker?.display_status_label === "string"
+    ? worker.display_status_label.trim()
+    : "";
+  const backendTone = typeof worker?.display_status_tone === "string"
+    ? worker.display_status_tone.trim().toLowerCase()
+    : "";
+  const backendStatus = typeof worker?.display_status === "string"
+    ? worker.display_status.trim().toLowerCase()
+    : "";
+  if (backendLabel) {
+    return {
+      status: backendStatus || backendLabel.toLowerCase().replace(/\s+/g, "_"),
+      label: backendLabel,
+      tone: STATUS_TONE_CLASSES.has(backendTone) ? backendTone : "neutral",
+      reason: typeof worker?.display_status_reason === "string" ? worker.display_status_reason : "",
+    };
+  }
+  const rawState = String(worker?.state || "unknown").trim().toLowerCase();
+  const fallback = RAW_WORKER_STATE_DISPLAY[rawState] || {
+    status: rawState || "unknown",
+    label: (rawState || "unknown").replace(/_/g, " "),
+    tone: "neutral",
+  };
+  return {
+    ...fallback,
+    reason: "",
+  };
+}
+
+export function workerStatusToneClass(displayStatus) {
+  const tone = typeof displayStatus?.tone === "string"
+    ? displayStatus.tone.trim().toLowerCase()
+    : "";
+  return `admin-worker-state--${STATUS_TONE_CLASSES.has(tone) ? tone : "neutral"}`;
+}
+
 export function shouldShowWorkerCleanupNotice(worker, { delayThresholdSeconds = 30 } = {}) {
   if (!worker?.stop_requested) {
     return false;

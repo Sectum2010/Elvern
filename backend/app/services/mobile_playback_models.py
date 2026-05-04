@@ -203,6 +203,8 @@ class Route2WorkerRecord:
     last_seen_at: str = field(default_factory=utcnow_iso)
     prepared_ranges: list[list[float]] = field(default_factory=list)
     stop_requested: bool = False
+    cleanup_delayed: bool = False
+    cleanup_delay_seconds: float | None = None
     non_retryable_error: str | None = None
     failure_count: int = 0
     replacement_count: int = 0

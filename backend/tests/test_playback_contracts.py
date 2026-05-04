@@ -4296,6 +4296,145 @@ def test_route2_status_freezes_stopped_worker_runtime_and_labels_profile(initial
     assert 79.0 <= item_payload["runtime_seconds"] <= 81.0
     assert item_payload["transcode_profile_key"] == "mobile_2160p"
     assert item_payload["display_profile_label"] == "2160p"
+    assert item_payload["display_status_label"] == "Stopped"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_status", "expected_label", "expected_tone"),
+    [
+        ("queued", "waiting", "Waiting", "info"),
+        ("running", "preparing", "Preparing", "info"),
+        ("completed", "complete", "Complete", "success"),
+        ("failed", "failed", "Failed", "danger"),
+        ("interrupted", "failed", "Failed", "danger"),
+    ],
+)
+def test_route2_worker_status_display_status_for_raw_worker_states(
+    initialized_settings,
+    state: str,
+    expected_status: str,
+    expected_label: str,
+    expected_tone: str,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    record = _make_route2_worker_record_for_spawn_dry_run()
+    record.worker_id = f"display-{state}"
+    record.state = state
+
+    with manager._lock:
+        manager._route2_workers[record.worker_id] = record
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+
+    assert item_payload["display_status"] == expected_status
+    assert item_payload["display_status_label"] == expected_label
+    assert item_payload["display_status_tone"] == expected_tone
+    assert isinstance(item_payload["display_status_reason"], str)
+    assert item_payload["display_status_priority"] >= 1
+
+
+def test_route2_worker_status_display_status_distinguishes_cleanup_delayed_and_stopping(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    cleanup_record = _make_route2_worker_record_for_spawn_dry_run()
+    cleanup_record.worker_id = "cleanup-delayed-worker"
+    cleanup_record.state = "stopped"
+    cleanup_record.stop_requested = True
+    cleanup_record.cleanup_delayed = True
+    cleanup_record.cleanup_delay_seconds = 31.0
+    stopping_record = _make_route2_worker_record_for_spawn_dry_run()
+    stopping_record.worker_id = "stopping-worker"
+    stopping_record.state = "running"
+    stopping_record.stop_requested = True
+
+    with manager._lock:
+        manager._route2_workers[cleanup_record.worker_id] = cleanup_record
+        manager._route2_workers[stopping_record.worker_id] = stopping_record
+
+    status = manager.get_route2_worker_status()
+    cleanup_payload = _route2_status_item(status, cleanup_record.worker_id)
+    stopping_payload = _route2_status_item(status, stopping_record.worker_id)
+
+    assert cleanup_payload["display_status"] == "cleanup_delayed"
+    assert cleanup_payload["display_status_label"] == "Cleanup delayed"
+    assert cleanup_payload["display_status_tone"] == "danger"
+    assert cleanup_payload["cleanup_delayed"] is True
+    assert cleanup_payload["cleanup_delay_seconds"] == 31.0
+    assert stopping_payload["display_status"] == "stopping"
+    assert stopping_payload["display_status_label"] == "Stopping"
+    assert stopping_payload["display_status_tone"] == "warning"
+
+
+def _install_display_status_session(
+    manager: MobilePlaybackManager,
+    session: MobilePlaybackSession,
+    epoch: PlaybackEpoch,
+    record: Route2WorkerRecord,
+) -> None:
+    session.browser_playback.active_epoch_id = epoch.epoch_id
+    session.browser_playback.epochs[epoch.epoch_id] = epoch
+    epoch.active_worker_id = record.worker_id
+    epoch.process = _TelemetryProcess(pid=5432, running=True)
+    epoch.state = "publishing"
+    epoch.publish_segment_count = 4
+    record.process = epoch.process
+    record.state = "running"
+    record.started_at = utcnow_iso()
+    record.assigned_threads = 4
+    record.process_exists = True
+    manager._sessions[session.session_id] = session
+    manager._route2_workers[record.worker_id] = record
+
+
+def test_route2_worker_status_display_status_for_running_paused_background_and_buffering(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    session.lifecycle_state = "attached"
+    session.client_is_playing = True
+    _mark_route2_runtime_supply(session, epoch, record, supply_rate_x=1.4, runway_seconds=90.0)
+    with manager._lock:
+        _install_display_status_session(manager, session, epoch, record)
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+    assert item_payload["display_status"] == "running"
+    assert item_payload["display_status_label"] == "Running"
+    assert item_payload["display_status_tone"] == "success"
+
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    session.lifecycle_state = "attached"
+    session.client_is_playing = False
+    with manager._lock:
+        _install_display_status_session(manager, session, epoch, record)
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+    assert item_payload["display_status"] == "paused"
+    assert item_payload["display_status_label"] == "Paused"
+    assert item_payload["display_status_tone"] == "neutral"
+
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    session.lifecycle_state = "background-suspended"
+    session.client_is_playing = False
+    with manager._lock:
+        _install_display_status_session(manager, session, epoch, record)
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+    assert item_payload["display_status"] == "background"
+    assert item_payload["display_status_label"] == "Background"
+    assert item_payload["display_status_tone"] == "neutral"
+
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings)
+    session.lifecycle_state = "attached"
+    session.client_is_playing = True
+    session.stalled_recovery_requested = True
+    with manager._lock:
+        _install_display_status_session(manager, session, epoch, record)
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+    assert item_payload["display_status"] == "buffering"
+    assert item_payload["display_status_label"] == "Buffering"
+    assert item_payload["display_status_tone"] == "warning"
 
 
 def test_route2_rss_parser_reads_vmrss_kib() -> None:

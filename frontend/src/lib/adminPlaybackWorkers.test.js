@@ -5,6 +5,7 @@ import {
   buildPlaybackWorkerSummaryBubbles,
   buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
+  buildWorkerDisplayStatus,
   canTerminatePlaybackWorker,
   clampGaugePercent,
   formatCpuCoresUsage,
@@ -13,6 +14,7 @@ import {
   formatMemoryGaugeValue,
   formatWorkerProfileLabel,
   shouldShowWorkerCleanupNotice,
+  workerStatusToneClass,
 } from "./adminPlaybackWorkers.js";
 
 
@@ -122,6 +124,43 @@ test("terminate helper includes the movie title", () => {
   assert.equal(canTerminatePlaybackWorker("running"), true);
   assert.equal(canTerminatePlaybackWorker("queued"), true);
   assert.equal(canTerminatePlaybackWorker("completed"), false);
+});
+
+
+test("worker display status prefers backend label and tone", () => {
+  const displayStatus = buildWorkerDisplayStatus({
+    state: "queued",
+    display_status: "paused",
+    display_status_label: "Paused",
+    display_status_tone: "neutral",
+    display_status_reason: "Client explicitly reported paused playback.",
+  });
+
+  assert.deepEqual(displayStatus, {
+    status: "paused",
+    label: "Paused",
+    tone: "neutral",
+    reason: "Client explicitly reported paused playback.",
+  });
+  assert.equal(workerStatusToneClass(displayStatus), "admin-worker-state--neutral");
+});
+
+
+test("worker display status falls back from raw queued to Waiting", () => {
+  const displayStatus = buildWorkerDisplayStatus({ state: "queued" });
+
+  assert.equal(displayStatus.status, "waiting");
+  assert.equal(displayStatus.label, "Waiting");
+  assert.equal(displayStatus.tone, "info");
+  assert.equal(workerStatusToneClass(displayStatus), "admin-worker-state--info");
+});
+
+
+test("worker display status tone class is defensive", () => {
+  assert.equal(
+    workerStatusToneClass(buildWorkerDisplayStatus({ display_status_label: "Mystery", display_status_tone: "sparkle" })),
+    "admin-worker-state--neutral",
+  );
 });
 
 

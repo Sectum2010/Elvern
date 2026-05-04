@@ -8,6 +8,7 @@ import {
   buildPlaybackWorkerSummaryBubbles,
   buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
+  buildWorkerDisplayStatus,
   canTerminatePlaybackWorker,
   formatCpuCoresUsage,
   formatMemoryGaugeValue,
@@ -17,6 +18,7 @@ import {
   formatWorkerRuntime,
   shouldShowWorkerCleanupNotice,
   shortenDiagnosticId,
+  workerStatusToneClass,
 } from "../lib/adminPlaybackWorkers";
 import { formatCompletedRescanWarning, formatRescanBannerText, hasCloudSyncWarning } from "../lib/cloudSyncStatus";
 import { formatDate } from "../lib/format";
@@ -1222,7 +1224,7 @@ export function AdminPage() {
                           const workerDiagnosticId = shortenDiagnosticId(worker.worker_id);
                           const epochDiagnosticId = shortenDiagnosticId(worker.epoch_id);
                           const hasTargetPosition = Number.isFinite(worker.target_position_seconds);
-                          const normalizedState = String(worker.state || "unknown").toLowerCase();
+                          const displayStatus = buildWorkerDisplayStatus(worker);
                           const canTerminateWorker = canTerminatePlaybackWorker(worker.state);
                           return (
                             <div className="admin-worker-card" key={worker.worker_id}>
@@ -1237,10 +1239,12 @@ export function AdminPage() {
                                   <span
                                     className={[
                                       "admin-worker-state",
-                                      `admin-worker-state--${normalizedState}`,
+                                      workerStatusToneClass(displayStatus),
                                     ].join(" ")}
+                                    onClick={(event) => event.stopPropagation()}
+                                    title={displayStatus.reason || undefined}
                                   >
-                                    {worker.state || "unknown"}
+                                    {displayStatus.label}
                                   </span>
                                   {canTerminateWorker ? (
                                     <button

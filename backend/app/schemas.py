@@ -1238,11 +1238,18 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     display_profile_label: str | None = None
     source_kind: str
     state: str
+    display_status: str | None = None
+    display_status_label: str | None = None
+    display_status_tone: str | None = None
+    display_status_reason: str | None = None
+    display_status_priority: int | None = Field(default=None, ge=0)
     runtime_seconds: float | None = Field(default=None, ge=0)
     pid: int | None = Field(default=None, ge=1)
     target_position_seconds: float = Field(ge=0)
     prepared_ranges: list[list[float]] = Field(default_factory=list)
     stop_requested: bool = False
+    cleanup_delayed: bool = False
+    cleanup_delay_seconds: float | None = Field(default=None, ge=0)
     non_retryable_error: str | None = None
     failure_count: int = Field(default=0, ge=0)
     replacement_count: int = Field(default=0, ge=0)

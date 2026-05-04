@@ -270,6 +270,15 @@ class _Route2WorkerTelemetryReadResult:
 
 
 @dataclass(slots=True)
+class _Route2WorkerDisplayStatus:
+    status: str
+    label: str
+    tone: str
+    reason: str
+    priority: int
+
+
+@dataclass(slots=True)
 class _Route2FfmpegProgressSnapshot:
     out_time_seconds: float | None = None
     speed_x: float | None = None
@@ -5864,6 +5873,166 @@ class MobilePlaybackManager:
             )
         )
 
+    def _route2_worker_display_status_locked(
+        self,
+        record: Route2WorkerRecord,
+        session: MobilePlaybackSession | None,
+        epoch: PlaybackEpoch | None,
+        payload: dict[str, object],
+    ) -> _Route2WorkerDisplayStatus:
+        state = str(record.state or "unknown").strip().lower()
+        epoch_state = str(epoch.state if epoch is not None else "").strip().lower()
+        lifecycle_state = str(session.lifecycle_state if session is not None else "").strip().lower()
+        runtime_health = str(payload.get("runtime_playback_health") or "").strip().lower()
+        process_active = bool(record.process_exists)
+        if not process_active and record.process is not None:
+            process_active = record.process.poll() is None
+        if not process_active and epoch is not None and epoch.process is not None:
+            process_active = epoch.process.poll() is None
+
+        cleanup_delay_seconds = getattr(record, "cleanup_delay_seconds", None)
+        cleanup_delayed = bool(getattr(record, "cleanup_delayed", False))
+        if cleanup_delay_seconds is not None:
+            cleanup_delayed = cleanup_delayed or cleanup_delay_seconds >= 30.0
+
+        if (
+            record.non_retryable_error
+            or state in {"failed", "interrupted"}
+            or epoch_state == "failed"
+            or (session is not None and session.last_error)
+            or (epoch is not None and epoch.last_error)
+        ):
+            reason = (
+                record.non_retryable_error
+                or (session.last_error if session is not None else None)
+                or (epoch.last_error if epoch is not None else None)
+                or "Worker or playback epoch reported a failure."
+            )
+            return _Route2WorkerDisplayStatus("failed", "Failed", "danger", str(reason), 1)
+
+        if record.stop_requested and cleanup_delayed:
+            return _Route2WorkerDisplayStatus(
+                "cleanup_delayed",
+                "Cleanup delayed",
+                "danger",
+                "Stop was requested, but backend cleanup exceeded the explicit delay threshold.",
+                2,
+            )
+
+        if record.stop_requested and (process_active or state in {"running", "queued", "stopping"}):
+            return _Route2WorkerDisplayStatus(
+                "stopping",
+                "Stopping",
+                "warning",
+                "Stop was requested and the worker is still ending.",
+                3,
+            )
+
+        if state in {"stopped", "cancelled", "closed"} or (
+            record.finished_at and state not in {"running", "queued", "completed"}
+        ):
+            return _Route2WorkerDisplayStatus(
+                "stopped",
+                "Stopped",
+                "neutral",
+                "Worker has ended; runtime is frozen at the final timestamp.",
+                4,
+            )
+
+        if state in {"queued", "waiting"}:
+            return _Route2WorkerDisplayStatus(
+                "waiting",
+                "Waiting",
+                "info",
+                "Worker is waiting for dispatch, source readiness, or capacity.",
+                5,
+            )
+
+        if (
+            session is not None
+            and session.client_is_playing
+            and (
+                session.stalled_recovery_requested
+                or runtime_health in {"cpu_thread_starved", "watch_supply_at_risk", "source_bound", "client_bound"}
+                or self._starvation_risk(session)
+                or self._stalled_recovery_needed(session)
+            )
+        ):
+            return _Route2WorkerDisplayStatus(
+                "buffering",
+                "Buffering",
+                "warning",
+                "Playback is active and backend health indicates stall, starvation, or recovery risk.",
+                6,
+            )
+
+        if lifecycle_state in {"background-suspended", "background_suspended", "background", "hidden", "suspended"}:
+            return _Route2WorkerDisplayStatus(
+                "background",
+                "Background",
+                "neutral",
+                "Client lifecycle reports the playback surface is backgrounded or suspended.",
+                7,
+            )
+
+        if (
+            session is not None
+            and lifecycle_state == "attached"
+            and session.client_is_playing is False
+            and state == "running"
+        ):
+            return _Route2WorkerDisplayStatus(
+                "paused",
+                "Paused",
+                "neutral",
+                "Client explicitly reports attached playback is not currently playing.",
+                8,
+            )
+
+        if (
+            state in {"running", "starting", "warming", "preparing"}
+            and (
+                session is None
+                or epoch is None
+                or not session.client_is_playing
+                or epoch_state in {"warming", "starting", "preparing"}
+                or not payload.get("publish_segment_count")
+            )
+        ):
+            return _Route2WorkerDisplayStatus(
+                "preparing",
+                "Preparing",
+                "info",
+                "Worker is active but initial readiness or active watch evidence is not established yet.",
+                9,
+            )
+
+        if state == "completed" or (epoch is not None and epoch.transcoder_completed):
+            return _Route2WorkerDisplayStatus(
+                "complete",
+                "Complete",
+                "success",
+                "Route2 output completed successfully.",
+                10,
+            )
+
+        if state == "running":
+            return _Route2WorkerDisplayStatus(
+                "running",
+                "Running",
+                "success",
+                "Worker is active without stop, failure, buffering, or preparation blockers.",
+                11,
+            )
+
+        return _Route2WorkerDisplayStatus(
+            state or "unknown",
+            (state or "unknown").replace("_", " ").capitalize(),
+            "neutral",
+            "No richer display status was available; using the raw worker state.",
+            99,
+        )
+
     def get_route2_worker_status(self) -> dict[str, object]:
         with self._lock:
             budget = self._route2_budget_summary_locked()
@@ -5952,6 +6121,12 @@ class MobilePlaybackManager:
                     "target_position_seconds": round(record.target_position_seconds, 2),
                     "prepared_ranges": record.prepared_ranges,
                     "stop_requested": record.stop_requested,
+                    "cleanup_delayed": record.cleanup_delayed,
+                    "cleanup_delay_seconds": (
+                        round(record.cleanup_delay_seconds, 3)
+                        if record.cleanup_delay_seconds is not None
+                        else None
+                    ),
                     "non_retryable_error": record.non_retryable_error,
                     "failure_count": record.failure_count,
                     "replacement_count": record.replacement_count,
@@ -6147,6 +6322,12 @@ class MobilePlaybackManager:
                     payload["publish_latency_avg_seconds"] = None
                     payload["publish_latency_max_seconds"] = None
                     payload["last_publish_kind"] = None
+                display_status = self._route2_worker_display_status_locked(record, session, epoch, payload)
+                payload["display_status"] = display_status.status
+                payload["display_status_label"] = display_status.label
+                payload["display_status_tone"] = display_status.tone
+                payload["display_status_reason"] = display_status.reason
+                payload["display_status_priority"] = display_status.priority
                 group["items"].append(payload)
                 payloads_by_worker_id[record.worker_id] = payload
             for group in grouped_users.values():
