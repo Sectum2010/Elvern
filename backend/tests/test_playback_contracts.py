@@ -4276,6 +4276,28 @@ def test_route2_worker_status_handles_exited_owned_worker_without_crashing(initi
     assert item_payload["state"] == "interrupted"
 
 
+def test_route2_status_freezes_stopped_worker_runtime_and_labels_profile(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    now_ts = time.time()
+    started_ts = now_ts - 125.0
+    finished_ts = now_ts - 45.0
+    record = _make_route2_worker_record_for_spawn_dry_run()
+    record.worker_id = "stopped-worker"
+    record.state = "stopped"
+    record.profile = "mobile_2160p"
+    record.started_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(started_ts))
+    record.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(finished_ts))
+
+    with manager._lock:
+        manager._route2_workers[record.worker_id] = record
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+
+    assert 79.0 <= item_payload["runtime_seconds"] <= 81.0
+    assert item_payload["transcode_profile_key"] == "mobile_2160p"
+    assert item_payload["display_profile_label"] == "2160p"
+
+
 def test_route2_rss_parser_reads_vmrss_kib() -> None:
     payload = "Name:\tffmpeg\nVmRSS:\t  524288 kB\nThreads:\t8\n"
 

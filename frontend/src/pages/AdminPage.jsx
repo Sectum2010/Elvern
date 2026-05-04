@@ -9,12 +9,13 @@ import {
   buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
   canTerminatePlaybackWorker,
-  formatCpuCoresValue,
   formatCpuCoresUsage,
   formatMemoryGaugeValue,
   formatPreparedRanges,
   formatWorkerModeLabel,
+  formatWorkerProfileLabel,
   formatWorkerRuntime,
+  shouldShowWorkerCleanupNotice,
   shortenDiagnosticId,
 } from "../lib/adminPlaybackWorkers";
 import { formatCompletedRescanWarning, formatRescanBannerText, hasCloudSyncWarning } from "../lib/cloudSyncStatus";
@@ -143,6 +144,16 @@ function UserStatusIndicator({ color, label }) {
   );
 }
 
+function AdminCrownIcon() {
+  return (
+    <span aria-label="Admin" className="admin-user-crown" role="img" title="Admin">
+      <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+        <path d="M4.4 18.4h15.2l1.1-10.1-5.2 3.7L12 4.8 8.5 12 3.3 8.3l1.1 10.1Zm1.1 2.1h13v1.8h-13v-1.8Z" />
+      </svg>
+    </span>
+  );
+}
+
 function getUserAvatarInitials(username) {
   if (typeof username !== "string") {
     return "U";
@@ -262,6 +273,8 @@ export function AdminPage() {
   const [playbackWorkersFeedback, setPlaybackWorkersFeedback] = useState(null);
   const [terminateWorkerPending, setTerminateWorkerPending] = useState("");
   const [terminateWorkerModal, setTerminateWorkerModal] = useState(null);
+  const [collapsedWorkerUserIds, setCollapsedWorkerUserIds] = useState({});
+  const [diagnosticIdModal, setDiagnosticIdModal] = useState(null);
   const [selfDeleteState, setSelfDeleteState] = useState({
     open: false,
     password: "",
@@ -602,6 +615,27 @@ export function AdminPage() {
       return;
     }
     setTerminateWorkerModal(null);
+  }
+
+  function toggleWorkerGroupCollapsed(userId) {
+    setCollapsedWorkerUserIds((current) => ({
+      ...current,
+      [userId]: !current[userId],
+    }));
+  }
+
+  function openDiagnosticIdModal(label, value) {
+    if (typeof value !== "string" || !value.trim()) {
+      return;
+    }
+    setDiagnosticIdModal({
+      label,
+      value: value.trim(),
+    });
+  }
+
+  function closeDiagnosticIdModal() {
+    setDiagnosticIdModal(null);
   }
 
   async function handleTerminateWorkerConfirm() {
@@ -992,12 +1026,16 @@ export function AdminPage() {
   }, [selectedUserActionsEntry, userActionsModalUserId]);
 
   useEffect(() => {
-    if ((!selectedUserActionsEntry && !terminateWorkerModal) || typeof document === "undefined") {
+    if ((!selectedUserActionsEntry && !terminateWorkerModal && !diagnosticIdModal) || typeof document === "undefined") {
       return undefined;
     }
     const previousOverflow = document.body.style.overflow;
     function handleKeyDown(event) {
       if (event.key === "Escape") {
+        if (diagnosticIdModal) {
+          closeDiagnosticIdModal();
+          return;
+        }
         if (terminateWorkerModal) {
           closeTerminateWorkerModal();
           return;
@@ -1011,7 +1049,7 @@ export function AdminPage() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [selectedUserActionsEntry, terminateWorkerModal, terminateWorkerPending]);
+  }, [selectedUserActionsEntry, terminateWorkerModal, terminateWorkerPending, diagnosticIdModal]);
 
   if (loading && !statusPayload) {
     return <LoadingView label="Loading admin tools..." />;
@@ -1081,6 +1119,7 @@ export function AdminPage() {
           const isSelf = entry.id === user?.id;
           const isActionsModalOpen = userActionsModalUserId === entry.id;
           const workerGroup = playbackWorkersByUserId.get(entry.id) || null;
+          const isWorkerGroupCollapsed = collapsedWorkerUserIds[entry.id] === true;
           return (
             <div className="admin-list__row admin-user-row" key={entry.id}>
               <button
@@ -1099,14 +1138,15 @@ export function AdminPage() {
               <div className="admin-user-row__summary">
                 <div className="admin-user-heading">
                   <strong>{entry.username}</strong>
+                  {entry.role === "admin" ? <AdminCrownIcon /> : null}
                   <UserStatusIndicator color={entry.status_color} label={entry.status_label} />
                 </div>
                 <p className="page-subnote">
-                  {entry.role} · {entry.enabled ? "enabled" : "disabled"} · {entry.active_sessions} live session{entry.active_sessions === 1 ? "" : "s"} · last login {formatDate(entry.last_login_at)}
+                  {entry.active_sessions} live session{entry.active_sessions === 1 ? "" : "s"} · last login {formatDate(entry.last_login_at)}
                 </p>
                 {entry.last_seen_at ? <p className="page-subnote">Last heartbeat {formatDate(entry.last_seen_at)}{entry.last_activity_at ? ` · last activity ${formatDate(entry.last_activity_at)}` : ""}</p> : null}
                 {isSelf ? (
-                  <p className="page-subnote">Your own admin account cannot be disabled. Use the self-delete flow below if needed.</p>
+                  <p className="page-subnote">Your own admin account cannot be disabled. Use Delete account inside Account actions if needed.</p>
                 ) : null}
                 {!isActionsModalOpen ? <InlineFeedback feedback={userFeedback[entry.id]} /> : null}
               </div>
@@ -1133,12 +1173,20 @@ export function AdminPage() {
               {workerGroup && workerGroup.totalWorkers > 0 ? (
                 <div className="admin-user-row__workers">
                   <div className="admin-user-workers">
-                    <div className="admin-user-workers__header">
+                    <button
+                      aria-expanded={!isWorkerGroupCollapsed}
+                      className="admin-user-workers__header admin-user-workers__header-button"
+                      onClick={() => toggleWorkerGroupCollapsed(entry.id)}
+                      type="button"
+                    >
                       <div className="admin-user-workers__copy">
                         <strong>Playback workers</strong>
                         <p className="page-subnote">
                           Route2 background preparation for this user.
                         </p>
+                        <span className="admin-user-workers__collapse-hint">
+                          {isWorkerGroupCollapsed ? "Show worker cards" : "Hide worker cards"}
+                        </span>
                       </div>
                       {workerGroup.hasRunningWorkers ? (
                         <div className="admin-user-workers__gauges">
@@ -1156,7 +1204,7 @@ export function AdminPage() {
                           />
                         </div>
                       ) : null}
-                    </div>
+                    </button>
 
                     <div className="admin-user-workers__stats">
                       <span className="admin-workers-summary__pill">{workerGroup.allocatedCpuCores ?? workerGroup.allocated_budget_cores ?? 0} allocated cores</span>
@@ -1165,80 +1213,108 @@ export function AdminPage() {
                       <span className="admin-workers-summary__pill">{workerGroup.totalWorkers} total</span>
                     </div>
 
-                    <div className="admin-user-workers__list">
-                      {workerGroup.items.map((worker) => {
-                        const preparedRanges = formatPreparedRanges(worker.prepared_ranges);
-                        const sessionDiagnosticId = shortenDiagnosticId(worker.session_id);
-                        const workerDiagnosticId = shortenDiagnosticId(worker.worker_id);
-                        const epochDiagnosticId = shortenDiagnosticId(worker.epoch_id);
-                        const hasTargetPosition = Number.isFinite(worker.target_position_seconds);
-                        const normalizedState = String(worker.state || "unknown").toLowerCase();
-                        const canTerminateWorker = canTerminatePlaybackWorker(worker.state);
-                        return (
-                          <div className="admin-worker-card" key={worker.worker_id}>
-                            <div className="admin-worker-card__header">
-                              <div className="admin-worker-card__copy">
-                                <strong>{worker.title || "Untitled media item"}</strong>
-                                <p className="page-subnote">
-                                  {formatWorkerModeLabel(worker.playback_mode)} · {worker.profile || "profile unknown"} · {worker.source_kind}
-                                </p>
-                              </div>
-                              <div className="admin-worker-card__actions">
-                                <span
-                                  className={[
-                                    "admin-worker-state",
-                                    `admin-worker-state--${normalizedState}`,
-                                  ].join(" ")}
-                                >
-                                  {worker.state || "unknown"}
-                                </span>
-                                {canTerminateWorker ? (
-                                  <button
-                                    className="ghost-button admin-worker-card__terminate"
-                                    disabled={terminateWorkerPending === worker.worker_id}
-                                    onClick={() => openTerminateWorkerModal(worker)}
-                                    type="button"
+                    {isWorkerGroupCollapsed ? (
+                      <p className="page-subnote admin-user-workers__collapsed-note">
+                        Worker cards hidden for this user.
+                      </p>
+                    ) : (
+                      <div className="admin-user-workers__list">
+                        {workerGroup.items.map((worker) => {
+                          const preparedRanges = formatPreparedRanges(worker.prepared_ranges);
+                          const sessionDiagnosticId = shortenDiagnosticId(worker.session_id);
+                          const workerDiagnosticId = shortenDiagnosticId(worker.worker_id);
+                          const epochDiagnosticId = shortenDiagnosticId(worker.epoch_id);
+                          const hasTargetPosition = Number.isFinite(worker.target_position_seconds);
+                          const normalizedState = String(worker.state || "unknown").toLowerCase();
+                          const canTerminateWorker = canTerminatePlaybackWorker(worker.state);
+                          return (
+                            <div className="admin-worker-card" key={worker.worker_id}>
+                              <div className="admin-worker-card__header">
+                                <div className="admin-worker-card__copy">
+                                  <strong>{worker.title || "Untitled media item"}</strong>
+                                  <p className="page-subnote">
+                                    {formatWorkerModeLabel(worker.playback_mode)} · {formatWorkerProfileLabel(worker)} · {worker.source_kind || "source unknown"}
+                                  </p>
+                                </div>
+                                <div className="admin-worker-card__actions">
+                                  <span
+                                    className={[
+                                      "admin-worker-state",
+                                      `admin-worker-state--${normalizedState}`,
+                                    ].join(" ")}
                                   >
-                                    Terminate
-                                  </button>
-                                ) : null}
+                                    {worker.state || "unknown"}
+                                  </span>
+                                  {canTerminateWorker ? (
+                                    <button
+                                      className="ghost-button admin-worker-card__terminate"
+                                      disabled={terminateWorkerPending === worker.worker_id}
+                                      onClick={() => openTerminateWorkerModal(worker)}
+                                      type="button"
+                                    >
+                                      Terminate
+                                    </button>
+                                  ) : null}
+                                </div>
                               </div>
-                            </div>
 
-                            <div className="admin-worker-card__meta">
-                              <span>Runtime {formatWorkerRuntime(worker.runtime_seconds)}</span>
-                              {worker.pid ? <span>PID {worker.pid}</span> : null}
-                              {worker.assigned_threads ? <span>{worker.assigned_threads} threads</span> : null}
-                              {hasTargetPosition ? <span>Target {Math.round(worker.target_position_seconds)}s</span> : null}
-                              {worker.cpu_cores_used != null ? <span>CPU {formatCpuCoresValue(worker.cpu_cores_used)}</span> : null}
-                              {worker.memory_bytes != null ? <span>RAM {formatMemoryGaugeValue(worker.memory_bytes)}</span> : null}
-                              {worker.replacement_count ? <span>{worker.replacement_count} replacements</span> : null}
-                              {worker.failure_count ? <span>{worker.failure_count} failures</span> : null}
-                            </div>
-
-                            {preparedRanges ? (
-                              <p className="page-subnote">Prepared ranges {preparedRanges}</p>
-                            ) : null}
-
-                            {sessionDiagnosticId || workerDiagnosticId || epochDiagnosticId ? (
-                              <div className="admin-worker-card__diagnostics">
-                                {sessionDiagnosticId ? <span>session {sessionDiagnosticId}</span> : null}
-                                {workerDiagnosticId ? <span>worker {workerDiagnosticId}</span> : null}
-                                {epochDiagnosticId ? <span>epoch {epochDiagnosticId}</span> : null}
+                              <div className="admin-worker-card__meta">
+                                <span>Runtime {formatWorkerRuntime(worker.runtime_seconds)}</span>
+                                {worker.pid ? <span>PID {worker.pid}</span> : null}
+                                {worker.assigned_threads ? <span>{worker.assigned_threads} threads</span> : null}
+                                {hasTargetPosition ? <span>Target {Math.round(worker.target_position_seconds)}s</span> : null}
+                                {worker.replacement_count ? <span>{worker.replacement_count} replacements</span> : null}
+                                {worker.failure_count ? <span>{worker.failure_count} failures</span> : null}
                               </div>
-                            ) : null}
 
-                            {worker.failure_reason || worker.non_retryable_error ? (
-                              <p className="action-feedback action-feedback--error">{worker.failure_reason || worker.non_retryable_error}</p>
-                            ) : null}
+                              {preparedRanges ? (
+                                <p className="page-subnote">Prepared ranges {preparedRanges}</p>
+                              ) : null}
 
-                            {worker.stop_requested ? (
-                              <p className="page-subnote">Stop requested. Waiting for backend cleanup.</p>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
+                              {sessionDiagnosticId || workerDiagnosticId || epochDiagnosticId ? (
+                                <div className="admin-worker-card__diagnostics">
+                                  {sessionDiagnosticId ? (
+                                    <button
+                                      className="admin-diagnostic-id-button"
+                                      onClick={() => openDiagnosticIdModal("session", worker.session_id)}
+                                      type="button"
+                                    >
+                                      session {sessionDiagnosticId}
+                                    </button>
+                                  ) : null}
+                                  {workerDiagnosticId ? (
+                                    <button
+                                      className="admin-diagnostic-id-button"
+                                      onClick={() => openDiagnosticIdModal("worker", worker.worker_id)}
+                                      type="button"
+                                    >
+                                      worker {workerDiagnosticId}
+                                    </button>
+                                  ) : null}
+                                  {epochDiagnosticId ? (
+                                    <button
+                                      className="admin-diagnostic-id-button"
+                                      onClick={() => openDiagnosticIdModal("epoch", worker.epoch_id)}
+                                      type="button"
+                                    >
+                                      epoch {epochDiagnosticId}
+                                    </button>
+                                  ) : null}
+                                </div>
+                              ) : null}
+
+                              {worker.failure_reason || worker.non_retryable_error ? (
+                                <p className="action-feedback action-feedback--error">{worker.failure_reason || worker.non_retryable_error}</p>
+                              ) : null}
+
+                              {shouldShowWorkerCleanupNotice(worker) ? (
+                                <p className="page-subnote">Backend cleanup is taking longer than expected.</p>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : null}
@@ -1360,10 +1436,107 @@ export function AdminPage() {
               >
                 {selectedUserActionsEntry.id === user?.id ? "Update my password" : "Reset password"}
               </button>
+              {selectedUserActionsEntry.id === user?.id ? (
+                <button
+                  className="ghost-button ghost-button--danger"
+                  disabled={!hasAnotherEnabledAdmin || userActionPending === selectedUserActionsEntry.id}
+                  onClick={() =>
+                    setSelfDeleteState({
+                      open: true,
+                      password: "",
+                      armed: false,
+                      pending: false,
+                      error: "",
+                    })
+                  }
+                  type="button"
+                >
+                  Delete account
+                </button>
+              ) : null}
             </div>
 
             {selectedUserActionsEntry.id === user?.id ? (
-              <p className="page-subnote">Your own admin account cannot be disabled from the main row.</p>
+              <p className="page-subnote">
+                Your own admin account cannot be disabled from the main row.
+                {!hasAnotherEnabledAdmin ? " Create another enabled admin before deleting your own account." : ""}
+              </p>
+            ) : null}
+
+            {selectedUserActionsEntry.id === user?.id && selfDeleteState.open ? (
+              <div className="admin-danger-block">
+                {!selfDeleteState.armed ? (
+                  <form className="admin-inline-form" onSubmit={handleSelfDeletePrecheck}>
+                    <p className="page-subnote">
+                      Enter your current admin password first. You will see one final destructive confirmation before anything is deleted.
+                    </p>
+                    <PasswordInput
+                      autoComplete="current-password"
+                      onChange={(event) =>
+                        setSelfDeleteState((current) => ({
+                          ...current,
+                          password: event.target.value,
+                        }))
+                      }
+                      placeholder="Current admin password"
+                      value={selfDeleteState.password}
+                    />
+                    {selfDeleteState.error ? <p className="form-error">{selfDeleteState.error}</p> : null}
+                    <div className="admin-list__actions">
+                      <button className="ghost-button ghost-button--danger" disabled={selfDeleteState.pending} type="submit">
+                        {selfDeleteState.pending ? "Checking..." : "Continue"}
+                      </button>
+                      <button
+                        className="ghost-button"
+                        onClick={() =>
+                          setSelfDeleteState({
+                            open: false,
+                            password: "",
+                            armed: false,
+                            pending: false,
+                            error: "",
+                          })
+                        }
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="admin-inline-form">
+                    <p className="form-error">
+                      Final warning: deleting your own admin account ends your current session immediately.
+                    </p>
+                    {selfDeleteState.error ? <p className="form-error">{selfDeleteState.error}</p> : null}
+                    <div className="admin-list__actions">
+                      <button
+                        className="ghost-button ghost-button--danger"
+                        disabled={selfDeleteState.pending}
+                        onClick={handleSelfDeleteConfirm}
+                        type="button"
+                      >
+                        {selfDeleteState.pending ? "Deleting..." : "Delete my admin account"}
+                      </button>
+                      <button
+                        className="ghost-button"
+                        onClick={() =>
+                          setSelfDeleteState({
+                            open: false,
+                            password: "",
+                            armed: false,
+                            pending: false,
+                            error: "",
+                          })
+                        }
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             ) : null}
 
             <InlineFeedback feedback={userFeedback[selectedUserActionsEntry.id]} />
@@ -1527,6 +1700,32 @@ export function AdminPage() {
     </div>
   ) : null;
 
+  const diagnosticIdPopup = diagnosticIdModal ? (
+    <div
+      aria-label="Full diagnostic ID"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="browser-resume-modal__backdrop"
+        onClick={closeDiagnosticIdModal}
+      />
+      <div className="browser-resume-modal__card detail-info-modal__card admin-diagnostic-id-modal">
+        <button
+          aria-label="Close"
+          className="ghost-button detail-info-modal__close"
+          onClick={closeDiagnosticIdModal}
+          type="button"
+        >
+          X
+        </button>
+        <code className="admin-diagnostic-id-modal__value">{diagnosticIdModal.value}</code>
+      </div>
+    </div>
+  ) : null;
+
   const createUserCard = (
     <section className="settings-card">
       <h2>Create user</h2>
@@ -1563,112 +1762,6 @@ export function AdminPage() {
           {createPending ? "Creating..." : "Create user"}
         </button>
       </form>
-    </section>
-  );
-
-  const selfDeleteCard = (
-    <section className="settings-card admin-sidecard">
-      <div>
-        <h2>Delete my admin account</h2>
-        <p className="page-subnote">
-          This is separate from disable. Elvern requires another enabled admin before your own account can be deleted.
-        </p>
-      </div>
-      {!hasAnotherEnabledAdmin ? (
-        <p className="form-error">Create another enabled admin before deleting your own account.</p>
-      ) : null}
-      {!selfDeleteState.open ? (
-        <button
-          className="ghost-button ghost-button--danger"
-          disabled={!hasAnotherEnabledAdmin}
-          onClick={() =>
-            setSelfDeleteState({
-              open: true,
-              password: "",
-              armed: false,
-              pending: false,
-              error: "",
-            })
-          }
-          type="button"
-        >
-          Start self-delete
-        </button>
-      ) : (
-        <div className="admin-danger-block">
-          {!selfDeleteState.armed ? (
-            <form className="admin-inline-form" onSubmit={handleSelfDeletePrecheck}>
-              <p className="page-subnote">
-                Enter your current admin password first. You will see one final destructive confirmation before anything is deleted.
-              </p>
-              <PasswordInput
-                autoComplete="current-password"
-                onChange={(event) =>
-                  setSelfDeleteState((current) => ({
-                    ...current,
-                    password: event.target.value,
-                  }))
-                }
-                placeholder="Current admin password"
-                value={selfDeleteState.password}
-              />
-              {selfDeleteState.error ? <p className="form-error">{selfDeleteState.error}</p> : null}
-              <div className="admin-list__actions">
-                <button className="ghost-button ghost-button--danger" disabled={selfDeleteState.pending} type="submit">
-                  {selfDeleteState.pending ? "Checking..." : "Continue"}
-                </button>
-                <button
-                  className="ghost-button"
-                  onClick={() =>
-                    setSelfDeleteState({
-                      open: false,
-                      password: "",
-                      armed: false,
-                      pending: false,
-                      error: "",
-                    })
-                  }
-                  type="button"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          ) : (
-            <div className="admin-inline-form">
-              <p className="form-error">
-                Final warning: deleting your own admin account ends your current session immediately.
-              </p>
-              {selfDeleteState.error ? <p className="form-error">{selfDeleteState.error}</p> : null}
-              <div className="admin-list__actions">
-                <button
-                  className="ghost-button ghost-button--danger"
-                  disabled={selfDeleteState.pending}
-                  onClick={handleSelfDeleteConfirm}
-                  type="button"
-                >
-                  {selfDeleteState.pending ? "Deleting..." : "Delete my admin account"}
-                </button>
-                <button
-                  className="ghost-button"
-                  onClick={() =>
-                    setSelfDeleteState({
-                      open: false,
-                      password: "",
-                      armed: false,
-                      pending: false,
-                      error: "",
-                    })
-                  }
-                  type="button"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
     </section>
   );
 
@@ -2159,15 +2252,12 @@ export function AdminPage() {
 
       {statusPayload ? (
         <div className="admin-section-stack">
-          {activeSection === "panel" ? (
-            <>
-              {usersCard}
-              <div className="admin-section-grid">
-                {createUserCard}
-                {selfDeleteCard}
-              </div>
-            </>
-          ) : null}
+              {activeSection === "panel" ? (
+                <>
+                  {usersCard}
+                  {createUserCard}
+                </>
+              ) : null}
 
           {activeSection === "security" ? securitySection : null}
 
@@ -2193,6 +2283,7 @@ export function AdminPage() {
       ) : null}
       {userActionsModal}
       {terminateWorkerConfirmationModal}
+      {diagnosticIdPopup}
     </section>
   );
 }

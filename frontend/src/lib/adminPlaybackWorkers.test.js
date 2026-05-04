@@ -11,6 +11,8 @@ import {
   formatCpuCoresValue,
   formatCpuGaugeValue,
   formatMemoryGaugeValue,
+  formatWorkerProfileLabel,
+  shouldShowWorkerCleanupNotice,
 } from "./adminPlaybackWorkers.js";
 
 
@@ -120,4 +122,20 @@ test("terminate helper includes the movie title", () => {
   assert.equal(canTerminatePlaybackWorker("running"), true);
   assert.equal(canTerminatePlaybackWorker("queued"), true);
   assert.equal(canTerminatePlaybackWorker("completed"), false);
+});
+
+
+test("worker profile display labels do not imply mobile device surface", () => {
+  assert.equal(formatWorkerProfileLabel("mobile_2160p"), "2160p");
+  assert.equal(formatWorkerProfileLabel({ profile: "mobile_1080p" }), "1080p");
+  assert.equal(formatWorkerProfileLabel({ display_profile_label: "2160p", profile: "mobile_2160p" }), "2160p");
+  assert.equal(formatWorkerProfileLabel({ profile: "" }), "profile unknown");
+});
+
+
+test("cleanup notice only appears for explicitly delayed cleanup", () => {
+  assert.equal(shouldShowWorkerCleanupNotice({ stop_requested: true, state: "stopped" }), false);
+  assert.equal(shouldShowWorkerCleanupNotice({ stop_requested: true, cleanup_delay_seconds: 29 }), false);
+  assert.equal(shouldShowWorkerCleanupNotice({ stop_requested: true, cleanup_delay_seconds: 30 }), true);
+  assert.equal(shouldShowWorkerCleanupNotice({ stop_requested: true, cleanup_delayed: true }), true);
 });

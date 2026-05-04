@@ -2069,6 +2069,25 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.65rem;
 }
 
+.admin-user-crown {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.45rem;
+  block-size: 1.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(242, 201, 116, 0.42);
+  background: linear-gradient(180deg, rgba(255, 224, 142, 0.2), rgba(180, 116, 35, 0.14));
+  color: #ffd778;
+  box-shadow: 0 0 0.8rem rgba(242, 201, 116, 0.18);
+}
+
+.admin-user-crown svg {
+  inline-size: 1rem;
+  block-size: 1rem;
+  fill: currentColor;
+}
+
 .user-status-pill {
   display: inline-flex;
   align-items: center;
@@ -2279,10 +2298,39 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 1rem;
 }
 
+.admin-user-workers__header-button {
+  inline-size: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0.75rem;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-user-workers__header-button:hover .admin-user-workers__collapse-hint,
+.admin-user-workers__header-button:focus-visible .admin-user-workers__collapse-hint {
+  color: #deedf7;
+  text-decoration: underline;
+  text-underline-offset: 0.18rem;
+}
+
+.admin-user-workers__header-button:focus-visible {
+  outline: 2px solid rgba(143, 182, 218, 0.38);
+  outline-offset: 4px;
+}
+
 .admin-user-workers__copy {
   display: grid;
   gap: 0.3rem;
   min-width: 0;
+}
+
+.admin-user-workers__collapse-hint {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  transition: color 150ms ease;
 }
 
 .admin-user-workers__gauges {
@@ -2371,6 +2419,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.8rem;
 }
 
+.admin-user-workers__collapsed-note {
+  margin: 0;
+}
+
 .admin-worker-card {
   display: grid;
   gap: 0.7rem;
@@ -2382,14 +2434,17 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .admin-worker-card__header {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 0.75rem;
 }
 
 .admin-worker-card__actions {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.55rem;
-  justify-items: start;
-  align-content: start;
+  justify-content: flex-end;
+  align-items: flex-start;
 }
 
 .admin-worker-card__copy {
@@ -2410,6 +2465,44 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .admin-worker-card__diagnostics {
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
   font-size: 0.78rem;
+}
+
+.admin-diagnostic-id-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.admin-diagnostic-id-button:hover,
+.admin-diagnostic-id-button:focus-visible {
+  color: #deedf7;
+  text-decoration: underline;
+  text-underline-offset: 0.16rem;
+}
+
+.admin-diagnostic-id-button:focus-visible {
+  outline: 2px solid rgba(143, 182, 218, 0.35);
+  outline-offset: 3px;
+}
+
+.browser-resume-modal__card.detail-info-modal__card.admin-diagnostic-id-modal {
+  position: relative;
+  width: min(calc(100vw - 32px), 34rem);
+  max-width: 34rem;
+  padding: 2.8rem 1.4rem 1.4rem;
+}
+
+.admin-diagnostic-id-modal__value {
+  display: block;
+  padding: 0.85rem;
+  border-radius: 0.75rem;
+  background: rgba(8, 14, 22, 0.72);
+  color: #deedf7;
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .admin-worker-state {
@@ -4281,6 +4374,10 @@ html[data-device-shell="iphone"] .admin-worker-card__header {
   grid-template-columns: 1fr;
 }
 
+html[data-device-shell="iphone"] .admin-worker-card__actions {
+  justify-content: flex-start;
+}
+
 html[data-device-shell="iphone"] .admin-user-workers__gauges {
   justify-content: flex-start;
 }
@@ -4308,6 +4405,10 @@ html[data-device-shell="iphone"] .admin-recovery-section {
   .admin-user-workers__header,
   .admin-worker-card__header {
     grid-template-columns: 1fr;
+  }
+
+  .admin-worker-card__actions {
+    justify-content: flex-start;
   }
 
   .admin-user-workers__gauges {

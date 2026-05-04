@@ -505,6 +505,80 @@ def test_external_player_native_playback_uses_external_stream_ttl(
     assert should_decouple_external_player_auth_session(client_name=client_name) is True
 
 
+def test_ios_vlc_external_playback_survives_longer_than_native_session_minutes(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="ios-vlc-airplay-pause")
+    session_user, token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="ios-vlc-airplay-pause.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS VLC Handoff",
+    )
+
+    now = datetime.now(timezone.utc)
+    paused_since = now - timedelta(minutes=initialized_settings.native_playback_session_minutes + 2)
+    external_expires_at = paused_since + timedelta(
+        seconds=initialized_settings.external_player_stream_ttl_seconds,
+    )
+    assert external_expires_at > now
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET created_at = ?, last_seen_at = ?, expires_at = ?
+            WHERE session_id = ?
+            """,
+            (
+                paused_since.isoformat(),
+                paused_since.isoformat(),
+                external_expires_at.isoformat(),
+                str(native_session["session_id"]),
+            ),
+        )
+        connection.commit()
+
+    destroy_session(initialized_settings, token)
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is True
+    assert access_state["reason"] == "allowed"
+
+    response = build_native_stream_response(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+        range_header="bytes=0-1",
+        record_activity=False,
+    )
+    context = getattr(response, "_elvern_native_stream_context", None)
+    assert response.status_code == 206
+    assert context is not None
+    assert context["external_player"] is True
+    assert context["auth_session_coupled"] is False
+    assert context["session_ttl_seconds"] == initialized_settings.external_player_stream_ttl_seconds
+
+
 def test_desktop_vlc_external_playback_survives_browser_auth_revoke_and_normal_ttl_pause(
     initialized_settings,
     monkeypatch,

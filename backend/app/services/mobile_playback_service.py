@@ -597,6 +597,20 @@ def _route2_cpu_upbound_cores_for_total(total_cpu_cores: int, upbound_percent: i
     return max(1, math.floor((max(1, total_cpu_cores) * upbound_percent) / 100))
 
 
+def _route2_display_profile_label(profile: str | None) -> str:
+    normalized = str(profile or "").strip()
+    if not normalized:
+        return "profile unknown"
+    label = normalized
+    for prefix in ("mobile_", "mobile-"):
+        if label.lower().startswith(prefix):
+            label = label[len(prefix) :]
+            break
+    if label.lower().endswith("p") and label[:-1].isdigit():
+        return label.lower()
+    return label.replace("_", " ").replace("-", " ")
+
+
 def _clock_ticks_per_second() -> int:
     try:
         return max(1, int(os.sysconf("SC_CLK_TCK")))
@@ -2329,6 +2343,13 @@ class MobilePlaybackManager:
         self._sync_route2_worker_record_locked(record, session, epoch)
         return record
 
+    def _mark_route2_worker_runtime_finished_locked(self, record: Route2WorkerRecord) -> None:
+        if record.state == "running":
+            record.finished_at = None
+            return
+        if record.started_at and not record.finished_at:
+            record.finished_at = utcnow_iso()
+
     def _sync_route2_worker_record_locked(
         self,
         record: Route2WorkerRecord,
@@ -2354,6 +2375,7 @@ class MobilePlaybackManager:
         else:
             record.process = None
             record.pid = None
+        self._mark_route2_worker_runtime_finished_locked(record)
 
     def _finalize_route2_worker_record_locked(
         self,
@@ -2371,6 +2393,7 @@ class MobilePlaybackManager:
         record.state = state
         if increment_failure:
             record.failure_count += 1
+        self._mark_route2_worker_runtime_finished_locked(record)
         if state != "running":
             record.process = None
             record.pid = None
@@ -2439,6 +2462,7 @@ class MobilePlaybackManager:
     ) -> None:
         if record.state == "running":
             record.state = "stopped" if record.stop_requested else "interrupted"
+        self._mark_route2_worker_runtime_finished_locked(record)
         record.process = None
         self._clear_route2_worker_telemetry_locked(record, sampled_at=sampled_at)
 
@@ -5905,7 +5929,12 @@ class MobilePlaybackManager:
                     any_memory_sampled = True
                 runtime_seconds = None
                 if record.started_at:
-                    runtime_seconds = max(0.0, now_ts - self._parse_iso_ts(record.started_at))
+                    runtime_end_ts = (
+                        self._parse_iso_ts(record.finished_at)
+                        if record.finished_at and record.state != "running"
+                        else now_ts
+                    )
+                    runtime_seconds = max(0.0, runtime_end_ts - self._parse_iso_ts(record.started_at))
                 payload = {
                     "worker_id": record.worker_id,
                     "session_id": record.session_id,
@@ -5914,6 +5943,8 @@ class MobilePlaybackManager:
                     "title": record.title,
                     "playback_mode": record.playback_mode,
                     "profile": record.profile,
+                    "transcode_profile_key": record.profile,
+                    "display_profile_label": _route2_display_profile_label(record.profile),
                     "source_kind": record.source_kind,
                     "state": record.state,
                     "runtime_seconds": round(runtime_seconds, 2) if runtime_seconds is not None else None,

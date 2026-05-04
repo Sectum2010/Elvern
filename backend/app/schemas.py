@@ -1234,6 +1234,8 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     title: str
     playback_mode: str
     profile: str
+    transcode_profile_key: str | None = None
+    display_profile_label: str | None = None
     source_kind: str
     state: str
     runtime_seconds: float | None = Field(default=None, ge=0)

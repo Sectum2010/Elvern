@@ -68,6 +68,25 @@ export function formatWorkerModeLabel(playbackMode) {
   return String(playbackMode).toLowerCase() === "full" ? "Full" : "Lite";
 }
 
+export function formatWorkerProfileLabel(workerOrProfile) {
+  const rawProfile = typeof workerOrProfile === "string"
+    ? workerOrProfile
+    : (
+      workerOrProfile?.display_profile_label
+      || workerOrProfile?.transcode_profile_key
+      || workerOrProfile?.profile
+    );
+  if (typeof rawProfile !== "string" || !rawProfile.trim()) {
+    return "profile unknown";
+  }
+  const normalized = rawProfile.trim();
+  const withoutMobilePrefix = normalized.replace(/^mobile[_-]/i, "");
+  if (/^\d{3,4}p$/i.test(withoutMobilePrefix)) {
+    return withoutMobilePrefix.toLowerCase();
+  }
+  return withoutMobilePrefix.replace(/[_-]+/g, " ");
+}
+
 export function formatCpuCoresValue(value) {
   if (!isFiniteNumber(value)) {
     return "—";
@@ -131,6 +150,17 @@ export function buildPlaybackWorkerTerminatePrompt(title) {
 export function canTerminatePlaybackWorker(workerState) {
   const normalizedState = String(workerState || "").trim().toLowerCase();
   return normalizedState === "running" || normalizedState === "queued";
+}
+
+export function shouldShowWorkerCleanupNotice(worker, { delayThresholdSeconds = 30 } = {}) {
+  if (!worker?.stop_requested) {
+    return false;
+  }
+  if (worker.cleanup_delayed === true) {
+    return true;
+  }
+  const cleanupDelaySeconds = Number(worker.cleanup_delay_seconds);
+  return Number.isFinite(cleanupDelaySeconds) && cleanupDelaySeconds >= delayThresholdSeconds;
 }
 
 export function shortenDiagnosticId(value, prefixLength = 6, suffixLength = 4) {

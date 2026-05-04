@@ -198,6 +198,7 @@ class Route2WorkerRecord:
     state: str = "queued"
     pid: int | None = None
     started_at: str | None = None
+    finished_at: str | None = None
     created_at: str = field(default_factory=utcnow_iso)
     last_seen_at: str = field(default_factory=utcnow_iso)
     prepared_ranges: list[list[float]] = field(default_factory=list)
