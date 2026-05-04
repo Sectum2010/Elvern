@@ -784,7 +784,7 @@ export function InstallPage() {
         <section className="page-section">
           <div className="section-header section-header--compact">
             <div>
-              <h2>VLC readiness</h2>
+              <h2>Recommended apps</h2>
               <p className="page-subnote">
                 {platform === "linux"
                   ? "Check whether Elvern can see VLC on this Linux host."

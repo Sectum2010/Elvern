@@ -150,6 +150,20 @@ def _set_media_admin_display_fields(
         connection.commit()
 
 
+def _mark_native_stream_activity(settings, *, session_id: str, at: datetime | None = None) -> None:
+    activity_at = (at or datetime.now(timezone.utc)).isoformat()
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET last_progress_recorded_at = ?
+            WHERE session_id = ?
+            """,
+            (activity_at, session_id),
+        )
+        connection.commit()
+
+
 def _login_headers(*, ip_address: str = "203.0.113.10", user_agent: str = "Pytest Browser 1.0") -> dict[str, str]:
     return {
         "x-forwarded-for": ip_address,
@@ -843,6 +857,14 @@ def test_admin_native_playback_status_exposes_vlc_and_infuse_without_sensitive_f
         source_ip="127.0.0.1",
         client_name="Elvern iOS Infuse Handoff",
     )
+    _mark_native_stream_activity(
+        initialized_settings,
+        session_id=str(vlc_session["session_id"]),
+    )
+    _mark_native_stream_activity(
+        initialized_settings,
+        session_id=str(infuse_session["session_id"]),
+    )
 
     payload = get_admin_native_playback_status(initialized_settings)
 
@@ -863,6 +885,7 @@ def test_admin_native_playback_status_exposes_vlc_and_infuse_without_sensitive_f
     assert vlc["external_player"] is True
     assert vlc["auth_session_coupled"] is False
     assert vlc["display_status_label"] == "Running"
+    assert vlc["last_stream_activity_at"] is not None
 
     infuse = items[str(infuse_session["session_id"])]
     assert infuse["playback_surface_label"] == "Infuse"
@@ -951,14 +974,21 @@ def test_admin_native_playback_status_maps_desktop_and_terminal_states(
     }
 
     now = datetime.now(timezone.utc)
+    for session in sessions.values():
+        _mark_native_stream_activity(
+            initialized_settings,
+            session_id=str(session["session_id"]),
+            at=now,
+        )
     with get_connection(initialized_settings) as connection:
         connection.execute(
             """
             UPDATE native_playback_sessions
-            SET last_seen_at = ?
+            SET last_seen_at = ?, last_progress_recorded_at = ?
             WHERE session_id = ?
             """,
             (
+                (now - timedelta(minutes=10)).isoformat(),
                 (now - timedelta(minutes=10)).isoformat(),
                 str(sessions["idle"]["session_id"]),
             ),
@@ -1002,14 +1032,72 @@ def test_admin_native_playback_status_maps_desktop_and_terminal_states(
     assert running["display_status_tone"] == "success"
     assert running["auth_session_coupled"] is False
 
-    idle = items[str(sessions["idle"]["session_id"])]
-    assert idle["device_label"] == "Linux desktop"
-    assert idle["display_status_label"] == "Idle"
-    assert idle["display_status_tone"] == "neutral"
+    assert str(sessions["idle"]["session_id"]) not in items
+    assert str(sessions["expired"]["session_id"]) not in items
+    assert str(sessions["revoked"]["session_id"]) not in items
+    assert str(sessions["closed"]["session_id"]) not in items
+    assert payload["native_playback_count"] == 1
+    assert group["total_native_playbacks"] == 1
+    assert group["running_native_playbacks"] == 1
+    assert group["idle_native_playbacks"] == 0
 
-    assert items[str(sessions["expired"]["session_id"])]["display_status_label"] == "Expired"
-    assert items[str(sessions["revoked"]["session_id"])]["display_status_label"] == "Revoked"
-    assert items[str(sessions["closed"]["session_id"])]["display_status_label"] == "Closed"
+
+def test_admin_native_playback_status_hides_long_ttl_idle_sessions_without_deleting_them(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="admin-native-idle-hidden")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    vlc_item = _create_media_item(initialized_settings, relative_name="admin-native-idle-vlc.mp4")
+    infuse_item = _create_media_item(initialized_settings, relative_name="admin-native-idle-infuse.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    vlc_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=vlc_item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS VLC Handoff",
+    )
+    infuse_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=infuse_item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS Infuse Handoff",
+    )
+
+    payload = get_admin_native_playback_status(initialized_settings)
+
+    assert payload["native_playback_count"] == 0
+    assert payload["native_playbacks_by_user"] == []
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT session_id, expires_at, closed_at, revoked_at
+            FROM native_playback_sessions
+            WHERE session_id IN (?, ?)
+            """,
+            (str(vlc_session["session_id"]), str(infuse_session["session_id"])),
+        ).fetchall()
+    assert len(rows) == 2
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        assert row["closed_at"] is None
+        assert row["revoked_at"] is None
+        assert datetime.fromisoformat(str(row["expires_at"])) > now
 
 
 def test_browser_internal_native_stream_policy_remains_short_lived(initialized_settings) -> None:

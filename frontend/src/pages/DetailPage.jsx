@@ -611,6 +611,21 @@ export function DetailPage() {
     });
   }
 
+  function renderBackToLibraryButton() {
+    return (
+      <Link
+        aria-label="Back to library"
+        className="assistant-back-button detail-back-to-library-button"
+        onClick={prepareLibraryReturnNavigation}
+        state={libraryReturnLinkState}
+        title="Back to library"
+        to={libraryReturnPath}
+      >
+        &lt;
+      </Link>
+    );
+  }
+
   function closeProviderReconnectModal() {
     providerReconnectContinuationRef.current = null;
     clearProviderAuthIntent();
@@ -1709,14 +1724,7 @@ export function DetailPage() {
     return (
       <section className="page-section page-section--detail">
         <p className="form-error">{error || "Media item not found"}</p>
-        <Link
-          className="ghost-button ghost-button--inline"
-          onClick={prepareLibraryReturnNavigation}
-          state={libraryReturnLinkState}
-          to={libraryReturnPath}
-        >
-          Back to library
-        </Link>
+        {renderBackToLibraryButton()}
       </section>
     );
   }
@@ -1731,14 +1739,7 @@ export function DetailPage() {
             <p className="eyebrow">Player</p>
             <h1>{detailTitle}</h1>
           </div>
-          <Link
-            className="ghost-button ghost-button--inline"
-            onClick={prepareLibraryReturnNavigation}
-            state={libraryReturnLinkState}
-            to={libraryReturnPath}
-          >
-            Back to library
-          </Link>
+          {renderBackToLibraryButton()}
         </div>
 
         <div className="player-card hidden-item-state">
@@ -1766,14 +1767,7 @@ export function DetailPage() {
             <Link className="ghost-button ghost-button--inline" to="/settings">
               Open Hidden for everyone in Settings
             </Link>
-            <Link
-              className="ghost-button ghost-button--inline"
-              onClick={prepareLibraryReturnNavigation}
-              state={libraryReturnLinkState}
-              to={libraryReturnPath}
-            >
-              Back to library
-            </Link>
+            {renderBackToLibraryButton()}
           </div>
           {globalHiddenActionError ? <p className="form-error">{globalHiddenActionError}</p> : null}
           {globalHiddenActionMessage ? <p className="page-note">{globalHiddenActionMessage}</p> : null}
@@ -1790,14 +1784,7 @@ export function DetailPage() {
             <p className="eyebrow">Player</p>
             <h1>{detailTitle}</h1>
           </div>
-          <Link
-            className="ghost-button ghost-button--inline"
-            onClick={prepareLibraryReturnNavigation}
-            state={libraryReturnLinkState}
-            to={libraryReturnPath}
-          >
-            Back to library
-          </Link>
+          {renderBackToLibraryButton()}
         </div>
 
         <div className="player-card hidden-item-state">
@@ -1825,14 +1812,7 @@ export function DetailPage() {
             <Link className="ghost-button ghost-button--inline" to="/settings">
               Open Hidden for me in Settings
             </Link>
-            <Link
-              className="ghost-button ghost-button--inline"
-              onClick={prepareLibraryReturnNavigation}
-              state={libraryReturnLinkState}
-              to={libraryReturnPath}
-            >
-              Back to library
-            </Link>
+            {renderBackToLibraryButton()}
           </div>
           {hiddenActionError ? <p className="form-error">{hiddenActionError}</p> : null}
           {hiddenActionMessage ? <p className="page-note">{hiddenActionMessage}</p> : null}
@@ -2304,14 +2284,7 @@ export function DetailPage() {
           <p className="eyebrow">Player</p>
           <h1>{detailTitle}</h1>
         </div>
-        <Link
-          className="ghost-button ghost-button--inline"
-          onClick={prepareLibraryReturnNavigation}
-          state={libraryReturnLinkState}
-          to={libraryReturnPath}
-        >
-          Back to library
-        </Link>
+        {renderBackToLibraryButton()}
       </div>
 
       <div className="player-card">

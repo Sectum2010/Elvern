@@ -1520,6 +1520,7 @@ class AdminNativePlaybackItemResponse(BaseModel):
     created_at: str | None = None
     expires_at: str | None = None
     last_seen_at: str | None = None
+    last_stream_activity_at: str | None = None
     closed_at: str | None = None
     revoked_at: str | None = None
     last_position_seconds: float | None = Field(default=None, ge=0)

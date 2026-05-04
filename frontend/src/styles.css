@@ -1772,6 +1772,15 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   margin-left: auto;
 }
 
+.admin-autofill-decoys {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .admin-nav-card__button {
   display: grid;
   grid-template-columns: 1.2rem 0fr;
@@ -3179,6 +3188,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .assistant-back-button:hover,
 .assistant-back-button:focus-visible {
   transform: translateY(-1px);
+}
+
+.detail-back-to-library-button {
+  text-decoration: none;
 }
 
 .assistant-detail-block {

@@ -37,6 +37,7 @@ EXTERNAL_PLAYER_STREAM_VALIDATION_INTERVAL_SECONDS = 5.0
 EXTERNAL_PLAYER_ACTIVE_STREAM_TTL_REFRESH_SECONDS = 60.0
 EXTERNAL_PLAYER_LOCAL_FILE_CHUNK_SIZE_BYTES = 2 * 1024 * 1024
 EXTERNAL_PLAYER_CLOUD_PROXY_CHUNK_SIZE_BYTES = 1024 * 1024
+ADMIN_NATIVE_STREAM_ACTIVE_SECONDS = 90.0
 
 
 @dataclass(frozen=True)
@@ -904,7 +905,7 @@ def _native_surface_and_device_labels(
 
 def _native_admin_display_status(row, *, now: datetime) -> tuple[str, str, str, str, int]:
     expires_at = _parse_native_admin_datetime(row["expires_at"])
-    last_seen_at = _parse_native_admin_datetime(row["last_seen_at"])
+    last_stream_activity_at = _parse_native_admin_datetime(row["last_progress_recorded_at"])
     auth_expires_at = _parse_native_admin_datetime(row["auth_session_expires_at"])
     if row["closed_at"] is not None:
         return "closed", "Closed", "neutral", "Native playback session was explicitly closed.", 4
@@ -918,9 +919,12 @@ def _native_admin_display_status(row, *, now: datetime) -> tuple[str, str, str, 
         return "expired", "Expired", "neutral", "Native playback session TTL expired.", 5
     if row["auth_session_id"] is not None and auth_expires_at is not None and auth_expires_at <= now:
         return "expired", "Expired", "neutral", "Coupled browser auth session expired.", 5
-    if last_seen_at is not None and (now - last_seen_at).total_seconds() <= 120.0:
-        return "running", "Running", "success", "Native stream had recent session activity.", 1
-    return "idle", "Idle", "neutral", "Native session is valid but has no recent stream activity.", 2
+    if (
+        last_stream_activity_at is not None
+        and (now - last_stream_activity_at).total_seconds() <= ADMIN_NATIVE_STREAM_ACTIVE_SECONDS
+    ):
+        return "running", "Running", "success", "Native stream had recent media activity.", 1
+    return "idle", "Idle", "neutral", "Native session is valid but has no recent media activity.", 2
 
 
 def _build_admin_native_playback_item(row, *, now: datetime) -> dict[str, object]:
@@ -953,6 +957,7 @@ def _build_admin_native_playback_item(row, *, now: datetime) -> dict[str, object
         "created_at": row["created_at"],
         "expires_at": row["expires_at"],
         "last_seen_at": row["last_seen_at"],
+        "last_stream_activity_at": row["last_progress_recorded_at"],
         "closed_at": row["closed_at"],
         "revoked_at": row["revoked_at"],
         "last_position_seconds": row["last_position_seconds"],
@@ -967,8 +972,7 @@ def _build_admin_native_playback_item(row, *, now: datetime) -> dict[str, object
 
 def get_admin_native_playback_status(settings: Settings) -> dict[str, object]:
     now = datetime.now(timezone.utc)
-    now_iso = now.isoformat()
-    cutoff_iso = (now - timedelta(hours=24)).isoformat()
+    active_cutoff_iso = (now - timedelta(seconds=ADMIN_NATIVE_STREAM_ACTIVE_SECONDS)).isoformat()
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
@@ -984,6 +988,7 @@ def get_admin_native_playback_status(settings: Settings) -> dict[str, object]:
                 n.created_at,
                 n.expires_at,
                 n.last_seen_at,
+                n.last_progress_recorded_at,
                 n.closed_at,
                 n.revoked_at,
                 n.last_position_seconds,
@@ -998,28 +1003,22 @@ def get_admin_native_playback_status(settings: Settings) -> dict[str, object]:
             JOIN users u ON u.id = n.user_id
             JOIN media_items m ON m.id = n.media_item_id
             LEFT JOIN sessions s ON s.id = n.auth_session_id
-            WHERE n.expires_at > ?
-               OR n.created_at >= ?
-               OR n.last_seen_at >= ?
-               OR n.closed_at >= ?
-               OR n.revoked_at >= ?
+            WHERE n.last_progress_recorded_at >= ?
             ORDER BY n.user_id ASC, n.created_at DESC
             LIMIT 200
             """,
-            (now_iso, cutoff_iso, cutoff_iso, cutoff_iso, cutoff_iso),
+            (active_cutoff_iso,),
         ).fetchall()
 
     groups: dict[int, dict[str, object]] = {}
     total = 0
     running = 0
-    idle = 0
     for row in rows:
         item = _build_admin_native_playback_item(row, now=now)
+        if item["display_status"] != "running":
+            continue
         total += 1
-        if item["display_status"] == "running":
-            running += 1
-        elif item["display_status"] == "idle":
-            idle += 1
+        running += 1
         user_id = int(item["user_id"])
         group = groups.setdefault(
             user_id,
@@ -1033,16 +1032,13 @@ def get_admin_native_playback_status(settings: Settings) -> dict[str, object]:
             },
         )
         group["total_native_playbacks"] = int(group["total_native_playbacks"]) + 1
-        if item["display_status"] == "running":
-            group["running_native_playbacks"] = int(group["running_native_playbacks"]) + 1
-        elif item["display_status"] == "idle":
-            group["idle_native_playbacks"] = int(group["idle_native_playbacks"]) + 1
+        group["running_native_playbacks"] = int(group["running_native_playbacks"]) + 1
         group["items"].append(item)
 
     return {
         "native_playback_count": total,
         "native_playback_running_count": running,
-        "native_playback_idle_count": idle,
+        "native_playback_idle_count": 0,
         "native_playbacks_by_user": list(groups.values()),
     }
 

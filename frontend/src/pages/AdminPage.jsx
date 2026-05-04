@@ -19,7 +19,7 @@ import {
   shortenDiagnosticId,
   workerStatusToneClass,
 } from "../lib/adminPlaybackWorkers";
-import { formatCompletedRescanWarning, formatRescanBannerText, hasCloudSyncWarning } from "../lib/cloudSyncStatus";
+import { formatCompletedRescanWarning } from "../lib/cloudSyncStatus";
 import { formatDate } from "../lib/format";
 
 
@@ -249,7 +249,7 @@ export function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [banner, setBanner] = useState(null);
   const [recoveryFeedback, setRecoveryFeedback] = useState(null);
-  const [rescanPending, setRescanPending] = useState(false);
+  const [statusRefreshPending, setStatusRefreshPending] = useState(false);
   const [createPending, setCreatePending] = useState(false);
   const [createBackupPending, setCreateBackupPending] = useState(false);
   const [recoveryLoading, setRecoveryLoading] = useState(false);
@@ -379,11 +379,13 @@ export function AdminPage() {
       if (user?.role === "admin" && activeSection === "panel") {
         await loadPlaybackWorkers({ silent: true });
       }
+      return true;
     } catch (requestError) {
       setBanner({
         tone: "error",
         text: requestError.message || "Failed to load admin data",
       });
+      return false;
     } finally {
       if (!silent) {
         setLoading(false);
@@ -666,31 +668,25 @@ export function AdminPage() {
     }
   }
 
-  async function handleRescan() {
-    if (rescanPending) {
+  async function handleRefreshStatus() {
+    if (statusRefreshPending) {
       return;
     }
-    setRescanPending(true);
+    setStatusRefreshPending(true);
     setBanner(null);
     try {
-      const payload = await apiRequest("/api/library/rescan", { method: "POST" });
-      const nextCloudSyncWarning = hasCloudSyncWarning(payload.cloud_sync)
-        ? String(payload.cloud_sync?.message || "").trim()
-        : "";
-      cloudSyncWarningRef.current = nextCloudSyncWarning;
-      setBanner({
-        tone: nextCloudSyncWarning ? "error" : "success",
-        text: formatRescanBannerText(payload),
-      });
-      scanRunningRef.current = Boolean(payload.running);
-      await loadAdminData({ silent: true });
+      const refreshed = await loadAdminData({ silent: true });
+      await loadPlaybackWorkers({ silent: true });
+      if (refreshed) {
+        setBanner({ tone: "success", text: "Admin status refreshed." });
+      }
     } catch (requestError) {
       setBanner({
         tone: "error",
-        text: requestError.message || "Failed to start scan",
+        text: requestError.message || "Failed to refresh admin status",
       });
     } finally {
-      setRescanPending(false);
+      setStatusRefreshPending(false);
     }
   }
 
@@ -1350,7 +1346,7 @@ export function AdminPage() {
                                 {nativePlayback.client_name ? <span>Client {nativePlayback.client_name}</span> : null}
                                 {hasPosition ? <span>Position {formatWorkerRuntime(positionSeconds)}</span> : null}
                                 {hasDuration ? <span>Duration {formatWorkerRuntime(durationSeconds)}</span> : null}
-                                {nativePlayback.last_seen_at ? <span>Last seen {formatDate(nativePlayback.last_seen_at)}</span> : null}
+                                {nativePlayback.last_stream_activity_at ? <span>Last stream {formatDate(nativePlayback.last_stream_activity_at)}</span> : null}
                                 {nativePlayback.expires_at ? <span>Expires {formatDate(nativePlayback.expires_at)}</span> : null}
                                 <span>{nativePlayback.auth_session_coupled ? "Auth coupled" : "Auth decoupled"}</span>
                               </div>
@@ -1791,12 +1787,28 @@ export function AdminPage() {
   const createUserCard = (
     <section className="settings-card">
       <h2>Create user</h2>
-      <form className="admin-form" onSubmit={handleCreateUser}>
+      <form
+        autoComplete="off"
+        className="admin-form"
+        id="elvern-admin-create-account-form"
+        name="elvern-admin-create-account-form"
+        onSubmit={handleCreateUser}
+      >
+        <div aria-hidden="true" className="admin-autofill-decoys">
+          <input autoComplete="username" name="username" tabIndex={-1} type="text" />
+          <input autoComplete="current-password" name="password" tabIndex={-1} type="password" />
+        </div>
         <label>
           Username
           <input
+            autoComplete="off"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            id="elvern-new-account-username"
+            name="elvern-new-account-username"
             onChange={(event) => setCreateUserForm((current) => ({ ...current, username: event.target.value }))}
             required
+            spellCheck="false"
             type="text"
             value={createUserForm.username}
           />
@@ -1804,6 +1816,11 @@ export function AdminPage() {
         <label>
           Password
           <PasswordInput
+            autoComplete="new-password"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            id="elvern-new-account-password"
+            name="elvern-new-account-password"
             onChange={(event) => setCreateUserForm((current) => ({ ...current, password: event.target.value }))}
             required
             value={createUserForm.password}
@@ -2300,14 +2317,16 @@ export function AdminPage() {
             );
           })}
         </div>
-        <button
-          className="ghost-button ghost-button--inline admin-nav-card__rescan"
-          disabled={rescanPending}
-          onClick={handleRescan}
-          type="button"
-        >
-          {rescanPending ? "Starting scan..." : "Rescan"}
-        </button>
+        {activeSection === "panel" ? (
+          <button
+            className="ghost-button ghost-button--inline admin-nav-card__rescan"
+            disabled={statusRefreshPending}
+            onClick={handleRefreshStatus}
+            type="button"
+          >
+            {statusRefreshPending ? "Refreshing..." : "Refresh status"}
+          </button>
+        ) : null}
       </div>
 
       <FeedbackBanner banner={banner} />

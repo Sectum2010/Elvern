@@ -93,8 +93,9 @@ test("grouping playback status includes native playback sessions without Route2 
             playback_kind: "native",
             session_id: "native-session-1",
             playback_metadata_label: "VLC · iPad 1080p · Cloud",
-            display_status_label: "Idle",
-            display_status_tone: "neutral",
+            display_status: "running",
+            display_status_label: "Running",
+            display_status_tone: "success",
           },
         ],
       },
@@ -112,8 +113,9 @@ test("grouping playback status includes native playback sessions without Route2 
             device_label: "iOS device",
             display_profile_label: "unknown quality",
             source_label: "Local",
-            display_status_label: "Running",
-            display_status_tone: "success",
+            display_status: "idle",
+            display_status_label: "Idle",
+            display_status_tone: "neutral",
           },
         ],
       },
@@ -133,9 +135,58 @@ test("grouping playback status includes native playback sessions without Route2 
   const bob = byUser.get(8);
   assert.ok(bob);
   assert.equal(bob.totalWorkers, 0);
-  assert.equal(bob.totalNativePlaybacks, 1);
-  assert.equal(bob.totalPlaybackItems, 1);
-  assert.equal(buildWorkerPlaybackMetadataLabel(bob.nativeItems[0]), "Infuse · iOS device unknown quality · Local");
+  assert.equal(bob.totalNativePlaybacks, 0);
+  assert.equal(bob.totalPlaybackItems, 0);
+  assert.deepEqual(bob.nativeItems, []);
+});
+
+
+test("idle native playback sessions do not count as visible active playback", () => {
+  const byUser = buildPlaybackWorkersByUserId({
+    native_playbacks_by_user: [
+      {
+        user_id: 9,
+        username: "idle-user",
+        total_native_playbacks: 3,
+        running_native_playbacks: 1,
+        idle_native_playbacks: 2,
+        items: [
+          {
+            playback_kind: "native",
+            session_id: "idle-vlc",
+            playback_metadata_label: "VLC · iPad 1080p · Cloud",
+            display_status: "idle",
+            display_status_label: "Idle",
+            display_status_tone: "neutral",
+          },
+          {
+            playback_kind: "native",
+            session_id: "expired-vlc",
+            playback_metadata_label: "VLC · iPad 1080p · Cloud",
+            display_status: "expired",
+            display_status_label: "Expired",
+            display_status_tone: "neutral",
+          },
+          {
+            playback_kind: "native",
+            session_id: "running-vlc",
+            playback_metadata_label: "VLC · iPad 1080p · Cloud",
+            display_status: "running",
+            display_status_label: "Running",
+            display_status_tone: "success",
+          },
+        ],
+      },
+    ],
+  });
+
+  const summary = byUser.get(9);
+  assert.ok(summary);
+  assert.equal(summary.totalNativePlaybacks, 1);
+  assert.equal(summary.runningNativePlaybacks, 1);
+  assert.equal(summary.idleNativePlaybacks, 0);
+  assert.equal(summary.totalPlaybackItems, 1);
+  assert.deepEqual(summary.nativeItems.map((item) => item.session_id), ["running-vlc"]);
 });
 
 
