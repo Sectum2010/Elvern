@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -21,8 +21,10 @@ from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
     create_native_playback_session,
     build_native_stream_response,
+    close_native_playback_session,
     get_native_playback_session_payload,
     inspect_native_playback_access,
+    should_decouple_external_player_auth_session,
 )
 
 
@@ -439,20 +441,28 @@ def test_external_player_native_playback_still_respects_user_disable_and_native_
 
 
 @pytest.mark.parametrize(
-    "client_name",
+    ("client_name", "username_slug"),
     [
-        "Elvern iOS VLC Handoff",
-        "Elvern iOS Infuse Handoff",
+        ("Elvern iOS VLC Handoff", "ios-vlc"),
+        ("Elvern iOS Infuse Handoff", "ios-infuse"),
+        ("VLC Helper Fallback (windows)", "desktop-vlc-helper"),
+        ("VLC Playlist Fallback (mac)", "desktop-vlc-playlist"),
+        ("Linux Same-Host VLC", "linux-same-host-vlc"),
     ],
 )
-def test_external_player_native_playback_uses_external_stream_ttl(initialized_settings, monkeypatch, client_name: str) -> None:
-    created = _create_standard_user(initialized_settings, username=client_name.replace(" ", "-").lower())
+def test_external_player_native_playback_uses_external_stream_ttl(
+    initialized_settings,
+    monkeypatch,
+    client_name: str,
+    username_slug: str,
+) -> None:
+    created = _create_standard_user(initialized_settings, username=f"native-{username_slug}")
     session_user, _token = _issue_user_session(
         initialized_settings,
         username=str(created["username"]),
         password="family-password",
     )
-    item = _create_media_item(initialized_settings, relative_name=f"{client_name.replace(' ', '-').lower()}.mp4")
+    item = _create_media_item(initialized_settings, relative_name=f"{username_slug}.mp4")
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
@@ -485,6 +495,162 @@ def test_external_player_native_playback_uses_external_stream_ttl(initialized_se
     created_at = datetime.fromisoformat(str(row["created_at"]))
     expires_at = datetime.fromisoformat(str(row["expires_at"]))
     assert int((expires_at - created_at).total_seconds()) == initialized_settings.external_player_stream_ttl_seconds
+
+    policy = _build_native_playback_stream_policy(
+        initialized_settings,
+        client_name=client_name,
+        stream_path_class="local_file",
+    )
+    assert policy.external_player is True
+    assert should_decouple_external_player_auth_session(client_name=client_name) is True
+
+
+def test_desktop_vlc_external_playback_survives_browser_auth_revoke_and_normal_ttl_pause(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="desktop-vlc-pause")
+    session_user, token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="desktop-vlc-pause.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="VLC Playlist Fallback (windows)",
+    )
+
+    now = datetime.now(timezone.utc)
+    paused_since = now - timedelta(seconds=initialized_settings.playback_token_ttl_seconds + 60)
+    external_expires_at = paused_since + timedelta(
+        seconds=initialized_settings.external_player_stream_ttl_seconds,
+    )
+    assert external_expires_at > now
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET created_at = ?, last_seen_at = ?, expires_at = ?
+            WHERE session_id = ?
+            """,
+            (
+                paused_since.isoformat(),
+                paused_since.isoformat(),
+                external_expires_at.isoformat(),
+                str(native_session["session_id"]),
+            ),
+        )
+        connection.commit()
+
+    destroy_session(initialized_settings, token)
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is True
+    assert access_state["reason"] == "allowed"
+
+    response = build_native_stream_response(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+        range_header="bytes=0-1",
+        record_activity=False,
+    )
+    context = getattr(response, "_elvern_native_stream_context", None)
+    assert context is not None
+    assert context["external_player"] is True
+    assert context["auth_session_coupled"] is False
+    assert context["session_ttl_seconds"] == initialized_settings.external_player_stream_ttl_seconds
+
+
+@pytest.mark.parametrize(
+    ("invalidation_mode", "expected_reason"),
+    [
+        ("user_disabled", "native_session_revoked"),
+        ("native_session_revoked", "native_session_revoked"),
+        ("native_session_closed", "native_session_closed"),
+    ],
+)
+def test_desktop_vlc_external_playback_still_respects_disable_revoke_and_close(
+    initialized_settings,
+    monkeypatch,
+    invalidation_mode: str,
+    expected_reason: str,
+) -> None:
+    created = _create_standard_user(initialized_settings, username=f"desktop-vlc-{invalidation_mode}")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name=f"desktop-vlc-{invalidation_mode}.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="VLC Playlist Fallback (windows)",
+    )
+
+    if invalidation_mode == "user_disabled":
+        update_user(
+            initialized_settings,
+            user_id=int(created["id"]),
+            enabled=False,
+            role=None,
+            current_admin_password=None,
+            actor=_admin_user(initialized_settings),
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+    elif invalidation_mode == "native_session_revoked":
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                """
+                UPDATE native_playback_sessions
+                SET revoked_at = ?
+                WHERE session_id = ?
+                """,
+                (utcnow_iso(), str(native_session["session_id"])),
+            )
+            connection.commit()
+    else:
+        close_native_playback_session(
+            initialized_settings,
+            session_id=str(native_session["session_id"]),
+            access_token=str(native_session["access_token"]),
+        )
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is False
+    assert access_state["reason"] == expected_reason
 
 
 def test_build_native_stream_response_exposes_external_player_debug_context(initialized_settings, monkeypatch) -> None:

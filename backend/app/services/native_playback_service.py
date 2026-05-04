@@ -357,7 +357,7 @@ def should_decouple_external_player_auth_session(
     normalized_external_player = str(external_player or "").strip().lower()
     if normalized_external_player in {"vlc", "infuse"}:
         return True
-    return _is_ios_external_player_backend_stream_client(client_name)
+    return _uses_external_player_backend_stream(client_name)
 
 
 def _is_ios_external_player_backend_stream_client(client_name: object | None) -> bool:
@@ -369,7 +369,11 @@ def _uses_external_player_backend_stream(client_name: object | None) -> bool:
     normalized = str(client_name or "").strip().lower()
     if _is_ios_external_player_backend_stream_client(normalized):
         return True
-    return normalized.startswith("vlc helper fallback") or normalized.startswith("vlc playlist fallback")
+    return (
+        normalized == "linux same-host vlc"
+        or normalized.startswith("vlc helper fallback")
+        or normalized.startswith("vlc playlist fallback")
+    )
 
 
 def _build_native_playback_stream_policy(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
+from html import unescape
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
 
@@ -1839,6 +1841,48 @@ def test_desktop_playback_route_returns_backend_fallback_when_mapping_is_missing
     assert payload["used_backend_fallback"] is True
     assert "short-lived backend URL" in payload["vlc_target"]
     assert any("Windows VLC mapping is not configured yet" in note for note in payload["notes"])
+
+
+def test_desktop_playlist_backend_fallback_decouples_vlc_stream_from_browser_auth(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="desktop/windows-playlist-fallback.mp4",
+    )
+    client.app.state.settings = replace(initialized_settings, library_root_windows=None)
+
+    response = client.get(
+        f"/api/desktop-playback/{item['id']}/playlist",
+        params={"platform": "windows"},
+    )
+
+    assert response.status_code == 200
+    location = unescape(response.text.split("<location>", 1)[1].split("</location>", 1)[0])
+    parsed_location = urlsplit(location)
+    assert parsed_location.path.endswith("/stream")
+    session_id = parsed_location.path.rstrip("/").split("/")[-2]
+    assert parse_qs(parsed_location.query).get("token")
+
+    with get_connection(initialized_settings) as connection:
+        session_row = connection.execute(
+            """
+            SELECT auth_session_id, client_name, created_at, expires_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+
+    assert session_row is not None
+    assert session_row["auth_session_id"] is None
+    assert str(session_row["client_name"]).lower().startswith("vlc playlist fallback (windows)")
+    created_at = datetime.fromisoformat(str(session_row["created_at"]))
+    expires_at = datetime.fromisoformat(str(session_row["expires_at"]))
+    assert int((expires_at - created_at).total_seconds()) == initialized_settings.external_player_stream_ttl_seconds
 
 
 @pytest.mark.parametrize("platform", ["mac", "windows"])

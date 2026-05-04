@@ -527,7 +527,9 @@ def launch_vlc_for_item(
             settings,
             user_id=user_id,
             item=item,
-            auth_session_id=auth_session_id,
+            # The backend URL is consumed by VLC, not the browser. Keep it
+            # pause-tolerant while native/user revocation remains enforced.
+            auth_session_id=None,
             user_agent=user_agent,
             source_ip=source_ip,
             client_name="Linux Same-Host VLC",
@@ -1045,7 +1047,9 @@ def build_vlc_playlist_response(
             settings,
             user_id=user_id,
             item=item,
-            auth_session_id=auth_session_id,
+            # VLC may pause without making HTTP requests for longer than the
+            # browser token TTL. The native token remains revokeable on its own.
+            auth_session_id=None,
             user_agent=user_agent,
             source_ip=source_ip,
             client_name=f"VLC Playlist Fallback ({platform})",
