@@ -620,6 +620,54 @@ def _route2_display_profile_label(profile: str | None) -> str:
     return label.replace("_", " ").replace("-", " ")
 
 
+def _source_kind_display_label(source_kind: object) -> str:
+    normalized = str(source_kind or "").strip().lower()
+    if normalized == "cloud":
+        return "Cloud"
+    if normalized == "local":
+        return "Local"
+    return "Unknown source"
+
+
+def _normalize_client_device_class(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"phone", "tablet", "desktop", "unknown"} else None
+
+
+def _browser_device_display_from_evidence(
+    *,
+    client_device_class: object | None,
+    user_agent: object | None,
+) -> tuple[str, str, str, str]:
+    explicit_class = _normalize_client_device_class(client_device_class)
+    normalized_user_agent = str(user_agent or "").strip().lower()
+    if "iphone" in normalized_user_agent or "ipod" in normalized_user_agent:
+        return "phone", "iPhone", "user_agent", "high"
+    if "ipad" in normalized_user_agent:
+        return "tablet", "iPad", "user_agent", "high"
+    if "android" in normalized_user_agent:
+        if "mobile" in normalized_user_agent:
+            return "phone", "Android phone", "user_agent", "high"
+        return "tablet", "Android tablet", "user_agent", "medium"
+    if "windows nt" in normalized_user_agent:
+        return "desktop", "Windows PC", "user_agent", "high"
+    if "macintosh" in normalized_user_agent:
+        if explicit_class == "tablet":
+            return "tablet", "iPad", "explicit_client_device_class", "medium"
+        return "desktop", "Mac", "user_agent", "high"
+    if "x11; linux" in normalized_user_agent or "linux x86_64" in normalized_user_agent:
+        return "desktop", "Linux desktop", "user_agent", "high"
+    if "cros" in normalized_user_agent:
+        return "desktop", "Desktop", "user_agent", "medium"
+    if explicit_class == "desktop":
+        return "desktop", "Desktop", "explicit_client_device_class", "medium"
+    if explicit_class == "tablet":
+        return "tablet", "Tablet", "explicit_client_device_class", "medium"
+    if explicit_class == "phone":
+        return "phone", "Phone", "explicit_client_device_class", "medium"
+    return "unknown", "Unknown device", "unavailable", "unknown"
+
+
 def _clock_ticks_per_second() -> int:
     try:
         return max(1, int(os.sysconf("SC_CLK_TCK")))
@@ -1293,12 +1341,16 @@ class MobilePlaybackManager:
         start_position_seconds: float = 0.0,
         engine_mode: str | None = None,
         playback_mode: str | None = None,
+        client_device_class: str | None = None,
+        client_user_agent: str | None = None,
         user_role: str | None = None,
     ) -> dict[str, object]:
         self._validate_transcoding()
         profile_key = self._normalize_profile(profile)
         selected_engine_mode = self._select_engine_mode(engine_mode)
         selected_playback_mode = self._select_playback_mode(playback_mode)
+        normalized_client_device_class = _normalize_client_device_class(client_device_class)
+        normalized_client_user_agent = (client_user_agent or "").strip() or None
         normalized_user_role = self._normalize_user_role(user_role)
         if selected_engine_mode != "route2" and selected_playback_mode != "lite":
             raise ValueError("Full Playback requires Browser Playback Route 2")
@@ -1360,6 +1412,8 @@ class MobilePlaybackManager:
                         candidate,
                         auth_session_id=auth_session_id,
                         username=username,
+                        client_device_class=normalized_client_device_class,
+                        client_user_agent=normalized_client_user_agent,
                     )
                     if self._route2_session_can_reuse_target_locked(candidate, target_position_seconds):
                         compatible_session = candidate
@@ -1455,6 +1509,8 @@ class MobilePlaybackManager:
                 engine_mode=selected_engine_mode,
                 playback_mode=selected_playback_mode,
             ),
+            client_device_class=normalized_client_device_class,
+            client_user_agent=normalized_client_user_agent,
             source_original_filename=(str(item.get("original_filename") or "").strip() or None),
             source_container=(str(item.get("container") or "").strip() or None),
             source_video_codec=(str(item.get("video_codec") or "").strip() or None),
@@ -2163,12 +2219,20 @@ class MobilePlaybackManager:
         *,
         auth_session_id: int | None = None,
         username: str | None = None,
+        client_device_class: str | None = None,
+        client_user_agent: str | None = None,
     ) -> None:
         normalized_username = (username or "").strip() or None
         if auth_session_id is not None:
             session.auth_session_id = auth_session_id
         if normalized_username:
             session.username = normalized_username
+        normalized_client_device_class = _normalize_client_device_class(client_device_class)
+        if normalized_client_device_class is not None:
+            session.client_device_class = normalized_client_device_class
+        normalized_client_user_agent = (client_user_agent or "").strip() or None
+        if normalized_client_user_agent:
+            session.client_user_agent = normalized_client_user_agent
 
     def _route2_conflict_worker_id_locked(self, session: MobilePlaybackSession) -> str | None:
         candidate_ids = [
@@ -6033,6 +6097,43 @@ class MobilePlaybackManager:
             99,
         )
 
+    def _route2_worker_playback_metadata_locked(
+        self,
+        record: Route2WorkerRecord,
+        session: MobilePlaybackSession | None,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        playback_mode = str(
+            session.browser_playback.playback_mode if session is not None else record.playback_mode
+        ).strip().lower()
+        if playback_mode == "full":
+            playback_surface = "route2_full"
+            playback_surface_label = "Full"
+        elif playback_mode == "lite":
+            playback_surface = "route2_lite"
+            playback_surface_label = "Lite"
+        else:
+            playback_surface = "unknown"
+            playback_surface_label = "Unknown playback"
+
+        device_class, device_label, evidence_source, confidence = _browser_device_display_from_evidence(
+            client_device_class=session.client_device_class if session is not None else None,
+            user_agent=session.client_user_agent if session is not None else None,
+        )
+        profile_label = str(payload.get("display_profile_label") or _route2_display_profile_label(record.profile))
+        source_label = _source_kind_display_label(record.source_kind)
+        playback_metadata_label = f"{playback_surface_label} · {device_label} {profile_label} · {source_label}"
+        return {
+            "playback_surface": playback_surface,
+            "playback_surface_label": playback_surface_label,
+            "device_class": device_class,
+            "device_label": device_label,
+            "device_evidence_source": evidence_source,
+            "device_confidence": confidence,
+            "source_label": source_label,
+            "playback_metadata_label": playback_metadata_label,
+        }
+
     def get_route2_worker_status(self) -> dict[str, object]:
         with self._lock:
             budget = self._route2_budget_summary_locked()
@@ -6322,6 +6423,7 @@ class MobilePlaybackManager:
                     payload["publish_latency_avg_seconds"] = None
                     payload["publish_latency_max_seconds"] = None
                     payload["last_publish_kind"] = None
+                payload.update(self._route2_worker_playback_metadata_locked(record, session, payload))
                 display_status = self._route2_worker_display_status_locked(record, session, epoch, payload)
                 payload["display_status"] = display_status.status
                 payload["display_status_label"] = display_status.label

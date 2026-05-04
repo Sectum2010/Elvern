@@ -4299,6 +4299,65 @@ def test_route2_status_freezes_stopped_worker_runtime_and_labels_profile(initial
     assert item_payload["display_status_label"] == "Stopped"
 
 
+def test_route2_worker_status_playback_metadata_uses_unknown_device_without_mobile_prefix(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="cloud")
+    record.worker_id = "metadata-unknown-device"
+    record.playback_mode = "full"
+    record.profile = "mobile_2160p"
+
+    with manager._lock:
+        manager._route2_workers[record.worker_id] = record
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+
+    assert item_payload["playback_surface"] == "route2_full"
+    assert item_payload["playback_surface_label"] == "Full"
+    assert item_payload["device_class"] == "unknown"
+    assert item_payload["device_label"] == "Unknown device"
+    assert item_payload["device_evidence_source"] == "unavailable"
+    assert item_payload["device_confidence"] == "unknown"
+    assert item_payload["display_profile_label"] == "2160p"
+    assert item_payload["source_label"] == "Cloud"
+    assert item_payload["playback_metadata_label"] == "Full · Unknown device 2160p · Cloud"
+    assert "mobile_2160p" not in item_payload["playback_metadata_label"]
+
+
+def test_route2_worker_status_playback_metadata_uses_explicit_ipad_evidence(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+    )
+    session.profile = "mobile_1080p"
+    session.client_device_class = "tablet"
+    session.client_user_agent = (
+        "Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+    )
+    record.profile = "mobile_1080p"
+    record.playback_mode = "lite"
+    record.source_kind = "cloud"
+    with manager._lock:
+        _install_display_status_session(manager, session, epoch, record)
+
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), record.worker_id)
+
+    assert item_payload["playback_surface"] == "route2_lite"
+    assert item_payload["playback_surface_label"] == "Lite"
+    assert item_payload["device_class"] == "tablet"
+    assert item_payload["device_label"] == "iPad"
+    assert item_payload["device_evidence_source"] == "user_agent"
+    assert item_payload["device_confidence"] == "high"
+    assert item_payload["display_profile_label"] == "1080p"
+    assert item_payload["source_label"] == "Cloud"
+    assert item_payload["playback_metadata_label"] == "Lite · iPad 1080p · Cloud"
+
+
 @pytest.mark.parametrize(
     ("state", "expected_status", "expected_label", "expected_tone"),
     [

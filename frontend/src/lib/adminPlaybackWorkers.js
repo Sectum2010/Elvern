@@ -87,6 +87,49 @@ export function formatWorkerProfileLabel(workerOrProfile) {
   return withoutMobilePrefix.replace(/[_-]+/g, " ");
 }
 
+export function formatWorkerSourceLabel(sourceKindOrWorker) {
+  const rawSource = typeof sourceKindOrWorker === "string"
+    ? sourceKindOrWorker
+    : (
+      sourceKindOrWorker?.source_label
+      || sourceKindOrWorker?.source_kind
+    );
+  const normalized = String(rawSource || "").trim().toLowerCase();
+  if (normalized === "cloud") {
+    return "Cloud";
+  }
+  if (normalized === "local") {
+    return "Local";
+  }
+  if (typeof rawSource === "string" && rawSource.trim()) {
+    return rawSource.trim();
+  }
+  return "Unknown source";
+}
+
+export function buildWorkerPlaybackMetadataLabel(worker) {
+  const backendLabel = typeof worker?.playback_metadata_label === "string"
+    ? worker.playback_metadata_label.trim()
+    : "";
+  if (backendLabel) {
+    return backendLabel;
+  }
+  const surfaceLabel = typeof worker?.playback_surface_label === "string" && worker.playback_surface_label.trim()
+    ? worker.playback_surface_label.trim()
+    : formatWorkerModeLabel(worker?.playback_mode);
+  const deviceLabel = typeof worker?.device_label === "string" && worker.device_label.trim()
+    ? worker.device_label.trim()
+    : "Unknown device";
+  const profileLabel = formatWorkerProfileLabel(worker);
+  const sourceLabel = formatWorkerSourceLabel(worker);
+  const deviceAndProfile = [deviceLabel, profileLabel]
+    .filter((part) => typeof part === "string" && part.trim())
+    .join(" ");
+  return [surfaceLabel, deviceAndProfile, sourceLabel]
+    .filter((part) => typeof part === "string" && part.trim())
+    .join(" · ");
+}
+
 export function formatCpuCoresValue(value) {
   if (!isFiniteNumber(value)) {
     return "—";

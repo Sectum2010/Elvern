@@ -1236,7 +1236,15 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     profile: str
     transcode_profile_key: str | None = None
     display_profile_label: str | None = None
+    playback_surface: str | None = None
+    playback_surface_label: str | None = None
+    device_class: str | None = None
+    device_label: str | None = None
+    device_evidence_source: str | None = None
+    device_confidence: str | None = None
     source_kind: str
+    source_label: str | None = None
+    playback_metadata_label: str | None = None
     state: str
     display_status: str | None = None
     display_status_label: str | None = None

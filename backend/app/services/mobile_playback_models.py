@@ -304,6 +304,8 @@ class MobilePlaybackSession:
     actual_media_element_time_seconds: float = 0.0
     playing_before_seek: bool = False
     client_is_playing: bool = False
+    client_device_class: str | None = None
+    client_user_agent: str | None = None
     lifecycle_state: str = "attached"
     stalled_recovery_requested: bool = False
     last_refill_start_seconds: float | None = None

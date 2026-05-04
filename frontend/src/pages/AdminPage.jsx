@@ -8,13 +8,12 @@ import {
   buildPlaybackWorkerSummaryBubbles,
   buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
+  buildWorkerPlaybackMetadataLabel,
   buildWorkerDisplayStatus,
   canTerminatePlaybackWorker,
   formatCpuCoresUsage,
   formatMemoryGaugeValue,
   formatPreparedRanges,
-  formatWorkerModeLabel,
-  formatWorkerProfileLabel,
   formatWorkerRuntime,
   shouldShowWorkerCleanupNotice,
   shortenDiagnosticId,
@@ -1232,7 +1231,7 @@ export function AdminPage() {
                                 <div className="admin-worker-card__copy">
                                   <strong>{worker.title || "Untitled media item"}</strong>
                                   <p className="page-subnote">
-                                    {formatWorkerModeLabel(worker.playback_mode)} · {formatWorkerProfileLabel(worker)} · {worker.source_kind || "source unknown"}
+                                    {buildWorkerPlaybackMetadataLabel(worker)}
                                   </p>
                                 </div>
                                 <div className="admin-worker-card__actions">

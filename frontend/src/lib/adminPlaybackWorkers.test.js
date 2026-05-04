@@ -5,6 +5,7 @@ import {
   buildPlaybackWorkerSummaryBubbles,
   buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
+  buildWorkerPlaybackMetadataLabel,
   buildWorkerDisplayStatus,
   canTerminatePlaybackWorker,
   clampGaugePercent,
@@ -169,6 +170,58 @@ test("worker profile display labels do not imply mobile device surface", () => {
   assert.equal(formatWorkerProfileLabel({ profile: "mobile_1080p" }), "1080p");
   assert.equal(formatWorkerProfileLabel({ display_profile_label: "2160p", profile: "mobile_2160p" }), "2160p");
   assert.equal(formatWorkerProfileLabel({ profile: "" }), "profile unknown");
+});
+
+
+test("worker playback metadata label prefers backend formatted label", () => {
+  assert.equal(
+    buildWorkerPlaybackMetadataLabel({
+      playback_metadata_label: "Lite · iPad 1080p · Cloud",
+      playback_mode: "full",
+      profile: "mobile_2160p",
+      source_kind: "local",
+    }),
+    "Lite · iPad 1080p · Cloud",
+  );
+});
+
+
+test("worker playback metadata fallback keeps profile pixels separate from device", () => {
+  const label = buildWorkerPlaybackMetadataLabel({
+    playback_mode: "full",
+    profile: "mobile_2160p",
+    source_kind: "cloud",
+  });
+
+  assert.equal(label, "Full · Unknown device 2160p · Cloud");
+  assert.equal(label.includes("mobile_2160p"), false);
+});
+
+
+test("worker playback metadata fallback uses provided surface and source labels", () => {
+  assert.equal(
+    buildWorkerPlaybackMetadataLabel({
+      playback_surface_label: "VLC",
+      device_label: "Linux desktop",
+      display_profile_label: "1080p",
+      source_label: "Local",
+      playback_mode: "lite",
+    }),
+    "VLC · Linux desktop 1080p · Local",
+  );
+});
+
+
+test("worker playback metadata does not fake VLC or Infuse for Route2 workers", () => {
+  assert.equal(
+    buildWorkerPlaybackMetadataLabel({
+      playback_surface_label: "Full",
+      device_label: "Unknown device",
+      profile: "mobile_1080p",
+      source_kind: "local",
+    }),
+    "Full · Unknown device 1080p · Local",
+  );
 });
 
 

@@ -1388,11 +1388,14 @@ def test_browser_playback_create_route_caps_profile_by_client_device_class(
     create_response = client.post(
         "/api/browser-playback/sessions",
         json=request_payload,
+        headers={"user-agent": DESKTOP_CHROME_USER_AGENT},
     )
 
     assert create_response.status_code == 200
     assert create_response.json()["profile"] == expected_profile
     assert stub.create_kwargs[-1]["profile"] == expected_profile
+    assert stub.create_kwargs[-1]["client_device_class"] == client_device_class
+    assert stub.create_kwargs[-1]["client_user_agent"] == DESKTOP_CHROME_USER_AGENT
 
 
 def test_admin_playback_workers_route_returns_route2_worker_registry(

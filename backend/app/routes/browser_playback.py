@@ -95,6 +95,8 @@ def create_browser_playback_session(
             start_position_seconds=float(payload.start_position_seconds or 0.0),
             engine_mode=payload.engine_mode,
             playback_mode=payload.playback_mode,
+            client_device_class=payload.client_device_class,
+            client_user_agent=request.headers.get("user-agent"),
             user_role=user.role,
         )
     except Exception as exc:  # noqa: BLE001
