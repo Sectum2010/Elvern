@@ -1171,7 +1171,7 @@ export function AdminPage() {
                 ) : null}
               </div>
 
-              {workerGroup && workerGroup.totalWorkers > 0 ? (
+              {workerGroup && workerGroup.totalPlaybackItems > 0 ? (
                 <div className="admin-user-row__workers">
                   <div className="admin-user-workers">
                     <button
@@ -1181,9 +1181,9 @@ export function AdminPage() {
                       type="button"
                     >
                       <div className="admin-user-workers__copy">
-                        <strong>Playback workers</strong>
+                        <strong>Playback status</strong>
                         <p className="page-subnote">
-                          Route2 background preparation for this user.
+                          Route2 workers and native playback sessions for this user.
                         </p>
                       </div>
                       {workerGroup.hasRunningWorkers ? (
@@ -1209,11 +1209,14 @@ export function AdminPage() {
                       <span className="admin-workers-summary__pill">{workerGroup.running_workers} running</span>
                       <span className="admin-workers-summary__pill">{workerGroup.queued_workers} queued</span>
                       <span className="admin-workers-summary__pill">{workerGroup.totalWorkers} total</span>
+                      {workerGroup.totalNativePlaybacks > 0 ? (
+                        <span className="admin-workers-summary__pill">{workerGroup.totalNativePlaybacks} native</span>
+                      ) : null}
                     </div>
 
                     {isWorkerGroupCollapsed ? (
                       <p className="page-subnote admin-user-workers__collapsed-note">
-                        Worker cards hidden for this user.
+                        Playback cards hidden for this user.
                       </p>
                     ) : (
                       <div className="admin-user-workers__list">
@@ -1309,6 +1312,59 @@ export function AdminPage() {
 
                               {shouldShowWorkerCleanupNotice(worker) ? (
                                 <p className="page-subnote">Backend cleanup is taking longer than expected.</p>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                        {workerGroup.nativeItems.map((nativePlayback) => {
+                          const displayStatus = buildWorkerDisplayStatus(nativePlayback);
+                          const sessionDiagnosticId = shortenDiagnosticId(nativePlayback.session_id);
+                          const positionSeconds = Number(nativePlayback.last_position_seconds);
+                          const durationSeconds = Number(nativePlayback.last_duration_seconds);
+                          const hasPosition = Number.isFinite(positionSeconds) && positionSeconds >= 0;
+                          const hasDuration = Number.isFinite(durationSeconds) && durationSeconds >= 0;
+                          return (
+                            <div className="admin-worker-card admin-native-playback-card" key={`native-${nativePlayback.session_id}`}>
+                              <div className="admin-worker-card__header">
+                                <div className="admin-worker-card__copy">
+                                  <strong>{nativePlayback.title || "Untitled media item"}</strong>
+                                  <p className="page-subnote">
+                                    {buildWorkerPlaybackMetadataLabel(nativePlayback)}
+                                  </p>
+                                </div>
+                                <div className="admin-worker-card__actions">
+                                  <span
+                                    className={[
+                                      "admin-worker-state",
+                                      workerStatusToneClass(displayStatus),
+                                    ].join(" ")}
+                                    onClick={(event) => event.stopPropagation()}
+                                    title={displayStatus.reason || undefined}
+                                  >
+                                    {displayStatus.label}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="admin-worker-card__meta">
+                                {nativePlayback.client_name ? <span>Client {nativePlayback.client_name}</span> : null}
+                                {hasPosition ? <span>Position {formatWorkerRuntime(positionSeconds)}</span> : null}
+                                {hasDuration ? <span>Duration {formatWorkerRuntime(durationSeconds)}</span> : null}
+                                {nativePlayback.last_seen_at ? <span>Last seen {formatDate(nativePlayback.last_seen_at)}</span> : null}
+                                {nativePlayback.expires_at ? <span>Expires {formatDate(nativePlayback.expires_at)}</span> : null}
+                                <span>{nativePlayback.auth_session_coupled ? "Auth coupled" : "Auth decoupled"}</span>
+                              </div>
+
+                              {sessionDiagnosticId ? (
+                                <div className="admin-worker-card__diagnostics">
+                                  <button
+                                    className="admin-diagnostic-id-button"
+                                    onClick={() => openDiagnosticIdModal("native session", nativePlayback.session_id)}
+                                    type="button"
+                                  >
+                                    session {sessionDiagnosticId}
+                                  </button>
+                                </div>
                               ) : null}
                             </div>
                           );

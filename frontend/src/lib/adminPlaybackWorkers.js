@@ -268,6 +268,7 @@ export function shortenDiagnosticId(value, prefixLength = 6, suffixLength = 4) {
 
 export function summarizeWorkerGroup(group) {
   const items = Array.isArray(group?.items) ? group.items : [];
+  const nativeItems = Array.isArray(group?.nativeItems) ? group.nativeItems : [];
   const cpuCoresValues = items
     .map((item) => (isFiniteNumber(item?.cpu_cores_used) ? Number(item.cpu_cores_used) : null))
     .filter((value) => value != null);
@@ -315,6 +316,18 @@ export function summarizeWorkerGroup(group) {
     memoryBytes,
     memoryGaugePercent,
     hasRunningWorkers: Number(group?.running_workers || 0) > 0,
+    nativeItems,
+    totalNativePlaybacks: isFiniteNumber(group?.total_native_playbacks)
+      ? Number(group.total_native_playbacks)
+      : nativeItems.length,
+    runningNativePlaybacks: isFiniteNumber(group?.running_native_playbacks)
+      ? Number(group.running_native_playbacks)
+      : nativeItems.filter((item) => String(item?.display_status || "").toLowerCase() === "running").length,
+    idleNativePlaybacks: isFiniteNumber(group?.idle_native_playbacks)
+      ? Number(group.idle_native_playbacks)
+      : nativeItems.filter((item) => String(item?.display_status || "").toLowerCase() === "idle").length,
+    totalPlaybackItems: (isFiniteNumber(group?.total_workers) ? Number(group.total_workers) : items.length)
+      + (isFiniteNumber(group?.total_native_playbacks) ? Number(group.total_native_playbacks) : nativeItems.length),
   };
 }
 
@@ -326,6 +339,34 @@ export function buildPlaybackWorkersByUserId(payload) {
       continue;
     }
     map.set(Number(group.user_id), summarizeWorkerGroup(group));
+  }
+  const nativeGroups = Array.isArray(payload?.native_playbacks_by_user) ? payload.native_playbacks_by_user : [];
+  for (const nativeGroup of nativeGroups) {
+    if (!isFiniteNumber(nativeGroup?.user_id)) {
+      continue;
+    }
+    const userId = Number(nativeGroup.user_id);
+    const existing = map.get(userId) || {
+      user_id: userId,
+      username: nativeGroup.username,
+      allocated_cpu_cores: 0,
+      allocated_budget_cores: 0,
+      running_workers: 0,
+      queued_workers: 0,
+      total_workers: 0,
+      items: [],
+    };
+    map.set(
+      userId,
+      summarizeWorkerGroup({
+        ...existing,
+        username: existing.username || nativeGroup.username,
+        nativeItems: Array.isArray(nativeGroup.items) ? nativeGroup.items : [],
+        total_native_playbacks: nativeGroup.total_native_playbacks,
+        running_native_playbacks: nativeGroup.running_native_playbacks,
+        idle_native_playbacks: nativeGroup.idle_native_playbacks,
+      }),
+    );
   }
   return map;
 }

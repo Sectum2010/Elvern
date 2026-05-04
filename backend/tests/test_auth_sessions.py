@@ -22,6 +22,7 @@ from backend.app.services.native_playback_service import (
     create_native_playback_session,
     build_native_stream_response,
     close_native_playback_session,
+    get_admin_native_playback_status,
     get_native_playback_session_payload,
     inspect_native_playback_access,
     should_decouple_external_player_auth_session,
@@ -127,6 +128,26 @@ def _create_media_item(settings, *, relative_name: str = "movie.mp4") -> dict[st
         "resume_position_seconds": 0,
         "subtitles": [],
     }
+
+
+def _set_media_admin_display_fields(
+    settings,
+    *,
+    item_id: int,
+    source_kind: str = "local",
+    width: int | None = None,
+    height: int | None = None,
+) -> None:
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            UPDATE media_items
+            SET source_kind = ?, width = ?, height = ?
+            WHERE id = ?
+            """,
+            (source_kind, width, height, item_id),
+        )
+        connection.commit()
 
 
 def _login_headers(*, ip_address: str = "203.0.113.10", user_agent: str = "Pytest Browser 1.0") -> dict[str, str]:
@@ -767,6 +788,228 @@ def test_build_native_stream_response_exposes_external_player_debug_context(init
     assert context["chunk_size_bytes"] == 2 * 1024 * 1024
     assert context["auth_session_coupled"] is False
     assert context["session_ttl_seconds"] == initialized_settings.external_player_stream_ttl_seconds
+
+
+def test_admin_native_playback_status_exposes_vlc_and_infuse_without_sensitive_fields(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="admin-native-visible")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    vlc_item = _create_media_item(initialized_settings, relative_name="admin-native-vlc.mp4")
+    infuse_item = _create_media_item(initialized_settings, relative_name="admin-native-infuse.mp4")
+    _set_media_admin_display_fields(
+        initialized_settings,
+        item_id=int(vlc_item["id"]),
+        source_kind="cloud",
+        width=1920,
+        height=1080,
+    )
+    _set_media_admin_display_fields(
+        initialized_settings,
+        item_id=int(infuse_item["id"]),
+        source_kind="local",
+        width=1280,
+        height=720,
+    )
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    vlc_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=vlc_item,
+        auth_session_id=None,
+        user_agent=(
+            "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS VLC Handoff",
+    )
+    infuse_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=infuse_item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS Infuse Handoff",
+    )
+
+    payload = get_admin_native_playback_status(initialized_settings)
+
+    assert payload["native_playback_count"] == 2
+    group = payload["native_playbacks_by_user"][0]
+    assert group["user_id"] == session_user.id
+    assert group["total_native_playbacks"] == 2
+    items = {item["session_id"]: item for item in group["items"]}
+    vlc = items[str(vlc_session["session_id"])]
+    assert vlc["playback_kind"] == "native"
+    assert vlc["playback_surface"] == "vlc_backend_stream"
+    assert vlc["playback_surface_label"] == "VLC"
+    assert vlc["device_label"] == "iPad"
+    assert vlc["device_evidence_source"] == "user_agent"
+    assert vlc["display_profile_label"] == "1080p"
+    assert vlc["source_label"] == "Cloud"
+    assert vlc["playback_metadata_label"] == "VLC \u00b7 iPad 1080p \u00b7 Cloud"
+    assert vlc["external_player"] is True
+    assert vlc["auth_session_coupled"] is False
+    assert vlc["display_status_label"] == "Running"
+
+    infuse = items[str(infuse_session["session_id"])]
+    assert infuse["playback_surface_label"] == "Infuse"
+    assert infuse["device_label"] == "iOS device"
+    assert infuse["display_profile_label"] == "720p"
+    assert infuse["playback_metadata_label"] == "Infuse \u00b7 iOS device 720p \u00b7 Local"
+
+    serialized = json.dumps(payload).lower()
+    assert "access_token" not in serialized
+    assert "access_token_hash" not in serialized
+    assert "source_ip" not in serialized
+    assert "file_path" not in serialized
+    assert "mozilla" not in serialized
+
+
+def test_admin_native_playback_status_maps_desktop_and_terminal_states(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="admin-native-states")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="admin-native-states.mp4")
+    _set_media_admin_display_fields(
+        initialized_settings,
+        item_id=int(item["id"]),
+        source_kind="local",
+        width=3840,
+        height=2160,
+    )
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+
+    sessions = {
+        "running": create_native_playback_session(
+            initialized_settings,
+            user_id=session_user.id,
+            item=item,
+            auth_session_id=None,
+            user_agent="pytest",
+            source_ip="127.0.0.1",
+            client_name="VLC Helper Fallback (windows)",
+        ),
+        "idle": create_native_playback_session(
+            initialized_settings,
+            user_id=session_user.id,
+            item=item,
+            auth_session_id=None,
+            user_agent="pytest",
+            source_ip="127.0.0.1",
+            client_name="VLC Playlist Fallback (linux)",
+        ),
+        "expired": create_native_playback_session(
+            initialized_settings,
+            user_id=session_user.id,
+            item=item,
+            auth_session_id=None,
+            user_agent="pytest",
+            source_ip="127.0.0.1",
+            client_name="Linux Same-Host VLC",
+        ),
+        "revoked": create_native_playback_session(
+            initialized_settings,
+            user_id=session_user.id,
+            item=item,
+            auth_session_id=None,
+            user_agent="pytest",
+            source_ip="127.0.0.1",
+            client_name="VLC Helper Fallback (mac)",
+        ),
+        "closed": create_native_playback_session(
+            initialized_settings,
+            user_id=session_user.id,
+            item=item,
+            auth_session_id=None,
+            user_agent="pytest",
+            source_ip="127.0.0.1",
+            client_name="Linux Same-Host VLC Direct",
+        ),
+    }
+
+    now = datetime.now(timezone.utc)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET last_seen_at = ?
+            WHERE session_id = ?
+            """,
+            (
+                (now - timedelta(minutes=10)).isoformat(),
+                str(sessions["idle"]["session_id"]),
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET expires_at = ?
+            WHERE session_id = ?
+            """,
+            (
+                (now - timedelta(seconds=5)).isoformat(),
+                str(sessions["expired"]["session_id"]),
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET revoked_at = ?
+            WHERE session_id = ?
+            """,
+            (now.isoformat(), str(sessions["revoked"]["session_id"])),
+        )
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET closed_at = ?
+            WHERE session_id = ?
+            """,
+            (now.isoformat(), str(sessions["closed"]["session_id"])),
+        )
+        connection.commit()
+
+    payload = get_admin_native_playback_status(initialized_settings)
+    group = payload["native_playbacks_by_user"][0]
+    items = {item["session_id"]: item for item in group["items"]}
+
+    running = items[str(sessions["running"]["session_id"])]
+    assert running["playback_metadata_label"] == "VLC \u00b7 Windows PC 2160p \u00b7 Local"
+    assert running["display_status_label"] == "Running"
+    assert running["display_status_tone"] == "success"
+    assert running["auth_session_coupled"] is False
+
+    idle = items[str(sessions["idle"]["session_id"])]
+    assert idle["device_label"] == "Linux desktop"
+    assert idle["display_status_label"] == "Idle"
+    assert idle["display_status_tone"] == "neutral"
+
+    assert items[str(sessions["expired"]["session_id"])]["display_status_label"] == "Expired"
+    assert items[str(sessions["revoked"]["session_id"])]["display_status_label"] == "Revoked"
+    assert items[str(sessions["closed"]["session_id"])]["display_status_label"] == "Closed"
 
 
 def test_browser_internal_native_stream_policy_remains_short_lived(initialized_settings) -> None:

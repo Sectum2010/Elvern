@@ -83,6 +83,7 @@ from ..services.media_technical_metadata_service import (
     get_local_technical_metadata_enrichment_status,
     trigger_local_technical_metadata_enrichment_batch,
 )
+from ..services.native_playback_service import get_admin_native_playback_status
 from ..services.local_library_source_service import validate_shared_local_library_path
 
 
@@ -308,8 +309,11 @@ def admin_playback_workers(
     user=CurrentAdmin,
 ) -> AdminPlaybackWorkersStatusResponse:
     del user
+    route2_status = request.app.state.mobile_playback_manager.get_route2_worker_status()
+    native_status = get_admin_native_playback_status(request.app.state.settings)
     return AdminPlaybackWorkersStatusResponse(
-        **request.app.state.mobile_playback_manager.get_route2_worker_status()
+        **route2_status,
+        **native_status,
     )
 
 

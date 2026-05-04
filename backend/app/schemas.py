@@ -1497,6 +1497,49 @@ class AdminPlaybackWorkersUserSummaryResponse(BaseModel):
     items: list[AdminPlaybackWorkerItemResponse] = Field(default_factory=list)
 
 
+class AdminNativePlaybackItemResponse(BaseModel):
+    playback_kind: str = "native"
+    session_id: str
+    media_item_id: int = Field(ge=1)
+    title: str = ""
+    user_id: int = Field(ge=1)
+    username: str | None = None
+    client_name: str | None = None
+    external_player: bool = False
+    auth_session_coupled: bool = False
+    playback_surface: str = "unknown"
+    playback_surface_label: str = "Unknown playback"
+    device_class: str = "unknown"
+    device_label: str = "Unknown device"
+    device_evidence_source: str = "unavailable"
+    device_confidence: str = "unknown"
+    display_profile_label: str = "unknown quality"
+    source_kind: str = "local"
+    source_label: str = "Unknown source"
+    playback_metadata_label: str = ""
+    created_at: str | None = None
+    expires_at: str | None = None
+    last_seen_at: str | None = None
+    closed_at: str | None = None
+    revoked_at: str | None = None
+    last_position_seconds: float | None = Field(default=None, ge=0)
+    last_duration_seconds: float | None = Field(default=None, ge=0)
+    display_status: str = "unknown"
+    display_status_label: str = "Unknown"
+    display_status_tone: str = "neutral"
+    display_status_reason: str = ""
+    display_status_priority: int = Field(default=99, ge=0)
+
+
+class AdminNativePlaybacksUserSummaryResponse(BaseModel):
+    user_id: int
+    username: str | None = None
+    total_native_playbacks: int = Field(default=0, ge=0)
+    running_native_playbacks: int = Field(default=0, ge=0)
+    idle_native_playbacks: int = Field(default=0, ge=0)
+    items: list[AdminNativePlaybackItemResponse] = Field(default_factory=list)
+
+
 class AdminPlaybackWorkersStatusResponse(BaseModel):
     shared_output_store_enabled: str | bool = "metadata_only"
     shared_output_root: str | None = None
@@ -1566,6 +1609,10 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     active_route2_workload_count: int = Field(default=0, ge=0)
     per_user_budget_cores: int = Field(default=0, ge=0)
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
+    native_playback_count: int = Field(default=0, ge=0)
+    native_playback_running_count: int = Field(default=0, ge=0)
+    native_playback_idle_count: int = Field(default=0, ge=0)
+    native_playbacks_by_user: list[AdminNativePlaybacksUserSummaryResponse] = Field(default_factory=list)
 
 
 class AdminTechnicalMetadataCurrentItemResponse(BaseModel):

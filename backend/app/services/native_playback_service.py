@@ -796,6 +796,257 @@ def get_native_playback_status(settings: Settings) -> dict[str, object]:
     }
 
 
+def _parse_native_admin_datetime(value: object) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _native_source_label(source_kind: object) -> str:
+    normalized = str(source_kind or "").strip().lower()
+    if normalized == "cloud":
+        return "Cloud"
+    if normalized == "local":
+        return "Local"
+    return "Unknown source"
+
+
+def _native_quality_label(*, width: object, height: object) -> str:
+    del width
+    try:
+        resolved_height = int(height)
+    except (TypeError, ValueError):
+        return "unknown quality"
+    if resolved_height >= 2160:
+        return "2160p"
+    if resolved_height >= 1080:
+        return "1080p"
+    if resolved_height >= 720:
+        return "720p"
+    return "unknown quality"
+
+
+def _native_user_agent_device_label(user_agent: object) -> tuple[str, str, str, str] | None:
+    normalized = str(user_agent or "").strip().lower()
+    if not normalized:
+        return None
+    if "iphone" in normalized or "ipod" in normalized:
+        return "phone", "iPhone", "user_agent", "high"
+    if "ipad" in normalized:
+        return "tablet", "iPad", "user_agent", "high"
+    if "android" in normalized:
+        if "mobile" in normalized:
+            return "phone", "Android phone", "user_agent", "high"
+        return "tablet", "Android tablet", "user_agent", "medium"
+    if "windows nt" in normalized:
+        return "desktop", "Windows PC", "user_agent", "high"
+    if "macintosh" in normalized:
+        return "desktop", "Mac", "user_agent", "high"
+    if "x11; linux" in normalized or "linux x86_64" in normalized:
+        return "desktop", "Linux desktop", "user_agent", "high"
+    return None
+
+
+def _native_surface_and_device_labels(
+    *,
+    client_name: object,
+    user_agent: object,
+) -> tuple[str, str, str, str, str, str]:
+    normalized_client = str(client_name or "").strip().lower()
+    surface = "native_backend_stream"
+    surface_label = "Native"
+    device_from_name: tuple[str, str, str, str] | None = None
+
+    if normalized_client.startswith("elvern ios vlc handoff"):
+        surface = "vlc_backend_stream"
+        surface_label = "VLC"
+        device_from_name = ("unknown", "iOS device", "native_client_name", "medium")
+    elif normalized_client.startswith("elvern ios infuse handoff"):
+        surface = "infuse_backend_stream"
+        surface_label = "Infuse"
+        device_from_name = ("unknown", "iOS device", "native_client_name", "medium")
+    elif normalized_client.startswith("vlc helper fallback") or normalized_client.startswith("vlc playlist fallback"):
+        surface = "vlc_backend_stream"
+        surface_label = "VLC"
+        if "(windows)" in normalized_client:
+            device_from_name = ("desktop", "Windows PC", "native_client_name", "high")
+        elif "(mac)" in normalized_client:
+            device_from_name = ("desktop", "Mac", "native_client_name", "high")
+        elif "(linux)" in normalized_client:
+            device_from_name = ("desktop", "Linux desktop", "native_client_name", "high")
+        else:
+            device_from_name = ("desktop", "Desktop", "native_client_name", "medium")
+    elif normalized_client == "linux same-host vlc":
+        surface = "vlc_backend_stream"
+        surface_label = "VLC"
+        device_from_name = ("desktop", "Linux desktop", "desktop_handoff", "high")
+    elif normalized_client == "linux same-host vlc direct":
+        surface = "vlc_direct_path"
+        surface_label = "VLC"
+        device_from_name = ("desktop", "Linux desktop", "desktop_handoff", "high")
+
+    user_agent_device = _native_user_agent_device_label(user_agent)
+    if user_agent_device is not None and (device_from_name is None or device_from_name[1] == "iOS device"):
+        device = user_agent_device
+    elif device_from_name is not None:
+        device = device_from_name
+    else:
+        device = ("unknown", "Unknown device", "unavailable", "unknown")
+
+    return surface, surface_label, device[0], device[1], device[2], device[3]
+
+
+def _native_admin_display_status(row, *, now: datetime) -> tuple[str, str, str, str, int]:
+    expires_at = _parse_native_admin_datetime(row["expires_at"])
+    last_seen_at = _parse_native_admin_datetime(row["last_seen_at"])
+    auth_expires_at = _parse_native_admin_datetime(row["auth_session_expires_at"])
+    if row["closed_at"] is not None:
+        return "closed", "Closed", "neutral", "Native playback session was explicitly closed.", 4
+    if row["revoked_at"] is not None:
+        return "revoked", "Revoked", "danger", "Native playback session was revoked.", 3
+    if not bool(row["user_enabled"]):
+        return "revoked", "Revoked", "danger", "User account is disabled.", 3
+    if row["auth_session_id"] is not None and row["auth_session_revoked_at"] is not None:
+        return "revoked", "Revoked", "danger", "Coupled browser auth session was revoked.", 3
+    if expires_at is None or expires_at <= now:
+        return "expired", "Expired", "neutral", "Native playback session TTL expired.", 5
+    if row["auth_session_id"] is not None and auth_expires_at is not None and auth_expires_at <= now:
+        return "expired", "Expired", "neutral", "Coupled browser auth session expired.", 5
+    if last_seen_at is not None and (now - last_seen_at).total_seconds() <= 120.0:
+        return "running", "Running", "success", "Native stream had recent session activity.", 1
+    return "idle", "Idle", "neutral", "Native session is valid but has no recent stream activity.", 2
+
+
+def _build_admin_native_playback_item(row, *, now: datetime) -> dict[str, object]:
+    surface, surface_label, device_class, device_label, device_evidence_source, device_confidence = (
+        _native_surface_and_device_labels(client_name=row["client_name"], user_agent=row["user_agent"])
+    )
+    profile_label = _native_quality_label(width=row["width"], height=row["height"])
+    source_label = _native_source_label(row["source_kind"])
+    status, status_label, status_tone, status_reason, status_priority = _native_admin_display_status(row, now=now)
+    return {
+        "playback_kind": "native",
+        "session_id": str(row["session_id"]),
+        "media_item_id": int(row["media_item_id"]),
+        "title": str(row["title"] or f"Media Item {row['media_item_id']}"),
+        "user_id": int(row["user_id"]),
+        "username": row["username"],
+        "client_name": row["client_name"],
+        "external_player": surface_label in {"VLC", "Infuse"},
+        "auth_session_coupled": row["auth_session_id"] is not None,
+        "playback_surface": surface,
+        "playback_surface_label": surface_label,
+        "device_class": device_class,
+        "device_label": device_label,
+        "device_evidence_source": device_evidence_source,
+        "device_confidence": device_confidence,
+        "display_profile_label": profile_label,
+        "source_kind": str(row["source_kind"] or "local"),
+        "source_label": source_label,
+        "playback_metadata_label": f"{surface_label} · {device_label} {profile_label} · {source_label}",
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+        "last_seen_at": row["last_seen_at"],
+        "closed_at": row["closed_at"],
+        "revoked_at": row["revoked_at"],
+        "last_position_seconds": row["last_position_seconds"],
+        "last_duration_seconds": row["last_duration_seconds"],
+        "display_status": status,
+        "display_status_label": status_label,
+        "display_status_tone": status_tone,
+        "display_status_reason": status_reason,
+        "display_status_priority": status_priority,
+    }
+
+
+def get_admin_native_playback_status(settings: Settings) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    cutoff_iso = (now - timedelta(hours=24)).isoformat()
+    with get_connection(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                n.session_id,
+                n.user_id,
+                u.username,
+                u.enabled AS user_enabled,
+                n.media_item_id,
+                n.auth_session_id,
+                n.client_name,
+                n.user_agent,
+                n.created_at,
+                n.expires_at,
+                n.last_seen_at,
+                n.closed_at,
+                n.revoked_at,
+                n.last_position_seconds,
+                n.last_duration_seconds,
+                s.expires_at AS auth_session_expires_at,
+                s.revoked_at AS auth_session_revoked_at,
+                m.title,
+                COALESCE(m.source_kind, 'local') AS source_kind,
+                m.width,
+                m.height
+            FROM native_playback_sessions n
+            JOIN users u ON u.id = n.user_id
+            JOIN media_items m ON m.id = n.media_item_id
+            LEFT JOIN sessions s ON s.id = n.auth_session_id
+            WHERE n.expires_at > ?
+               OR n.created_at >= ?
+               OR n.last_seen_at >= ?
+               OR n.closed_at >= ?
+               OR n.revoked_at >= ?
+            ORDER BY n.user_id ASC, n.created_at DESC
+            LIMIT 200
+            """,
+            (now_iso, cutoff_iso, cutoff_iso, cutoff_iso, cutoff_iso),
+        ).fetchall()
+
+    groups: dict[int, dict[str, object]] = {}
+    total = 0
+    running = 0
+    idle = 0
+    for row in rows:
+        item = _build_admin_native_playback_item(row, now=now)
+        total += 1
+        if item["display_status"] == "running":
+            running += 1
+        elif item["display_status"] == "idle":
+            idle += 1
+        user_id = int(item["user_id"])
+        group = groups.setdefault(
+            user_id,
+            {
+                "user_id": user_id,
+                "username": item["username"],
+                "total_native_playbacks": 0,
+                "running_native_playbacks": 0,
+                "idle_native_playbacks": 0,
+                "items": [],
+            },
+        )
+        group["total_native_playbacks"] = int(group["total_native_playbacks"]) + 1
+        if item["display_status"] == "running":
+            group["running_native_playbacks"] = int(group["running_native_playbacks"]) + 1
+        elif item["display_status"] == "idle":
+            group["idle_native_playbacks"] = int(group["idle_native_playbacks"]) + 1
+        group["items"].append(item)
+
+    return {
+        "native_playback_count": total,
+        "native_playback_running_count": running,
+        "native_playback_idle_count": idle,
+        "native_playbacks_by_user": list(groups.values()),
+    }
+
+
 def _require_native_session(
     settings: Settings,
     *,

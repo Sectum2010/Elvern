@@ -68,6 +68,77 @@ test("grouping workers by user summarizes totals and resources", () => {
 });
 
 
+test("grouping playback status includes native playback sessions without Route2 fields", () => {
+  const byUser = buildPlaybackWorkersByUserId({
+    workers_by_user: [
+      {
+        user_id: 7,
+        username: "alice",
+        allocated_cpu_cores: 9,
+        running_workers: 1,
+        queued_workers: 0,
+        total_workers: 1,
+        items: [{ worker_id: "worker-a", cpu_cores_used: 4.5 }],
+      },
+    ],
+    native_playbacks_by_user: [
+      {
+        user_id: 7,
+        username: "alice",
+        total_native_playbacks: 1,
+        running_native_playbacks: 0,
+        idle_native_playbacks: 1,
+        items: [
+          {
+            playback_kind: "native",
+            session_id: "native-session-1",
+            playback_metadata_label: "VLC · iPad 1080p · Cloud",
+            display_status_label: "Idle",
+            display_status_tone: "neutral",
+          },
+        ],
+      },
+      {
+        user_id: 8,
+        username: "bob",
+        total_native_playbacks: 1,
+        running_native_playbacks: 1,
+        idle_native_playbacks: 0,
+        items: [
+          {
+            playback_kind: "native",
+            session_id: "native-session-2",
+            playback_surface_label: "Infuse",
+            device_label: "iOS device",
+            display_profile_label: "unknown quality",
+            source_label: "Local",
+            display_status_label: "Running",
+            display_status_tone: "success",
+          },
+        ],
+      },
+    ],
+  });
+
+  const alice = byUser.get(7);
+  assert.ok(alice);
+  assert.equal(alice.totalWorkers, 1);
+  assert.equal(alice.totalNativePlaybacks, 1);
+  assert.equal(alice.totalPlaybackItems, 2);
+  assert.equal(alice.nativeItems[0].playback_kind, "native");
+  assert.equal(alice.nativeItems[0].worker_id, undefined);
+  assert.equal(alice.nativeItems[0].epoch_id, undefined);
+  assert.equal(buildWorkerPlaybackMetadataLabel(alice.nativeItems[0]), "VLC · iPad 1080p · Cloud");
+
+  const bob = byUser.get(8);
+  assert.ok(bob);
+  assert.equal(bob.totalWorkers, 0);
+  assert.equal(bob.totalNativePlaybacks, 1);
+  assert.equal(bob.totalPlaybackItems, 1);
+  assert.equal(buildWorkerPlaybackMetadataLabel(bob.nativeItems[0]), "Infuse · iOS device unknown quality · Local");
+});
+
+
 test("gauge percent clamping keeps values in range", () => {
   assert.equal(clampGaugePercent(-12), 0);
   assert.equal(clampGaugePercent(38), 38);
