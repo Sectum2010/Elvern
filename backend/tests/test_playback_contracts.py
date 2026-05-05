@@ -6005,6 +6005,38 @@ def test_route2_full_bad_condition_real_gate_blocks_until_actual_reserve_ready(
     assert gate["full_bad_condition_reserve_remaining_seconds"] == pytest.approx(1680.0)
 
 
+def test_route2_full_bad_condition_real_gate_allows_when_reserve_satisfied(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_full_bad_condition_30min_gate_enabled=True,
+        route2_full_bad_condition_30min_gate_dry_run_enabled=True,
+    )
+    _patch_route2_full_gate_budget_ready(manager, monkeypatch)
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="full")
+    session.browser_playback.full_preflight_state = "ready"
+    session.browser_playback.full_source_bin_bytes = [500_000] * 1800
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=1810.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    gate = manager._route2_full_mode_gate_locked(session, epoch)
+
+    assert gate["mode_ready"] is True
+    assert gate["gate_reason"] == "full_budget_complete"
+    assert gate["full_bad_condition_detected"] is True
+    assert gate["full_bad_condition_reserve_satisfied"] is True
+    assert gate["full_bad_condition_gate_would_block_ready"] is False
+    assert gate["full_bad_condition_gate_blocks_ready"] is False
+
+
 def test_route2_full_bad_condition_gate_does_not_detach_already_attached_playback(
     initialized_settings,
     monkeypatch,
@@ -6037,6 +6069,32 @@ def test_route2_full_bad_condition_gate_does_not_detach_already_attached_playbac
     assert "already_attached_no_detach" in gate["full_bad_condition_gate_blockers"]
 
 
+def test_route2_full_bad_condition_real_gate_does_not_affect_lite(
+    initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_full_bad_condition_30min_gate_enabled=True,
+        route2_full_bad_condition_30min_gate_dry_run_enabled=True,
+    )
+    session, epoch, record = _make_route2_reserve_inputs(playback_mode="lite")
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.7,
+        runway_seconds=30.0,
+        effective_playhead_seconds=0.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["bad_condition_reserve_required"] is False
+    assert status["bad_condition_reason"] == "not_full_playback"
+    assert status["full_bad_condition_detected"] is False
+    assert status["full_bad_condition_gate_blocks_ready"] is False
+
+
 def test_route2_full_bad_condition_seek_recalculates_reserve_from_new_target(
     initialized_settings,
 ) -> None:
@@ -6062,8 +6120,46 @@ def test_route2_full_bad_condition_seek_recalculates_reserve_from_new_target(
     assert status["full_bad_condition_reserve_remaining_seconds"] == pytest.approx(1600.0)
 
 
-def test_route2_full_bad_condition_provider_auth_blocks_with_provider_reason(
+def test_route2_full_bad_condition_replacement_epoch_recalculates_reserve_from_replacement_target(
     initialized_settings,
+) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session, epoch, record = _make_route2_reserve_inputs(
+        playback_mode="full",
+        target_position_seconds=900.0,
+    )
+    session.browser_playback.attach_revision = 1
+    session.browser_playback.active_epoch_id = "old-active-epoch"
+    session.browser_playback.replacement_epoch_id = epoch.epoch_id
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        runway_seconds=240.0,
+        effective_playhead_seconds=900.0,
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["reserve_start_seconds"] == pytest.approx(900.0)
+    assert status["full_bad_condition_reserve_target_seconds"] == pytest.approx(2700.0)
+    assert status["full_bad_condition_reserve_remaining_seconds"] == pytest.approx(1560.0)
+    assert status["full_bad_condition_gate_would_block_ready"] is True
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_reason"),
+    [
+        ("provider_auth_required", "provider_auth_required"),
+        ("provider_quota_exceeded", "provider_quota_exceeded"),
+        ("provider_source_error", "provider_source_error"),
+    ],
+)
+def test_route2_full_bad_condition_provider_errors_block_with_provider_reason(
+    initialized_settings,
+    provider_error: str,
+    expected_reason: str,
 ) -> None:
     manager, _settings = _make_route2_manager(
         initialized_settings,
@@ -6073,7 +6169,7 @@ def test_route2_full_bad_condition_provider_auth_blocks_with_provider_reason(
         playback_mode="full",
         duration_seconds=3600.0,
     )
-    record.non_retryable_error = "provider_auth_required"
+    record.non_retryable_error = provider_error
     manager._route2_workers[record.worker_id] = record
     _mark_route2_runtime_supply(
         session,
@@ -6087,8 +6183,50 @@ def test_route2_full_bad_condition_provider_auth_blocks_with_provider_reason(
     status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
 
     assert status["full_bad_condition_detected"] is True
-    assert status["full_bad_condition_reason"] == "provider_auth_required"
-    assert "provider_auth_required" in status["full_bad_condition_gate_blockers"]
+    assert status["full_bad_condition_reason"] == expected_reason
+    assert expected_reason in status["full_bad_condition_gate_blockers"]
+    assert status["full_bad_condition_gate_blocks_ready"] is True
+
+
+def test_route2_full_bad_condition_cloud_immature_source_feed_is_not_healthy(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_full_bad_condition_30min_gate_enabled=True,
+    )
+    session, epoch, record = _make_route2_reserve_inputs(
+        playback_mode="full",
+        duration_seconds=3600.0,
+    )
+    manager._route2_workers[record.worker_id] = record
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        runway_seconds=120.0,
+        effective_playhead_seconds=0.0,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_route2_source_feed_rate_locked",
+        lambda _session, _record: _Route2SourceFeedRate(
+            rate_x=None,
+            available=True,
+            mature=False,
+            reason=None,
+            missing_reason="route2_source_observation_not_mature",
+            missing_metrics=["source_feed_rate"],
+        ),
+    )
+
+    status = manager._route2_bad_condition_reserve_status_locked(session, epoch)
+
+    assert status["full_bad_condition_detected"] is True
+    assert status["full_bad_condition_reason"] == "cloud_source_feed_immature"
+    assert "cloud_source_feed_immature" in status["full_bad_condition_gate_blockers"]
     assert status["full_bad_condition_gate_blocks_ready"] is True
 
 

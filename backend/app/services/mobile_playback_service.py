@@ -3424,6 +3424,17 @@ class MobilePlaybackManager:
             if active_record is not None
             else (epoch.last_error or session.last_error)
         )
+        cloud_source_feed_blocker: str | None = None
+        if is_full_route2 and session.source_kind == "cloud" and active_record is not None:
+            source_feed = self._route2_source_feed_rate_locked(session, active_record)
+            if not source_feed.available:
+                cloud_source_feed_blocker = "cloud_source_feed_unavailable"
+            elif not source_feed.mature:
+                cloud_source_feed_blocker = "cloud_source_feed_immature"
+            elif source_feed.rate_x is None:
+                cloud_source_feed_blocker = "cloud_source_feed_unavailable"
+            elif float(source_feed.rate_x) < ROUTE2_ACTIVE_SUPPLY_HEALTHY_RATE_X:
+                cloud_source_feed_blocker = "cloud_source_feed_low"
         coverage_starts_at_reserve = (
             epoch.init_published
             and epoch.contiguous_published_through_segment is not None
@@ -3460,6 +3471,12 @@ class MobilePlaybackManager:
             bad_condition_reason = provider_blocker
             bad_condition_reasons.append(provider_blocker)
             bad_condition_confidence = "high"
+            bad_condition_mature = True
+        elif cloud_source_feed_blocker is not None:
+            bad_condition_required = True
+            bad_condition_reason = cloud_source_feed_blocker
+            bad_condition_reasons.append(cloud_source_feed_blocker)
+            bad_condition_confidence = "medium"
             bad_condition_mature = True
         elif not metrics_mature:
             bad_condition_reason = "metrics_immature"
@@ -3522,6 +3539,8 @@ class MobilePlaybackManager:
             gate_blockers.append("full_bad_condition_reserve_unsatisfied")
             if provider_blocker is not None:
                 gate_blockers.append(provider_blocker)
+            if cloud_source_feed_blocker is not None:
+                gate_blockers.append(cloud_source_feed_blocker)
             if not coverage_starts_at_reserve:
                 gate_blockers.append("published_frontier_not_contiguous_from_target")
             if not gate_applies_to_attach:
