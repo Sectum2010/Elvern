@@ -582,6 +582,24 @@ class MobilePlaybackSessionResponse(BaseModel):
     actual_startup_runway_seconds: float | None = Field(default=None, ge=0)
     effective_goodput_ratio: float | None = Field(default=None, ge=0)
     gate_reason: str | None = None
+    full_bad_condition_detected: bool = False
+    full_bad_condition_reason: str | None = None
+    full_bad_condition_reasons: list[str] = Field(default_factory=list)
+    full_bad_condition_confidence: str | None = None
+    full_bad_condition_mature: bool = False
+    full_bad_condition_reserve_required_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_reserve_target_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_actual_contiguous_end_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_actual_contiguous_seconds_after_target: float | None = Field(default=None, ge=0)
+    full_bad_condition_reserve_remaining_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_reserve_satisfied: bool = False
+    full_bad_condition_reserve_progress_source: str | None = None
+    full_bad_condition_reserve_eta_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_gate_enabled: bool = False
+    full_bad_condition_gate_dry_run_enabled: bool = True
+    full_bad_condition_gate_would_block_ready: bool = False
+    full_bad_condition_gate_blocks_ready: bool = False
+    full_bad_condition_gate_blockers: list[str] = Field(default_factory=list)
     session_state: BrowserPlaybackSessionEngineState = "legacy"
     attach_revision: int = Field(default=0, ge=0)
     client_attach_revision: int = Field(default=0, ge=0)
@@ -1462,6 +1480,24 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     runway_delta_per_second: float | None = None
     runway_delta_observation_seconds: float | None = Field(default=None, ge=0)
     runway_delta_mature: bool = False
+    full_bad_condition_detected: bool = False
+    full_bad_condition_reason: str | None = None
+    full_bad_condition_reasons: list[str] = Field(default_factory=list)
+    full_bad_condition_confidence: str | None = None
+    full_bad_condition_mature: bool = False
+    full_bad_condition_reserve_required_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_reserve_target_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_actual_contiguous_end_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_actual_contiguous_seconds_after_target: float | None = Field(default=None, ge=0)
+    full_bad_condition_reserve_remaining_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_reserve_satisfied: bool = False
+    full_bad_condition_reserve_progress_source: str | None = None
+    full_bad_condition_reserve_eta_seconds: float | None = Field(default=None, ge=0)
+    full_bad_condition_gate_enabled: bool = False
+    full_bad_condition_gate_dry_run_enabled: bool = True
+    full_bad_condition_gate_would_block_ready: bool = False
+    full_bad_condition_gate_blocks_ready: bool = False
+    full_bad_condition_gate_blockers: list[str] = Field(default_factory=list)
     ffmpeg_progress_out_time_seconds: float | None = Field(default=None, ge=0)
     ffmpeg_progress_speed_x: float | None = Field(default=None, ge=0)
     ffmpeg_progress_fps: float | None = Field(default=None, ge=0)
@@ -1756,6 +1792,8 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     adaptive_resupply_enabled: bool = False
     adaptive_resupply_dry_run_enabled: bool = True
     adaptive_resupply_stabilization_seconds: int = Field(default=120, ge=0)
+    full_bad_condition_gate_enabled: bool = False
+    full_bad_condition_gate_dry_run_enabled: bool = True
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
     native_playback_count: int = Field(default=0, ge=0)
     native_playback_running_count: int = Field(default=0, ge=0)

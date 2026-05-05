@@ -60,6 +60,26 @@ def _route2_snapshot_locked(
     actual_startup_runway_seconds = None
     effective_goodput_ratio = None
     gate_reason = "none"
+    full_bad_condition_fields: dict[str, object] = {
+        "full_bad_condition_detected": False,
+        "full_bad_condition_reason": None,
+        "full_bad_condition_reasons": [],
+        "full_bad_condition_confidence": "none",
+        "full_bad_condition_mature": False,
+        "full_bad_condition_reserve_required_seconds": None,
+        "full_bad_condition_reserve_target_seconds": None,
+        "full_bad_condition_actual_contiguous_end_seconds": None,
+        "full_bad_condition_actual_contiguous_seconds_after_target": None,
+        "full_bad_condition_reserve_remaining_seconds": None,
+        "full_bad_condition_reserve_satisfied": False,
+        "full_bad_condition_reserve_progress_source": None,
+        "full_bad_condition_reserve_eta_seconds": None,
+        "full_bad_condition_gate_enabled": False,
+        "full_bad_condition_gate_dry_run_enabled": True,
+        "full_bad_condition_gate_would_block_ready": False,
+        "full_bad_condition_gate_blocks_ready": False,
+        "full_bad_condition_gate_blockers": [],
+    }
     if active_epoch is not None:
         active_manifest_url = f"/api/mobile-playback/epochs/{active_epoch.epoch_id}/index.m3u8"
         attach_position_seconds = round(active_epoch.attach_position_seconds, 2)
@@ -152,6 +172,9 @@ def _route2_snapshot_locked(
         effective_goodput_ratio = full_mode_gate.get("effective_goodput_ratio")
         gate_reason = str(full_mode_gate.get("gate_reason") or gate_reason)
         prepare_estimate_seconds = mode_estimate_seconds
+        for key in full_bad_condition_fields:
+            if key in full_mode_gate:
+                full_bad_condition_fields[key] = full_mode_gate[key]
     else:
         mode_ready = attach_ready
         mode_estimate_seconds = round(prepare_estimate_seconds, 2) if prepare_estimate_seconds is not None else None
@@ -253,4 +276,5 @@ def _route2_snapshot_locked(
         "attach_ready": attach_ready,
         "browser_session_state": browser_session.state,
         "active_epoch_state": active_epoch.state if active_epoch is not None else None,
+        **full_bad_condition_fields,
     }

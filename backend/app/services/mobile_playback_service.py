@@ -36,6 +36,7 @@ from .mobile_playback_models import (
     ROUTE2_ETA_DISPLAY_MIN_OBSERVATION_SECONDS,
     ROUTE2_ETA_DISPLAY_STICKY_OBSERVATION_SECONDS,
     ROUTE2_FULL_GOODPUT_MIN_SAMPLE_COUNT,
+    ROUTE2_FULL_FAST_START_RUNWAY_SECONDS,
     ROUTE2_FULL_RESERVE_BASE_SECONDS,
     ROUTE2_FULL_RESERVE_MAX_UNCERTAINTY_SECONDS,
     ROUTE2_FULL_RESERVE_MAX_VOLATILITY_SECONDS,
@@ -3248,6 +3249,12 @@ class MobilePlaybackManager:
             "adaptive_resupply_enabled": self.settings.route2_adaptive_resupply_enabled,
             "adaptive_resupply_dry_run_enabled": self.settings.route2_adaptive_resupply_dry_run_enabled,
             "adaptive_resupply_stabilization_seconds": self._route2_resupply_stabilization_seconds(),
+            "full_bad_condition_gate_enabled": bool(
+                getattr(self.settings, "route2_full_bad_condition_30min_gate_enabled", False)
+            ),
+            "full_bad_condition_gate_dry_run_enabled": bool(
+                getattr(self.settings, "route2_full_bad_condition_30min_gate_dry_run_enabled", True)
+            ),
             "active_worker_count": len(self._route2_running_workers_locked()),
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
@@ -3376,8 +3383,13 @@ class MobilePlaybackManager:
     ) -> dict[str, object]:
         actual_ready_end_seconds = self._route2_epoch_ready_end_seconds(session, epoch)
         duration_seconds = max(0.0, float(session.duration_seconds or 0.0))
+        requested_target_seconds = (
+            session.pending_target_seconds
+            if session.pending_target_seconds is not None
+            else (epoch.attach_position_seconds or session.target_position_seconds or 0.0)
+        )
         reserve_start_seconds = min(
-            max(0.0, float(epoch.attach_position_seconds or session.target_position_seconds or 0.0)),
+            max(0.0, float(requested_target_seconds)),
             duration_seconds,
         )
         reserve_target_ready_end_seconds = min(
@@ -3391,14 +3403,37 @@ class MobilePlaybackManager:
         supply_rate_x = max(0.0, float(supply_model["effective_rate_x"]))
         observation_seconds = max(0.0, float(supply_model["observation_seconds"]))
         metrics_mature = observation_seconds >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+        (
+            runtime_runway_seconds,
+            _runtime_supply_rate_x,
+            _refill_in_progress,
+            starvation_risk,
+            stalled_recovery_needed,
+        ) = self._route2_low_water_recovery_needed_locked(session, epoch)
         is_full_route2 = (
             session.browser_playback.engine_mode == "route2"
             and session.browser_playback.playback_mode == "full"
+        )
+        active_record = (
+            self._route2_workers.get(epoch.active_worker_id)
+            if epoch.active_worker_id is not None
+            else None
+        )
+        provider_blocker = self._route2_provider_prepare_blocker(
+            active_record.non_retryable_error
+            if active_record is not None
+            else (epoch.last_error or session.last_error)
         )
         coverage_starts_at_reserve = (
             epoch.init_published
             and epoch.contiguous_published_through_segment is not None
             and epoch.epoch_start_seconds <= reserve_start_seconds + 0.001
+        )
+        progress_source = "published_frontier" if coverage_starts_at_reserve else "manifest_contiguous_range_unavailable"
+        actual_contiguous_seconds_after_target = (
+            max(0.0, actual_ready_end_seconds - reserve_start_seconds)
+            if coverage_starts_at_reserve
+            else 0.0
         )
         manifest_fully_published = (
             duration_seconds <= 0.0
@@ -3414,10 +3449,34 @@ class MobilePlaybackManager:
         )
         bad_condition_required = False
         bad_condition_reason: str | None = None
+        bad_condition_reasons: list[str] = []
+        bad_condition_confidence = "none"
+        bad_condition_mature = False
         if not is_full_route2:
             bad_condition_reason = "not_full_playback"
+            bad_condition_reasons.append(bad_condition_reason)
+        elif provider_blocker is not None:
+            bad_condition_required = True
+            bad_condition_reason = provider_blocker
+            bad_condition_reasons.append(provider_blocker)
+            bad_condition_confidence = "high"
+            bad_condition_mature = True
         elif not metrics_mature:
             bad_condition_reason = "metrics_immature"
+            bad_condition_reasons.append(bad_condition_reason)
+            bad_condition_confidence = "low"
+        elif stalled_recovery_needed:
+            bad_condition_required = True
+            bad_condition_reason = "stalled_recovery_needed"
+            bad_condition_reasons.append(bad_condition_reason)
+            bad_condition_confidence = "high"
+            bad_condition_mature = True
+        elif starvation_risk:
+            bad_condition_required = True
+            bad_condition_reason = "starvation_risk"
+            bad_condition_reasons.append(bad_condition_reason)
+            bad_condition_confidence = "high"
+            bad_condition_mature = True
         elif supply_rate_x < ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X:
             bad_condition_required = True
             bad_condition_reason = (
@@ -3425,9 +3484,58 @@ class MobilePlaybackManager:
                 if supply_rate_x < ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X
                 else "mature_supply_below_1_05"
             )
+            bad_condition_reasons.append(bad_condition_reason)
+            bad_condition_confidence = (
+                "high"
+                if supply_rate_x < ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X
+                else "medium"
+            )
+            bad_condition_mature = True
+        elif (
+            runtime_runway_seconds + 0.001 < ROUTE2_FULL_FAST_START_RUNWAY_SECONDS
+            and supply_rate_x < ROUTE2_ACTIVE_SUPPLY_HEALTHY_RATE_X
+        ):
+            bad_condition_required = True
+            bad_condition_reason = "low_runway_with_poor_supply"
+            bad_condition_reasons.append(bad_condition_reason)
+            bad_condition_confidence = "medium"
+            bad_condition_mature = True
+        else:
+            bad_condition_mature = True
+            bad_condition_confidence = "high"
         reserve_eta_seconds = None
         if bad_condition_required and not reserve_satisfied and supply_rate_x > 0.001:
             reserve_eta_seconds = reserve_remaining_seconds / supply_rate_x
+        gate_enabled = bool(getattr(self.settings, "route2_full_bad_condition_30min_gate_enabled", False))
+        gate_dry_run_enabled = bool(
+            getattr(self.settings, "route2_full_bad_condition_30min_gate_dry_run_enabled", True)
+        )
+        browser_session = session.browser_playback
+        gate_applies_to_attach = bool(
+            browser_session.attach_revision <= 0
+            or browser_session.active_epoch_id != epoch.epoch_id
+            or session.pending_target_seconds is not None
+        )
+        reserve_unsatisfied = bool(bad_condition_required and not reserve_satisfied)
+        gate_blockers: list[str] = []
+        if reserve_unsatisfied:
+            gate_blockers.append("full_bad_condition_reserve_unsatisfied")
+            if provider_blocker is not None:
+                gate_blockers.append(provider_blocker)
+            if not coverage_starts_at_reserve:
+                gate_blockers.append("published_frontier_not_contiguous_from_target")
+            if not gate_applies_to_attach:
+                gate_blockers.append("already_attached_no_detach")
+        gate_would_block_ready = bool(
+            gate_dry_run_enabled
+            and reserve_unsatisfied
+            and gate_applies_to_attach
+        )
+        gate_blocks_ready = bool(
+            gate_enabled
+            and reserve_unsatisfied
+            and gate_applies_to_attach
+        )
         return {
             "bad_condition_reserve_required": bad_condition_required,
             "bad_condition_reason": bad_condition_reason,
@@ -3448,6 +3556,34 @@ class MobilePlaybackManager:
             "runway_delta_per_second": runway_delta["runway_delta_per_second"],
             "runway_delta_observation_seconds": runway_delta["runway_delta_observation_seconds"],
             "runway_delta_mature": runway_delta["runway_delta_mature"],
+            "full_bad_condition_detected": bad_condition_required,
+            "full_bad_condition_reason": bad_condition_reason if bad_condition_required else None,
+            "full_bad_condition_reasons": bad_condition_reasons if bad_condition_required else [],
+            "full_bad_condition_confidence": bad_condition_confidence,
+            "full_bad_condition_mature": bad_condition_mature,
+            "full_bad_condition_reserve_required_seconds": (
+                reserve_required_seconds if is_full_route2 else 0.0
+            ),
+            "full_bad_condition_reserve_target_seconds": (
+                reserve_target_ready_end_seconds if is_full_route2 else 0.0
+            ),
+            "full_bad_condition_actual_contiguous_end_seconds": (
+                actual_ready_end_seconds if is_full_route2 else 0.0
+            ),
+            "full_bad_condition_actual_contiguous_seconds_after_target": (
+                actual_contiguous_seconds_after_target if is_full_route2 else 0.0
+            ),
+            "full_bad_condition_reserve_remaining_seconds": (
+                reserve_remaining_seconds if is_full_route2 else 0.0
+            ),
+            "full_bad_condition_reserve_satisfied": reserve_satisfied,
+            "full_bad_condition_reserve_progress_source": progress_source if is_full_route2 else "not_full_playback",
+            "full_bad_condition_reserve_eta_seconds": reserve_eta_seconds,
+            "full_bad_condition_gate_enabled": gate_enabled,
+            "full_bad_condition_gate_dry_run_enabled": gate_dry_run_enabled,
+            "full_bad_condition_gate_would_block_ready": gate_would_block_ready,
+            "full_bad_condition_gate_blocks_ready": gate_blocks_ready,
+            "full_bad_condition_gate_blockers": list(dict.fromkeys(gate_blockers)),
         }
 
     def _route2_bad_condition_reserve_payload_locked(
@@ -3480,6 +3616,43 @@ class MobilePlaybackManager:
             ),
             "runway_delta_observation_seconds": round(float(status["runway_delta_observation_seconds"]), 2),
             "runway_delta_mature": status["runway_delta_mature"],
+            "full_bad_condition_detected": status["full_bad_condition_detected"],
+            "full_bad_condition_reason": status["full_bad_condition_reason"],
+            "full_bad_condition_reasons": list(status["full_bad_condition_reasons"]),
+            "full_bad_condition_confidence": status["full_bad_condition_confidence"],
+            "full_bad_condition_mature": status["full_bad_condition_mature"],
+            "full_bad_condition_reserve_required_seconds": round(
+                float(status["full_bad_condition_reserve_required_seconds"]),
+                2,
+            ),
+            "full_bad_condition_reserve_target_seconds": round(
+                float(status["full_bad_condition_reserve_target_seconds"]),
+                2,
+            ),
+            "full_bad_condition_actual_contiguous_end_seconds": round(
+                float(status["full_bad_condition_actual_contiguous_end_seconds"]),
+                2,
+            ),
+            "full_bad_condition_actual_contiguous_seconds_after_target": round(
+                float(status["full_bad_condition_actual_contiguous_seconds_after_target"]),
+                2,
+            ),
+            "full_bad_condition_reserve_remaining_seconds": round(
+                float(status["full_bad_condition_reserve_remaining_seconds"]),
+                2,
+            ),
+            "full_bad_condition_reserve_satisfied": status["full_bad_condition_reserve_satisfied"],
+            "full_bad_condition_reserve_progress_source": status["full_bad_condition_reserve_progress_source"],
+            "full_bad_condition_reserve_eta_seconds": (
+                round(float(status["full_bad_condition_reserve_eta_seconds"]), 2)
+                if status["full_bad_condition_reserve_eta_seconds"] is not None
+                else None
+            ),
+            "full_bad_condition_gate_enabled": status["full_bad_condition_gate_enabled"],
+            "full_bad_condition_gate_dry_run_enabled": status["full_bad_condition_gate_dry_run_enabled"],
+            "full_bad_condition_gate_would_block_ready": status["full_bad_condition_gate_would_block_ready"],
+            "full_bad_condition_gate_blocks_ready": status["full_bad_condition_gate_blocks_ready"],
+            "full_bad_condition_gate_blockers": list(status["full_bad_condition_gate_blockers"]),
         }
         return rounded_payload
 
@@ -9133,6 +9306,28 @@ class MobilePlaybackManager:
                     payload["runway_delta_per_second"] = None
                     payload["runway_delta_observation_seconds"] = None
                     payload["runway_delta_mature"] = False
+                    payload["full_bad_condition_detected"] = False
+                    payload["full_bad_condition_reason"] = None
+                    payload["full_bad_condition_reasons"] = []
+                    payload["full_bad_condition_confidence"] = "none"
+                    payload["full_bad_condition_mature"] = False
+                    payload["full_bad_condition_reserve_required_seconds"] = None
+                    payload["full_bad_condition_reserve_target_seconds"] = None
+                    payload["full_bad_condition_actual_contiguous_end_seconds"] = None
+                    payload["full_bad_condition_actual_contiguous_seconds_after_target"] = None
+                    payload["full_bad_condition_reserve_remaining_seconds"] = None
+                    payload["full_bad_condition_reserve_satisfied"] = False
+                    payload["full_bad_condition_reserve_progress_source"] = None
+                    payload["full_bad_condition_reserve_eta_seconds"] = None
+                    payload["full_bad_condition_gate_enabled"] = bool(
+                        getattr(self.settings, "route2_full_bad_condition_30min_gate_enabled", False)
+                    )
+                    payload["full_bad_condition_gate_dry_run_enabled"] = bool(
+                        getattr(self.settings, "route2_full_bad_condition_30min_gate_dry_run_enabled", True)
+                    )
+                    payload["full_bad_condition_gate_would_block_ready"] = False
+                    payload["full_bad_condition_gate_blocks_ready"] = False
+                    payload["full_bad_condition_gate_blockers"] = []
                     payload["ffmpeg_progress_out_time_seconds"] = None
                     payload["ffmpeg_progress_speed_x"] = None
                     payload["ffmpeg_progress_fps"] = None
@@ -10128,8 +10323,8 @@ class MobilePlaybackManager:
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
-    ) -> dict[str, float | str | bool | None]:
-        return _route2_full_mode_gate_locked_impl(
+    ) -> dict[str, object]:
+        gate = _route2_full_mode_gate_locked_impl(
             session,
             epoch,
             route2_full_mode_requires_initial_attach_gate_locked=self._route2_full_mode_requires_initial_attach_gate_locked,
@@ -10142,12 +10337,21 @@ class MobilePlaybackManager:
             route2_epoch_ready_end_seconds=self._route2_epoch_ready_end_seconds,
             route2_supply_model_locked=self._route2_supply_model_locked,
         )
+        reserve_status = self._route2_bad_condition_reserve_payload_locked(session, epoch)
+        gate.update(reserve_status)
+        if bool(reserve_status["full_bad_condition_gate_blocks_ready"]):
+            gate["mode_state"] = "preparing"
+            gate["mode_ready"] = False
+            gate["mode_estimate_seconds"] = reserve_status["full_bad_condition_reserve_eta_seconds"]
+            gate["mode_estimate_source"] = "published_frontier"
+            gate["gate_reason"] = "preparing_for_bad_condition_reserve"
+        return gate
 
     def _route2_epoch_startup_attach_gate_locked(
         self,
         session: MobilePlaybackSession,
         epoch: PlaybackEpoch,
-    ) -> dict[str, float | str | bool | None]:
+    ) -> dict[str, object]:
         return _route2_epoch_startup_attach_gate_locked_impl(
             session,
             epoch,
