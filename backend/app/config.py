@@ -148,6 +148,8 @@ class Settings:
     route2_adaptive_thread_control_cloud_enabled: bool
     route2_adaptive_thread_control_strict_12_enabled: bool
     route2_adaptive_thread_control_real_9_prepare_enabled: bool
+    route2_adaptive_downshift_enabled: bool
+    route2_adaptive_downshift_dry_run_enabled: bool
     route2_shared_output_init_writer_enabled: bool
     route2_shared_output_segment_writer_enabled: bool
     route2_max_replacement_epochs_per_session: int
@@ -268,6 +270,14 @@ def load_settings() -> Settings:
         route2_adaptive_thread_control_real_9_prepare_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED",
             False,
+        ),
+        route2_adaptive_downshift_enabled=_get_bool(
+            "ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_ENABLED",
+            False,
+        ),
+        route2_adaptive_downshift_dry_run_enabled=_get_bool(
+            "ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_DRY_RUN_ENABLED",
+            True,
         ),
         route2_shared_output_init_writer_enabled=_get_bool(
             "ELVERN_ROUTE2_SHARED_OUTPUT_INIT_WRITER_ENABLED",

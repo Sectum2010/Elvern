@@ -48,10 +48,14 @@ def _build_route2_epoch_locked(
     session: MobilePlaybackSession,
     *,
     clamp_time,
+    target_position_seconds_override: float | None = None,
 ) -> PlaybackEpoch:
     epoch_id = uuid.uuid4().hex
     epoch_dir = route2_root / "sessions" / session.session_id / "epochs" / epoch_id
-    target_position_seconds = clamp_time(session.target_position_seconds, session.duration_seconds)
+    target_position_seconds = clamp_time(
+        session.target_position_seconds if target_position_seconds_override is None else target_position_seconds_override,
+        session.duration_seconds,
+    )
     epoch_start_seconds = max(0.0, round(target_position_seconds - 20.0, 2))
     return PlaybackEpoch(
         epoch_id=epoch_id,

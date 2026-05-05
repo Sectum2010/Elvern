@@ -1295,6 +1295,24 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     strict_12_prepare_applied: bool = False
     strict_12_prepare_blockers: list[str] = Field(default_factory=list)
     strict_12_prepare_reason: str | None = None
+    adaptive_downshift_enabled: bool = False
+    adaptive_downshift_candidate: bool = False
+    adaptive_downshift_target_threads: int | None = Field(default=None, ge=0)
+    adaptive_downshift_policy: str | None = None
+    adaptive_downshift_reason: str | None = None
+    adaptive_downshift_blockers: list[str] = Field(default_factory=list)
+    adaptive_downshift_replacement_epoch_id: str | None = None
+    adaptive_downshift_replacement_worker_id: str | None = None
+    adaptive_downshift_state: str = "none"
+    adaptive_downshift_transition_started_at: str | None = None
+    adaptive_downshift_switched_at: str | None = None
+    adaptive_downshift_aborted_reason: str | None = None
+    adaptive_boost_exit_reason: str | None = None
+    current_boost_tier: int | None = Field(default=None, ge=0)
+    maintenance_tier_target: int | None = Field(default=None, ge=0)
+    downshift_safe_to_apply: bool = False
+    downshift_transition_headroom_required: int | None = Field(default=None, ge=0)
+    downshift_transition_headroom_available: int | None = Field(default=None, ge=0)
     process_exists: bool = False
     cpu_cores_used: float | None = Field(default=None, ge=0)
     cpu_percent_of_total: float | None = Field(default=None, ge=0)
@@ -1633,6 +1651,8 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     adaptive_thread_control_cloud_enabled: bool = False
     adaptive_thread_control_strict_12_enabled: bool = False
     adaptive_thread_control_real_9_prepare_enabled: bool = False
+    adaptive_downshift_enabled: bool = False
+    adaptive_downshift_dry_run_enabled: bool = True
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
     native_playback_count: int = Field(default=0, ge=0)
     native_playback_running_count: int = Field(default=0, ge=0)

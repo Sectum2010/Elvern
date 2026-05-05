@@ -3485,6 +3485,8 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_core
     assert settings.route2_adaptive_thread_control_cloud_enabled is False
     assert settings.route2_adaptive_thread_control_strict_12_enabled is False
     assert settings.route2_adaptive_thread_control_real_9_prepare_enabled is False
+    assert settings.route2_adaptive_downshift_enabled is False
+    assert settings.route2_adaptive_downshift_dry_run_enabled is True
     assert settings.route2_shared_output_init_writer_enabled is False
     assert settings.route2_shared_output_segment_writer_enabled is False
 
@@ -3517,6 +3519,8 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED", "true")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED", "true")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED", "true")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_ENABLED", "true")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_DRY_RUN_ENABLED", "false")
 
     enabled_settings = refresh_settings()
 
@@ -3525,12 +3529,16 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     assert enabled_settings.route2_adaptive_thread_control_cloud_enabled is True
     assert enabled_settings.route2_adaptive_thread_control_strict_12_enabled is True
     assert enabled_settings.route2_adaptive_thread_control_real_9_prepare_enabled is True
+    assert enabled_settings.route2_adaptive_downshift_enabled is True
+    assert enabled_settings.route2_adaptive_downshift_dry_run_enabled is False
 
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY", "true")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_DRY_RUN_ENABLED", "true")
 
     disabled_settings = refresh_settings()
 
@@ -3539,6 +3547,8 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     assert disabled_settings.route2_adaptive_thread_control_cloud_enabled is False
     assert disabled_settings.route2_adaptive_thread_control_strict_12_enabled is False
     assert disabled_settings.route2_adaptive_thread_control_real_9_prepare_enabled is False
+    assert disabled_settings.route2_adaptive_downshift_enabled is False
+    assert disabled_settings.route2_adaptive_downshift_dry_run_enabled is True
 
 
 def test_route2_shared_output_init_writer_flag_is_disabled_by_default(
@@ -6986,6 +6996,11 @@ def test_route2_real_assignment_status_payload_includes_strict_twelve_fields(ini
     assert item_payload["strict_12_prepare_applied"] is True
     assert item_payload["strict_12_prepare_blockers"] == []
     assert item_payload["strict_12_prepare_reason"] == "Strict 12 prepare gates passed."
+    assert item_payload["adaptive_downshift_enabled"] is False
+    assert item_payload["adaptive_downshift_candidate"] is False
+    assert item_payload["adaptive_downshift_state"] in {"none", "candidate"}
+    assert "adaptive_downshift_blockers" in item_payload
+    assert item_payload["downshift_safe_to_apply"] is False
     assert started_workers
 
 
@@ -8362,6 +8377,573 @@ def test_route2_closed_loop_marks_stable_surplus_as_downshift_candidate(
     assert decision.downshift_target_threads == 2
     assert decision.donor_candidate is False
     assert record.assigned_threads == 4
+
+
+def test_route2_adaptive_downshift_dry_run_boosted_twelve_comfortable_targets_six(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is True
+    assert payload["adaptive_downshift_target_threads"] == 6
+    assert payload["maintenance_tier_target"] == 6
+    assert payload["current_boost_tier"] == 12
+    assert payload["adaptive_downshift_state"] == "candidate"
+    assert payload["downshift_safe_to_apply"] is False
+    assert payload["adaptive_downshift_blockers"] == []
+
+
+def test_route2_adaptive_downshift_dry_run_very_oversupplied_targets_four(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.7,
+        observation_seconds=24.0,
+        runway_seconds=320.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is True
+    assert payload["adaptive_downshift_target_threads"] == 4
+    assert payload["maintenance_tier_target"] == 4
+
+
+def test_route2_adaptive_downshift_dry_run_boosted_nine_comfortable_targets_six(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=9)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is True
+    assert payload["adaptive_downshift_target_threads"] == 6
+    assert payload["current_boost_tier"] == 9
+
+
+def test_route2_adaptive_downshift_dry_run_non_boosted_worker_is_not_candidate(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=6)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.5,
+        observation_seconds=24.0,
+        runway_seconds=320.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is False
+    assert "not_boosted_prepare_tier" in payload["adaptive_downshift_blockers"]
+
+
+def test_route2_adaptive_downshift_dry_run_blocks_unready_startup(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.8,
+        observation_seconds=24.0,
+        runway_seconds=80.0,
+        cpu_cores_used=4.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is False
+    assert "runway_below_comfortable_target" in payload["adaptive_downshift_blockers"]
+
+
+def test_route2_adaptive_downshift_dry_run_blocks_marginal_supply(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.06,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is False
+    assert "supply_below_downshift_threshold" in payload["adaptive_downshift_blockers"]
+
+
+def test_route2_adaptive_downshift_dry_run_allows_comfortable_io_publish_bound(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.4,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    pressure_root = tmp_path / "pressure"
+    pressure_root.mkdir()
+    normal = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    high_io = "some avg10=6.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=1.25 avg60=0.00 avg300=0.00 total=0\n"
+    (pressure_root / "cpu").write_text(normal, encoding="utf-8")
+    (pressure_root / "io").write_text(high_io, encoding="utf-8")
+    (pressure_root / "memory").write_text(normal, encoding="utf-8")
+    psi_snapshot = _read_linux_psi_snapshot(pressure_root=pressure_root)
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(
+        session,
+        epoch,
+        record,
+        psi_snapshot=psi_snapshot,
+    )
+    assert decision.role == "io_or_publish_bound"
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is True
+    assert payload["adaptive_downshift_target_threads"] == 6
+    assert "io_or_publish_bound_blocks_downshift" not in payload["adaptive_downshift_blockers"]
+
+
+def test_route2_adaptive_downshift_dry_run_blocks_recovery_and_starvation(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    session.stalled_recovery_requested = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.4,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is False
+    assert "stalled_recovery_needed" in payload["adaptive_downshift_blockers"]
+
+
+def test_route2_adaptive_downshift_dry_run_blocks_bad_condition_reserve(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.9,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=4.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is False
+    assert "active_bad_condition_reserve_protection" in payload["adaptive_downshift_blockers"]
+
+
+def test_route2_adaptive_downshift_dry_run_blocks_errors_and_replacements(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    record.process_exists = True
+    record.non_retryable_error = "provider_source_error"
+    session.browser_playback.replacement_epoch_id = "replacement-epoch"
+    replacement_epoch = _make_route2_epoch()
+    replacement_epoch.epoch_id = "replacement-epoch"
+    session.browser_playback.epochs["replacement-epoch"] = replacement_epoch
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.4,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    assert payload["adaptive_downshift_candidate"] is False
+    assert payload["adaptive_downshift_state"] == "replacement_warming"
+    assert "provider_source_or_session_error" in payload["adaptive_downshift_blockers"]
+    assert "replacement_already_in_progress" in payload["adaptive_downshift_blockers"]
+
+
+def _install_route2_downshift_inputs(
+    manager: MobilePlaybackManager,
+    session: MobilePlaybackSession,
+    epoch: PlaybackEpoch,
+    record: Route2WorkerRecord,
+) -> None:
+    session.browser_playback.active_epoch_id = epoch.epoch_id
+    session.browser_playback.epochs[epoch.epoch_id] = epoch
+    session.browser_playback.attach_revision = 1
+    session.browser_playback.client_attach_revision = 1
+    session.state = "ready"
+    session.pending_target_seconds = None
+    epoch.active_worker_id = record.worker_id
+    record.state = "running"
+    record.process_exists = True
+    manager._sessions[session.session_id] = session
+    manager._route2_workers[record.worker_id] = record
+
+
+def _publish_route2_epoch_dummy_range(epoch: PlaybackEpoch, *, through_segment: int) -> None:
+    epoch.published_dir.mkdir(parents=True, exist_ok=True)
+    epoch.published_init_path.write_bytes(b"init")
+    for index in range(through_segment + 1):
+        (epoch.published_dir / f"segment_{index:06d}.m4s").write_bytes(f"segment-{index}".encode("ascii"))
+
+
+def test_route2_adaptive_downshift_real_disabled_stays_dry_run_candidate_only(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+
+    assert payload["adaptive_downshift_candidate"] is True
+    assert payload["adaptive_downshift_target_threads"] == 6
+    assert payload["downshift_safe_to_apply"] is False
+    assert replacement is None
+    assert session.browser_playback.replacement_epoch_id is None
+
+
+def test_route2_adaptive_downshift_real_starts_maintenance_replacement_with_lower_threads(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    started_workers = _capture_route2_worker_threads(monkeypatch)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    original_target = session.target_position_seconds
+    original_attach_revision = session.browser_playback.attach_revision
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        effective_playhead_seconds=40.0,
+        cpu_cores_used=1.0,
+    )
+
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    manager._ensure_route2_epoch_workers_locked(session)
+    manager._dispatch_waiting_route2_workers_locked()
+
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    assert replacement.replacement_reason == "maintenance_downshift"
+    assert replacement.maintenance_downshift_source_epoch_id == epoch.epoch_id
+    assert replacement.maintenance_downshift_target_threads == 6
+    assert replacement_record.assigned_threads == 6
+    assert replacement_record.assigned_threads_source == "adaptive_downshift_maintenance_6"
+    assert replacement_record.adaptive_thread_assignment_policy == "adaptive_downshift_maintenance_replacement"
+    assert record.state == "running"
+    assert record.assigned_threads == 12
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.target_position_seconds == original_target
+    assert session.pending_target_seconds is None
+    assert session.browser_playback.attach_revision == original_attach_revision
+    assert len(started_workers) == 1
+
+
+def test_route2_adaptive_downshift_replacement_ready_switches_without_target_mutation(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        effective_playhead_seconds=40.0,
+        cpu_cores_used=1.0,
+    )
+    session.target_position_seconds = 5.0
+    original_target = session.target_position_seconds
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    manager._ensure_route2_epoch_workers_locked(session)
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_record.state = "running"
+    replacement_record.assigned_threads = 6
+    replacement_record.process_exists = True
+    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
+    replacement.transcoder_completed = True
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == replacement.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.browser_playback.attach_revision == 2
+    assert session.target_position_seconds == original_target
+    assert session.pending_target_seconds is None
+    assert replacement.adaptive_downshift_switched_at is not None
+    assert record.state == "stopped"
+    assert replacement_record.assigned_threads == 6
+
+
+def test_route2_adaptive_downshift_replacement_failure_aborts_without_losing_active_epoch(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    replacement.state = "failed"
+    replacement.last_error = "simulated replacement failure"
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.state != "failed"
+    assert record.state == "running"
+    assert epoch.adaptive_downshift_aborted_reason == "replacement_failed"
+
+
+def test_route2_adaptive_downshift_client_seek_aborts_warming_replacement(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    session.pending_target_seconds = 120.0
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
+    assert epoch.adaptive_downshift_aborted_reason == "client_seek_during_downshift"
+
+
+def test_route2_adaptive_downshift_external_pressure_aborts_warming_replacement(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    manager._route2_resource_snapshot.external_ffmpeg_process_count = 1
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
+    assert epoch.adaptive_downshift_aborted_reason == "external_ffmpeg_during_downshift"
+
+
+def test_route2_adaptive_downshift_real_blocks_without_transition_headroom(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_cpu_budget_percent=60,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+
+    assert payload["adaptive_downshift_candidate"] is True
+    assert payload["downshift_safe_to_apply"] is False
+    assert payload["downshift_transition_headroom_available"] == 0
+    assert "downshift_transition_headroom_unavailable" in payload["adaptive_downshift_blockers"]
+    assert replacement is None
+
+
+def test_route2_adaptive_downshift_status_payload_exposes_transition_fields(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, record.worker_id)
+
+    assert item_payload["adaptive_downshift_enabled"] is True
+    assert item_payload["adaptive_downshift_state"] in {"replacement_starting", "replacement_warming"}
+    assert item_payload["adaptive_downshift_replacement_epoch_id"] == replacement.epoch_id
+    assert "adaptive_downshift_replacement_worker_id" in item_payload
+    assert item_payload["adaptive_downshift_transition_started_at"] is not None
+    assert item_payload["downshift_transition_headroom_required"] == 6
+    assert item_payload["downshift_transition_headroom_available"] == 6
 
 
 def test_route2_closed_loop_marks_high_surplus_as_theoretical_donor_only(

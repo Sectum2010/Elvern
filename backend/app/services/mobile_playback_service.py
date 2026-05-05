@@ -2460,6 +2460,24 @@ class MobilePlaybackManager:
         record.stop_requested = epoch.stop_requested
         record.non_retryable_error = epoch.last_error if _is_non_retryable_cloud_source_error(epoch.last_error) else None
         record.replacement_count = session.browser_playback.replacement_epoch_count
+        if epoch.replacement_reason == "maintenance_downshift":
+            record.adaptive_downshift_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False))
+            record.adaptive_downshift_replacement_epoch_id = epoch.epoch_id
+            record.adaptive_downshift_replacement_worker_id = epoch.active_worker_id
+            record.adaptive_downshift_target_threads = epoch.maintenance_downshift_target_threads
+            record.maintenance_tier_target = epoch.maintenance_downshift_target_threads
+            record.adaptive_downshift_transition_started_at = epoch.adaptive_downshift_transition_started_at
+            record.adaptive_downshift_switched_at = epoch.adaptive_downshift_switched_at
+            record.adaptive_downshift_aborted_reason = epoch.adaptive_downshift_aborted_reason
+            record.adaptive_downshift_policy = "phase_3a2_safe_replacement_downshift"
+            if epoch.adaptive_downshift_aborted_reason:
+                record.adaptive_downshift_state = "aborted"
+            elif epoch.adaptive_downshift_switched_at:
+                record.adaptive_downshift_state = "switched"
+            elif epoch.active_worker_id or (epoch.process and epoch.process.poll() is None):
+                record.adaptive_downshift_state = "replacement_warming"
+            else:
+                record.adaptive_downshift_state = "replacement_starting"
         process = epoch.process
         if process is not None and process.poll() is None:
             record.process = process
@@ -3012,6 +3030,8 @@ class MobilePlaybackManager:
             "adaptive_thread_control_real_9_prepare_enabled": (
                 self.settings.route2_adaptive_thread_control_real_9_prepare_enabled
             ),
+            "adaptive_downshift_enabled": self.settings.route2_adaptive_downshift_enabled,
+            "adaptive_downshift_dry_run_enabled": self.settings.route2_adaptive_downshift_dry_run_enabled,
             "active_worker_count": len(self._route2_running_workers_locked()),
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
@@ -4184,6 +4204,215 @@ class MobilePlaybackManager:
             "runtime_rebalance_target_threads": None,
             "runtime_rebalance_can_donate_threads": 0,
             "runtime_rebalance_priority": 0,
+        }
+
+    def _route2_maintenance_tier_target(
+        self,
+        *,
+        assigned_threads: int,
+        supply_rate_x: float,
+        runway_seconds: float,
+        comfortable_runway_seconds: float,
+        manifest_complete: bool,
+    ) -> int:
+        current_threads = max(1, int(assigned_threads or 0))
+        floor = max(4, int(self.settings.route2_min_worker_threads))
+        if manifest_complete or (
+            supply_rate_x >= ROUTE2_CLOSED_LOOP_DONOR_RATE_X
+            and runway_seconds >= comfortable_runway_seconds * 1.25
+        ):
+            return min(current_threads, floor)
+        return min(current_threads, max(floor, 6))
+
+    def _route2_downshift_transition_headroom_locked(self, *, user_id: int) -> int:
+        budget = self._route2_budget_summary_locked()
+        total_available = int(budget["total_route2_budget_cores"]) - self._route2_running_threads_locked()
+        per_user_available = int(budget["per_user_budget_cores"]) - self._route2_running_threads_locked(user_id=user_id)
+        return max(0, min(total_available, per_user_available))
+
+    def _adaptive_downshift_default_payload(self) -> dict[str, object]:
+        return {
+            "adaptive_downshift_enabled": bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False)),
+            "adaptive_downshift_candidate": False,
+            "adaptive_downshift_target_threads": None,
+            "adaptive_downshift_policy": "phase_3a_dry_run_only",
+            "adaptive_downshift_reason": "No Route2 worker is available for downshift evaluation.",
+            "adaptive_downshift_blockers": ["route2_session_or_epoch_missing"],
+            "adaptive_downshift_replacement_epoch_id": None,
+            "adaptive_downshift_replacement_worker_id": None,
+            "adaptive_downshift_state": "none",
+            "adaptive_downshift_transition_started_at": None,
+            "adaptive_downshift_switched_at": None,
+            "adaptive_downshift_aborted_reason": None,
+            "adaptive_boost_exit_reason": None,
+            "current_boost_tier": None,
+            "maintenance_tier_target": None,
+            "downshift_safe_to_apply": False,
+            "downshift_transition_headroom_required": None,
+            "downshift_transition_headroom_available": None,
+        }
+
+    def _apply_route2_downshift_payload_to_record(
+        self,
+        record: Route2WorkerRecord,
+        payload: dict[str, object],
+    ) -> None:
+        record.adaptive_downshift_enabled = bool(payload["adaptive_downshift_enabled"])
+        record.adaptive_downshift_candidate = bool(payload["adaptive_downshift_candidate"])
+        record.adaptive_downshift_target_threads = payload["adaptive_downshift_target_threads"]  # type: ignore[assignment]
+        record.adaptive_downshift_policy = payload["adaptive_downshift_policy"]  # type: ignore[assignment]
+        record.adaptive_downshift_reason = payload["adaptive_downshift_reason"]  # type: ignore[assignment]
+        record.adaptive_downshift_blockers = list(payload["adaptive_downshift_blockers"])  # type: ignore[arg-type]
+        record.adaptive_downshift_replacement_epoch_id = payload["adaptive_downshift_replacement_epoch_id"]  # type: ignore[assignment]
+        record.adaptive_downshift_replacement_worker_id = payload["adaptive_downshift_replacement_worker_id"]  # type: ignore[assignment]
+        record.adaptive_downshift_state = str(payload["adaptive_downshift_state"])
+        record.adaptive_downshift_transition_started_at = payload["adaptive_downshift_transition_started_at"]  # type: ignore[assignment]
+        record.adaptive_downshift_switched_at = payload["adaptive_downshift_switched_at"]  # type: ignore[assignment]
+        record.adaptive_downshift_aborted_reason = payload["adaptive_downshift_aborted_reason"]  # type: ignore[assignment]
+        record.adaptive_boost_exit_reason = payload["adaptive_boost_exit_reason"]  # type: ignore[assignment]
+        record.current_boost_tier = payload["current_boost_tier"]  # type: ignore[assignment]
+        record.maintenance_tier_target = payload["maintenance_tier_target"]  # type: ignore[assignment]
+        record.downshift_safe_to_apply = bool(payload["downshift_safe_to_apply"])
+        record.downshift_transition_headroom_required = payload["downshift_transition_headroom_required"]  # type: ignore[assignment]
+        record.downshift_transition_headroom_available = payload["downshift_transition_headroom_available"]  # type: ignore[assignment]
+
+    def _route2_adaptive_downshift_payload_locked(
+        self,
+        session: MobilePlaybackSession,
+        epoch: PlaybackEpoch,
+        record: Route2WorkerRecord,
+        decision: _Route2ClosedLoopDryRunDecision,
+    ) -> dict[str, object]:
+        downshift_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False))
+        dry_run_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_dry_run_enabled", True))
+        assigned_threads = max(0, int(record.assigned_threads or 0))
+        replacement_epoch_id = session.browser_playback.replacement_epoch_id
+        (
+            _published_end_seconds,
+            _effective_playhead_seconds,
+            runway_seconds,
+            supply_rate_x,
+            observation_seconds,
+            manifest_complete,
+            refill_in_progress,
+        ) = self._route2_runtime_supply_metrics_locked(session, epoch)
+        reserve_status = self._route2_bad_condition_reserve_status_locked(session, epoch)
+        comfortable_runway_seconds = self._route2_closed_loop_comfortable_runway_seconds(record.playback_mode)
+        blockers: list[str] = []
+
+        if not dry_run_enabled and not downshift_enabled:
+            blockers.append("adaptive_downshift_dry_run_disabled")
+        if assigned_threads < 9:
+            blockers.append("not_boosted_prepare_tier")
+        if record.state != "running" or not record.process_exists:
+            blockers.append("worker_not_running")
+        if record.stop_requested or epoch.stop_requested or epoch.state in {"draining", "failed", "ended"}:
+            blockers.append("cleanup_or_drain_instability")
+        if replacement_epoch_id:
+            blockers.append("replacement_already_in_progress")
+        if record.non_retryable_error or session.last_error or epoch.last_error:
+            blockers.append("provider_source_or_session_error")
+        if decision.role == "metrics_immature" or observation_seconds < ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS:
+            blockers.append("telemetry_immature")
+        if decision.prepare_boost_needed or decision.needs_resource:
+            blockers.append("prepare_or_recovery_still_needs_boost")
+        if decision.role in {"provider_error", "source_bound", "client_bound", "host_pressure_limited"}:
+            blockers.append(f"{decision.role}_blocks_downshift")
+        if self._stalled_recovery_needed(session):
+            blockers.append("stalled_recovery_needed")
+        if self._starvation_risk(session):
+            blockers.append("starvation_risk")
+        if bool(reserve_status.get("bad_condition_reserve_required")) and not bool(reserve_status.get("reserve_satisfied")):
+            blockers.append("active_bad_condition_reserve_protection")
+        if not manifest_complete and supply_rate_x < ROUTE2_CLOSED_LOOP_DOWNSHIFT_RATE_X:
+            blockers.append("supply_below_downshift_threshold")
+        if not manifest_complete and runway_seconds < comfortable_runway_seconds:
+            blockers.append("runway_below_comfortable_target")
+        if session.lifecycle_state not in {"attached", "background-suspended", "resuming"}:
+            blockers.append("client_lifecycle_not_stable")
+        if not manifest_complete and not refill_in_progress:
+            blockers.append("no_active_refill_to_replace")
+
+        maintenance_target = None
+        if assigned_threads >= 9:
+            maintenance_target = self._route2_maintenance_tier_target(
+                assigned_threads=assigned_threads,
+                supply_rate_x=supply_rate_x,
+                runway_seconds=runway_seconds,
+                comfortable_runway_seconds=comfortable_runway_seconds,
+                manifest_complete=manifest_complete,
+            )
+            if maintenance_target >= assigned_threads:
+                blockers.append("maintenance_target_not_below_current")
+        headroom_available = (
+            self._route2_downshift_transition_headroom_locked(user_id=record.user_id)
+            if maintenance_target is not None
+            else None
+        )
+        transition_headroom_blocked = bool(
+            downshift_enabled
+            and maintenance_target is not None
+            and headroom_available is not None
+            and headroom_available < maintenance_target
+        )
+        candidate = not blockers and maintenance_target is not None and maintenance_target < assigned_threads
+        state = "candidate" if candidate else "none"
+        replacement_worker_id = None
+        transition_started_at = epoch.adaptive_downshift_transition_started_at
+        switched_at = epoch.adaptive_downshift_switched_at
+        aborted_reason = epoch.adaptive_downshift_aborted_reason
+        if replacement_epoch_id:
+            replacement = session.browser_playback.epochs.get(replacement_epoch_id)
+            replacement_worker_id = replacement.active_worker_id if replacement is not None else None
+            transition_started_at = (
+                replacement.adaptive_downshift_transition_started_at if replacement is not None else None
+            )
+            switched_at = replacement.adaptive_downshift_switched_at if replacement is not None else None
+            aborted_reason = replacement.adaptive_downshift_aborted_reason if replacement is not None else None
+            if replacement is not None and replacement.replacement_reason == "maintenance_downshift":
+                if replacement.state == "failed":
+                    state = "failed"
+                elif self._route2_downshift_replacement_ready_locked(session, replacement):
+                    state = "ready_to_switch"
+                elif replacement.active_worker_id or (replacement.process and replacement.process.poll() is None):
+                    state = "replacement_warming"
+                else:
+                    state = "replacement_starting"
+            else:
+                state = "failed" if replacement is not None and replacement.state == "failed" else "replacement_warming"
+        safe_to_apply = bool(candidate and downshift_enabled and not transition_headroom_blocked)
+        if transition_headroom_blocked:
+            blockers.append("downshift_transition_headroom_unavailable")
+        reason = (
+            "Boosted worker is oversupplied and can be planned for a lower maintenance replacement."
+            if candidate
+            else "Downshift replacement is blocked by conservative safety gates."
+        )
+        if candidate and not downshift_enabled:
+            reason = "Dry-run candidate only; real replacement downshift flag is disabled."
+        if candidate and downshift_enabled and transition_headroom_blocked:
+            reason = "Dry-run candidate only; transition headroom cannot safely hold old and replacement workers together."
+        elif candidate and downshift_enabled:
+            reason = "Safety gates passed; real maintenance replacement downshift is allowed to start."
+        return {
+            "adaptive_downshift_enabled": downshift_enabled,
+            "adaptive_downshift_candidate": candidate,
+            "adaptive_downshift_target_threads": maintenance_target if candidate else None,
+            "adaptive_downshift_policy": "phase_3a2_safe_replacement_downshift",
+            "adaptive_downshift_reason": reason,
+            "adaptive_downshift_blockers": list(dict.fromkeys(blockers)),
+            "adaptive_downshift_replacement_epoch_id": replacement_epoch_id,
+            "adaptive_downshift_replacement_worker_id": replacement_worker_id,
+            "adaptive_downshift_state": state,
+            "adaptive_downshift_transition_started_at": transition_started_at,
+            "adaptive_downshift_switched_at": switched_at,
+            "adaptive_downshift_aborted_reason": aborted_reason,
+            "adaptive_boost_exit_reason": "oversupplied_comfortable_runway" if candidate else None,
+            "current_boost_tier": assigned_threads if assigned_threads >= 9 else None,
+            "maintenance_tier_target": maintenance_target if candidate else None,
+            "downshift_safe_to_apply": safe_to_apply,
+            "downshift_transition_headroom_required": maintenance_target,
+            "downshift_transition_headroom_available": headroom_available,
         }
 
     def _route2_shared_supply_output_contract_fingerprint_locked(
@@ -6872,6 +7101,24 @@ class MobilePlaybackManager:
                     "strict_12_prepare_applied": record.strict_12_prepare_applied,
                     "strict_12_prepare_blockers": list(record.strict_12_prepare_blockers),
                     "strict_12_prepare_reason": record.strict_12_prepare_reason,
+                    "adaptive_downshift_enabled": record.adaptive_downshift_enabled,
+                    "adaptive_downshift_candidate": record.adaptive_downshift_candidate,
+                    "adaptive_downshift_target_threads": record.adaptive_downshift_target_threads,
+                    "adaptive_downshift_policy": record.adaptive_downshift_policy,
+                    "adaptive_downshift_reason": record.adaptive_downshift_reason,
+                    "adaptive_downshift_blockers": list(record.adaptive_downshift_blockers),
+                    "adaptive_downshift_replacement_epoch_id": record.adaptive_downshift_replacement_epoch_id,
+                    "adaptive_downshift_replacement_worker_id": record.adaptive_downshift_replacement_worker_id,
+                    "adaptive_downshift_state": record.adaptive_downshift_state,
+                    "adaptive_downshift_transition_started_at": record.adaptive_downshift_transition_started_at,
+                    "adaptive_downshift_switched_at": record.adaptive_downshift_switched_at,
+                    "adaptive_downshift_aborted_reason": record.adaptive_downshift_aborted_reason,
+                    "adaptive_boost_exit_reason": record.adaptive_boost_exit_reason,
+                    "current_boost_tier": record.current_boost_tier,
+                    "maintenance_tier_target": record.maintenance_tier_target,
+                    "downshift_safe_to_apply": record.downshift_safe_to_apply,
+                    "downshift_transition_headroom_required": record.downshift_transition_headroom_required,
+                    "downshift_transition_headroom_available": record.downshift_transition_headroom_available,
                     "process_exists": record.process_exists,
                     "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
                     "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
@@ -7178,6 +7425,17 @@ class MobilePlaybackManager:
                     )
                 payload.update(self._closed_loop_dry_run_payload(closed_loop_decision))
                 payload.update(self._closed_loop_runtime_rebalance_payload(closed_loop_decision))
+                if session is not None and epoch is not None:
+                    downshift_payload = self._route2_adaptive_downshift_payload_locked(
+                        session,
+                        epoch,
+                        record,
+                        closed_loop_decision,
+                    )
+                else:
+                    downshift_payload = self._adaptive_downshift_default_payload()
+                payload.update(downshift_payload)
+                self._apply_route2_downshift_payload_to_record(record, downshift_payload)
                 if closed_loop_decision.donor_candidate:
                     closed_loop_donors.append((closed_loop_decision.donor_score, record.worker_id))
                 strategy_input, strategy_metadata_source, strategy_metadata_trusted = (
@@ -7457,11 +7715,17 @@ class MobilePlaybackManager:
             ensure_route2_full_preflight_locked=self._ensure_route2_full_preflight_locked,
         )
 
-    def _build_route2_epoch_locked(self, session: MobilePlaybackSession) -> PlaybackEpoch:
+    def _build_route2_epoch_locked(
+        self,
+        session: MobilePlaybackSession,
+        *,
+        target_position_seconds_override: float | None = None,
+    ) -> PlaybackEpoch:
         return _build_route2_epoch_locked_impl(
             self._route2_root,
             session,
             clamp_time=self._clamp_time,
+            target_position_seconds_override=target_position_seconds_override,
         )
 
     def _log_route2_event(
@@ -8206,6 +8470,205 @@ class MobilePlaybackManager:
             previous_epoch_id=previous_active.epoch_id if previous_active is not None else None,
         )
 
+    def _route2_downshift_replacement_ready_locked(
+        self,
+        session: MobilePlaybackSession,
+        replacement_epoch: PlaybackEpoch,
+    ) -> bool:
+        if replacement_epoch.replacement_reason != "maintenance_downshift":
+            return False
+        if replacement_epoch.state in {"failed", "ended", "draining"}:
+            return False
+        if replacement_epoch.last_error:
+            return False
+        if not replacement_epoch.init_published:
+            return False
+        if replacement_epoch.contiguous_published_through_segment is None:
+            return False
+        if self._stalled_recovery_needed(session) or self._starvation_risk(session):
+            return False
+        reserve_status = self._route2_bad_condition_reserve_status_locked(session, replacement_epoch)
+        if bool(reserve_status.get("bad_condition_reserve_required")) and not bool(reserve_status.get("reserve_satisfied")):
+            return False
+        attach_ready = self._route2_epoch_startup_attach_ready_locked(session, replacement_epoch)
+        return self._guard_route2_full_attach_boundary_locked(
+            session,
+            replacement_epoch,
+            attach_eligible=attach_ready,
+            guard_path="maintenance_downshift_ready_check",
+        )
+
+    def _route2_downshift_abort_reason_locked(
+        self,
+        session: MobilePlaybackSession,
+        replacement_epoch: PlaybackEpoch,
+    ) -> str | None:
+        if replacement_epoch.replacement_reason != "maintenance_downshift":
+            return None
+        if session.pending_target_seconds is not None:
+            return "client_seek_during_downshift"
+        if replacement_epoch.last_error or replacement_epoch.state == "failed":
+            return "replacement_failed"
+        snapshot = self._latest_route2_resource_snapshot_locked()
+        if snapshot is not None and not snapshot.sample_stale:
+            if snapshot.external_ffmpeg_process_count > 0:
+                return "external_ffmpeg_during_downshift"
+            if snapshot.external_pressure_level in {"moderate", "high"}:
+                return "external_pressure_during_downshift"
+        active_workloads = len(
+            [
+                record
+                for record in self._route2_workers.values()
+                if record.state in {"queued", "running"}
+            ]
+        )
+        if active_workloads > 2:
+            return "route2_workload_changed_during_downshift"
+        return None
+
+    def _abort_route2_downshift_replacement_locked(
+        self,
+        session: MobilePlaybackSession,
+        replacement_epoch: PlaybackEpoch,
+        *,
+        reason: str,
+    ) -> None:
+        replacement_epoch.adaptive_downshift_aborted_reason = reason
+        replacement_epoch.state = "failed" if replacement_epoch.state == "failed" else "ended"
+        active_epoch = (
+            session.browser_playback.epochs.get(session.browser_playback.active_epoch_id)
+            if session.browser_playback.active_epoch_id
+            else None
+        )
+        if active_epoch is not None:
+            active_epoch.adaptive_downshift_aborted_reason = reason
+            self._write_route2_epoch_metadata_locked(active_epoch)
+        self._log_route2_event(
+            "maintenance_downshift_replacement_aborted",
+            session=session,
+            epoch=replacement_epoch,
+            level=logging.WARNING,
+            reason=reason,
+        )
+        self._discard_route2_epoch_locked(session, replacement_epoch.epoch_id)
+        session.browser_playback.replacement_retry_not_before_ts = time.time() + ROUTE2_REPLACEMENT_RETRY_BACKOFF_SECONDS
+
+    def _create_route2_downshift_replacement_epoch_locked(
+        self,
+        session: MobilePlaybackSession,
+        active_epoch: PlaybackEpoch,
+        *,
+        target_threads: int,
+    ) -> PlaybackEpoch | None:
+        browser_session = session.browser_playback
+        if browser_session.replacement_epoch_id:
+            return None
+        if browser_session.replacement_epoch_count >= self.settings.route2_max_replacement_epochs_per_session:
+            active_epoch.adaptive_downshift_aborted_reason = "replacement_epoch_cap_exceeded"
+            self._write_route2_epoch_metadata_locked(active_epoch)
+            return None
+        target_threads = max(int(self.settings.route2_min_worker_threads), int(target_threads))
+        effective_playhead = self._route2_effective_playhead_seconds_locked(session, active_epoch)
+        replacement_epoch = self._build_route2_epoch_locked(
+            session,
+            target_position_seconds_override=effective_playhead,
+        )
+        now = utcnow_iso()
+        replacement_epoch.replacement_reason = "maintenance_downshift"
+        replacement_epoch.maintenance_downshift_target_threads = target_threads
+        replacement_epoch.maintenance_downshift_source_epoch_id = active_epoch.epoch_id
+        replacement_epoch.adaptive_downshift_transition_started_at = now
+        browser_session.replacement_epoch_count += 1
+        browser_session.replacement_epoch_id = replacement_epoch.epoch_id
+        browser_session.epochs[replacement_epoch.epoch_id] = replacement_epoch
+        self._ensure_route2_epoch_workspace_locked(replacement_epoch)
+        self._log_route2_event(
+            "maintenance_downshift_replacement_created",
+            session=session,
+            epoch=replacement_epoch,
+            source_epoch_id=active_epoch.epoch_id,
+            target_threads=target_threads,
+            effective_playhead_seconds=round(effective_playhead, 2),
+        )
+        return replacement_epoch
+
+    def _promote_route2_downshift_replacement_epoch_locked(
+        self,
+        session: MobilePlaybackSession,
+        replacement_epoch: PlaybackEpoch,
+    ) -> None:
+        browser_session = session.browser_playback
+        previous_active = (
+            browser_session.epochs.get(browser_session.active_epoch_id)
+            if browser_session.active_epoch_id
+            else None
+        )
+        if previous_active is replacement_epoch:
+            return
+        next_revision = max(1, int(browser_session.attach_revision or 0) + 1)
+        replacement_epoch.adaptive_downshift_switched_at = utcnow_iso()
+        replacement_epoch.state = "attach_ready"
+        browser_session.active_epoch_id = replacement_epoch.epoch_id
+        browser_session.replacement_epoch_id = None
+        self._issue_route2_attach_revision_locked(
+            session,
+            next_revision=next_revision,
+            reason="maintenance_downshift_ready",
+            epoch=replacement_epoch,
+        )
+        if previous_active is not None:
+            self._mark_route2_epoch_draining_locked(
+                session,
+                previous_active,
+                reason="maintenance_downshift_switched",
+                required_client_revision=browser_session.attach_revision,
+            )
+            self._write_route2_epoch_metadata_locked(previous_active)
+            self._terminate_route2_epoch_locked(
+                previous_active,
+                session=session,
+                final_state="stopped",
+                remove_worker_record=False,
+            )
+        self._write_route2_epoch_metadata_locked(replacement_epoch)
+        self._log_route2_event(
+            "maintenance_downshift_replacement_promoted",
+            session=session,
+            epoch=replacement_epoch,
+            previous_epoch_id=previous_active.epoch_id if previous_active is not None else None,
+            target_threads=replacement_epoch.maintenance_downshift_target_threads,
+        )
+
+    def _maybe_start_route2_downshift_locked(
+        self,
+        session: MobilePlaybackSession,
+        active_epoch: PlaybackEpoch,
+    ) -> PlaybackEpoch | None:
+        if not bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False)):
+            return None
+        if session.browser_playback.replacement_epoch_id:
+            return None
+        record = self._route2_workers.get(active_epoch.active_worker_id) if active_epoch.active_worker_id else None
+        if record is None:
+            return None
+        decision = self._evaluate_route2_closed_loop_dry_run_locked(session, active_epoch, record)
+        payload = self._route2_adaptive_downshift_payload_locked(session, active_epoch, record, decision)
+        self._apply_route2_downshift_payload_to_record(record, payload)
+        if not bool(payload["downshift_safe_to_apply"]):
+            return None
+        target_threads = payload["adaptive_downshift_target_threads"]
+        if not isinstance(target_threads, int) or target_threads <= 0:
+            return None
+        replacement_epoch = self._create_route2_downshift_replacement_epoch_locked(
+            session,
+            active_epoch,
+            target_threads=target_threads,
+        )
+        if replacement_epoch is not None:
+            payload = self._route2_adaptive_downshift_payload_locked(session, active_epoch, record, decision)
+            self._apply_route2_downshift_payload_to_record(record, payload)
+        return replacement_epoch
+
     def _route2_epoch_needs_worker_locked(
         self,
         session: MobilePlaybackSession,
@@ -8746,7 +9209,14 @@ class MobilePlaybackManager:
             if replacement_epoch.state == "failed":
                 failed_error = replacement_epoch.last_error
                 failed_epoch_id = replacement_epoch.epoch_id
-                if _is_non_retryable_cloud_source_error(failed_error):
+                if replacement_epoch.replacement_reason == "maintenance_downshift":
+                    self._abort_route2_downshift_replacement_locked(
+                        session,
+                        replacement_epoch,
+                        reason="replacement_failed",
+                    )
+                    replacement_epoch = None
+                elif _is_non_retryable_cloud_source_error(failed_error):
                     self._log_route2_event(
                         "replacement_epoch_non_retryable_source_failure",
                         session=session,
@@ -8760,29 +9230,30 @@ class MobilePlaybackManager:
                     session.last_error = failed_error or "Browser Playback Route 2 replacement epoch failed"
                     self._write_route2_epoch_metadata_locked(active_epoch)
                     return
-                self._log_route2_event(
-                    "replacement_epoch_failed_before_promotion",
-                    session=session,
-                    epoch=replacement_epoch,
-                    level=logging.WARNING,
-                    error=failed_error,
-                )
-                browser_session.replacement_retry_not_before_ts = now_ts + ROUTE2_REPLACEMENT_RETRY_BACKOFF_SECONDS
-                self._discard_route2_epoch_locked(session, failed_epoch_id)
-                replacement_epoch = None
-                if active_epoch.state == "draining" and not self._route2_epoch_startup_attach_ready_locked(session, active_epoch):
-                    browser_session.state = "failed"
-                    session.state = "failed"
-                    session.last_error = failed_error or "Browser Playback Route 2 replacement epoch failed"
+                else:
                     self._log_route2_event(
-                        "recovery_failed_without_authoritative_epoch",
+                        "replacement_epoch_failed_before_promotion",
                         session=session,
-                        epoch=active_epoch,
-                        level=logging.ERROR,
-                        error=session.last_error,
+                        epoch=replacement_epoch,
+                        level=logging.WARNING,
+                        error=failed_error,
                     )
-                    self._write_route2_epoch_metadata_locked(active_epoch)
-                    return
+                    browser_session.replacement_retry_not_before_ts = now_ts + ROUTE2_REPLACEMENT_RETRY_BACKOFF_SECONDS
+                    self._discard_route2_epoch_locked(session, failed_epoch_id)
+                    replacement_epoch = None
+                    if active_epoch.state == "draining" and not self._route2_epoch_startup_attach_ready_locked(session, active_epoch):
+                        browser_session.state = "failed"
+                        session.state = "failed"
+                        session.last_error = failed_error or "Browser Playback Route 2 replacement epoch failed"
+                        self._log_route2_event(
+                            "recovery_failed_without_authoritative_epoch",
+                            session=session,
+                            epoch=active_epoch,
+                            level=logging.ERROR,
+                            error=session.last_error,
+                        )
+                        self._write_route2_epoch_metadata_locked(active_epoch)
+                        return
 
         if active_epoch.state == "failed":
             self._mark_route2_epoch_draining_locked(
@@ -8833,7 +9304,31 @@ class MobilePlaybackManager:
                 self._write_route2_epoch_metadata_locked(active_epoch)
                 return
 
-        if replacement_epoch is not None:
+        if replacement_epoch is None and active_epoch.state not in {"failed", "draining", "ended"}:
+            replacement_epoch = self._maybe_start_route2_downshift_locked(session, active_epoch)
+
+        if replacement_epoch is not None and replacement_epoch.replacement_reason == "maintenance_downshift":
+            abort_reason = self._route2_downshift_abort_reason_locked(session, replacement_epoch)
+            if abort_reason is not None:
+                self._abort_route2_downshift_replacement_locked(
+                    session,
+                    replacement_epoch,
+                    reason=abort_reason,
+                )
+                replacement_epoch = None
+            elif self._route2_downshift_replacement_ready_locked(session, replacement_epoch):
+                self._promote_route2_downshift_replacement_epoch_locked(session, replacement_epoch)
+                active_epoch = replacement_epoch
+                replacement_epoch = None
+                self._rebuild_route2_published_frontier_locked(active_epoch)
+            else:
+                if replacement_epoch.active_worker_id or (replacement_epoch.process and replacement_epoch.process.poll() is None):
+                    replacement_epoch.state = "warming"
+                elif replacement_epoch.state not in {"failed", "ended"}:
+                    replacement_epoch.state = "starting"
+                self._write_route2_epoch_metadata_locked(replacement_epoch)
+
+        if replacement_epoch is not None and replacement_epoch.replacement_reason != "maintenance_downshift":
             replacement_attach_ready = self._route2_epoch_startup_attach_ready_locked(session, replacement_epoch)
             replacement_attach_ready = self._guard_route2_full_attach_boundary_locked(
                 session,
@@ -9985,6 +10480,24 @@ class MobilePlaybackManager:
                 )
                 if assigned_threads < self.settings.route2_min_worker_threads:
                     continue
+                downshift_target_threads = (
+                    int(epoch.maintenance_downshift_target_threads)
+                    if epoch.replacement_reason == "maintenance_downshift"
+                    and epoch.maintenance_downshift_target_threads is not None
+                    else None
+                )
+                if downshift_target_threads is not None:
+                    if (
+                        available_total_threads < downshift_target_threads
+                        or user_remaining_threads < downshift_target_threads
+                    ):
+                        self._abort_route2_downshift_replacement_locked(
+                            session,
+                            epoch,
+                            reason="downshift_transition_headroom_unavailable",
+                        )
+                        continue
+                    assigned_threads = downshift_target_threads
                 spawn_dry_run = self._build_route2_adaptive_spawn_dry_run_locked(
                     record,
                     fixed_assigned_threads=assigned_threads,
@@ -9995,33 +10508,53 @@ class MobilePlaybackManager:
                     active_route2_user_count=int(budget["active_decoding_user_count"]),
                     active_route2_workload_count=int(budget["active_route2_workload_count"]),
                 )
-                try:
-                    thread_assignment = self._resolve_route2_real_assigned_threads_locked(
-                        record,
-                        fixed_assigned_threads=assigned_threads,
-                        spawn_dry_run=spawn_dry_run,
-                        session=session,
-                        epoch=epoch,
+                if downshift_target_threads is not None:
+                    thread_assignment = _Route2RealThreadAssignmentDecision(
+                        assigned_threads=assigned_threads,
+                        assignment_policy="adaptive_downshift_maintenance_replacement",
+                        assignment_reason=(
+                            "Maintenance downshift replacement uses the precomputed lower thread tier; "
+                            "no in-place ffmpeg thread mutation is performed."
+                        ),
+                        assignment_blockers=[],
+                        adaptive_control_enabled=bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False)),
+                        adaptive_control_applied=True,
+                        assigned_threads_source=f"adaptive_downshift_maintenance_{assigned_threads}",
+                        fallback_used=False,
+                        effective_ladder_target=assigned_threads,
                     )
-                except Exception:
-                    logger.debug("Route2 adaptive real assignment failed; falling back to fixed assignment", exc_info=True)
-                    thread_assignment = self._fixed_route2_thread_assignment_decision(
-                        fixed_assigned_threads=assigned_threads,
-                        policy="adaptive_assignment_exception_fallback",
-                        reason="Adaptive real thread assignment failed; using fixed Route2 assignment.",
-                        blockers=["adaptive_assignment_exception"],
-                        source="fixed_fallback",
-                        adaptive_enabled=bool(getattr(self.settings, "route2_adaptive_thread_control_enabled", False)),
-                        fallback_used=True,
-                    )
+                else:
+                    try:
+                        thread_assignment = self._resolve_route2_real_assigned_threads_locked(
+                            record,
+                            fixed_assigned_threads=assigned_threads,
+                            spawn_dry_run=spawn_dry_run,
+                            session=session,
+                            epoch=epoch,
+                        )
+                    except Exception:
+                        logger.debug("Route2 adaptive real assignment failed; falling back to fixed assignment", exc_info=True)
+                        thread_assignment = self._fixed_route2_thread_assignment_decision(
+                            fixed_assigned_threads=assigned_threads,
+                            policy="adaptive_assignment_exception_fallback",
+                            reason="Adaptive real thread assignment failed; using fixed Route2 assignment.",
+                            blockers=["adaptive_assignment_exception"],
+                            source="fixed_fallback",
+                            adaptive_enabled=bool(getattr(self.settings, "route2_adaptive_thread_control_enabled", False)),
+                            fallback_used=True,
+                        )
                 assigned_threads = thread_assignment.assigned_threads
                 if assigned_threads < self.settings.route2_min_worker_threads:
                     continue
                 record.state = "running"
-                record.fixed_assigned_threads_at_dispatch = min(
-                    self.settings.route2_max_worker_threads,
-                    available_total_threads,
-                    user_remaining_threads,
+                record.fixed_assigned_threads_at_dispatch = (
+                    assigned_threads
+                    if downshift_target_threads is not None
+                    else min(
+                        self.settings.route2_max_worker_threads,
+                        available_total_threads,
+                        user_remaining_threads,
+                    )
                 )
                 record.adaptive_spawn_dry_run_enabled = True
                 record.adaptive_spawn_dry_run_threads = spawn_dry_run.recommended_threads

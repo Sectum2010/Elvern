@@ -179,6 +179,12 @@ class PlaybackEpoch:
     display_eta_seconds: float | None = None
     display_eta_updated_at_ts: float = 0.0
     display_eta_stable: bool = False
+    replacement_reason: str | None = None
+    maintenance_downshift_target_threads: int | None = None
+    maintenance_downshift_source_epoch_id: str | None = None
+    adaptive_downshift_transition_started_at: str | None = None
+    adaptive_downshift_switched_at: str | None = None
+    adaptive_downshift_aborted_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -242,6 +248,24 @@ class Route2WorkerRecord:
     strict_12_prepare_applied: bool = False
     strict_12_prepare_blockers: list[str] = field(default_factory=list)
     strict_12_prepare_reason: str | None = None
+    adaptive_downshift_enabled: bool = False
+    adaptive_downshift_candidate: bool = False
+    adaptive_downshift_target_threads: int | None = None
+    adaptive_downshift_policy: str | None = None
+    adaptive_downshift_reason: str | None = None
+    adaptive_downshift_blockers: list[str] = field(default_factory=list)
+    adaptive_downshift_replacement_epoch_id: str | None = None
+    adaptive_downshift_replacement_worker_id: str | None = None
+    adaptive_downshift_state: str = "none"
+    adaptive_downshift_transition_started_at: str | None = None
+    adaptive_downshift_switched_at: str | None = None
+    adaptive_downshift_aborted_reason: str | None = None
+    adaptive_boost_exit_reason: str | None = None
+    current_boost_tier: int | None = None
+    maintenance_tier_target: int | None = None
+    downshift_safe_to_apply: bool = False
+    downshift_transition_headroom_required: int | None = None
+    downshift_transition_headroom_available: int | None = None
     process_exists: bool = False
     cpu_cores_used: float | None = None
     cpu_percent_of_total: float | None = None
