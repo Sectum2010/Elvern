@@ -224,6 +224,7 @@ ROUTE2_ADAPTIVE_RECLAIM_MAX_ATTEMPTS_PER_DONOR = 3
 ROUTE2_ADAPTIVE_RECLAIM_PENDING_TTL_SECONDS = 120.0
 ROUTE2_ADAPTIVE_RESUPPLY_RETRY_BACKOFF_SECONDS = 30.0
 ROUTE2_ADAPTIVE_RESUPPLY_MAX_ATTEMPTS_PER_DONOR = 3
+ROUTE2_ADAPTIVE_RESUPPLY_STABILIZATION_DEFAULT_SECONDS = 120
 ROUTE2_RECLAIM_ACTIVE_STATES = {
     "consumer_waiting_for_reclaim",
     "donor_selected",
@@ -2503,6 +2504,14 @@ class MobilePlaybackManager:
             session.browser_playback,
         )
         browser_session = session.browser_playback
+        record.adaptive_downshift_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False))
+        record.autonomous_maintenance_downshift_enabled = bool(
+            getattr(self.settings, "route2_adaptive_maintenance_downshift_enabled", False)
+        )
+        record.adaptive_downshift_mode = "none"
+        record.reclaim_donor_downshift_active = False
+        record.donor_reserved_for_reclaim = False
+        record.maintenance_downshift_suppressed_by_reclaim = False
         record.adaptive_reclaim_enabled = bool(getattr(self.settings, "route2_adaptive_reclaim_enabled", False))
         record.adaptive_reclaim_dry_run_enabled = bool(
             getattr(self.settings, "route2_adaptive_reclaim_dry_run_enabled", True)
@@ -2598,12 +2607,31 @@ class MobilePlaybackManager:
         record.adaptive_resupply_measured_at = browser_session.adaptive_resupply_measured_at
         record.adaptive_resupply_blockers = list(browser_session.adaptive_resupply_blockers)
         record.adaptive_resupply_abort_reason = browser_session.adaptive_resupply_abort_reason
+        stabilization_payload = self._route2_resupply_stabilization_payload_locked(browser_session)
+        record.adaptive_resupply_stabilization_active = bool(
+            stabilization_payload["adaptive_resupply_stabilization_active"]
+        )
+        record.adaptive_resupply_stabilization_until = stabilization_payload[  # type: ignore[assignment]
+            "adaptive_resupply_stabilization_until"
+        ]
+        record.adaptive_resupply_stabilization_seconds_remaining = stabilization_payload[  # type: ignore[assignment]
+            "adaptive_resupply_stabilization_seconds_remaining"
+        ]
+        record.adaptive_resupply_stabilization_reason = stabilization_payload[  # type: ignore[assignment]
+            "adaptive_resupply_stabilization_reason"
+        ]
+        record.last_resupply_completed_at = stabilization_payload["last_resupply_completed_at"]  # type: ignore[assignment]
+        record.last_resupply_target_threads = stabilization_payload["last_resupply_target_threads"]  # type: ignore[assignment]
+        record.resupplied_donor_protection_active = bool(
+            stabilization_payload["resupplied_donor_protection_active"]
+        )
         record.priority_reexpand_pending = bool(browser_session.priority_reexpand_pending)
         record.priority_reexpand_reason = browser_session.priority_reexpand_reason
         record.donor_protection_active = bool(browser_session.donor_protection_active)
         record.donor_health_after_resupply = dict(browser_session.donor_health_after_resupply)
         record.admission_blocked_by_resupply = bool(browser_session.admission_blocked_by_resupply)
         if epoch.replacement_reason == "adaptive_resupply_boost":
+            record.adaptive_downshift_mode = "resupply_boost"
             record.adaptive_resupply_replacement_epoch_id = epoch.epoch_id
             record.adaptive_resupply_replacement_worker_id = epoch.active_worker_id
             record.adaptive_resupply_target_threads = epoch.adaptive_resupply_target_threads
@@ -2624,6 +2652,10 @@ class MobilePlaybackManager:
                 record.adaptive_resupply_state = "boost_replacement_starting"
         if epoch.replacement_reason == "maintenance_downshift":
             record.adaptive_downshift_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False))
+            record.adaptive_downshift_mode = (
+                "reclaim_donor" if epoch.adaptive_reclaim_request_id else "autonomous_maintenance"
+            )
+            record.reclaim_donor_downshift_active = bool(epoch.adaptive_reclaim_request_id)
             record.adaptive_downshift_replacement_epoch_id = epoch.epoch_id
             record.adaptive_downshift_replacement_worker_id = epoch.active_worker_id
             record.adaptive_downshift_target_threads = epoch.maintenance_downshift_target_threads
@@ -3205,10 +3237,17 @@ class MobilePlaybackManager:
             ),
             "adaptive_downshift_enabled": self.settings.route2_adaptive_downshift_enabled,
             "adaptive_downshift_dry_run_enabled": self.settings.route2_adaptive_downshift_dry_run_enabled,
+            "autonomous_maintenance_downshift_enabled": (
+                self.settings.route2_adaptive_maintenance_downshift_enabled
+            ),
+            "autonomous_maintenance_downshift_dry_run_enabled": (
+                self.settings.route2_adaptive_maintenance_downshift_dry_run_enabled
+            ),
             "adaptive_reclaim_enabled": self.settings.route2_adaptive_reclaim_enabled,
             "adaptive_reclaim_dry_run_enabled": self.settings.route2_adaptive_reclaim_dry_run_enabled,
             "adaptive_resupply_enabled": self.settings.route2_adaptive_resupply_enabled,
             "adaptive_resupply_dry_run_enabled": self.settings.route2_adaptive_resupply_dry_run_enabled,
+            "adaptive_resupply_stabilization_seconds": self._route2_resupply_stabilization_seconds(),
             "active_worker_count": len(self._route2_running_workers_locked()),
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
@@ -3240,6 +3279,63 @@ class MobilePlaybackManager:
         if current_threads <= 11:
             return 12
         return current_threads
+
+    def _route2_resupply_stabilization_seconds(self) -> int:
+        return max(
+            0,
+            int(
+                getattr(
+                    self.settings,
+                    "route2_adaptive_resupply_stabilization_seconds",
+                    ROUTE2_ADAPTIVE_RESUPPLY_STABILIZATION_DEFAULT_SECONDS,
+                )
+                or 0
+            ),
+        )
+
+    def _route2_resupply_stabilization_payload_locked(
+        self,
+        browser_session: BrowserPlaybackSession,
+        *,
+        now_ts: float | None = None,
+    ) -> dict[str, object]:
+        reference_ts = time.time() if now_ts is None else now_ts
+        until_ts = float(browser_session.adaptive_resupply_stabilization_until_ts or 0.0)
+        remaining = max(0.0, until_ts - reference_ts)
+        active = remaining > 0.0
+        return {
+            "adaptive_resupply_stabilization_active": active,
+            "adaptive_resupply_stabilization_until": browser_session.adaptive_resupply_stabilization_until,
+            "adaptive_resupply_stabilization_seconds_remaining": round(remaining, 3) if active else None,
+            "adaptive_resupply_stabilization_reason": (
+                browser_session.adaptive_resupply_stabilization_reason if active else None
+            ),
+            "last_resupply_completed_at": browser_session.last_resupply_completed_at,
+            "last_resupply_target_threads": browser_session.last_resupply_target_threads,
+            "resupplied_donor_protection_active": active,
+        }
+
+    def _activate_route2_resupply_stabilization_locked(
+        self,
+        browser_session: BrowserPlaybackSession,
+        *,
+        target_threads: int | None,
+        now_ts: float | None = None,
+    ) -> None:
+        reference_ts = time.time() if now_ts is None else now_ts
+        completed_at = utcnow_iso()
+        browser_session.last_resupply_completed_at = completed_at
+        browser_session.last_resupply_target_threads = target_threads
+        seconds = self._route2_resupply_stabilization_seconds()
+        if seconds <= 0:
+            browser_session.adaptive_resupply_stabilization_until_ts = 0.0
+            browser_session.adaptive_resupply_stabilization_until = None
+            browser_session.adaptive_resupply_stabilization_reason = None
+            return
+        until_ts = reference_ts + float(seconds)
+        browser_session.adaptive_resupply_stabilization_until_ts = until_ts
+        browser_session.adaptive_resupply_stabilization_until = datetime.fromtimestamp(until_ts).astimezone().isoformat()
+        browser_session.adaptive_resupply_stabilization_reason = "post_resupply_donor_stabilization"
 
     def _route2_record_cpu_thread_limited(self, record: Route2WorkerRecord) -> bool:
         if record.cpu_cores_used is None:
@@ -4613,6 +4709,15 @@ class MobilePlaybackManager:
         return {
             "adaptive_downshift_enabled": bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False)),
             "adaptive_downshift_candidate": False,
+            "adaptive_downshift_mode": "none",
+            "autonomous_maintenance_downshift_enabled": bool(
+                getattr(self.settings, "route2_adaptive_maintenance_downshift_enabled", False)
+            ),
+            "autonomous_maintenance_downshift_candidate": False,
+            "autonomous_maintenance_downshift_blockers": ["route2_session_or_epoch_missing"],
+            "maintenance_downshift_suppressed_by_reclaim": False,
+            "donor_reserved_for_reclaim": False,
+            "reclaim_donor_downshift_active": False,
             "adaptive_downshift_target_threads": None,
             "adaptive_downshift_policy": "phase_3a_dry_run_only",
             "adaptive_downshift_reason": "No Route2 worker is available for downshift evaluation.",
@@ -4645,6 +4750,17 @@ class MobilePlaybackManager:
     ) -> None:
         record.adaptive_downshift_enabled = bool(payload["adaptive_downshift_enabled"])
         record.adaptive_downshift_candidate = bool(payload["adaptive_downshift_candidate"])
+        record.adaptive_downshift_mode = str(payload["adaptive_downshift_mode"])
+        record.autonomous_maintenance_downshift_enabled = bool(payload["autonomous_maintenance_downshift_enabled"])
+        record.autonomous_maintenance_downshift_candidate = bool(payload["autonomous_maintenance_downshift_candidate"])
+        record.autonomous_maintenance_downshift_blockers = list(
+            payload["autonomous_maintenance_downshift_blockers"]  # type: ignore[arg-type]
+        )
+        record.maintenance_downshift_suppressed_by_reclaim = bool(
+            payload["maintenance_downshift_suppressed_by_reclaim"]
+        )
+        record.donor_reserved_for_reclaim = bool(payload["donor_reserved_for_reclaim"])
+        record.reclaim_donor_downshift_active = bool(payload["reclaim_donor_downshift_active"])
         record.adaptive_downshift_target_threads = payload["adaptive_downshift_target_threads"]  # type: ignore[assignment]
         record.adaptive_downshift_policy = payload["adaptive_downshift_policy"]  # type: ignore[assignment]
         record.adaptive_downshift_reason = payload["adaptive_downshift_reason"]  # type: ignore[assignment]
@@ -4678,10 +4794,19 @@ class MobilePlaybackManager:
     ) -> dict[str, object]:
         downshift_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False))
         dry_run_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_dry_run_enabled", True))
+        maintenance_enabled = bool(getattr(self.settings, "route2_adaptive_maintenance_downshift_enabled", False))
+        maintenance_dry_run_enabled = bool(
+            getattr(self.settings, "route2_adaptive_maintenance_downshift_dry_run_enabled", True)
+        )
         assigned_threads = max(0, int(record.assigned_threads or 0))
         browser_session = session.browser_playback
         replacement_epoch_id = browser_session.replacement_epoch_id
         now_ts = time.time()
+        pending_reclaim = (
+            self._route2_pending_reclaim_request_locked(now_ts=now_ts)
+            if bool(getattr(self.settings, "route2_adaptive_reclaim_enabled", False))
+            else None
+        )
         resource_snapshot = self._latest_route2_resource_snapshot_locked(now_ts=now_ts)
         retry_not_before_seconds = self._route2_downshift_retry_seconds_remaining(
             browser_session,
@@ -4701,9 +4826,15 @@ class MobilePlaybackManager:
         reserve_status = self._route2_bad_condition_reserve_status_locked(session, epoch)
         comfortable_runway_seconds = self._route2_closed_loop_comfortable_runway_seconds(record.playback_mode)
         blockers: list[str] = []
+        stabilization_payload = self._route2_resupply_stabilization_payload_locked(
+            browser_session,
+            now_ts=now_ts,
+        )
 
-        if not dry_run_enabled and not downshift_enabled:
+        if not (dry_run_enabled or maintenance_dry_run_enabled or downshift_enabled):
             blockers.append("adaptive_downshift_dry_run_disabled")
+        if bool(stabilization_payload["adaptive_resupply_stabilization_active"]):
+            blockers.append("recently_resupplied_donor_stabilizing")
         if downshift_enabled and retry_not_before_seconds is not None:
             retry_blocker = "adaptive_downshift_retry_cooldown_active"
             blockers.append(retry_blocker)
@@ -4812,9 +4943,26 @@ class MobilePlaybackManager:
                 state = "replacement_warming"
             else:
                 state = "replacement_starting"
-        safe_to_apply = bool(candidate and downshift_enabled and not transition_headroom_blocked)
+        donor_reserved_for_reclaim = bool(candidate and pending_reclaim is not None and not reclaim_downshift_active)
+        maintenance_downshift_suppressed_by_reclaim = bool(donor_reserved_for_reclaim)
+        autonomous_candidate = bool(candidate and not reclaim_downshift_active and not donor_reserved_for_reclaim)
+        autonomous_blockers = list(blockers)
+        if donor_reserved_for_reclaim:
+            autonomous_blockers.append("maintenance_downshift_suppressed_by_reclaim")
+            autonomous_blockers.append("donor_reserved_for_reclaim")
+        elif candidate and not maintenance_enabled:
+            autonomous_blockers.append("autonomous_maintenance_downshift_disabled")
+        reclaim_mode_allowed = bool(pending_reclaim is not None or reclaim_downshift_active)
+        maintenance_mode_allowed = bool(maintenance_enabled and not maintenance_downshift_suppressed_by_reclaim)
+        safe_to_apply = bool(
+            candidate
+            and downshift_enabled
+            and not transition_headroom_blocked
+            and (reclaim_mode_allowed or maintenance_mode_allowed)
+        )
         if transition_headroom_blocked:
             blockers.append("downshift_transition_headroom_unavailable")
+            autonomous_blockers.append("downshift_transition_headroom_unavailable")
         reason = (
             "Boosted worker is oversupplied and can be planned for a lower maintenance replacement."
             if candidate
@@ -4822,20 +4970,45 @@ class MobilePlaybackManager:
         )
         if candidate and not downshift_enabled:
             reason = "Dry-run candidate only; real replacement downshift flag is disabled."
+        elif candidate and donor_reserved_for_reclaim:
+            reason = "Maintenance downshift is suppressed; donor is reserved for an admission-triggered reclaim transaction."
+        elif candidate and downshift_enabled and not maintenance_enabled and not reclaim_mode_allowed:
+            reason = "Dry-run candidate only; autonomous maintenance downshift flag is disabled."
         if candidate and downshift_enabled and transition_headroom_blocked:
             reason = "Dry-run candidate only; transition headroom cannot safely hold old and replacement workers together."
-        elif candidate and downshift_enabled:
+        elif candidate and donor_reserved_for_reclaim:
+            reason = "Maintenance downshift is suppressed; donor is reserved for an admission-triggered reclaim transaction."
+        elif candidate and downshift_enabled and reclaim_mode_allowed:
+            reason = "Safety gates passed; admission-triggered reclaim donor replacement downshift is allowed to start."
+        elif candidate and downshift_enabled and maintenance_mode_allowed:
             reason = "Safety gates passed; real maintenance replacement downshift is allowed to start."
         target_for_status = (
             maintenance_target
             if candidate or state in {"replacement_starting", "replacement_warming", "ready_to_switch", "switched", "aborted"}
             else None
         )
+        if epoch.replacement_reason == "adaptive_resupply_boost":
+            downshift_mode = "resupply_boost"
+        elif reclaim_downshift_active or donor_reserved_for_reclaim:
+            downshift_mode = "reclaim_donor"
+        elif candidate or state in {"replacement_starting", "replacement_warming", "ready_to_switch", "switched", "aborted"}:
+            downshift_mode = "autonomous_maintenance"
+        else:
+            downshift_mode = "none"
         return {
             "adaptive_downshift_enabled": downshift_enabled,
             "adaptive_downshift_candidate": candidate,
+            "adaptive_downshift_mode": downshift_mode,
+            "autonomous_maintenance_downshift_enabled": maintenance_enabled,
+            "autonomous_maintenance_downshift_candidate": autonomous_candidate,
+            "autonomous_maintenance_downshift_blockers": list(dict.fromkeys(autonomous_blockers)),
+            "maintenance_downshift_suppressed_by_reclaim": maintenance_downshift_suppressed_by_reclaim,
+            "donor_reserved_for_reclaim": donor_reserved_for_reclaim,
+            "reclaim_donor_downshift_active": bool(reclaim_downshift_active),
             "adaptive_downshift_target_threads": target_for_status,
-            "adaptive_downshift_policy": "reclaim_donor" if reclaim_downshift_active else "maintenance",
+            "adaptive_downshift_policy": (
+                "reclaim_donor" if reclaim_downshift_active or donor_reserved_for_reclaim else "maintenance"
+            ),
             "adaptive_downshift_reason": reason,
             "adaptive_downshift_blockers": list(dict.fromkeys(blockers)),
             "adaptive_downshift_replacement_epoch_id": replacement_epoch_id,
@@ -4938,6 +5111,51 @@ class MobilePlaybackManager:
             browser_session.adaptive_reclaim_completed_at = utcnow_iso()
             browser_session.adaptive_reclaim_failed_reason = None
             browser_session.adaptive_reclaim_abort_reason = None
+
+    def _route2_resupplied_reclaim_capacity_blocker_locked(
+        self,
+        *,
+        incoming_user_id: int,
+        incoming_media_item_id: int | None,
+    ) -> dict[str, object] | None:
+        for donor_session in self._sessions.values():
+            browser_session = donor_session.browser_playback
+            if browser_session.engine_mode != "route2":
+                continue
+            if browser_session.adaptive_reclaim_state != "capacity_available":
+                continue
+            if browser_session.adaptive_reclaim_consumer_user_id != int(incoming_user_id):
+                continue
+            if (
+                incoming_media_item_id is not None
+                and browser_session.adaptive_reclaim_consumer_media_item_id is not None
+                and browser_session.adaptive_reclaim_consumer_media_item_id != int(incoming_media_item_id)
+            ):
+                continue
+            stabilization = self._route2_resupply_stabilization_payload_locked(browser_session)
+            if not bool(stabilization["adaptive_resupply_stabilization_active"]):
+                continue
+            if browser_session.adaptive_reclaim_capacity_sufficient_for_consumer is not False:
+                continue
+            return {
+                "admission_waiting_for_reclaim": False,
+                "admission_reclaim_possible": False,
+                "admission_reclaim_attempted": True,
+                "admission_reclaim_succeeded": False,
+                "admission_reclaim_failed_reason": "insufficient_measured_capacity_after_resupply",
+                "admission_capacity_after_reclaim": browser_session.adaptive_reclaim_cpu_headroom_after,
+                "admission_hard_block_reason": "insufficient_measured_capacity_after_resupply",
+                "adaptive_reclaim_enabled": bool(getattr(self.settings, "route2_adaptive_reclaim_enabled", False)),
+                "adaptive_reclaim_dry_run_enabled": bool(
+                    getattr(self.settings, "route2_adaptive_reclaim_dry_run_enabled", True)
+                ),
+                "adaptive_reclaim_state": browser_session.adaptive_reclaim_state,
+                "adaptive_reclaim_request_id": browser_session.adaptive_reclaim_request_id,
+                "adaptive_reclaim_capacity_sufficient_for_consumer": False,
+                "adaptive_reclaim_blockers": ["insufficient_measured_capacity_after_resupply"],
+                **stabilization,
+            }
+        return None
 
     def _route2_pending_reclaim_request_locked(self, *, now_ts: float | None = None) -> dict[str, object] | None:
         request = self._route2_pending_reclaim_request
@@ -5053,6 +5271,13 @@ class MobilePlaybackManager:
             "adaptive_resupply_measured_at": None,
             "adaptive_resupply_blockers": [],
             "adaptive_resupply_abort_reason": None,
+            "adaptive_resupply_stabilization_active": False,
+            "adaptive_resupply_stabilization_until": None,
+            "adaptive_resupply_stabilization_seconds_remaining": None,
+            "adaptive_resupply_stabilization_reason": None,
+            "last_resupply_completed_at": None,
+            "last_resupply_target_threads": None,
+            "resupplied_donor_protection_active": False,
             "priority_reexpand_pending": False,
             "priority_reexpand_reason": None,
             "donor_protection_active": False,
@@ -5072,8 +5297,11 @@ class MobilePlaybackManager:
         dry_run_enabled = bool(getattr(self.settings, "route2_adaptive_reclaim_dry_run_enabled", True))
         browser_session = session.browser_playback
         blockers: list[str] = []
+        stabilization_payload = self._route2_resupply_stabilization_payload_locked(browser_session)
         if not dry_run_enabled and not reclaim_enabled:
             blockers.append("adaptive_reclaim_dry_run_disabled")
+        if bool(stabilization_payload["adaptive_resupply_stabilization_active"]):
+            blockers.append("recently_resupplied_donor_stabilizing")
         if not bool(getattr(self.settings, "route2_adaptive_downshift_dry_run_enabled", True)) and not bool(
             getattr(self.settings, "route2_adaptive_downshift_enabled", False)
         ):
@@ -5250,6 +5478,7 @@ class MobilePlaybackManager:
     ) -> dict[str, object]:
         payload = self._adaptive_resupply_default_payload()
         browser_session = session.browser_playback
+        payload.update(self._route2_resupply_stabilization_payload_locked(browser_session))
         if (
             browser_session.active_epoch_id != epoch.epoch_id
             and epoch.replacement_reason != "adaptive_resupply_boost"
@@ -5323,6 +5552,7 @@ class MobilePlaybackManager:
                         "adaptive_resupply_measured_at": browser_session.adaptive_resupply_measured_at,
                         "adaptive_resupply_blockers": list(browser_session.adaptive_resupply_blockers),
                         "adaptive_resupply_abort_reason": replacement.adaptive_resupply_abort_reason,
+                        **self._route2_resupply_stabilization_payload_locked(browser_session),
                         "priority_reexpand_pending": True,
                         "priority_reexpand_reason": browser_session.priority_reexpand_reason,
                         "donor_protection_active": True,
@@ -5356,6 +5586,7 @@ class MobilePlaybackManager:
                         "adaptive_resupply_switched_at": browser_session.adaptive_resupply_switched_at,
                         "adaptive_resupply_measured_at": browser_session.adaptive_resupply_measured_at,
                         "donor_health_after_resupply": dict(browser_session.donor_health_after_resupply),
+                        **self._route2_resupply_stabilization_payload_locked(browser_session),
                     }
                 )
             return payload
@@ -5456,6 +5687,7 @@ class MobilePlaybackManager:
                 "adaptive_resupply_measured_at": browser_session.adaptive_resupply_measured_at,
                 "adaptive_resupply_blockers": list(browser_session.adaptive_resupply_blockers),
                 "adaptive_resupply_abort_reason": browser_session.adaptive_resupply_abort_reason,
+                **self._route2_resupply_stabilization_payload_locked(browser_session),
                 "priority_reexpand_pending": True,
                 "priority_reexpand_reason": browser_session.priority_reexpand_reason,
                 "donor_protection_active": True,
@@ -6693,6 +6925,12 @@ class MobilePlaybackManager:
         dry_run_enabled = bool(getattr(self.settings, "route2_adaptive_reclaim_dry_run_enabled", True))
         plans = self._route2_reclaim_candidate_plans_locked()
         if not plans:
+            resupplied_capacity_blocker = self._route2_resupplied_reclaim_capacity_blocker_locked(
+                incoming_user_id=incoming_user_id,
+                incoming_media_item_id=incoming_media_item_id,
+            )
+            if resupplied_capacity_blocker is not None:
+                return resupplied_capacity_blocker
             retry_blocked_session = next(
                 (
                     candidate.browser_playback
@@ -8579,6 +8817,21 @@ class MobilePlaybackManager:
                     "strict_12_prepare_reason": record.strict_12_prepare_reason,
                     "adaptive_downshift_enabled": record.adaptive_downshift_enabled,
                     "adaptive_downshift_candidate": record.adaptive_downshift_candidate,
+                    "adaptive_downshift_mode": record.adaptive_downshift_mode,
+                    "autonomous_maintenance_downshift_enabled": (
+                        record.autonomous_maintenance_downshift_enabled
+                    ),
+                    "autonomous_maintenance_downshift_candidate": (
+                        record.autonomous_maintenance_downshift_candidate
+                    ),
+                    "autonomous_maintenance_downshift_blockers": list(
+                        record.autonomous_maintenance_downshift_blockers
+                    ),
+                    "maintenance_downshift_suppressed_by_reclaim": (
+                        record.maintenance_downshift_suppressed_by_reclaim
+                    ),
+                    "donor_reserved_for_reclaim": record.donor_reserved_for_reclaim,
+                    "reclaim_donor_downshift_active": record.reclaim_donor_downshift_active,
                     "adaptive_downshift_target_threads": record.adaptive_downshift_target_threads,
                     "adaptive_downshift_policy": record.adaptive_downshift_policy,
                     "adaptive_downshift_reason": record.adaptive_downshift_reason,
@@ -8701,6 +8954,17 @@ class MobilePlaybackManager:
                     "adaptive_resupply_measured_at": record.adaptive_resupply_measured_at,
                     "adaptive_resupply_blockers": list(record.adaptive_resupply_blockers),
                     "adaptive_resupply_abort_reason": record.adaptive_resupply_abort_reason,
+                    "adaptive_resupply_stabilization_active": record.adaptive_resupply_stabilization_active,
+                    "adaptive_resupply_stabilization_until": record.adaptive_resupply_stabilization_until,
+                    "adaptive_resupply_stabilization_seconds_remaining": (
+                        round(record.adaptive_resupply_stabilization_seconds_remaining, 3)
+                        if record.adaptive_resupply_stabilization_seconds_remaining is not None
+                        else None
+                    ),
+                    "adaptive_resupply_stabilization_reason": record.adaptive_resupply_stabilization_reason,
+                    "last_resupply_completed_at": record.last_resupply_completed_at,
+                    "last_resupply_target_threads": record.last_resupply_target_threads,
+                    "resupplied_donor_protection_active": record.resupplied_donor_protection_active,
                     "priority_reexpand_pending": record.priority_reexpand_pending,
                     "priority_reexpand_reason": record.priority_reexpand_reason,
                     "donor_protection_active": record.donor_protection_active,
@@ -10246,6 +10510,35 @@ class MobilePlaybackManager:
             if not snapshot_fresh:
                 browser_session.adaptive_reclaim_blockers.append("resource_snapshot_missing_or_stale")
 
+    def _measure_route2_reclaim_capacity_after_resupply_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> None:
+        browser_session = session.browser_playback
+        if not browser_session.adaptive_reclaim_request_id:
+            return
+        after_measurement = self._route2_reclaim_capacity_measurement_locked(user_id=session.user_id)
+        after_headroom = int(after_measurement["route2_headroom"])
+        required_capacity = self._route2_admission_min_worker_threads() + ROUTE2_ADAPTIVE_RECLAIM_MEASURED_HEADROOM_MARGIN_THREADS
+        snapshot_fresh = bool(after_measurement["snapshot_fresh"])
+        browser_session.adaptive_reclaim_measured_at = utcnow_iso()
+        browser_session.adaptive_reclaim_cpu_headroom_after = after_headroom
+        browser_session.adaptive_reclaim_route2_headroom_after = after_headroom
+        browser_session.adaptive_reclaim_route2_cpu_cores_used_after = after_measurement["route2_cpu_cores_used"]  # type: ignore[assignment]
+        browser_session.adaptive_reclaim_user_cpu_cores_used_after = after_measurement["user_cpu_cores_used"]  # type: ignore[assignment]
+        browser_session.adaptive_reclaim_host_cpu_used_cores_after = after_measurement["host_cpu_used_cores"]  # type: ignore[assignment]
+        browser_session.adaptive_reclaim_host_cpu_spare_cores_after = after_measurement["host_cpu_spare_cores"]  # type: ignore[assignment]
+        browser_session.adaptive_reclaim_memory_pressure_after = after_measurement["memory_pressure"]  # type: ignore[assignment]
+        browser_session.adaptive_reclaim_external_pressure_after = after_measurement["external_pressure"]  # type: ignore[assignment]
+        browser_session.adaptive_reclaim_capacity_sufficient_for_consumer = bool(
+            snapshot_fresh and after_headroom >= required_capacity
+        )
+        if browser_session.adaptive_reclaim_capacity_sufficient_for_consumer:
+            browser_session.adaptive_reclaim_failed_reason = None
+            browser_session.adaptive_reclaim_abort_reason = None
+        else:
+            browser_session.adaptive_reclaim_failed_reason = "insufficient_measured_capacity_after_resupply"
+
     def _create_route2_downshift_replacement_epoch_locked(
         self,
         session: MobilePlaybackSession,
@@ -10441,6 +10734,9 @@ class MobilePlaybackManager:
         browser_session.adaptive_resupply_measured_at = None
         browser_session.adaptive_resupply_abort_reason = None
         browser_session.adaptive_resupply_state = "boost_replacement_starting"
+        browser_session.adaptive_resupply_stabilization_until_ts = 0.0
+        browser_session.adaptive_resupply_stabilization_until = None
+        browser_session.adaptive_resupply_stabilization_reason = None
         browser_session.priority_reexpand_pending = True
         browser_session.donor_protection_active = True
         browser_session.replacement_epoch_id = replacement_epoch.epoch_id
@@ -10567,6 +10863,10 @@ class MobilePlaybackManager:
         browser_session.adaptive_resupply_measured_at = utcnow_iso()
         browser_session.donor_health_after_resupply = health
         if bool(health.get("safe")):
+            self._activate_route2_resupply_stabilization_locked(
+                browser_session,
+                target_threads=replacement_epoch.adaptive_resupply_target_threads,
+            )
             browser_session.adaptive_resupply_state = "donor_safe"
             browser_session.adaptive_resupply_needed = False
             browser_session.adaptive_resupply_reason = None
@@ -10577,6 +10877,9 @@ class MobilePlaybackManager:
             browser_session.donor_protection_active = False
             browser_session.admission_blocked_by_resupply = False
         else:
+            browser_session.adaptive_resupply_stabilization_until_ts = 0.0
+            browser_session.adaptive_resupply_stabilization_until = None
+            browser_session.adaptive_resupply_stabilization_reason = None
             blockers = [str(item) for item in health.get("blockers") or []]
             browser_session.adaptive_resupply_state = "capacity_insufficient_after_resupply"
             browser_session.adaptive_resupply_blockers = blockers
@@ -10584,6 +10887,7 @@ class MobilePlaybackManager:
             browser_session.priority_reexpand_reason = browser_session.adaptive_resupply_reason
             browser_session.donor_protection_active = True
             browser_session.admission_blocked_by_resupply = True
+        self._measure_route2_reclaim_capacity_after_resupply_locked(session)
         self._write_route2_epoch_metadata_locked(replacement_epoch)
         self._log_route2_event(
             "adaptive_resupply_replacement_promoted",

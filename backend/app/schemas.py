@@ -1297,6 +1297,13 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     strict_12_prepare_reason: str | None = None
     adaptive_downshift_enabled: bool = False
     adaptive_downshift_candidate: bool = False
+    adaptive_downshift_mode: str = "none"
+    autonomous_maintenance_downshift_enabled: bool = False
+    autonomous_maintenance_downshift_candidate: bool = False
+    autonomous_maintenance_downshift_blockers: list[str] = Field(default_factory=list)
+    maintenance_downshift_suppressed_by_reclaim: bool = False
+    donor_reserved_for_reclaim: bool = False
+    reclaim_donor_downshift_active: bool = False
     adaptive_downshift_target_threads: int | None = Field(default=None, ge=0)
     adaptive_downshift_policy: str | None = None
     adaptive_downshift_reason: str | None = None
@@ -1383,6 +1390,13 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     adaptive_resupply_measured_at: str | None = None
     adaptive_resupply_blockers: list[str] = Field(default_factory=list)
     adaptive_resupply_abort_reason: str | None = None
+    adaptive_resupply_stabilization_active: bool = False
+    adaptive_resupply_stabilization_until: str | None = None
+    adaptive_resupply_stabilization_seconds_remaining: float | None = Field(default=None, ge=0)
+    adaptive_resupply_stabilization_reason: str | None = None
+    last_resupply_completed_at: str | None = None
+    last_resupply_target_threads: int | None = Field(default=None, ge=0)
+    resupplied_donor_protection_active: bool = False
     priority_reexpand_pending: bool = False
     priority_reexpand_reason: str | None = None
     donor_protection_active: bool = False
@@ -1735,10 +1749,13 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     adaptive_thread_control_real_9_prepare_enabled: bool = False
     adaptive_downshift_enabled: bool = False
     adaptive_downshift_dry_run_enabled: bool = True
+    autonomous_maintenance_downshift_enabled: bool = False
+    autonomous_maintenance_downshift_dry_run_enabled: bool = True
     adaptive_reclaim_enabled: bool = False
     adaptive_reclaim_dry_run_enabled: bool = True
     adaptive_resupply_enabled: bool = False
     adaptive_resupply_dry_run_enabled: bool = True
+    adaptive_resupply_stabilization_seconds: int = Field(default=120, ge=0)
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
     native_playback_count: int = Field(default=0, ge=0)
     native_playback_running_count: int = Field(default=0, ge=0)
