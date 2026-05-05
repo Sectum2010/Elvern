@@ -1278,6 +1278,11 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     adaptive_thread_assignment_blockers: list[str] = Field(default_factory=list)
     adaptive_thread_assignment_fallback_used: bool = False
     assigned_threads_source: str = "fixed_disabled"
+    real_9_prepare_enabled: bool = False
+    real_9_prepare_candidate: bool = False
+    real_9_prepare_applied: bool = False
+    real_9_prepare_blockers: list[str] = Field(default_factory=list)
+    effective_ladder_target: int | None = Field(default=None, ge=0)
     process_exists: bool = False
     cpu_cores_used: float | None = Field(default=None, ge=0)
     cpu_percent_of_total: float | None = Field(default=None, ge=0)
@@ -1609,6 +1614,13 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     active_decoding_user_count: int = Field(default=0, ge=0)
     active_route2_workload_count: int = Field(default=0, ge=0)
     per_user_budget_cores: int = Field(default=0, ge=0)
+    max_worker_threads: int = Field(default=0, ge=0)
+    adaptive_max_worker_threads: int = Field(default=0, ge=0)
+    adaptive_thread_control_enabled: bool = False
+    adaptive_thread_control_local_only: bool = True
+    adaptive_thread_control_cloud_enabled: bool = False
+    adaptive_thread_control_strict_12_enabled: bool = False
+    adaptive_thread_control_real_9_prepare_enabled: bool = False
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
     native_playback_count: int = Field(default=0, ge=0)
     native_playback_running_count: int = Field(default=0, ge=0)

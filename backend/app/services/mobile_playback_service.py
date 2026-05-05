@@ -366,6 +366,11 @@ class _Route2RealThreadAssignmentDecision:
     adaptive_control_applied: bool
     assigned_threads_source: str
     fallback_used: bool
+    real_9_prepare_enabled: bool = False
+    real_9_prepare_candidate: bool = False
+    real_9_prepare_applied: bool = False
+    real_9_prepare_blockers: list[str] = field(default_factory=list)
+    effective_ladder_target: int | None = None
 
 
 @dataclass(slots=True)
@@ -2986,6 +2991,13 @@ class MobilePlaybackManager:
             "per_user_budget_cores": per_user_budget_cores,
             "max_worker_threads": self.settings.route2_max_worker_threads,
             "adaptive_max_worker_threads": self.settings.route2_adaptive_max_worker_threads,
+            "adaptive_thread_control_enabled": self.settings.route2_adaptive_thread_control_enabled,
+            "adaptive_thread_control_local_only": self.settings.route2_adaptive_thread_control_local_only,
+            "adaptive_thread_control_cloud_enabled": self.settings.route2_adaptive_thread_control_cloud_enabled,
+            "adaptive_thread_control_strict_12_enabled": self.settings.route2_adaptive_thread_control_strict_12_enabled,
+            "adaptive_thread_control_real_9_prepare_enabled": (
+                self.settings.route2_adaptive_thread_control_real_9_prepare_enabled
+            ),
             "active_worker_count": len(self._route2_running_workers_locked()),
             "queued_worker_count": len(self._route2_queued_workers_locked()),
         }
@@ -5520,18 +5532,27 @@ class MobilePlaybackManager:
             reason_parts.append("per-user Route2 CPU telemetry is missing")
 
         first_tier_target = max(6, int(self.settings.route2_min_worker_threads))
+        real_9_prepare_enabled = bool(
+            getattr(self.settings, "route2_adaptive_thread_control_real_9_prepare_enabled", False)
+        )
+        prepare_boost_target = max(first_tier_target, 9)
         adaptive_ceiling = min(
             max(0, int(self.settings.route2_adaptive_max_worker_threads)),
             max(0, int(available_total_threads)),
             max(0, int(user_remaining_threads)),
             max(0, int(route2_cpu_upbound_cores)),
         )
-        dry_run_target = min(first_tier_target, adaptive_ceiling)
+        if real_9_prepare_enabled and adaptive_ceiling >= prepare_boost_target:
+            dry_run_target = prepare_boost_target
+        else:
+            dry_run_target = min(first_tier_target, adaptive_ceiling)
         if dry_run_target < int(self.settings.route2_min_worker_threads):
             blockers.append("below_min_worker_threads")
             reason_parts.append("adaptive dry-run ceiling is below route2_min_worker_threads")
         if dry_run_target < first_tier_target:
             reason_parts.append("adaptive max or CPU budget caps the first-tier target below 6")
+        if real_9_prepare_enabled and dry_run_target < prepare_boost_target:
+            reason_parts.append("adaptive max or CPU budget caps the real 9-thread prepare boost below 9")
         if route2_cpu_total is not None and (route2_cpu_upbound_cores - route2_cpu_total) < dry_run_target:
             blockers.append("global_cpu_headroom_insufficient")
             reason_parts.append("global Route2 CPU headroom is insufficient")
@@ -5558,6 +5579,8 @@ class MobilePlaybackManager:
             if dry_run_target < first_tier_target
             else ""
         )
+        if real_9_prepare_enabled and dry_run_target < prepare_boost_target:
+            capped_note += " Adaptive max or CPU budget caps the real 9-thread prepare boost below 9."
         return _Route2AdaptiveSpawnDryRunDecision(
             recommended_threads=dry_run_target,
             reason=(
@@ -5581,6 +5604,10 @@ class MobilePlaybackManager:
         source: str,
         adaptive_enabled: bool,
         fallback_used: bool,
+        real_9_prepare_enabled: bool | None = None,
+        real_9_prepare_candidate: bool = False,
+        real_9_prepare_blockers: list[str] | None = None,
+        effective_ladder_target: int | None = None,
     ) -> _Route2RealThreadAssignmentDecision:
         return _Route2RealThreadAssignmentDecision(
             assigned_threads=max(0, int(fixed_assigned_threads)),
@@ -5591,6 +5618,15 @@ class MobilePlaybackManager:
             adaptive_control_applied=False,
             assigned_threads_source=source,
             fallback_used=fallback_used,
+            real_9_prepare_enabled=bool(
+                getattr(self.settings, "route2_adaptive_thread_control_real_9_prepare_enabled", False)
+                if real_9_prepare_enabled is None
+                else real_9_prepare_enabled
+            ),
+            real_9_prepare_candidate=real_9_prepare_candidate,
+            real_9_prepare_applied=False,
+            real_9_prepare_blockers=list(dict.fromkeys(real_9_prepare_blockers or [])),
+            effective_ladder_target=effective_ladder_target,
         )
 
     def _resolve_route2_real_assigned_threads_locked(
@@ -5613,6 +5649,11 @@ class MobilePlaybackManager:
 
         blockers: list[str] = []
         reason_parts: list[str] = []
+        real_9_prepare_enabled = bool(
+            getattr(self.settings, "route2_adaptive_thread_control_real_9_prepare_enabled", False)
+        )
+        real_9_prepare_candidate = real_9_prepare_enabled and record.source_kind == "local"
+        real_9_prepare_blockers: list[str] = []
         if record.source_kind == "cloud":
             if bool(getattr(self.settings, "route2_adaptive_thread_control_local_only", True)):
                 blockers.append("cloud_adaptive_thread_control_local_only")
@@ -5630,20 +5671,41 @@ class MobilePlaybackManager:
             reason_parts.append("unsupported source kind for real adaptive thread control")
 
         target_threads = int(spawn_dry_run.recommended_threads or 0)
+        effective_ladder_target = target_threads if target_threads > 0 else int(fixed_assigned_threads)
+        if not real_9_prepare_enabled:
+            real_9_prepare_blockers.append("real_9_prepare_disabled")
+        if record.source_kind != "local":
+            real_9_prepare_blockers.append("real_9_prepare_local_only")
         if spawn_dry_run.blockers:
             blockers.extend(spawn_dry_run.blockers)
+            real_9_prepare_blockers.extend(spawn_dry_run.blockers)
             reason_parts.append("spawn dry-run safety blockers did not pass")
         if not bool(spawn_dry_run.sample_mature):
             blockers.append("telemetry_missing_or_stale")
+            real_9_prepare_blockers.append("telemetry_missing_or_stale")
             reason_parts.append("resource telemetry is missing, immature, or stale")
-        if target_threads != 6:
+        if int(getattr(self.settings, "route2_adaptive_max_worker_threads", 0) or 0) < 9:
+            real_9_prepare_blockers.append("adaptive_max_below_9")
+        if target_threads < 9:
+            real_9_prepare_blockers.append("effective_ladder_target_below_9")
+        elif target_threads > 9:
+            real_9_prepare_blockers.append("real_9_prepare_target_above_phase_cap")
+        if target_threads == 9:
+            if not real_9_prepare_enabled:
+                blockers.append("real_9_prepare_disabled")
+                reason_parts.append("real 9-thread prepare boost flag is disabled")
+            if int(getattr(self.settings, "route2_adaptive_max_worker_threads", 0) or 0) < 9:
+                blockers.append("adaptive_max_below_9")
+                reason_parts.append("adaptive max worker threads is below the 9-thread prepare tier")
+        elif target_threads != 6:
             blockers.append("unsupported_real_adaptive_target")
-            reason_parts.append("this phase only permits an initial local 6-thread assignment")
+            reason_parts.append("this phase only permits initial local 6-thread or flagged 9-thread prepare assignment")
         if int(getattr(self.settings, "route2_adaptive_max_worker_threads", 0) or 0) < 6:
             blockers.append("adaptive_max_below_first_tier")
             reason_parts.append("adaptive max worker threads is below the 6-thread first tier")
         if int(fixed_assigned_threads) < int(self.settings.route2_min_worker_threads):
             blockers.append("fixed_assignment_below_min_worker_threads")
+            real_9_prepare_blockers.append("fixed_assignment_below_min_worker_threads")
             reason_parts.append("fixed assignment is below route2_min_worker_threads")
 
         if blockers:
@@ -5664,6 +5726,30 @@ class MobilePlaybackManager:
                 source=source,
                 adaptive_enabled=True,
                 fallback_used=True,
+                real_9_prepare_enabled=real_9_prepare_enabled,
+                real_9_prepare_candidate=real_9_prepare_candidate,
+                real_9_prepare_blockers=real_9_prepare_blockers,
+                effective_ladder_target=effective_ladder_target,
+            )
+
+        if target_threads == 9:
+            return _Route2RealThreadAssignmentDecision(
+                assigned_threads=9,
+                assignment_policy="adaptive_local_prepare_9",
+                assignment_reason=(
+                    "Adaptive real thread control selected 9 threads for a local Route2 prepare/startup boost "
+                    "after the explicit real-9 flag, single-workload, telemetry, resource, and safety gates passed."
+                ),
+                assignment_blockers=[],
+                adaptive_control_enabled=True,
+                adaptive_control_applied=True,
+                assigned_threads_source="adaptive_local_prepare_9",
+                fallback_used=False,
+                real_9_prepare_enabled=real_9_prepare_enabled,
+                real_9_prepare_candidate=True,
+                real_9_prepare_applied=True,
+                real_9_prepare_blockers=[],
+                effective_ladder_target=effective_ladder_target,
             )
 
         return _Route2RealThreadAssignmentDecision(
@@ -5678,6 +5764,11 @@ class MobilePlaybackManager:
             adaptive_control_applied=True,
             assigned_threads_source="adaptive_local_initial_6",
             fallback_used=False,
+            real_9_prepare_enabled=real_9_prepare_enabled,
+            real_9_prepare_candidate=real_9_prepare_candidate,
+            real_9_prepare_applied=False,
+            real_9_prepare_blockers=list(dict.fromkeys(real_9_prepare_blockers)),
+            effective_ladder_target=effective_ladder_target,
         )
 
     def _build_route2_adaptive_shadow_input_locked(
@@ -6252,6 +6343,11 @@ class MobilePlaybackManager:
                     "adaptive_thread_assignment_blockers": list(record.adaptive_thread_assignment_blockers),
                     "adaptive_thread_assignment_fallback_used": record.adaptive_thread_assignment_fallback_used,
                     "assigned_threads_source": record.assigned_threads_source,
+                    "real_9_prepare_enabled": record.real_9_prepare_enabled,
+                    "real_9_prepare_candidate": record.real_9_prepare_candidate,
+                    "real_9_prepare_applied": record.real_9_prepare_applied,
+                    "real_9_prepare_blockers": list(record.real_9_prepare_blockers),
+                    "effective_ladder_target": record.effective_ladder_target,
                     "process_exists": record.process_exists,
                     "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
                     "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
@@ -9416,6 +9512,11 @@ class MobilePlaybackManager:
                 record.adaptive_thread_assignment_blockers = thread_assignment.assignment_blockers
                 record.adaptive_thread_assignment_fallback_used = thread_assignment.fallback_used
                 record.assigned_threads_source = thread_assignment.assigned_threads_source
+                record.real_9_prepare_enabled = thread_assignment.real_9_prepare_enabled
+                record.real_9_prepare_candidate = thread_assignment.real_9_prepare_candidate
+                record.real_9_prepare_applied = thread_assignment.real_9_prepare_applied
+                record.real_9_prepare_blockers = thread_assignment.real_9_prepare_blockers
+                record.effective_ladder_target = thread_assignment.effective_ladder_target
                 record.assigned_threads = assigned_threads
                 if not record.started_at:
                     record.started_at = utcnow_iso()

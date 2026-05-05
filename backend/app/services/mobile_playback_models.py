@@ -225,6 +225,11 @@ class Route2WorkerRecord:
     adaptive_thread_assignment_blockers: list[str] = field(default_factory=list)
     adaptive_thread_assignment_fallback_used: bool = False
     assigned_threads_source: str = "fixed_disabled"
+    real_9_prepare_enabled: bool = False
+    real_9_prepare_candidate: bool = False
+    real_9_prepare_applied: bool = False
+    real_9_prepare_blockers: list[str] = field(default_factory=list)
+    effective_ladder_target: int | None = None
     process_exists: bool = False
     cpu_cores_used: float | None = None
     cpu_percent_of_total: float | None = None

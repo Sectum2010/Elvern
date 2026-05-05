@@ -3470,6 +3470,7 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_core
     assert settings.route2_adaptive_thread_control_local_only is True
     assert settings.route2_adaptive_thread_control_cloud_enabled is False
     assert settings.route2_adaptive_thread_control_strict_12_enabled is False
+    assert settings.route2_adaptive_thread_control_real_9_prepare_enabled is False
     assert settings.route2_shared_output_init_writer_enabled is False
     assert settings.route2_shared_output_segment_writer_enabled is False
 
@@ -3501,6 +3502,7 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED", "true")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED", "true")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED", "true")
 
     enabled_settings = refresh_settings()
 
@@ -3508,11 +3510,13 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     assert enabled_settings.route2_adaptive_thread_control_local_only is False
     assert enabled_settings.route2_adaptive_thread_control_cloud_enabled is True
     assert enabled_settings.route2_adaptive_thread_control_strict_12_enabled is True
+    assert enabled_settings.route2_adaptive_thread_control_real_9_prepare_enabled is True
 
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY", "true")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED", "false")
 
     disabled_settings = refresh_settings()
 
@@ -3520,6 +3524,7 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     assert disabled_settings.route2_adaptive_thread_control_local_only is True
     assert disabled_settings.route2_adaptive_thread_control_cloud_enabled is False
     assert disabled_settings.route2_adaptive_thread_control_strict_12_enabled is False
+    assert disabled_settings.route2_adaptive_thread_control_real_9_prepare_enabled is False
 
 
 def test_route2_shared_output_init_writer_flag_is_disabled_by_default(
@@ -5044,6 +5049,59 @@ def test_route2_adaptive_spawn_dry_run_local_single_user_recommends_six(initiali
     assert decision.sample_mature is True
 
 
+def test_route2_adaptive_spawn_dry_run_real_nine_prepare_flag_recommends_nine(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_max_worker_threads=4,
+        route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+        active_route2_workload_count=1,
+    )
+
+    assert decision.recommended_threads == 9
+    assert decision.blockers == []
+    assert "would choose 9" in decision.reason
+    assert "single active Route2 playback workload" in decision.reason
+
+
+def test_route2_adaptive_spawn_dry_run_real_nine_prepare_cap_falls_back_to_six(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_max_worker_threads=4,
+        route2_adaptive_max_worker_threads=8,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+
+    decision = manager._build_route2_adaptive_spawn_dry_run_locked(
+        record,
+        fixed_assigned_threads=4,
+        available_total_threads=18,
+        user_remaining_threads=18,
+        allocated_cpu_cores=18,
+        route2_cpu_upbound_cores=18,
+        active_route2_user_count=1,
+        active_route2_workload_count=1,
+    )
+
+    assert decision.recommended_threads == 6
+    assert decision.blockers == []
+    assert "caps the real 9-thread prepare boost below 9" in decision.reason
+
+
 def test_route2_adaptive_spawn_dry_run_multiple_workloads_remain_conservative(initialized_settings) -> None:
     manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
@@ -5835,6 +5893,110 @@ def test_route2_dispatch_adaptive_enabled_local_single_user_can_assign_six(
         assert record.adaptive_thread_assignment_policy == "adaptive_local_initial_6"
         assert record.assigned_threads_source == "adaptive_local_initial_6"
         assert record.adaptive_thread_assignment_blockers == []
+        assert record.real_9_prepare_enabled is False
+        assert record.real_9_prepare_candidate is False
+        assert record.real_9_prepare_applied is False
+        assert "real_9_prepare_disabled" in record.real_9_prepare_blockers
+        assert record.effective_ladder_target == 6
+
+    assert len(started_workers) == 1
+
+
+def test_route2_dispatch_adaptive_enabled_real_nine_prepare_assigns_nine(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+        route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    started_workers = _capture_route2_worker_threads(monkeypatch)
+
+    item = _make_local_item(settings, item_id=320, relative_name="route2/adaptive-real-nine-local.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=807,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    manager._dispatch_waiting_sessions()
+
+    with manager._lock:
+        _session, _epoch, record = _active_route2_record_for_session(manager, payload)
+        assert record.assigned_threads == 9
+        assert record.fixed_assigned_threads_at_dispatch == 4
+        assert record.adaptive_spawn_dry_run_threads == 9
+        assert record.adaptive_thread_control_enabled is True
+        assert record.adaptive_thread_control_applied is True
+        assert record.adaptive_thread_assignment_policy == "adaptive_local_prepare_9"
+        assert record.assigned_threads_source == "adaptive_local_prepare_9"
+        assert record.adaptive_thread_assignment_blockers == []
+        assert record.real_9_prepare_enabled is True
+        assert record.real_9_prepare_candidate is True
+        assert record.real_9_prepare_applied is True
+        assert record.real_9_prepare_blockers == []
+        assert record.effective_ladder_target == 9
+
+    status = manager.get_route2_worker_status()
+    assert status["adaptive_thread_control_real_9_prepare_enabled"] is True
+    item_payload = _route2_status_item(status, record.worker_id)
+    assert item_payload["assigned_threads"] == 9
+    assert item_payload["real_9_prepare_enabled"] is True
+    assert item_payload["real_9_prepare_candidate"] is True
+    assert item_payload["real_9_prepare_applied"] is True
+    assert item_payload["real_9_prepare_blockers"] == []
+    assert item_payload["effective_ladder_target"] == 9
+
+    assert len(started_workers) == 1
+
+
+def test_route2_dispatch_real_nine_prepare_cap_uses_six_with_clear_blocker(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+        route2_adaptive_max_worker_threads=8,
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    started_workers = _capture_route2_worker_threads(monkeypatch)
+
+    item = _make_local_item(settings, item_id=321, relative_name="route2/adaptive-real-nine-capped.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=808,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="lite",
+    )
+
+    manager._dispatch_waiting_sessions()
+
+    with manager._lock:
+        _session, _epoch, record = _active_route2_record_for_session(manager, payload)
+        assert record.assigned_threads == 6
+        assert record.adaptive_thread_assignment_policy == "adaptive_local_initial_6"
+        assert record.real_9_prepare_enabled is True
+        assert record.real_9_prepare_candidate is True
+        assert record.real_9_prepare_applied is False
+        assert "adaptive_max_below_9" in record.real_9_prepare_blockers
+        assert "effective_ladder_target_below_9" in record.real_9_prepare_blockers
+        assert record.effective_ladder_target == 6
 
     assert len(started_workers) == 1
 
@@ -5904,6 +6066,7 @@ def test_route2_dispatch_adaptive_enabled_admin_second_playback_falls_back_fixed
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
         route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
@@ -5937,14 +6100,17 @@ def test_route2_dispatch_adaptive_enabled_admin_second_playback_falls_back_fixed
     with manager._lock:
         _first_session, _first_epoch, first_record = _active_route2_record_for_session(manager, first_payload)
         _second_session, _second_epoch, second_record = _active_route2_record_for_session(manager, second_payload)
-        assert first_record.assigned_threads == 6
+        assert first_record.assigned_threads == 9
         assert first_record.adaptive_thread_control_applied is True
+        assert first_record.real_9_prepare_applied is True
         assert second_record.assigned_threads == 4
         assert second_record.fixed_assigned_threads_at_dispatch == 4
         assert second_record.adaptive_thread_control_enabled is True
         assert second_record.adaptive_thread_control_applied is False
         assert second_record.adaptive_thread_assignment_policy == "adaptive_enabled_fixed_fallback"
         assert "existing_route2_workload_present" in second_record.adaptive_thread_assignment_blockers
+        assert second_record.real_9_prepare_applied is False
+        assert "existing_route2_workload_present" in second_record.real_9_prepare_blockers
 
     assert len(started_workers) == 2
 
@@ -5977,6 +6143,38 @@ def test_route2_real_assignment_enabled_falls_back_for_safety_blockers(initializ
     assert decision.assigned_threads_source == "safety_fallback"
     assert decision.fallback_used is True
     assert "external_host_cpu_pressure_high" in decision.assignment_blockers
+
+
+def test_route2_real_assignment_nine_target_requires_real_nine_flag(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=False,
+    )
+    record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
+    nine_dry_run = _Route2AdaptiveSpawnDryRunDecision(
+        recommended_threads=9,
+        reason="Would otherwise use 9.",
+        blockers=[],
+        policy="route2_initial_spawn_dry_run_v1",
+        sample_age_seconds=1.0,
+        sample_mature=True,
+    )
+
+    decision = manager._resolve_route2_real_assigned_threads_locked(
+        record,
+        fixed_assigned_threads=4,
+        spawn_dry_run=nine_dry_run,
+    )
+
+    assert decision.assigned_threads == 4
+    assert decision.adaptive_control_applied is False
+    assert decision.fallback_used is True
+    assert "real_9_prepare_disabled" in decision.assignment_blockers
+    assert decision.real_9_prepare_enabled is False
+    assert decision.real_9_prepare_candidate is False
+    assert decision.real_9_prepare_applied is False
 
 
 def test_route2_real_assignment_enabled_cloud_uses_fixed_fallback_by_default(initialized_settings) -> None:
@@ -6035,7 +6233,7 @@ def test_route2_real_assignment_strict_twelve_is_not_used_in_first_phase(initial
     assert decision.assigned_threads == 4
     assert decision.adaptive_control_applied is False
     assert "unsupported_real_adaptive_target" in decision.assignment_blockers
-    assert "only permits an initial local 6-thread assignment" in decision.assignment_reason
+    assert "6-thread or flagged 9-thread prepare assignment" in decision.assignment_reason
 
 
 def test_route2_dispatch_adaptive_assignment_exception_falls_back_fixed(
