@@ -419,10 +419,11 @@ def _make_route2_closed_loop_inputs(
     route2_max_worker_threads: int = 6,
     **manager_overrides,
 ) -> tuple[MobilePlaybackManager, MobilePlaybackSession, PlaybackEpoch, Route2WorkerRecord]:
+    adaptive_max_worker_threads = manager_overrides.pop("route2_adaptive_max_worker_threads", 12)
     manager, _settings = _make_route2_manager(
         initialized_settings,
         route2_max_worker_threads=route2_max_worker_threads,
-        route2_adaptive_max_worker_threads=12,
+        route2_adaptive_max_worker_threads=adaptive_max_worker_threads,
         **manager_overrides,
     )
     session, epoch, record = _make_route2_reserve_inputs(playback_mode=playback_mode)
@@ -6721,18 +6722,134 @@ def test_route2_real_assignment_status_payload_includes_lite_and_cloud_fields(in
     assert len(started_workers) == 1
 
 
-def test_route2_real_assignment_strict_twelve_is_not_used_in_first_phase(initialized_settings) -> None:
+def test_route2_real_assignment_strict_twelve_default_false_falls_back_to_nine(initialized_settings) -> None:
     manager, _settings = _make_route2_manager(
         initialized_settings,
         route2_adaptive_max_worker_threads=12,
         route2_adaptive_thread_control_enabled=True,
-        route2_adaptive_thread_control_strict_12_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
-    strict_twelve_dry_run = _Route2AdaptiveSpawnDryRunDecision(
-        recommended_threads=12,
-        reason="Strict 12 would be possible in shadow.",
-        blockers=[],
+
+    decision = manager._resolve_route2_real_assigned_threads_locked(
+        record,
+        fixed_assigned_threads=4,
+        spawn_dry_run=_clean_route2_adaptive_spawn_dry_run(12),
+    )
+
+    assert decision.assigned_threads == 9
+    assert decision.adaptive_control_applied is True
+    assert decision.strict_12_prepare_enabled is False
+    assert decision.strict_12_prepare_candidate is False
+    assert decision.real_9_prepare_applied is True
+
+
+def test_route2_real_assignment_strict_twelve_local_full_can_assign_twelve(initialized_settings) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="full",
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record.state = "queued"
+    epoch.init_published = False
+    epoch.contiguous_published_through_segment = None
+
+    decision = manager._resolve_route2_real_assigned_threads_locked(
+        record,
+        fixed_assigned_threads=4,
+        spawn_dry_run=_clean_route2_adaptive_spawn_dry_run(12),
+        session=session,
+        epoch=epoch,
+    )
+
+    assert decision.assigned_threads == 12
+    assert decision.assigned_threads_source == "adaptive_local_prepare_12"
+    assert decision.strict_12_prepare_enabled is True
+    assert decision.strict_12_prepare_candidate is True
+    assert decision.strict_12_prepare_applied is True
+    assert decision.strict_12_prepare_blockers == []
+    assert decision.real_9_prepare_applied is False
+    assert "strict_12_selected_instead" in decision.real_9_prepare_blockers
+
+
+def test_route2_real_assignment_strict_twelve_lite_healthy_falls_back_to_six(initialized_settings) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=8.0,
+        runway_seconds=60.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._resolve_route2_real_assigned_threads_locked(
+        record,
+        fixed_assigned_threads=4,
+        spawn_dry_run=_clean_route2_adaptive_spawn_dry_run(12),
+        session=session,
+        epoch=epoch,
+    )
+
+    assert decision.assigned_threads == 6
+    assert decision.strict_12_prepare_candidate is True
+    assert decision.strict_12_prepare_applied is False
+    assert "lite_runway_already_sufficient" in decision.strict_12_prepare_blockers
+    assert "effective_ladder_target_below_12" in decision.strict_12_prepare_blockers
+
+
+def test_route2_real_assignment_strict_twelve_cap_below_twelve_falls_back_to_nine(initialized_settings) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="full",
+        route2_adaptive_max_worker_threads=9,
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    record.state = "queued"
+    epoch.init_published = False
+    epoch.contiguous_published_through_segment = None
+
+    decision = manager._resolve_route2_real_assigned_threads_locked(
+        record,
+        fixed_assigned_threads=4,
+        spawn_dry_run=_clean_route2_adaptive_spawn_dry_run(12),
+        session=session,
+        epoch=epoch,
+    )
+
+    assert decision.assigned_threads == 9
+    assert decision.strict_12_prepare_candidate is True
+    assert decision.strict_12_prepare_applied is False
+    assert "adaptive_cap_below_12" in decision.strict_12_prepare_blockers
+
+
+def test_route2_real_assignment_strict_twelve_external_ffmpeg_falls_back_fixed(initialized_settings) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="full",
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    blocked_dry_run = _Route2AdaptiveSpawnDryRunDecision(
+        recommended_threads=4,
+        reason="external ffmpeg",
+        blockers=["external_ffmpeg_detected"],
         policy="route2_initial_spawn_dry_run_v1",
         sample_age_seconds=1.0,
         sample_mature=True,
@@ -6741,13 +6858,135 @@ def test_route2_real_assignment_strict_twelve_is_not_used_in_first_phase(initial
     decision = manager._resolve_route2_real_assigned_threads_locked(
         record,
         fixed_assigned_threads=4,
-        spawn_dry_run=strict_twelve_dry_run,
+        spawn_dry_run=blocked_dry_run,
+        session=session,
+        epoch=epoch,
     )
 
     assert decision.assigned_threads == 4
-    assert decision.adaptive_control_applied is False
-    assert "unsupported_real_adaptive_target" in decision.assignment_blockers
-    assert "6-thread or flagged 9-thread prepare assignment" in decision.assignment_reason
+    assert "external_ffmpeg_detected" in decision.assignment_blockers
+    assert "external_ffmpeg" in decision.real_9_prepare_blockers
+
+
+def test_route2_real_assignment_strict_twelve_cloud_healthy_cpu_thread_can_assign_twelve(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_local_only=False,
+        route2_adaptive_thread_control_cloud_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=10.0,
+        effective_playhead_seconds=0.0,
+        cpu_cores_used=4.0,
+    )
+    record.io_sample_mature = True
+    record.io_sample_stale = False
+    record.io_read_bytes_per_second = 2_000_000.0
+    monkeypatch.setattr(manager, "_route2_estimated_source_bytes_per_media_second_locked", lambda _session, _record: 1_000_000.0)
+
+    decision = manager._resolve_route2_real_assigned_threads_locked(
+        record,
+        fixed_assigned_threads=4,
+        spawn_dry_run=_clean_route2_adaptive_spawn_dry_run(12),
+        session=session,
+        epoch=epoch,
+    )
+
+    assert decision.assigned_threads == 12
+    assert decision.assigned_threads_source == "adaptive_cloud_prepare_12"
+    assert decision.cloud_adaptive_prepare_applied is True
+    assert decision.strict_12_prepare_applied is True
+    assert decision.strict_12_prepare_blockers == []
+
+
+def test_route2_real_assignment_strict_twelve_cloud_missing_source_feed_blocks_nine_and_twelve(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        source_kind="cloud",
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_local_only=False,
+        route2_adaptive_thread_control_cloud_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=True,
+    )
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=0.8,
+        runway_seconds=10.0,
+        effective_playhead_seconds=0.0,
+        cpu_cores_used=4.0,
+    )
+
+    decision = manager._resolve_route2_real_assigned_threads_locked(
+        record,
+        fixed_assigned_threads=4,
+        spawn_dry_run=_clean_route2_adaptive_spawn_dry_run(12),
+        session=session,
+        epoch=epoch,
+    )
+
+    assert decision.assigned_threads == 4
+    assert "cloud_source_feed_unavailable" in decision.assignment_blockers
+    assert "cloud_source_feed_unavailable" in decision.cloud_adaptive_prepare_blockers
+
+
+def test_route2_real_assignment_status_payload_includes_strict_twelve_fields(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=4,
+        route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_real_9_prepare_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
+    started_workers = _capture_route2_worker_threads(monkeypatch)
+
+    item = _make_local_item(settings, item_id=323, relative_name="route2/adaptive-strict-12-status.mp4")
+    payload = manager.create_session(
+        item,
+        user_id=1,
+        auth_session_id=810,
+        username="alice",
+        engine_mode="route2",
+        playback_mode="full",
+    )
+    manager._dispatch_waiting_sessions()
+
+    with manager._lock:
+        _session, _epoch, record = _active_route2_record_for_session(manager, payload)
+        worker_id = record.worker_id
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, worker_id)
+
+    assert item_payload["assigned_threads"] == 12
+    assert item_payload["strict_12_prepare_enabled"] is True
+    assert item_payload["strict_12_prepare_candidate"] is True
+    assert item_payload["strict_12_prepare_applied"] is True
+    assert item_payload["strict_12_prepare_blockers"] == []
+    assert item_payload["strict_12_prepare_reason"] == "Strict 12 prepare gates passed."
+    assert started_workers
 
 
 def test_route2_dispatch_adaptive_assignment_exception_falls_back_fixed(

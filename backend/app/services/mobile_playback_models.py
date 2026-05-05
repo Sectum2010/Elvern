@@ -237,6 +237,11 @@ class Route2WorkerRecord:
     cloud_adaptive_prepare_candidate: bool = False
     cloud_adaptive_prepare_applied: bool = False
     cloud_adaptive_prepare_blockers: list[str] = field(default_factory=list)
+    strict_12_prepare_enabled: bool = False
+    strict_12_prepare_candidate: bool = False
+    strict_12_prepare_applied: bool = False
+    strict_12_prepare_blockers: list[str] = field(default_factory=list)
+    strict_12_prepare_reason: str | None = None
     process_exists: bool = False
     cpu_cores_used: float | None = None
     cpu_percent_of_total: float | None = None
