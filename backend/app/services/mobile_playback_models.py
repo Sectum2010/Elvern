@@ -260,6 +260,13 @@ class Route2WorkerRecord:
     adaptive_downshift_transition_started_at: str | None = None
     adaptive_downshift_switched_at: str | None = None
     adaptive_downshift_aborted_reason: str | None = None
+    adaptive_downshift_pressure_abort_reason: str | None = None
+    adaptive_downshift_pressure_snapshot: dict[str, object] = field(default_factory=dict)
+    adaptive_downshift_retry_count: int = 0
+    adaptive_downshift_retry_not_before_seconds: float | None = None
+    adaptive_downshift_retry_blocker: str | None = None
+    adaptive_downshift_last_abort_reason: str | None = None
+    adaptive_downshift_replacement_epoch_cap_remaining: int | None = None
     adaptive_boost_exit_reason: str | None = None
     current_boost_tier: int | None = None
     maintenance_tier_target: int | None = None
@@ -305,6 +312,14 @@ class BrowserPlaybackSession:
     replacement_epoch_id: str | None = None
     replacement_retry_not_before_ts: float = 0.0
     replacement_epoch_count: int = 0
+    adaptive_downshift_retry_count: int = 0
+    adaptive_downshift_retry_not_before_ts: float = 0.0
+    adaptive_downshift_retry_blocker: str | None = None
+    adaptive_downshift_last_abort_reason: str | None = None
+    adaptive_downshift_pressure_moderate_started_at_ts: float = 0.0
+    adaptive_downshift_pressure_moderate_sample_count: int = 0
+    adaptive_downshift_pressure_abort_reason: str | None = None
+    adaptive_downshift_pressure_snapshot: dict[str, object] = field(default_factory=dict)
     full_preflight_state: str = "idle"
     full_preflight_error: str | None = None
     full_preflight_started_at_ts: float = 0.0

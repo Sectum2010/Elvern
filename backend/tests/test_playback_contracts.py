@@ -57,6 +57,7 @@ from backend.app.services.mobile_playback_service import (
     _Route2AdaptiveSpawnDryRunDecision,
     _Route2ResourceSnapshot,
     _Route2SourceFeedRate,
+    ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION,
     MobilePlaybackManager,
     PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
@@ -4887,6 +4888,28 @@ def test_route2_external_ffmpeg_detector_excludes_elvern_owned_child_process(tmp
     assert classification.external_process_count == 1
 
 
+def test_route2_ffmpeg_detector_separates_route2_worker_elvern_helper_and_external_process(
+    tmp_path: Path,
+) -> None:
+    _write_fake_proc_entry(tmp_path, pid=920, comm="python", parent_pid=1)
+    _write_fake_proc_entry(tmp_path, pid=921, comm="ffmpeg", parent_pid=920)
+    _write_fake_proc_entry(tmp_path, pid=922, comm="ffprobe", parent_pid=920)
+    _write_fake_proc_entry(tmp_path, pid=923, comm="ffmpeg", parent_pid=1)
+
+    classification = _classify_ffmpeg_processes(
+        proc_root=tmp_path,
+        owned_route2_pids={921},
+        backend_pid=920,
+    )
+
+    assert classification.route2_worker_process_count == 1
+    assert classification.elvern_owned_process_count == 1
+    assert classification.external_process_count == 1
+    assert classification.route2_worker_pids == {921}
+    assert classification.elvern_owned_pids == {922}
+    assert classification.external_pids == {923}
+
+
 def test_route2_external_ffmpeg_detector_counts_non_elvern_process(tmp_path: Path) -> None:
     _write_fake_proc_entry(tmp_path, pid=910, comm="ffmpeg", parent_pid=1)
 
@@ -8776,6 +8799,12 @@ def test_route2_adaptive_downshift_replacement_ready_switches_without_target_mut
     assert replacement.adaptive_downshift_switched_at is not None
     assert record.state == "stopped"
     assert replacement_record.assigned_threads == 6
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, replacement_record.worker_id)
+    assert item_payload["adaptive_downshift_state"] == "switched"
+    assert item_payload["adaptive_downshift_replacement_epoch_id"] == replacement.epoch_id
+    assert item_payload["adaptive_downshift_replacement_worker_id"] == replacement_record.worker_id
+    assert item_payload["adaptive_downshift_target_threads"] == 6
 
 
 def test_route2_adaptive_downshift_replacement_failure_aborts_without_losing_active_epoch(
@@ -8875,6 +8904,217 @@ def test_route2_adaptive_downshift_external_pressure_aborts_warming_replacement(
     assert session.browser_playback.active_epoch_id == epoch.epoch_id
     assert session.browser_playback.replacement_epoch_id is None
     assert epoch.adaptive_downshift_aborted_reason == "external_ffmpeg_during_downshift"
+    assert session.browser_playback.adaptive_downshift_pressure_abort_reason == "external_ffmpeg_detected"
+    assert session.browser_playback.adaptive_downshift_retry_count == 1
+    assert session.browser_playback.replacement_epoch_count == 0
+
+
+def test_route2_adaptive_downshift_transient_moderate_pressure_does_not_abort_warming_replacement(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    _set_route2_resource_snapshot(
+        manager,
+        per_user_cpu_cores_used_total={1: 13.0},
+        route2_cpu_cores_used_total=13.0,
+        route2_worker_ffmpeg_process_count=2,
+        external_cpu_cores_used_estimate=3.1,
+        external_cpu_percent_estimate=0.155,
+        external_pressure_level="moderate",
+        external_pressure_reason="external_cpu_moderate",
+    )
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
+    assert epoch.adaptive_downshift_aborted_reason is None
+    assert session.browser_playback.adaptive_downshift_pressure_abort_reason is None
+    assert session.browser_playback.adaptive_downshift_pressure_moderate_sample_count == 1
+    assert session.browser_playback.adaptive_downshift_pressure_snapshot["moderate_sample_count"] == 1
+
+
+def test_route2_adaptive_downshift_sustained_moderate_pressure_aborts_warming_replacement(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    session.browser_playback.adaptive_downshift_pressure_moderate_started_at_ts = time.time() - 7.0
+    session.browser_playback.adaptive_downshift_pressure_moderate_sample_count = 2
+    _set_route2_resource_snapshot(
+        manager,
+        per_user_cpu_cores_used_total={1: 13.0},
+        route2_cpu_cores_used_total=13.0,
+        route2_worker_ffmpeg_process_count=2,
+        external_cpu_cores_used_estimate=3.1,
+        external_cpu_percent_estimate=0.155,
+        external_pressure_level="moderate",
+        external_pressure_reason="external_cpu_moderate",
+    )
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
+    assert epoch.adaptive_downshift_aborted_reason == "external_pressure_during_downshift"
+    assert session.browser_playback.adaptive_downshift_pressure_abort_reason == "external_cpu_moderate_sustained"
+    assert session.browser_playback.adaptive_downshift_retry_count == 1
+
+
+def test_route2_adaptive_downshift_high_pressure_aborts_immediately(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    _set_route2_resource_snapshot(
+        manager,
+        per_user_cpu_cores_used_total={1: 12.0},
+        route2_cpu_cores_used_total=12.0,
+        external_cpu_cores_used_estimate=4.0,
+        external_cpu_percent_estimate=0.20,
+        external_pressure_level="high",
+        external_pressure_reason="external_cpu_high",
+    )
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.replacement_epoch_id is None
+    assert epoch.adaptive_downshift_aborted_reason == "external_pressure_during_downshift"
+    assert session.browser_playback.adaptive_downshift_pressure_abort_reason == "external_cpu_high"
+
+
+def test_route2_adaptive_downshift_retry_cooldown_blocks_retry_without_replacement_cap(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+
+    manager._abort_route2_downshift_replacement_locked(
+        session,
+        replacement,
+        reason="external_pressure_during_downshift",
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+    retry = manager._maybe_start_route2_downshift_locked(session, epoch)
+
+    assert retry is None
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.browser_playback.replacement_epoch_count == 0
+    assert session.browser_playback.adaptive_downshift_retry_count == 1
+    assert payload["adaptive_downshift_retry_count"] == 1
+    assert payload["adaptive_downshift_retry_blocker"] == "adaptive_downshift_retry_cooldown_active"
+    assert "adaptive_downshift_retry_cooldown_active" in payload["adaptive_downshift_blockers"]
+    assert "replacement_epoch_cap_exceeded" not in payload["adaptive_downshift_blockers"]
+
+
+def test_route2_adaptive_downshift_retry_cap_is_separate_from_seek_recovery_cap(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    session.browser_playback.adaptive_downshift_retry_count = ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION
+    session.browser_playback.replacement_epoch_count = 0
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+
+    assert replacement is None
+    assert session.browser_playback.replacement_epoch_count == 0
+    assert payload["adaptive_downshift_retry_blocker"] == "adaptive_downshift_retry_cap_exceeded"
+    assert payload["adaptive_downshift_replacement_epoch_cap_remaining"] == 0
+    assert "adaptive_downshift_retry_cap_exceeded" in payload["adaptive_downshift_blockers"]
+    assert "replacement_epoch_cap_exceeded" not in payload["adaptive_downshift_blockers"]
 
 
 def test_route2_adaptive_downshift_real_blocks_without_transition_headroom(
@@ -8888,6 +9128,7 @@ def test_route2_adaptive_downshift_real_blocks_without_transition_headroom(
         route2_adaptive_downshift_enabled=True,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
     _install_route2_downshift_inputs(manager, session, epoch, record)
     _mark_route2_runtime_supply(
         session,
@@ -8944,6 +9185,15 @@ def test_route2_adaptive_downshift_status_payload_exposes_transition_fields(
     assert item_payload["adaptive_downshift_transition_started_at"] is not None
     assert item_payload["downshift_transition_headroom_required"] == 6
     assert item_payload["downshift_transition_headroom_available"] == 6
+    assert item_payload["adaptive_downshift_pressure_abort_reason"] is None
+    assert isinstance(item_payload["adaptive_downshift_pressure_snapshot"], dict)
+    assert item_payload["adaptive_downshift_retry_count"] == 0
+    assert item_payload["adaptive_downshift_retry_not_before_seconds"] is None
+    assert item_payload["adaptive_downshift_retry_blocker"] is None
+    assert item_payload["adaptive_downshift_last_abort_reason"] is None
+    assert item_payload["adaptive_downshift_replacement_epoch_cap_remaining"] == (
+        ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION
+    )
 
 
 def test_route2_closed_loop_marks_high_surplus_as_theoretical_donor_only(

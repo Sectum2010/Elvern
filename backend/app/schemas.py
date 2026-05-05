@@ -1307,6 +1307,13 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     adaptive_downshift_transition_started_at: str | None = None
     adaptive_downshift_switched_at: str | None = None
     adaptive_downshift_aborted_reason: str | None = None
+    adaptive_downshift_pressure_abort_reason: str | None = None
+    adaptive_downshift_pressure_snapshot: dict[str, object] = Field(default_factory=dict)
+    adaptive_downshift_retry_count: int = Field(default=0, ge=0)
+    adaptive_downshift_retry_not_before_seconds: float | None = Field(default=None, ge=0)
+    adaptive_downshift_retry_blocker: str | None = None
+    adaptive_downshift_last_abort_reason: str | None = None
+    adaptive_downshift_replacement_epoch_cap_remaining: int | None = Field(default=None, ge=0)
     adaptive_boost_exit_reason: str | None = None
     current_boost_tier: int | None = Field(default=None, ge=0)
     maintenance_tier_target: int | None = Field(default=None, ge=0)

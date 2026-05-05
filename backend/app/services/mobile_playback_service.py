@@ -214,6 +214,10 @@ ROUTE2_RUNTIME_DONOR_SUPPLY_RATE_X = 1.2
 ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X = 1.05
 ROUTE2_CLOSED_LOOP_DOWNSHIFT_RATE_X = 1.10
 ROUTE2_CLOSED_LOOP_DONOR_RATE_X = 1.50
+ROUTE2_ADAPTIVE_DOWNSHIFT_RETRY_BACKOFF_SECONDS = 30.0
+ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION = 3
+ROUTE2_ADAPTIVE_DOWNSHIFT_MODERATE_PRESSURE_MIN_SAMPLES = 3
+ROUTE2_ADAPTIVE_DOWNSHIFT_MODERATE_PRESSURE_MIN_SECONDS = 6.0
 ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS = 1800.0
 ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X = ROUTE2_STARTUP_MIN_SUPPLY_RATE_X
 ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X = 1.0
@@ -2460,6 +2464,17 @@ class MobilePlaybackManager:
         record.stop_requested = epoch.stop_requested
         record.non_retryable_error = epoch.last_error if _is_non_retryable_cloud_source_error(epoch.last_error) else None
         record.replacement_count = session.browser_playback.replacement_epoch_count
+        record.adaptive_downshift_pressure_abort_reason = session.browser_playback.adaptive_downshift_pressure_abort_reason
+        record.adaptive_downshift_pressure_snapshot = dict(session.browser_playback.adaptive_downshift_pressure_snapshot)
+        record.adaptive_downshift_retry_count = int(session.browser_playback.adaptive_downshift_retry_count or 0)
+        record.adaptive_downshift_retry_not_before_seconds = self._route2_downshift_retry_seconds_remaining(
+            session.browser_playback,
+        )
+        record.adaptive_downshift_retry_blocker = session.browser_playback.adaptive_downshift_retry_blocker
+        record.adaptive_downshift_last_abort_reason = session.browser_playback.adaptive_downshift_last_abort_reason
+        record.adaptive_downshift_replacement_epoch_cap_remaining = self._route2_downshift_retry_cap_remaining(
+            session.browser_playback,
+        )
         if epoch.replacement_reason == "maintenance_downshift":
             record.adaptive_downshift_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False))
             record.adaptive_downshift_replacement_epoch_id = epoch.epoch_id
@@ -4230,6 +4245,158 @@ class MobilePlaybackManager:
         per_user_available = int(budget["per_user_budget_cores"]) - self._route2_running_threads_locked(user_id=user_id)
         return max(0, min(total_available, per_user_available))
 
+    def _route2_downshift_retry_cap_remaining(self, browser_session: BrowserPlaybackSession) -> int:
+        return max(
+            0,
+            ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION
+            - int(browser_session.adaptive_downshift_retry_count or 0),
+        )
+
+    def _route2_downshift_retry_seconds_remaining(
+        self,
+        browser_session: BrowserPlaybackSession,
+        *,
+        now_ts: float | None = None,
+    ) -> float | None:
+        reference_ts = time.time() if now_ts is None else now_ts
+        retry_at = float(browser_session.adaptive_downshift_retry_not_before_ts or 0.0)
+        if retry_at <= reference_ts:
+            return None
+        return max(0.0, retry_at - reference_ts)
+
+    def _route2_downshift_pressure_snapshot_payload(
+        self,
+        snapshot: _Route2ResourceSnapshot | None,
+        *,
+        moderate_sample_count: int = 0,
+        moderate_elapsed_seconds: float | None = None,
+    ) -> dict[str, object]:
+        if snapshot is None:
+            return {
+                "sample_available": False,
+                "sample_mature": False,
+                "sample_stale": True,
+                "external_pressure_level": "unknown",
+                "external_pressure_reason": "resource_snapshot_missing",
+                "moderate_sample_count": max(0, int(moderate_sample_count)),
+                "moderate_elapsed_seconds": (
+                    round(moderate_elapsed_seconds, 3) if moderate_elapsed_seconds is not None else None
+                ),
+            }
+        return {
+            "sample_available": True,
+            "sample_mature": bool(snapshot.sample_mature),
+            "sample_stale": bool(snapshot.sample_stale),
+            "sample_age_seconds": max(0.0, round(time.time() - snapshot.sampled_at_ts, 3)),
+            "host_cpu_total_cores": snapshot.host_cpu_total_cores,
+            "host_cpu_used_cores": (
+                round(snapshot.host_cpu_used_cores, 3) if snapshot.host_cpu_used_cores is not None else None
+            ),
+            "host_cpu_used_percent": (
+                round(snapshot.host_cpu_used_percent, 4) if snapshot.host_cpu_used_percent is not None else None
+            ),
+            "external_cpu_cores_used_estimate": (
+                round(snapshot.external_cpu_cores_used_estimate, 3)
+                if snapshot.external_cpu_cores_used_estimate is not None
+                else None
+            ),
+            "external_cpu_percent_estimate": (
+                round(snapshot.external_cpu_percent_estimate, 4)
+                if snapshot.external_cpu_percent_estimate is not None
+                else None
+            ),
+            "external_ffmpeg_process_count": int(snapshot.external_ffmpeg_process_count),
+            "external_ffmpeg_cpu_cores_estimate": (
+                round(snapshot.external_ffmpeg_cpu_cores_estimate, 3)
+                if snapshot.external_ffmpeg_cpu_cores_estimate is not None
+                else None
+            ),
+            "route2_worker_ffmpeg_process_count": int(snapshot.route2_worker_ffmpeg_process_count),
+            "elvern_owned_ffmpeg_process_count": int(snapshot.elvern_owned_ffmpeg_process_count),
+            "elvern_owned_ffmpeg_cpu_cores_estimate": (
+                round(snapshot.elvern_owned_ffmpeg_cpu_cores_estimate, 3)
+                if snapshot.elvern_owned_ffmpeg_cpu_cores_estimate is not None
+                else None
+            ),
+            "route2_cpu_cores_used_total": (
+                round(snapshot.route2_cpu_cores_used_total, 3)
+                if snapshot.route2_cpu_cores_used_total is not None
+                else None
+            ),
+            "external_pressure_level": snapshot.external_pressure_level,
+            "external_pressure_reason": snapshot.external_pressure_reason,
+            "moderate_sample_count": max(0, int(moderate_sample_count)),
+            "moderate_elapsed_seconds": (
+                round(moderate_elapsed_seconds, 3) if moderate_elapsed_seconds is not None else None
+            ),
+        }
+
+    def _route2_reset_downshift_pressure_tracker_locked(self, browser_session: BrowserPlaybackSession) -> None:
+        browser_session.adaptive_downshift_pressure_moderate_started_at_ts = 0.0
+        browser_session.adaptive_downshift_pressure_moderate_sample_count = 0
+
+    def _route2_downshift_pressure_abort_reason_locked(
+        self,
+        session: MobilePlaybackSession,
+        snapshot: _Route2ResourceSnapshot | None,
+    ) -> str | None:
+        browser_session = session.browser_playback
+        now_ts = time.time()
+        if snapshot is None or snapshot.sample_stale:
+            self._route2_reset_downshift_pressure_tracker_locked(browser_session)
+            browser_session.adaptive_downshift_pressure_abort_reason = None
+            browser_session.adaptive_downshift_pressure_snapshot = self._route2_downshift_pressure_snapshot_payload(
+                snapshot,
+            )
+            return None
+        if snapshot.external_ffmpeg_process_count > 0:
+            self._route2_reset_downshift_pressure_tracker_locked(browser_session)
+            browser_session.adaptive_downshift_pressure_abort_reason = "external_ffmpeg_detected"
+            browser_session.adaptive_downshift_pressure_snapshot = self._route2_downshift_pressure_snapshot_payload(
+                snapshot,
+            )
+            return "external_ffmpeg_during_downshift"
+        if snapshot.external_pressure_level == "high":
+            self._route2_reset_downshift_pressure_tracker_locked(browser_session)
+            browser_session.adaptive_downshift_pressure_abort_reason = (
+                snapshot.external_pressure_reason or "external_pressure_high"
+            )
+            browser_session.adaptive_downshift_pressure_snapshot = self._route2_downshift_pressure_snapshot_payload(
+                snapshot,
+            )
+            return "external_pressure_during_downshift"
+        if snapshot.external_pressure_level == "moderate":
+            started_at = float(browser_session.adaptive_downshift_pressure_moderate_started_at_ts or 0.0)
+            if started_at <= 0.0:
+                started_at = now_ts
+                browser_session.adaptive_downshift_pressure_moderate_started_at_ts = started_at
+                browser_session.adaptive_downshift_pressure_moderate_sample_count = 1
+            else:
+                browser_session.adaptive_downshift_pressure_moderate_sample_count += 1
+            sample_count = int(browser_session.adaptive_downshift_pressure_moderate_sample_count)
+            elapsed_seconds = max(0.0, now_ts - started_at)
+            browser_session.adaptive_downshift_pressure_snapshot = self._route2_downshift_pressure_snapshot_payload(
+                snapshot,
+                moderate_sample_count=sample_count,
+                moderate_elapsed_seconds=elapsed_seconds,
+            )
+            if (
+                sample_count >= ROUTE2_ADAPTIVE_DOWNSHIFT_MODERATE_PRESSURE_MIN_SAMPLES
+                and elapsed_seconds >= ROUTE2_ADAPTIVE_DOWNSHIFT_MODERATE_PRESSURE_MIN_SECONDS
+            ):
+                browser_session.adaptive_downshift_pressure_abort_reason = (
+                    f"{snapshot.external_pressure_reason or 'external_pressure_moderate'}_sustained"
+                )
+                return "external_pressure_during_downshift"
+            browser_session.adaptive_downshift_pressure_abort_reason = None
+            return None
+        self._route2_reset_downshift_pressure_tracker_locked(browser_session)
+        browser_session.adaptive_downshift_pressure_abort_reason = None
+        browser_session.adaptive_downshift_pressure_snapshot = self._route2_downshift_pressure_snapshot_payload(
+            snapshot,
+        )
+        return None
+
     def _adaptive_downshift_default_payload(self) -> dict[str, object]:
         return {
             "adaptive_downshift_enabled": bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False)),
@@ -4244,6 +4411,13 @@ class MobilePlaybackManager:
             "adaptive_downshift_transition_started_at": None,
             "adaptive_downshift_switched_at": None,
             "adaptive_downshift_aborted_reason": None,
+            "adaptive_downshift_pressure_abort_reason": None,
+            "adaptive_downshift_pressure_snapshot": {},
+            "adaptive_downshift_retry_count": 0,
+            "adaptive_downshift_retry_not_before_seconds": None,
+            "adaptive_downshift_retry_blocker": None,
+            "adaptive_downshift_last_abort_reason": None,
+            "adaptive_downshift_replacement_epoch_cap_remaining": ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION,
             "adaptive_boost_exit_reason": None,
             "current_boost_tier": None,
             "maintenance_tier_target": None,
@@ -4269,6 +4443,13 @@ class MobilePlaybackManager:
         record.adaptive_downshift_transition_started_at = payload["adaptive_downshift_transition_started_at"]  # type: ignore[assignment]
         record.adaptive_downshift_switched_at = payload["adaptive_downshift_switched_at"]  # type: ignore[assignment]
         record.adaptive_downshift_aborted_reason = payload["adaptive_downshift_aborted_reason"]  # type: ignore[assignment]
+        record.adaptive_downshift_pressure_abort_reason = payload["adaptive_downshift_pressure_abort_reason"]  # type: ignore[assignment]
+        record.adaptive_downshift_pressure_snapshot = dict(payload["adaptive_downshift_pressure_snapshot"])  # type: ignore[arg-type]
+        record.adaptive_downshift_retry_count = int(payload["adaptive_downshift_retry_count"])
+        record.adaptive_downshift_retry_not_before_seconds = payload["adaptive_downshift_retry_not_before_seconds"]  # type: ignore[assignment]
+        record.adaptive_downshift_retry_blocker = payload["adaptive_downshift_retry_blocker"]  # type: ignore[assignment]
+        record.adaptive_downshift_last_abort_reason = payload["adaptive_downshift_last_abort_reason"]  # type: ignore[assignment]
+        record.adaptive_downshift_replacement_epoch_cap_remaining = payload["adaptive_downshift_replacement_epoch_cap_remaining"]  # type: ignore[assignment]
         record.adaptive_boost_exit_reason = payload["adaptive_boost_exit_reason"]  # type: ignore[assignment]
         record.current_boost_tier = payload["current_boost_tier"]  # type: ignore[assignment]
         record.maintenance_tier_target = payload["maintenance_tier_target"]  # type: ignore[assignment]
@@ -4286,7 +4467,16 @@ class MobilePlaybackManager:
         downshift_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_enabled", False))
         dry_run_enabled = bool(getattr(self.settings, "route2_adaptive_downshift_dry_run_enabled", True))
         assigned_threads = max(0, int(record.assigned_threads or 0))
-        replacement_epoch_id = session.browser_playback.replacement_epoch_id
+        browser_session = session.browser_playback
+        replacement_epoch_id = browser_session.replacement_epoch_id
+        now_ts = time.time()
+        resource_snapshot = self._latest_route2_resource_snapshot_locked(now_ts=now_ts)
+        retry_not_before_seconds = self._route2_downshift_retry_seconds_remaining(
+            browser_session,
+            now_ts=now_ts,
+        )
+        retry_blocker = browser_session.adaptive_downshift_retry_blocker
+        retry_cap_remaining = self._route2_downshift_retry_cap_remaining(browser_session)
         (
             _published_end_seconds,
             _effective_playhead_seconds,
@@ -4302,6 +4492,18 @@ class MobilePlaybackManager:
 
         if not dry_run_enabled and not downshift_enabled:
             blockers.append("adaptive_downshift_dry_run_disabled")
+        if downshift_enabled and retry_not_before_seconds is not None:
+            retry_blocker = "adaptive_downshift_retry_cooldown_active"
+            blockers.append(retry_blocker)
+        if downshift_enabled and retry_cap_remaining <= 0:
+            retry_blocker = "adaptive_downshift_retry_cap_exceeded"
+            blockers.append(retry_blocker)
+        if downshift_enabled and (
+            resource_snapshot is None
+            or resource_snapshot.sample_stale
+            or not resource_snapshot.sample_mature
+        ):
+            blockers.append("downshift_pressure_sample_unavailable")
         if assigned_threads < 9:
             blockers.append("not_boosted_prepare_tier")
         if record.state != "running" or not record.process_exists:
@@ -4380,6 +4582,21 @@ class MobilePlaybackManager:
                     state = "replacement_starting"
             else:
                 state = "failed" if replacement is not None and replacement.state == "failed" else "replacement_warming"
+        elif epoch.replacement_reason == "maintenance_downshift":
+            replacement_epoch_id = epoch.epoch_id
+            replacement_worker_id = epoch.active_worker_id
+            transition_started_at = epoch.adaptive_downshift_transition_started_at
+            switched_at = epoch.adaptive_downshift_switched_at
+            aborted_reason = epoch.adaptive_downshift_aborted_reason
+            maintenance_target = epoch.maintenance_downshift_target_threads or maintenance_target
+            if epoch.adaptive_downshift_aborted_reason:
+                state = "aborted"
+            elif epoch.adaptive_downshift_switched_at:
+                state = "switched"
+            elif epoch.active_worker_id or (epoch.process and epoch.process.poll() is None):
+                state = "replacement_warming"
+            else:
+                state = "replacement_starting"
         safe_to_apply = bool(candidate and downshift_enabled and not transition_headroom_blocked)
         if transition_headroom_blocked:
             blockers.append("downshift_transition_headroom_unavailable")
@@ -4394,10 +4611,15 @@ class MobilePlaybackManager:
             reason = "Dry-run candidate only; transition headroom cannot safely hold old and replacement workers together."
         elif candidate and downshift_enabled:
             reason = "Safety gates passed; real maintenance replacement downshift is allowed to start."
+        target_for_status = (
+            maintenance_target
+            if candidate or state in {"replacement_starting", "replacement_warming", "ready_to_switch", "switched", "aborted"}
+            else None
+        )
         return {
             "adaptive_downshift_enabled": downshift_enabled,
             "adaptive_downshift_candidate": candidate,
-            "adaptive_downshift_target_threads": maintenance_target if candidate else None,
+            "adaptive_downshift_target_threads": target_for_status,
             "adaptive_downshift_policy": "phase_3a2_safe_replacement_downshift",
             "adaptive_downshift_reason": reason,
             "adaptive_downshift_blockers": list(dict.fromkeys(blockers)),
@@ -4407,9 +4629,18 @@ class MobilePlaybackManager:
             "adaptive_downshift_transition_started_at": transition_started_at,
             "adaptive_downshift_switched_at": switched_at,
             "adaptive_downshift_aborted_reason": aborted_reason,
+            "adaptive_downshift_pressure_abort_reason": browser_session.adaptive_downshift_pressure_abort_reason,
+            "adaptive_downshift_pressure_snapshot": dict(browser_session.adaptive_downshift_pressure_snapshot),
+            "adaptive_downshift_retry_count": int(browser_session.adaptive_downshift_retry_count or 0),
+            "adaptive_downshift_retry_not_before_seconds": (
+                round(retry_not_before_seconds, 3) if retry_not_before_seconds is not None else None
+            ),
+            "adaptive_downshift_retry_blocker": retry_blocker,
+            "adaptive_downshift_last_abort_reason": browser_session.adaptive_downshift_last_abort_reason,
+            "adaptive_downshift_replacement_epoch_cap_remaining": retry_cap_remaining,
             "adaptive_boost_exit_reason": "oversupplied_comfortable_runway" if candidate else None,
             "current_boost_tier": assigned_threads if assigned_threads >= 9 else None,
-            "maintenance_tier_target": maintenance_target if candidate else None,
+            "maintenance_tier_target": target_for_status,
             "downshift_safe_to_apply": safe_to_apply,
             "downshift_transition_headroom_required": maintenance_target,
             "downshift_transition_headroom_available": headroom_available,
@@ -7113,6 +7344,19 @@ class MobilePlaybackManager:
                     "adaptive_downshift_transition_started_at": record.adaptive_downshift_transition_started_at,
                     "adaptive_downshift_switched_at": record.adaptive_downshift_switched_at,
                     "adaptive_downshift_aborted_reason": record.adaptive_downshift_aborted_reason,
+                    "adaptive_downshift_pressure_abort_reason": record.adaptive_downshift_pressure_abort_reason,
+                    "adaptive_downshift_pressure_snapshot": dict(record.adaptive_downshift_pressure_snapshot),
+                    "adaptive_downshift_retry_count": record.adaptive_downshift_retry_count,
+                    "adaptive_downshift_retry_not_before_seconds": (
+                        round(record.adaptive_downshift_retry_not_before_seconds, 3)
+                        if record.adaptive_downshift_retry_not_before_seconds is not None
+                        else None
+                    ),
+                    "adaptive_downshift_retry_blocker": record.adaptive_downshift_retry_blocker,
+                    "adaptive_downshift_last_abort_reason": record.adaptive_downshift_last_abort_reason,
+                    "adaptive_downshift_replacement_epoch_cap_remaining": (
+                        record.adaptive_downshift_replacement_epoch_cap_remaining
+                    ),
                     "adaptive_boost_exit_reason": record.adaptive_boost_exit_reason,
                     "current_boost_tier": record.current_boost_tier,
                     "maintenance_tier_target": record.maintenance_tier_target,
@@ -8510,11 +8754,9 @@ class MobilePlaybackManager:
         if replacement_epoch.last_error or replacement_epoch.state == "failed":
             return "replacement_failed"
         snapshot = self._latest_route2_resource_snapshot_locked()
-        if snapshot is not None and not snapshot.sample_stale:
-            if snapshot.external_ffmpeg_process_count > 0:
-                return "external_ffmpeg_during_downshift"
-            if snapshot.external_pressure_level in {"moderate", "high"}:
-                return "external_pressure_during_downshift"
+        pressure_abort_reason = self._route2_downshift_pressure_abort_reason_locked(session, snapshot)
+        if pressure_abort_reason is not None:
+            return pressure_abort_reason
         active_workloads = len(
             [
                 record
@@ -8533,11 +8775,18 @@ class MobilePlaybackManager:
         *,
         reason: str,
     ) -> None:
+        browser_session = session.browser_playback
         replacement_epoch.adaptive_downshift_aborted_reason = reason
         replacement_epoch.state = "failed" if replacement_epoch.state == "failed" else "ended"
+        browser_session.adaptive_downshift_last_abort_reason = reason
+        browser_session.adaptive_downshift_retry_count += 1
+        browser_session.adaptive_downshift_retry_not_before_ts = (
+            time.time() + ROUTE2_ADAPTIVE_DOWNSHIFT_RETRY_BACKOFF_SECONDS
+        )
+        browser_session.adaptive_downshift_retry_blocker = "adaptive_downshift_retry_cooldown_active"
         active_epoch = (
-            session.browser_playback.epochs.get(session.browser_playback.active_epoch_id)
-            if session.browser_playback.active_epoch_id
+            browser_session.epochs.get(browser_session.active_epoch_id)
+            if browser_session.active_epoch_id
             else None
         )
         if active_epoch is not None:
@@ -8549,9 +8798,12 @@ class MobilePlaybackManager:
             epoch=replacement_epoch,
             level=logging.WARNING,
             reason=reason,
+            pressure_abort_reason=browser_session.adaptive_downshift_pressure_abort_reason,
+            pressure_snapshot=browser_session.adaptive_downshift_pressure_snapshot,
+            adaptive_downshift_retry_count=browser_session.adaptive_downshift_retry_count,
+            adaptive_downshift_retry_not_before_seconds=ROUTE2_ADAPTIVE_DOWNSHIFT_RETRY_BACKOFF_SECONDS,
         )
         self._discard_route2_epoch_locked(session, replacement_epoch.epoch_id)
-        session.browser_playback.replacement_retry_not_before_ts = time.time() + ROUTE2_REPLACEMENT_RETRY_BACKOFF_SECONDS
 
     def _create_route2_downshift_replacement_epoch_locked(
         self,
@@ -8563,9 +8815,14 @@ class MobilePlaybackManager:
         browser_session = session.browser_playback
         if browser_session.replacement_epoch_id:
             return None
-        if browser_session.replacement_epoch_count >= self.settings.route2_max_replacement_epochs_per_session:
-            active_epoch.adaptive_downshift_aborted_reason = "replacement_epoch_cap_exceeded"
+        if self._route2_downshift_retry_cap_remaining(browser_session) <= 0:
+            browser_session.adaptive_downshift_retry_blocker = "adaptive_downshift_retry_cap_exceeded"
+            active_epoch.adaptive_downshift_aborted_reason = "adaptive_downshift_retry_cap_exceeded"
             self._write_route2_epoch_metadata_locked(active_epoch)
+            return None
+        retry_seconds = self._route2_downshift_retry_seconds_remaining(browser_session)
+        if retry_seconds is not None:
+            browser_session.adaptive_downshift_retry_blocker = "adaptive_downshift_retry_cooldown_active"
             return None
         target_threads = max(int(self.settings.route2_min_worker_threads), int(target_threads))
         effective_playhead = self._route2_effective_playhead_seconds_locked(session, active_epoch)
@@ -8578,7 +8835,10 @@ class MobilePlaybackManager:
         replacement_epoch.maintenance_downshift_target_threads = target_threads
         replacement_epoch.maintenance_downshift_source_epoch_id = active_epoch.epoch_id
         replacement_epoch.adaptive_downshift_transition_started_at = now
-        browser_session.replacement_epoch_count += 1
+        active_epoch.adaptive_downshift_aborted_reason = None
+        browser_session.adaptive_downshift_retry_blocker = None
+        browser_session.adaptive_downshift_pressure_abort_reason = None
+        self._route2_reset_downshift_pressure_tracker_locked(browser_session)
         browser_session.replacement_epoch_id = replacement_epoch.epoch_id
         browser_session.epochs[replacement_epoch.epoch_id] = replacement_epoch
         self._ensure_route2_epoch_workspace_locked(replacement_epoch)
@@ -8608,6 +8868,10 @@ class MobilePlaybackManager:
         next_revision = max(1, int(browser_session.attach_revision or 0) + 1)
         replacement_epoch.adaptive_downshift_switched_at = utcnow_iso()
         replacement_epoch.state = "attach_ready"
+        browser_session.adaptive_downshift_retry_not_before_ts = 0.0
+        browser_session.adaptive_downshift_retry_blocker = None
+        browser_session.adaptive_downshift_pressure_abort_reason = None
+        self._route2_reset_downshift_pressure_tracker_locked(browser_session)
         browser_session.active_epoch_id = replacement_epoch.epoch_id
         browser_session.replacement_epoch_id = None
         self._issue_route2_attach_revision_locked(
