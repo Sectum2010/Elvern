@@ -60,6 +60,11 @@ def _route2_snapshot_locked(
     actual_startup_runway_seconds = None
     effective_goodput_ratio = None
     gate_reason = "none"
+    lite_undersupply_runway_seconds = None
+    lite_undersupply_detected = False
+    lite_undersupply_reason = None
+    lite_required_runway_seconds = None
+    lite_required_runway_source = None
     full_bad_condition_fields: dict[str, object] = {
         "full_bad_condition_detected": False,
         "full_bad_condition_reason": None,
@@ -142,6 +147,11 @@ def _route2_snapshot_locked(
             actual_startup_runway_seconds = startup_gate.get("actual_startup_runway_seconds")
             effective_goodput_ratio = startup_gate.get("effective_goodput_ratio")
             gate_reason = str(startup_gate.get("gate_reason") or "none")
+            lite_undersupply_runway_seconds = startup_gate.get("lite_undersupply_runway_seconds")
+            lite_undersupply_detected = bool(startup_gate.get("lite_undersupply_detected") or False)
+            lite_undersupply_reason = startup_gate.get("lite_undersupply_reason")
+            lite_required_runway_seconds = startup_gate.get("lite_required_runway_seconds")
+            lite_required_runway_source = startup_gate.get("lite_required_runway_source")
             if (
                 browser_session.playback_mode == "lite"
                 and browser_session.client_attach_revision == 0
@@ -246,6 +256,15 @@ def _route2_snapshot_locked(
         if effective_goodput_ratio is not None
         else None,
         "gate_reason": gate_reason,
+        "lite_undersupply_runway_seconds": round(float(lite_undersupply_runway_seconds), 2)
+        if lite_undersupply_runway_seconds is not None
+        else None,
+        "lite_undersupply_detected": lite_undersupply_detected,
+        "lite_undersupply_reason": lite_undersupply_reason,
+        "lite_required_runway_seconds": round(float(lite_required_runway_seconds), 2)
+        if lite_required_runway_seconds is not None
+        else None,
+        "lite_required_runway_source": lite_required_runway_source,
         "prepare_estimate_seconds": round(prepare_estimate_seconds, 2)
         if prepare_estimate_seconds is not None
         else None,

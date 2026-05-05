@@ -6,6 +6,7 @@ from .mobile_playback_models import (
     ROUTE2_ATTACH_READY_SECONDS,
     ROUTE2_LITE_FAST_START_RUNWAY_SECONDS,
     ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+    ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X,
     ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS,
@@ -130,6 +131,14 @@ def _route2_lite_initial_startup_gate_locked(
             ),
             "actual_startup_runway_seconds": 0.0,
             "gate_reason": "lite_slow_supply_unknown_or_deficit",
+            "lite_undersupply_runway_seconds": ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS,
+            "lite_undersupply_detected": False,
+            "lite_undersupply_reason": None,
+            "lite_required_runway_seconds": min(
+                ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+                max(0.0, session.duration_seconds - epoch.attach_position_seconds),
+            ),
+            "lite_required_runway_source": "slow_path_45",
         }
     (
         _generic_ready,
@@ -151,8 +160,25 @@ def _route2_lite_initial_startup_gate_locked(
         supply_rate_x=supply_rate_x,
         observation_seconds=observation_seconds,
     )
+    supply_sample_mature = observation_seconds + 0.001 >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+    lite_undersupply_detected = supply_sample_mature and supply_rate_x < 1.0
+    if supply_surplus:
+        required_runway_source = "healthy_fast_start_15"
+        required_runway_seconds = ROUTE2_LITE_FAST_START_RUNWAY_SECONDS
+        gate_reason = "lite_fast_supply_surplus"
+        lite_undersupply_reason = None
+    elif lite_undersupply_detected:
+        required_runway_source = "undersupply_180"
+        required_runway_seconds = ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS
+        gate_reason = "lite_undersupply_below_realtime"
+        lite_undersupply_reason = "mature_supply_below_1_0"
+    else:
+        required_runway_source = "slow_path_45"
+        required_runway_seconds = ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS
+        gate_reason = "lite_slow_supply_unknown_or_deficit"
+        lite_undersupply_reason = None
     required_startup_runway_seconds = min(
-        ROUTE2_LITE_FAST_START_RUNWAY_SECONDS if supply_surplus else ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+        required_runway_seconds,
         max(0.0, session.duration_seconds - epoch.attach_position_seconds),
     )
     actual_startup_runway_seconds = max(
@@ -176,7 +202,12 @@ def _route2_lite_initial_startup_gate_locked(
         "supply_observation_seconds": observation_seconds,
         "required_startup_runway_seconds": required_startup_runway_seconds,
         "actual_startup_runway_seconds": actual_startup_runway_seconds,
-        "gate_reason": "lite_fast_supply_surplus" if supply_surplus else "lite_slow_supply_unknown_or_deficit",
+        "gate_reason": gate_reason,
+        "lite_undersupply_runway_seconds": ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS,
+        "lite_undersupply_detected": lite_undersupply_detected,
+        "lite_undersupply_reason": lite_undersupply_reason,
+        "lite_required_runway_seconds": required_startup_runway_seconds,
+        "lite_required_runway_source": required_runway_source,
     }
 
 

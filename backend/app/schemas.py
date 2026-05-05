@@ -582,6 +582,11 @@ class MobilePlaybackSessionResponse(BaseModel):
     actual_startup_runway_seconds: float | None = Field(default=None, ge=0)
     effective_goodput_ratio: float | None = Field(default=None, ge=0)
     gate_reason: str | None = None
+    lite_undersupply_runway_seconds: float | None = Field(default=None, ge=0)
+    lite_undersupply_detected: bool = False
+    lite_undersupply_reason: str | None = None
+    lite_required_runway_seconds: float | None = Field(default=None, ge=0)
+    lite_required_runway_source: str | None = None
     full_bad_condition_detected: bool = False
     full_bad_condition_reason: str | None = None
     full_bad_condition_reasons: list[str] = Field(default_factory=list)
@@ -1498,6 +1503,11 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     full_bad_condition_gate_would_block_ready: bool = False
     full_bad_condition_gate_blocks_ready: bool = False
     full_bad_condition_gate_blockers: list[str] = Field(default_factory=list)
+    lite_undersupply_runway_seconds: float | None = Field(default=None, ge=0)
+    lite_undersupply_detected: bool = False
+    lite_undersupply_reason: str | None = None
+    lite_required_runway_seconds: float | None = Field(default=None, ge=0)
+    lite_required_runway_source: str | None = None
     ffmpeg_progress_out_time_seconds: float | None = Field(default=None, ge=0)
     ffmpeg_progress_speed_x: float | None = Field(default=None, ge=0)
     ffmpeg_progress_fps: float | None = Field(default=None, ge=0)

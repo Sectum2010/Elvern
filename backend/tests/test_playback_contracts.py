@@ -127,6 +127,7 @@ from backend.app.services.route2_shared_output_store import (
     write_shared_output_store_metadata,
 )
 from backend.app.services.playback_service import build_playback_decision
+from backend.app.schemas import AdminPlaybackWorkerItemResponse, MobilePlaybackSessionResponse
 from backend.app.services.transcode_service import TranscodeManager
 from fastapi import HTTPException
 
@@ -1010,6 +1011,9 @@ def test_route2_lite_initial_attach_ready_uses_target_window_instead_of_projecte
     assert gate["required_startup_runway_seconds"] == 15.0
     assert gate["actual_startup_runway_seconds"] == 15.0
     assert gate["gate_reason"] == "lite_fast_supply_surplus"
+    assert gate["lite_undersupply_detected"] is False
+    assert gate["lite_required_runway_source"] == "healthy_fast_start_15"
+    assert gate["lite_required_runway_seconds"] == 15.0
 
 
 def test_route2_lite_initial_attach_still_waits_for_minimum_target_window() -> None:
@@ -1021,7 +1025,7 @@ def test_route2_lite_initial_attach_still_waits_for_minimum_target_window() -> N
         epoch,
         route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
         route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
-        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 54.0, 0.72, 16.8, 6.0, True),
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 54.0, 1.0, 16.8, 6.0, True),
         route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 24.0,
     )
 
@@ -1029,6 +1033,72 @@ def test_route2_lite_initial_attach_still_waits_for_minimum_target_window() -> N
     assert gate["required_startup_runway_seconds"] == 45.0
     assert gate["actual_startup_runway_seconds"] == 19.0
     assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
+    assert gate["lite_undersupply_detected"] is False
+    assert gate["lite_undersupply_reason"] is None
+    assert gate["lite_required_runway_source"] == "slow_path_45"
+
+
+def test_route2_lite_mature_supply_below_realtime_requires_180_second_runway() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+
+    gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 138.0, 0.99, 6.0, 45.0, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 50.0,
+    )
+
+    assert gate["ready"] is False
+    assert gate["required_startup_runway_seconds"] == 180.0
+    assert gate["actual_startup_runway_seconds"] == 45.0
+    assert gate["gate_reason"] == "lite_undersupply_below_realtime"
+    assert gate["lite_undersupply_detected"] is True
+    assert gate["lite_undersupply_reason"] == "mature_supply_below_1_0"
+    assert gate["lite_required_runway_source"] == "undersupply_180"
+    assert gate["lite_required_runway_seconds"] == 180.0
+
+
+def test_route2_lite_mature_supply_below_realtime_ready_after_180_second_runway() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+
+    gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 0.0, 0.99, 6.0, 180.0, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 185.0,
+    )
+
+    assert gate["ready"] is True
+    assert gate["required_startup_runway_seconds"] == 180.0
+    assert gate["actual_startup_runway_seconds"] == 180.0
+    assert gate["lite_undersupply_detected"] is True
+    assert gate["lite_required_runway_source"] == "undersupply_180"
+
+
+def test_route2_lite_supply_exactly_realtime_keeps_slow_45_second_path() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+
+    gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 0.0, 1.0, 6.0, 45.0, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 50.0,
+    )
+
+    assert gate["ready"] is True
+    assert gate["required_startup_runway_seconds"] == 45.0
+    assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
+    assert gate["lite_undersupply_detected"] is False
+    assert gate["lite_required_runway_source"] == "slow_path_45"
 
 
 def test_route2_lite_initial_attach_with_insufficient_observation_requires_slow_runway() -> None:
@@ -1047,6 +1117,8 @@ def test_route2_lite_initial_attach_with_insufficient_observation_requires_slow_
     assert gate["ready"] is True
     assert gate["required_startup_runway_seconds"] == 45.0
     assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
+    assert gate["lite_undersupply_detected"] is False
+    assert gate["lite_required_runway_source"] == "slow_path_45"
 
 
 def test_route2_lite_reattach_keeps_existing_projected_runway_gate() -> None:
@@ -1063,6 +1135,24 @@ def test_route2_lite_reattach_keeps_existing_projected_runway_gate() -> None:
     )
 
     assert ready is False
+
+
+def test_route2_lite_undersupply_status_fields_survive_response_schemas() -> None:
+    session_fields = getattr(MobilePlaybackSessionResponse, "model_fields", None) or getattr(
+        MobilePlaybackSessionResponse,
+        "__fields__",
+    )
+    admin_worker_fields = getattr(AdminPlaybackWorkerItemResponse, "model_fields", None) or getattr(
+        AdminPlaybackWorkerItemResponse,
+        "__fields__",
+    )
+
+    for fields in (session_fields, admin_worker_fields):
+        assert "lite_undersupply_runway_seconds" in fields
+        assert "lite_undersupply_detected" in fields
+        assert "lite_undersupply_reason" in fields
+        assert "lite_required_runway_seconds" in fields
+        assert "lite_required_runway_source" in fields
 
 
 def _make_full_gate_session() -> MobilePlaybackSession:

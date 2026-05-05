@@ -43,6 +43,7 @@ from .mobile_playback_models import (
     ROUTE2_FULL_VOLATILITY_HORIZON_SECONDS,
     ROUTE2_LITE_FAST_START_RUNWAY_SECONDS,
     ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+    ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X,
     ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS,
@@ -8521,6 +8522,13 @@ class MobilePlaybackManager:
         server_goodput = self._route2_server_byte_goodput_locked(epoch)
         client_goodput = self._route2_client_goodput_locked(session)
 
+        required_startup_runway_seconds = 120.0
+        if record.playback_mode == "lite":
+            lite_gate = self._route2_epoch_startup_attach_gate_locked(session, epoch)
+            required_startup_runway_seconds = float(
+                lite_gate.get("required_startup_runway_seconds") or ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS
+            )
+
         return Route2AdaptiveShadowInput(
             worker_state=record.state,
             playback_mode=record.playback_mode,
@@ -8550,7 +8558,7 @@ class MobilePlaybackManager:
             ready_end_seconds=ready_end_seconds,
             effective_playhead_seconds=effective_playhead_seconds,
             ahead_runway_seconds=ahead_runway_seconds,
-            required_startup_runway_seconds=120.0 if record.playback_mode == "full" else 45.0,
+            required_startup_runway_seconds=required_startup_runway_seconds,
             supply_rate_x=supply_rate_x,
             supply_observation_seconds=supply_observation_seconds,
             client_goodput_bytes_per_second=(
@@ -9298,7 +9306,31 @@ class MobilePlaybackManager:
                     payload["runtime_rebalance_target_threads"] = active_health.runtime_rebalance_target_threads
                     payload["runtime_rebalance_can_donate_threads"] = active_health.runtime_rebalance_can_donate_threads
                     payload["runtime_rebalance_priority"] = active_health.runtime_rebalance_priority
+                    payload["lite_undersupply_runway_seconds"] = None
+                    payload["lite_undersupply_detected"] = False
+                    payload["lite_undersupply_reason"] = None
+                    payload["lite_required_runway_seconds"] = None
+                    payload["lite_required_runway_source"] = None
                     payload.update(self._route2_bad_condition_reserve_payload_locked(session, epoch))
+                    if record.playback_mode == "lite":
+                        lite_gate = self._route2_epoch_startup_attach_gate_locked(session, epoch)
+                        payload["lite_undersupply_runway_seconds"] = round(
+                            float(
+                                lite_gate.get("lite_undersupply_runway_seconds")
+                                or ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS
+                            ),
+                            2,
+                        )
+                        payload["lite_undersupply_detected"] = bool(
+                            lite_gate.get("lite_undersupply_detected") or False
+                        )
+                        payload["lite_undersupply_reason"] = lite_gate.get("lite_undersupply_reason")
+                        payload["lite_required_runway_seconds"] = (
+                            round(float(lite_gate["lite_required_runway_seconds"]), 2)
+                            if lite_gate.get("lite_required_runway_seconds") is not None
+                            else None
+                        )
+                        payload["lite_required_runway_source"] = lite_gate.get("lite_required_runway_source")
                 else:
                     payload["runtime_playback_health"] = None
                     payload["runtime_playback_health_reason"] = None
@@ -9310,6 +9342,11 @@ class MobilePlaybackManager:
                     payload["runtime_rebalance_target_threads"] = None
                     payload["runtime_rebalance_can_donate_threads"] = 0
                     payload["runtime_rebalance_priority"] = 0
+                    payload["lite_undersupply_runway_seconds"] = None
+                    payload["lite_undersupply_detected"] = False
+                    payload["lite_undersupply_reason"] = None
+                    payload["lite_required_runway_seconds"] = None
+                    payload["lite_required_runway_source"] = None
                     payload["bad_condition_reserve_required"] = False
                     payload["bad_condition_reason"] = None
                     payload["bad_condition_supply_floor"] = ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X
