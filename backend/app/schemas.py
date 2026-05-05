@@ -1283,6 +1283,13 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     real_9_prepare_applied: bool = False
     real_9_prepare_blockers: list[str] = Field(default_factory=list)
     effective_ladder_target: int | None = Field(default=None, ge=0)
+    lite_adaptive_prepare_candidate: bool = False
+    lite_adaptive_prepare_applied: bool = False
+    lite_adaptive_prepare_blockers: list[str] = Field(default_factory=list)
+    cloud_adaptive_prepare_enabled: bool = False
+    cloud_adaptive_prepare_candidate: bool = False
+    cloud_adaptive_prepare_applied: bool = False
+    cloud_adaptive_prepare_blockers: list[str] = Field(default_factory=list)
     process_exists: bool = False
     cpu_cores_used: float | None = Field(default=None, ge=0)
     cpu_percent_of_total: float | None = Field(default=None, ge=0)

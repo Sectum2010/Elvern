@@ -230,6 +230,13 @@ class Route2WorkerRecord:
     real_9_prepare_applied: bool = False
     real_9_prepare_blockers: list[str] = field(default_factory=list)
     effective_ladder_target: int | None = None
+    lite_adaptive_prepare_candidate: bool = False
+    lite_adaptive_prepare_applied: bool = False
+    lite_adaptive_prepare_blockers: list[str] = field(default_factory=list)
+    cloud_adaptive_prepare_enabled: bool = False
+    cloud_adaptive_prepare_candidate: bool = False
+    cloud_adaptive_prepare_applied: bool = False
+    cloud_adaptive_prepare_blockers: list[str] = field(default_factory=list)
     process_exists: bool = False
     cpu_cores_used: float | None = None
     cpu_percent_of_total: float | None = None

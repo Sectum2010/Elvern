@@ -40,6 +40,8 @@ from .mobile_playback_models import (
     ROUTE2_FULL_RESERVE_MAX_UNCERTAINTY_SECONDS,
     ROUTE2_FULL_RESERVE_MAX_VOLATILITY_SECONDS,
     ROUTE2_FULL_VOLATILITY_HORIZON_SECONDS,
+    ROUTE2_LITE_FAST_START_RUNWAY_SECONDS,
+    ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_RUNWAY_SECONDS,
     ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X,
     ROUTE2_RECOVERY_PROJECTION_HORIZON_SECONDS,
@@ -371,6 +373,13 @@ class _Route2RealThreadAssignmentDecision:
     real_9_prepare_applied: bool = False
     real_9_prepare_blockers: list[str] = field(default_factory=list)
     effective_ladder_target: int | None = None
+    lite_adaptive_prepare_candidate: bool = False
+    lite_adaptive_prepare_applied: bool = False
+    lite_adaptive_prepare_blockers: list[str] = field(default_factory=list)
+    cloud_adaptive_prepare_enabled: bool = False
+    cloud_adaptive_prepare_candidate: bool = False
+    cloud_adaptive_prepare_applied: bool = False
+    cloud_adaptive_prepare_blockers: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -5490,9 +5499,17 @@ class MobilePlaybackManager:
         blockers: list[str] = []
         reason_parts: list[str] = []
 
-        if record.source_kind != "local":
-            blockers.append("cloud_adaptive_spawn_deferred")
-            reason_parts.append("cloud real adaptive initial spawn is deferred")
+        if record.source_kind == "cloud":
+            cloud_prepare_enabled = (
+                not bool(getattr(self.settings, "route2_adaptive_thread_control_local_only", True))
+                and bool(getattr(self.settings, "route2_adaptive_thread_control_cloud_enabled", False))
+            )
+            if not cloud_prepare_enabled:
+                blockers.append("cloud_adaptive_disabled")
+                reason_parts.append("cloud real adaptive initial spawn is disabled")
+        elif record.source_kind != "local":
+            blockers.append("unsupported_source_kind")
+            reason_parts.append("unsupported source kind for real adaptive initial spawn")
         if effective_workload_count != 1:
             blockers.append("existing_route2_workload_present")
             reason_parts.append("Route2 is not a single active playback workload")
@@ -5608,6 +5625,11 @@ class MobilePlaybackManager:
         real_9_prepare_candidate: bool = False,
         real_9_prepare_blockers: list[str] | None = None,
         effective_ladder_target: int | None = None,
+        lite_adaptive_prepare_candidate: bool = False,
+        lite_adaptive_prepare_blockers: list[str] | None = None,
+        cloud_adaptive_prepare_enabled: bool = False,
+        cloud_adaptive_prepare_candidate: bool = False,
+        cloud_adaptive_prepare_blockers: list[str] | None = None,
     ) -> _Route2RealThreadAssignmentDecision:
         return _Route2RealThreadAssignmentDecision(
             assigned_threads=max(0, int(fixed_assigned_threads)),
@@ -5627,7 +5649,178 @@ class MobilePlaybackManager:
             real_9_prepare_applied=False,
             real_9_prepare_blockers=list(dict.fromkeys(real_9_prepare_blockers or [])),
             effective_ladder_target=effective_ladder_target,
+            lite_adaptive_prepare_candidate=lite_adaptive_prepare_candidate,
+            lite_adaptive_prepare_applied=False,
+            lite_adaptive_prepare_blockers=list(dict.fromkeys(lite_adaptive_prepare_blockers or [])),
+            cloud_adaptive_prepare_enabled=cloud_adaptive_prepare_enabled,
+            cloud_adaptive_prepare_candidate=cloud_adaptive_prepare_candidate,
+            cloud_adaptive_prepare_applied=False,
+            cloud_adaptive_prepare_blockers=list(dict.fromkeys(cloud_adaptive_prepare_blockers or [])),
         )
+
+    def _route2_cloud_adaptive_prepare_enabled(self) -> bool:
+        return (
+            not bool(getattr(self.settings, "route2_adaptive_thread_control_local_only", True))
+            and bool(getattr(self.settings, "route2_adaptive_thread_control_cloud_enabled", False))
+        )
+
+    def _route2_provider_prepare_blocker(self, error: str | None) -> str | None:
+        if not error:
+            return None
+        lowered = str(error).lower()
+        if "quota" in lowered:
+            return "provider_quota_exceeded"
+        if "auth" in lowered or "token" in lowered or "reconnect" in lowered:
+            return "provider_auth_required"
+        if "provider" in lowered or "source" in lowered or "cloud" in lowered:
+            return "provider_source_error"
+        return "provider_source_error"
+
+    def _route2_prepare_alias_blockers(self, blockers: list[str]) -> list[str]:
+        aliases: list[str] = []
+        for blocker in blockers:
+            if blocker in {"external_host_cpu_pressure_high", "external_host_cpu_pressure_moderate"}:
+                aliases.append("external_pressure")
+            elif blocker in {"external_ffmpeg_detected", "external_ffmpeg_process_present"}:
+                aliases.append("external_ffmpeg")
+            elif blocker in {"route2_memory_pressure", "route2_memory_hard_pressure"}:
+                aliases.append("ram_pressure")
+            elif blocker == "telemetry_missing_or_stale":
+                aliases.append("lite_telemetry_immature")
+        return aliases
+
+    def _route2_lite_adaptive_prepare_blockers_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        session: MobilePlaybackSession | None,
+        epoch: PlaybackEpoch | None,
+        target_threads: int,
+        spawn_sample_mature: bool,
+    ) -> list[str]:
+        if record.playback_mode != "lite":
+            return []
+        blockers: list[str] = []
+        if session is None or epoch is None:
+            return ["lite_telemetry_immature"]
+
+        gate = self._route2_epoch_startup_attach_gate_locked(session, epoch)
+        required_runway = float(
+            gate.get("required_startup_runway_seconds")
+            or min(ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS, max(0.0, float(session.duration_seconds or 0.0)))
+        )
+        actual_runway = float(gate.get("actual_startup_runway_seconds") or 0.0)
+        supply_rate_x = float(gate.get("supply_rate_x") or 0.0)
+        supply_observation_seconds = float(gate.get("supply_observation_seconds") or 0.0)
+        initial_empty_startup = (
+            record.state == "queued"
+            and not bool(epoch.init_published)
+            and epoch.contiguous_published_through_segment is None
+            and actual_runway <= 0.001
+        )
+        if actual_runway + 0.001 >= required_runway:
+            blockers.append("lite_runway_already_sufficient")
+        if (
+            actual_runway + 0.001 >= min(required_runway, ROUTE2_LITE_FAST_START_RUNWAY_SECONDS)
+            and supply_observation_seconds + 0.001 >= ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+            and supply_rate_x >= ROUTE2_STARTUP_MIN_SUPPLY_RATE_X
+        ):
+            blockers.append("lite_supply_healthy_no_boost_needed")
+        if not spawn_sample_mature:
+            blockers.append("lite_telemetry_immature")
+        elif (
+            not initial_empty_startup
+            and 0.0 < supply_observation_seconds < ROUTE2_SUPPLY_RATE_MIN_SAMPLE_SECONDS
+        ):
+            blockers.append("lite_telemetry_immature")
+
+        provider_blocker = self._route2_provider_prepare_blocker(record.non_retryable_error or session.last_error)
+        if provider_blocker:
+            blockers.append(provider_blocker)
+        if self._route2_client_limited_locked(session, epoch):
+            blockers.append("client_bound")
+        source_feed = self._route2_source_feed_rate_locked(session, record)
+        if record.source_kind == "local" and source_feed.available and source_feed.mature and source_feed.rate_x is not None:
+            if float(source_feed.rate_x) < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X:
+                blockers.append("source_bound")
+
+        cpu_thread_proven = (
+            target_threads >= 6
+            and (
+                initial_empty_startup
+                or self._route2_record_cpu_thread_limited(record)
+                or record.cpu_cores_used is None
+            )
+        )
+        if not cpu_thread_proven:
+            blockers.append("lite_cpu_thread_bottleneck_not_proven")
+        return list(dict.fromkeys(blockers))
+
+    def _route2_cloud_adaptive_prepare_blockers_locked(
+        self,
+        record: Route2WorkerRecord,
+        *,
+        session: MobilePlaybackSession | None,
+        epoch: PlaybackEpoch | None,
+    ) -> list[str]:
+        if record.source_kind != "cloud":
+            return []
+        blockers: list[str] = []
+        if not self._route2_cloud_adaptive_prepare_enabled():
+            blockers.append("cloud_adaptive_disabled")
+        if session is None or epoch is None:
+            blockers.append("cloud_source_feed_unavailable")
+            return list(dict.fromkeys(blockers))
+
+        provider_blocker = self._route2_provider_prepare_blocker(record.non_retryable_error or session.last_error)
+        if provider_blocker:
+            blockers.append(provider_blocker)
+
+        source_feed = self._route2_source_feed_rate_locked(session, record)
+        if not source_feed.available:
+            blockers.append("cloud_source_feed_unavailable")
+        elif not source_feed.mature:
+            blockers.append("cloud_source_feed_immature")
+        elif source_feed.rate_x is None:
+            blockers.append("cloud_source_feed_unavailable")
+        elif float(source_feed.rate_x) < ROUTE2_CLOSED_LOOP_HEALTH_FLOOR_RATE_X:
+            blockers.extend(["cloud_source_feed_low", "source_bound"])
+
+        snapshot = self._latest_route2_resource_snapshot_locked()
+        limiting_factor = self._evaluate_route2_limiting_factor_locked(
+            session,
+            epoch,
+            record,
+            progress=None,
+            host_cpu_pressure=_host_cpu_pressure_from_resource_snapshot(snapshot),
+            route2_cpu_cores_used_total=(
+                snapshot.route2_cpu_cores_used_total
+                if snapshot is not None and not snapshot.sample_stale
+                else None
+            ),
+            route2_cpu_upbound_cores=self._route2_budget_summary_locked()["route2_cpu_upbound_cores"],
+            total_memory_bytes=(
+                snapshot.total_memory_bytes
+                if snapshot is not None and not snapshot.sample_stale
+                else None
+            ),
+            route2_memory_bytes_total=(
+                snapshot.route2_memory_bytes_total
+                if snapshot is not None and not snapshot.sample_stale
+                else None
+            ),
+        )
+        if limiting_factor.primary == "provider_error":
+            blockers.append(provider_blocker or "provider_source_error")
+        elif limiting_factor.primary == "client":
+            blockers.append("client_bound")
+        elif limiting_factor.primary in {"source", "cloud_source", "local_source"}:
+            blockers.append("source_bound")
+        elif limiting_factor.primary != "cpu_thread":
+            blockers.append("cpu_thread_not_primary")
+        elif limiting_factor.confidence < 0.65:
+            blockers.append("limiting_factor_confidence_low")
+        return list(dict.fromkeys(blockers))
 
     def _resolve_route2_real_assigned_threads_locked(
         self,
@@ -5635,6 +5828,8 @@ class MobilePlaybackManager:
         *,
         fixed_assigned_threads: int,
         spawn_dry_run: _Route2AdaptiveSpawnDryRunDecision,
+        session: MobilePlaybackSession | None = None,
+        epoch: PlaybackEpoch | None = None,
     ) -> _Route2RealThreadAssignmentDecision:
         adaptive_enabled = bool(getattr(self.settings, "route2_adaptive_thread_control_enabled", False))
         if not adaptive_enabled:
@@ -5652,18 +5847,25 @@ class MobilePlaybackManager:
         real_9_prepare_enabled = bool(
             getattr(self.settings, "route2_adaptive_thread_control_real_9_prepare_enabled", False)
         )
-        real_9_prepare_candidate = real_9_prepare_enabled and record.source_kind == "local"
+        cloud_adaptive_prepare_enabled = self._route2_cloud_adaptive_prepare_enabled()
+        lite_adaptive_prepare_candidate = record.playback_mode == "lite"
+        cloud_adaptive_prepare_candidate = record.source_kind == "cloud" and cloud_adaptive_prepare_enabled
+        real_9_prepare_candidate = real_9_prepare_enabled and (
+            record.source_kind == "local" or cloud_adaptive_prepare_candidate
+        )
         real_9_prepare_blockers: list[str] = []
+        lite_adaptive_prepare_blockers: list[str] = []
+        cloud_adaptive_prepare_blockers: list[str] = []
         if record.source_kind == "cloud":
-            if bool(getattr(self.settings, "route2_adaptive_thread_control_local_only", True)):
-                blockers.append("cloud_adaptive_thread_control_local_only")
-                reason_parts.append("cloud real adaptive thread control is blocked by local-only rollout")
-            elif not bool(getattr(self.settings, "route2_adaptive_thread_control_cloud_enabled", False)):
-                blockers.append("cloud_adaptive_thread_control_disabled")
-                reason_parts.append("cloud real adaptive thread control is disabled/deferred")
-            else:
-                blockers.append("cloud_adaptive_thread_control_deferred")
-                reason_parts.append("cloud real adaptive thread control has no real assignment policy in this phase")
+            if not cloud_adaptive_prepare_enabled:
+                blockers.append("cloud_adaptive_disabled")
+                cloud_adaptive_prepare_blockers.append("cloud_adaptive_disabled")
+                if bool(getattr(self.settings, "route2_adaptive_thread_control_local_only", True)):
+                    blockers.append("cloud_adaptive_thread_control_local_only")
+                    cloud_adaptive_prepare_blockers.append("cloud_adaptive_thread_control_local_only")
+                    reason_parts.append("cloud real adaptive thread control is blocked by local-only rollout")
+                else:
+                    reason_parts.append("cloud real adaptive thread control is disabled/deferred")
         elif record.source_kind == "local":
             pass
         else:
@@ -5675,15 +5877,77 @@ class MobilePlaybackManager:
         if not real_9_prepare_enabled:
             real_9_prepare_blockers.append("real_9_prepare_disabled")
         if record.source_kind != "local":
-            real_9_prepare_blockers.append("real_9_prepare_local_only")
+            if record.source_kind == "cloud":
+                if not cloud_adaptive_prepare_enabled:
+                    real_9_prepare_blockers.append("cloud_adaptive_disabled")
+            else:
+                real_9_prepare_blockers.append("real_9_prepare_local_only")
         if spawn_dry_run.blockers:
             blockers.extend(spawn_dry_run.blockers)
             real_9_prepare_blockers.extend(spawn_dry_run.blockers)
+            lite_adaptive_prepare_blockers.extend(
+                blocker
+                for blocker in spawn_dry_run.blockers
+                if blocker not in {"cloud_adaptive_disabled", "cloud_adaptive_thread_control_local_only"}
+            )
+            cloud_adaptive_prepare_blockers.extend(spawn_dry_run.blockers)
+            alias_blockers = self._route2_prepare_alias_blockers(spawn_dry_run.blockers)
+            real_9_prepare_blockers.extend(alias_blockers)
+            lite_adaptive_prepare_blockers.extend(alias_blockers)
+            cloud_adaptive_prepare_blockers.extend(alias_blockers)
             reason_parts.append("spawn dry-run safety blockers did not pass")
         if not bool(spawn_dry_run.sample_mature):
             blockers.append("telemetry_missing_or_stale")
             real_9_prepare_blockers.append("telemetry_missing_or_stale")
+            lite_adaptive_prepare_blockers.append("lite_telemetry_immature")
             reason_parts.append("resource telemetry is missing, immature, or stale")
+        if lite_adaptive_prepare_candidate:
+            lite_adaptive_prepare_blockers.extend(
+                self._route2_lite_adaptive_prepare_blockers_locked(
+                    record,
+                    session=session,
+                    epoch=epoch,
+                    target_threads=target_threads,
+                    spawn_sample_mature=bool(spawn_dry_run.sample_mature),
+                )
+            )
+        if record.source_kind == "cloud":
+            cloud_adaptive_prepare_blockers.extend(
+                self._route2_cloud_adaptive_prepare_blockers_locked(
+                    record,
+                    session=session,
+                    epoch=epoch,
+                )
+            )
+            if cloud_adaptive_prepare_blockers:
+                blockers.extend(cloud_adaptive_prepare_blockers)
+                real_9_prepare_blockers.extend(cloud_adaptive_prepare_blockers)
+                reason_parts.append("cloud adaptive prepare gates did not pass")
+        if lite_adaptive_prepare_candidate:
+            hard_lite_blockers = {
+                "lite_telemetry_immature",
+                "lite_cpu_thread_bottleneck_not_proven",
+                "provider_auth_required",
+                "provider_quota_exceeded",
+                "provider_source_error",
+                "source_bound",
+                "client_bound",
+                "external_pressure",
+                "external_ffmpeg",
+                "ram_pressure",
+            }
+            if any(blocker in hard_lite_blockers for blocker in lite_adaptive_prepare_blockers):
+                blockers.extend(lite_adaptive_prepare_blockers)
+                real_9_prepare_blockers.extend(lite_adaptive_prepare_blockers)
+                reason_parts.append("Lite adaptive prepare gates did not pass")
+            elif target_threads >= 9 and any(
+                blocker in {"lite_runway_already_sufficient", "lite_supply_healthy_no_boost_needed"}
+                for blocker in lite_adaptive_prepare_blockers
+            ):
+                target_threads = 6
+                effective_ladder_target = 6
+                real_9_prepare_blockers.extend(lite_adaptive_prepare_blockers)
+                real_9_prepare_blockers.append("effective_ladder_target_below_9")
         if int(getattr(self.settings, "route2_adaptive_max_worker_threads", 0) or 0) < 9:
             real_9_prepare_blockers.append("adaptive_max_below_9")
         if target_threads < 9:
@@ -5730,45 +5994,70 @@ class MobilePlaybackManager:
                 real_9_prepare_candidate=real_9_prepare_candidate,
                 real_9_prepare_blockers=real_9_prepare_blockers,
                 effective_ladder_target=effective_ladder_target,
+                lite_adaptive_prepare_candidate=lite_adaptive_prepare_candidate,
+                lite_adaptive_prepare_blockers=lite_adaptive_prepare_blockers,
+                cloud_adaptive_prepare_enabled=cloud_adaptive_prepare_enabled,
+                cloud_adaptive_prepare_candidate=cloud_adaptive_prepare_candidate,
+                cloud_adaptive_prepare_blockers=cloud_adaptive_prepare_blockers,
             )
 
         if target_threads == 9:
+            source = "adaptive_cloud_prepare_9" if record.source_kind == "cloud" else "adaptive_local_prepare_9"
+            lite_prepare_applied = bool(lite_adaptive_prepare_candidate and not lite_adaptive_prepare_blockers)
+            cloud_prepare_applied = bool(record.source_kind == "cloud" and not cloud_adaptive_prepare_blockers)
             return _Route2RealThreadAssignmentDecision(
                 assigned_threads=9,
-                assignment_policy="adaptive_local_prepare_9",
+                assignment_policy=source,
                 assignment_reason=(
-                    "Adaptive real thread control selected 9 threads for a local Route2 prepare/startup boost "
-                    "after the explicit real-9 flag, single-workload, telemetry, resource, and safety gates passed."
+                    "Adaptive real thread control selected 9 threads for a Route2 prepare/startup boost "
+                    "after the explicit real-9 flag, source, single-workload, telemetry, resource, and safety gates passed."
                 ),
                 assignment_blockers=[],
                 adaptive_control_enabled=True,
                 adaptive_control_applied=True,
-                assigned_threads_source="adaptive_local_prepare_9",
+                assigned_threads_source=source,
                 fallback_used=False,
                 real_9_prepare_enabled=real_9_prepare_enabled,
                 real_9_prepare_candidate=True,
                 real_9_prepare_applied=True,
                 real_9_prepare_blockers=[],
                 effective_ladder_target=effective_ladder_target,
+                lite_adaptive_prepare_candidate=lite_adaptive_prepare_candidate,
+                lite_adaptive_prepare_applied=lite_prepare_applied,
+                lite_adaptive_prepare_blockers=[],
+                cloud_adaptive_prepare_enabled=cloud_adaptive_prepare_enabled,
+                cloud_adaptive_prepare_candidate=cloud_adaptive_prepare_candidate,
+                cloud_adaptive_prepare_applied=cloud_prepare_applied,
+                cloud_adaptive_prepare_blockers=[],
             )
 
+        source = "adaptive_cloud_prepare_6" if record.source_kind == "cloud" else "adaptive_local_initial_6"
+        lite_prepare_applied = bool(lite_adaptive_prepare_candidate and not lite_adaptive_prepare_blockers)
+        cloud_prepare_applied = bool(record.source_kind == "cloud" and not cloud_adaptive_prepare_blockers)
         return _Route2RealThreadAssignmentDecision(
             assigned_threads=6,
-            assignment_policy="adaptive_local_initial_6",
+            assignment_policy=source,
             assignment_reason=(
-                "Adaptive real thread control selected 6 threads for an initial local Route2 spawn "
-                "after strict telemetry, resource, and safety gates passed."
+                "Adaptive real thread control selected 6 threads for an initial Route2 prepare spawn "
+                "after strict source, telemetry, resource, and safety gates passed."
             ),
             assignment_blockers=[],
             adaptive_control_enabled=True,
             adaptive_control_applied=True,
-            assigned_threads_source="adaptive_local_initial_6",
+            assigned_threads_source=source,
             fallback_used=False,
             real_9_prepare_enabled=real_9_prepare_enabled,
             real_9_prepare_candidate=real_9_prepare_candidate,
             real_9_prepare_applied=False,
             real_9_prepare_blockers=list(dict.fromkeys(real_9_prepare_blockers)),
             effective_ladder_target=effective_ladder_target,
+            lite_adaptive_prepare_candidate=lite_adaptive_prepare_candidate,
+            lite_adaptive_prepare_applied=lite_prepare_applied,
+            lite_adaptive_prepare_blockers=list(dict.fromkeys(lite_adaptive_prepare_blockers)),
+            cloud_adaptive_prepare_enabled=cloud_adaptive_prepare_enabled,
+            cloud_adaptive_prepare_candidate=cloud_adaptive_prepare_candidate,
+            cloud_adaptive_prepare_applied=cloud_prepare_applied,
+            cloud_adaptive_prepare_blockers=list(dict.fromkeys(cloud_adaptive_prepare_blockers)),
         )
 
     def _build_route2_adaptive_shadow_input_locked(
@@ -6348,6 +6637,13 @@ class MobilePlaybackManager:
                     "real_9_prepare_applied": record.real_9_prepare_applied,
                     "real_9_prepare_blockers": list(record.real_9_prepare_blockers),
                     "effective_ladder_target": record.effective_ladder_target,
+                    "lite_adaptive_prepare_candidate": record.lite_adaptive_prepare_candidate,
+                    "lite_adaptive_prepare_applied": record.lite_adaptive_prepare_applied,
+                    "lite_adaptive_prepare_blockers": list(record.lite_adaptive_prepare_blockers),
+                    "cloud_adaptive_prepare_enabled": record.cloud_adaptive_prepare_enabled,
+                    "cloud_adaptive_prepare_candidate": record.cloud_adaptive_prepare_candidate,
+                    "cloud_adaptive_prepare_applied": record.cloud_adaptive_prepare_applied,
+                    "cloud_adaptive_prepare_blockers": list(record.cloud_adaptive_prepare_blockers),
                     "process_exists": record.process_exists,
                     "cpu_cores_used": round(record.cpu_cores_used, 3) if record.cpu_cores_used is not None else None,
                     "cpu_percent_of_total": round(record.cpu_percent_of_total, 3) if record.cpu_percent_of_total is not None else None,
@@ -9476,6 +9772,8 @@ class MobilePlaybackManager:
                         record,
                         fixed_assigned_threads=assigned_threads,
                         spawn_dry_run=spawn_dry_run,
+                        session=session,
+                        epoch=epoch,
                     )
                 except Exception:
                     logger.debug("Route2 adaptive real assignment failed; falling back to fixed assignment", exc_info=True)
@@ -9517,6 +9815,13 @@ class MobilePlaybackManager:
                 record.real_9_prepare_applied = thread_assignment.real_9_prepare_applied
                 record.real_9_prepare_blockers = thread_assignment.real_9_prepare_blockers
                 record.effective_ladder_target = thread_assignment.effective_ladder_target
+                record.lite_adaptive_prepare_candidate = thread_assignment.lite_adaptive_prepare_candidate
+                record.lite_adaptive_prepare_applied = thread_assignment.lite_adaptive_prepare_applied
+                record.lite_adaptive_prepare_blockers = thread_assignment.lite_adaptive_prepare_blockers
+                record.cloud_adaptive_prepare_enabled = thread_assignment.cloud_adaptive_prepare_enabled
+                record.cloud_adaptive_prepare_candidate = thread_assignment.cloud_adaptive_prepare_candidate
+                record.cloud_adaptive_prepare_applied = thread_assignment.cloud_adaptive_prepare_applied
+                record.cloud_adaptive_prepare_blockers = thread_assignment.cloud_adaptive_prepare_blockers
                 record.assigned_threads = assigned_threads
                 if not record.started_at:
                     record.started_at = utcnow_iso()
