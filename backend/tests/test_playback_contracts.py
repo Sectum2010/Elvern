@@ -127,6 +127,7 @@ from backend.app.services.route2_shared_output_store import (
     write_shared_output_store_metadata,
 )
 from backend.app.services.playback_service import build_playback_decision
+from backend.app.services.transcode_service import TranscodeManager
 from fastapi import HTTPException
 
 
@@ -144,6 +145,25 @@ class StubTranscodeManager:
 
     def get_job_snapshot(self, item: dict[str, object]) -> dict[str, object]:
         return dict(self._snapshot)
+
+
+def test_route2_transcode_root_is_not_removed_by_legacy_transcode_orphan_cleanup(initialized_settings) -> None:
+    transcode_root = initialized_settings.transcode_dir
+    route2_root = transcode_root / "browser_playback_route2"
+    mobile_cache_root = transcode_root / "mobile_cache"
+    mobile_sessions_root = transcode_root / "mobile_sessions"
+    legacy_orphan = transcode_root / "legacy-orphan"
+    for path in (route2_root, mobile_cache_root, mobile_sessions_root, legacy_orphan):
+        path.mkdir(parents=True, exist_ok=True)
+        old_ts = time.time() - ((initialized_settings.transcode_ttl_minutes * 60) + 60)
+        os.utime(path, (old_ts, old_ts))
+
+    TranscodeManager(initialized_settings)._cleanup_orphaned_dirs()
+
+    assert route2_root.exists()
+    assert mobile_cache_root.exists()
+    assert mobile_sessions_root.exists()
+    assert not legacy_orphan.exists()
 
 
 def _make_route2_session(*, playback_mode: str = "lite", client_attach_revision: int = 0) -> MobilePlaybackSession:
@@ -3488,6 +3508,10 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_core
     assert settings.route2_adaptive_thread_control_real_9_prepare_enabled is False
     assert settings.route2_adaptive_downshift_enabled is False
     assert settings.route2_adaptive_downshift_dry_run_enabled is True
+    assert settings.route2_adaptive_reclaim_enabled is False
+    assert settings.route2_adaptive_reclaim_dry_run_enabled is True
+    assert settings.route2_adaptive_resupply_enabled is False
+    assert settings.route2_adaptive_resupply_dry_run_enabled is True
     assert settings.route2_shared_output_init_writer_enabled is False
     assert settings.route2_shared_output_segment_writer_enabled is False
 
@@ -3522,6 +3546,10 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED", "true")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_ENABLED", "true")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_DRY_RUN_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RECLAIM_ENABLED", "true")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RECLAIM_DRY_RUN_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RESUPPLY_ENABLED", "true")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RESUPPLY_DRY_RUN_ENABLED", "false")
 
     enabled_settings = refresh_settings()
 
@@ -3532,6 +3560,10 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     assert enabled_settings.route2_adaptive_thread_control_real_9_prepare_enabled is True
     assert enabled_settings.route2_adaptive_downshift_enabled is True
     assert enabled_settings.route2_adaptive_downshift_dry_run_enabled is False
+    assert enabled_settings.route2_adaptive_reclaim_enabled is True
+    assert enabled_settings.route2_adaptive_reclaim_dry_run_enabled is False
+    assert enabled_settings.route2_adaptive_resupply_enabled is True
+    assert enabled_settings.route2_adaptive_resupply_dry_run_enabled is False
 
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY", "true")
@@ -3540,6 +3572,10 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_ENABLED", "false")
     monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_DRY_RUN_ENABLED", "true")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RECLAIM_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RECLAIM_DRY_RUN_ENABLED", "true")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RESUPPLY_ENABLED", "false")
+    monkeypatch.setenv("ELVERN_ROUTE2_ADAPTIVE_RESUPPLY_DRY_RUN_ENABLED", "true")
 
     disabled_settings = refresh_settings()
 
@@ -3550,6 +3586,10 @@ def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
     assert disabled_settings.route2_adaptive_thread_control_real_9_prepare_enabled is False
     assert disabled_settings.route2_adaptive_downshift_enabled is False
     assert disabled_settings.route2_adaptive_downshift_dry_run_enabled is True
+    assert disabled_settings.route2_adaptive_reclaim_enabled is False
+    assert disabled_settings.route2_adaptive_reclaim_dry_run_enabled is True
+    assert disabled_settings.route2_adaptive_resupply_enabled is False
+    assert disabled_settings.route2_adaptive_resupply_dry_run_enabled is True
 
 
 def test_route2_shared_output_init_writer_flag_is_disabled_by_default(
@@ -9038,6 +9078,53 @@ def test_route2_adaptive_downshift_high_pressure_aborts_immediately(
     assert session.browser_playback.adaptive_downshift_pressure_abort_reason == "external_cpu_high"
 
 
+def test_route2_adaptive_downshift_route2_dominated_high_cpu_sample_does_not_abort_immediately(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    _set_route2_resource_snapshot(
+        manager,
+        per_user_cpu_cores_used_total={1: 10.4},
+        host_cpu_used_cores=19.0,
+        host_cpu_used_percent=0.95,
+        route2_cpu_cores_used_total=10.4,
+        route2_worker_ffmpeg_process_count=1,
+        external_cpu_cores_used_estimate=8.6,
+        external_cpu_percent_estimate=0.43,
+        external_pressure_level="high",
+        external_pressure_reason="external_cpu_high",
+    )
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
+    assert epoch.adaptive_downshift_aborted_reason is None
+    assert session.browser_playback.adaptive_downshift_pressure_abort_reason is None
+    assert session.browser_playback.adaptive_downshift_pressure_moderate_sample_count == 1
+    assert session.browser_playback.adaptive_downshift_pressure_snapshot["external_pressure_level"] == "high"
+    assert session.browser_playback.adaptive_downshift_pressure_snapshot["moderate_sample_count"] == 1
+
+
 def test_route2_adaptive_downshift_retry_cooldown_blocks_retry_without_replacement_cap(
     initialized_settings,
     monkeypatch,
@@ -9194,6 +9281,754 @@ def test_route2_adaptive_downshift_status_payload_exposes_transition_fields(
     assert item_payload["adaptive_downshift_replacement_epoch_cap_remaining"] == (
         ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION
     )
+
+
+def test_route2_adaptive_reclaim_dry_run_candidate_does_not_start_replacement(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    downshift_payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    payload = manager._route2_adaptive_reclaim_payload_locked(
+        session,
+        epoch,
+        record,
+        decision,
+        downshift_payload,
+    )
+
+    assert payload["adaptive_reclaim_candidate"] is True
+    assert payload["adaptive_reclaim_target_threads"] == 6
+    assert payload["adaptive_reclaim_state"] == "dry_run_candidate"
+    assert payload["adaptive_reclaim_released_threads_expected"] == 6
+    assert session.browser_playback.replacement_epoch_id is None
+
+
+def test_route2_adaptive_reclaim_blocks_unhealthy_or_unproven_donor(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=4.0,
+    )
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    downshift_payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
+
+    payload = manager._route2_adaptive_reclaim_payload_locked(
+        session,
+        epoch,
+        record,
+        decision,
+        downshift_payload,
+    )
+
+    assert payload["adaptive_reclaim_candidate"] is False
+    assert "active_bad_condition_reserve_protection" in payload["adaptive_reclaim_blockers"]
+    assert "supply_below_reclaim_threshold" in payload["adaptive_reclaim_blockers"]
+
+
+def test_route2_adaptive_reclaim_real_starts_downshift_and_denies_admission_until_measured(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_max_worker_threads=12,
+        route2_cpu_budget_percent=100,
+        route2_protected_min_threads_per_active_user=9,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_reclaim_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    started_workers = _capture_route2_worker_threads(monkeypatch)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+
+    with pytest.raises(PlaybackAdmissionError) as exc_info:
+        manager._raise_if_route2_admission_denied_locked(
+            incoming_user_id=2,
+            incoming_user_role="standard_user",
+            source_kind="local",
+        )
+
+    detail = exc_info.value.detail
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    assert detail["reason_code"] == "waiting_for_reclaim"
+    assert detail["admission_waiting_for_reclaim"] is True
+    assert detail["admission_reclaim_attempted"] is True
+    assert replacement.replacement_reason == "maintenance_downshift"
+    assert replacement.adaptive_reclaim_request_id == session.browser_playback.adaptive_reclaim_request_id
+    assert replacement.maintenance_downshift_target_threads == 6
+    assert replacement_record.assigned_threads == 6
+    assert replacement_record.assigned_threads_source == "adaptive_reclaim_maintenance_6"
+    assert replacement_record.adaptive_downshift_policy == "reclaim_donor"
+    assert detail["adaptive_reclaim_request_id"]
+    assert detail["adaptive_reclaim_consumer_user_id"] == 2
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert record.state == "running"
+    assert len(started_workers) == 1
+
+
+def test_route2_adaptive_reclaim_measures_capacity_after_switch_before_admission_can_succeed(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        assigned_threads=12,
+        route2_max_worker_threads=12,
+        route2_cpu_budget_percent=100,
+        route2_protected_min_threads_per_active_user=9,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_reclaim_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _capture_route2_worker_threads(monkeypatch)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    with pytest.raises(PlaybackAdmissionError):
+        manager._raise_if_route2_admission_denied_locked(
+            incoming_user_id=2,
+            incoming_user_role="standard_user",
+            source_kind="local",
+        )
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    manager._ensure_route2_epoch_workers_locked(session)
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_record.state = "running"
+    replacement_record.assigned_threads = 6
+    replacement_record.process_exists = True
+    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
+    replacement.transcoder_completed = True
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.adaptive_reclaim_state == "capacity_available"
+    assert session.browser_playback.adaptive_reclaim_cpu_headroom_before == 8
+    assert session.browser_playback.adaptive_reclaim_cpu_headroom_after == 11
+    assert session.browser_playback.adaptive_reclaim_released_threads_measured == 3
+    assert session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer is True
+    assert record.state == "stopped"
+    assert replacement_record.state == "running"
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, replacement_record.worker_id)
+    assert item_payload["adaptive_reclaim_state"] == "capacity_available"
+    assert item_payload["admission_reclaim_succeeded"] is True
+    assert item_payload["adaptive_reclaim_released_threads_measured"] == 3
+    assert item_payload["adaptive_reclaim_capacity_sufficient_for_consumer"] is True
+    assert item_payload["adaptive_reclaim_route2_headroom_after"] == 11
+    _mark_route2_runtime_supply(
+        session,
+        replacement,
+        replacement_record,
+        supply_rate_x=2.0,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=2.0,
+    )
+    assert manager._route2_resupply_protections_locked() == []
+
+
+def test_route2_adaptive_reclaim_measured_insufficient_capacity_does_not_claim_success(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        assigned_threads=12,
+        route2_max_worker_threads=15,
+        route2_cpu_budget_percent=100,
+        route2_protected_min_threads_per_active_user=9,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_reclaim_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 17)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _capture_route2_worker_threads(monkeypatch)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.7,
+        observation_seconds=24.0,
+        runway_seconds=320.0,
+        cpu_cores_used=1.0,
+    )
+    with pytest.raises(PlaybackAdmissionError):
+        manager._raise_if_route2_admission_denied_locked(
+            incoming_user_id=1,
+            incoming_user_role="admin",
+            source_kind="local",
+        )
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    manager._ensure_route2_epoch_workers_locked(session)
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_record.state = "running"
+    replacement_record.assigned_threads = 4
+    replacement_record.process_exists = True
+    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
+    replacement.transcoder_completed = True
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.adaptive_reclaim_state == "capacity_insufficient"
+    assert session.browser_playback.adaptive_reclaim_abort_reason == "insufficient_measured_capacity"
+    assert session.browser_playback.adaptive_reclaim_cpu_headroom_after < 9
+    assert session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer is False
+
+
+def test_route2_adaptive_reclaim_abort_preserves_old_epoch_and_records_abort(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_reclaim_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._create_route2_downshift_replacement_epoch_locked(
+        session,
+        epoch,
+        target_threads=6,
+        reclaim_request_id="reclaim-test",
+    )
+    assert replacement is not None
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "donor_downshift_warming"
+
+    manager._abort_route2_downshift_replacement_locked(
+        session,
+        replacement,
+        reason="external_pressure_during_downshift",
+    )
+
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.browser_playback.adaptive_reclaim_state == "reclaim_aborted"
+    assert session.browser_playback.adaptive_reclaim_abort_reason == "external_pressure_during_downshift"
+    assert record.state == "running"
+    assert session.browser_playback.adaptive_reclaim_retry_count == 1
+    assert session.browser_playback.adaptive_reclaim_retry_blocker == "adaptive_reclaim_retry_cooldown_active"
+
+
+def test_route2_maintenance_downshift_without_reclaim_id_does_not_count_as_reclaim(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_reclaim_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _capture_route2_worker_threads(monkeypatch)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._create_route2_downshift_replacement_epoch_locked(
+        session,
+        epoch,
+        target_threads=6,
+    )
+    assert replacement is not None
+    manager._ensure_route2_epoch_workers_locked(session)
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_record.state = "running"
+    replacement_record.assigned_threads = 6
+    replacement_record.process_exists = True
+    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
+    replacement.transcoder_completed = True
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert replacement.adaptive_reclaim_request_id is None
+    assert session.browser_playback.adaptive_reclaim_state == "none"
+    assert session.browser_playback.adaptive_reclaim_measured_at is None
+    assert session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer is None
+    item_payload = _route2_status_item(manager.get_route2_worker_status(), replacement_record.worker_id)
+    assert item_payload["adaptive_downshift_policy"] == "maintenance"
+    assert item_payload["admission_reclaim_succeeded"] is False
+
+
+def test_route2_pending_admission_reclaim_converts_later_downshift_to_reclaim_donor(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_max_worker_threads=12,
+        route2_cpu_budget_percent=100,
+        route2_protected_min_threads_per_active_user=9,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_reclaim_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=1.0,
+    )
+
+    detail = manager._route2_start_reclaim_for_admission_locked(
+        incoming_user_id=2,
+        incoming_user_role="standard_user",
+        source_kind="local",
+        incoming_media_item_id=999,
+    )
+
+    assert detail is not None
+    assert detail["adaptive_reclaim_state"] == "consumer_waiting_for_reclaim"
+    assert detail["adaptive_reclaim_request_id"]
+    request_id = detail["adaptive_reclaim_request_id"]
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+
+    assert replacement is not None
+    assert replacement.replacement_reason == "maintenance_downshift"
+    assert replacement.adaptive_reclaim_request_id == request_id
+    assert replacement.adaptive_reclaim_consumer_user_id == 2
+    assert replacement.adaptive_reclaim_consumer_media_item_id == 999
+    assert session.browser_playback.adaptive_reclaim_state == "donor_downshift_warming"
+    assert session.browser_playback.adaptive_reclaim_donor_worker_id == record.worker_id
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    if replacement.active_worker_id is None:
+        manager._ensure_route2_epoch_workers_locked(session)
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_payload = _route2_status_item(manager.get_route2_worker_status(), replacement_record.worker_id)
+    assert replacement_payload["adaptive_downshift_policy"] == "reclaim_donor"
+
+
+def test_route2_reclaim_retry_cooldown_blocks_before_replacement_cap(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_max_worker_threads=12,
+        route2_cpu_budget_percent=100,
+        route2_protected_min_threads_per_active_user=9,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_reclaim_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+    )
+    replacement = manager._create_route2_downshift_replacement_epoch_locked(
+        session,
+        epoch,
+        target_threads=6,
+        reclaim_request_id="reclaim-test",
+    )
+    assert replacement is not None
+    manager._abort_route2_downshift_replacement_locked(
+        session,
+        replacement,
+        reason="external_pressure_during_downshift",
+    )
+
+    detail = manager._route2_start_reclaim_for_admission_locked(
+        incoming_user_id=2,
+        incoming_user_role="standard_user",
+        source_kind="local",
+        incoming_media_item_id=999,
+    )
+
+    assert detail is not None
+    assert detail["admission_reclaim_failed_reason"] == "adaptive_reclaim_retry_cooldown_active"
+    assert detail["adaptive_reclaim_retry_blocker"] == "adaptive_reclaim_retry_cooldown_active"
+
+
+def test_route2_adaptive_resupply_marks_reclaimed_donor_priority_before_new_admission(
+    initialized_settings,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=6)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    record.assigned_threads_source = "adaptive_reclaim_maintenance_6"
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "capacity_available"
+    session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=5.0,
+    )
+
+    payload = manager._route2_adaptive_resupply_payload_locked(session, epoch, record)
+
+    assert payload["adaptive_resupply_needed"] is True
+    assert payload["priority_reexpand_pending"] is True
+    assert payload["donor_protection_active"] is True
+    assert payload["adaptive_resupply_target_threads"] == 9
+    protections = manager._route2_resupply_protections_locked()
+    assert protections and protections[0]["worker_id"] == record.worker_id
+
+
+def test_route2_adaptive_resupply_disabled_blocks_admission_with_dry_run_priority(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=6,
+        route2_max_worker_threads=12,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 4.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "capacity_available"
+    session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=5.0,
+    )
+
+    with pytest.raises(PlaybackAdmissionError) as exc_info:
+        manager._raise_if_route2_admission_denied_locked(
+            incoming_user_id=2,
+            incoming_user_role="standard_user",
+            source_kind="local",
+        )
+
+    detail = exc_info.value.detail
+    assert detail["reason_code"] == "adaptive_resupply_priority_reexpand_pending"
+    assert detail["admission_blocked_by_resupply"] is True
+    assert detail["adaptive_resupply_protections"][0]["state"] == "dry_run_needed"
+    assert session.browser_playback.replacement_epoch_id is None
+
+
+def test_route2_adaptive_resupply_enabled_starts_boost_replacement_without_stopping_donor(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=6,
+        route2_max_worker_threads=12,
+        route2_adaptive_resupply_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    started_workers = _capture_route2_worker_threads(monkeypatch)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 4.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "capacity_available"
+    session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=5.0,
+    )
+
+    replacement = manager._maybe_start_route2_resupply_locked(session, epoch)
+
+    assert replacement is not None
+    assert replacement.replacement_reason == "adaptive_resupply_boost"
+    assert replacement.adaptive_resupply_original_reclaim_request_id == "reclaim-test"
+    assert replacement.adaptive_resupply_target_threads == 9
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
+    assert record.state == "running"
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    assert replacement_record.assigned_threads == 9
+    assert replacement_record.assigned_threads_source == "adaptive_resupply_boost_9"
+    assert len(started_workers) == 1
+
+
+def test_route2_adaptive_resupply_ready_switches_and_clears_priority_when_donor_safe(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        playback_mode="lite",
+        assigned_threads=6,
+        route2_max_worker_threads=12,
+        route2_adaptive_resupply_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _capture_route2_worker_threads(monkeypatch)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 4.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "capacity_available"
+    session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=5.0,
+    )
+    replacement = manager._maybe_start_route2_resupply_locked(session, epoch)
+    assert replacement is not None
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_record.state = "running"
+    replacement_record.assigned_threads = 9
+    replacement_record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        replacement,
+        replacement_record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=80.0,
+        cpu_cores_used=6.0,
+    )
+    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
+    replacement.transcoder_completed = True
+
+    manager._refresh_route2_session_authority_locked(session)
+
+    assert session.browser_playback.active_epoch_id == replacement.epoch_id
+    assert session.browser_playback.priority_reexpand_pending is False
+    assert session.browser_playback.donor_protection_active is False
+    assert session.browser_playback.admission_blocked_by_resupply is False
+    assert session.browser_playback.adaptive_resupply_state == "donor_safe"
+    assert record.state == "stopped"
+    assert replacement_record.state == "running"
+    assert replacement_record.assigned_threads == 9
+    status = manager.get_route2_worker_status()
+    item_payload = _route2_status_item(status, replacement_record.worker_id)
+    assert item_payload["adaptive_resupply_state"] == "donor_safe"
+    assert item_payload["donor_health_after_resupply"]["safe"] is True
+
+
+def test_route2_adaptive_resupply_keeps_priority_when_boosted_donor_still_unsafe(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=6,
+        route2_max_worker_threads=12,
+        route2_adaptive_resupply_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _capture_route2_worker_threads(monkeypatch)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 4.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "capacity_available"
+    session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=5.0,
+    )
+    replacement = manager._maybe_start_route2_resupply_locked(session, epoch)
+    assert replacement is not None
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_record.state = "running"
+    replacement_record.assigned_threads = 9
+    replacement_record.process_exists = True
+    _mark_route2_runtime_supply(
+        session,
+        replacement,
+        replacement_record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=12.0,
+        cpu_cores_used=8.0,
+    )
+    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
+
+    manager._promote_route2_resupply_replacement_epoch_locked(session, replacement)
+
+    assert session.browser_playback.active_epoch_id == replacement.epoch_id
+    assert session.browser_playback.priority_reexpand_pending is True
+    assert session.browser_playback.donor_protection_active is True
+    assert session.browser_playback.adaptive_resupply_state == "capacity_insufficient_after_resupply"
+    assert "supply_below_health_floor" in session.browser_playback.adaptive_resupply_blockers
+
+
+def test_route2_adaptive_resupply_source_error_blocks_thread_boost_but_keeps_admission_protected(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=6,
+        route2_max_worker_threads=12,
+        route2_adaptive_resupply_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 4.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    record.non_retryable_error = "provider_source_error"
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "capacity_available"
+    session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=5.0,
+    )
+
+    replacement = manager._maybe_start_route2_resupply_locked(session, epoch)
+    protections = manager._route2_resupply_protections_locked()
+
+    assert replacement is None
+    assert protections and protections[0]["worker_id"] == record.worker_id
+    assert "provider_source_or_session_error" in protections[0]["blockers"]
+    assert session.browser_playback.priority_reexpand_pending is True
+
+
+def test_route2_adaptive_resupply_schema_status_exposes_transaction_fields(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=6,
+        route2_max_worker_threads=12,
+        route2_adaptive_resupply_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _capture_route2_worker_threads(monkeypatch)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 4.0})
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    session.browser_playback.adaptive_reclaim_request_id = "reclaim-test"
+    session.browser_playback.adaptive_reclaim_state = "capacity_available"
+    session.browser_playback.adaptive_reclaim_capacity_sufficient_for_consumer = True
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.0,
+        observation_seconds=24.0,
+        runway_seconds=20.0,
+        cpu_cores_used=5.0,
+    )
+    replacement = manager._maybe_start_route2_resupply_locked(session, epoch)
+    assert replacement is not None
+
+    item_payload = _route2_status_item(
+        manager.get_route2_worker_status(),
+        manager._route2_workers[replacement.active_worker_id].worker_id,
+    )
+
+    assert item_payload["adaptive_resupply_enabled"] is True
+    assert item_payload["adaptive_resupply_request_id"]
+    assert item_payload["adaptive_resupply_original_reclaim_request_id"] == "reclaim-test"
+    assert item_payload["adaptive_resupply_replacement_epoch_id"] == replacement.epoch_id
+    assert item_payload["adaptive_resupply_replacement_worker_id"] == replacement.active_worker_id
+    assert item_payload["adaptive_resupply_target_threads"] == 9
+    assert item_payload["priority_reexpand_pending"] is True
 
 
 def test_route2_closed_loop_marks_high_surplus_as_theoretical_donor_only(

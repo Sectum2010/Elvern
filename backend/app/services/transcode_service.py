@@ -17,6 +17,13 @@ from ..media_stream import ensure_media_path_within_root
 logger = logging.getLogger(__name__)
 
 
+_TRANSCODE_MANAGER_RESERVED_ROOTS = {
+    "browser_playback_route2",
+    "mobile_cache",
+    "mobile_sessions",
+}
+
+
 @dataclass(slots=True)
 class TranscodeJob:
     media_item_id: int
@@ -366,6 +373,8 @@ class TranscodeManager:
         cutoff = time.time() - (self.settings.transcode_ttl_minutes * 60)
         for child in self.settings.transcode_dir.iterdir():
             if not child.is_dir():
+                continue
+            if child.name in _TRANSCODE_MANAGER_RESERVED_ROOTS:
                 continue
             if child.stat().st_mtime >= cutoff:
                 continue

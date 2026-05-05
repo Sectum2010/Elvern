@@ -1320,6 +1320,81 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     downshift_safe_to_apply: bool = False
     downshift_transition_headroom_required: int | None = Field(default=None, ge=0)
     downshift_transition_headroom_available: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_enabled: bool = False
+    adaptive_reclaim_dry_run_enabled: bool = True
+    adaptive_reclaim_candidate: bool = False
+    adaptive_reclaim_candidate_reason: str | None = None
+    adaptive_reclaim_target_threads: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_state: str = "none"
+    adaptive_reclaim_request_id: str | None = None
+    adaptive_reclaim_consumer_worker_id: str | None = None
+    adaptive_reclaim_consumer_session_id: str | None = None
+    adaptive_reclaim_consumer_user_id: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_consumer_media_item_id: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_consumer_reason: str | None = None
+    adaptive_reclaim_donor_worker_id: str | None = None
+    adaptive_reclaim_donor_session_id: str | None = None
+    adaptive_reclaim_downshift_replacement_epoch_id: str | None = None
+    adaptive_reclaim_downshift_replacement_worker_id: str | None = None
+    adaptive_reclaim_started_at: str | None = None
+    adaptive_reclaim_switched_at: str | None = None
+    adaptive_reclaim_measured_at: str | None = None
+    adaptive_reclaim_completed_at: str | None = None
+    adaptive_reclaim_failed_reason: str | None = None
+    adaptive_reclaim_released_threads_expected: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_released_threads_measured: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_released_cpu_cores_measured: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_cpu_headroom_before: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_cpu_headroom_after: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_route2_cpu_cores_used_before: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_route2_cpu_cores_used_after: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_user_cpu_cores_used_before: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_user_cpu_cores_used_after: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_host_cpu_used_cores_before: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_host_cpu_used_cores_after: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_host_cpu_spare_cores_before: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_host_cpu_spare_cores_after: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_route2_headroom_before: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_route2_headroom_after: int | None = Field(default=None, ge=0)
+    adaptive_reclaim_memory_pressure_before: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_memory_pressure_after: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_external_pressure_before: str | None = None
+    adaptive_reclaim_external_pressure_after: str | None = None
+    adaptive_reclaim_capacity_sufficient_for_consumer: bool | None = None
+    adaptive_reclaim_retry_count: int = Field(default=0, ge=0)
+    adaptive_reclaim_retry_not_before_seconds: float | None = Field(default=None, ge=0)
+    adaptive_reclaim_retry_blocker: str | None = None
+    adaptive_reclaim_blockers: list[str] = Field(default_factory=list)
+    adaptive_reclaim_abort_reason: str | None = None
+    adaptive_resupply_enabled: bool = False
+    adaptive_resupply_dry_run_enabled: bool = True
+    adaptive_resupply_needed: bool = False
+    adaptive_resupply_reason: str | None = None
+    adaptive_resupply_priority: int = Field(default=0, ge=0)
+    adaptive_resupply_target_threads: int | None = Field(default=None, ge=0)
+    adaptive_resupply_state: str = "none"
+    adaptive_resupply_request_id: str | None = None
+    adaptive_resupply_original_reclaim_request_id: str | None = None
+    adaptive_resupply_donor_worker_id: str | None = None
+    adaptive_resupply_replacement_epoch_id: str | None = None
+    adaptive_resupply_replacement_worker_id: str | None = None
+    adaptive_resupply_started_at: str | None = None
+    adaptive_resupply_switched_at: str | None = None
+    adaptive_resupply_measured_at: str | None = None
+    adaptive_resupply_blockers: list[str] = Field(default_factory=list)
+    adaptive_resupply_abort_reason: str | None = None
+    priority_reexpand_pending: bool = False
+    priority_reexpand_reason: str | None = None
+    donor_protection_active: bool = False
+    donor_health_after_resupply: dict[str, object] = Field(default_factory=dict)
+    admission_blocked_by_resupply: bool = False
+    admission_waiting_for_reclaim: bool = False
+    admission_reclaim_possible: bool = False
+    admission_reclaim_attempted: bool = False
+    admission_reclaim_succeeded: bool = False
+    admission_reclaim_failed_reason: str | None = None
+    admission_capacity_after_reclaim: int | None = Field(default=None, ge=0)
+    admission_hard_block_reason: str | None = None
     process_exists: bool = False
     cpu_cores_used: float | None = Field(default=None, ge=0)
     cpu_percent_of_total: float | None = Field(default=None, ge=0)
@@ -1660,6 +1735,10 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     adaptive_thread_control_real_9_prepare_enabled: bool = False
     adaptive_downshift_enabled: bool = False
     adaptive_downshift_dry_run_enabled: bool = True
+    adaptive_reclaim_enabled: bool = False
+    adaptive_reclaim_dry_run_enabled: bool = True
+    adaptive_resupply_enabled: bool = False
+    adaptive_resupply_dry_run_enabled: bool = True
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
     native_playback_count: int = Field(default=0, ge=0)
     native_playback_running_count: int = Field(default=0, ge=0)
