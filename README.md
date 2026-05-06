@@ -54,7 +54,7 @@
 
 ## ✦ Why Elvern
 
-Elvern is a private, family-scale media server that takes the parts of self-hosted streaming that *should* feel premium — quality, reliability, and control — and stops compromising on them.
+Elvern is a private, family-scale media server that takes the parts of self-hosted streaming that should feel *premium* — quality, reliability, and control — and stops compromising on them.
 
 Most home-server stacks force a choice: stream through a browser and surrender to codec limits and stutter, or hand off to a player and lose your library context. Elvern refuses the trade. It runs a sophisticated **adaptive playback engine** for the browser path, **hands off cleanly to installed VLC** when you want reference-grade quality, and keeps everything wrapped behind a **private Tailscale-only perimeter** so the only people who can ever see your library are the ones you invited.
 

@@ -11521,6 +11521,20 @@ def test_route2_closed_loop_status_runtime_rebalance_follows_prepare_boost_role(
         "backend.app.services.mobile_playback_service._read_cgroup_telemetry_snapshot",
         lambda **_kwargs: (cgroup_snapshot, None),
     )
+    monkeypatch.setattr(
+        manager,
+        "_sample_host_cpu_pressure_locked",
+        lambda **_kwargs: _HostCpuPressureSnapshot(
+            host_cpu_total_cores=20,
+            host_cpu_used_cores=4.0,
+            host_cpu_used_percent=0.20,
+            external_cpu_cores_used_estimate=0.0,
+            external_cpu_percent_estimate=0.0,
+            external_ffmpeg_process_count=0,
+            external_ffmpeg_cpu_cores_estimate=None,
+            host_cpu_sample_mature=True,
+        ),
+    )
     item = _make_local_item(settings, item_id=381, relative_name="route2/closed-loop-prepare-runtime.mp4")
 
     first = manager.create_session(item, user_id=1, auth_session_id=995, username="alice", engine_mode="route2", playback_mode="full")
