@@ -138,6 +138,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
+  const floatingSearchScrollRestoreEnabled = ["desktop", "phone", "tablet"].includes(clientDeviceClass);
   const normalizedQuery = deferredQuery.trim().toLowerCase();
   const visibleSeriesRails = useMemo(
     () => seriesRails
@@ -245,7 +246,7 @@ export function LibrarySourcePage({ sourceKind }) {
   useEffect(() => {
     if (
       typeof window === "undefined"
-      || !floatingSearchDesktopMode
+      || !floatingSearchScrollRestoreEnabled
       || normalizedQuery
       || loading
       || pendingFloatingSearchRestoreYRef.current === null
@@ -260,7 +261,7 @@ export function LibrarySourcePage({ sourceKind }) {
     return () => window.cancelAnimationFrame(frameId);
   }, [
     filteredItems.length,
-    floatingSearchDesktopMode,
+    floatingSearchScrollRestoreEnabled,
     loading,
     normalizedQuery,
     visibleSeriesRails.length,
@@ -323,7 +324,7 @@ export function LibrarySourcePage({ sourceKind }) {
     const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
     const nextSearchValue = typeof nextValue === "string" ? nextValue : "";
 
-    if (floatingSearchDesktopMode && typeof window !== "undefined") {
+    if (floatingSearchScrollRestoreEnabled && typeof window !== "undefined") {
       const previousWasEmpty = previousValue.trim().length === 0;
       const nextIsEmpty = nextSearchValue.trim().length === 0;
       if (previousWasEmpty && !nextIsEmpty && floatingSearchScrollYRef.current === null) {

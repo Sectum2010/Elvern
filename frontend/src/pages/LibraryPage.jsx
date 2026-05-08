@@ -171,6 +171,7 @@ export function LibraryPage() {
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
+  const floatingSearchScrollRestoreEnabled = ["desktop", "phone", "tablet"].includes(clientDeviceClass);
   const isPhoneClient = useMemo(() => {
     if (typeof navigator === "undefined") {
       return false;
@@ -247,7 +248,7 @@ export function LibraryPage() {
   function scheduleFloatingSearchScrollRestore() {
     if (
       typeof window === "undefined"
-      || !floatingSearchDesktopMode
+      || !floatingSearchScrollRestoreEnabled
       || pendingFloatingSearchRestoreYRef.current === null
     ) {
       return;
@@ -914,7 +915,7 @@ export function LibraryPage() {
     const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
     const nextSearchValue = typeof nextValue === "string" ? nextValue : "";
 
-    if (floatingSearchDesktopMode && typeof window !== "undefined") {
+    if (floatingSearchScrollRestoreEnabled && typeof window !== "undefined") {
       const previousWasEmpty = previousValue.trim().length === 0;
       const nextIsEmpty = nextSearchValue.trim().length === 0;
       if (previousWasEmpty && !nextIsEmpty && floatingSearchScrollYRef.current === null) {
