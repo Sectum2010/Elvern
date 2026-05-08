@@ -105,16 +105,25 @@ const EMPTY_CLOUD_LIBRARIES = {
   shared_libraries: [],
 };
 
-const ACTIVE_DOWNLOAD_PHASES = new Set(["starting", "downloading", "browser_handoff"]);
+const CONTROLLED_DOWNLOAD_PHASES = new Set(["starting", "downloading"]);
+const DOWNLOAD_START_LOCK_PHASES = new Set(["starting", "downloading", "browser_handoff"]);
+const DOWNLOAD_FALLBACK_ACK_MS = 6500;
+const DOWNLOAD_FINAL_ACK_MS = 6500;
+const DOWNLOAD_SAMPLE_WINDOW_MS = 30_000;
+const DOWNLOAD_STALL_AFTER_MS = 5000;
+const DOWNLOAD_FAST_EMA_ALPHA = 0.35;
+const DOWNLOAD_SLOW_EMA_ALPHA = 0.12;
 const INITIAL_DOWNLOAD_STATE = {
   active: false,
   phase: "idle",
+  mode: "idle",
   sessionToken: "",
   downloadUrl: "",
   receivedBytes: 0,
   totalBytes: 0,
   etaSeconds: null,
   etaAvailable: false,
+  stalled: false,
   message: "",
   error: "",
   blocked: false,
@@ -168,6 +177,21 @@ function downloadEtaTone(seconds) {
     return "red";
   }
   return "dark-purple";
+}
+
+function sanitizeSuggestedDownloadName(value, fallback = "movie") {
+  const normalized = String(value || fallback)
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized || fallback;
+}
+
+function supportsControlledDownloadMode(clientDeviceClass) {
+  return clientDeviceClass === "desktop"
+    && typeof window !== "undefined"
+    && typeof window.showSaveFilePicker === "function"
+    && typeof ReadableStream !== "undefined";
 }
 
 function triggerBrowserNativeDownload(downloadUrl, filename) {
@@ -454,8 +478,15 @@ export function DetailPage() {
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
   const [downloadState, setDownloadState] = useState(() => ({ ...INITIAL_DOWNLOAD_STATE }));
   const downloadSamplesRef = useRef([]);
-  const downloadEmaSpeedRef = useRef(null);
+  const downloadFastEmaSpeedRef = useRef(null);
+  const downloadSlowEmaSpeedRef = useRef(null);
+  const downloadLastProgressAtRef = useRef(0);
   const downloadAbortControllerRef = useRef(null);
+  const downloadWritableRef = useRef(null);
+  const downloadStallTimerRef = useRef(0);
+  const downloadHandoffTimerRef = useRef(0);
+  const downloadStartLockedRef = useRef(false);
+  const downloadTerminationRequestedRef = useRef(false);
   const clientPlatform = detectClientPlatform();
   const desktopPlatform = detectDesktopPlatform();
   const clientDeviceClass = detectClientDeviceClass();
@@ -476,7 +507,11 @@ export function DetailPage() {
 
   useEffect(() => () => {
     downloadAbortControllerRef.current?.abort();
+    downloadWritableRef.current?.abort?.();
     downloadAbortControllerRef.current = null;
+    downloadWritableRef.current = null;
+    window.clearInterval(downloadStallTimerRef.current);
+    window.clearTimeout(downloadHandoffTimerRef.current);
   }, []);
 
   function resetLocalProviderReconnectPendingAfterReturn() {
@@ -1815,41 +1850,124 @@ export function DetailPage() {
     }
   }
 
+  function clearDownloadRuntimeTimers() {
+    window.clearInterval(downloadStallTimerRef.current);
+    downloadStallTimerRef.current = 0;
+    window.clearTimeout(downloadHandoffTimerRef.current);
+    downloadHandoffTimerRef.current = 0;
+  }
+
+  function resetDownloadRuntime() {
+    clearDownloadRuntimeTimers();
+    downloadSamplesRef.current = [];
+    downloadFastEmaSpeedRef.current = null;
+    downloadSlowEmaSpeedRef.current = null;
+    downloadLastProgressAtRef.current = 0;
+    downloadAbortControllerRef.current = null;
+    downloadWritableRef.current = null;
+    downloadTerminationRequestedRef.current = false;
+  }
+
+  function scheduleDownloadStateReset(delayMs = DOWNLOAD_FINAL_ACK_MS) {
+    window.clearTimeout(downloadHandoffTimerRef.current);
+    downloadHandoffTimerRef.current = window.setTimeout(() => {
+      setDownloadState((current) => {
+        if (current.phase === "starting" || current.phase === "downloading") {
+          return current;
+        }
+        downloadStartLockedRef.current = false;
+        return { ...INITIAL_DOWNLOAD_STATE };
+      });
+    }, delayMs);
+  }
+
+  function startDownloadStallMonitor() {
+    window.clearInterval(downloadStallTimerRef.current);
+    downloadStallTimerRef.current = window.setInterval(() => {
+      const now = performance.now();
+      const stalled = downloadLastProgressAtRef.current > 0
+        && now - downloadLastProgressAtRef.current > DOWNLOAD_STALL_AFTER_MS;
+      if (!stalled) {
+        return;
+      }
+      setDownloadState((current) => {
+        if (
+          current.mode !== "controlled"
+          || current.phase !== "downloading"
+          || current.receivedBytes >= current.totalBytes
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          stalled: true,
+          etaAvailable: false,
+          etaSeconds: null,
+          message: "Download stalled. Waiting for data...",
+        };
+      });
+    }, 1000);
+  }
+
   function updateDownloadProgress(receivedBytes, totalBytes) {
     const now = performance.now();
-    const samples = [...downloadSamplesRef.current, { time: now, bytes: receivedBytes }].slice(-8);
+    const previousSample = downloadSamplesRef.current[downloadSamplesRef.current.length - 1] || null;
+    if (!previousSample || receivedBytes > previousSample.bytes) {
+      downloadLastProgressAtRef.current = now;
+    }
+    const samples = [
+      ...downloadSamplesRef.current.filter((sample) => now - sample.timeMs <= DOWNLOAD_SAMPLE_WINDOW_MS),
+      { timeMs: now, bytes: receivedBytes },
+    ];
     downloadSamplesRef.current = samples;
     const speeds = [];
     for (let index = 1; index < samples.length; index += 1) {
       const previous = samples[index - 1];
-      const current = samples[index];
-      const elapsedSeconds = (current.time - previous.time) / 1000;
-      const bytesDelta = current.bytes - previous.bytes;
-      if (elapsedSeconds > 0 && bytesDelta > 0) {
+      const currentSample = samples[index];
+      const elapsedSeconds = (currentSample.timeMs - previous.timeMs) / 1000;
+      const bytesDelta = currentSample.bytes - previous.bytes;
+      if (elapsedSeconds >= 0.25 && bytesDelta > 0) {
         speeds.push(bytesDelta / elapsedSeconds);
       }
     }
     speeds.sort((left, right) => left - right);
     const medianSpeed = speeds.length ? speeds[Math.floor(speeds.length / 2)] : null;
     if (medianSpeed) {
-      downloadEmaSpeedRef.current = downloadEmaSpeedRef.current
-        ? (downloadEmaSpeedRef.current * 0.7) + (medianSpeed * 0.3)
+      downloadFastEmaSpeedRef.current = downloadFastEmaSpeedRef.current
+        ? (downloadFastEmaSpeedRef.current * (1 - DOWNLOAD_FAST_EMA_ALPHA)) + (medianSpeed * DOWNLOAD_FAST_EMA_ALPHA)
+        : medianSpeed;
+      downloadSlowEmaSpeedRef.current = downloadSlowEmaSpeedRef.current
+        ? (downloadSlowEmaSpeedRef.current * (1 - DOWNLOAD_SLOW_EMA_ALPHA)) + (medianSpeed * DOWNLOAD_SLOW_EMA_ALPHA)
         : medianSpeed;
     }
-    const remainingBytes = Math.max(0, totalBytes - receivedBytes);
-    const etaSeconds = samples.length >= 3 && downloadEmaSpeedRef.current
-      ? remainingBytes / downloadEmaSpeedRef.current
+    const slowSpeed = downloadSlowEmaSpeedRef.current;
+    const fastSpeed = downloadFastEmaSpeedRef.current;
+    const effectiveSpeed = medianSpeed && slowSpeed && fastSpeed
+      ? Math.min((slowSpeed * 0.7) + (medianSpeed * 0.3), fastSpeed)
       : null;
-    setDownloadState((current) => ({
-      ...current,
-      active: true,
-      phase: "downloading",
-      receivedBytes,
-      totalBytes,
-      etaSeconds,
-      etaAvailable: etaSeconds !== null,
-      message: etaSeconds !== null ? "Download active." : "Estimating download time...",
-    }));
+    const remainingBytes = Math.max(0, totalBytes - receivedBytes);
+    const rawEtaSeconds = samples.length >= 3 && effectiveSpeed
+      ? remainingBytes / effectiveSpeed
+      : null;
+    setDownloadState((current) => {
+      let etaSeconds = rawEtaSeconds;
+      if (Number.isFinite(etaSeconds) && Number.isFinite(current.etaSeconds) && current.etaSeconds > 0) {
+        etaSeconds = Math.min(current.etaSeconds * 1.7, Math.max(current.etaSeconds * 0.55, etaSeconds));
+      }
+      const etaAvailable = Number.isFinite(etaSeconds) && etaSeconds >= 0;
+      return {
+        ...current,
+        active: true,
+        mode: "controlled",
+        phase: "downloading",
+        receivedBytes,
+        totalBytes,
+        etaSeconds: etaAvailable ? etaSeconds : null,
+        etaAvailable,
+        stalled: false,
+        message: etaAvailable ? "Download active." : "Estimating download time...",
+      };
+    });
   }
 
   function isMobileDownloadSizeBlocked(targetItem = item) {
@@ -1868,7 +1986,7 @@ export function DetailPage() {
   }
 
   function openDownloadDialog() {
-    if (!item || downloadState.active) {
+    if (!item || downloadStartLockedRef.current || DOWNLOAD_START_LOCK_PHASES.has(downloadState.phase)) {
       return;
     }
     if (isMobileDownloadSizeBlocked(item)) {
@@ -1891,8 +2009,168 @@ export function DetailPage() {
     setDownloadModalOpen(true);
   }
 
+  async function terminateDownloadSessionQuietly(sessionToken) {
+    if (!sessionToken) {
+      return;
+    }
+    try {
+      await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/terminate`, {
+        method: "POST",
+      });
+    } catch {
+      // Best-effort cleanup; the stream validator also rejects expired/revoked sessions.
+    }
+  }
+
+  async function markDownloadFailure(sessionToken, message) {
+    if (!sessionToken) {
+      return;
+    }
+    try {
+      await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/failed`, {
+        method: "POST",
+        data: { message: message || "download_failed" },
+      });
+    } catch {
+      // Best-effort audit update.
+    }
+  }
+
+  async function abortActiveWritable() {
+    const writable = downloadWritableRef.current;
+    downloadWritableRef.current = null;
+    if (!writable || typeof writable.abort !== "function") {
+      return;
+    }
+    try {
+      await writable.abort();
+    } catch {
+      // Some browsers throw if the writable was already closed or aborted.
+    }
+  }
+
+  async function openControlledDownloadWritable(suggestedName) {
+    const fileHandle = await window.showSaveFilePicker({
+      suggestedName: sanitizeSuggestedDownloadName(suggestedName, "movie"),
+    });
+    if (!fileHandle || typeof fileHandle.createWritable !== "function") {
+      throw new Error("Controlled file writing is not available in this browser.");
+    }
+    return fileHandle.createWritable();
+  }
+
+  async function runControlledDownload({
+    abortController,
+    downloadUrl,
+    sessionToken,
+    suggestedName,
+    totalBytes,
+  }) {
+    setDownloadState((current) => ({
+      ...current,
+      active: true,
+      mode: "controlled",
+      phase: "starting",
+      sessionToken,
+      downloadUrl,
+      totalBytes,
+      message: "Choose where to save this movie.",
+    }));
+
+    let writable;
+    try {
+      writable = await openControlledDownloadWritable(suggestedName);
+    } catch (pickerError) {
+      await terminateDownloadSessionQuietly(sessionToken);
+      downloadStartLockedRef.current = false;
+      resetDownloadRuntime();
+      setDownloadState({
+        ...INITIAL_DOWNLOAD_STATE,
+        phase: "terminated",
+        message: "Download cancelled.",
+      });
+      scheduleDownloadStateReset(DOWNLOAD_FINAL_ACK_MS);
+      return;
+    }
+
+    downloadWritableRef.current = writable;
+    const response = await fetch(downloadUrl, {
+      credentials: "include",
+      signal: abortController.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Download failed with status ${response.status}`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("Controlled download streaming is not available in this browser.");
+    }
+    const responseTotalBytes = Number(response.headers.get("content-length") || totalBytes || 0);
+    setDownloadState((current) => ({
+      ...current,
+      active: true,
+      mode: "controlled",
+      phase: "downloading",
+      totalBytes: responseTotalBytes,
+      message: "Estimating download time...",
+    }));
+    updateDownloadProgress(0, responseTotalBytes);
+    startDownloadStallMonitor();
+
+    let receivedBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (abortController.signal.aborted) {
+        throw new DOMException("Download aborted", "AbortError");
+      }
+      if (value && value.byteLength > 0) {
+        await writable.write(value);
+        receivedBytes += value.byteLength;
+        updateDownloadProgress(receivedBytes, responseTotalBytes);
+      }
+    }
+
+    await writable.close();
+    downloadWritableRef.current = null;
+    window.clearInterval(downloadStallTimerRef.current);
+    downloadStallTimerRef.current = 0;
+    await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/complete`, {
+      method: "POST",
+    });
+    downloadStartLockedRef.current = false;
+    resetDownloadRuntime();
+    setDownloadState({
+      ...INITIAL_DOWNLOAD_STATE,
+      mode: "controlled",
+      phase: "completed",
+      receivedBytes: responseTotalBytes || receivedBytes,
+      totalBytes: responseTotalBytes || receivedBytes,
+      message: "Download complete.",
+    });
+    scheduleDownloadStateReset(DOWNLOAD_FINAL_ACK_MS);
+  }
+
+  function startBrowserNativeFallback({ downloadUrl, sessionToken, totalBytes, suggestedName }) {
+    setDownloadState({
+      ...INITIAL_DOWNLOAD_STATE,
+      active: true,
+      mode: "browser",
+      phase: "browser_handoff",
+      sessionToken,
+      downloadUrl,
+      totalBytes,
+      message: "Browser download started. ETA unavailable after browser handoff.",
+    });
+    triggerBrowserNativeDownload(downloadUrl, suggestedName);
+    downloadAbortControllerRef.current = null;
+    scheduleDownloadStateReset(DOWNLOAD_FALLBACK_ACK_MS);
+  }
+
   async function handleConfirmDownload() {
-    if (!item || downloadState.active) {
+    if (!item || downloadStartLockedRef.current || DOWNLOAD_START_LOCK_PHASES.has(downloadState.phase)) {
       return;
     }
     if (isMobileDownloadSizeBlocked(item)) {
@@ -1904,17 +2182,18 @@ export function DetailPage() {
       return;
     }
     setDownloadModalOpen(false);
-    downloadSamplesRef.current = [];
-    downloadEmaSpeedRef.current = null;
+    resetDownloadRuntime();
+    downloadStartLockedRef.current = true;
     const abortController = new AbortController();
     downloadAbortControllerRef.current = abortController;
     setDownloadState({
       ...INITIAL_DOWNLOAD_STATE,
       active: true,
+      mode: "controlled",
       phase: "starting",
       receivedBytes: 0,
       totalBytes: Number(item.file_size || 0),
-      message: "Starting browser download...",
+      message: "Starting download...",
     });
     let sessionToken = "";
     try {
@@ -1923,42 +2202,53 @@ export function DetailPage() {
         signal: abortController.signal,
       });
       if (abortController.signal.aborted) {
-        return;
+        throw new DOMException("Download aborted", "AbortError");
       }
       sessionToken = sessionPayload.session_token;
       const totalBytes = Number(sessionPayload.file_size || item.file_size || 0);
       const downloadUrl = sessionPayload.download_url;
-      setDownloadState((current) => ({
-        ...current,
-        active: true,
-        phase: "browser_handoff",
-        sessionToken,
-        downloadUrl,
-        totalBytes,
-        etaSeconds: null,
-        etaAvailable: false,
-        message: "Browser download active. ETA unavailable after browser handoff.",
-      }));
-      downloadAbortControllerRef.current = null;
-      triggerBrowserNativeDownload(downloadUrl, item.original_filename || `${detailTitle}.bin`);
-    } catch (requestError) {
-      downloadAbortControllerRef.current = null;
-      if (requestError.name === "AbortError") {
+      const suggestedName = sanitizeSuggestedDownloadName(item.original_filename || `${detailTitle}.bin`, "movie");
+      if (supportsControlledDownloadMode(clientDeviceClass)) {
+        await runControlledDownload({
+          abortController,
+          downloadUrl,
+          sessionToken,
+          suggestedName,
+          totalBytes,
+        });
         return;
       }
-      if (sessionToken) {
-        try {
-          await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/failed`, {
-            method: "POST",
-            data: { message: requestError.message || "download_failed" },
-          });
-        } catch {
-          // Best-effort audit update.
-        }
+      startBrowserNativeFallback({
+        downloadUrl,
+        sessionToken,
+        suggestedName,
+        totalBytes,
+      });
+    } catch (requestError) {
+      downloadAbortControllerRef.current = null;
+      await abortActiveWritable();
+      if (requestError.name === "AbortError" && downloadTerminationRequestedRef.current) {
+        return;
       }
+      if (requestError.name === "AbortError") {
+        await terminateDownloadSessionQuietly(sessionToken);
+        downloadStartLockedRef.current = false;
+        resetDownloadRuntime();
+        setDownloadState({
+          ...INITIAL_DOWNLOAD_STATE,
+          phase: "terminated",
+          message: "Download cancelled.",
+        });
+        scheduleDownloadStateReset(DOWNLOAD_FINAL_ACK_MS);
+        return;
+      }
+      await markDownloadFailure(sessionToken, requestError.message || "download_failed");
+      downloadStartLockedRef.current = false;
+      resetDownloadRuntime();
       setDownloadState((current) => ({
         ...current,
         active: false,
+        mode: "controlled",
         phase: "failed",
         error: requestError.message || "Download failed",
         message: "",
@@ -1968,28 +2258,36 @@ export function DetailPage() {
 
   async function handleTerminateDownload() {
     const sessionToken = downloadState.sessionToken;
+    downloadTerminationRequestedRef.current = true;
     downloadAbortControllerRef.current?.abort();
     downloadAbortControllerRef.current = null;
-    downloadSamplesRef.current = [];
-    downloadEmaSpeedRef.current = null;
+    window.clearInterval(downloadStallTimerRef.current);
+    downloadStallTimerRef.current = 0;
+    await abortActiveWritable();
     try {
       if (sessionToken) {
         await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/terminate`, {
           method: "POST",
         });
       }
+      downloadStartLockedRef.current = false;
+      resetDownloadRuntime();
       setDownloadState({
         ...INITIAL_DOWNLOAD_STATE,
         phase: "terminated",
         message: "Download terminated.",
       });
+      scheduleDownloadStateReset(DOWNLOAD_FINAL_ACK_MS);
     } catch (requestError) {
+      downloadStartLockedRef.current = false;
+      resetDownloadRuntime();
       setDownloadState((current) => ({
         ...INITIAL_DOWNLOAD_STATE,
         phase: "terminated",
         error: requestError.message || "Download termination failed",
         message: "Download termination requested.",
       }));
+      scheduleDownloadStateReset(DOWNLOAD_FINAL_ACK_MS);
     }
   }
 
@@ -2298,17 +2596,30 @@ export function DetailPage() {
   const downloadProgressPercent = downloadState.totalBytes > 0
     ? Math.min(100, Math.max(0, (downloadState.receivedBytes / downloadState.totalBytes) * 100))
     : 0;
-  const downloadActive = Boolean(downloadState.active && ACTIVE_DOWNLOAD_PHASES.has(downloadState.phase));
-  const downloadEtaLabel = downloadActive
+  const controlledDownloadActive = Boolean(
+    downloadState.active
+    && downloadState.mode === "controlled"
+    && CONTROLLED_DOWNLOAD_PHASES.has(downloadState.phase),
+  );
+  const downloadStartLocked = Boolean(downloadState.active && DOWNLOAD_START_LOCK_PHASES.has(downloadState.phase));
+  const downloadButtonProgressPercent = controlledDownloadActive || downloadState.phase === "completed"
+    ? downloadProgressPercent
+    : 0;
+  const showDownloadTerminate = Boolean(controlledDownloadActive && downloadState.sessionToken);
+  const downloadEtaLabel = controlledDownloadActive
     ? (
       downloadState.phase === "starting"
         ? "Starting"
-        : downloadState.etaAvailable
-          ? formatDownloadEta(downloadState.etaSeconds)
-          : "Started"
+        : downloadState.stalled
+          ? "stalled"
+          : downloadState.etaAvailable
+            ? formatDownloadEta(downloadState.etaSeconds)
+            : "estimating"
     )
     : "";
-  const downloadEtaClassName = `detail-download-eta detail-download-eta--${downloadEtaTone(downloadState.etaAvailable ? downloadState.etaSeconds : null)}`;
+  const downloadEtaClassName = `detail-download-eta detail-download-eta--${downloadEtaTone(
+    downloadState.etaAvailable && !downloadState.stalled ? downloadState.etaSeconds : null,
+  )}`;
   const showDownloadButton = Boolean(item.download_access_allowed) && !item.hidden_for_user && !item.hidden_globally;
   const downloadDialogBlocked = Boolean(downloadState.blocked && downloadState.error);
 
@@ -2952,19 +3263,19 @@ export function DetailPage() {
           </button>
           {showDownloadButton ? (
             <div className="detail-download-action" aria-live="polite">
-              {downloadActive || downloadState.message || downloadState.error ? (
+              {controlledDownloadActive || downloadState.message || downloadState.error ? (
                 <div className="detail-download-status">
-                  {downloadActive ? <span className={downloadEtaClassName}>{downloadEtaLabel}</span> : null}
+                  {controlledDownloadActive ? <span className={downloadEtaClassName}>{downloadEtaLabel}</span> : null}
                   {downloadState.message ? <span className="detail-download-status__message">{downloadState.message}</span> : null}
                   {downloadState.error ? <span className="detail-download-status__error">{downloadState.error}</span> : null}
                 </div>
               ) : null}
               <button
                 aria-label="Download movie"
-                className={`detail-download-button${downloadActive ? " detail-download-button--active" : ""}`}
-                disabled={downloadActive}
+                className={`detail-download-button${controlledDownloadActive ? " detail-download-button--active" : ""}`}
+                disabled={downloadStartLocked}
                 onClick={openDownloadDialog}
-                style={{ "--download-progress": `${downloadProgressPercent}%` }}
+                style={{ "--download-progress": `${downloadButtonProgressPercent}%` }}
                 type="button"
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -2973,7 +3284,7 @@ export function DetailPage() {
                   <path d="M5 19h14" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
                 </svg>
               </button>
-              {downloadActive ? (
+              {showDownloadTerminate ? (
                 <button
                   className="ghost-button ghost-button--danger detail-download-terminate"
                   onClick={handleTerminateDownload}

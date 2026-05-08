@@ -1636,7 +1636,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   border: 1px solid rgba(143, 182, 218, 0.35);
   border-radius: 999px;
   background:
-    conic-gradient(#9af0b6 var(--download-progress), rgba(255, 255, 255, 0.12) 0),
+    conic-gradient(#fff var(--download-progress), rgba(255, 255, 255, 0.12) 0),
     rgba(11, 17, 24, 0.92);
   color: #f8fbff;
   box-shadow: var(--shadow);
