@@ -43,8 +43,8 @@ export function ForgotPasswordPage() {
           <label>
             Username
             <input
-              autoComplete="username"
-              name="username"
+              autoComplete="off"
+              name="account-help-username"
               onChange={(event) => setUsername(event.target.value)}
               required
               type="text"

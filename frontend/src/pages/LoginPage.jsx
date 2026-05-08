@@ -84,7 +84,7 @@ export function LoginPage() {
         <p className="eyebrow">Private media app</p>
         <h1>Elvern</h1>
         <p className="login-copy">
-          Sign in with your own family account before browsing the library. Elvern is private by default, meant to stay inside Tailscale, and still requires app auth for every user.
+          Sign in with your own family account before browsing the library.
         </p>
 
         <form className="login-form" onSubmit={handleSubmit}>

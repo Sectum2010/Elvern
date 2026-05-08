@@ -2,6 +2,28 @@
 
 This repo uses deadchecks for user-visible core paths. They are required before accepting changes that touch Detail rendering, mobile/browser playback lifecycle, native handoff, desktop VLC handoff, or the backend services/routes that feed those paths.
 
+## Password Autofill / Non-login Secret Fields
+
+- `LoginPage` is the only place allowed to use browser/password-manager login autofill.
+- No admin modal, destructive confirmation, user-management action, signup page, update-password form, delete-user confirmation, self-delete flow, invite-code form, download setting, or admin setting may auto-fill saved passwords.
+- `autocomplete="current-password"` is forbidden outside `LoginPage`.
+- `name="password"` and `id="password"` are forbidden outside `LoginPage`.
+- Admin re-auth and destructive action fields must use the hardened non-login secret input.
+- Secret values must be cleared on cancel, close, submit, failed submit when safest, and unmount, and must never be stored in `localStorage` or `sessionStorage`.
+- Every future PR touching password fields must run the autofill static regression test.
+- Any future UI review must manually verify that non-login fields open empty and are not password-manager prefilled.
+- This rule exists because accidental admin-password autofill in destructive actions is a major security risk.
+
+## Download Security / Network Inspect Reality
+
+- Elvern cannot hide a download request from the authorized user's own browser DevTools.
+- Elvern is not DRM and does not apply per-file client-side encryption; authorized users who receive raw movie bytes can copy the downloaded file afterward.
+- The download feature's security goal is to prevent unauthorized users, devices, accounts, and revoked sessions from reusing a captured URL or token to download movies they were not granted.
+- Download protections must stay server-side: auth-session binding, user binding, media-item binding, download-grant checks, hidden and source visibility checks, Range re-checks, and revoke or terminate checks.
+- Download bytes are encrypted in transit only when Elvern is served over HTTPS or another encrypted private transport.
+- Inspect Network by the authorized user cannot be prevented; server-side authorization prevents unauthorized replay.
+- Request logs and diagnostics must not expose raw download tokens or token hashes. If a path has to be logged, redact `/api/download/sessions/<anything>` as `/api/download/sessions/[redacted]`.
+
 ## Core Regression Matrix
 
 - Detail page: the page must render, not blank, and expose the expected playback/handoff actions.

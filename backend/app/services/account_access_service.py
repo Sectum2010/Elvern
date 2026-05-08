@@ -594,7 +594,7 @@ def create_download_session(
     now = now_dt.isoformat()
     expires_at = (now_dt + timedelta(minutes=DOWNLOAD_SESSION_TTL_MINUTES)).isoformat()
     with get_connection(settings) as connection:
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO download_sessions (
                 session_token_hash,
@@ -608,6 +608,7 @@ def create_download_session(
             (token_hash, user.id, item_id, user.session_id, now, expires_at),
         )
         connection.commit()
+        session_id = int(cursor.lastrowid)
     log_audit_event(
         settings,
         action="download.started",
@@ -620,13 +621,26 @@ def create_download_session(
         ip_address=ip_address,
         user_agent=user_agent,
     )
+    download_filename = safe_download_filename(str(detail.get("original_filename") or detail.get("title") or "movie"))
     return {
+        "session_id": session_id,
         "download_url": f"/api/download/sessions/{token}",
+        "controlled_download_url": f"/api/download/session-stream/{session_id}",
+        "controlled_complete_url": f"/api/download/session-stream/{session_id}/complete",
+        "controlled_failed_url": f"/api/download/session-stream/{session_id}/failed",
+        "controlled_terminate_url": f"/api/download/session-stream/{session_id}/terminate",
         "session_token": token,
         "title": str(detail["title"]),
+        "download_filename": download_filename,
+        "original_filename": download_filename,
         "file_size": int(detail["file_size"] or 0),
         "expires_at": expires_at,
     }
+
+
+def get_download_filename_for_item(settings: Settings, *, user_id: int, item_id: int) -> str:
+    detail = _get_download_item_detail(settings, user_id=user_id, item_id=item_id)
+    return safe_download_filename(str(detail.get("original_filename") or detail.get("title") or "movie"))
 
 
 def validate_download_session(
@@ -634,13 +648,13 @@ def validate_download_session(
     *,
     token: str,
     user: AuthenticatedUser,
+    session_id: int | None = None,
     allow_expired_download_session: bool = False,
 ) -> int:
     now = utcnow_iso()
     token_hash = _secret_hash(settings, "download-session", token)
     with get_connection(settings) as connection:
-        row = connection.execute(
-            """
+        query = """
             SELECT
                 d.id,
                 d.user_id,
@@ -656,9 +670,15 @@ def validate_download_session(
             JOIN users u ON u.id = d.user_id
             LEFT JOIN sessions s ON s.id = d.auth_session_id
             WHERE d.session_token_hash = ?
-            LIMIT 1
-            """,
-            (token_hash,),
+            """
+        params: list[object] = [token_hash]
+        if session_id is not None:
+            query += " AND d.id = ?"
+            params.append(int(session_id))
+        query += " LIMIT 1"
+        row = connection.execute(
+            query,
+            params,
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download session not found")
@@ -690,26 +710,46 @@ def validate_download_session(
     return int(row["media_item_id"])
 
 
-def is_download_session_still_authorized(settings: Settings, *, token: str, user: AuthenticatedUser) -> bool:
+def is_download_session_still_authorized(
+    settings: Settings,
+    *,
+    token: str,
+    user: AuthenticatedUser,
+    session_id: int | None = None,
+) -> bool:
     try:
-        validate_download_session(settings, token=token, user=user, allow_expired_download_session=True)
+        validate_download_session(
+            settings,
+            token=token,
+            user=user,
+            session_id=session_id,
+            allow_expired_download_session=True,
+        )
     except HTTPException:
         return False
     return True
 
 
-def mark_download_session_completed(settings: Settings, *, token: str, user: AuthenticatedUser) -> None:
+def mark_download_session_completed(
+    settings: Settings,
+    *,
+    token: str,
+    user: AuthenticatedUser,
+    session_id: int | None = None,
+) -> None:
     token_hash = _secret_hash(settings, "download-session", token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
-        row = connection.execute(
-            """
+        query = """
             SELECT id, media_item_id
             FROM download_sessions
             WHERE session_token_hash = ? AND user_id = ?
-            """,
-            (token_hash, user.id),
-        ).fetchone()
+            """
+        params: list[object] = [token_hash, user.id]
+        if session_id is not None:
+            query += " AND id = ?"
+            params.append(int(session_id))
+        row = connection.execute(query, params).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download session not found")
         connection.execute(
@@ -740,18 +780,21 @@ def mark_download_session_failed(
     user: AuthenticatedUser,
     message: str | None,
     audit_action: str = "download.failed",
+    session_id: int | None = None,
 ) -> None:
     token_hash = _secret_hash(settings, "download-session", token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
-        row = connection.execute(
-            """
+        query = """
             SELECT id, media_item_id
             FROM download_sessions
             WHERE session_token_hash = ? AND user_id = ?
-            """,
-            (token_hash, user.id),
-        ).fetchone()
+            """
+        params: list[object] = [token_hash, user.id]
+        if session_id is not None:
+            query += " AND id = ?"
+            params.append(int(session_id))
+        row = connection.execute(query, params).fetchone()
         if row is None:
             return
         connection.execute(
@@ -784,19 +827,22 @@ def mark_download_session_terminated(
     user: AuthenticatedUser,
     ip_address: str | None = None,
     user_agent: str | None = None,
+    session_id: int | None = None,
 ) -> None:
     token_hash = _secret_hash(settings, "download-session", token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
-        row = connection.execute(
-            """
+        query = """
             SELECT id, user_id, media_item_id, auth_session_id
             FROM download_sessions
             WHERE session_token_hash = ?
-            LIMIT 1
-            """,
-            (token_hash,),
-        ).fetchone()
+            """
+        params: list[object] = [token_hash]
+        if session_id is not None:
+            query += " AND id = ?"
+            params.append(int(session_id))
+        query += " LIMIT 1"
+        row = connection.execute(query, params).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download session not found")
         if int(row["user_id"]) != int(user.id) or (

@@ -1321,8 +1321,15 @@ class AdminDownloadAccessUpdateRequest(BaseModel):
 
 
 class DownloadSessionResponse(BaseModel):
+    session_id: int
     download_url: str
+    controlled_download_url: str
+    controlled_complete_url: str
+    controlled_failed_url: str
+    controlled_terminate_url: str
     title: str
+    download_filename: str
+    original_filename: str
     file_size: int
     expires_at: str
     session_token: str

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from backend.app.auth import (
     authenticate_user,
@@ -1533,6 +1533,10 @@ def test_download_session_endpoint_authorizes_range_requests(initialized_setting
             "UPDATE media_items SET library_source_id = ? WHERE id = ?",
             (shared_local_source_id, media_item["id"]),
         )
+        connection.execute(
+            "UPDATE media_items SET original_filename = ? WHERE id = ?",
+            ("nested/family movie?.mp4", media_item["id"]),
+        )
         connection.commit()
     update_download_access_for_user(
         initialized_settings,
@@ -1552,12 +1556,163 @@ def test_download_session_endpoint_authorizes_range_requests(initialized_setting
 
     session_response = client.post(f"/api/download/item/{media_item['id']}/session")
     assert session_response.status_code == 200
-    download_url = session_response.json()["download_url"]
+    session_payload = session_response.json()
+    download_url = session_payload["download_url"]
+    assert session_payload["download_filename"] == "family movie?.mp4"
+    assert session_payload["original_filename"] == "family movie?.mp4"
+    assert session_payload["session_token"] not in session_payload["controlled_download_url"]
 
     range_response = client.get(download_url, headers={"Range": "bytes=0-3"})
     assert range_response.status_code == 206
     assert range_response.headers["accept-ranges"] == "bytes"
+    assert range_response.headers["content-disposition"] == "attachment; filename*=UTF-8''family%20movie%3F.mp4"
     assert range_response.content == b"not "
+
+
+def test_download_session_rejects_captured_token_for_other_user_and_revoked_auth(initialized_settings, client) -> None:
+    alice = _create_standard_user(initialized_settings, username="download-alice")
+    _create_standard_user(initialized_settings, username="download-bob")
+    media_item = _create_media_item(initialized_settings, relative_name="captured-token.mp4")
+    with get_connection(initialized_settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ? WHERE id = ?",
+            (shared_local_source_id, media_item["id"]),
+        )
+        connection.commit()
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(alice["id"]),
+        access_mode="selected",
+        media_item_ids=[int(media_item["id"])],
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _alice_user, alice_token = _issue_user_session(
+        initialized_settings,
+        username="download-alice",
+        password="family-password",
+    )
+    client.cookies.set(initialized_settings.session_cookie_name, alice_token)
+
+    session_response = client.post(f"/api/download/item/{media_item['id']}/session")
+    assert session_response.status_code == 200
+    session_payload = session_response.json()
+
+    _bob_user, bob_token = _issue_user_session(
+        initialized_settings,
+        username="download-bob",
+        password="family-password",
+    )
+    client.cookies.set(initialized_settings.session_cookie_name, bob_token)
+    replay_response = client.get(session_payload["download_url"], headers={"Range": "bytes=0-3"})
+    assert replay_response.status_code == 403
+    controlled_replay_response = client.get(
+        session_payload["controlled_download_url"],
+        headers={
+            "Range": "bytes=0-3",
+            "X-Elvern-Download-Token": session_payload["session_token"],
+        },
+    )
+    assert controlled_replay_response.status_code == 403
+
+    client.cookies.set(initialized_settings.session_cookie_name, alice_token)
+    destroy_session(initialized_settings, alice_token)
+    revoked_session_response = client.get(session_payload["download_url"], headers={"Range": "bytes=0-3"})
+    assert revoked_session_response.status_code in {401, 403}
+
+
+def test_download_session_cloud_response_uses_sanitized_original_filename(initialized_settings, client, monkeypatch) -> None:
+    created = _create_standard_user(initialized_settings, username="cloud-download-name")
+    media_item = _create_media_item(initialized_settings, relative_name="cloud-download-name.mp4")
+    with get_connection(initialized_settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ?, original_filename = ? WHERE id = ?",
+            (shared_local_source_id, "cloud/family cloud movie.mkv", media_item["id"]),
+        )
+        connection.commit()
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="selected",
+        media_item_ids=[int(media_item["id"])],
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _session_user, token = _issue_user_session(
+        initialized_settings,
+        username="cloud-download-name",
+        password="family-password",
+    )
+    client.cookies.set(initialized_settings.session_cookie_name, token)
+
+    def fake_cloud_response(*args, **kwargs):
+        return Response(
+            content=b"cloud",
+            headers={"Content-Disposition": "attachment; filename*=UTF-8''movie"},
+            media_type="application/octet-stream",
+        )
+
+    monkeypatch.setattr("backend.app.routes.download.build_cloud_stream_response", fake_cloud_response)
+
+    session_response = client.post(f"/api/download/item/{media_item['id']}/session")
+    assert session_response.status_code == 200
+    response = client.get(session_response.json()["download_url"])
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == "attachment; filename*=UTF-8''family%20cloud%20movie.mkv"
+
+
+def test_download_session_rejects_after_grant_revoked(initialized_settings, client) -> None:
+    created = _create_standard_user(initialized_settings, username="revoked-download-grant")
+    media_item = _create_media_item(initialized_settings, relative_name="grant-revoked.mp4")
+    with get_connection(initialized_settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ? WHERE id = ?",
+            (shared_local_source_id, media_item["id"]),
+        )
+        connection.commit()
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="selected",
+        media_item_ids=[int(media_item["id"])],
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _session_user, token = _issue_user_session(
+        initialized_settings,
+        username="revoked-download-grant",
+        password="family-password",
+    )
+    client.cookies.set(initialized_settings.session_cookie_name, token)
+    session_response = client.post(f"/api/download/item/{media_item['id']}/session")
+    assert session_response.status_code == 200
+
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="none",
+        media_item_ids=[],
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    range_response = client.get(session_response.json()["download_url"], headers={"Range": "bytes=0-3"})
+    assert range_response.status_code == 403
 
 
 def test_download_session_terminate_revokes_stream_authorization(initialized_settings, client) -> None:

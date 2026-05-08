@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
-import { PasswordInput } from "../components/PasswordInput";
 import { apiRequest } from "../lib/api";
 import {
   formatGoogleConnectionHealthLabel,
@@ -1761,8 +1760,9 @@ export function SettingsPage() {
                     <strong>HTTPS app origin</strong>
                     <small>Use the private HTTPS hostname users actually browse to, not a raw HTTP IP address.</small>
                   </span>
-                  <PasswordInput
+                  <input
                     autoCapitalize="off"
+                    autoComplete="off"
                     autoCorrect="off"
                     className="cloud-source-form__input"
                     disabled={googleDriveSetupSaving}

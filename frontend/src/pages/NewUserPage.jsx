@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
-import { PasswordInput } from "../components/PasswordInput";
+import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { apiRequest } from "../lib/api";
 
 
@@ -42,6 +42,11 @@ export function NewUserPage() {
       await refreshAuth();
       navigate("/library", { replace: true });
     } catch (requestError) {
+      setForm((current) => ({
+        ...current,
+        password: "",
+        confirm_password: "",
+      }));
       setError(requestError.message || "Unable to create account");
     } finally {
       setPending(false);
@@ -57,8 +62,8 @@ export function NewUserPage() {
           <label>
             Username
             <input
-              autoComplete="username"
-              name="new-username"
+              autoComplete="off"
+              name="signup-username"
               onChange={(event) => updateField("username", event.target.value)}
               required
               type="text"
@@ -67,20 +72,20 @@ export function NewUserPage() {
           </label>
           <label>
             Password
-            <PasswordInput
+            <NonLoginSecretInput
               autoComplete="new-password"
-              name="new-password"
               onChange={(event) => updateField("password", event.target.value)}
+              purpose="signup-primary-secret"
               required
               value={form.password}
             />
           </label>
           <label>
             Confirm password
-            <PasswordInput
+            <NonLoginSecretInput
               autoComplete="new-password"
-              name="confirm-password"
               onChange={(event) => updateField("confirm_password", event.target.value)}
+              purpose="signup-confirm-secret"
               required
               value={form.confirm_password}
             />
@@ -89,6 +94,9 @@ export function NewUserPage() {
             One-time invite code
             <input
               autoComplete="one-time-code"
+              data-1p-ignore="true"
+              data-bwignore="true"
+              data-lpignore="true"
               name="invite-code"
               onChange={(event) => updateField("invite_code", event.target.value)}
               required

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LoadingView } from "../components/LoadingView";
-import { PasswordInput } from "../components/PasswordInput";
+import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
@@ -809,6 +809,13 @@ export function AdminPage() {
     if (userActionsModalUserId != null) {
       clearUserEditors(userActionsModalUserId);
     }
+    setSelfDeleteState({
+      open: false,
+      password: "",
+      armed: false,
+      pending: false,
+      error: "",
+    });
     setUserActionsModalUserId(null);
   }
 
@@ -981,6 +988,19 @@ export function AdminPage() {
     }
   }
 
+  function closeCreateUserForm() {
+    setCreateUserForm({ username: "", password: "", role: "standard_user" });
+    setCreateUserExpanded(false);
+  }
+
+  function toggleCreateUserForm() {
+    if (createUserExpanded) {
+      closeCreateUserForm();
+      return;
+    }
+    setCreateUserExpanded(true);
+  }
+
   async function handleCreateUser(event) {
     event.preventDefault();
     setCreatePending(true);
@@ -995,11 +1015,11 @@ export function AdminPage() {
           enabled: true,
         },
       });
-      setCreateUserForm({ username: "", password: "", role: "standard_user" });
-      setCreateUserExpanded(false);
+      closeCreateUserForm();
       setBanner({ tone: "success", text: "User created." });
       await loadAdminData({ silent: true });
     } catch (requestError) {
+      setCreateUserForm((current) => ({ ...current, password: "" }));
       setBanner({
         tone: "error",
         text: requestError.message || "Failed to create user",
@@ -1021,6 +1041,11 @@ export function AdminPage() {
       setFeedbackForUser(targetUser.id, "success", successText || `Updated ${payload.username}.`);
       await loadAdminData({ silent: true });
     } catch (requestError) {
+      if (updates && Object.prototype.hasOwnProperty.call(updates, "current_admin_password")) {
+        setRoleConfirm((current) => (current.userId === targetUser.id
+          ? { ...current, currentAdminPassword: "" }
+          : current));
+      }
       setFeedbackForUser(
         targetUser.id,
         "error",
@@ -1048,6 +1073,9 @@ export function AdminPage() {
       );
       await loadAdminData({ silent: true });
     } catch (requestError) {
+      setPasswordEditor((current) => (current.userId === entry.id
+        ? { ...current, newPassword: "", currentAdminPassword: "" }
+        : current));
       setFeedbackForUser(
         entry.id,
         "error",
@@ -1369,6 +1397,7 @@ export function AdminPage() {
       }
       setSelfDeleteState((current) => ({
         ...current,
+        password: "",
         pending: false,
         error: requestError.message || "Unable to verify your password.",
       }));
@@ -1397,6 +1426,8 @@ export function AdminPage() {
     } catch (requestError) {
       setSelfDeleteState((current) => ({
         ...current,
+        password: "",
+        armed: false,
         pending: false,
         error: requestError.message || "Failed to delete your admin account.",
       }));
@@ -1801,7 +1832,7 @@ export function AdminPage() {
             aria-expanded={createUserExpanded}
             aria-label="Create user"
             className="user-avatar-button user-avatar-button--create"
-            onClick={() => setCreateUserExpanded((current) => !current)}
+            onClick={toggleCreateUserForm}
             type="button"
           >
             <span aria-hidden="true" className="user-avatar-button__initials">+</span>
@@ -1809,15 +1840,13 @@ export function AdminPage() {
           <div className="admin-user-row__summary">
             <button
               className="admin-create-user-row__button"
-              onClick={() => setCreateUserExpanded((current) => !current)}
+              onClick={toggleCreateUserForm}
               type="button"
             >
               Create user
             </button>
             {createUserExpanded ? (
               <form className="admin-form admin-create-user-inline-form" onSubmit={handleCreateUser}>
-                <input autoComplete="false" className="sr-only" name="admin-decoy-username" tabIndex="-1" type="text" />
-                <input autoComplete="new-password" className="sr-only" name="admin-decoy-password" tabIndex="-1" type="password" />
                 <label>
                   Username
                   <input
@@ -1831,10 +1860,10 @@ export function AdminPage() {
                 </label>
                 <label>
                   Password
-                  <PasswordInput
+                  <NonLoginSecretInput
                     autoComplete="new-password"
-                    name="admin-create-user-password"
                     onChange={(event) => setCreateUserForm((current) => ({ ...current, password: event.target.value }))}
+                    purpose="admin-create-user-secret"
                     required
                     value={createUserForm.password}
                   />
@@ -1857,7 +1886,7 @@ export function AdminPage() {
                   <button
                     className="ghost-button"
                     disabled={createPending}
-                    onClick={() => setCreateUserExpanded(false)}
+                    onClick={closeCreateUserForm}
                     type="button"
                   >
                     Close
@@ -2013,32 +2042,9 @@ export function AdminPage() {
                 <p className="form-error">
                   Warning: deleting {selectedUserActionsEntry.username} revokes auth, native playback, Route2 sessions, and download sessions.
                 </p>
-                <input
-                  aria-hidden="true"
-                  autoComplete="username"
-                  className="sr-only"
-                  name={`decoy-user-${deleteUserState.fieldToken}`}
-                  tabIndex="-1"
-                  type="text"
-                />
-                <input
-                  aria-hidden="true"
-                  autoComplete="current-password"
-                  className="sr-only"
-                  name={`decoy-gate-${deleteUserState.fieldToken}`}
-                  tabIndex="-1"
-                  type="password"
-                />
-                <input
-                  autoCapitalize="off"
-                  autoComplete="new-password"
-                  autoCorrect="off"
+                <NonLoginSecretInput
                   className="admin-delete-confirm-secret"
-                  data-1p-ignore="true"
-                  data-form-type="other"
-                  data-lpignore="true"
-                  id={`destructive-gate-${deleteUserState.fieldToken}`}
-                  name={`destructive-gate-${deleteUserState.fieldToken}`}
+                  key={deleteUserState.fieldToken}
                   onChange={(event) =>
                     setDeleteUserState((current) => ({
                       ...current,
@@ -2047,8 +2053,7 @@ export function AdminPage() {
                     }))
                   }
                   placeholder="Required to delete this user"
-                  spellCheck="false"
-                  type="password"
+                  purpose={`delete-user-reauth-${deleteUserState.fieldToken}`}
                   value={deleteUserState.currentAdminPassword}
                 />
                 {deleteUserState.error ? <p className="form-error">{deleteUserState.error}</p> : null}
@@ -2096,8 +2101,8 @@ export function AdminPage() {
                     <p className="page-subnote">
                       Enter your current admin password first. You will see one final destructive confirmation before anything is deleted.
                     </p>
-                    <PasswordInput
-                      autoComplete="current-password"
+                    <NonLoginSecretInput
+                      autoComplete="new-password"
                       onChange={(event) =>
                         setSelfDeleteState((current) => ({
                           ...current,
@@ -2105,6 +2110,7 @@ export function AdminPage() {
                         }))
                       }
                       placeholder="Current admin password"
+                      purpose="self-delete-reauth"
                       value={selfDeleteState.password}
                     />
                     {selfDeleteState.error ? <p className="form-error">{selfDeleteState.error}</p> : null}
@@ -2178,8 +2184,8 @@ export function AdminPage() {
                 <p className="page-subnote">
                   Confirm making {selectedUserActionsEntry.username} {roleConfirm.nextRole === "admin" ? "an admin" : "a standard user"}.
                 </p>
-                <PasswordInput
-                  autoComplete="current-password"
+                <NonLoginSecretInput
+                  autoComplete="new-password"
                   onChange={(event) =>
                     setRoleConfirm((current) => ({
                       ...current,
@@ -2187,6 +2193,7 @@ export function AdminPage() {
                     }))
                   }
                   placeholder="Current admin password"
+                  purpose="role-change-reauth"
                   value={roleConfirm.currentAdminPassword}
                 />
                 <div className="admin-list__actions">
@@ -2212,7 +2219,7 @@ export function AdminPage() {
                   handleSubmitPassword(selectedUserActionsEntry);
                 }}
               >
-                <PasswordInput
+                <NonLoginSecretInput
                   autoComplete="new-password"
                   onChange={(event) =>
                     setPasswordEditor((current) => ({
@@ -2221,10 +2228,11 @@ export function AdminPage() {
                     }))
                   }
                   placeholder="New password"
+                  purpose="admin-update-new-secret"
                   value={passwordEditor.newPassword}
                 />
-                <PasswordInput
-                  autoComplete="current-password"
+                <NonLoginSecretInput
+                  autoComplete="new-password"
                   onChange={(event) =>
                     setPasswordEditor((current) => ({
                       ...current,
@@ -2232,6 +2240,7 @@ export function AdminPage() {
                     }))
                   }
                   placeholder="Current admin password"
+                  purpose="admin-update-reauth"
                   value={passwordEditor.currentAdminPassword}
                 />
                 <div className="admin-list__actions">
@@ -3050,6 +3059,12 @@ export function AdminPage() {
 		                              <div className="admin-invite-code-field">
 		                                <input
 		                                  aria-label="Invite code"
+                                      autoComplete="one-time-code"
+                                      data-1p-ignore="true"
+                                      data-bwignore="true"
+                                      data-lpignore="true"
+                                      id={`elvern-invite-code-${inviteCode.id}`}
+                                      name={`elvern-invite-code-${inviteCode.id}`}
 		                                  readOnly
 		                                  type={inviteCode.code && !isRevealed ? "password" : "text"}
 		                                  value={inviteCode.code || "Code is only available in this browser"}

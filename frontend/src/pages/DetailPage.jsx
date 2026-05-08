@@ -107,7 +107,6 @@ const EMPTY_CLOUD_LIBRARIES = {
 
 const CONTROLLED_DOWNLOAD_PHASES = new Set(["starting", "downloading"]);
 const DOWNLOAD_START_LOCK_PHASES = new Set(["starting", "downloading", "browser_handoff"]);
-const DOWNLOAD_FALLBACK_ACK_MS = 6500;
 const DOWNLOAD_FINAL_ACK_MS = 6500;
 const DOWNLOAD_SAMPLE_WINDOW_MS = 30_000;
 const DOWNLOAD_STALL_AFTER_MS = 5000;
@@ -119,6 +118,9 @@ const INITIAL_DOWNLOAD_STATE = {
   mode: "idle",
   sessionToken: "",
   downloadUrl: "",
+  controlledCompleteUrl: "",
+  controlledFailedUrl: "",
+  controlledTerminateUrl: "",
   receivedBytes: 0,
   totalBytes: 0,
   etaSeconds: null,
@@ -211,6 +213,10 @@ function triggerBrowserNativeDownload(downloadUrl, filename) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+function buildControlledDownloadHeaders(sessionToken) {
+  return sessionToken ? { "X-Elvern-Download-Token": sessionToken } : {};
 }
 
 function buildInfuseLaunchUrl(streamUrl, { successUrl, errorUrl } = {}) {
@@ -2009,12 +2015,13 @@ export function DetailPage() {
     setDownloadModalOpen(true);
   }
 
-  async function terminateDownloadSessionQuietly(sessionToken) {
+  async function terminateDownloadSessionQuietly(sessionToken, controlledTerminateUrl = "") {
     if (!sessionToken) {
       return;
     }
     try {
-      await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/terminate`, {
+      await apiRequest(controlledTerminateUrl || `/api/download/sessions/${encodeURIComponent(sessionToken)}/terminate`, {
+        headers: controlledTerminateUrl ? buildControlledDownloadHeaders(sessionToken) : {},
         method: "POST",
       });
     } catch {
@@ -2022,12 +2029,13 @@ export function DetailPage() {
     }
   }
 
-  async function markDownloadFailure(sessionToken, message) {
+  async function markDownloadFailure(sessionToken, message, controlledFailedUrl = "") {
     if (!sessionToken) {
       return;
     }
     try {
-      await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/failed`, {
+      await apiRequest(controlledFailedUrl || `/api/download/sessions/${encodeURIComponent(sessionToken)}/failed`, {
+        headers: controlledFailedUrl ? buildControlledDownloadHeaders(sessionToken) : {},
         method: "POST",
         data: { message: message || "download_failed" },
       });
@@ -2061,9 +2069,12 @@ export function DetailPage() {
 
   async function runControlledDownload({
     abortController,
+    completeUrl,
     downloadUrl,
+    failedUrl,
     sessionToken,
     suggestedName,
+    terminateUrl,
     totalBytes,
   }) {
     setDownloadState((current) => ({
@@ -2073,6 +2084,9 @@ export function DetailPage() {
       phase: "starting",
       sessionToken,
       downloadUrl,
+      controlledCompleteUrl: completeUrl,
+      controlledFailedUrl: failedUrl,
+      controlledTerminateUrl: terminateUrl,
       totalBytes,
       message: "Choose where to save this movie.",
     }));
@@ -2081,7 +2095,7 @@ export function DetailPage() {
     try {
       writable = await openControlledDownloadWritable(suggestedName);
     } catch (pickerError) {
-      await terminateDownloadSessionQuietly(sessionToken);
+      await terminateDownloadSessionQuietly(sessionToken, terminateUrl);
       downloadStartLockedRef.current = false;
       resetDownloadRuntime();
       setDownloadState({
@@ -2096,6 +2110,7 @@ export function DetailPage() {
     downloadWritableRef.current = writable;
     const response = await fetch(downloadUrl, {
       credentials: "include",
+      headers: buildControlledDownloadHeaders(sessionToken),
       signal: abortController.signal,
     });
     if (!response.ok) {
@@ -2137,7 +2152,8 @@ export function DetailPage() {
     downloadWritableRef.current = null;
     window.clearInterval(downloadStallTimerRef.current);
     downloadStallTimerRef.current = 0;
-    await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/complete`, {
+    await apiRequest(completeUrl || `/api/download/sessions/${encodeURIComponent(sessionToken)}/complete`, {
+      headers: completeUrl ? buildControlledDownloadHeaders(sessionToken) : {},
       method: "POST",
     });
     downloadStartLockedRef.current = false;
@@ -2162,11 +2178,10 @@ export function DetailPage() {
       sessionToken,
       downloadUrl,
       totalBytes,
-      message: "Browser download started. ETA unavailable after browser handoff.",
+      message: "Browser download started. Progress is unavailable in this mode.",
     });
     triggerBrowserNativeDownload(downloadUrl, suggestedName);
     downloadAbortControllerRef.current = null;
-    scheduleDownloadStateReset(DOWNLOAD_FALLBACK_ACK_MS);
   }
 
   async function handleConfirmDownload() {
@@ -2196,6 +2211,8 @@ export function DetailPage() {
       message: "Starting download...",
     });
     let sessionToken = "";
+    let controlledFailedUrl = "";
+    let controlledTerminateUrl = "";
     try {
       const sessionPayload = await apiRequest(`/api/download/item/${item.id}/session`, {
         method: "POST",
@@ -2207,13 +2224,23 @@ export function DetailPage() {
       sessionToken = sessionPayload.session_token;
       const totalBytes = Number(sessionPayload.file_size || item.file_size || 0);
       const downloadUrl = sessionPayload.download_url;
-      const suggestedName = sanitizeSuggestedDownloadName(item.original_filename || `${detailTitle}.bin`, "movie");
+      const controlledDownloadUrl = sessionPayload.controlled_download_url || downloadUrl;
+      const controlledCompleteUrl = sessionPayload.controlled_complete_url || "";
+      controlledFailedUrl = sessionPayload.controlled_failed_url || "";
+      controlledTerminateUrl = sessionPayload.controlled_terminate_url || "";
+      const suggestedName = sanitizeSuggestedDownloadName(
+        sessionPayload.download_filename || sessionPayload.original_filename || item.original_filename || `${detailTitle}.bin`,
+        "movie",
+      );
       if (supportsControlledDownloadMode(clientDeviceClass)) {
         await runControlledDownload({
           abortController,
-          downloadUrl,
+          completeUrl: controlledCompleteUrl,
+          downloadUrl: controlledDownloadUrl,
+          failedUrl: controlledFailedUrl,
           sessionToken,
           suggestedName,
+          terminateUrl: controlledTerminateUrl,
           totalBytes,
         });
         return;
@@ -2231,7 +2258,7 @@ export function DetailPage() {
         return;
       }
       if (requestError.name === "AbortError") {
-        await terminateDownloadSessionQuietly(sessionToken);
+        await terminateDownloadSessionQuietly(sessionToken, controlledTerminateUrl);
         downloadStartLockedRef.current = false;
         resetDownloadRuntime();
         setDownloadState({
@@ -2242,7 +2269,7 @@ export function DetailPage() {
         scheduleDownloadStateReset(DOWNLOAD_FINAL_ACK_MS);
         return;
       }
-      await markDownloadFailure(sessionToken, requestError.message || "download_failed");
+      await markDownloadFailure(sessionToken, requestError.message || "download_failed", controlledFailedUrl);
       downloadStartLockedRef.current = false;
       resetDownloadRuntime();
       setDownloadState((current) => ({
@@ -2258,6 +2285,7 @@ export function DetailPage() {
 
   async function handleTerminateDownload() {
     const sessionToken = downloadState.sessionToken;
+    const controlledTerminateUrl = downloadState.controlledTerminateUrl;
     downloadTerminationRequestedRef.current = true;
     downloadAbortControllerRef.current?.abort();
     downloadAbortControllerRef.current = null;
@@ -2266,7 +2294,8 @@ export function DetailPage() {
     await abortActiveWritable();
     try {
       if (sessionToken) {
-        await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/terminate`, {
+        await apiRequest(controlledTerminateUrl || `/api/download/sessions/${encodeURIComponent(sessionToken)}/terminate`, {
+          headers: controlledTerminateUrl ? buildControlledDownloadHeaders(sessionToken) : {},
           method: "POST",
         });
       }
@@ -2605,7 +2634,10 @@ export function DetailPage() {
   const downloadButtonProgressPercent = controlledDownloadActive || downloadState.phase === "completed"
     ? downloadProgressPercent
     : 0;
-  const showDownloadTerminate = Boolean(controlledDownloadActive && downloadState.sessionToken);
+  const showDownloadTerminate = Boolean(downloadState.sessionToken && (
+    controlledDownloadActive
+    || (downloadState.active && downloadState.mode === "browser" && downloadState.phase === "browser_handoff")
+  ));
   const downloadEtaLabel = controlledDownloadActive
     ? (
       downloadState.phase === "starting"
