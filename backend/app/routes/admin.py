@@ -223,6 +223,7 @@ def admin_delete_user(
         request.app.state.settings,
         user_id=user_id,
         confirm=payload.confirm,
+        current_admin_password=payload.current_admin_password,
         actor=user,
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),

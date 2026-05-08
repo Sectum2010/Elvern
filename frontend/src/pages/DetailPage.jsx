@@ -90,6 +90,7 @@ const DESKTOP_PLAYBACK_HIDDEN_NOTE_PREFIXES = [
   "Cloud libraries use a secure backend stream fallback for desktop VLC in this phase.",
 ];
 const MOBILE_DOWNLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
+const MOBILE_DOWNLOAD_LIMIT_MESSAGE = "this file cannot be downloaded on this device because it is larger than 2GB";
 const EMPTY_CLOUD_LIBRARIES = {
   google: {
     enabled: false,
@@ -425,6 +426,7 @@ export function DetailPage() {
     error: "",
     message: "",
     sessionToken: "",
+    blocked: false,
   });
   const downloadSamplesRef = useRef([]);
   const downloadEmaSpeedRef = useRef(null);
@@ -1101,6 +1103,7 @@ export function DetailPage() {
         error: "",
         message: "",
         sessionToken: "",
+        blocked: false,
       });
       try {
         const itemPayload = await apiRequest(`/api/library/item/${itemId}`);
@@ -1814,15 +1817,60 @@ export function DetailPage() {
     }));
   }
 
+  function isMobileDownloadSizeBlocked(targetItem = item) {
+    const isMobileOrTablet = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
+    return isMobileOrTablet && Number(targetItem?.file_size || 0) > MOBILE_DOWNLOAD_LIMIT_BYTES;
+  }
+
+  function closeDownloadDialog() {
+    if (downloadState.pending) {
+      return;
+    }
+    setDownloadModalOpen(false);
+    setDownloadState((current) => ({
+      ...current,
+      error: "",
+      message: "",
+      blocked: false,
+    }));
+  }
+
+  function openDownloadDialog() {
+    if (!item || downloadState.pending) {
+      return;
+    }
+    if (isMobileDownloadSizeBlocked(item)) {
+      setDownloadState({
+        pending: false,
+        receivedBytes: 0,
+        totalBytes: Number(item.file_size || 0),
+        etaSeconds: null,
+        error: MOBILE_DOWNLOAD_LIMIT_MESSAGE,
+        message: "",
+        sessionToken: "",
+        blocked: true,
+      });
+      setDownloadModalOpen(true);
+      return;
+    }
+    setDownloadState((current) => ({
+      ...current,
+      error: "",
+      message: "",
+      blocked: false,
+    }));
+    setDownloadModalOpen(true);
+  }
+
   async function handleConfirmDownload() {
     if (!item || downloadState.pending) {
       return;
     }
-    const isMobileOrTablet = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
-    if (isMobileOrTablet && Number(item.file_size || 0) > MOBILE_DOWNLOAD_LIMIT_BYTES) {
+    if (isMobileDownloadSizeBlocked(item)) {
       setDownloadState((current) => ({
         ...current,
-        error: "Phone, iPad, tablet, and similar mobile downloads are limited to files 2 GB or smaller.",
+        error: MOBILE_DOWNLOAD_LIMIT_MESSAGE,
+        blocked: true,
       }));
       return;
     }
@@ -1836,6 +1884,7 @@ export function DetailPage() {
       error: "",
       message: "Preparing download...",
       sessionToken: "",
+      blocked: false,
     });
     let sessionToken = "";
     try {
@@ -2217,8 +2266,9 @@ export function DetailPage() {
     ? Math.min(100, Math.max(0, (downloadState.receivedBytes / downloadState.totalBytes) * 100))
     : 0;
   const downloadEtaLabel = downloadState.pending ? formatDownloadEta(downloadState.etaSeconds) : "";
-  const downloadEtaClassName = `download-floating__eta download-floating__eta--${downloadEtaTone(downloadState.etaSeconds)}`;
+  const downloadEtaClassName = `detail-download-eta detail-download-eta--${downloadEtaTone(downloadState.etaSeconds)}`;
   const showDownloadButton = Boolean(item.download_access_allowed) && !item.hidden_for_user && !item.hidden_globally;
+  const downloadDialogBlocked = Boolean(downloadState.blocked && downloadState.error);
 
 	  return (
 	    <section className="page-section page-section--detail">
@@ -2245,59 +2295,50 @@ export function DetailPage() {
           <div
             aria-hidden="true"
             className="browser-resume-modal__backdrop"
-            onClick={() => (!downloadState.pending ? setDownloadModalOpen(false) : null)}
+            onClick={closeDownloadDialog}
           />
           <div className="browser-resume-modal__card detail-info-modal__card download-confirm-modal">
             <div className="detail-info-modal__copy">
               <p className="eyebrow detail-info-modal__eyebrow">Download</p>
               <h2 id="download-confirm-modal-title">
-                {detailTitle} is {formatBytes(item.file_size)}. Are you sure you want to download it?
+                {downloadDialogBlocked
+                  ? "Download unavailable on this device"
+                  : `${detailTitle} is ${formatBytes(item.file_size)}. Are you sure you want to download it?`}
               </h2>
-              <p className="page-subnote">If this page is closed, Elvern will lose in-page download progress.</p>
-              <p className="page-subnote">
-                If the browser keeps the connection alive after switching apps or tabs, progress may continue, but Elvern does not rely on it.
-              </p>
+              {downloadDialogBlocked ? (
+                <p className="form-error">{downloadState.error}</p>
+              ) : (
+                <>
+                  <p className="page-subnote">If this page is closed, Elvern will lose in-page download progress.</p>
+                  <p className="page-subnote">
+                    If the browser keeps the connection alive after switching apps or tabs, progress may continue, but Elvern does not rely on it.
+                  </p>
+                </>
+              )}
             </div>
-            {downloadState.error ? <p className="form-error">{downloadState.error}</p> : null}
+            {downloadState.error && !downloadDialogBlocked ? <p className="form-error">{downloadState.error}</p> : null}
             {downloadState.message ? <p className="page-note">{downloadState.message}</p> : null}
             <div className="browser-resume-modal__actions">
-              <button
-                className="primary-button"
-                disabled={downloadState.pending}
-                onClick={handleConfirmDownload}
-                type="button"
-              >
-                {downloadState.pending ? "Downloading..." : "Download"}
-              </button>
+              {!downloadDialogBlocked ? (
+                <button
+                  className="primary-button"
+                  disabled={downloadState.pending}
+                  onClick={handleConfirmDownload}
+                  type="button"
+                >
+                  {downloadState.pending ? "Downloading..." : "Download"}
+                </button>
+              ) : null}
               <button
                 className="ghost-button"
                 disabled={downloadState.pending}
-                onClick={() => setDownloadModalOpen(false)}
+                onClick={closeDownloadDialog}
                 type="button"
               >
-                Cancel
+                {downloadDialogBlocked ? "Close" : "Cancel"}
               </button>
             </div>
           </div>
-        </div>
-      ) : null}
-      {showDownloadButton ? (
-        <div className="download-floating" aria-live="polite">
-          {downloadState.pending ? <span className={downloadEtaClassName}>{downloadEtaLabel}</span> : null}
-          <button
-            aria-label="Download movie"
-            className="download-floating__button"
-            disabled={downloadState.pending}
-            onClick={() => setDownloadModalOpen(true)}
-            style={{ "--download-progress": `${downloadProgressPercent}%` }}
-            type="button"
-          >
-            <svg aria-hidden="true" viewBox="0 0 24 24">
-              <path d="M12 4v10" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
-              <path d="M7.5 10.5L12 15l4.5-4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-              <path d="M5 19h14" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
-            </svg>
-          </button>
         </div>
       ) : null}
       {browserResumeModalOpen ? (
@@ -2870,7 +2911,26 @@ export function DetailPage() {
           >
             {hiddenActionPending ? "Hiding..." : "Hide for me"}
           </button>
-        </div>
+          {showDownloadButton ? (
+            <div className="detail-download-action" aria-live="polite">
+              {downloadState.pending ? <span className={downloadEtaClassName}>{downloadEtaLabel}</span> : null}
+              <button
+                aria-label="Download movie"
+                className="detail-download-button"
+                disabled={downloadState.pending}
+                onClick={openDownloadDialog}
+                style={{ "--download-progress": `${downloadProgressPercent}%` }}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M12 4v10" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                  <path d="M7.5 10.5L12 15l4.5-4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+                  <path d="M5 19h14" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                </svg>
+              </button>
+            </div>
+          ) : null}
+	        </div>
 
       </div>
     </section>

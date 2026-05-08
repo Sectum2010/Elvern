@@ -382,6 +382,7 @@ def delete_user(
     *,
     user_id: int,
     confirm: bool,
+    current_admin_password: str | None,
     actor: AuthenticatedUser,
     ip_address: str | None,
     user_agent: str | None,
@@ -399,6 +400,11 @@ def delete_user(
 
     now = utcnow_iso()
     with get_connection(settings) as connection:
+        _require_current_admin_password(
+            connection,
+            actor=actor,
+            current_admin_password=current_admin_password,
+        )
         row = connection.execute(
             """
             SELECT id, username, role, enabled

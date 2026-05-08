@@ -187,6 +187,48 @@ function AdminCrownIcon() {
   );
 }
 
+
+function createDestructiveGateToken() {
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const values = new Uint32Array(2);
+    crypto.getRandomValues(values);
+    return `${values[0].toString(36)}${values[1].toString(36)}`;
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+
+function InviteCodeEyeIcon({ struck = false }) {
+  return (
+    <svg aria-hidden="true" fill="none" viewBox="0 0 24 24">
+      <path
+        d="M2.25 12S5.625 5.25 12 5.25 21.75 12 21.75 12 18.375 18.75 12 18.75 2.25 12 2.25 12Z"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M15 12A3 3 0 1 1 9 12A3 3 0 0 1 15 12Z"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      {struck ? (
+        <path
+          d="M4.5 19.5L19.5 4.5"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.7"
+        />
+      ) : null}
+    </svg>
+  );
+}
+
+
 function getUserAvatarInitials(username) {
   if (typeof username !== "string") {
     return "U";
@@ -305,6 +347,8 @@ export function AdminPage() {
   const [deleteUserState, setDeleteUserState] = useState({
     userId: null,
     username: "",
+    currentAdminPassword: "",
+    fieldToken: createDestructiveGateToken(),
     pending: false,
     error: "",
   });
@@ -744,6 +788,16 @@ export function AdminPage() {
           currentAdminPassword: "",
         }
       : current));
+    setDeleteUserState((current) => (current.userId === userId
+      ? {
+          userId: null,
+          username: "",
+          currentAdminPassword: "",
+          fieldToken: createDestructiveGateToken(),
+          pending: false,
+          error: "",
+        }
+      : current));
   }
 
   function openUserActionsModal(entry) {
@@ -1056,6 +1110,8 @@ export function AdminPage() {
     setDeleteUserState({
       userId: entry.id,
       username: entry.username,
+      currentAdminPassword: "",
+      fieldToken: createDestructiveGateToken(),
       pending: false,
       error: "",
     });
@@ -1065,19 +1121,38 @@ export function AdminPage() {
     if (deleteUserState.pending) {
       return;
     }
+    if (!deleteUserState.currentAdminPassword.trim()) {
+      setDeleteUserState((current) => ({
+        ...current,
+        error: "Enter your current admin password before deleting this user.",
+      }));
+      return;
+    }
     setDeleteUserState((current) => ({ ...current, pending: true, error: "" }));
     try {
       await apiRequest(`/api/admin/users/${entry.id}`, {
         method: "DELETE",
-        data: { confirm: true },
+        data: {
+          confirm: true,
+          current_admin_password: deleteUserState.currentAdminPassword,
+        },
       });
       setUserActionsModalUserId(null);
-      setDeleteUserState({ userId: null, username: "", pending: false, error: "" });
+      setDeleteUserState({
+        userId: null,
+        username: "",
+        currentAdminPassword: "",
+        fieldToken: createDestructiveGateToken(),
+        pending: false,
+        error: "",
+      });
       setBanner({ tone: "success", text: `Deleted user ${entry.username}.` });
       await loadAdminData({ silent: true });
     } catch (requestError) {
       setDeleteUserState((current) => ({
         ...current,
+        currentAdminPassword: "",
+        fieldToken: createDestructiveGateToken(),
         pending: false,
         error: requestError.message || `Failed to delete ${entry.username}`,
       }));
@@ -1716,7 +1791,12 @@ export function AdminPage() {
             </div>
           );
 	        })}
-        <div className="admin-list__row admin-user-row admin-create-user-row">
+        <div
+          className={[
+            "admin-list__row admin-user-row admin-create-user-row",
+            createUserExpanded ? "admin-create-user-row--expanded" : "",
+          ].filter(Boolean).join(" ")}
+        >
           <button
             aria-expanded={createUserExpanded}
             aria-label="Create user"
@@ -1818,6 +1898,16 @@ export function AdminPage() {
                   {selectedUserActionsEntry.username}
                   {selectedUserActionsEntry.role === "admin" ? <AdminCrownIcon /> : null}
                 </h2>
+                <div className="admin-user-actions-modal__subtitle">
+                  <UserStatusIndicator
+                    color={selectedUserActionsEntry.status_color}
+                    label={selectedUserActionsEntry.status_label}
+                  />
+                  <span>
+                    {selectedUserActionsEntry.active_sessions} live session
+                    {selectedUserActionsEntry.active_sessions === 1 ? "" : "s"}
+                  </span>
+                </div>
               </div>
             </div>
             <p className="page-subnote">
@@ -1923,6 +2013,44 @@ export function AdminPage() {
                 <p className="form-error">
                   Warning: deleting {selectedUserActionsEntry.username} revokes auth, native playback, Route2 sessions, and download sessions.
                 </p>
+                <input
+                  aria-hidden="true"
+                  autoComplete="username"
+                  className="sr-only"
+                  name={`decoy-user-${deleteUserState.fieldToken}`}
+                  tabIndex="-1"
+                  type="text"
+                />
+                <input
+                  aria-hidden="true"
+                  autoComplete="current-password"
+                  className="sr-only"
+                  name={`decoy-gate-${deleteUserState.fieldToken}`}
+                  tabIndex="-1"
+                  type="password"
+                />
+                <input
+                  autoCapitalize="off"
+                  autoComplete="new-password"
+                  autoCorrect="off"
+                  className="admin-delete-confirm-secret"
+                  data-1p-ignore="true"
+                  data-form-type="other"
+                  data-lpignore="true"
+                  id={`destructive-gate-${deleteUserState.fieldToken}`}
+                  name={`destructive-gate-${deleteUserState.fieldToken}`}
+                  onChange={(event) =>
+                    setDeleteUserState((current) => ({
+                      ...current,
+                      currentAdminPassword: event.target.value,
+                      error: "",
+                    }))
+                  }
+                  placeholder="Required to delete this user"
+                  spellCheck="false"
+                  type="password"
+                  value={deleteUserState.currentAdminPassword}
+                />
                 {deleteUserState.error ? <p className="form-error">{deleteUserState.error}</p> : null}
                 <div className="admin-list__actions">
                   <button
@@ -1933,10 +2061,19 @@ export function AdminPage() {
                   >
                     {deleteUserState.pending ? "Deleting..." : "Confirm delete user"}
                   </button>
-                  <button
-                    className="ghost-button"
-                    disabled={deleteUserState.pending}
-                    onClick={() => setDeleteUserState({ userId: null, username: "", pending: false, error: "" })}
+	                  <button
+	                    className="ghost-button"
+	                    disabled={deleteUserState.pending}
+	                    onClick={() =>
+                      setDeleteUserState({
+                        userId: null,
+                        username: "",
+                        currentAdminPassword: "",
+                        fieldToken: createDestructiveGateToken(),
+                        pending: false,
+                        error: "",
+                      })
+	                    }
                     type="button"
                   >
                     Cancel
@@ -2122,11 +2259,11 @@ export function AdminPage() {
               <div className="assistant-access-toggle assistant-access-toggle--modal">
                 <div>
                   <strong>{selectedUserActionsEntry.assistant_beta_enabled ? "Enabled" : "Disabled"}</strong>
-                  <p className="page-subnote">
-                    {selectedUserActionsEntry.assistant_beta_enabled
-                      ? "This user can access the Assistant (Beta) request flow."
-                      : "This user cannot access the Assistant (Beta) request flow."}
-                  </p>
+	                  <p className="page-subnote">
+	                    {selectedUserActionsEntry.assistant_beta_enabled
+	                      ? "This user can access the Assistant request flow."
+	                      : "This user cannot access the Assistant request flow."}
+	                  </p>
                 </div>
                 <button
                   className={selectedUserActionsEntry.assistant_beta_enabled ? "ghost-button" : "primary-button"}
@@ -2138,9 +2275,9 @@ export function AdminPage() {
                 </button>
               </div>
             ) : (
-              <p className="page-subnote">
-                Assistant (Beta) access is only configurable for standard users in this phase.
-              </p>
+	              <p className="page-subnote">
+	                Assistant access is only configurable for standard users in this phase.
+	              </p>
 	            )}
 	          </section>
 
@@ -2367,7 +2504,7 @@ export function AdminPage() {
             Refresh
           </button>
         </div>
-        <div className="admin-list admin-list--dense">
+		                <div className="admin-list admin-list--dense admin-invite-code-list">
           {passwordHelpRequests.length > 0 ? (
             passwordHelpRequests.map((requestEntry) => (
               <div className="admin-list__row admin-list__row--card" key={requestEntry.id}>
@@ -2896,32 +3033,50 @@ export function AdminPage() {
 	                  </button>
 	                </div>
 	                <div className="admin-list admin-list--dense">
-	                  {inviteCodes.length > 0 ? (
-	                    inviteCodes.map((inviteCode) => {
-	                      const isRevealed = revealedInviteIds[inviteCode.id] === true;
-	                      const displayCode = inviteCode.code
-	                        ? (isRevealed ? inviteCode.code : "............................")
-	                        : "Code is only available in this browser";
-	                      return (
-	                        <div className="admin-list__row admin-list__row--card admin-invite-code-row" key={inviteCode.id}>
-	                          <div>
-	                            <code className="admin-invite-code-row__code">{displayCode}</code>
-	                            <p className="page-subnote">
-	                              Expires {formatDate(inviteCode.expires_at)}
-	                              {inviteCode.used_at ? ` · used ${formatDate(inviteCode.used_at)}` : ""}
-	                            </p>
-	                          </div>
-	                          <div className="admin-list__actions">
-	                            <button
-	                              className="ghost-button ghost-button--inline"
-	                              disabled={!inviteCode.code}
-	                              onClick={() => setRevealedInviteIds((current) => ({ ...current, [inviteCode.id]: !current[inviteCode.id] }))}
-	                              type="button"
-	                            >
-	                              {isRevealed ? "Hide" : "Show"}
-	                            </button>
-	                            <button
-	                              className="ghost-button ghost-button--inline"
+		                  {inviteCodes.length > 0 ? (
+		                    inviteCodes.map((inviteCode) => {
+		                      const isRevealed = revealedInviteIds[inviteCode.id] === true;
+		                      const expiresAtMs = Date.parse(inviteCode.expires_at);
+		                      const statusKey = inviteCode.used_at
+		                        ? "used"
+		                        : (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now() ? "expired" : "valid");
+		                      const statusLabel = statusKey === "used"
+		                        ? "Used"
+		                        : (statusKey === "expired" ? "Expired" : "Valid");
+		                      return (
+		                        <div className="admin-list__row admin-list__row--card admin-invite-code-row" key={inviteCode.id}>
+		                          <div className="admin-invite-code-row__body">
+		                            <div className="admin-invite-code-row__line">
+		                              <div className="admin-invite-code-field">
+		                                <input
+		                                  aria-label="Invite code"
+		                                  readOnly
+		                                  type={inviteCode.code && !isRevealed ? "password" : "text"}
+		                                  value={inviteCode.code || "Code is only available in this browser"}
+		                                />
+		                                <button
+		                                  aria-label={isRevealed ? "Hide invite code" : "Reveal invite code"}
+		                                  aria-pressed={isRevealed}
+		                                  className="admin-invite-code-field__toggle"
+		                                  disabled={!inviteCode.code}
+		                                  onClick={() => setRevealedInviteIds((current) => ({ ...current, [inviteCode.id]: !current[inviteCode.id] }))}
+		                                  type="button"
+		                                >
+		                                  <InviteCodeEyeIcon struck={!isRevealed} />
+		                                </button>
+		                              </div>
+		                              <span className={`admin-invite-status admin-invite-status--${statusKey}`}>
+		                                {statusLabel}
+		                              </span>
+		                            </div>
+		                            <p className="page-subnote">
+		                              Expires {formatDate(inviteCode.expires_at)}
+		                              {inviteCode.used_at ? ` · used ${formatDate(inviteCode.used_at)}` : ""}
+		                            </p>
+		                          </div>
+		                          <div className="admin-list__actions">
+		                            <button
+		                              className="ghost-button ghost-button--inline"
 	                              disabled={!inviteCode.code}
 	                              onClick={() => navigator.clipboard?.writeText(inviteCode.code)}
 	                              type="button"
@@ -2940,9 +3095,9 @@ export function AdminPage() {
 	                        </div>
 	                      );
 	                    })
-	                  ) : (
-	                    <p className="page-subnote">No visible active invite codes.</p>
-	                  )}
+		                  ) : (
+		                    <p className="page-subnote">No visible invite codes.</p>
+		                  )}
 	                </div>
 	              </section>
 	            </>

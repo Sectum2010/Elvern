@@ -1259,6 +1259,7 @@ class AdminSelfDeleteRequest(BaseModel):
 
 
 class AdminUserDeleteRequest(BaseModel):
+    current_admin_password: str
     confirm: bool = False
 
 

@@ -124,19 +124,16 @@ def generate_invite_code(
 
 
 def list_visible_invite_codes(settings: Settings) -> list[dict[str, object]]:
-    now = utcnow_iso()
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
             SELECT id, created_by_user_id, created_at, expires_at, used_at, used_by_user_id, hidden_at
             FROM invite_codes
             WHERE hidden_at IS NULL
-              AND expires_at > ?
               AND revoked_at IS NULL
             ORDER BY datetime(created_at) DESC, id DESC
             LIMIT 50
             """,
-            (now,),
         ).fetchall()
     return [_serialize_invite_code(row) for row in rows]
 
@@ -418,6 +415,12 @@ def _serialize_download_movie(row) -> dict[str, object]:
 
 def get_download_access_for_user(settings: Settings, *, user_id: int) -> dict[str, object]:
     with get_connection(settings) as connection:
+        target_user = connection.execute(
+            "SELECT id, role FROM users WHERE id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if target_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         grant = connection.execute(
             """
             SELECT user_id, access_mode, updated_at, updated_by_user_id
@@ -436,9 +439,15 @@ def get_download_access_for_user(settings: Settings, *, user_id: int) -> dict[st
             """,
             (user_id,),
         ).fetchall()
+    default_access_mode = (
+        DOWNLOAD_ACCESS_ALL
+        if (target_user["role"] or "standard_user") == "admin"
+        else DOWNLOAD_ACCESS_NONE
+    )
+    access_mode = grant["access_mode"] if grant else default_access_mode
     return {
         "user_id": user_id,
-        "access_mode": grant["access_mode"] if grant else DOWNLOAD_ACCESS_NONE,
+        "access_mode": access_mode,
         "selected_items": [_serialize_download_movie(row) for row in selected_rows],
         "updated_at": grant["updated_at"] if grant else None,
         "updated_by_user_id": grant["updated_by_user_id"] if grant else None,
@@ -529,12 +538,25 @@ def is_item_download_allowed(settings: Settings, *, user_id: int, item_id: int) 
         return False
     with get_connection(settings) as connection:
         grant = connection.execute(
-            "SELECT access_mode FROM download_access_grants WHERE user_id = ?",
+            """
+            SELECT u.role, g.access_mode
+            FROM users u
+            LEFT JOIN download_access_grants g ON g.user_id = u.id
+            WHERE u.id = ?
+            LIMIT 1
+            """,
             (user_id,),
         ).fetchone()
-        if grant is None or grant["access_mode"] == DOWNLOAD_ACCESS_NONE:
+        if grant is None:
             return False
-        if grant["access_mode"] == DOWNLOAD_ACCESS_ALL:
+        access_mode = grant["access_mode"] if grant["access_mode"] is not None else (
+            DOWNLOAD_ACCESS_ALL
+            if (grant["role"] or "standard_user") == "admin"
+            else DOWNLOAD_ACCESS_NONE
+        )
+        if access_mode == DOWNLOAD_ACCESS_NONE:
+            return False
+        if access_mode == DOWNLOAD_ACCESS_ALL:
             return True
         selected = connection.execute(
             """

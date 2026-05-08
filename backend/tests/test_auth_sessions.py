@@ -1478,6 +1478,49 @@ def test_download_access_selected_movie_gate_and_revoke(initialized_settings) ->
     ) is False
 
 
+def test_admin_download_access_defaults_to_all_until_explicit_override(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    media_item = _create_media_item(initialized_settings, relative_name="admin-download-default.mp4")
+    with get_connection(initialized_settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ? WHERE id = ?",
+            (shared_local_source_id, media_item["id"]),
+        )
+        connection.commit()
+
+    default_access = get_download_access_for_user(initialized_settings, user_id=admin_user.id)
+    assert default_access["access_mode"] == "all"
+    assert default_access["updated_at"] is None
+    assert is_item_download_allowed(
+        initialized_settings,
+        user_id=admin_user.id,
+        item_id=int(media_item["id"]),
+    ) is True
+
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=admin_user.id,
+        access_mode="none",
+        media_item_ids=[],
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    explicit_access = get_download_access_for_user(initialized_settings, user_id=admin_user.id)
+    assert explicit_access["access_mode"] == "none"
+    assert explicit_access["updated_at"] is not None
+    assert is_item_download_allowed(
+        initialized_settings,
+        user_id=admin_user.id,
+        item_id=int(media_item["id"]),
+    ) is False
+
+
 def test_download_session_endpoint_authorizes_range_requests(initialized_settings, client) -> None:
     created = _create_standard_user(initialized_settings, username="range-download-user")
     media_item = _create_media_item(initialized_settings, relative_name="range-download.mp4")
@@ -1525,10 +1568,24 @@ def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initia
         password="family-password",
     )
 
+    with pytest.raises(HTTPException) as password_exc:
+        delete_user(
+            initialized_settings,
+            user_id=int(created["id"]),
+            confirm=True,
+            current_admin_password="wrong-password",
+            actor=_admin_user(initialized_settings),
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+    assert password_exc.value.status_code == 401
+    assert get_user_by_session_token(initialized_settings, token) is not None
+
     deleted = delete_user(
         initialized_settings,
         user_id=int(created["id"]),
         confirm=True,
+        current_admin_password=initialized_settings.admin_bootstrap_password or "",
         actor=_admin_user(initialized_settings),
         ip_address="127.0.0.1",
         user_agent="pytest",
@@ -1541,6 +1598,7 @@ def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initia
             initialized_settings,
             user_id=_admin_user(initialized_settings).id,
             confirm=True,
+            current_admin_password=initialized_settings.admin_bootstrap_password or "",
             actor=_admin_user(initialized_settings),
             ip_address="127.0.0.1",
             user_agent="pytest",
