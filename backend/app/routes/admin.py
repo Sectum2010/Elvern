@@ -12,10 +12,15 @@ from ..schemas import (
     AdminTechnicalMetadataEnrichmentRequest,
     AdminTechnicalMetadataEnrichmentTriggerResponse,
     AdminTechnicalMetadataStatusResponse,
+    AdminDownloadAccessResponse,
+    AdminDownloadAccessUpdateRequest,
+    AdminInviteCodeListResponse,
+    AdminInviteCodeResponse,
     AdminPlaybackWorkersStatusResponse,
     AdminPasswordUpdateRequest,
     AdminSessionListResponse,
     AdminSelfDeleteRequest,
+    AdminUserDeleteRequest,
     BackupCheckpointCreateResponse,
     BackupCheckpointInspectResponse,
     BackupCheckpointListResponse,
@@ -27,6 +32,8 @@ from ..schemas import (
     AssistantUserAccessResponse,
     AssistantUserAccessUpdateRequest,
     AuditLogListResponse,
+    PasswordHelpDismissRequest,
+    PasswordHelpRequestListResponse,
     GoogleDriveSetupResponse,
     GoogleDriveSetupUpdateRequest,
     HiddenMovieListResponse,
@@ -44,6 +51,7 @@ from ..services.assistant_service import update_assistant_user_access
 from ..services.audit_service import log_audit_event
 from ..services.admin_service import (
     create_user,
+    delete_user,
     delete_self,
     list_active_sessions,
     list_audit_log,
@@ -51,6 +59,15 @@ from ..services.admin_service import (
     revoke_session,
     update_user_password,
     update_user,
+)
+from ..services.account_access_service import (
+    dismiss_password_help_request,
+    generate_invite_code,
+    get_download_access_for_user,
+    hide_invite_code_display,
+    list_password_help_requests,
+    list_visible_invite_codes,
+    update_download_access_for_user,
 )
 from ..services.app_settings_service import (
     get_google_drive_setup_payload,
@@ -88,6 +105,13 @@ from ..services.local_library_source_service import validate_shared_local_librar
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _invalidate_user_sessions_if_available(request: Request, user_id: int, *, reason: str) -> None:
+    manager = getattr(request.app.state, "mobile_playback_manager", None)
+    invalidate = getattr(manager, "invalidate_user_sessions", None)
+    if callable(invalidate):
+        invalidate(user_id, reason=reason)
 
 
 def _resolve_admin_checkpoint_path(settings, checkpoint_id: str):
@@ -142,7 +166,8 @@ def admin_update_user(
         user_agent=request.headers.get("user-agent"),
     )
     if payload.enabled is False:
-        request.app.state.mobile_playback_manager.invalidate_user_sessions(
+        _invalidate_user_sessions_if_available(
+            request,
             user_id,
             reason="user_disabled",
         )
@@ -187,6 +212,111 @@ def admin_update_user_password(
     return MessageResponse(message=f"Password updated for {updated['username']}")
 
 
+@router.delete("/users/{user_id}", response_model=MessageResponse)
+def admin_delete_user(
+    user_id: int,
+    payload: AdminUserDeleteRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> MessageResponse:
+    deleted = delete_user(
+        request.app.state.settings,
+        user_id=user_id,
+        confirm=payload.confirm,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    _invalidate_user_sessions_if_available(request, user_id, reason="user_deleted")
+    return MessageResponse(message=f"Deleted user {deleted['username']}")
+
+
+@router.get("/invite-codes", response_model=AdminInviteCodeListResponse)
+def admin_invite_codes(request: Request, user=CurrentAdmin) -> AdminInviteCodeListResponse:
+    del user
+    return AdminInviteCodeListResponse(invite_codes=list_visible_invite_codes(request.app.state.settings))
+
+
+@router.post("/invite-codes", response_model=AdminInviteCodeResponse)
+def admin_generate_invite_code(request: Request, user=CurrentAdmin) -> AdminInviteCodeResponse:
+    invite_code = generate_invite_code(
+        request.app.state.settings,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return AdminInviteCodeResponse(**invite_code)
+
+
+@router.delete("/invite-codes/{invite_id}/display", response_model=MessageResponse)
+def admin_hide_invite_code_display(
+    invite_id: int,
+    request: Request,
+    user=CurrentAdmin,
+) -> MessageResponse:
+    hide_invite_code_display(
+        request.app.state.settings,
+        invite_id=invite_id,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return MessageResponse(message="Invite code hidden from admin display")
+
+
+@router.get("/password-help-requests", response_model=PasswordHelpRequestListResponse)
+def admin_password_help_requests(request: Request, user=CurrentAdmin) -> PasswordHelpRequestListResponse:
+    del user
+    return PasswordHelpRequestListResponse(requests=list_password_help_requests(request.app.state.settings))
+
+
+@router.post("/password-help-requests/{request_id}/dismiss", response_model=MessageResponse)
+def admin_dismiss_password_help_request(
+    request_id: int,
+    payload: PasswordHelpDismissRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> MessageResponse:
+    dismiss_password_help_request(
+        request.app.state.settings,
+        request_id=request_id,
+        confirm=payload.confirm,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return MessageResponse(message="Password help request dismissed")
+
+
+@router.get("/users/{user_id}/download-access", response_model=AdminDownloadAccessResponse)
+def admin_get_user_download_access(
+    user_id: int,
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminDownloadAccessResponse:
+    del user
+    return AdminDownloadAccessResponse(**get_download_access_for_user(request.app.state.settings, user_id=user_id))
+
+
+@router.put("/users/{user_id}/download-access", response_model=AdminDownloadAccessResponse)
+def admin_update_user_download_access(
+    user_id: int,
+    payload: AdminDownloadAccessUpdateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminDownloadAccessResponse:
+    updated = update_download_access_for_user(
+        request.app.state.settings,
+        user_id=user_id,
+        access_mode=payload.access_mode,
+        media_item_ids=payload.media_item_ids,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return AdminDownloadAccessResponse(**updated)
+
+
 @router.post("/self-delete", response_model=MessageResponse)
 def admin_self_delete(
     payload: AdminSelfDeleteRequest,
@@ -202,10 +332,7 @@ def admin_self_delete(
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
-    request.app.state.mobile_playback_manager.invalidate_user_sessions(
-        int(user.id),
-        reason="self_deleted",
-    )
+    _invalidate_user_sessions_if_available(request, int(user.id), reason="self_deleted")
     clear_session_cookie(response, request.app.state.settings)
     return MessageResponse(message="Your admin account was deleted")
 

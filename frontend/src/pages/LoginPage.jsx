@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PasswordInput } from "../components/PasswordInput";
 
@@ -128,6 +128,10 @@ export function LoginPage() {
           <button className="primary-button" disabled={pending} type="submit">
             {pending ? "Signing in..." : "Sign in"}
           </button>
+          <div className="login-links">
+            <Link to="/new-user">New user?</Link>
+            <Link to="/forgot-password">Forgot password?</Link>
+          </div>
         </form>
       </div>
     </div>

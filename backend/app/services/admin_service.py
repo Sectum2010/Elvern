@@ -377,6 +377,100 @@ def delete_self(
         connection.commit()
 
 
+def delete_user(
+    settings: Settings,
+    *,
+    user_id: int,
+    confirm: bool,
+    actor: AuthenticatedUser,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> dict[str, object]:
+    if int(user_id) == int(actor.id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use the self-delete flow for your own admin account",
+        )
+    if not confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirm deletion before removing this user",
+        )
+
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id, username, role, enabled
+            FROM users
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        if row["role"] == "admin" and bool(row["enabled"]):
+            enabled_admin_count = connection.execute(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin' AND enabled = 1",
+            ).fetchone()[0]
+            if int(enabled_admin_count) <= 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot delete the last remaining enabled admin",
+                )
+        revoke_sessions_for_user_in_connection(connection, user_id=user_id, reason="user_deleted")
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET revoked_at = COALESCE(revoked_at, ?)
+            WHERE user_id = ? AND revoked_at IS NULL
+            """,
+            (now, user_id),
+        )
+        connection.execute(
+            """
+            UPDATE desktop_vlc_handoffs
+            SET revoked_at = COALESCE(revoked_at, ?)
+            WHERE user_id = ? AND revoked_at IS NULL
+            """,
+            (now, user_id),
+        )
+        connection.execute(
+            """
+            UPDATE download_sessions
+            SET revoked_at = COALESCE(revoked_at, ?),
+                last_error = COALESCE(last_error, 'user_deleted')
+            WHERE user_id = ? AND revoked_at IS NULL
+            """,
+            (now, user_id),
+        )
+        deleted_payload = {
+            "id": int(row["id"]),
+            "username": row["username"],
+            "role": row["role"],
+            "enabled": bool(row["enabled"]),
+        }
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        connection.commit()
+    log_audit_event(
+        settings,
+        action="admin.user.delete",
+        outcome="success",
+        user_id=actor.id,
+        username=actor.username,
+        role=actor.role,
+        session_id=actor.session_id,
+        target_type="user",
+        target_id=user_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details={"deleted_username": deleted_payload["username"]},
+    )
+    emit_admin_event("user_deleted", user_id=user_id)
+    return deleted_payload
+
+
 def list_active_sessions(settings: Settings) -> list[dict[str, object]]:
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()

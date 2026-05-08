@@ -16,7 +16,14 @@ from backend.app.auth import (
 )
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.security import hash_session_token
-from backend.app.services.admin_service import create_user, update_user
+from backend.app.services.account_access_service import (
+    create_user_with_invite,
+    generate_invite_code,
+    get_download_access_for_user,
+    is_item_download_allowed,
+    update_download_access_for_user,
+)
+from backend.app.services.admin_service import create_user, delete_user, update_user
 from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
     create_native_playback_session,
@@ -27,6 +34,7 @@ from backend.app.services.native_playback_service import (
     inspect_native_playback_access,
     should_decouple_external_player_auth_session,
 )
+from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
 
 
 def _admin_user(settings):
@@ -1359,3 +1367,182 @@ def test_login_audit_log_distinguishes_invalid_credentials_and_device_rate_limit
         "reason": "device_rate_limited",
         "retry_after": 600,
     }
+
+
+def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    invite_payload = generate_invite_code(
+        initialized_settings,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    invite_code = str(invite_payload["code"])
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute("SELECT code_hash FROM invite_codes WHERE id = ?", (invite_payload["id"],)).fetchone()
+    assert row is not None
+    assert row["code_hash"] != invite_code
+
+    created_user = create_user_with_invite(
+        initialized_settings,
+        username="invited-user",
+        password="family-password",
+        confirm_password="family-password",
+        invite_code=invite_code,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert created_user.username == "invited-user"
+
+    with pytest.raises(HTTPException) as reused_exc:
+        create_user_with_invite(
+            initialized_settings,
+            username="second-user",
+            password="family-password",
+            confirm_password="family-password",
+            invite_code=invite_code,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+    assert reused_exc.value.status_code == 400
+
+    with pytest.raises(HTTPException) as invalid_exc:
+        create_user_with_invite(
+            initialized_settings,
+            username="third-user",
+            password="family-password",
+            confirm_password="family-password",
+            invite_code="not-a-real-code",
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+    assert invalid_exc.value.status_code == 400
+
+
+def test_download_access_selected_movie_gate_and_revoke(initialized_settings) -> None:
+    created = _create_standard_user(initialized_settings, username="download-user")
+    media_item = _create_media_item(initialized_settings, relative_name="download-movie.mp4")
+    admin_user = _admin_user(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            """
+            UPDATE media_items
+            SET library_source_id = ?
+            WHERE id = ?
+            """,
+            (shared_local_source_id, media_item["id"]),
+        )
+        connection.commit()
+
+    assert is_item_download_allowed(
+        initialized_settings,
+        user_id=int(created["id"]),
+        item_id=int(media_item["id"]),
+    ) is False
+
+    updated = update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="selected",
+        media_item_ids=[int(media_item["id"])],
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert updated["access_mode"] == "selected"
+    assert get_download_access_for_user(initialized_settings, user_id=int(created["id"]))["selected_items"][0]["id"] == media_item["id"]
+    assert is_item_download_allowed(
+        initialized_settings,
+        user_id=int(created["id"]),
+        item_id=int(media_item["id"]),
+    ) is True
+
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="none",
+        media_item_ids=[],
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert is_item_download_allowed(
+        initialized_settings,
+        user_id=int(created["id"]),
+        item_id=int(media_item["id"]),
+    ) is False
+
+
+def test_download_session_endpoint_authorizes_range_requests(initialized_settings, client) -> None:
+    created = _create_standard_user(initialized_settings, username="range-download-user")
+    media_item = _create_media_item(initialized_settings, relative_name="range-download.mp4")
+    with get_connection(initialized_settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ? WHERE id = ?",
+            (shared_local_source_id, media_item["id"]),
+        )
+        connection.commit()
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="selected",
+        media_item_ids=[int(media_item["id"])],
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _session_user, token = _issue_user_session(
+        initialized_settings,
+        username="range-download-user",
+        password="family-password",
+    )
+    client.cookies.set(initialized_settings.session_cookie_name, token)
+
+    session_response = client.post(f"/api/download/item/{media_item['id']}/session")
+    assert session_response.status_code == 200
+    download_url = session_response.json()["download_url"]
+
+    range_response = client.get(download_url, headers={"Range": "bytes=0-3"})
+    assert range_response.status_code == 206
+    assert range_response.headers["accept-ranges"] == "bytes"
+    assert range_response.content == b"not "
+
+
+def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initialized_settings) -> None:
+    created = _create_standard_user(initialized_settings, username="delete-user")
+    _session_user, token = _issue_user_session(
+        initialized_settings,
+        username="delete-user",
+        password="family-password",
+    )
+
+    deleted = delete_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        confirm=True,
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert deleted["username"] == "delete-user"
+    assert get_user_by_session_token(initialized_settings, token) is None
+
+    with pytest.raises(HTTPException) as self_exc:
+        delete_user(
+            initialized_settings,
+            user_id=_admin_user(initialized_settings).id,
+            confirm=True,
+            actor=_admin_user(initialized_settings),
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+    assert self_exc.value.status_code == 400

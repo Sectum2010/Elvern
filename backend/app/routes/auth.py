@@ -14,8 +14,9 @@ from ..auth import (
     set_session_cookie,
 )
 from ..models import AuthenticatedUser
+from ..services.account_access_service import create_password_help_request, create_user_with_invite
 from ..services.audit_service import log_audit_event
-from ..schemas import AuthLoginRequest, AuthUserEnvelope, MessageResponse
+from ..schemas import AuthLoginRequest, AuthSignupRequest, AuthUserEnvelope, MessageResponse, PasswordHelpRequest
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -123,6 +124,51 @@ def login(payload: AuthLoginRequest, request: Request, response: Response) -> Au
             "session_id": None,
         }
     )
+
+
+@router.post("/signup", response_model=AuthUserEnvelope)
+def signup(payload: AuthSignupRequest, request: Request, response: Response) -> AuthUserEnvelope:
+    settings = request.app.state.settings
+    ip_address = resolve_client_ip(request)
+    user_agent = request.headers.get("user-agent")
+    user = create_user_with_invite(
+        settings,
+        username=payload.username,
+        password=payload.password,
+        confirm_password=payload.confirm_password,
+        invite_code=payload.invite_code,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    token = create_session(
+        settings,
+        user,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    request.app.state.scan_service.maybe_refresh_local_library(trigger="signup")
+    set_session_cookie(response, settings, token)
+    return AuthUserEnvelope(
+        user={
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+            "enabled": user.enabled,
+            "assistant_beta_enabled": user.assistant_beta_enabled,
+            "session_id": None,
+        }
+    )
+
+
+@router.post("/password-help", response_model=MessageResponse)
+def password_help(payload: PasswordHelpRequest, request: Request) -> MessageResponse:
+    result = create_password_help_request(
+        request.app.state.settings,
+        username=payload.username,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return MessageResponse(message=result["message"])
 
 
 @router.post("/logout", response_model=MessageResponse)

@@ -13,7 +13,7 @@ import {
 } from "../lib/browserPlayback";
 import { getOrCreateDeviceId } from "../lib/device";
 import { formatBytes, formatDuration } from "../lib/format";
-import { detectClientPlatform, detectDesktopPlatform } from "../lib/platformDetection";
+import { detectClientDeviceClass, detectClientPlatform, detectDesktopPlatform } from "../lib/platformDetection";
 import {
   resolveDetailVlcActionRoute,
   shouldShowDesktopBrowserSeekControl,
@@ -89,6 +89,7 @@ const DESKTOP_PLAYBACK_HIDDEN_NOTE_PREFIXES = [
   "On the Elvern host, clicking Open in VLC launches the installed VLC app directly",
   "Cloud libraries use a secure backend stream fallback for desktop VLC in this phase.",
 ];
+const MOBILE_DOWNLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
 const EMPTY_CLOUD_LIBRARIES = {
   google: {
     enabled: false,
@@ -110,6 +111,47 @@ function isLocalDevelopmentLoopback(platform) {
   }
   const host = (window.location.hostname || "").toLowerCase();
   return host === "localhost" || host === "127.0.0.1";
+}
+
+function formatDownloadEta(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "estimating";
+  }
+  if (seconds < 60) {
+    return "< 1 min";
+  }
+  if (seconds < 3600) {
+    return `${Math.ceil(seconds / 60)} min`;
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.ceil((seconds % 3600) / 60);
+  return minutes > 0 ? `${hours} hr ${minutes} min` : `${hours} hr`;
+}
+
+
+function downloadEtaTone(seconds) {
+  if (!Number.isFinite(seconds)) {
+    return "estimating";
+  }
+  if (seconds <= 10 * 60) {
+    return "bright-light-green";
+  }
+  if (seconds <= 20 * 60) {
+    return "green";
+  }
+  if (seconds <= 30 * 60) {
+    return "yellow";
+  }
+  if (seconds <= 45 * 60) {
+    return "orange";
+  }
+  if (seconds <= 60 * 60) {
+    return "dark-orange";
+  }
+  if (seconds < 3 * 60 * 60) {
+    return "red";
+  }
+  return "dark-purple";
 }
 
 function buildInfuseLaunchUrl(streamUrl, { successUrl, errorUrl } = {}) {
@@ -374,8 +416,21 @@ export function DetailPage() {
   const [globalHiddenActionMessage, setGlobalHiddenActionMessage] = useState("");
   const [globalHiddenActionError, setGlobalHiddenActionError] = useState("");
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
+  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+  const [downloadState, setDownloadState] = useState({
+    pending: false,
+    receivedBytes: 0,
+    totalBytes: 0,
+    etaSeconds: null,
+    error: "",
+    message: "",
+    sessionToken: "",
+  });
+  const downloadSamplesRef = useRef([]);
+  const downloadEmaSpeedRef = useRef(null);
   const clientPlatform = detectClientPlatform();
   const desktopPlatform = detectDesktopPlatform();
+  const clientDeviceClass = detectClientDeviceClass();
   const iosMobile = isIOSMobileBrowser();
   const browserPlaybackSessionRoot = resolveBrowserPlaybackSessionRoot();
   const showIosTransportDebug = iosTransportDebug && isIosTransportDebugEnabled(location.search);
@@ -1037,6 +1092,16 @@ export function DetailPage() {
       setPlaybackConflictModal(null);
       setPlaybackConflictPending(false);
       setInfoModalOpen(false);
+      setDownloadModalOpen(false);
+      setDownloadState({
+        pending: false,
+        receivedBytes: 0,
+        totalBytes: 0,
+        etaSeconds: null,
+        error: "",
+        message: "",
+        sessionToken: "",
+      });
       try {
         const itemPayload = await apiRequest(`/api/library/item/${itemId}`);
         if (cancelled) {
@@ -1716,6 +1781,136 @@ export function DetailPage() {
     }
   }
 
+  function updateDownloadProgress(receivedBytes, totalBytes) {
+    const now = performance.now();
+    const samples = [...downloadSamplesRef.current, { time: now, bytes: receivedBytes }].slice(-8);
+    downloadSamplesRef.current = samples;
+    const speeds = [];
+    for (let index = 1; index < samples.length; index += 1) {
+      const previous = samples[index - 1];
+      const current = samples[index];
+      const elapsedSeconds = (current.time - previous.time) / 1000;
+      const bytesDelta = current.bytes - previous.bytes;
+      if (elapsedSeconds > 0 && bytesDelta > 0) {
+        speeds.push(bytesDelta / elapsedSeconds);
+      }
+    }
+    speeds.sort((left, right) => left - right);
+    const medianSpeed = speeds.length ? speeds[Math.floor(speeds.length / 2)] : null;
+    if (medianSpeed) {
+      downloadEmaSpeedRef.current = downloadEmaSpeedRef.current
+        ? (downloadEmaSpeedRef.current * 0.7) + (medianSpeed * 0.3)
+        : medianSpeed;
+    }
+    const remainingBytes = Math.max(0, totalBytes - receivedBytes);
+    const etaSeconds = samples.length >= 3 && downloadEmaSpeedRef.current
+      ? remainingBytes / downloadEmaSpeedRef.current
+      : null;
+    setDownloadState((current) => ({
+      ...current,
+      receivedBytes,
+      totalBytes,
+      etaSeconds,
+    }));
+  }
+
+  async function handleConfirmDownload() {
+    if (!item || downloadState.pending) {
+      return;
+    }
+    const isMobileOrTablet = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
+    if (isMobileOrTablet && Number(item.file_size || 0) > MOBILE_DOWNLOAD_LIMIT_BYTES) {
+      setDownloadState((current) => ({
+        ...current,
+        error: "Phone, iPad, tablet, and similar mobile downloads are limited to files 2 GB or smaller.",
+      }));
+      return;
+    }
+    downloadSamplesRef.current = [];
+    downloadEmaSpeedRef.current = null;
+    setDownloadState({
+      pending: true,
+      receivedBytes: 0,
+      totalBytes: Number(item.file_size || 0),
+      etaSeconds: null,
+      error: "",
+      message: "Preparing download...",
+      sessionToken: "",
+    });
+    let sessionToken = "";
+    try {
+      const sessionPayload = await apiRequest(`/api/download/item/${item.id}/session`, { method: "POST" });
+      sessionToken = sessionPayload.session_token;
+      setDownloadState((current) => ({
+        ...current,
+        sessionToken,
+        totalBytes: Number(sessionPayload.file_size || item.file_size || 0),
+        message: "Downloading...",
+      }));
+      const response = await fetch(sessionPayload.download_url, { credentials: "include" });
+      if (!response.ok) {
+        throw new Error(`Download failed with status ${response.status}`);
+      }
+      const totalBytes = Number(response.headers.get("content-length") || sessionPayload.file_size || item.file_size || 0);
+      const reader = response.body?.getReader();
+      if (!reader) {
+        window.location.assign(sessionPayload.download_url);
+        setDownloadState((current) => ({
+          ...current,
+          pending: false,
+          message: "Download handed to the browser. Exact in-page progress is unavailable.",
+        }));
+        return;
+      }
+      const chunks = [];
+      let receivedBytes = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (value) {
+          chunks.push(value);
+          receivedBytes += value.byteLength;
+          updateDownloadProgress(receivedBytes, totalBytes);
+        }
+      }
+      const blob = new Blob(chunks);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = item.original_filename || `${detailTitle}.bin`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+      await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/complete`, { method: "POST" });
+      setDownloadState((current) => ({
+        ...current,
+        pending: false,
+        receivedBytes: totalBytes || current.receivedBytes,
+        message: "Download complete.",
+      }));
+    } catch (requestError) {
+      if (sessionToken) {
+        try {
+          await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/failed`, {
+            method: "POST",
+            data: { message: requestError.message || "download_failed" },
+          });
+        } catch {
+          // Best-effort audit update.
+        }
+      }
+      setDownloadState((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || "Download failed",
+        message: "",
+      }));
+    }
+  }
+
   if (loading) {
     return <LoadingView label="Loading player..." />;
   }
@@ -1985,7 +2180,7 @@ export function DetailPage() {
     });
   }
 
-  async function toggleMacAppFullscreen() {
+	  async function toggleMacAppFullscreen() {
     if (!showMacAppFullscreenControl || typeof document === "undefined") {
       return;
     }
@@ -2015,11 +2210,18 @@ export function DetailPage() {
       setMacAppFullscreenError(
         fullscreenError?.message || "Fullscreen is not available in this browser.",
       );
-    }
-  }
+	    }
+	  }
 
-  return (
-    <section className="page-section page-section--detail">
+  const downloadProgressPercent = downloadState.totalBytes > 0
+    ? Math.min(100, Math.max(0, (downloadState.receivedBytes / downloadState.totalBytes) * 100))
+    : 0;
+  const downloadEtaLabel = downloadState.pending ? formatDownloadEta(downloadState.etaSeconds) : "";
+  const downloadEtaClassName = `download-floating__eta download-floating__eta--${downloadEtaTone(downloadState.etaSeconds)}`;
+  const showDownloadButton = Boolean(item.download_access_allowed) && !item.hidden_for_user && !item.hidden_globally;
+
+	  return (
+	    <section className="page-section page-section--detail">
       <ProviderReconnectModal
         allowReconnect={providerReconnectModal.allowReconnect}
         errorMessage={providerReconnectModal.errorMessage}
@@ -2030,9 +2232,74 @@ export function DetailPage() {
         open={providerReconnectModal.open}
         reconnectLabel="Reconnect Google Drive"
         reconnectPending={providerReconnectPending}
-        secondaryLabel={providerReconnectModal.secondaryLabel}
-        title={providerReconnectModal.title}
-      />
+	        secondaryLabel={providerReconnectModal.secondaryLabel}
+	        title={providerReconnectModal.title}
+	      />
+      {downloadModalOpen ? (
+        <div
+          aria-labelledby="download-confirm-modal-title"
+          aria-modal="true"
+          className="browser-resume-modal"
+          role="dialog"
+        >
+          <div
+            aria-hidden="true"
+            className="browser-resume-modal__backdrop"
+            onClick={() => (!downloadState.pending ? setDownloadModalOpen(false) : null)}
+          />
+          <div className="browser-resume-modal__card detail-info-modal__card download-confirm-modal">
+            <div className="detail-info-modal__copy">
+              <p className="eyebrow detail-info-modal__eyebrow">Download</p>
+              <h2 id="download-confirm-modal-title">
+                {detailTitle} is {formatBytes(item.file_size)}. Are you sure you want to download it?
+              </h2>
+              <p className="page-subnote">If this page is closed, Elvern will lose in-page download progress.</p>
+              <p className="page-subnote">
+                If the browser keeps the connection alive after switching apps or tabs, progress may continue, but Elvern does not rely on it.
+              </p>
+            </div>
+            {downloadState.error ? <p className="form-error">{downloadState.error}</p> : null}
+            {downloadState.message ? <p className="page-note">{downloadState.message}</p> : null}
+            <div className="browser-resume-modal__actions">
+              <button
+                className="primary-button"
+                disabled={downloadState.pending}
+                onClick={handleConfirmDownload}
+                type="button"
+              >
+                {downloadState.pending ? "Downloading..." : "Download"}
+              </button>
+              <button
+                className="ghost-button"
+                disabled={downloadState.pending}
+                onClick={() => setDownloadModalOpen(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showDownloadButton ? (
+        <div className="download-floating" aria-live="polite">
+          {downloadState.pending ? <span className={downloadEtaClassName}>{downloadEtaLabel}</span> : null}
+          <button
+            aria-label="Download movie"
+            className="download-floating__button"
+            disabled={downloadState.pending}
+            onClick={() => setDownloadModalOpen(true)}
+            style={{ "--download-progress": `${downloadProgressPercent}%` }}
+            type="button"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M12 4v10" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+              <path d="M7.5 10.5L12 15l4.5-4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+              <path d="M5 19h14" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+            </svg>
+          </button>
+        </div>
+      ) : null}
       {browserResumeModalOpen ? (
         <div
           aria-labelledby="browser-resume-modal-title"

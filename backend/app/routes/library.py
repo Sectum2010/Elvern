@@ -14,7 +14,9 @@ from ..services.library_service import (
     list_library,
     search_library,
 )
+from ..services.account_access_service import is_item_download_allowed
 from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
+from ..services.user_settings_service import get_poster_card_display_max_width
 from ..services.audit_service import log_audit_event
 
 
@@ -88,6 +90,11 @@ def get_item(item_id: int, request: Request, user=CurrentUser) -> MediaItemDetai
     )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    item["download_access_allowed"] = is_item_download_allowed(
+        request.app.state.settings,
+        user_id=user.id,
+        item_id=item_id,
+    )
     return MediaItemDetail(**item)
 
 
@@ -109,11 +116,14 @@ def get_item_poster(item_id: int, request: Request, user=CurrentUser, variant: s
     response_path = poster_path
     cache_control = "private, no-cache, max-age=0, must-revalidate"
     if normalized_variant == "card":
-        response_path = get_or_create_card_poster_display_cache(
-            request.app.state.settings,
-            poster_path,
-        )
-        cache_control = "private, max-age=604800, immutable"
+        target_width = get_poster_card_display_max_width(request.app.state.settings, user_id=user.id)
+        if target_width is not None:
+            response_path = get_or_create_card_poster_display_cache(
+                request.app.state.settings,
+                poster_path,
+                target_width=target_width,
+            )
+            cache_control = "private, max-age=604800, immutable"
 
     return FileResponse(
         response_path,

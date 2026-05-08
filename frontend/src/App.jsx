@@ -7,6 +7,8 @@ import { DetailPage } from "./pages/DetailPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { LibrarySourcePage } from "./pages/LibrarySourcePage";
 import { LoginPage } from "./pages/LoginPage";
+import { NewUserPage } from "./pages/NewUserPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { AdminPage } from "./pages/AdminPage";
 import { AdminAssistantRequestDetailPage } from "./pages/AdminAssistantRequestDetailPage";
 import { AdminAssistantRequestsPage } from "./pages/AdminAssistantRequestsPage";
@@ -34,6 +36,8 @@ export default function App() {
         <div aria-hidden="true" className="app-viewport-backdrop" />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/new-user" element={<NewUserPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route element={<ProtectedShell />}>
             <Route path="/" element={<Navigate to="/library" replace />} />
             <Route path="/library" element={<LibraryPage />} />

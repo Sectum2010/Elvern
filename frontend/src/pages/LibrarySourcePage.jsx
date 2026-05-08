@@ -2,6 +2,7 @@ import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState } from "../components/EmptyState";
+import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
 import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
 import { SeriesRail } from "../components/SeriesRail";
@@ -119,10 +120,14 @@ export function LibrarySourcePage({ sourceKind }) {
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
+  const [settings, setSettings] = useState({
+    floating_library_search_enabled: true,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [items, setItems] = useState([]);
   const [seriesRails, setSeriesRails] = useState([]);
+  const sourceSearchInputRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const copy = SOURCE_PAGE_COPY[sourceKind] || SOURCE_PAGE_COPY.local;
@@ -215,6 +220,22 @@ export function LibrarySourcePage({ sourceKind }) {
       controller.abort();
     };
   }, [refreshAuth, sourceKind]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadSettings() {
+      try {
+        const payload = await apiRequest("/api/user-settings", { signal: controller.signal });
+        setSettings(payload);
+      } catch (requestError) {
+        if (requestError.name !== "AbortError") {
+          setSettings({ floating_library_search_enabled: true });
+        }
+      }
+    }
+    loadSettings();
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     if (loading || typeof window === "undefined" || typeof document === "undefined") {
@@ -317,11 +338,21 @@ export function LibrarySourcePage({ sourceKind }) {
           <input
             onChange={(event) => setQuery(event.target.value)}
             placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
+            ref={sourceSearchInputRef}
             type="search"
             value={query}
           />
         </label>
       </div>
+
+      <FloatingLibrarySearch
+        enabled={settings.floating_library_search_enabled !== false}
+        label={`Search ${copy.title}`}
+        mainInputRefs={[sourceSearchInputRef]}
+        onChange={setQuery}
+        placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
+        value={query}
+      />
 
       {error ? <p className="form-error">{error}</p> : null}
       {loading ? <LoadingView label={`Loading ${copy.title.toLowerCase()}...`} /> : null}

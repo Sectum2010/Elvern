@@ -10,6 +10,17 @@ class AuthLoginRequest(BaseModel):
     password: str
 
 
+class AuthSignupRequest(BaseModel):
+    username: str
+    password: str
+    confirm_password: str
+    invite_code: str
+
+
+class PasswordHelpRequest(BaseModel):
+    username: str
+
+
 class UserResponse(BaseModel):
     id: int
     username: str
@@ -95,6 +106,7 @@ class LibraryItemSummary(BaseModel):
     progress_seconds: float | None = None
     progress_duration_seconds: float | None = None
     completed: bool = False
+    download_access_allowed: bool = False
 
 
 class SeriesRailResponse(BaseModel):
@@ -119,7 +131,19 @@ class UserSettingsResponse(BaseModel):
     hide_duplicate_movies: bool = True
     hide_recently_added: bool = False
     floating_controls_position: Literal["bottom", "top"] = "bottom"
+    floating_library_search_enabled: bool = True
     poster_card_appearance: Literal["classic", "modern"] = "classic"
+    poster_card_display_max_width: Literal[
+        "800",
+        "1000",
+        "1200",
+        "1400",
+        "1600",
+        "1800",
+        "2000",
+        "2200",
+        "original",
+    ] = "1400"
     media_library_reference_private_value: str | None = None
     media_library_reference_shared_default_value: str = ""
     media_library_reference_effective_value: str = ""
@@ -129,7 +153,9 @@ class UserSettingsUpdateRequest(BaseModel):
     hide_duplicate_movies: bool | None = None
     hide_recently_added: bool | None = None
     floating_controls_position: Literal["bottom", "top"] | None = None
+    floating_library_search_enabled: bool | None = None
     poster_card_appearance: str | None = None
+    poster_card_display_max_width: str | int | None = None
     media_library_reference_private_value: str | None = None
 
 
@@ -1230,6 +1256,79 @@ class AdminPasswordUpdateRequest(BaseModel):
 class AdminSelfDeleteRequest(BaseModel):
     current_admin_password: str
     confirm: bool = False
+
+
+class AdminUserDeleteRequest(BaseModel):
+    confirm: bool = False
+
+
+class AdminInviteCodeResponse(BaseModel):
+    id: int
+    code: str | None = None
+    created_by_user_id: int
+    created_at: str
+    expires_at: str
+    used_at: str | None = None
+    used_by_user_id: int | None = None
+    hidden_at: str | None = None
+
+
+class AdminInviteCodeListResponse(BaseModel):
+    invite_codes: list[AdminInviteCodeResponse] = Field(default_factory=list)
+
+
+class PasswordHelpRequestResponse(BaseModel):
+    id: int
+    username_snapshot: str
+    user_id: int
+    created_at: str
+    expires_at: str
+    status: Literal["pending", "dismissed"] = "pending"
+
+
+class PasswordHelpRequestListResponse(BaseModel):
+    requests: list[PasswordHelpRequestResponse] = Field(default_factory=list)
+
+
+class PasswordHelpDismissRequest(BaseModel):
+    confirm: bool = False
+
+
+DownloadAccessMode = Literal["none", "all", "selected"]
+
+
+class DownloadAccessMovieResponse(BaseModel):
+    id: int
+    title: str
+    original_filename: str
+    source_kind: Literal["local", "cloud"] = "local"
+    file_size: int
+    year: int | None = None
+
+
+class AdminDownloadAccessResponse(BaseModel):
+    user_id: int
+    access_mode: DownloadAccessMode = "none"
+    selected_items: list[DownloadAccessMovieResponse] = Field(default_factory=list)
+    updated_at: str | None = None
+    updated_by_user_id: int | None = None
+
+
+class AdminDownloadAccessUpdateRequest(BaseModel):
+    access_mode: DownloadAccessMode
+    media_item_ids: list[int] = Field(default_factory=list)
+
+
+class DownloadSessionResponse(BaseModel):
+    download_url: str
+    title: str
+    file_size: int
+    expires_at: str
+    session_token: str
+
+
+class DownloadSessionStatusRequest(BaseModel):
+    message: str | None = None
 
 
 class AdminSessionResponse(BaseModel):

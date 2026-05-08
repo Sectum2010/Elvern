@@ -54,8 +54,9 @@ def _card_cache_path(
     *,
     cache_key: str,
     extension: str,
+    target_width: int,
 ) -> Path:
-    variant_dir = settings.poster_display_cache_dir / f"card_{int(settings.poster_card_cache_max_width)}"
+    variant_dir = settings.poster_display_cache_dir / f"card_{int(target_width)}"
     return variant_dir / f"{cache_key}{extension}"
 
 
@@ -92,25 +93,31 @@ def _atomic_save_image(image: Image.Image, *, target_path: Path, output_format: 
             temp_path.unlink(missing_ok=True)
 
 
-def get_or_create_card_poster_display_cache(settings: Settings, original_poster_path: Path | str) -> Path:
+def get_or_create_card_poster_display_cache(
+    settings: Settings,
+    original_poster_path: Path | str,
+    *,
+    target_width: int | None = None,
+) -> Path:
     original_path = Path(original_poster_path)
     if not settings.poster_display_cache_enabled:
         return original_path
 
+    resolved_target_width = int(target_width or settings.poster_card_cache_max_width)
     try:
         source_stat = original_path.stat()
         with Image.open(original_path) as opened_image:
             icc_profile = opened_image.info.get("icc_profile")
             normalized_image = ImageOps.exif_transpose(opened_image)
             source_width, source_height = normalized_image.size
-            if source_width <= int(settings.poster_card_cache_max_width):
+            if source_width <= resolved_target_width:
                 return original_path
 
             output_format, extension = _card_cache_output_format(normalized_image)
             cache_key = _card_cache_key(
                 original_poster_path=original_path,
                 source_stat=source_stat,
-                target_width=int(settings.poster_card_cache_max_width),
+                target_width=resolved_target_width,
                 output_format=output_format,
                 jpeg_quality=int(settings.poster_card_cache_jpeg_quality),
             )
@@ -118,14 +125,15 @@ def get_or_create_card_poster_display_cache(settings: Settings, original_poster_
                 settings,
                 cache_key=cache_key,
                 extension=extension,
+                target_width=resolved_target_width,
             )
             if target_path.is_file():
                 return target_path
 
-            resize_ratio = int(settings.poster_card_cache_max_width) / float(source_width)
+            resize_ratio = resolved_target_width / float(source_width)
             target_height = max(1, round(source_height * resize_ratio))
             resized_image = normalized_image.resize(
-                (int(settings.poster_card_cache_max_width), target_height),
+                (resolved_target_width, target_height),
                 Image.Resampling.LANCZOS,
             )
             if output_format == "JPEG" and resized_image.mode not in {"RGB", "L"}:

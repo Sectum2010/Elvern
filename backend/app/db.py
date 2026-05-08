@@ -195,6 +195,81 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS invite_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code_hash TEXT NOT NULL UNIQUE,
+        created_by_user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        used_by_user_id INTEGER,
+        hidden_at TEXT,
+        revoked_at TEXT,
+        FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (used_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS password_help_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username_snapshot TEXT NOT NULL,
+        user_id INTEGER,
+        requester_bucket_hash TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        dismissed_at TEXT,
+        dismissed_by_user_id INTEGER,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL,
+        FOREIGN KEY (dismissed_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+        CHECK (status IN ('pending', 'dismissed'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS download_access_grants (
+        user_id INTEGER PRIMARY KEY,
+        access_mode TEXT NOT NULL DEFAULT 'none',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        updated_by_user_id INTEGER,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (updated_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+        CHECK (access_mode IN ('none', 'all', 'selected'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS download_access_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        media_item_id INTEGER NOT NULL,
+        granted_by_user_id INTEGER,
+        granted_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (media_item_id) REFERENCES media_items (id) ON DELETE CASCADE,
+        FOREIGN KEY (granted_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+        UNIQUE (user_id, media_item_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS download_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_token_hash TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL,
+        media_item_id INTEGER NOT NULL,
+        auth_session_id INTEGER,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT,
+        failed_at TEXT,
+        revoked_at TEXT,
+        last_error TEXT,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (media_item_id) REFERENCES media_items (id) ON DELETE CASCADE,
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE SET NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS google_drive_accounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL UNIQUE,
@@ -601,6 +676,15 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_playback_tracking_events_user_media ON playback_tracking_events (user_id, media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_playback_tracking_events_native_session ON playback_tracking_events (native_session_id)",
     "CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_invite_codes_expires_at ON invite_codes (expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by ON invite_codes (created_by_user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_password_help_requests_status ON password_help_requests (status, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_password_help_requests_user ON password_help_requests (user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_password_help_requests_bucket ON password_help_requests (requester_bucket_hash, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_download_access_items_user_id ON download_access_items (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_download_access_items_media_item_id ON download_access_items (media_item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_download_sessions_user_media ON download_sessions (user_id, media_item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_download_sessions_expires_at ON download_sessions (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_google_drive_accounts_user_id ON google_drive_accounts (user_id)",
     "CREATE INDEX IF NOT EXISTS idx_google_oauth_states_expires_at ON google_oauth_states (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_library_sources_owner_user_id ON library_sources (owner_user_id)",

@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useProviderAuth } from "../auth/ProviderAuthContext";
 import { EmptyState } from "../components/EmptyState";
+import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
 import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
 import { SeriesRail } from "../components/SeriesRail";
@@ -123,6 +124,7 @@ export function LibraryPage() {
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
+    floating_library_search_enabled: true,
   });
   const [loading, setLoading] = useState(true);
   const [rescanPending, setRescanPending] = useState(false);
@@ -158,6 +160,8 @@ export function LibraryPage() {
   const orientationUserIntentVersionRef = useRef(0);
   const orientationSamplerRef = useRef(() => {});
   const orientationDebugLogAtRef = useRef(0);
+  const desktopSearchInputRef = useRef(null);
+  const mobileSearchInputRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const isPhoneClient = useMemo(() => {
@@ -903,6 +907,7 @@ export function LibraryPage() {
             <input
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search title or filename"
+              ref={desktopSearchInputRef}
               type="search"
               value={query}
             />
@@ -924,11 +929,21 @@ export function LibraryPage() {
           <input
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search title or filename"
+            ref={mobileSearchInputRef}
             type="search"
             value={query}
           />
         </label>
       </div>
+
+      <FloatingLibrarySearch
+        enabled={settings.floating_library_search_enabled !== false}
+        label="Search library"
+        mainInputRefs={[desktopSearchInputRef, mobileSearchInputRef]}
+        onChange={setQuery}
+        placeholder="Search title or filename"
+        value={query}
+      />
 
       <div className="library-focus-entry">
         <Link className="library-focus-entry__link" to="/library/local">

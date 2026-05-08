@@ -24,9 +24,29 @@ const POSTER_CARD_APPEARANCE_OPTIONS = [
   { value: "modern", label: "Modern" },
 ];
 
+const POSTER_DISPLAY_WIDTH_OPTIONS = [
+  { value: "800", label: "800 px" },
+  { value: "1000", label: "1000 px" },
+  { value: "1200", label: "1200 px" },
+  { value: "1400", label: "1400 px" },
+  { value: "1600", label: "1600 px" },
+  { value: "1800", label: "1800 px" },
+  { value: "2000", label: "2000 px" },
+  { value: "2200", label: "2200 px" },
+  { value: "original", label: "Original / No upperbound" },
+];
+
 
 function normalizePosterCardAppearance(value) {
   return value === "modern" ? "modern" : "classic";
+}
+
+
+function normalizePosterDisplayWidth(value) {
+  const normalized = String(value || "1400").toLowerCase();
+  return POSTER_DISPLAY_WIDTH_OPTIONS.some((option) => option.value === normalized)
+    ? normalized
+    : "1400";
 }
 
 
@@ -308,7 +328,9 @@ export function SettingsPage() {
     hide_duplicate_movies: true,
     hide_recently_added: false,
     floating_controls_position: "bottom",
+    floating_library_search_enabled: true,
     poster_card_appearance: "classic",
+    poster_card_display_max_width: "1400",
     media_library_reference_private_value: null,
     media_library_reference_shared_default_value: "",
     media_library_reference_effective_value: "",
@@ -655,6 +677,28 @@ export function SettingsPage() {
     }
   }
 
+  async function handleFloatingLibrarySearchToggle(event) {
+    const nextValue = event.target.checked;
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await apiRequest("/api/user-settings", {
+        method: "PATCH",
+        data: { floating_library_search_enabled: nextValue },
+      });
+      setSettings(payload);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+      }
+      setMessage(nextValue ? "Floating library search is enabled." : "Floating library search is disabled.");
+    } catch (requestError) {
+      setError(requestError.message || "Failed to update floating search setting");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function handlePosterCardAppearanceChange(nextValue) {
     const normalizedValue = normalizePosterCardAppearance(nextValue);
     if (normalizedValue === normalizePosterCardAppearance(settings.poster_card_appearance)) {
@@ -679,6 +723,31 @@ export function SettingsPage() {
       );
     } catch (requestError) {
       setError(requestError.message || "Failed to update poster appearance");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handlePosterDisplayWidthChange(event) {
+    const normalizedValue = normalizePosterDisplayWidth(event.target.value);
+    if (normalizedValue === normalizePosterDisplayWidth(settings.poster_card_display_max_width)) {
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const payload = await apiRequest("/api/user-settings", {
+        method: "PATCH",
+        data: { poster_card_display_max_width: normalizedValue },
+      });
+      setSettings(payload);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+      }
+      setMessage("Poster display quality saved.");
+    } catch (requestError) {
+      setError(requestError.message || "Failed to update poster display quality");
     } finally {
       setSaving(false);
     }
@@ -1272,26 +1341,44 @@ export function SettingsPage() {
           {loading ? (
             <p className="page-subnote">Loading display preferences...</p>
           ) : (
-            <div className="settings-segmented-control" role="radiogroup" aria-label="Poster appearance">
-              {POSTER_CARD_APPEARANCE_OPTIONS.map((option) => {
-                const isSelected = normalizePosterCardAppearance(settings.poster_card_appearance) === option.value;
-                return (
-                  <button
-                    aria-checked={isSelected}
-                    className={[
-                      "settings-segmented-control__button",
-                      isSelected ? "settings-segmented-control__button--active" : "",
-                    ].filter(Boolean).join(" ")}
-                    disabled={saving}
-                    key={option.value}
-                    onClick={() => handlePosterCardAppearanceChange(option.value)}
-                    role="radio"
-                    type="button"
-                  >
-                    {option.label}
-                  </button>
-                );
-              })}
+            <div className="settings-card-stack">
+              <div className="settings-segmented-control" role="radiogroup" aria-label="Poster appearance">
+                {POSTER_CARD_APPEARANCE_OPTIONS.map((option) => {
+                  const isSelected = normalizePosterCardAppearance(settings.poster_card_appearance) === option.value;
+                  return (
+                    <button
+                      aria-checked={isSelected}
+                      className={[
+                        "settings-segmented-control__button",
+                        isSelected ? "settings-segmented-control__button--active" : "",
+                      ].filter(Boolean).join(" ")}
+                      disabled={saving}
+                      key={option.value}
+                      onClick={() => handlePosterCardAppearanceChange(option.value)}
+                      role="radio"
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <label className="settings-field">
+                <span>
+                  <strong>Poster display quality</strong>
+                  <small>Maximum poster width used for library card images.</small>
+                </span>
+                <select
+                  className="admin-select"
+                  disabled={saving}
+                  onChange={handlePosterDisplayWidthChange}
+                  value={normalizePosterDisplayWidth(settings.poster_card_display_max_width)}
+                >
+                  {POSTER_DISPLAY_WIDTH_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
             </div>
           )}
         </section>
@@ -1301,21 +1388,35 @@ export function SettingsPage() {
           {loading ? (
             <p className="page-subnote">Loading interface preferences...</p>
           ) : (
-            <label className="settings-field">
-              <span>
-                <strong>Floating island position</strong>
-                <small>Move the full floating navigation and account island away from the Dynamic Island area.</small>
-              </span>
-              <select
-                className="admin-select"
-                disabled={saving}
-                onChange={handleFloatingControlsPositionChange}
-                value={settings.floating_controls_position || "bottom"}
-              >
-                <option value="bottom">Bottom</option>
-                <option value="top">Top</option>
-              </select>
-            </label>
+            <div className="settings-card-stack">
+              <label className="settings-field">
+                <span>
+                  <strong>Floating island position</strong>
+                  <small>Move the full floating navigation and account island away from the Dynamic Island area.</small>
+                </span>
+                <select
+                  className="admin-select"
+                  disabled={saving}
+                  onChange={handleFloatingControlsPositionChange}
+                  value={settings.floating_controls_position || "bottom"}
+                >
+                  <option value="bottom">Bottom</option>
+                  <option value="top">Top</option>
+                </select>
+              </label>
+              <label className="settings-toggle">
+                <span>
+                  <strong>Floating library search</strong>
+                  <small>Show the compact search button on Library pages.</small>
+                </span>
+                <input
+                  checked={settings.floating_library_search_enabled !== false}
+                  disabled={saving}
+                  onChange={handleFloatingLibrarySearchToggle}
+                  type="checkbox"
+                />
+              </label>
+            </div>
           )}
         </section>
 

@@ -99,6 +99,23 @@ def test_large_jpeg_generates_high_quality_cache_width_capped(initialized_settin
         assert bool(cached_image.info.get("progressive") or cached_image.info.get("progression"))
 
 
+def test_card_cache_target_width_is_part_of_variant_path(initialized_settings, tmp_path) -> None:
+    settings = _display_cache_settings(initialized_settings, tmp_path)
+    original_path = tmp_path / "posters" / "large.jpg"
+    _create_jpeg(original_path, size=(3200, 4800))
+
+    cache_1000 = get_or_create_card_poster_display_cache(settings, original_path, target_width=1000)
+    cache_1400 = get_or_create_card_poster_display_cache(settings, original_path, target_width=1400)
+
+    assert cache_1000 != cache_1400
+    assert "card_1000" in str(cache_1000)
+    assert "card_1400" in str(cache_1400)
+    with Image.open(cache_1000) as cached_image:
+        assert cached_image.width == 1000
+    with Image.open(cache_1400) as cached_image:
+        assert cached_image.width == 1400
+
+
 def test_cache_is_reused_when_source_is_unchanged(initialized_settings, tmp_path) -> None:
     settings = _display_cache_settings(initialized_settings, tmp_path)
     original_path = tmp_path / "posters" / "large.jpg"
@@ -180,6 +197,35 @@ def test_route_variant_card_returns_display_cache(client, admin_credentials, ini
     assert poster_response.content != poster_path.read_bytes()
     with Image.open(BytesIO(poster_response.content)) as cached_image:
         assert cached_image.width == 1400
+
+
+def test_route_variant_card_respects_user_poster_width_setting(client, admin_credentials, initialized_settings, tmp_path) -> None:
+    settings = _display_cache_settings(initialized_settings, tmp_path)
+    _sync_client_settings(client, settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    _seed_movie_with_poster(
+        settings,
+        movie_filename="Dune.2021.2160p.REMUX.mkv",
+        poster_filename="Dune (2021).jpg",
+    )
+
+    settings_response = client.patch("/api/user-settings", json={"poster_card_display_max_width": "1000"})
+    assert settings_response.status_code == 200
+    library_response = client.get("/api/library")
+    item = library_response.json()["items"][0]
+
+    poster_response = client.get(f"{item['poster_url']}&variant=card")
+    assert poster_response.status_code == 200
+    with Image.open(BytesIO(poster_response.content)) as cached_image:
+        assert cached_image.width == 1000
+
+    original_setting_response = client.patch("/api/user-settings", json={"poster_card_display_max_width": "original"})
+    assert original_setting_response.status_code == 200
+    original_poster_response = client.get(f"{item['poster_url']}&variant=card")
+    assert original_poster_response.status_code == 200
+    with Image.open(BytesIO(original_poster_response.content)) as original_image:
+        assert original_image.width == 2800
 
 
 def test_route_original_or_missing_variant_keeps_original_behavior(client, admin_credentials, initialized_settings, tmp_path) -> None:

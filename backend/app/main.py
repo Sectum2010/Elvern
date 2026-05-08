@@ -18,6 +18,7 @@ from .routes.cloud_libraries import router as cloud_libraries_router
 from .routes.debug import router as debug_router
 from .routes.desktop_helper import router as desktop_helper_router
 from .routes.desktop_playback import router as desktop_playback_router
+from .routes.download import router as download_router
 from .routes.library import router as library_router
 from .routes.mobile_playback import router as mobile_playback_router
 from .routes.native_playback import router as native_playback_router
@@ -83,6 +84,7 @@ app.include_router(cloud_libraries_router)
 app.include_router(debug_router)
 app.include_router(desktop_helper_router)
 app.include_router(desktop_playback_router)
+app.include_router(download_router)
 app.include_router(library_router)
 app.include_router(mobile_playback_router)
 app.include_router(native_playback_router)

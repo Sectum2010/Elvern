@@ -33,7 +33,9 @@ const ADMIN_STREAM_RELEVANT_EVENTS = [
   "session_status_changed",
   "user_disabled",
   "user_enabled",
+  "user_deleted",
 ];
+const ADMIN_INVITE_CODE_STORAGE_KEY = "elvern-admin-invite-codes";
 const ADMIN_SECTION_AUTO_COLLAPSE_MS = 15_000;
 const PLAYBACK_WORKERS_POLL_MS = 4_000;
 const RECOVERY_CHECKPOINT_LIMIT = 4;
@@ -106,6 +108,36 @@ function formatBytes(value) {
   }
   const decimals = unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
   return `${size.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+
+function readStoredInviteCodes() {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(ADMIN_INVITE_CODE_STORAGE_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+
+function writeStoredInviteCodes(inviteCodes) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(ADMIN_INVITE_CODE_STORAGE_KEY, JSON.stringify(inviteCodes));
+}
+
+
+function mergeInviteCodesWithLocalPlaintext(inviteCodes) {
+  const stored = readStoredInviteCodes();
+  return inviteCodes.map((inviteCode) => ({
+    ...inviteCode,
+    code: inviteCode.code || stored[String(inviteCode.id)]?.code || null,
+  }));
 }
 
 
@@ -269,6 +301,30 @@ export function AdminPage() {
   const [showAllAudit, setShowAllAudit] = useState(false);
   const [userFeedback, setUserFeedback] = useState({});
   const [userActionsModalUserId, setUserActionsModalUserId] = useState(null);
+  const [createUserExpanded, setCreateUserExpanded] = useState(false);
+  const [deleteUserState, setDeleteUserState] = useState({
+    userId: null,
+    username: "",
+    pending: false,
+    error: "",
+  });
+  const [inviteCodes, setInviteCodes] = useState([]);
+  const [invitePending, setInvitePending] = useState(false);
+  const [revealedInviteIds, setRevealedInviteIds] = useState({});
+  const [passwordHelpRequests, setPasswordHelpRequests] = useState([]);
+  const [passwordHelpPendingId, setPasswordHelpPendingId] = useState(null);
+  const [downloadAccessState, setDownloadAccessState] = useState({
+    userId: null,
+    loading: false,
+    saving: false,
+    accessMode: "none",
+    selectedItems: [],
+    searchQuery: "",
+    searchResults: [],
+    searchPending: false,
+    feedback: "",
+    error: "",
+  });
   const [playbackWorkersPayload, setPlaybackWorkersPayload] = useState(null);
   const [playbackWorkersWarning, setPlaybackWorkersWarning] = useState("");
   const [playbackWorkersFeedback, setPlaybackWorkersFeedback] = useState(null);
@@ -393,6 +449,30 @@ export function AdminPage() {
     }
   }
 
+  async function loadInviteCodes() {
+    try {
+      const payload = await apiRequest("/api/admin/invite-codes");
+      setInviteCodes(mergeInviteCodesWithLocalPlaintext(payload.invite_codes || []));
+    } catch (requestError) {
+      setBanner({
+        tone: "error",
+        text: requestError.message || "Failed to load invite codes",
+      });
+    }
+  }
+
+  async function loadPasswordHelpRequests() {
+    try {
+      const payload = await apiRequest("/api/admin/password-help-requests");
+      setPasswordHelpRequests(payload.requests || []);
+    } catch (requestError) {
+      setBanner({
+        tone: "error",
+        text: requestError.message || "Failed to load password help requests",
+      });
+    }
+  }
+
   async function loadRecoveryData({ silent = false, preserveFeedback = false, preferredCheckpointId = "" } = {}) {
     if (!silent) {
       setRecoveryLoading(true);
@@ -468,6 +548,80 @@ export function AdminPage() {
     }
     loadRecoveryData();
   }, [activeSection, recoveryLoaded, recoveryLoading]);
+
+  useEffect(() => {
+    if (user?.role !== "admin" || activeSection !== "assistant") {
+      return;
+    }
+    loadInviteCodes();
+  }, [activeSection, user?.role]);
+
+  useEffect(() => {
+    if (user?.role !== "admin" || activeSection !== "security") {
+      return;
+    }
+    loadPasswordHelpRequests();
+  }, [activeSection, user?.role]);
+
+  useEffect(() => {
+    if (!selectedUserActionsEntry) {
+      setDownloadAccessState((current) => ({
+        ...current,
+        userId: null,
+        accessMode: "none",
+        selectedItems: [],
+        searchQuery: "",
+        searchResults: [],
+        feedback: "",
+        error: "",
+      }));
+      return;
+    }
+    loadDownloadAccessForUser(selectedUserActionsEntry);
+  }, [selectedUserActionsEntry?.id]);
+
+  useEffect(() => {
+    if (!selectedUserActionsEntry || downloadAccessState.accessMode !== "selected") {
+      return undefined;
+    }
+    const query = downloadAccessState.searchQuery.trim();
+    if (!query) {
+      setDownloadAccessState((current) => ({ ...current, searchResults: [], searchPending: false }));
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timerId = window.setTimeout(async () => {
+      setDownloadAccessState((current) => ({ ...current, searchPending: true }));
+      try {
+        const payload = await apiRequest(`/api/library/search?q=${encodeURIComponent(query)}`, {
+          signal: controller.signal,
+        });
+        setDownloadAccessState((current) => ({
+          ...current,
+          searchPending: false,
+          searchResults: (payload.items || []).filter(
+            (item) => !current.selectedItems.some((selected) => selected.id === item.id),
+          ),
+        }));
+      } catch (requestError) {
+        if (requestError.name !== "AbortError") {
+          setDownloadAccessState((current) => ({
+            ...current,
+            searchPending: false,
+            error: requestError.message || "Movie search failed",
+          }));
+        }
+      }
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timerId);
+    };
+  }, [
+    downloadAccessState.accessMode,
+    downloadAccessState.searchQuery,
+    selectedUserActionsEntry,
+  ]);
 
   useEffect(() => () => {
     if (typeof window !== "undefined" && sectionCollapseTimerRef.current) {
@@ -788,6 +942,7 @@ export function AdminPage() {
         },
       });
       setCreateUserForm({ username: "", password: "", role: "standard_user" });
+      setCreateUserExpanded(false);
       setBanner({ tone: "success", text: "User created." });
       await loadAdminData({ silent: true });
     } catch (requestError) {
@@ -894,6 +1049,194 @@ export function AdminPage() {
       );
     } finally {
       setUserActionPending(null);
+    }
+  }
+
+  function armDeleteUser(entry) {
+    setDeleteUserState({
+      userId: entry.id,
+      username: entry.username,
+      pending: false,
+      error: "",
+    });
+  }
+
+  async function handleConfirmDeleteUser(entry) {
+    if (deleteUserState.pending) {
+      return;
+    }
+    setDeleteUserState((current) => ({ ...current, pending: true, error: "" }));
+    try {
+      await apiRequest(`/api/admin/users/${entry.id}`, {
+        method: "DELETE",
+        data: { confirm: true },
+      });
+      setUserActionsModalUserId(null);
+      setDeleteUserState({ userId: null, username: "", pending: false, error: "" });
+      setBanner({ tone: "success", text: `Deleted user ${entry.username}.` });
+      await loadAdminData({ silent: true });
+    } catch (requestError) {
+      setDeleteUserState((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || `Failed to delete ${entry.username}`,
+      }));
+    }
+  }
+
+  async function handleGenerateInviteCode() {
+    setInvitePending(true);
+    setBanner(null);
+    try {
+      const payload = await apiRequest("/api/admin/invite-codes", { method: "POST" });
+      const stored = readStoredInviteCodes();
+      if (payload.code) {
+        stored[String(payload.id)] = {
+          code: payload.code,
+          expires_at: payload.expires_at,
+        };
+        writeStoredInviteCodes(stored);
+      }
+      await loadInviteCodes();
+      setRevealedInviteIds((current) => ({ ...current, [payload.id]: false }));
+      setBanner({ tone: "success", text: "Invite code generated." });
+    } catch (requestError) {
+      setBanner({
+        tone: "error",
+        text: requestError.message || "Failed to generate invite code",
+      });
+    } finally {
+      setInvitePending(false);
+    }
+  }
+
+  async function handleHideInviteCode(inviteCode) {
+    const confirmed = window.confirm("Hide this invite code from the admin list? The code itself will remain usable until it expires or is used.");
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await apiRequest(`/api/admin/invite-codes/${inviteCode.id}/display`, { method: "DELETE" });
+      const stored = readStoredInviteCodes();
+      delete stored[String(inviteCode.id)];
+      writeStoredInviteCodes(stored);
+      await loadInviteCodes();
+      setBanner({ tone: "success", text: "Invite code hidden." });
+    } catch (requestError) {
+      setBanner({
+        tone: "error",
+        text: requestError.message || "Failed to hide invite code",
+      });
+    }
+  }
+
+  async function handleDismissPasswordHelpRequest(requestEntry) {
+    const confirmed = window.confirm(`Dismiss the password help request for ${requestEntry.username_snapshot}?`);
+    if (!confirmed) {
+      return;
+    }
+    setPasswordHelpPendingId(requestEntry.id);
+    try {
+      await apiRequest(`/api/admin/password-help-requests/${requestEntry.id}/dismiss`, {
+        method: "POST",
+        data: { confirm: true },
+      });
+      await loadPasswordHelpRequests();
+      setBanner({ tone: "success", text: "Password help request dismissed." });
+    } catch (requestError) {
+      setBanner({
+        tone: "error",
+        text: requestError.message || "Failed to dismiss password help request",
+      });
+    } finally {
+      setPasswordHelpPendingId(null);
+    }
+  }
+
+  async function loadDownloadAccessForUser(entry) {
+    if (!entry) {
+      return;
+    }
+    setDownloadAccessState((current) => ({
+      ...current,
+      userId: entry.id,
+      loading: true,
+      error: "",
+      feedback: "",
+      searchQuery: "",
+      searchResults: [],
+    }));
+    try {
+      const payload = await apiRequest(`/api/admin/users/${entry.id}/download-access`);
+      setDownloadAccessState((current) => ({
+        ...current,
+        userId: entry.id,
+        loading: false,
+        accessMode: payload.access_mode || "none",
+        selectedItems: payload.selected_items || [],
+      }));
+    } catch (requestError) {
+      setDownloadAccessState((current) => ({
+        ...current,
+        loading: false,
+        error: requestError.message || "Failed to load download access",
+      }));
+    }
+  }
+
+  function updateDownloadAccessMode(accessMode) {
+    setDownloadAccessState((current) => ({
+      ...current,
+      accessMode,
+      feedback: "",
+      error: "",
+    }));
+  }
+
+  function addDownloadAccessMovie(item) {
+    setDownloadAccessState((current) => {
+      if (current.selectedItems.some((selected) => selected.id === item.id)) {
+        return current;
+      }
+      return {
+        ...current,
+        selectedItems: [...current.selectedItems, item],
+        searchQuery: "",
+        searchResults: [],
+      };
+    });
+  }
+
+  function removeDownloadAccessMovie(itemId) {
+    setDownloadAccessState((current) => ({
+      ...current,
+      selectedItems: current.selectedItems.filter((item) => item.id !== itemId),
+    }));
+  }
+
+  async function saveDownloadAccess(entry) {
+    setDownloadAccessState((current) => ({ ...current, saving: true, error: "", feedback: "" }));
+    try {
+      const payload = await apiRequest(`/api/admin/users/${entry.id}/download-access`, {
+        method: "PUT",
+        data: {
+          access_mode: downloadAccessState.accessMode,
+          media_item_ids: downloadAccessState.selectedItems.map((item) => item.id),
+        },
+      });
+      setDownloadAccessState((current) => ({
+        ...current,
+        saving: false,
+        accessMode: payload.access_mode || "none",
+        selectedItems: payload.selected_items || [],
+        feedback: "Download access saved.",
+      }));
+    } catch (requestError) {
+      setDownloadAccessState((current) => ({
+        ...current,
+        saving: false,
+        error: requestError.message || "Failed to save download access",
+      }));
     }
   }
 
@@ -1372,7 +1715,78 @@ export function AdminPage() {
               ) : null}
             </div>
           );
-        })}
+	        })}
+        <div className="admin-list__row admin-user-row admin-create-user-row">
+          <button
+            aria-expanded={createUserExpanded}
+            aria-label="Create user"
+            className="user-avatar-button user-avatar-button--create"
+            onClick={() => setCreateUserExpanded((current) => !current)}
+            type="button"
+          >
+            <span aria-hidden="true" className="user-avatar-button__initials">+</span>
+          </button>
+          <div className="admin-user-row__summary">
+            <button
+              className="admin-create-user-row__button"
+              onClick={() => setCreateUserExpanded((current) => !current)}
+              type="button"
+            >
+              Create user
+            </button>
+            {createUserExpanded ? (
+              <form className="admin-form admin-create-user-inline-form" onSubmit={handleCreateUser}>
+                <input autoComplete="false" className="sr-only" name="admin-decoy-username" tabIndex="-1" type="text" />
+                <input autoComplete="new-password" className="sr-only" name="admin-decoy-password" tabIndex="-1" type="password" />
+                <label>
+                  Username
+                  <input
+                    autoComplete="off"
+                    name="admin-create-user-username"
+                    onChange={(event) => setCreateUserForm((current) => ({ ...current, username: event.target.value }))}
+                    required
+                    type="text"
+                    value={createUserForm.username}
+                  />
+                </label>
+                <label>
+                  Password
+                  <PasswordInput
+                    autoComplete="new-password"
+                    name="admin-create-user-password"
+                    onChange={(event) => setCreateUserForm((current) => ({ ...current, password: event.target.value }))}
+                    required
+                    value={createUserForm.password}
+                  />
+                </label>
+                <label>
+                  Role
+                  <select
+                    className="admin-select"
+                    onChange={(event) => setCreateUserForm((current) => ({ ...current, role: event.target.value }))}
+                    value={createUserForm.role}
+                  >
+                    <option value="standard_user">Standard user</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </label>
+                <div className="admin-form__actions">
+                  <button className="primary-button" disabled={createPending} type="submit">
+                    {createPending ? "Creating..." : "Create user"}
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={createPending}
+                    onClick={() => setCreateUserExpanded(false)}
+                    type="button"
+                  >
+                    Close
+                  </button>
+                </div>
+              </form>
+            ) : null}
+          </div>
+        </div>
       </div>
     </section>
   );
@@ -1402,16 +1816,8 @@ export function AdminPage() {
               <div className="admin-user-actions-modal__title-copy">
                 <h2 id="admin-user-actions-modal-title" className="detail-info-modal__title">
                   {selectedUserActionsEntry.username}
+                  {selectedUserActionsEntry.role === "admin" ? <AdminCrownIcon /> : null}
                 </h2>
-                <div className="admin-user-actions-modal__subtitle">
-                  <UserStatusIndicator
-                    color={selectedUserActionsEntry.status_color}
-                    label={selectedUserActionsEntry.status_label}
-                  />
-                  <span>
-                    {selectedUserActionsEntry.role} · {selectedUserActionsEntry.enabled ? "enabled" : "disabled"} · {selectedUserActionsEntry.active_sessions} live session{selectedUserActionsEntry.active_sessions === 1 ? "" : "s"}
-                  </span>
-                </div>
               </div>
             </div>
             <p className="page-subnote">
@@ -1435,12 +1841,6 @@ export function AdminPage() {
               <p className="page-subnote">
                 Role changes and password updates still require your current admin password.
               </p>
-            </div>
-            <div className="admin-user-actions-modal__meta">
-              <span className="admin-user-actions-modal__meta-pill">Role: {selectedUserActionsEntry.role}</span>
-              <span className="admin-user-actions-modal__meta-pill">
-                Account: {selectedUserActionsEntry.enabled ? "Enabled" : "Disabled"}
-              </span>
             </div>
             <div className="admin-list__actions">
               {selectedUserActionsEntry.id !== user?.id ? (
@@ -1485,9 +1885,19 @@ export function AdminPage() {
                   });
                 }}
                 type="button"
-              >
-                {selectedUserActionsEntry.id === user?.id ? "Update my password" : "Reset password"}
-              </button>
+	              >
+	                Update password
+	              </button>
+              {selectedUserActionsEntry.id !== user?.id ? (
+                <button
+                  className="ghost-button ghost-button--danger"
+                  disabled={userActionPending === selectedUserActionsEntry.id || deleteUserState.pending}
+                  onClick={() => armDeleteUser(selectedUserActionsEntry)}
+                  type="button"
+                >
+                  Delete user
+                </button>
+              ) : null}
               {selectedUserActionsEntry.id === user?.id ? (
                 <button
                   className="ghost-button ghost-button--danger"
@@ -1506,7 +1916,34 @@ export function AdminPage() {
                   Delete account
                 </button>
               ) : null}
-            </div>
+	            </div>
+
+            {deleteUserState.userId === selectedUserActionsEntry.id ? (
+              <div className="admin-danger-block">
+                <p className="form-error">
+                  Warning: deleting {selectedUserActionsEntry.username} revokes auth, native playback, Route2 sessions, and download sessions.
+                </p>
+                {deleteUserState.error ? <p className="form-error">{deleteUserState.error}</p> : null}
+                <div className="admin-list__actions">
+                  <button
+                    className="ghost-button ghost-button--danger"
+                    disabled={deleteUserState.pending}
+                    onClick={() => handleConfirmDeleteUser(selectedUserActionsEntry)}
+                    type="button"
+                  >
+                    {deleteUserState.pending ? "Deleting..." : "Confirm delete user"}
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={deleteUserState.pending}
+                    onClick={() => setDeleteUserState({ userId: null, username: "", pending: false, error: "" })}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             {selectedUserActionsEntry.id === user?.id ? (
               <p className="page-subnote">
@@ -1676,11 +2113,11 @@ export function AdminPage() {
             ) : null}
           </section>
 
-          <section className="admin-user-actions-modal__section">
-            <div className="admin-user-actions-modal__section-header">
-              <h3>Assistant Beta</h3>
-              <p className="page-subnote">Secondary access only for the safe structured request form.</p>
-            </div>
+	          <section className="admin-user-actions-modal__section">
+	            <div className="admin-user-actions-modal__section-header">
+	              <h3>Assistant (Beta)</h3>
+	              <p className="page-subnote">Secondary access only for the safe structured request form.</p>
+	            </div>
             {selectedUserActionsEntry.role === "standard_user" ? (
               <div className="assistant-access-toggle assistant-access-toggle--modal">
                 <div>
@@ -1704,11 +2141,124 @@ export function AdminPage() {
               <p className="page-subnote">
                 Assistant (Beta) access is only configurable for standard users in this phase.
               </p>
+	            )}
+	          </section>
+
+          <section className="admin-user-actions-modal__section">
+            <div className="admin-user-actions-modal__section-header">
+              <h3>Download Access (Beta)</h3>
+              <p className="page-subnote">Download grants are separate from playback access.</p>
+            </div>
+            {downloadAccessState.loading && downloadAccessState.userId === selectedUserActionsEntry.id ? (
+              <p className="page-subnote">Loading download access...</p>
+            ) : (
+              <div className="download-access-card">
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>No download access</strong>
+                    <small>Hide download actions for this user.</small>
+                  </span>
+                  <input
+                    checked={downloadAccessState.accessMode === "none"}
+                    name="download-access-mode"
+                    onChange={() => updateDownloadAccessMode("none")}
+                    type="radio"
+                  />
+                </label>
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>Enable access to all movies</strong>
+                    <small>Allow downloading every visible movie.</small>
+                  </span>
+                  <input
+                    checked={downloadAccessState.accessMode === "all"}
+                    name="download-access-mode"
+                    onChange={() => updateDownloadAccessMode("all")}
+                    type="radio"
+                  />
+                </label>
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>Select available movies</strong>
+                    <small>Grant individual movies one at a time.</small>
+                  </span>
+                  <input
+                    checked={downloadAccessState.accessMode === "selected"}
+                    name="download-access-mode"
+                    onChange={() => updateDownloadAccessMode("selected")}
+                    type="radio"
+                  />
+                </label>
+
+                {downloadAccessState.accessMode === "selected" ? (
+                  <div className="download-access-picker">
+                    <label className="search-field">
+                      <span className="sr-only">Search movies for download access</span>
+                      <input
+                        autoComplete="off"
+                        onChange={(event) =>
+                          setDownloadAccessState((current) => ({ ...current, searchQuery: event.target.value }))
+                        }
+                        placeholder="Search movies to add"
+                        type="search"
+                        value={downloadAccessState.searchQuery}
+                      />
+                    </label>
+                    {downloadAccessState.searchQuery.trim() ? (
+                      <div className="download-access-results">
+                        {downloadAccessState.searchPending ? <p className="page-subnote">Searching...</p> : null}
+                        {!downloadAccessState.searchPending && downloadAccessState.searchResults.length === 0 ? (
+                          <p className="page-subnote">No matching movies.</p>
+                        ) : null}
+                        {downloadAccessState.searchResults.slice(0, 8).map((item) => (
+                          <button
+                            className="download-access-result"
+                            key={item.id}
+                            onClick={() => addDownloadAccessMovie(item)}
+                            type="button"
+                          >
+                            <strong>{item.title}</strong>
+                            <span>{formatBytes(item.file_size)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    {downloadAccessState.selectedItems.length > 0 ? (
+                      <div className="download-access-selected">
+                        {downloadAccessState.selectedItems.map((item) => (
+                          <span className="download-access-chip" key={item.id}>
+                            {item.title}
+                            <button
+                              aria-label={`Remove ${item.title}`}
+                              onClick={() => removeDownloadAccessMovie(item.id)}
+                              type="button"
+                            >
+                              X
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="page-subnote">No selected movies yet.</p>
+                    )}
+                  </div>
+                ) : null}
+                {downloadAccessState.error ? <p className="form-error">{downloadAccessState.error}</p> : null}
+                {downloadAccessState.feedback ? <p className="action-feedback">{downloadAccessState.feedback}</p> : null}
+                <button
+                  className="primary-button"
+                  disabled={downloadAccessState.saving}
+                  onClick={() => saveDownloadAccess(selectedUserActionsEntry)}
+                  type="button"
+                >
+                  {downloadAccessState.saving ? "Saving..." : "Save download access"}
+                </button>
+              </div>
             )}
           </section>
-        </div>
-      </div>
-    </div>
+	        </div>
+	      </div>
+	    </div>
   ) : null;
 
   const terminateWorkerConfirmationModal = terminateWorkerModal ? (
@@ -1784,66 +2334,6 @@ export function AdminPage() {
     </div>
   ) : null;
 
-  const createUserCard = (
-    <section className="settings-card">
-      <h2>Create user</h2>
-      <form
-        autoComplete="off"
-        className="admin-form"
-        id="elvern-admin-create-account-form"
-        name="elvern-admin-create-account-form"
-        onSubmit={handleCreateUser}
-      >
-        <div aria-hidden="true" className="admin-autofill-decoys">
-          <input autoComplete="username" name="username" tabIndex={-1} type="text" />
-          <input autoComplete="current-password" name="password" tabIndex={-1} type="password" />
-        </div>
-        <label>
-          Username
-          <input
-            autoComplete="off"
-            data-1p-ignore="true"
-            data-lpignore="true"
-            id="elvern-new-account-username"
-            name="elvern-new-account-username"
-            onChange={(event) => setCreateUserForm((current) => ({ ...current, username: event.target.value }))}
-            required
-            spellCheck="false"
-            type="text"
-            value={createUserForm.username}
-          />
-        </label>
-        <label>
-          Password
-          <PasswordInput
-            autoComplete="new-password"
-            data-1p-ignore="true"
-            data-lpignore="true"
-            id="elvern-new-account-password"
-            name="elvern-new-account-password"
-            onChange={(event) => setCreateUserForm((current) => ({ ...current, password: event.target.value }))}
-            required
-            value={createUserForm.password}
-          />
-        </label>
-        <label>
-          Role
-          <select
-            className="admin-select"
-            onChange={(event) => setCreateUserForm((current) => ({ ...current, role: event.target.value }))}
-            value={createUserForm.role}
-          >
-            <option value="standard_user">Standard user</option>
-            <option value="admin">Admin</option>
-          </select>
-        </label>
-        <button className="primary-button" disabled={createPending} type="submit">
-          {createPending ? "Creating..." : "Create user"}
-        </button>
-      </form>
-    </section>
-  );
-
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
       <section className="settings-card">
@@ -1858,16 +2348,52 @@ export function AdminPage() {
         <StatusRow label="Removed" value={String(statusPayload.last_scan?.files_removed ?? 0)} />
       </section>
 
-      <section className="settings-card">
-        <h2>Security</h2>
-        <StatusRow label="Private-only mode" value={statusPayload.security.private_network_only ? "Enabled" : "Disabled"} />
-        <StatusRow label="Multi-user" value={statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"} />
-        <StatusRow label="Users" value={String(statusPayload.total_users)} />
-        <StatusRow label="Active auth sessions" value={String(sessionsPayload.length)} />
-        <StatusRow label="Session TTL" value={`${statusPayload.security.session_ttl_hours} hour(s)`} />
+	      <section className="settings-card">
+	        <h2>Security</h2>
+	        <StatusRow label="Private-only mode" value={statusPayload.security.private_network_only ? "Enabled" : "Disabled"} />
+	        <StatusRow label="Multi-user" value={statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"} />
+	        <StatusRow label="Users" value={String(statusPayload.total_users)} />
+	        <StatusRow label="Active auth sessions" value={String(sessionsPayload.length)} />
+	        <StatusRow label="Session TTL" value={`${statusPayload.security.session_ttl_hours} hour(s)`} />
+	      </section>
+
+      <section className="settings-card settings-card--wide">
+        <div className="settings-inline-header">
+          <div>
+            <h2>Password help requests</h2>
+            <p className="page-subnote">Pending requests stay visible for 30 days unless dismissed.</p>
+          </div>
+          <button className="ghost-button ghost-button--inline" onClick={loadPasswordHelpRequests} type="button">
+            Refresh
+          </button>
+        </div>
+        <div className="admin-list admin-list--dense">
+          {passwordHelpRequests.length > 0 ? (
+            passwordHelpRequests.map((requestEntry) => (
+              <div className="admin-list__row admin-list__row--card" key={requestEntry.id}>
+                <div>
+                  <strong>{requestEntry.username_snapshot}</strong>
+                  <p className="page-subnote">
+                    Requested {formatDate(requestEntry.created_at)} · expires {formatDate(requestEntry.expires_at)}
+                  </p>
+                </div>
+                <button
+                  className="ghost-button ghost-button--danger"
+                  disabled={passwordHelpPendingId === requestEntry.id}
+                  onClick={() => handleDismissPasswordHelpRequest(requestEntry)}
+                  type="button"
+                >
+                  {passwordHelpPendingId === requestEntry.id ? "Dismissing..." : "Dismiss"}
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="page-subnote">No pending password help requests.</p>
+          )}
+        </div>
       </section>
-    </div>
-  ) : null;
+	    </div>
+	  ) : null;
 
   const logsSection = (
     <div className="admin-activity-grid">
@@ -2333,12 +2859,11 @@ export function AdminPage() {
 
       {statusPayload ? (
         <div className="admin-section-stack">
-              {activeSection === "panel" ? (
-                <>
-                  {usersCard}
-                  {createUserCard}
-                </>
-              ) : null}
+	              {activeSection === "panel" ? (
+	                <>
+	                  {usersCard}
+	                </>
+	              ) : null}
 
           {activeSection === "security" ? securitySection : null}
 
@@ -2346,20 +2871,82 @@ export function AdminPage() {
 
           {activeSection === "recovery" ? recoverySection : null}
 
-          {activeSection === "assistant" ? (
-            <section className="settings-card admin-assistant-placeholder">
-              <p className="eyebrow">Assistant (Beta)</p>
-              <h2>Request workflow</h2>
-              <p className="page-subnote">
-                Review structured user requests, placeholder triage drafts, proposed action requests, approval records, and change drafts.
-              </p>
-              <div className="admin-list__actions">
-                <Link className="primary-button" to="/admin/assistant">
-                  Open request queue
-                </Link>
-              </div>
-            </section>
-          ) : null}
+	          {activeSection === "assistant" ? (
+	            <>
+	              <section className="settings-card admin-assistant-placeholder">
+	                <p className="eyebrow">Assistant (Beta)</p>
+	                <h2>Request workflow</h2>
+	                <p className="page-subnote">
+	                  Review structured user requests, placeholder triage drafts, proposed action requests, approval records, and change drafts.
+	                </p>
+	                <div className="admin-list__actions">
+	                  <Link className="primary-button" to="/admin/assistant">
+	                    Open request queue
+	                  </Link>
+	                </div>
+	              </section>
+	              <section className="settings-card">
+	                <div className="settings-inline-header">
+	                  <div>
+	                    <h2>Generate invite code</h2>
+	                    <p className="page-subnote">Codes expire after 30 minutes and can be used once.</p>
+	                  </div>
+	                  <button className="primary-button" disabled={invitePending} onClick={handleGenerateInviteCode} type="button">
+	                    {invitePending ? "Generating..." : "Generate invite code"}
+	                  </button>
+	                </div>
+	                <div className="admin-list admin-list--dense">
+	                  {inviteCodes.length > 0 ? (
+	                    inviteCodes.map((inviteCode) => {
+	                      const isRevealed = revealedInviteIds[inviteCode.id] === true;
+	                      const displayCode = inviteCode.code
+	                        ? (isRevealed ? inviteCode.code : "............................")
+	                        : "Code is only available in this browser";
+	                      return (
+	                        <div className="admin-list__row admin-list__row--card admin-invite-code-row" key={inviteCode.id}>
+	                          <div>
+	                            <code className="admin-invite-code-row__code">{displayCode}</code>
+	                            <p className="page-subnote">
+	                              Expires {formatDate(inviteCode.expires_at)}
+	                              {inviteCode.used_at ? ` · used ${formatDate(inviteCode.used_at)}` : ""}
+	                            </p>
+	                          </div>
+	                          <div className="admin-list__actions">
+	                            <button
+	                              className="ghost-button ghost-button--inline"
+	                              disabled={!inviteCode.code}
+	                              onClick={() => setRevealedInviteIds((current) => ({ ...current, [inviteCode.id]: !current[inviteCode.id] }))}
+	                              type="button"
+	                            >
+	                              {isRevealed ? "Hide" : "Show"}
+	                            </button>
+	                            <button
+	                              className="ghost-button ghost-button--inline"
+	                              disabled={!inviteCode.code}
+	                              onClick={() => navigator.clipboard?.writeText(inviteCode.code)}
+	                              type="button"
+	                            >
+	                              Copy
+	                            </button>
+	                            <button
+	                              aria-label="Hide invite code"
+	                              className="ghost-button ghost-button--danger"
+	                              onClick={() => handleHideInviteCode(inviteCode)}
+	                              type="button"
+	                            >
+	                              X
+	                            </button>
+	                          </div>
+	                        </div>
+	                      );
+	                    })
+	                  ) : (
+	                    <p className="page-subnote">No visible active invite codes.</p>
+	                  )}
+	                </div>
+	              </section>
+	            </>
+	          ) : null}
         </div>
       ) : null}
       {userActionsModal}
