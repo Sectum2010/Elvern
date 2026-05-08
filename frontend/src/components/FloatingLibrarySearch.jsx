@@ -16,6 +16,7 @@ export function FloatingLibrarySearch({
   placeholder = "Search library",
   label = "Search library",
   mainInputRefs = [],
+  desktopInteractionMode = false,
 }) {
   const [expanded, setExpanded] = useState(false);
   const containerRef = useRef(null);
@@ -49,11 +50,15 @@ export function FloatingLibrarySearch({
       handleCompactClick();
       return;
     }
+    if (desktopInteractionMode) {
+      setExpanded(false);
+      return;
+    }
     if (!value) {
       setExpanded(false);
       return;
     }
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
   }
 
   function handleKeyDown(event) {
@@ -62,13 +67,16 @@ export function FloatingLibrarySearch({
     }
     event.preventDefault();
     if (value) {
-      onChange("");
+      onChange("", { action: "escape", previousValue: value, source: "floating" });
       return;
     }
     setExpanded(false);
   }
 
   function handleBlur(event) {
+    if (desktopInteractionMode) {
+      return;
+    }
     const nextTarget = event.relatedTarget;
     if (nextTarget && event.currentTarget.contains(nextTarget)) {
       return;
@@ -88,6 +96,7 @@ export function FloatingLibrarySearch({
       className={[
         "floating-library-search",
         expanded ? "floating-library-search--expanded" : "floating-library-search--compact",
+        desktopInteractionMode ? "floating-library-search--desktop" : "",
       ].join(" ")}
       onBlur={expanded ? handleBlur : undefined}
       ref={containerRef}
@@ -102,7 +111,11 @@ export function FloatingLibrarySearch({
             <input
               ref={inputRef}
               autoComplete="off"
-              onChange={(event) => onChange(event.target.value)}
+              onChange={(event) => onChange(event.target.value, {
+                action: "input",
+                previousValue: value,
+                source: "floating",
+              })}
               onCompositionEnd={() => {
                 composingRef.current = false;
               }}
@@ -119,8 +132,11 @@ export function FloatingLibrarySearch({
                 aria-label="Clear search"
                 className="floating-library-search__clear"
                 onClick={() => {
-                  onChange("");
-                  inputRef.current?.focus();
+                  onChange("", { action: "clear", previousValue: value, source: "floating" });
+                  inputRef.current?.focus({ preventScroll: true });
+                }}
+                onMouseDown={(event) => {
+                  event.preventDefault();
                 }}
                 type="button"
               >
@@ -130,7 +146,7 @@ export function FloatingLibrarySearch({
           </label>
           <button
             aria-expanded={expanded}
-            aria-label={value ? label : "Collapse search"}
+            aria-label={desktopInteractionMode || !value ? "Collapse search" : label}
             className="floating-library-search__button"
             onClick={handleSearchButtonClick}
             type="button"

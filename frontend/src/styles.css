@@ -378,6 +378,11 @@ button {
   outline-offset: 3px;
 }
 
+.floating-library-search--desktop .floating-library-search__capsule:focus-within {
+  outline: 0;
+  outline-offset: 0;
+}
+
 .floating-library-search--expanded .floating-library-search__button {
   width: 3.05rem;
   height: 3.05rem;
@@ -398,6 +403,10 @@ button {
   min-width: 0;
 }
 
+.floating-library-search--desktop .floating-library-search__field {
+  overflow: visible;
+}
+
 .floating-library-search__field input {
   flex: 1 1 auto;
   width: 100%;
@@ -408,6 +417,15 @@ button {
   background: transparent;
   color: var(--text);
   padding: 0;
+}
+
+.floating-library-search--desktop .floating-library-search__field input {
+  min-height: 2.8rem;
+  padding-block: 0.12rem;
+  line-height: 1.35;
+  caret-color: #fff;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .floating-library-search__field input::-webkit-search-cancel-button {
@@ -700,6 +718,12 @@ button {
   padding: 0.85rem 0.95rem;
   background: rgba(11, 17, 24, 0.92);
   color: #f4f8fb;
+}
+
+.page-section--library .library-desktop-hero__search input,
+.page-section--library .library-mobile-search-card .search-field input,
+.page-section--library-source .library-focus-search-card .search-field input {
+  border-radius: 999px;
 }
 
 .password-input {

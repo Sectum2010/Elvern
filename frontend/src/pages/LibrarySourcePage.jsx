@@ -128,9 +128,16 @@ export function LibrarySourcePage({ sourceKind }) {
   const [items, setItems] = useState([]);
   const [seriesRails, setSeriesRails] = useState([]);
   const sourceSearchInputRef = useRef(null);
+  const floatingSearchScrollYRef = useRef(null);
+  const pendingFloatingSearchRestoreYRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const copy = SOURCE_PAGE_COPY[sourceKind] || SOURCE_PAGE_COPY.local;
+  const clientPlatform = detectClientPlatform();
+  const clientDeviceClass = detectClientDeviceClass();
+  const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
+  const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
+  const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
   const normalizedQuery = deferredQuery.trim().toLowerCase();
   const visibleSeriesRails = useMemo(
     () => seriesRails
@@ -171,8 +178,6 @@ export function LibrarySourcePage({ sourceKind }) {
   );
   const sourceVisibleCount = items.length;
   const hasVisibleContent = visibleSeriesRails.length > 0 || filteredItems.length > 0;
-  const libraryDevice = detectClientPlatform() === "ipad" ? "ipad" : undefined;
-  const libraryDeviceClass = detectClientDeviceClass() === "phone" ? "phone" : undefined;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -238,6 +243,30 @@ export function LibrarySourcePage({ sourceKind }) {
   }, []);
 
   useEffect(() => {
+    if (
+      typeof window === "undefined"
+      || !floatingSearchDesktopMode
+      || normalizedQuery
+      || loading
+      || pendingFloatingSearchRestoreYRef.current === null
+    ) {
+      return undefined;
+    }
+    const restoreY = pendingFloatingSearchRestoreYRef.current;
+    const frameId = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: restoreY, behavior: "auto" });
+      pendingFloatingSearchRestoreYRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    filteredItems.length,
+    floatingSearchDesktopMode,
+    loading,
+    normalizedQuery,
+    visibleSeriesRails.length,
+  ]);
+
+  useEffect(() => {
     if (loading || typeof window === "undefined" || typeof document === "undefined") {
       return undefined;
     }
@@ -289,6 +318,27 @@ export function LibrarySourcePage({ sourceKind }) {
       window.clearTimeout(timerId);
     };
   }, [items, loading, location.pathname, location.state, seriesRails]);
+
+  function handleFloatingSearchChange(nextValue, details = {}) {
+    const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
+    const nextSearchValue = typeof nextValue === "string" ? nextValue : "";
+
+    if (floatingSearchDesktopMode && typeof window !== "undefined") {
+      const previousWasEmpty = previousValue.trim().length === 0;
+      const nextIsEmpty = nextSearchValue.trim().length === 0;
+      if (previousWasEmpty && !nextIsEmpty && floatingSearchScrollYRef.current === null) {
+        floatingSearchScrollYRef.current = window.scrollY;
+      }
+      if (!previousWasEmpty && nextIsEmpty) {
+        if (Number.isFinite(floatingSearchScrollYRef.current)) {
+          pendingFloatingSearchRestoreYRef.current = floatingSearchScrollYRef.current;
+        }
+        floatingSearchScrollYRef.current = null;
+      }
+    }
+
+    setQuery(nextSearchValue);
+  }
 
   return (
     <section
@@ -346,10 +396,11 @@ export function LibrarySourcePage({ sourceKind }) {
       </div>
 
       <FloatingLibrarySearch
+        desktopInteractionMode={floatingSearchDesktopMode}
         enabled={settings.floating_library_search_enabled !== false}
         label={`Search ${copy.title}`}
         mainInputRefs={[sourceSearchInputRef]}
-        onChange={setQuery}
+        onChange={handleFloatingSearchChange}
         placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
         value={query}
       />

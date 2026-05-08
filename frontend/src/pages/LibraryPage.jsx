@@ -162,8 +162,15 @@ export function LibraryPage() {
   const orientationDebugLogAtRef = useRef(0);
   const desktopSearchInputRef = useRef(null);
   const mobileSearchInputRef = useRef(null);
+  const floatingSearchScrollYRef = useRef(null);
+  const pendingFloatingSearchRestoreYRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
+  const clientPlatform = detectClientPlatform();
+  const clientDeviceClass = detectClientDeviceClass();
+  const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
+  const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
+  const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
   const isPhoneClient = useMemo(() => {
     if (typeof navigator === "undefined") {
       return false;
@@ -237,6 +244,23 @@ export function LibraryPage() {
     [providerAuthRequirement],
   );
 
+  function scheduleFloatingSearchScrollRestore() {
+    if (
+      typeof window === "undefined"
+      || !floatingSearchDesktopMode
+      || pendingFloatingSearchRestoreYRef.current === null
+    ) {
+      return;
+    }
+    const restoreY = pendingFloatingSearchRestoreYRef.current;
+    pendingFloatingSearchRestoreYRef.current = null;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: restoreY, behavior: "auto" });
+      });
+    });
+  }
+
   async function loadLibrary({ signal, silent = false } = {}) {
     if (!silent) {
       startTransition(() => {
@@ -273,6 +297,9 @@ export function LibraryPage() {
       }
       scanRunningRef.current = Boolean(payload.scan_in_progress);
       setLibrary(payload);
+      if (!deferredQuery.trim()) {
+        scheduleFloatingSearchScrollRestore();
+      }
     } catch (requestError) {
       if (requestError.name === "AbortError") {
         return;
@@ -883,9 +910,28 @@ export function LibraryPage() {
     }
   }
 
+  function handleFloatingSearchChange(nextValue, details = {}) {
+    const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
+    const nextSearchValue = typeof nextValue === "string" ? nextValue : "";
+
+    if (floatingSearchDesktopMode && typeof window !== "undefined") {
+      const previousWasEmpty = previousValue.trim().length === 0;
+      const nextIsEmpty = nextSearchValue.trim().length === 0;
+      if (previousWasEmpty && !nextIsEmpty && floatingSearchScrollYRef.current === null) {
+        floatingSearchScrollYRef.current = window.scrollY;
+      }
+      if (!previousWasEmpty && nextIsEmpty) {
+        if (Number.isFinite(floatingSearchScrollYRef.current)) {
+          pendingFloatingSearchRestoreYRef.current = floatingSearchScrollYRef.current;
+        }
+        floatingSearchScrollYRef.current = null;
+      }
+    }
+
+    setQuery(nextSearchValue);
+  }
+
   const isSearching = deferredQuery.trim().length > 0;
-  const libraryDevice = detectClientPlatform() === "ipad" ? "ipad" : undefined;
-  const libraryDeviceClass = detectClientDeviceClass() === "phone" ? "phone" : undefined;
 
   return (
     <section
@@ -937,10 +983,11 @@ export function LibraryPage() {
       </div>
 
       <FloatingLibrarySearch
+        desktopInteractionMode={floatingSearchDesktopMode}
         enabled={settings.floating_library_search_enabled !== false}
         label="Search library"
         mainInputRefs={[desktopSearchInputRef, mobileSearchInputRef]}
-        onChange={setQuery}
+        onChange={handleFloatingSearchChange}
         placeholder="Search title or filename"
         value={query}
       />
