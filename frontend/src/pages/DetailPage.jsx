@@ -105,6 +105,21 @@ const EMPTY_CLOUD_LIBRARIES = {
   shared_libraries: [],
 };
 
+const ACTIVE_DOWNLOAD_PHASES = new Set(["starting", "downloading", "browser_handoff"]);
+const INITIAL_DOWNLOAD_STATE = {
+  active: false,
+  phase: "idle",
+  sessionToken: "",
+  downloadUrl: "",
+  receivedBytes: 0,
+  totalBytes: 0,
+  etaSeconds: null,
+  etaAvailable: false,
+  message: "",
+  error: "",
+  blocked: false,
+};
+
 
 function isLocalDevelopmentLoopback(platform) {
   if (typeof window === "undefined" || platform !== "linux") {
@@ -153,6 +168,25 @@ function downloadEtaTone(seconds) {
     return "red";
   }
   return "dark-purple";
+}
+
+function triggerBrowserNativeDownload(downloadUrl, filename) {
+  if (typeof document === "undefined") {
+    if (typeof window !== "undefined") {
+      window.location.assign(downloadUrl);
+    }
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  if (filename) {
+    link.download = filename;
+  }
+  link.rel = "noopener";
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 function buildInfuseLaunchUrl(streamUrl, { successUrl, errorUrl } = {}) {
@@ -418,18 +452,10 @@ export function DetailPage() {
   const [globalHiddenActionError, setGlobalHiddenActionError] = useState("");
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
-  const [downloadState, setDownloadState] = useState({
-    pending: false,
-    receivedBytes: 0,
-    totalBytes: 0,
-    etaSeconds: null,
-    error: "",
-    message: "",
-    sessionToken: "",
-    blocked: false,
-  });
+  const [downloadState, setDownloadState] = useState(() => ({ ...INITIAL_DOWNLOAD_STATE }));
   const downloadSamplesRef = useRef([]);
   const downloadEmaSpeedRef = useRef(null);
+  const downloadAbortControllerRef = useRef(null);
   const clientPlatform = detectClientPlatform();
   const desktopPlatform = detectDesktopPlatform();
   const clientDeviceClass = detectClientDeviceClass();
@@ -447,6 +473,11 @@ export function DetailPage() {
   useEffect(() => {
     providerReconnectModalRef.current = providerReconnectModal;
   }, [providerReconnectModal]);
+
+  useEffect(() => () => {
+    downloadAbortControllerRef.current?.abort();
+    downloadAbortControllerRef.current = null;
+  }, []);
 
   function resetLocalProviderReconnectPendingAfterReturn() {
     if (typeof window === "undefined") {
@@ -1811,9 +1842,13 @@ export function DetailPage() {
       : null;
     setDownloadState((current) => ({
       ...current,
+      active: true,
+      phase: "downloading",
       receivedBytes,
       totalBytes,
       etaSeconds,
+      etaAvailable: etaSeconds !== null,
+      message: etaSeconds !== null ? "Download active." : "Estimating download time...",
     }));
   }
 
@@ -1823,31 +1858,25 @@ export function DetailPage() {
   }
 
   function closeDownloadDialog() {
-    if (downloadState.pending) {
-      return;
-    }
     setDownloadModalOpen(false);
     setDownloadState((current) => ({
       ...current,
       error: "",
-      message: "",
+      message: current.active ? current.message : "",
       blocked: false,
     }));
   }
 
   function openDownloadDialog() {
-    if (!item || downloadState.pending) {
+    if (!item || downloadState.active) {
       return;
     }
     if (isMobileDownloadSizeBlocked(item)) {
       setDownloadState({
-        pending: false,
+        ...INITIAL_DOWNLOAD_STATE,
         receivedBytes: 0,
         totalBytes: Number(item.file_size || 0),
-        etaSeconds: null,
         error: MOBILE_DOWNLOAD_LIMIT_MESSAGE,
-        message: "",
-        sessionToken: "",
         blocked: true,
       });
       setDownloadModalOpen(true);
@@ -1863,7 +1892,7 @@ export function DetailPage() {
   }
 
   async function handleConfirmDownload() {
-    if (!item || downloadState.pending) {
+    if (!item || downloadState.active) {
       return;
     }
     if (isMobileDownloadSizeBlocked(item)) {
@@ -1874,73 +1903,49 @@ export function DetailPage() {
       }));
       return;
     }
+    setDownloadModalOpen(false);
     downloadSamplesRef.current = [];
     downloadEmaSpeedRef.current = null;
+    const abortController = new AbortController();
+    downloadAbortControllerRef.current = abortController;
     setDownloadState({
-      pending: true,
+      ...INITIAL_DOWNLOAD_STATE,
+      active: true,
+      phase: "starting",
       receivedBytes: 0,
       totalBytes: Number(item.file_size || 0),
-      etaSeconds: null,
-      error: "",
-      message: "Preparing download...",
-      sessionToken: "",
-      blocked: false,
+      message: "Starting browser download...",
     });
     let sessionToken = "";
     try {
-      const sessionPayload = await apiRequest(`/api/download/item/${item.id}/session`, { method: "POST" });
-      sessionToken = sessionPayload.session_token;
-      setDownloadState((current) => ({
-        ...current,
-        sessionToken,
-        totalBytes: Number(sessionPayload.file_size || item.file_size || 0),
-        message: "Downloading...",
-      }));
-      const response = await fetch(sessionPayload.download_url, { credentials: "include" });
-      if (!response.ok) {
-        throw new Error(`Download failed with status ${response.status}`);
-      }
-      const totalBytes = Number(response.headers.get("content-length") || sessionPayload.file_size || item.file_size || 0);
-      const reader = response.body?.getReader();
-      if (!reader) {
-        window.location.assign(sessionPayload.download_url);
-        setDownloadState((current) => ({
-          ...current,
-          pending: false,
-          message: "Download handed to the browser. Exact in-page progress is unavailable.",
-        }));
+      const sessionPayload = await apiRequest(`/api/download/item/${item.id}/session`, {
+        method: "POST",
+        signal: abortController.signal,
+      });
+      if (abortController.signal.aborted) {
         return;
       }
-      const chunks = [];
-      let receivedBytes = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
-        if (value) {
-          chunks.push(value);
-          receivedBytes += value.byteLength;
-          updateDownloadProgress(receivedBytes, totalBytes);
-        }
-      }
-      const blob = new Blob(chunks);
-      const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = item.original_filename || `${detailTitle}.bin`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
-      await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/complete`, { method: "POST" });
+      sessionToken = sessionPayload.session_token;
+      const totalBytes = Number(sessionPayload.file_size || item.file_size || 0);
+      const downloadUrl = sessionPayload.download_url;
       setDownloadState((current) => ({
         ...current,
-        pending: false,
-        receivedBytes: totalBytes || current.receivedBytes,
-        message: "Download complete.",
+        active: true,
+        phase: "browser_handoff",
+        sessionToken,
+        downloadUrl,
+        totalBytes,
+        etaSeconds: null,
+        etaAvailable: false,
+        message: "Browser download active. ETA unavailable after browser handoff.",
       }));
+      downloadAbortControllerRef.current = null;
+      triggerBrowserNativeDownload(downloadUrl, item.original_filename || `${detailTitle}.bin`);
     } catch (requestError) {
+      downloadAbortControllerRef.current = null;
+      if (requestError.name === "AbortError") {
+        return;
+      }
       if (sessionToken) {
         try {
           await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/failed`, {
@@ -1953,9 +1958,37 @@ export function DetailPage() {
       }
       setDownloadState((current) => ({
         ...current,
-        pending: false,
+        active: false,
+        phase: "failed",
         error: requestError.message || "Download failed",
         message: "",
+      }));
+    }
+  }
+
+  async function handleTerminateDownload() {
+    const sessionToken = downloadState.sessionToken;
+    downloadAbortControllerRef.current?.abort();
+    downloadAbortControllerRef.current = null;
+    downloadSamplesRef.current = [];
+    downloadEmaSpeedRef.current = null;
+    try {
+      if (sessionToken) {
+        await apiRequest(`/api/download/sessions/${encodeURIComponent(sessionToken)}/terminate`, {
+          method: "POST",
+        });
+      }
+      setDownloadState({
+        ...INITIAL_DOWNLOAD_STATE,
+        phase: "terminated",
+        message: "Download terminated.",
+      });
+    } catch (requestError) {
+      setDownloadState((current) => ({
+        ...INITIAL_DOWNLOAD_STATE,
+        phase: "terminated",
+        error: requestError.message || "Download termination failed",
+        message: "Download termination requested.",
       }));
     }
   }
@@ -2265,8 +2298,17 @@ export function DetailPage() {
   const downloadProgressPercent = downloadState.totalBytes > 0
     ? Math.min(100, Math.max(0, (downloadState.receivedBytes / downloadState.totalBytes) * 100))
     : 0;
-  const downloadEtaLabel = downloadState.pending ? formatDownloadEta(downloadState.etaSeconds) : "";
-  const downloadEtaClassName = `detail-download-eta detail-download-eta--${downloadEtaTone(downloadState.etaSeconds)}`;
+  const downloadActive = Boolean(downloadState.active && ACTIVE_DOWNLOAD_PHASES.has(downloadState.phase));
+  const downloadEtaLabel = downloadActive
+    ? (
+      downloadState.phase === "starting"
+        ? "Starting"
+        : downloadState.etaAvailable
+          ? formatDownloadEta(downloadState.etaSeconds)
+          : "Started"
+    )
+    : "";
+  const downloadEtaClassName = `detail-download-eta detail-download-eta--${downloadEtaTone(downloadState.etaAvailable ? downloadState.etaSeconds : null)}`;
   const showDownloadButton = Boolean(item.download_access_allowed) && !item.hidden_for_user && !item.hidden_globally;
   const downloadDialogBlocked = Boolean(downloadState.blocked && downloadState.error);
 
@@ -2317,21 +2359,18 @@ export function DetailPage() {
               )}
             </div>
             {downloadState.error && !downloadDialogBlocked ? <p className="form-error">{downloadState.error}</p> : null}
-            {downloadState.message ? <p className="page-note">{downloadState.message}</p> : null}
             <div className="browser-resume-modal__actions">
               {!downloadDialogBlocked ? (
                 <button
                   className="primary-button"
-                  disabled={downloadState.pending}
                   onClick={handleConfirmDownload}
                   type="button"
                 >
-                  {downloadState.pending ? "Downloading..." : "Download"}
+                  Download
                 </button>
               ) : null}
               <button
                 className="ghost-button"
-                disabled={downloadState.pending}
                 onClick={closeDownloadDialog}
                 type="button"
               >
@@ -2913,11 +2952,17 @@ export function DetailPage() {
           </button>
           {showDownloadButton ? (
             <div className="detail-download-action" aria-live="polite">
-              {downloadState.pending ? <span className={downloadEtaClassName}>{downloadEtaLabel}</span> : null}
+              {downloadActive || downloadState.message || downloadState.error ? (
+                <div className="detail-download-status">
+                  {downloadActive ? <span className={downloadEtaClassName}>{downloadEtaLabel}</span> : null}
+                  {downloadState.message ? <span className="detail-download-status__message">{downloadState.message}</span> : null}
+                  {downloadState.error ? <span className="detail-download-status__error">{downloadState.error}</span> : null}
+                </div>
+              ) : null}
               <button
                 aria-label="Download movie"
-                className="detail-download-button"
-                disabled={downloadState.pending}
+                className={`detail-download-button${downloadActive ? " detail-download-button--active" : ""}`}
+                disabled={downloadActive}
                 onClick={openDownloadDialog}
                 style={{ "--download-progress": `${downloadProgressPercent}%` }}
                 type="button"
@@ -2928,6 +2973,15 @@ export function DetailPage() {
                   <path d="M5 19h14" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
                 </svg>
               </button>
+              {downloadActive ? (
+                <button
+                  className="ghost-button ghost-button--danger detail-download-terminate"
+                  onClick={handleTerminateDownload}
+                  type="button"
+                >
+                  Terminate
+                </button>
+              ) : null}
             </div>
           ) : null}
 	        </div>

@@ -12,6 +12,7 @@ from ..services.account_access_service import (
     is_download_session_still_authorized,
     mark_download_session_completed,
     mark_download_session_failed,
+    mark_download_session_terminated,
     safe_download_filename,
     validate_download_session,
 )
@@ -110,3 +111,19 @@ def fail_download_session(
         message=payload.message,
     )
     return MessageResponse(message="Download failure recorded")
+
+
+@router.post("/sessions/{token}/terminate", response_model=MessageResponse)
+def terminate_download_session(
+    token: str,
+    request: Request,
+    user=CurrentUser,
+) -> MessageResponse:
+    mark_download_session_terminated(
+        request.app.state.settings,
+        token=token,
+        user=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return MessageResponse(message="Download terminated")

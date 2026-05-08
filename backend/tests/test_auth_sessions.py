@@ -1560,6 +1560,61 @@ def test_download_session_endpoint_authorizes_range_requests(initialized_setting
     assert range_response.content == b"not "
 
 
+def test_download_session_terminate_revokes_stream_authorization(initialized_settings, client) -> None:
+    created = _create_standard_user(initialized_settings, username="terminate-download-user")
+    media_item = _create_media_item(initialized_settings, relative_name="terminate-download.mp4")
+    with get_connection(initialized_settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            initialized_settings,
+            connection=connection,
+        )
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ? WHERE id = ?",
+            (shared_local_source_id, media_item["id"]),
+        )
+        connection.commit()
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="selected",
+        media_item_ids=[int(media_item["id"])],
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _session_user, token = _issue_user_session(
+        initialized_settings,
+        username="terminate-download-user",
+        password="family-password",
+    )
+    client.cookies.set(initialized_settings.session_cookie_name, token)
+
+    session_response = client.post(f"/api/download/item/{media_item['id']}/session")
+    assert session_response.status_code == 200
+    session_payload = session_response.json()
+
+    terminate_response = client.post(
+        f"/api/download/sessions/{session_payload['session_token']}/terminate",
+    )
+    assert terminate_response.status_code == 200
+    assert terminate_response.json()["message"] == "Download terminated"
+
+    range_response = client.get(session_payload["download_url"], headers={"Range": "bytes=0-3"})
+    assert range_response.status_code == 403
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT revoked_at, last_error
+            FROM download_sessions
+            WHERE media_item_id = ? AND user_id = ?
+            """,
+            (media_item["id"], created["id"]),
+        ).fetchone()
+    assert row is not None
+    assert row["revoked_at"] is not None
+    assert row["last_error"] == "download_terminated"
+
+
 def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initialized_settings) -> None:
     created = _create_standard_user(initialized_settings, username="delete-user")
     _session_user, token = _issue_user_session(

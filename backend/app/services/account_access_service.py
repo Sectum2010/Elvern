@@ -634,6 +634,7 @@ def validate_download_session(
     *,
     token: str,
     user: AuthenticatedUser,
+    allow_expired_download_session: bool = False,
 ) -> int:
     now = utcnow_iso()
     token_hash = _secret_hash(settings, "download-session", token)
@@ -665,7 +666,9 @@ def validate_download_session(
             row["auth_session_id"] is not None and int(row["auth_session_id"]) != int(user.session_id or 0)
         ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is not valid for this session")
-        if row["revoked_at"] is not None or row["completed_at"] is not None or str(row["expires_at"]) <= now:
+        if row["revoked_at"] is not None or row["completed_at"] is not None or (
+            not allow_expired_download_session and str(row["expires_at"]) <= now
+        ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is no longer active")
         if not bool(row["user_enabled"]):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
@@ -689,7 +692,7 @@ def validate_download_session(
 
 def is_download_session_still_authorized(settings: Settings, *, token: str, user: AuthenticatedUser) -> bool:
     try:
-        validate_download_session(settings, token=token, user=user)
+        validate_download_session(settings, token=token, user=user, allow_expired_download_session=True)
     except HTTPException:
         return False
     return True
@@ -771,6 +774,56 @@ def mark_download_session_failed(
         media_item_id=int(row["media_item_id"]),
         session_id=user.session_id,
         details={"message": message or "download_failed"},
+    )
+
+
+def mark_download_session_terminated(
+    settings: Settings,
+    *,
+    token: str,
+    user: AuthenticatedUser,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    token_hash = _secret_hash(settings, "download-session", token)
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id, user_id, media_item_id, auth_session_id
+            FROM download_sessions
+            WHERE session_token_hash = ?
+            LIMIT 1
+            """,
+            (token_hash,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download session not found")
+        if int(row["user_id"]) != int(user.id) or (
+            row["auth_session_id"] is not None and int(row["auth_session_id"]) != int(user.session_id or 0)
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is not valid for this session")
+        connection.execute(
+            """
+            UPDATE download_sessions
+            SET revoked_at = COALESCE(revoked_at, ?),
+                last_error = ?
+            WHERE id = ?
+            """,
+            (now, "download_terminated", row["id"]),
+        )
+        connection.commit()
+    log_audit_event(
+        settings,
+        action="download.terminated",
+        outcome="success",
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        media_item_id=int(row["media_item_id"]),
+        session_id=user.session_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
 
 
