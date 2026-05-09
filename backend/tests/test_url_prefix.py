@@ -185,10 +185,24 @@ class TestSpaServing:
         response = client.get(f"/{prefix}/library")
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
+        assert f'<base href="/{prefix}/">' in response.text
+
+    def test_nested_html_route_uses_prefix_base_href(self, client) -> None:
+        prefix = client.app.state.url_prefix
+        response = client.get(f"/{prefix}/setup/totp")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert f'<base href="/{prefix}/">' in response.text
 
     def test_missing_asset_returns_404_not_index(self, client) -> None:
         prefix = client.app.state.url_prefix
         response = client.get(f"/{prefix}/assets/nonexistent.js")
+        assert response.status_code == 404
+        assert b"<html" not in response.content.lower()
+
+    def test_nested_missing_asset_returns_404_not_index(self, client) -> None:
+        prefix = client.app.state.url_prefix
+        response = client.get(f"/{prefix}/setup/assets/nonexistent.js")
         assert response.status_code == 404
         assert b"<html" not in response.content.lower()
 
@@ -216,6 +230,7 @@ class TestSpaServing:
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         assert b"<html" in response.content.lower()
+        assert f'<base href="/{prefix}/">' in response.text
 
 
 class TestAdminRotateEndpoint:
