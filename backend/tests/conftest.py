@@ -116,6 +116,9 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("ELVERN_LIBRARY_ROOT_LINUX", str(media_root))
     monkeypatch.setenv("ELVERN_HELPER_RELEASES_DIR", str(helper_releases_dir))
     monkeypatch.setenv("ELVERN_TRANSCODE_DIR", str(transcode_dir))
+    monkeypatch.setenv("ELVERN_ARGON2_TIME_COST", "1")
+    monkeypatch.setenv("ELVERN_ARGON2_MEMORY_COST", "8192")
+    monkeypatch.setenv("ELVERN_ARGON2_PARALLELISM", "1")
 
     settings = refresh_settings()
     yield settings

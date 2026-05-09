@@ -105,6 +105,29 @@ A new module is usually required when:
 
 Do not add code to a file just because it is the file you are already editing.
 
+## Password Hashing
+
+Elvern stores new user passwords as Argon2id PHC strings. Legacy
+`pbkdf2_sha256` hashes remain readable only for zero-downtime migration: on a
+successful login, the auth flow persists a fresh Argon2id hash for that user.
+
+Argon2id parameters are configured as an all-or-none set. If
+`ELVERN_ARGON2_TIME_COST`, `ELVERN_ARGON2_MEMORY_COST`, and
+`ELVERN_ARGON2_PARALLELISM` are all set, Elvern uses those exact values and
+skips calibration. If all three are unset, Elvern calibrates parameters for the
+current hardware and stores the result in `backend/data/argon2_calibration.json`.
+Partial configuration is invalid.
+
+`verify_password` must stay side-effect free: it may return a replacement hash
+for callers to persist, but it must not write to the database itself. It must
+also fail closed without raising on malformed input. Any change touching
+`backend/app/security.py`, Argon2id calibration, or password-hash migration must
+run the full password-security test file:
+
+```bash
+python -m pytest backend/tests/test_security.py -v
+```
+
 ## 5. Rules For Creating New Files
 
 Create a new file when it gives a real owner a home.

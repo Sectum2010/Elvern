@@ -14,7 +14,7 @@ from backend.app.config import get_settings, refresh_settings
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.db import init_db
 from backend.app.media_scan import scan_media_library
-from backend.app.security import hash_password
+from backend.app.security import _hash_password_pbkdf2
 from backend.app.services import cloud_source_sync_service
 from backend.app.services.desktop_playback_service import resolve_same_host_request
 from backend.app.services.google_drive_service import build_google_drive_provider_auth_required_detail
@@ -223,7 +223,7 @@ def test_auth_login_me_logout_smoke(client, admin_credentials) -> None:
 
 
 def test_test_settings_fixture_clears_live_auth_hash_linux_root_and_origin_overrides(monkeypatch, request) -> None:
-    monkeypatch.setenv("ELVERN_ADMIN_PASSWORD_HASH", hash_password("wrong-live-password"))
+    monkeypatch.setenv("ELVERN_ADMIN_PASSWORD_HASH", _hash_password_pbkdf2("wrong-live-password"))
     monkeypatch.setenv("ELVERN_LIBRARY_ROOT_LINUX", "/home/sectum/Videos/Movies")
     monkeypatch.setenv("ELVERN_PUBLIC_APP_ORIGIN", "https://spark-e245.taila5aa7b.ts.net")
     monkeypatch.setenv("ELVERN_BACKEND_ORIGIN", "https://spark-e245.taila5aa7b.ts.net")

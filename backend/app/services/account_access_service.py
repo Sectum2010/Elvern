@@ -226,7 +226,7 @@ def create_user_with_invite(
             INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at)
             VALUES (?, ?, 'standard_user', 1, ?, ?)
             """,
-            (normalized_username, hash_password(password), now, now),
+            (normalized_username, hash_password(password, settings), now, now),
         )
         user_id = int(cursor.lastrowid)
         connection.execute(

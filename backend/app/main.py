@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from .auth import build_login_rate_limiter, ensure_admin_user
 from .config import refresh_settings
 from .db import init_db
+from .argon2_calibration import resolve_argon2_params
 from .routes.admin import router as admin_router
 from .routes.admin_assistant import router as admin_assistant_router
 from .routes.assistant import raw_router as assistant_raw_router
@@ -48,6 +49,7 @@ def configure_logging(level: str) -> None:
 async def lifespan(app: FastAPI):
     settings = refresh_settings()
     configure_logging(settings.log_level)
+    resolve_argon2_params(settings, logger)
     init_db(settings)
     ensure_admin_user(settings)
     app.state.settings = settings

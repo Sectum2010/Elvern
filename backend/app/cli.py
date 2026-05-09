@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .auth import ensure_admin_user
-from .config import refresh_settings
+from .config import ConfigError, DEFAULT_DB_PATH, refresh_settings
 from .db import init_db
 from .media_scan import scan_media_library
 from .security import hash_password
@@ -20,12 +23,74 @@ from .services.desktop_helper_service import import_helper_release_artifacts
 from .services.status_service import get_system_status
 
 
+ARGON2_PARTIAL_CONFIG_ERROR = (
+    "Argon2id parameters must be either all set "
+    "(ELVERN_ARGON2_TIME_COST, ELVERN_ARGON2_MEMORY_COST, "
+    "ELVERN_ARGON2_PARALLELISM) or all unset for adaptive calibration."
+)
+
+
+@dataclass(frozen=True)
+class _Argon2CliSettings:
+    db_path: Path
+    argon2_time_cost: int | None
+    argon2_memory_cost: int | None
+    argon2_parallelism: int | None
+
+    @property
+    def argon2_params_manually_set(self) -> bool:
+        return self.argon2_time_cost is not None
+
+
+def _read_optional_argon2_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
+
+
+def _fallback_argon2_cli_settings() -> _Argon2CliSettings:
+    time_cost = _read_optional_argon2_int("ELVERN_ARGON2_TIME_COST")
+    memory_cost = _read_optional_argon2_int("ELVERN_ARGON2_MEMORY_COST")
+    parallelism = _read_optional_argon2_int("ELVERN_ARGON2_PARALLELISM")
+    provided = (time_cost is not None, memory_cost is not None, parallelism is not None)
+    if any(provided) and not all(provided):
+        raise ConfigError(ARGON2_PARTIAL_CONFIG_ERROR)
+    if time_cost is not None and not (1 <= time_cost <= 10):
+        raise ConfigError("ELVERN_ARGON2_TIME_COST must be between 1 and 10")
+    if memory_cost is not None and not (8192 <= memory_cost <= 1048576):
+        raise ConfigError("ELVERN_ARGON2_MEMORY_COST must be between 8192 and 1048576")
+    if parallelism is not None and not (1 <= parallelism <= 16):
+        raise ConfigError("ELVERN_ARGON2_PARALLELISM must be between 1 and 16")
+    return _Argon2CliSettings(
+        db_path=DEFAULT_DB_PATH,
+        argon2_time_cost=time_cost,
+        argon2_memory_cost=memory_cost,
+        argon2_parallelism=parallelism,
+    )
+
+
+def _settings_for_argon2_cli():
+    try:
+        return refresh_settings()
+    except ConfigError:
+        return _fallback_argon2_cli_settings()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Elvern backend helper commands")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     hash_parser = subparsers.add_parser("hash-password", help="Generate a password hash")
     hash_parser.add_argument("password", help="Password to hash")
+
+    subparsers.add_parser(
+        "calibrate-argon2",
+        help="Calibrate Argon2id password hashing parameters for this hardware",
+    )
 
     helper_parser = subparsers.add_parser(
         "import-helper-releases",
@@ -113,12 +178,54 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def cmd_calibrate_argon2(args, settings) -> int:
+    from .argon2_calibration import (
+        CALIBRATION_VERSION,
+        TARGET_VERIFY_MS,
+        CalibrationRecord,
+        calibrate_argon2,
+        compute_host_fingerprint,
+        write_calibration,
+    )
+
+    if settings.argon2_params_manually_set:
+        print("Argon2id parameters are manually set in environment.")
+        print(
+            "Calibration would be ignored. Unset ELVERN_ARGON2_* "
+            "to enable calibration, then re-run."
+        )
+        return 1
+
+    print("Calibrating Argon2id parameters...")
+    params, measured_ms = calibrate_argon2()
+    record = CalibrationRecord(
+        calibrated_at=datetime.now(timezone.utc).isoformat(),
+        calibration_version=CALIBRATION_VERSION,
+        host_fingerprint=compute_host_fingerprint(),
+        target_verify_ms=TARGET_VERIFY_MS,
+        measured_verify_ms=measured_ms,
+        params=params,
+    )
+    write_calibration(record, settings)
+    print(
+        f"Calibrated: t={params.time_cost} "
+        f"m={params.memory_cost} p={params.parallelism} "
+        f"verify={measured_ms:.1f}ms"
+    )
+    return 0
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
     if args.command == "hash-password":
-        print(hash_password(args.password))
+        settings = _settings_for_argon2_cli()
+        print(hash_password(args.password, settings))
         return
+
+    if args.command == "calibrate-argon2":
+        settings = _settings_for_argon2_cli()
+        raise SystemExit(cmd_calibrate_argon2(args, settings))
 
     if args.command == "backup-inspect":
         payload = inspect_backup_checkpoint(args.path)

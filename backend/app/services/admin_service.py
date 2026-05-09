@@ -120,7 +120,7 @@ def create_user(
                 """,
                 (
                     normalized_username,
-                    hash_password(password),
+                    hash_password(password, settings),
                     role,
                     int(enabled),
                     now,
@@ -199,6 +199,7 @@ def update_user(
         if role_changed:
             _require_current_admin_password(
                 connection,
+                settings=settings,
                 actor=actor,
                 current_admin_password=current_admin_password,
             )
@@ -281,6 +282,7 @@ def update_user_password(
     with get_connection(settings) as connection:
         _require_current_admin_password(
             connection,
+            settings=settings,
             actor=actor,
             current_admin_password=current_admin_password,
         )
@@ -303,7 +305,7 @@ def update_user_password(
             SET password_hash = ?, updated_at = ?
             WHERE id = ?
             """,
-            (hash_password(new_password), now, user_id),
+            (hash_password(new_password, settings), now, user_id),
         )
         connection.commit()
 
@@ -337,6 +339,7 @@ def delete_self(
     with get_connection(settings) as connection:
         _require_current_admin_password(
             connection,
+            settings=settings,
             actor=actor,
             current_admin_password=current_admin_password,
         )
@@ -402,6 +405,7 @@ def delete_user(
     with get_connection(settings) as connection:
         _require_current_admin_password(
             connection,
+            settings=settings,
             actor=actor,
             current_admin_password=current_admin_password,
         )
@@ -590,6 +594,7 @@ def _get_user_from_row(row) -> dict[str, object]:
 def _require_current_admin_password(
     connection,
     *,
+    settings: Settings,
     actor: AuthenticatedUser,
     current_admin_password: str | None,
 ) -> None:
@@ -612,10 +617,16 @@ def _require_current_admin_password(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access is required",
         )
-    if not verify_password(current_admin_password, row["password_hash"]):
+    ok, new_hash = verify_password(current_admin_password, row["password_hash"], settings)
+    if not ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current admin password is incorrect",
+        )
+    if new_hash is not None:
+        connection.execute(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+            (new_hash, utcnow_iso(), actor.id),
         )
 
 

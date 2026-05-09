@@ -17,6 +17,7 @@ from .security import (
     hash_password,
     hash_session_token,
     looks_like_password_hash,
+    perform_dummy_verify,
     verify_password,
 )
 
@@ -87,10 +88,10 @@ def ensure_admin_user(settings: Settings) -> None:
     password_hash = settings.admin_password_hash
     if password_hash and not looks_like_password_hash(password_hash):
         raise ValueError(
-            "ELVERN_ADMIN_PASSWORD_HASH is not in the expected pbkdf2 format"
+            "ELVERN_ADMIN_PASSWORD_HASH is not in a supported password hash format"
         )
     if not password_hash and settings.admin_bootstrap_password:
-        password_hash = hash_password(settings.admin_bootstrap_password)
+        password_hash = hash_password(settings.admin_bootstrap_password, settings)
     if not password_hash:
         raise ValueError(
             "Set ELVERN_ADMIN_PASSWORD_HASH or ELVERN_ADMIN_BOOTSTRAP_PASSWORD"
@@ -148,11 +149,28 @@ def authenticate_user(
             (username,),
         ).fetchone()
         if row is None:
+            perform_dummy_verify(settings)
             return None, "invalid_credentials"
         if not bool(row["enabled"]):
             return None, "disabled"
-        if not verify_password(password, row["password_hash"]):
+        ok, new_hash = verify_password(password, row["password_hash"], settings)
+        if not ok:
             return None, "invalid_credentials"
+        if new_hash is not None:
+            connection.execute(
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (new_hash, utcnow_iso(), row["id"]),
+            )
+            connection.commit()
+            log_audit_event(
+                settings,
+                action="password_hash_upgraded",
+                outcome="success",
+                user_id=int(row["id"]),
+                username=str(row["username"]),
+                role=str(row["role"] or "standard_user"),
+                details={"from": "pbkdf2_sha256", "to": "argon2id"},
+            )
         return (
             AuthenticatedUser(
                 id=row["id"],

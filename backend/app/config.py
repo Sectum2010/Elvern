@@ -46,6 +46,16 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
+def _get_optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
+
+
 def _get_first_int(names: tuple[str, ...], default: int) -> int:
     for name in names:
         raw = os.getenv(name)
@@ -186,6 +196,13 @@ class Settings:
     login_window_seconds: int
     login_max_attempts: int
     login_lockout_seconds: int
+    argon2_time_cost: int | None
+    argon2_memory_cost: int | None
+    argon2_parallelism: int | None
+
+    @property
+    def argon2_params_manually_set(self) -> bool:
+        return self.argon2_time_cost is not None
 
 
 def load_settings() -> Settings:
@@ -379,6 +396,9 @@ def load_settings() -> Settings:
         login_window_seconds=_get_int("ELVERN_LOGIN_WINDOW_SECONDS", 300),
         login_max_attempts=_get_int("ELVERN_LOGIN_MAX_ATTEMPTS", 10),
         login_lockout_seconds=_get_int("ELVERN_LOGIN_LOCKOUT_SECONDS", 600),
+        argon2_time_cost=_get_optional_int("ELVERN_ARGON2_TIME_COST"),
+        argon2_memory_cost=_get_optional_int("ELVERN_ARGON2_MEMORY_COST"),
+        argon2_parallelism=_get_optional_int("ELVERN_ARGON2_PARALLELISM"),
     )
     validate_settings(settings)
     return settings
@@ -484,6 +504,23 @@ def validate_settings(settings: Settings) -> None:
             )
         if parsed_backend_origin.path not in {"", "/"} or parsed_backend_origin.query or parsed_backend_origin.fragment:
             raise ConfigError("ELVERN_BACKEND_ORIGIN must be an origin only, without a path or query")
+    argon2_provided = (
+        settings.argon2_time_cost is not None,
+        settings.argon2_memory_cost is not None,
+        settings.argon2_parallelism is not None,
+    )
+    if any(argon2_provided) and not all(argon2_provided):
+        raise ConfigError(
+            "Argon2id parameters must be either all set "
+            "(ELVERN_ARGON2_TIME_COST, ELVERN_ARGON2_MEMORY_COST, "
+            "ELVERN_ARGON2_PARALLELISM) or all unset for adaptive calibration."
+        )
+    if settings.argon2_time_cost is not None and not (1 <= settings.argon2_time_cost <= 10):
+        raise ConfigError("ELVERN_ARGON2_TIME_COST must be between 1 and 10")
+    if settings.argon2_memory_cost is not None and not (8192 <= settings.argon2_memory_cost <= 1048576):
+        raise ConfigError("ELVERN_ARGON2_MEMORY_COST must be between 8192 and 1048576")
+    if settings.argon2_parallelism is not None and not (1 <= settings.argon2_parallelism <= 16):
+        raise ConfigError("ELVERN_ARGON2_PARALLELISM must be between 1 and 16")
     settings.helper_releases_dir.mkdir(parents=True, exist_ok=True)
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.transcode_dir.mkdir(parents=True, exist_ok=True)
