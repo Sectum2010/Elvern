@@ -68,6 +68,7 @@ class TotpStatusResponse(BaseModel):
     enabled_at: str | None = None
     recovery_codes_remaining: int = 0
     setup_required: bool = False
+    setup_available: bool = False
 
 
 class TotpDisableRequest(BaseModel):
@@ -91,6 +92,10 @@ class AdminUserTotpDisableRequest(BaseModel):
 class AdminUserTotpDisableResponse(BaseModel):
     disabled: bool
     target_user: int
+
+
+class AdminUserTotpSetupPromptUpdateRequest(BaseModel):
+    enabled: bool
 
 
 class MessageResponse(BaseModel):
@@ -1063,6 +1068,7 @@ class AdminUserResponse(BaseModel):
     last_activity_at: str | None = None
     totp_enabled: bool = False
     totp_enabled_at: str | None = None
+    totp_setup_prompt_enabled: bool = False
 
 
 class AdminUserListResponse(BaseModel):

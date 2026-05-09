@@ -45,24 +45,20 @@ def is_totp_setup_required_for_values(
     role: str,
     totp_secret: str | None,
     totp_setup_skipped_at: str | None,
+    totp_setup_prompt_enabled: bool | int | None = None,
     now: datetime | None = None,
 ) -> bool:
-    if role != "admin" or totp_secret:
+    del role, now
+    if totp_secret:
         return False
-    if not totp_setup_skipped_at:
-        return True
-    skipped_at = _parse_iso_datetime(totp_setup_skipped_at)
-    if skipped_at is None:
-        return True
-    current = now or datetime.now(timezone.utc)
-    return (current - skipped_at).days >= SKIP_GRACE_DAYS
+    return bool(totp_setup_prompt_enabled) and not bool(totp_setup_skipped_at)
 
 
 def is_totp_setup_required(settings: Settings, *, user_id: int) -> bool:
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT role, totp_secret, totp_setup_skipped_at
+            SELECT role, totp_secret, totp_setup_skipped_at, totp_setup_prompt_enabled
             FROM users
             WHERE id = ?
             LIMIT 1
@@ -75,6 +71,7 @@ def is_totp_setup_required(settings: Settings, *, user_id: int) -> bool:
         role=row["role"] or "standard_user",
         totp_secret=row["totp_secret"],
         totp_setup_skipped_at=row["totp_setup_skipped_at"],
+        totp_setup_prompt_enabled=row["totp_setup_prompt_enabled"],
     )
 
 
@@ -143,7 +140,7 @@ def ensure_admin_user(settings: Settings) -> None:
     now = utcnow_iso()
     with get_connection(settings) as connection:
         existing = connection.execute(
-            "SELECT id, role, enabled FROM users WHERE username = ?",
+            "SELECT id, role, enabled, totp_secret, totp_setup_skipped_at FROM users WHERE username = ?",
             (settings.admin_username,),
         ).fetchone()
         if existing:
@@ -156,13 +153,24 @@ def ensure_admin_user(settings: Settings) -> None:
                     """,
                     (now, existing["id"]),
                 )
-                connection.commit()
+            if not existing["totp_secret"] and not existing["totp_setup_skipped_at"]:
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET totp_setup_prompt_enabled = 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, existing["id"]),
+                )
+            connection.commit()
             logger.info("Admin user '%s' already exists", settings.admin_username)
             return
         connection.execute(
             """
-            INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at)
-            VALUES (?, ?, 'admin', 1, ?, ?)
+            INSERT INTO users (
+                username, password_hash, role, enabled, totp_setup_prompt_enabled, created_at, updated_at
+            )
+            VALUES (?, ?, 'admin', 1, 1, ?, ?)
             """,
             (settings.admin_username, password_hash, now, now),
         )

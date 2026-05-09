@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
@@ -323,6 +323,7 @@ function DirectoryPickerModal({
 export function SettingsPage() {
   const { user } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
@@ -407,6 +408,10 @@ export function SettingsPage() {
     client_secret: "",
   });
   const [googleDriveSetupSaving, setGoogleDriveSetupSaving] = useState(false);
+  const [totpStatus, setTotpStatus] = useState({
+    enabled: false,
+    setup_available: false,
+  });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [openSections, setOpenSections] = useState({
@@ -415,6 +420,7 @@ export function SettingsPage() {
     googleDriveSetup: false,
     mediaLibraryReference: false,
     posterReference: false,
+    totpSetup: false,
   });
   const [directoryPicker, setDirectoryPicker] = useState({
     open: false,
@@ -465,6 +471,7 @@ export function SettingsPage() {
           posterPayload,
           cloudPayload,
           googleSetupPayload,
+          totpPayload,
         ] = await Promise.all([
           apiRequest("/api/user-settings"),
           apiRequest("/api/user-hidden-items"),
@@ -481,6 +488,7 @@ export function SettingsPage() {
           user?.role === "admin"
             ? apiRequest("/api/admin/google-drive-setup")
             : Promise.resolve(null),
+          apiRequest("/api/auth/totp/status"),
         ]);
         if (active) {
           setSettings(settingsPayload);
@@ -505,6 +513,7 @@ export function SettingsPage() {
               client_secret: googleSetupPayload.client_secret || "",
             });
           }
+          setTotpStatus(totpPayload);
         }
       } catch (requestError) {
         if (active) {
@@ -2003,6 +2012,26 @@ export function SettingsPage() {
 
       {activeSettingsSection === "advanced" ? (
       <div className="settings-grid">
+        {totpStatus?.setup_available && !totpStatus?.enabled ? (
+          <SettingsAccordionSection
+            description="Your admin has enabled two-factor setup for this account. You can finish setup here whenever you're ready."
+            isOpen={openSections.totpSetup}
+            onToggle={() => toggleSection("totpSetup")}
+            title="Two-factor authentication"
+          >
+            <div className="desktop-playback-notes">
+              <p className="page-subnote">
+                Setup was skipped during login, but it remains available because 2FA is enabled for your account.
+              </p>
+              <div className="player-actions">
+                <button className="primary-button" onClick={() => navigate("/setup/totp")} type="button">
+                  Set up 2FA
+                </button>
+              </div>
+            </div>
+          </SettingsAccordionSection>
+        ) : null}
+
         {user?.role === "admin" ? (
           <SettingsAccordionSection
             description="Admin-only real shared local library path. This is the live shared local library path Elvern currently uses."

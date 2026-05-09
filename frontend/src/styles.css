@@ -2358,6 +2358,31 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   margin-top: 0.75rem;
 }
 
+.admin-totp-summary-card {
+  align-self: stretch;
+}
+
+.admin-totp-user-row {
+  align-items: center;
+}
+
+.admin-totp-user-row__copy {
+  min-width: 0;
+}
+
+.admin-totp-user-row__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.admin-totp-user-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  justify-content: flex-start;
+}
+
 .admin-user-row {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
@@ -4628,6 +4653,15 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
     align-items: start;
   }
 
+  .admin-totp-user-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .admin-totp-user-row__actions {
+    justify-content: flex-end;
+  }
+
   .admin-user-row {
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: start;
@@ -4660,7 +4694,7 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
 
   .admin-section-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
+    align-items: stretch;
   }
 
   .assistant-form__grid,

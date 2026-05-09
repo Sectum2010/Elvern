@@ -367,7 +367,7 @@ export function AdminPage() {
     error: "",
   });
   const [totpStatus, setTotpStatus] = useState(null);
-  const [totpAdminPendingUserId, setTotpAdminPendingUserId] = useState(null);
+  const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
   const [downloadAccessState, setDownloadAccessState] = useState({
     userId: null,
     loading: false,
@@ -574,23 +574,41 @@ export function AdminPage() {
     }
   }
 
-  async function handleAdminResetUserTotp(entry) {
-    const currentAdminPassword = window.prompt(`Confirm with your current admin password to reset 2FA for ${entry.username}.`);
-    if (!currentAdminPassword) {
-      return;
+  async function handleToggleUserTotpRequirement(entry) {
+    const currentlyEnabled = Boolean(entry.totp_setup_prompt_enabled || entry.totp_enabled);
+    const nextEnabled = !currentlyEnabled;
+    let currentAdminPassword = "";
+    if (!nextEnabled) {
+      currentAdminPassword = window.prompt(`Confirm with your current admin password to disable 2FA for ${entry.username}.`) || "";
+      if (!currentAdminPassword) {
+        return;
+      }
     }
-    setTotpAdminPendingUserId(entry.id);
+    setTotpPromptPendingUserId(entry.id);
     try {
-      await apiRequest(`/api/admin/users/${entry.id}/2fa/disable`, {
-        method: "POST",
-        data: { current_admin_password: currentAdminPassword },
+      if (nextEnabled) {
+        await apiRequest(`/api/admin/users/${entry.id}/2fa/setup-prompt`, {
+          method: "PATCH",
+          data: { enabled: true },
+        });
+      } else {
+        await apiRequest(`/api/admin/users/${entry.id}/2fa/disable`, {
+          method: "POST",
+          data: { current_admin_password: currentAdminPassword },
+        });
+      }
+      setBanner({
+        tone: "success",
+        text: `${nextEnabled ? "Enabled" : "Disabled"} 2FA for ${entry.username}.`,
       });
-      setBanner({ tone: "success", text: `Reset 2FA for ${entry.username}.` });
       await loadAdminData({ silent: true });
     } catch (requestError) {
-      setBanner({ tone: "error", text: requestError.message || `Failed to reset 2FA for ${entry.username}.` });
+      setBanner({
+        tone: "error",
+        text: requestError.message || `Failed to update 2FA for ${entry.username}.`,
+      });
     } finally {
-      setTotpAdminPendingUserId(null);
+      setTotpPromptPendingUserId(null);
     }
   }
 
@@ -2692,7 +2710,7 @@ export function AdminPage() {
         </div>
       </section>
 
-      <section className="settings-card">
+      <section className="settings-card admin-totp-summary-card">
         <div className="settings-inline-header">
           <div>
             <h2>Two-factor authentication</h2>
@@ -2700,14 +2718,9 @@ export function AdminPage() {
           </div>
           <div className="admin-list__actions">
             {totpStatus?.enabled ? (
-              <>
-                <button className="ghost-button" onClick={handleRegenerateOwnRecoveryCodes} type="button">
-                  Regenerate recovery codes
-                </button>
-                <button className="ghost-button ghost-button--danger" onClick={handleDisableOwnTotp} type="button">
-                  Disable 2FA
-                </button>
-              </>
+              <button className="ghost-button" onClick={handleRegenerateOwnRecoveryCodes} type="button">
+                Regenerate recovery codes
+              </button>
             ) : (
               <Link className="primary-button" to="/setup/totp">
                 Enable 2FA
@@ -2723,31 +2736,43 @@ export function AdminPage() {
         <div className="settings-inline-header">
           <div>
             <h2>Manage user 2FA</h2>
-            <p className="page-subnote">Resetting removes the pairing and revokes that user's active sessions.</p>
+            <p className="page-subnote">Enable requires setup on next login. Disable removes pairing and revokes that user's active sessions.</p>
           </div>
         </div>
         <div className="admin-list admin-list--dense">
-          {usersPayload.map((entry) => (
-            <div className="admin-list__row admin-list__row--card" key={`totp-${entry.id}`}>
-              <div>
-                <strong>{entry.username}</strong>
-                <p className="page-subnote">
-                  2FA {entry.totp_enabled ? "enabled" : "disabled"}
-                  {entry.totp_enabled_at ? ` · last enabled ${formatDate(entry.totp_enabled_at)}` : ""}
-                </p>
+          {usersPayload.map((entry) => {
+            const totpRequirementEnabled = Boolean(entry.totp_setup_prompt_enabled || entry.totp_enabled);
+            const totpLabel = entry.totp_enabled
+              ? `2FA set up${entry.totp_enabled_at ? ` · last enabled ${formatDate(entry.totp_enabled_at)}` : ""}`
+              : entry.totp_setup_prompt_enabled
+                ? "2FA required · setup not complete"
+                : "2FA not required";
+            return (
+              <div className="admin-list__row admin-list__row--card admin-totp-user-row" key={`totp-${entry.id}`}>
+                <div className="admin-totp-user-row__copy">
+                  <span className="admin-totp-user-row__name">
+                    <strong>{entry.username}</strong>
+                    {entry.role === "admin" ? <AdminCrownIcon /> : null}
+                  </span>
+                  <p className="page-subnote">{totpLabel}</p>
+                </div>
+                <div className="admin-totp-user-row__actions">
+                  <button
+                    className={totpRequirementEnabled ? "ghost-button ghost-button--danger" : "ghost-button"}
+                    disabled={totpPromptPendingUserId === entry.id}
+                    onClick={() => handleToggleUserTotpRequirement(entry)}
+                    type="button"
+                  >
+                    {totpPromptPendingUserId === entry.id
+                      ? "Saving..."
+                      : totpRequirementEnabled
+                        ? "Disable"
+                        : "Enable"}
+                  </button>
+                </div>
               </div>
-              {entry.totp_enabled ? (
-                <button
-                  className="ghost-button ghost-button--danger"
-                  disabled={totpAdminPendingUserId === entry.id}
-                  onClick={() => handleAdminResetUserTotp(entry)}
-                  type="button"
-                >
-                  {totpAdminPendingUserId === entry.id ? "Resetting..." : "Reset 2FA"}
-                </button>
-              ) : null}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
 

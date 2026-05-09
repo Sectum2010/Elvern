@@ -40,7 +40,8 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
                 updated_at,
                 last_login_at,
                 totp_secret,
-                totp_enabled_at
+                totp_enabled_at,
+                totp_setup_prompt_enabled
             FROM users
             ORDER BY lower(username) ASC
             """
@@ -88,6 +89,7 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
             "last_activity_at": status_by_user[int(row["id"])]["last_activity_at"],
             "totp_enabled": bool(row["totp_secret"]),
             "totp_enabled_at": row["totp_enabled_at"],
+            "totp_setup_prompt_enabled": bool(row["totp_setup_prompt_enabled"]),
         }
         for row in rows
     ]
@@ -126,14 +128,17 @@ def create_user(
         try:
             cursor = connection.execute(
                 """
-                INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (
+                    username, password_hash, role, enabled, totp_setup_prompt_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_username,
                     hash_password(password, settings),
                     role,
                     int(enabled),
+                    1 if role == "admin" else 0,
                     now,
                     now,
                 ),
@@ -187,7 +192,8 @@ def update_user(
                 updated_at,
                 last_login_at,
                 totp_secret,
-                totp_enabled_at
+                totp_enabled_at,
+                totp_setup_prompt_enabled
             FROM users
             WHERE id = ?
             LIMIT 1
@@ -242,13 +248,17 @@ def update_user(
         if not role_changed and not enabled_changed:
             return _get_user_from_row(row)
         revoked_session_count = 0
+        enable_totp_prompt = bool(role_changed and next_role == "admin" and not row["totp_secret"])
         connection.execute(
             """
             UPDATE users
-            SET role = ?, enabled = ?, updated_at = ?
+            SET role = ?,
+                enabled = ?,
+                totp_setup_prompt_enabled = CASE WHEN ? THEN 1 ELSE totp_setup_prompt_enabled END,
+                updated_at = ?
             WHERE id = ?
             """,
-            (next_role, int(next_enabled), now, user_id),
+            (next_role, int(next_enabled), int(enable_totp_prompt), now, user_id),
         )
         if not next_enabled:
             revoked_session_count = revoke_sessions_for_user_in_connection(
@@ -308,7 +318,17 @@ def update_user_password(
         )
         row = connection.execute(
             """
-            SELECT id, username, role, enabled, created_at, updated_at, last_login_at
+            SELECT
+                id,
+                username,
+                role,
+                enabled,
+                created_at,
+                updated_at,
+                last_login_at,
+                totp_secret,
+                totp_enabled_at,
+                totp_setup_prompt_enabled
             FROM users
             WHERE id = ?
             LIMIT 1
@@ -610,6 +630,9 @@ def _get_user_from_row(row) -> dict[str, object]:
         "last_activity_at": None,
         "totp_enabled": bool(row["totp_secret"]) if "totp_secret" in row.keys() else False,
         "totp_enabled_at": row["totp_enabled_at"] if "totp_enabled_at" in row.keys() else None,
+        "totp_setup_prompt_enabled": bool(row["totp_setup_prompt_enabled"])
+        if "totp_setup_prompt_enabled" in row.keys()
+        else False,
     }
 
 

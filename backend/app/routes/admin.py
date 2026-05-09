@@ -19,6 +19,7 @@ from ..schemas import (
     AdminUrlPrefixRotateResponse,
     AdminUserTotpDisableRequest,
     AdminUserTotpDisableResponse,
+    AdminUserTotpSetupPromptUpdateRequest,
     AdminInviteCodeListResponse,
     AdminInviteCodeResponse,
     AdminPlaybackWorkersStatusResponse,
@@ -332,6 +333,7 @@ def admin_disable_user_totp(
                 totp_enabled_at = NULL,
                 totp_last_used_window = NULL,
                 totp_setup_skipped_at = ?,
+                totp_setup_prompt_enabled = 0,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -350,6 +352,51 @@ def admin_disable_user_totp(
         details={"target_user_id": user_id},
     )
     return AdminUserTotpDisableResponse(disabled=True, target_user=user_id)
+
+
+@router.patch("/users/{user_id}/2fa/setup-prompt", response_model=AdminUserResponse)
+def admin_update_user_totp_setup_prompt(
+    user_id: int,
+    payload: AdminUserTotpSetupPromptUpdateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminUserResponse:
+    settings = request.app.state.settings
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            "SELECT id, username, totp_secret FROM users WHERE id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        connection.execute(
+            """
+            UPDATE users
+            SET totp_setup_prompt_enabled = ?,
+                totp_setup_skipped_at = CASE WHEN ? THEN NULL ELSE totp_setup_skipped_at END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (1 if payload.enabled else 0, 1 if payload.enabled else 0, now, user_id),
+        )
+        connection.commit()
+    log_security_event(
+        settings,
+        event_kind="totp_setup_prompt_updated",
+        actor_user_id=user.id,
+        actor_username=user.username,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={
+            "target_user_id": user_id,
+            "target_username": row["username"],
+            "enabled": payload.enabled,
+            "target_totp_enabled": bool(row["totp_secret"]),
+        },
+    )
+    updated = next(entry for entry in list_users(settings) if int(entry["id"]) == user_id)
+    return AdminUserResponse(**updated)
 
 
 @router.get("/invite-codes", response_model=AdminInviteCodeListResponse)

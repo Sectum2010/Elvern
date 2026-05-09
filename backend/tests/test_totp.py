@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pyotp
 
 from backend.app.db import get_connection, utcnow_iso
+from backend.app.security import hash_password
 from backend.app.services.totp_service import (
     CHALLENGE_TOKEN_TTL_SECONDS,
     RECOVERY_CODE_COUNT,
@@ -121,18 +122,56 @@ class TestLoginFlow:
         response = _login(client)
         assert response.json()["totp_setup_required"] is False
 
-    def test_admin_skipped_over_30_days_forces_setup_again(self, client, initialized_settings) -> None:
+    def test_admin_skipped_setup_does_not_prompt_but_remains_available(self, client, initialized_settings) -> None:
         assert _login(client).status_code == 200
         old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
         with get_connection(initialized_settings) as connection:
             connection.execute(
-                "UPDATE users SET totp_setup_skipped_at = ? WHERE username = ?",
+                "UPDATE users SET totp_setup_skipped_at = ?, totp_setup_prompt_enabled = 1 WHERE username = ?",
                 (old, "admin"),
             )
             connection.commit()
         _logout(client)
         response = _login(client)
+        assert response.json()["totp_setup_required"] is False
+        status = client.get("/api/auth/totp/status")
+        assert status.status_code == 200
+        assert status.json()["setup_available"] is True
+
+    def test_standard_user_prompt_flag_requires_setup_then_skip_keeps_settings_setup_available(self, client, initialized_settings) -> None:
+        now = utcnow_iso()
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, enabled, totp_setup_prompt_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, 'standard_user', 1, 1, ?, ?)
+                """,
+                ("caleb", hash_password("standard-password", initialized_settings), now, now),
+            )
+            connection.commit()
+
+        response = _login(client, username="caleb", password="standard-password")
+        assert response.status_code == 200
         assert response.json()["totp_setup_required"] is True
+
+        skip = client.post("/api/auth/totp/skip")
+        assert skip.status_code == 200
+        with get_connection(initialized_settings) as connection:
+            prompt = connection.execute(
+                "SELECT totp_setup_prompt_enabled FROM users WHERE username = ?",
+                ("caleb",),
+            ).fetchone()[0]
+        assert prompt == 1
+
+        _logout(client)
+        response = _login(client, username="caleb", password="standard-password")
+        assert response.status_code == 200
+        assert response.json()["totp_setup_required"] is False
+        status = client.get("/api/auth/totp/status")
+        assert status.status_code == 200
+        assert status.json()["setup_available"] is True
 
     def test_user_with_totp_returns_pending_state(self, client, initialized_settings) -> None:
         _enable_totp(client, initialized_settings)
@@ -186,6 +225,12 @@ class TestSetupFlow:
     def test_setup_verify_returns_recovery_codes_once(self, client, initialized_settings) -> None:
         _secret, codes = _enable_totp(client, initialized_settings)
         assert len(codes) == 10
+        with get_connection(initialized_settings) as connection:
+            prompt_enabled = connection.execute(
+                "SELECT totp_setup_prompt_enabled FROM users WHERE username = ?",
+                ("admin",),
+            ).fetchone()[0]
+        assert prompt_enabled == 1
 
 
 class TestDisableAndAdminReset:
@@ -196,7 +241,7 @@ class TestDisableAndAdminReset:
         with get_connection(initialized_settings) as connection:
             assert connection.execute("SELECT totp_secret FROM users WHERE id = 1").fetchone()[0] == secret
 
-    def test_admin_disable_other_user_clears_secret_and_codes(self, client, initialized_settings) -> None:
+    def test_admin_disable_other_user_clears_secret_codes_and_requirement(self, client, initialized_settings) -> None:
         _enable_totp(client, initialized_settings)
         response = client.post(
             "/api/admin/users/1/2fa/disable",
@@ -204,9 +249,10 @@ class TestDisableAndAdminReset:
         )
         assert response.status_code == 200, response.text
         with get_connection(initialized_settings) as connection:
-            row = connection.execute("SELECT totp_secret FROM users WHERE id = 1").fetchone()
+            row = connection.execute("SELECT totp_secret, totp_setup_prompt_enabled FROM users WHERE id = 1").fetchone()
             code_count = connection.execute("SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = 1").fetchone()[0]
         assert row["totp_secret"] is None
+        assert row["totp_setup_prompt_enabled"] == 0
         assert code_count == 0
 
 
@@ -218,3 +264,38 @@ class TestAdminUiData:
         payload = response.json()
         assert payload["enabled"] is True
         assert payload["recovery_codes_remaining"] == 10
+
+    def test_admin_user_list_exposes_setup_prompt_flag(self, client) -> None:
+        assert _login(client).status_code == 200
+        response = client.get("/api/admin/users")
+        assert response.status_code == 200
+        admin = next(entry for entry in response.json()["users"] if entry["username"] == "admin")
+        assert admin["totp_setup_prompt_enabled"] is True
+
+    def test_admin_can_enable_then_disable_user_2fa_requirement(self, client, initialized_settings) -> None:
+        now = utcnow_iso()
+        with get_connection(initialized_settings) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at)
+                VALUES (?, ?, 'standard_user', 1, ?, ?)
+                """,
+                ("caleb", hash_password("standard-password", initialized_settings), now, now),
+            )
+            user_id = int(cursor.lastrowid)
+            connection.commit()
+
+        assert _login(client).status_code == 200
+        enabled = client.patch(f"/api/admin/users/{user_id}/2fa/setup-prompt", json={"enabled": True})
+        assert enabled.status_code == 200, enabled.text
+        assert enabled.json()["totp_setup_prompt_enabled"] is True
+
+        disabled = client.post(
+            f"/api/admin/users/{user_id}/2fa/disable",
+            json={"current_admin_password": "test-admin-password"},
+        )
+        assert disabled.status_code == 200, disabled.text
+        refreshed = client.get("/api/admin/users")
+        assert refreshed.status_code == 200
+        caleb = next(entry for entry in refreshed.json()["users"] if entry["id"] == user_id)
+        assert caleb["totp_setup_prompt_enabled"] is False

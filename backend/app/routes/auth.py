@@ -87,7 +87,8 @@ def _get_totp_row(settings, *, user_id: int):
                 totp_secret,
                 totp_enabled_at,
                 totp_last_used_window,
-                totp_setup_skipped_at
+                totp_setup_skipped_at,
+                totp_setup_prompt_enabled
             FROM users
             WHERE id = ?
             LIMIT 1
@@ -371,6 +372,7 @@ def login(payload: AuthLoginRequest, request: Request, response: Response) -> Au
             role=totp_row["role"] or "standard_user",
             totp_secret=totp_row["totp_secret"],
             totp_setup_skipped_at=totp_row["totp_setup_skipped_at"],
+            totp_setup_prompt_enabled=totp_row["totp_setup_prompt_enabled"],
         )
     return _auth_envelope(
         AuthenticatedUser(
@@ -543,7 +545,9 @@ def verify_totp_setup(
             """
             UPDATE users
             SET totp_secret = ?, totp_enabled_at = ?, totp_last_used_window = ?,
-                totp_setup_skipped_at = NULL, updated_at = ?
+                totp_setup_skipped_at = NULL,
+                totp_setup_prompt_enabled = 1,
+                updated_at = ?
             WHERE id = ?
             """,
             (row["secret"], now, window, now, user.id),
@@ -558,13 +562,16 @@ def verify_totp_setup(
 
 @router.post("/totp/skip", response_model=TotpSkipResponse)
 def skip_totp_setup(request: Request, user: AuthenticatedUser = CurrentUser) -> TotpSkipResponse:
-    if user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access is required")
     settings = request.app.state.settings
     now = datetime.now(timezone.utc)
     with get_connection(settings) as connection:
         connection.execute(
-            "UPDATE users SET totp_setup_skipped_at = ?, updated_at = ? WHERE id = ?",
+            """
+            UPDATE users
+            SET totp_setup_skipped_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
             (now.isoformat(), now.isoformat(), user.id),
         )
         connection.commit()
@@ -577,7 +584,7 @@ def totp_status(request: Request, user: AuthenticatedUser = CurrentUser) -> Totp
     settings = request.app.state.settings
     with get_connection(settings) as connection:
         row = connection.execute(
-            "SELECT totp_secret, totp_enabled_at FROM users WHERE id = ? LIMIT 1",
+            "SELECT totp_secret, totp_enabled_at, totp_setup_prompt_enabled FROM users WHERE id = ? LIMIT 1",
             (user.id,),
         ).fetchone()
         remaining = connection.execute(
@@ -589,6 +596,7 @@ def totp_status(request: Request, user: AuthenticatedUser = CurrentUser) -> Totp
         enabled_at=row["totp_enabled_at"] if row else None,
         recovery_codes_remaining=int(remaining),
         setup_required=is_totp_setup_required(settings, user_id=user.id),
+        setup_available=bool(row and row["totp_setup_prompt_enabled"] and not row["totp_secret"]),
     )
 
 
@@ -618,7 +626,9 @@ def disable_totp(
             """
             UPDATE users
             SET totp_secret = NULL, totp_enabled_at = NULL, totp_last_used_window = NULL,
-                totp_setup_skipped_at = ?, updated_at = ?
+                totp_setup_skipped_at = ?,
+                totp_setup_prompt_enabled = 0,
+                updated_at = ?
             WHERE id = ?
             """,
             (now, now, user.id),

@@ -857,6 +857,8 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "users", "totp_enabled_at", "TEXT")
     _ensure_column(connection, "users", "totp_last_used_window", "INTEGER")
     _ensure_column(connection, "users", "totp_setup_skipped_at", "TEXT")
+    _ensure_column(connection, "users", "totp_setup_prompt_enabled", "INTEGER NOT NULL DEFAULT 0")
+    _run_totp_prompt_default_migration(connection)
     _mark_totp_migration(connection)
 
     _ensure_column(connection, "sessions", "revoked_at", "TEXT")
@@ -927,6 +929,36 @@ def _mark_totp_migration(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if row is not None:
         return
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (name, applied_at)
+        VALUES (?, ?)
+        """,
+        (migration_name, utcnow_iso()),
+    )
+
+
+def _run_totp_prompt_default_migration(connection: sqlite3.Connection) -> None:
+    migration_name = "totp_prompt_defaults_v1"
+    row = connection.execute(
+        """
+        SELECT name
+        FROM schema_migrations
+        WHERE name = ?
+        LIMIT 1
+        """,
+        (migration_name,),
+    ).fetchone()
+    if row is not None:
+        return
+    connection.execute(
+        """
+        UPDATE users
+        SET totp_setup_prompt_enabled = 1
+        WHERE role = 'admin'
+          AND totp_secret IS NULL
+        """
+    )
     connection.execute(
         """
         INSERT INTO schema_migrations (name, applied_at)
