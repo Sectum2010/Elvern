@@ -12,6 +12,11 @@ const backendHost =
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    globals: true,
+    environment: "jsdom",
+    setupFiles: "./src/test-setup.js",
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,
