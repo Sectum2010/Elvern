@@ -1598,9 +1598,16 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   align-items: start;
 }
 
+.totp-setup-card__qr-panel {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: center;
+}
+
 .totp-setup-card__qr {
   display: grid;
   place-items: center;
+  width: 100%;
   background: #fff;
   border-radius: 16px;
   padding: 18px;
@@ -1613,14 +1620,44 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   height: auto;
 }
 
-.totp-skip-link {
-  opacity: 0.4;
-  transition: opacity 160ms ease, color 160ms ease;
+.totp-setup-card__actions {
+  display: grid;
+  gap: 0.75rem;
 }
 
-.totp-skip-link:hover {
-  opacity: 1;
+.totp-setup-card__actions > button {
+  width: 100%;
+}
+
+.totp-text-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: rgba(207, 219, 231, 0.38);
+  font-size: 0.95rem;
+  line-height: 1.35;
+  text-align: center;
+  transition: color 160ms ease, opacity 160ms ease, text-decoration-color 160ms ease;
+}
+
+.totp-text-link:hover,
+.totp-text-link:focus-visible {
   color: #fff;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+}
+
+.totp-challenge-recovery-toggle {
+  justify-self: center;
+  margin-top: -0.2rem;
+}
+
+@media (min-width: 860px) {
+  .totp-setup-card__actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .player-status {
@@ -2314,6 +2351,11 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
+}
+
+.admin-url-prefix-actions {
+  align-items: center;
+  margin-top: 0.75rem;
 }
 
 .admin-user-row {

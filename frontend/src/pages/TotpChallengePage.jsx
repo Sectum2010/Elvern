@@ -76,10 +76,10 @@ export function TotpChallengePage() {
           <button className="primary-button login-button" disabled={pending || !challengeToken} type="submit">
             {pending ? "Verifying..." : (useRecovery ? "Use recovery code" : "Verify")}
           </button>
+          <button className="totp-text-link totp-challenge-recovery-toggle" onClick={() => setUseRecovery((current) => !current)} type="button">
+            {useRecovery ? "Use authenticator code" : "Use a recovery code"}
+          </button>
         </form>
-        <button className="link-button" onClick={() => setUseRecovery((current) => !current)} type="button">
-          {useRecovery ? "Use authenticator code instead" : "Use a recovery code instead"}
-        </button>
       </div>
     </div>
   );

@@ -575,7 +575,7 @@ export function AdminPage() {
   }
 
   async function handleAdminResetUserTotp(entry) {
-    const currentAdminPassword = window.prompt(`Confirm with your admin password to reset 2FA for ${entry.username}.`);
+    const currentAdminPassword = window.prompt(`Confirm with your current admin password to reset 2FA for ${entry.username}.`);
     if (!currentAdminPassword) {
       return;
     }
@@ -595,7 +595,7 @@ export function AdminPage() {
   }
 
   async function handleRegenerateOwnRecoveryCodes() {
-    const password = window.prompt("Enter your current password to regenerate recovery codes.");
+    const password = window.prompt("Enter your current admin password to regenerate recovery codes.");
     if (!password) {
       return;
     }
@@ -616,7 +616,7 @@ export function AdminPage() {
   }
 
   async function handleDisableOwnTotp() {
-    const password = window.prompt("Enter your current password to disable 2FA.");
+    const password = window.prompt("Enter your current admin password to disable 2FA.");
     if (!password) {
       return;
     }
@@ -2666,7 +2666,7 @@ export function AdminPage() {
         <StatusRow label="Current prefix" value={urlPrefixStatus?.prefix ? `/${urlPrefixStatus.prefix}/` : "Unknown"} />
         <StatusRow label="Generated" value={urlPrefixStatus?.generated_at ? `${formatDate(urlPrefixStatus.generated_at)} (${urlPrefixStatus.days_old} days ago)` : "Manual override"} />
         <StatusRow label="Manual rotations" value={String(urlPrefixStatus?.rotated_count ?? 0)} />
-        <div className="admin-list__actions">
+        <div className="admin-list__actions admin-url-prefix-actions">
           <button
             className="primary-button"
             onClick={() =>
@@ -2692,7 +2692,7 @@ export function AdminPage() {
         </div>
       </section>
 
-      <section className="settings-card settings-card--wide">
+      <section className="settings-card">
         <div className="settings-inline-header">
           <div>
             <h2>Two-factor authentication</h2>

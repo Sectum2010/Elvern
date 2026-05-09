@@ -84,8 +84,13 @@ export function TotpSetupPage() {
         </p>
       </section>
       <section className="settings-card totp-setup-card">
-        <div className="totp-setup-card__qr">
-          {setup?.qr_svg ? <div dangerouslySetInnerHTML={{ __html: setup.qr_svg }} /> : <p>Loading QR...</p>}
+        <div className="totp-setup-card__qr-panel">
+          <div className="totp-setup-card__qr">
+            {setup?.qr_svg ? <div dangerouslySetInnerHTML={{ __html: setup.qr_svg }} /> : <p>Loading QR...</p>}
+          </div>
+          <button className="totp-text-link totp-skip-link" onClick={handleSkip} type="button">
+            Skip for now
+          </button>
         </div>
         <form className="admin-inline-form" onSubmit={handleVerify}>
           <h2>1. Scan QR code</h2>
@@ -101,17 +106,16 @@ export function TotpSetupPage() {
             type="text"
             value={code}
           />
-          <button className="ghost-button ghost-button--inline" onClick={() => setShowManual((current) => !current)} type="button">
-            {showManual ? "Hide manual code" : "Enter manually"}
-          </button>
+          <div className="totp-setup-card__actions">
+            <button className="ghost-button ghost-button--inline" onClick={() => setShowManual((current) => !current)} type="button">
+              {showManual ? "Hide manual code" : "Enter manually"}
+            </button>
+            <button className="primary-button" disabled={pending || !setup} type="submit">
+              {pending ? "Verifying..." : "Verify and enable"}
+            </button>
+          </div>
           {showManual ? <p className="admin-diagnostic-id-modal__value">{setup?.secret}</p> : null}
           {error ? <p className="action-feedback action-feedback--error">{error}</p> : null}
-          <button className="primary-button" disabled={pending || !setup} type="submit">
-            {pending ? "Verifying..." : "Verify and enable"}
-          </button>
-          <button className="link-button totp-skip-link" onClick={handleSkip} type="button">
-            Skip for now
-          </button>
         </form>
       </section>
       {recoveryCodes.length > 0 ? (
