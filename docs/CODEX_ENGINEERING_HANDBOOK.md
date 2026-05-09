@@ -155,6 +155,17 @@ python -m pytest backend/tests/test_rate_limiter.py -v
 python -m pytest backend/tests/test_auth_sessions.py -v
 ```
 
+## External HTTP Requests
+
+Google API and Google Drive media calls must use
+`backend/app/services/_safe_http.py`. Do not directly import or call
+`urllib.request.urlopen` for Google API work; the safe wrapper validates the
+initial host and every redirect target against the Google host allowlist.
+
+Before adding a new allowed host suffix, stop and check the SSRF risk. The
+allowlist should stay limited to Google-owned API, OAuth, static, and Drive CDN
+hosts that Elvern actually needs.
+
 ## 5. Rules For Creating New Files
 
 Create a new file when it gives a real owner a home.

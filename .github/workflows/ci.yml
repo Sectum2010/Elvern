@@ -28,21 +28,6 @@ jobs:
       - name: Run backend tests
         run: python -m pytest
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -50,3 +35,68 @@ jobs:
 
       - name: Build desktop helper
         run: dotnet build clients/desktop-vlc-opener/Elvern.VlcOpener.csproj --configuration Release
+
+  frontend_tests:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+  security_audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit and bandit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit "bandit[toml]"
+
+      - name: Run pip-audit on backend dependencies
+        run: pip-audit -r backend/requirements.txt --strict
+
+      - name: Run pip-audit on test dependencies
+        run: pip-audit -r backend/requirements-test.txt --strict
+
+      - name: Run bandit on backend source
+        run: bandit -r backend/app -ll -ii --exclude backend/app/__pycache__
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run npm audit (high severity)
+        working-directory: frontend
+        run: npm audit --audit-level=high

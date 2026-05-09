@@ -713,31 +713,34 @@ def _revoke_session_ids(
     if not session_ids:
         return
     placeholders = ",".join("?" for _ in session_ids)
-    connection.execute(
-        f"""
+    revoke_sessions_sql = f"""
         UPDATE sessions
         SET revoked_at = ?, revoked_reason = ?, cleanup_confirmed_at = NULL
         WHERE id IN ({placeholders})
-        """,
+        """  # nosec B608 - placeholders generated from trusted session_ids length
+    connection.execute(
+        revoke_sessions_sql,
         (now, reason, *session_ids),
     )
-    connection.execute(
-        f"""
+    revoke_native_sql = f"""
         UPDATE native_playback_sessions
         SET revoked_at = ?
         WHERE auth_session_id IN ({placeholders})
           AND revoked_at IS NULL
           AND closed_at IS NULL
-        """,
+        """  # nosec B608 - placeholders generated from trusted session_ids length
+    connection.execute(
+        revoke_native_sql,
         (now, *session_ids),
     )
-    connection.execute(
-        f"""
+    revoke_desktop_sql = f"""
         UPDATE desktop_vlc_handoffs
         SET revoked_at = ?
         WHERE auth_session_id IN ({placeholders})
           AND revoked_at IS NULL
-        """,
+        """  # nosec B608 - placeholders generated from trusted session_ids length
+    connection.execute(
+        revoke_desktop_sql,
         (now, *session_ids),
     )
 

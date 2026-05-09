@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import re
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,7 @@ from pathlib import PurePosixPath
 from typing import Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -20,8 +21,10 @@ from .app_settings_service import (
     get_effective_google_drive_https_origin,
     google_drive_callback_url,
 )
+from ._safe_http import HostNotAllowedError, safe_urlopen
 
 
+logger = logging.getLogger(__name__)
 GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -59,6 +62,11 @@ def require_google_drive_enabled(settings: Settings) -> None:
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail="Google Drive setup is incomplete. Add a secure HTTPS app origin, Client ID, and Client Secret in Settings.",
     )
+
+
+def _raise_blocked_google_redirect(exc: HostNotAllowedError, *, detail: str) -> None:
+    logger.error("Blocked SSRF attempt: %s", str(exc))
+    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
 
 def google_drive_redirect_uri(settings: Settings) -> str:
@@ -488,9 +496,11 @@ def proxy_google_drive_file_response(
         range_header=upstream_range_header,
     )
     try:
-        upstream = urlopen(request, timeout=30)
+        upstream = safe_urlopen(request, timeout=30)
     except HTTPError as exc:
         _raise_google_drive_stream_http_exception(exc)
+    except HostNotAllowedError as exc:
+        _raise_blocked_google_redirect(exc, detail="Google Drive redirected to an unexpected host.")
     except URLError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -613,7 +623,10 @@ def _iter_stitched_google_drive_ranges(
             range_header=range_header,
         )
         try:
-            current_upstream = urlopen(request, timeout=30)
+            current_upstream = safe_urlopen(request, timeout=30)
+        except HostNotAllowedError as exc:
+            logger.error("Blocked SSRF attempt: %s", str(exc))
+            break
         except (HTTPError, URLError):
             break
         content_range = _parse_content_range(getattr(current_upstream, "headers", {}).get("Content-Range"))
@@ -750,7 +763,7 @@ def _post_form_json(url: str, payload: dict[str, object]) -> dict[str, object]:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=30) as response:
+        with safe_urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = "Google authentication request failed."
@@ -774,6 +787,8 @@ def _post_form_json(url: str, payload: dict[str, object]) -> dict[str, object]:
         except Exception:
             pass
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+    except HostNotAllowedError as exc:
+        _raise_blocked_google_redirect(exc, detail="Google authentication redirected to an unexpected host.")
     except URLError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -792,7 +807,7 @@ def _get_json(
         resolved_url = f"{url}?{urlencode(query)}"
     request = Request(resolved_url, headers=headers or {})
     try:
-        with urlopen(request, timeout=30) as response:
+        with safe_urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail, provider_auth_reason, _provider_source_reason = _parse_google_drive_http_error(
@@ -807,6 +822,8 @@ def _get_json(
                 message="Reconnect Google Drive to continue this action.",
             )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+    except HostNotAllowedError as exc:
+        _raise_blocked_google_redirect(exc, detail="Google Drive redirected to an unexpected host.")
     except URLError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

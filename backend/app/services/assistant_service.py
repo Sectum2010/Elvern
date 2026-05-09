@@ -91,7 +91,7 @@ def build_assistant_access_map(connection: sqlite3.Connection, user_ids: list[in
             updated_at
         FROM assistant_user_access
         WHERE user_id IN ({placeholders})
-        """,
+        """,  # nosec B608 - placeholders generated from trusted user_ids length
         tuple(user_ids),
     ).fetchall()
     by_user_id = {
@@ -1164,13 +1164,14 @@ def _assistant_request_detail_from_row(connection: sqlite3.Connection, row: sqli
     approval_rows: list[sqlite3.Row] = []
     if action_ids:
         placeholders = ",".join("?" for _ in action_ids)
-        approval_rows = connection.execute(
-            f"""
+        approval_query = f"""
             SELECT *
             FROM assistant_approval_records
             WHERE action_request_id IN ({placeholders})
             ORDER BY datetime(decided_at) DESC, id DESC
-            """,
+            """  # nosec B608 - placeholders generated from trusted action_ids length
+        approval_rows = connection.execute(
+            approval_query,
             tuple(action_ids),
         ).fetchall()
     change_rows = connection.execute(

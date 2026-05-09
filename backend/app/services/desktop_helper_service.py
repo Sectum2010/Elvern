@@ -1074,7 +1074,7 @@ def _upsert_client_device(
         UPDATE client_devices
         SET {", ".join(assignments)}
         WHERE device_id = ?
-        """,
+        """,  # nosec B608 - assignments list is internal fixed column set
         (
             user_id,
             browser_platform,
@@ -1121,13 +1121,13 @@ def _desktop_backend_origin(settings: Settings) -> str:
     if public_origin:
         parsed = urlsplit(public_origin)
         host = (parsed.hostname or settings.bind_host).strip().lower()
-        if host in {"", "0.0.0.0", "::", "[::]"}:
+        if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
             host = "127.0.0.1"
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         return f"http://{host}:{settings.port}"
     host = settings.bind_host
-    if host in {"", "0.0.0.0", "::", "[::]"}:
+    if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         host = "127.0.0.1"
     return f"http://{host}:{settings.port}"
 

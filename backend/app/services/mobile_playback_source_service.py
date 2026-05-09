@@ -173,7 +173,7 @@ def _rewrite_stream_url_for_server_localhost(
     if not parsed.scheme or not parsed.netloc:
         return stream_url
     host = settings.bind_host.strip()
-    if host in {"", "0.0.0.0", "::", "[::]"}:
+    if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         host = "127.0.0.1"
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
@@ -186,7 +186,7 @@ def _probe_worker_source_input_error(source_input: str) -> str | None:
         return None
     request = Request(source_input, headers={"Range": "bytes=0-0"}, method="HEAD")
     try:
-        with urlopen(request, timeout=15):
+        with urlopen(request, timeout=15):  # nosec B310 - probes local Elvern stream URL only
             return None
     except HTTPError as exc:
         detail: str | None = None

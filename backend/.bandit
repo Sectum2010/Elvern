@@ -1,0 +1,3 @@
+[bandit]
+exclude_dirs = ['backend/tests', 'backend/__pycache__']
+skips = ['B101']

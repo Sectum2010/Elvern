@@ -77,7 +77,7 @@ def _rewrite_stream_url_for_linux_same_host(settings: Settings, *, stream_url: s
     if not parsed.scheme or not parsed.netloc:
         return stream_url
     host = settings.bind_host.strip()
-    if host in {"", "0.0.0.0", "::", "[::]"}:
+    if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         host = "127.0.0.1"
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
@@ -196,7 +196,7 @@ def _public_app_origin(settings: Settings) -> str:
     if configured:
         return configured
     host = settings.frontend_host
-    if host in {"", "0.0.0.0", "::", "[::]"}:
+    if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         host = "127.0.0.1"
     return f"http://{host}:{settings.frontend_port}"
 
@@ -210,13 +210,13 @@ def _desktop_backend_origin(settings: Settings) -> str:
     if public_origin:
         parsed = urlsplit(public_origin)
         host = (parsed.hostname or settings.bind_host).strip().lower()
-        if host in {"", "0.0.0.0", "::", "[::]"}:
+        if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
             host = "127.0.0.1"
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         return f"http://{host}:{settings.port}"
     host = settings.bind_host
-    if host in {"", "0.0.0.0", "::", "[::]"}:
+    if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         host = "127.0.0.1"
     return f"http://{host}:{settings.port}"
 

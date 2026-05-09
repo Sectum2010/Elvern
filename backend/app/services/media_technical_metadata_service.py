@@ -348,13 +348,14 @@ def upsert_technical_metadata(
     params = [int(media_item_id), *(payload[column] for column in TECHNICAL_METADATA_COLUMNS)]
 
     with get_connection(settings) as connection:
-        connection.execute(
-            f"""
+        upsert_query = f"""
             INSERT INTO media_item_technical_metadata ({columns_sql})
             VALUES ({placeholders_sql})
             ON CONFLICT(media_item_id) DO UPDATE SET
                 {update_sql}
-            """,
+            """  # nosec B608 - columns are internal TECHNICAL_METADATA_COLUMNS constants
+        connection.execute(
+            upsert_query,
             params,
         )
         connection.commit()

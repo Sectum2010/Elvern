@@ -239,7 +239,7 @@ def _rewrite_stream_url_for_server_localhost(settings: Settings, *, stream_url: 
     if not parsed.scheme or not parsed.netloc:
         return stream_url
     host = settings.bind_host.strip()
-    if host in {"", "0.0.0.0", "::", "[::]"}:
+    if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         host = "127.0.0.1"
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"

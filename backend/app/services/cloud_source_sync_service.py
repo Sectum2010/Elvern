@@ -402,7 +402,7 @@ def _sync_google_drive_library_source(
                     WHERE COALESCE(source_kind, 'local') = 'cloud'
                       AND library_source_id = ?
                       AND external_media_id NOT IN ({placeholders})
-                    """,
+                    """,  # nosec B608 - placeholders generated from discovered provider ids
                     (source_id, *sorted(discovered_media_ids)),
                 )
             else:
@@ -599,7 +599,7 @@ def _merge_playback_progress_rows(connection, *, canonical_id: int, duplicate_id
         FROM playback_progress
         WHERE media_item_id IN ({placeholders})
         ORDER BY id ASC
-        """,
+        """,  # nosec B608 - placeholders generated from canonical and duplicate ids
         (canonical_id, *duplicate_ids),
     ).fetchall()
     rows_by_user: dict[int, list] = {}
@@ -688,7 +688,7 @@ def _merge_user_hidden_rows(connection, *, canonical_id: int, duplicate_ids: lis
         FROM user_hidden_media_items
         WHERE media_item_id IN ({placeholders})
         ORDER BY id ASC
-        """,
+        """,  # nosec B608 - placeholders generated from canonical and duplicate ids
         (canonical_id, *duplicate_ids),
     ).fetchall()
     rows_by_user: dict[int, list] = {}
@@ -747,7 +747,7 @@ def _merge_global_hidden_rows(connection, *, canonical_id: int, duplicate_ids: l
         FROM global_hidden_media_items
         WHERE media_item_id IN ({placeholders})
         ORDER BY id ASC
-        """,
+        """,  # nosec B608 - placeholders generated from canonical and duplicate ids
         (canonical_id, *duplicate_ids),
     ).fetchall()
     if not rows:
@@ -809,7 +809,7 @@ def _reassign_media_item_rows(
         return
     placeholders = ",".join("?" for _ in duplicate_ids)
     connection.execute(
-        f"UPDATE {table_name} SET media_item_id = ? WHERE media_item_id IN ({placeholders})",
+        f"UPDATE {table_name} SET media_item_id = ? WHERE media_item_id IN ({placeholders})",  # nosec B608 - table_name is internal constant and placeholders are generated
         (canonical_id, *duplicate_ids),
     )
 

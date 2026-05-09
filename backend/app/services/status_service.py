@@ -97,6 +97,6 @@ def _backend_api_origin(settings: Settings) -> str:
 
 
 def _local_host(bind_host: str) -> str:
-    if bind_host in {"", "0.0.0.0", "::", "[::]"}:
+    if bind_host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         return "127.0.0.1"
     return bind_host

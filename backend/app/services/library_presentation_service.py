@@ -320,7 +320,7 @@ def _poster_cache_token(*, poster_path: Path, poster_dir: Path) -> str:
             str(int(stat.st_size)),
         ]
     )
-    return hashlib.sha1(token_source.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(token_source.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def _poster_url_for_row(settings: Settings, row, *, poster_dir: Path | None = None) -> str | None:

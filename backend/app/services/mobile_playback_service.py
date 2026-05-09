@@ -13072,7 +13072,7 @@ class MobilePlaybackManager:
                     SELECT id, enabled
                     FROM users
                     WHERE id IN ({placeholders})
-                    """,
+                    """,  # nosec B608 - placeholders generated from managed session user_ids
                     tuple(user_ids),
                 ).fetchall():
                     if not bool(row["enabled"]):
@@ -13084,7 +13084,7 @@ class MobilePlaybackManager:
                     SELECT id, revoked_at, revoked_reason
                     FROM sessions
                     WHERE id IN ({placeholders})
-                    """,
+                    """,  # nosec B608 - placeholders generated from managed auth_session_ids
                     tuple(auth_session_ids),
                 ).fetchall():
                     if row["revoked_at"] is None:

@@ -297,7 +297,7 @@ def build_google_connect_callback_redirect(
         base_origin = (settings.public_app_origin or "").strip().rstrip("/")
     if not base_origin:
         host = settings.frontend_host
-        if host in {"0.0.0.0", "::"}:
+        if host in {"0.0.0.0", "::"}:  # nosec B104 - intentional bind for Tailscale/LAN access
             host = "127.0.0.1"
         base_origin = f"http://{host}:{settings.frontend_port}"
     normalized_return_path = _normalize_google_connect_return_path(return_path) or "/settings"

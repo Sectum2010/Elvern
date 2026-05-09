@@ -3071,7 +3071,7 @@ def test_google_drive_stream_proxy_preserves_provider_error_detail(monkeypatch) 
 
     error = HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
     monkeypatch.setattr(error, "read", lambda: payload)
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
 
     try:
         proxy_google_drive_file_response(
@@ -3106,7 +3106,7 @@ def test_google_drive_stream_proxy_maps_auth_error_to_provider_auth(monkeypatch)
 
     error = HTTPError(request.full_url, 401, "Unauthorized", hdrs=None, fp=None)
     monkeypatch.setattr(error, "read", lambda: payload)
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
 
     try:
         proxy_google_drive_file_response(
@@ -3180,7 +3180,7 @@ def test_google_drive_stream_proxy_maps_forbidden_source_error(monkeypatch) -> N
 
     error = HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
     monkeypatch.setattr(error, "read", lambda: payload)
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", lambda _request, timeout=30: (_ for _ in ()).throw(error))
 
     try:
         proxy_google_drive_file_response(
@@ -3261,7 +3261,7 @@ def test_google_drive_stream_proxy_forwards_range_header(monkeypatch) -> None:
         seen["range"] = request.headers.get("Range")
         return _FakeResponse()
 
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", _open)
 
     response = proxy_google_drive_file_response(
         "token",
@@ -3294,7 +3294,7 @@ def test_google_drive_stream_proxy_uses_bounded_fallback_range_when_missing(monk
         seen["range"] = request.headers.get("Range")
         return _FakeResponse()
 
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", _open)
 
     response = proxy_google_drive_file_response(
         "token",
@@ -3331,7 +3331,7 @@ def test_google_drive_stream_proxy_bounds_open_ended_range(monkeypatch) -> None:
         seen["range"] = request.headers.get("Range")
         return _FakeResponse()
 
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", _open)
 
     response = proxy_google_drive_file_response(
         "token",
@@ -3391,7 +3391,7 @@ def test_google_drive_stream_proxy_stitches_open_ended_range(monkeypatch) -> Non
             chunks.append(chunk)
         return b"".join(chunks)
 
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", _open)
 
     response = proxy_google_drive_file_response(
         "token",
@@ -3429,7 +3429,7 @@ def test_google_drive_stream_proxy_includes_resource_key(monkeypatch) -> None:
         seen["url"] = request.full_url
         return _FakeResponse()
 
-    monkeypatch.setattr("backend.app.services.google_drive_service.urlopen", _open)
+    monkeypatch.setattr("backend.app.services.google_drive_service.safe_urlopen", _open)
 
     proxy_google_drive_file_response(
         "token",

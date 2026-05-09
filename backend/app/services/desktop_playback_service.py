@@ -350,7 +350,7 @@ def _normalize_ip_literal(value: str) -> str | None:
 
 def _resolve_host_ips(host: str | None) -> set[str]:
     normalized_host = (host or "").strip()
-    if not normalized_host or normalized_host in {"0.0.0.0", "::", "[::]"}:
+    if not normalized_host or normalized_host in {"0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         return set()
 
     normalized_host = _normalize_ip_literal(normalized_host) or ""

@@ -481,7 +481,7 @@ def update_download_access_for_user(
             existing_ids = {
                 int(row["id"])
                 for row in connection.execute(
-                    f"SELECT id FROM media_items WHERE id IN ({placeholders})",
+                    f"SELECT id FROM media_items WHERE id IN ({placeholders})",  # nosec B608 - placeholders generated from validated integer ids
                     selected_ids,
                 ).fetchall()
             }
