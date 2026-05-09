@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -176,6 +177,45 @@ class TestUrlPrefixRouting:
 
     def test_api_path_unaffected(self, client) -> None:
         assert client.get("/api/auth/me").status_code in {200, 401}
+
+
+class TestSpaServing:
+    def test_html_route_falls_back_to_index(self, client) -> None:
+        prefix = client.app.state.url_prefix
+        response = client.get(f"/{prefix}/library")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+
+    def test_missing_asset_returns_404_not_index(self, client) -> None:
+        prefix = client.app.state.url_prefix
+        response = client.get(f"/{prefix}/assets/nonexistent.js")
+        assert response.status_code == 404
+        assert b"<html" not in response.content.lower()
+
+    def test_existing_asset_returns_correct_mime(self, client) -> None:
+        from backend.app.spa_static import FRONTEND_DIST
+
+        asset_path = Path(FRONTEND_DIST) / "assets" / "test.js"
+        asset_path.parent.mkdir(parents=True, exist_ok=True)
+        asset_path.write_text("export const elvernSpaAssetMimeCheck = true;\n", encoding="utf-8")
+        try:
+            prefix = client.app.state.url_prefix
+            response = client.get(f"/{prefix}/assets/test.js")
+        finally:
+            asset_path.unlink(missing_ok=True)
+        assert response.status_code == 200
+        assert response.headers["content-type"].split(";")[0] in {
+            "text/javascript",
+            "application/javascript",
+        }
+        assert b"elvernSpaAssetMimeCheck" in response.content
+
+    def test_root_prefix_serves_index_html(self, client) -> None:
+        prefix = client.app.state.url_prefix
+        response = client.get(f"/{prefix}/")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert b"<html" in response.content.lower()
 
 
 class TestAdminRotateEndpoint:

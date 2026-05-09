@@ -19,6 +19,9 @@ class SpaStaticFiles(StaticFiles):
         except StarletteHTTPException as exc:
             if exc.status_code != 404:
                 raise
+            last_segment = path.rsplit("/", 1)[-1]
+            if "." in last_segment:
+                raise
             return await super().get_response("index.html", scope)
 
 

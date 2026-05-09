@@ -315,6 +315,16 @@ it to a default systemd unit, default docker compose file, or generated env
 example as an enabled value. Prefix age reminders are soft 180-day prompts by
 default. Every rotation revokes all auth sessions.
 
+### URL prefix is server-only state
+
+The prefix lives in `backend/data/url_prefix_state.json` and must NEVER be
+committed to git. If you ever see it in `git status` as a tracked file, run:
+
+```bash
+git rm --cached backend/data/url_prefix_state.json
+echo "backend/data/url_prefix_state.json" >> .gitignore
+```
+
 ## Two-factor authentication
 
 Admin accounts are softly required to enroll in TOTP. An admin without TOTP is

@@ -1,14 +1,20 @@
 # Private environment and local runtime config
 deploy/env/elvern.env
+deploy/env/*.env
+!deploy/env/*.example
 
 # Local databases, logs, and runtime state
 backend/elvern.db
+backend/data/
 backend/data/*.db
 backend/data/*.db*
 backend/data/*.sqlite*
 backend/data/*.log
 backend/data/url_prefix_state.json
 backend/data/argon2_calibration.json
+backend/data/elvern.db
+backend/data/elvern.db-shm
+backend/data/elvern.db-wal
 backend/data/assistant_uploads/
 backend/data/backups/
 backend/data/poster_display_cache/
@@ -18,13 +24,19 @@ backend/data/transcodes/
 
 # Python
 .venv/
+backend/.venv/
 __pycache__/
+**/__pycache__/
 *.py[cod]
+**/*.pyc
 *.pyo
 *.pyd
 .pytest_cache/
+backend/tests/.pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # Frontend
 frontend/node_modules/
