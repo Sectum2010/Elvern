@@ -7,6 +7,8 @@ backend/data/*.db
 backend/data/*.db*
 backend/data/*.sqlite*
 backend/data/*.log
+backend/data/url_prefix_state.json
+backend/data/argon2_calibration.json
 backend/data/assistant_uploads/
 backend/data/backups/
 backend/data/poster_display_cache/
