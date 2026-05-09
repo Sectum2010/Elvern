@@ -6,11 +6,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from backend.app.config import refresh_settings
 from backend.app.db import get_connection, init_db, utcnow_iso
 from backend.app.security import hash_password
-from backend.app.spa_static import clear_manifest_cache, render_manifest_for_prefix
+from backend.app.spa_static import clear_manifest_cache, install_manifest_middleware, mount_spa, render_manifest_for_prefix
 from backend.app.url_prefix_service import (
     URL_PREFIX_ALPHABET,
     URL_PREFIX_LENGTH,
@@ -329,6 +331,57 @@ class TestManifestEndpoint:
 
     def test_manifest_at_wrong_prefix_404(self, client) -> None:
         assert client.get("/wrongprefix/manifest.webmanifest").status_code == 404
+
+
+class TestManifestMiddleware:
+    @pytest.fixture()
+    def app_with_full_mount(self, tmp_path):
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+        (dist / "manifest.webmanifest").write_text(
+            json.dumps(
+                {
+                    "name": "Elvern",
+                    "start_url": "/library",
+                    "scope": "/",
+                    "icons": [
+                        {
+                            "src": "/icons/icon-192.png",
+                            "sizes": "192x192",
+                            "type": "image/png",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        app = FastAPI()
+        app.state.url_prefix = "testprefix"
+        install_manifest_middleware(app, frontend_dist=dist)
+        mount_spa(app, prefix="testprefix", frontend_dist=dist)
+        return app
+
+    def test_manifest_intercepted_before_mount(self, app_with_full_mount) -> None:
+        client = TestClient(app_with_full_mount)
+        response = client.get("/testprefix/manifest.webmanifest")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/manifest+json"
+        data = response.json()
+        assert data["start_url"] == "/testprefix/library"
+        assert data["scope"] == "/testprefix/"
+        assert data["icons"][0]["src"] == "/testprefix/icons/icon-192.png"
+
+    def test_other_static_assets_not_intercepted(self, app_with_full_mount) -> None:
+        client = TestClient(app_with_full_mount)
+        response = client.get("/testprefix/")
+        assert response.status_code == 200
+        assert "html" in response.headers.get("content-type", "")
+
+    def test_root_manifest_path_not_intercepted(self, app_with_full_mount) -> None:
+        client = TestClient(app_with_full_mount)
+        response = client.get("/manifest.webmanifest")
+        assert response.status_code == 404
 
 
 class TestAdminRotateEndpoint:

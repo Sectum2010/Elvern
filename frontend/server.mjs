@@ -281,6 +281,18 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    // The manifest must come from the backend so URL-prefix paths are rewritten.
+    // The static dist/manifest.webmanifest is only the unprefixed template.
+    const urlPrefix = await getActiveUrlPrefix();
+    if (urlPrefix) {
+      const manifestPath = `/${urlPrefix}/manifest.webmanifest`;
+      const parsedUrl = new URL(request.url, "http://elvern.local");
+      if (decodeURIComponent(parsedUrl.pathname) === manifestPath) {
+        await proxyRequest(request, response);
+        return;
+      }
+    }
+
     await serveAsset(request, response);
   } catch (error) {
     console.error("Elvern frontend server error", error);

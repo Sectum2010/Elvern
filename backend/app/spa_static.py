@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
@@ -51,16 +52,21 @@ def clear_manifest_cache() -> None:
     _manifest_cache.clear()
 
 
-def mount_manifest(app: FastAPI, *, prefix: str, frontend_dist: Path | None = None) -> None:
-    mounted_prefixes = getattr(app.state, "mounted_manifest_prefixes", set())
-    if prefix in mounted_prefixes:
-        return
+class DynamicManifestMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, *, frontend_dist: Path):
+        super().__init__(app)
+        self.frontend_dist = frontend_dist
 
-    dist = frontend_dist or FRONTEND_DIST
+    async def dispatch(self, request: Request, call_next):
+        current_prefix = getattr(request.app.state, "url_prefix", None)
+        if not current_prefix:
+            return await call_next(request)
+        target_path = f"/{current_prefix}/manifest.webmanifest"
+        if request.url.path != target_path:
+            return await call_next(request)
 
-    async def serve_manifest() -> Response:
         try:
-            content = render_manifest_for_prefix(prefix, dist)
+            content = render_manifest_for_prefix(current_prefix, self.frontend_dist)
         except FileNotFoundError:
             return Response(status_code=404)
         return Response(
@@ -69,15 +75,15 @@ def mount_manifest(app: FastAPI, *, prefix: str, frontend_dist: Path | None = No
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    app.add_api_route(
-        f"/{prefix}/manifest.webmanifest",
-        serve_manifest,
-        methods=["GET"],
-        include_in_schema=False,
-        name=f"manifest-{prefix}",
+
+def install_manifest_middleware(app: FastAPI, *, frontend_dist: Path | None = None) -> None:
+    if getattr(app.state, "dynamic_manifest_middleware_installed", False):
+        return
+    app.add_middleware(
+        DynamicManifestMiddleware,
+        frontend_dist=frontend_dist or FRONTEND_DIST,
     )
-    mounted_prefixes.add(prefix)
-    app.state.mounted_manifest_prefixes = mounted_prefixes
+    app.state.dynamic_manifest_middleware_installed = True
 
 
 def _prefix_manifest_path(value: object, prefix_root: str) -> object:
