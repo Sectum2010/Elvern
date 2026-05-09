@@ -55,7 +55,7 @@ from ..schemas import (
 )
 from ..db import get_connection, utcnow_iso
 from ..security import verify_password
-from ..spa_static import mount_spa
+from ..spa_static import mount_manifest, mount_spa
 from ..services.assistant_service import update_assistant_user_access
 from ..services.audit_service import log_audit_event
 from ..services.security_event_service import log_security_event
@@ -198,6 +198,7 @@ def admin_rotate_url_prefix(
         )
         connection.commit()
     request.app.state.url_prefix = new_prefix
+    mount_manifest(request.app, prefix=new_prefix)
     mount_spa(request.app, prefix=new_prefix)
     return AdminUrlPrefixRotateResponse(new_prefix=new_prefix, session_revoked=True)
 

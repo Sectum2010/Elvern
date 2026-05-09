@@ -34,7 +34,7 @@ from .services.admin_events_service import admin_event_hub
 from .services.transcode_service import TranscodeManager
 from .services.mobile_playback_service import MobilePlaybackManager
 from .services.scan_service import ScanService
-from .spa_static import mount_spa
+from .spa_static import mount_manifest, mount_spa
 from .url_prefix_service import resolve_url_prefix
 
 
@@ -58,6 +58,7 @@ async def lifespan(app: FastAPI):
     url_prefix = resolve_url_prefix(settings, logger)
     app.state.settings = settings
     app.state.url_prefix = url_prefix
+    mount_manifest(app, prefix=url_prefix)
     mount_spa(app, prefix=url_prefix)
     app.state.scan_service = ScanService(settings)
     app.state.transcode_manager = TranscodeManager(settings)

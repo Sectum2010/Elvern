@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import Settings, URL_PREFIX_PATTERN
 from .db import get_connection, utcnow_iso
+from .spa_static import clear_manifest_cache
 
 
 URL_PREFIX_LENGTH = 8
@@ -118,6 +119,7 @@ def rotate_url_prefix(
     state = load_state(settings)
     old_prefix = settings.url_prefix or (state.prefix if state else "")
     new_prefix = _generate_distinct_prefix(old_prefix)
+    clear_manifest_cache()
     save_state(
         settings,
         UrlPrefixState(

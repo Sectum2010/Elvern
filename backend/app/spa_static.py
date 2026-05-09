@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import FastAPI
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
@@ -11,6 +12,84 @@ from .config import PROJECT_ROOT
 
 
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+_manifest_cache: dict[str, bytes] = {}
+
+
+def render_manifest_for_prefix(prefix: str, frontend_dist: Path) -> bytes:
+    if prefix in _manifest_cache:
+        return _manifest_cache[prefix]
+
+    manifest_path = frontend_dist / "manifest.webmanifest"
+    if not manifest_path.exists():
+        raise FileNotFoundError(manifest_path)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    prefix_root = f"/{prefix.strip('/')}/"
+
+    if "start_url" in manifest:
+        manifest["start_url"] = _prefix_manifest_path(manifest["start_url"], prefix_root)
+
+    if "scope" in manifest:
+        scope = manifest["scope"]
+        if scope == "":
+            manifest["scope"] = prefix_root
+        else:
+            manifest["scope"] = _prefix_manifest_path(scope, prefix_root)
+
+    for icon in manifest.get("icons", []):
+        icon["src"] = _prefix_manifest_path(icon.get("src", ""), prefix_root)
+
+    for shortcut in manifest.get("shortcuts", []):
+        shortcut["url"] = _prefix_manifest_path(shortcut.get("url", ""), prefix_root)
+
+    rendered = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    _manifest_cache[prefix] = rendered
+    return rendered
+
+
+def clear_manifest_cache() -> None:
+    _manifest_cache.clear()
+
+
+def mount_manifest(app: FastAPI, *, prefix: str, frontend_dist: Path | None = None) -> None:
+    mounted_prefixes = getattr(app.state, "mounted_manifest_prefixes", set())
+    if prefix in mounted_prefixes:
+        return
+
+    dist = frontend_dist or FRONTEND_DIST
+
+    async def serve_manifest() -> Response:
+        try:
+            content = render_manifest_for_prefix(prefix, dist)
+        except FileNotFoundError:
+            return Response(status_code=404)
+        return Response(
+            content=content,
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    app.add_api_route(
+        f"/{prefix}/manifest.webmanifest",
+        serve_manifest,
+        methods=["GET"],
+        include_in_schema=False,
+        name=f"manifest-{prefix}",
+    )
+    mounted_prefixes.add(prefix)
+    app.state.mounted_manifest_prefixes = mounted_prefixes
+
+
+def _prefix_manifest_path(value: object, prefix_root: str) -> object:
+    if not isinstance(value, str):
+        return value
+    if value == "":
+        return value
+    if value.startswith(prefix_root):
+        return value
+    if value.startswith("/"):
+        return prefix_root + value.lstrip("/")
+    return value
 
 
 class SpaStaticFiles(StaticFiles):

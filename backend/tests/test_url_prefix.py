@@ -10,6 +10,7 @@ import pytest
 from backend.app.config import refresh_settings
 from backend.app.db import get_connection, init_db, utcnow_iso
 from backend.app.security import hash_password
+from backend.app.spa_static import clear_manifest_cache, render_manifest_for_prefix
 from backend.app.url_prefix_service import (
     URL_PREFIX_ALPHABET,
     URL_PREFIX_LENGTH,
@@ -231,6 +232,103 @@ class TestSpaServing:
         assert "text/html" in response.headers["content-type"]
         assert b"<html" in response.content.lower()
         assert f'<base href="/{prefix}/">' in response.text
+
+
+class TestManifestRendering:
+    def test_manifest_start_url_prefixed(self, tmp_path) -> None:
+        clear_manifest_cache()
+        (tmp_path / "manifest.webmanifest").write_text(
+            json.dumps({"start_url": "/library", "scope": "/", "icons": []}),
+            encoding="utf-8",
+        )
+        payload = json.loads(render_manifest_for_prefix("xyzabc23", tmp_path))
+        assert payload["start_url"] == "/xyzabc23/library"
+
+    def test_manifest_scope_prefixed(self, tmp_path) -> None:
+        clear_manifest_cache()
+        (tmp_path / "manifest.webmanifest").write_text(
+            json.dumps({"start_url": "/library", "scope": "/", "icons": []}),
+            encoding="utf-8",
+        )
+        payload = json.loads(render_manifest_for_prefix("xyzabc23", tmp_path))
+        assert payload["scope"] == "/xyzabc23/"
+
+    def test_manifest_icon_src_prefixed(self, tmp_path) -> None:
+        clear_manifest_cache()
+        (tmp_path / "manifest.webmanifest").write_text(
+            json.dumps(
+                {
+                    "start_url": "/library",
+                    "scope": "/",
+                    "icons": [{"src": "/icons/icon-192.png?v=2"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = json.loads(render_manifest_for_prefix("xyzabc23", tmp_path))
+        assert payload["icons"][0]["src"] == "/xyzabc23/icons/icon-192.png?v=2"
+
+    def test_manifest_already_prefixed_paths_not_double_prefixed(self, tmp_path) -> None:
+        clear_manifest_cache()
+        (tmp_path / "manifest.webmanifest").write_text(
+            json.dumps(
+                {
+                    "start_url": "/xyzabc23/library",
+                    "scope": "/xyzabc23/",
+                    "icons": [{"src": "/xyzabc23/icons/icon-192.png?v=2"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = json.loads(render_manifest_for_prefix("xyzabc23", tmp_path))
+        assert payload["start_url"] == "/xyzabc23/library"
+        assert payload["scope"] == "/xyzabc23/"
+        assert payload["icons"][0]["src"] == "/xyzabc23/icons/icon-192.png?v=2"
+
+    def test_manifest_cache_returns_same_bytes(self, tmp_path) -> None:
+        clear_manifest_cache()
+        (tmp_path / "manifest.webmanifest").write_text(
+            json.dumps({"start_url": "/library", "scope": "/", "icons": []}),
+            encoding="utf-8",
+        )
+        first = render_manifest_for_prefix("xyzabc23", tmp_path)
+        second = render_manifest_for_prefix("xyzabc23", tmp_path)
+        assert first == second
+
+    def test_clear_cache_invalidates(self, tmp_path) -> None:
+        clear_manifest_cache()
+        manifest_path = tmp_path / "manifest.webmanifest"
+        manifest_path.write_text(
+            json.dumps({"start_url": "/library", "scope": "/", "icons": []}),
+            encoding="utf-8",
+        )
+        first = json.loads(render_manifest_for_prefix("xyzabc23", tmp_path))
+        manifest_path.write_text(
+            json.dumps({"start_url": "/login", "scope": "/", "icons": []}),
+            encoding="utf-8",
+        )
+        clear_manifest_cache()
+        second = json.loads(render_manifest_for_prefix("xyzabc23", tmp_path))
+        assert first["start_url"] == "/xyzabc23/library"
+        assert second["start_url"] == "/xyzabc23/login"
+
+
+class TestManifestEndpoint:
+    def test_manifest_served_at_prefixed_path(self, client) -> None:
+        prefix = client.app.state.url_prefix
+        response = client.get(f"/{prefix}/manifest.webmanifest")
+        assert response.status_code == 200
+        assert response.headers["content-type"].split(";")[0] == "application/manifest+json"
+        payload = response.json()
+        assert payload["start_url"] == f"/{prefix}/library"
+        assert payload["scope"] == f"/{prefix}/"
+        assert all(icon["src"].startswith(f"/{prefix}/icons/") for icon in payload["icons"])
+
+    def test_manifest_at_root_path_404(self, client) -> None:
+        assert client.get("/manifest.webmanifest").status_code == 404
+
+    def test_manifest_at_wrong_prefix_404(self, client) -> None:
+        assert client.get("/wrongprefix/manifest.webmanifest").status_code == 404
 
 
 class TestAdminRotateEndpoint:
