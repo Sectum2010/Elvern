@@ -128,6 +128,33 @@ run the full password-security test file:
 python -m pytest backend/tests/test_security.py -v
 ```
 
+## Authentication And Rate Limiting
+
+Elvern login throttling is SQLite-backed and survives backend restarts. The
+login route owns two `SqliteRateLimiter` instances: IP buckets allow 10 failures
+per 5 minutes before a 600 second lockout, and username buckets allow 50
+failures per hour before a 600 second lockout. Checks must read SQLite directly;
+do not add in-memory limiter decision caches.
+
+`login_failures` is the short-lived limiter working table and is pruned after
+7 days. `security_events` is the long-lived security audit stream and should not
+be pruned by limiter cleanup. Keep it separate from the existing `audit_logs`
+schema.
+
+Browser auth sessions are idle-timeout based. `last_seen_at` is updated on every
+valid request, `ELVERN_SESSION_IDLE_TIMEOUT_HOURS` defaults to 24 hours, and
+`ELVERN_SESSION_TTL_HOURS` is only a 1 year safety cap. The
+`session_idle_timeout_v1` migration intentionally clears existing sessions so
+all users log in again after deployment.
+
+Any change touching `backend/app/auth.py`, login throttling, or auth-session
+lifetime must run:
+
+```bash
+python -m pytest backend/tests/test_rate_limiter.py -v
+python -m pytest backend/tests/test_auth_sessions.py -v
+```
+
 ## 5. Rules For Creating New Files
 
 Create a new file when it gives a real owner a home.

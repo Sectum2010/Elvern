@@ -1187,7 +1187,7 @@ def test_login_rate_limit_locks_same_client_bucket_after_tenth_failure_across_us
     )
 
     assert tenth_response.status_code == 429
-    assert tenth_response.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+    assert tenth_response.json()["detail"] == "Too many login attempts. Try again in 600 seconds."
 
     different_username_same_bucket = client.post(
         "/api/auth/login",
@@ -1195,7 +1195,7 @@ def test_login_rate_limit_locks_same_client_bucket_after_tenth_failure_across_us
         headers=headers,
     )
     assert different_username_same_bucket.status_code == 429
-    assert different_username_same_bucket.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+    assert different_username_same_bucket.json()["detail"] == "Too many login attempts from this IP. Try again in 600 seconds."
 
 
 def test_login_rate_limit_private_browsing_simulation_with_same_ip_and_user_agent_is_still_locked(
@@ -1221,10 +1221,10 @@ def test_login_rate_limit_private_browsing_simulation_with_same_ip_and_user_agen
     )
 
     assert retry_response.status_code == 429
-    assert retry_response.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+    assert retry_response.json()["detail"] == "Too many login attempts from this IP. Try again in 600 seconds."
 
 
-def test_login_rate_limit_different_client_bucket_is_not_blocked(
+def test_login_rate_limit_different_ip_is_not_blocked_but_same_ip_is_blocked(
     initialized_settings,
     client,
 ) -> None:
@@ -1252,8 +1252,8 @@ def test_login_rate_limit_different_client_bucket_is_not_blocked(
         json={"username": initialized_settings.admin_username, "password": "wrong-password"},
         headers=_login_headers(ip_address="203.0.113.30", user_agent="Pytest Device B"),
     )
-    assert different_user_agent_response.status_code == 401
-    assert different_user_agent_response.json()["detail"] == "Invalid username or password"
+    assert different_user_agent_response.status_code == 429
+    assert different_user_agent_response.json()["detail"] == "Too many login attempts from this IP. Try again in 600 seconds."
 
 
 def test_successful_login_clears_client_bucket_failures(
@@ -1312,7 +1312,7 @@ def test_disabled_login_does_not_count_as_invalid_password_for_device_lockout(
     assert disabled_response.status_code == 403
     assert disabled_response.json()["detail"] == "This account has been disabled"
 
-    for _ in range(9):
+    for _ in range(8):
         response = client.post(
             "/api/auth/login",
             json={"username": initialized_settings.admin_username, "password": "wrong-password"},
@@ -1326,7 +1326,7 @@ def test_disabled_login_does_not_count_as_invalid_password_for_device_lockout(
         headers=headers,
     )
     assert tenth_invalid.status_code == 429
-    assert tenth_invalid.json()["detail"] == "Too many login attempts from this device. Try again in 600 seconds."
+    assert tenth_invalid.json()["detail"] == "Too many login attempts. Try again in 600 seconds."
 
 
 def test_login_audit_log_distinguishes_invalid_credentials_and_device_rate_limited(
@@ -1361,12 +1361,296 @@ def test_login_audit_log_distinguishes_invalid_credentials_and_device_rate_limit
     reasons = [detail["reason"] for detail in latest_details if detail]
 
     assert "invalid_credentials" in reasons
-    assert "device_rate_limited" in reasons
+    assert "ip_rate_limited" in reasons
     assert latest_details[0] == {
         "attempted_username": "ethan",
-        "reason": "device_rate_limited",
+        "reason": "ip_rate_limited",
         "retry_after": 600,
     }
+
+
+class TestSessionIdleTimeout:
+    def test_session_accepts_request_within_idle_window(self, initialized_settings, client) -> None:
+        user = _admin_user(initialized_settings)
+        token = create_session(
+            initialized_settings,
+            user,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+        seen_at = (datetime.now(timezone.utc) - timedelta(hours=23)).isoformat()
+        with get_connection(initialized_settings) as connection:
+            session_id = connection.execute(
+                "SELECT id FROM sessions WHERE session_token_hash = ?",
+                (hash_session_token(token, initialized_settings.session_secret),),
+            ).fetchone()["id"]
+            connection.execute(
+                "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+                (seen_at, session_id),
+            )
+            connection.commit()
+
+        client.cookies.set(initialized_settings.session_cookie_name, token)
+        response = client.get("/api/auth/me")
+
+        assert response.status_code == 200
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        assert row is not None
+
+    def test_session_rejected_after_idle_timeout(self, initialized_settings, client) -> None:
+        user = _admin_user(initialized_settings)
+        token = create_session(
+            initialized_settings,
+            user,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+        seen_at = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        with get_connection(initialized_settings) as connection:
+            session_id = connection.execute(
+                "SELECT id FROM sessions WHERE session_token_hash = ?",
+                (hash_session_token(token, initialized_settings.session_secret),),
+            ).fetchone()["id"]
+            connection.execute(
+                "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+                (seen_at, session_id),
+            )
+            connection.commit()
+
+        client.cookies.set(initialized_settings.session_cookie_name, token)
+        response = client.get("/api/auth/me")
+
+        assert response.status_code == 401
+        with get_connection(initialized_settings) as connection:
+            session_row = connection.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            event_row = connection.execute(
+                """
+                SELECT event_kind, details_json
+                FROM security_events
+                WHERE event_kind = 'session_revoked_idle'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        assert session_row is None
+        assert event_row is not None
+        assert json.loads(event_row["details_json"])["reason"] == "idle_timeout"
+
+    def test_each_request_updates_last_seen_at(self, initialized_settings, client) -> None:
+        user = _admin_user(initialized_settings)
+        token = create_session(
+            initialized_settings,
+            user,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+        previous_seen_at = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        with get_connection(initialized_settings) as connection:
+            session_id = connection.execute(
+                "SELECT id FROM sessions WHERE session_token_hash = ?",
+                (hash_session_token(token, initialized_settings.session_secret),),
+            ).fetchone()["id"]
+            connection.execute(
+                "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+                (previous_seen_at, session_id),
+            )
+            connection.commit()
+
+        client.cookies.set(initialized_settings.session_cookie_name, token)
+        response = client.get("/api/auth/me")
+
+        assert response.status_code == 200
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute("SELECT last_seen_at FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        assert datetime.fromisoformat(row["last_seen_at"]) > datetime.fromisoformat(previous_seen_at)
+
+    def test_session_with_null_last_seen_at_treated_as_expired(self, initialized_settings, client) -> None:
+        user = _admin_user(initialized_settings)
+        token = create_session(
+            initialized_settings,
+            user,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+        with get_connection(initialized_settings) as connection:
+            session_id = connection.execute(
+                "SELECT id FROM sessions WHERE session_token_hash = ?",
+                (hash_session_token(token, initialized_settings.session_secret),),
+            ).fetchone()["id"]
+            connection.execute("UPDATE sessions SET last_seen_at = NULL WHERE id = ?", (session_id,))
+            connection.commit()
+
+        client.cookies.set(initialized_settings.session_cookie_name, token)
+        response = client.get("/api/auth/me")
+
+        assert response.status_code == 401
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        assert row is None
+
+    def test_absolute_ttl_safety_net_still_works(self, initialized_settings, client) -> None:
+        user = _admin_user(initialized_settings)
+        token = create_session(
+            initialized_settings,
+            user,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+        now = datetime.now(timezone.utc)
+        with get_connection(initialized_settings) as connection:
+            session_id = connection.execute(
+                "SELECT id FROM sessions WHERE session_token_hash = ?",
+                (hash_session_token(token, initialized_settings.session_secret),),
+            ).fetchone()["id"]
+            connection.execute(
+                "UPDATE sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?",
+                ((now - timedelta(seconds=1)).isoformat(), now.isoformat(), session_id),
+            )
+            connection.commit()
+
+        client.cookies.set(initialized_settings.session_cookie_name, token)
+        response = client.get("/api/auth/me")
+
+        assert response.status_code == 401
+
+
+class TestAuthRateLimiting:
+    def test_ip_lockout_after_10_failures(self, initialized_settings, client) -> None:
+        headers = _login_headers(ip_address="203.0.113.70", user_agent="Pytest IP Lock")
+        for attempt in range(10):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+                headers=headers,
+            )
+            assert response.status_code == (429 if attempt == 9 else 401)
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "somebody-else", "password": "wrong-password"},
+            headers=headers,
+        )
+
+        assert response.status_code == 429
+        with get_connection(initialized_settings) as connection:
+            lockout = connection.execute(
+                "SELECT 1 FROM login_lockouts WHERE bucket_kind = 'ip' AND bucket_key = '203.0.113.70'"
+            ).fetchone()
+            event = connection.execute(
+                "SELECT 1 FROM security_events WHERE event_kind = 'login_lockout' LIMIT 1"
+            ).fetchone()
+        assert lockout is not None
+        assert event is not None
+
+    def test_username_lockout_after_50_failures_in_one_hour(self, initialized_settings, client) -> None:
+        for attempt in range(50):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+                headers=_login_headers(ip_address=f"203.0.114.{attempt}", user_agent="Pytest Username Lock"),
+            )
+            assert response.status_code == (429 if attempt == 49 else 401)
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+            headers=_login_headers(ip_address="203.0.115.1", user_agent="Pytest Username Lock"),
+        )
+
+        assert response.status_code == 429
+        assert "username" in response.json()["detail"].lower()
+
+    def test_successful_login_clears_both_limiters(self, initialized_settings, client, admin_credentials) -> None:
+        headers = _login_headers(ip_address="203.0.113.80", user_agent="Pytest Clear Both")
+        for _ in range(5):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+                headers=headers,
+            )
+            assert response.status_code == 401
+
+        success = client.post("/api/auth/login", json=admin_credentials, headers=headers)
+        assert success.status_code == 200
+
+        for _ in range(5):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+                headers=headers,
+            )
+            assert response.status_code == 401
+
+    def test_security_events_recorded_on_failure(self, initialized_settings, client) -> None:
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "missing-user", "password": "wrong-password"},
+            headers=_login_headers(ip_address="203.0.113.90", user_agent="Pytest Security Failure"),
+        )
+        assert response.status_code == 401
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                """
+                SELECT actor_username, ip_address, details_json
+                FROM security_events
+                WHERE event_kind = 'login_failure'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        assert row["actor_username"] == "missing-user"
+        assert row["ip_address"] == "203.0.113.90"
+        assert json.loads(row["details_json"])["reason"] == "user_not_found"
+
+    def test_security_events_recorded_on_lockout(self, initialized_settings, client) -> None:
+        headers = _login_headers(ip_address="203.0.113.91", user_agent="Pytest Security Lockout")
+        for _ in range(10):
+            client.post(
+                "/api/auth/login",
+                json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+                headers=headers,
+            )
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                """
+                SELECT details_json
+                FROM security_events
+                WHERE event_kind = 'login_lockout'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        assert row is not None
+        assert json.loads(row["details_json"])["ip_lockout_seconds"] == 600
+
+    def test_login_success_after_failures_event(self, initialized_settings, client, admin_credentials) -> None:
+        headers = _login_headers(ip_address="203.0.113.92", user_agent="Pytest Success After Failure")
+        for _ in range(3):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": initialized_settings.admin_username, "password": "wrong-password"},
+                headers=headers,
+            )
+            assert response.status_code == 401
+
+        success = client.post("/api/auth/login", json=admin_credentials, headers=headers)
+
+        assert success.status_code == 200
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                """
+                SELECT actor_username
+                FROM security_events
+                WHERE event_kind = 'login_success_after_failures'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        assert row is not None
+        assert row["actor_username"] == initialized_settings.admin_username
 
 
 def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> None:

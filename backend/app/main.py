@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .auth import build_login_rate_limiter, ensure_admin_user
+from .auth import build_login_rate_limiters, ensure_admin_user
 from .config import refresh_settings
 from .db import init_db
 from .argon2_calibration import resolve_argon2_params
@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
     app.state.transcode_manager.start()
     app.state.mobile_playback_manager.start()
     app.state.admin_event_hub.start()
-    app.state.login_rate_limiter = build_login_rate_limiter(settings)
+    app.state.login_ip_rate_limiter, app.state.login_username_rate_limiter = build_login_rate_limiters(settings)
     logger.info(
         "Elvern API starting with media root=%s db=%s",
         settings.media_root,

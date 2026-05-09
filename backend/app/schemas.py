@@ -1984,6 +1984,7 @@ class SecurityStatusResponse(BaseModel):
     multiuser_enabled: bool
     private_network_only: bool
     session_ttl_hours: int
+    session_idle_timeout_hours: int
     playback_token_ttl_seconds: int
 
 

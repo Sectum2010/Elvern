@@ -123,6 +123,7 @@ class Settings:
     session_secret: str
     session_cookie_name: str
     session_ttl_hours: int
+    session_idle_timeout_hours: int
     cookie_secure: bool
     enable_multiuser: bool
     private_network_only: bool
@@ -227,7 +228,8 @@ def load_settings() -> Settings:
         session_secret=session_secret,
         session_cookie_name=os.getenv("ELVERN_SESSION_COOKIE_NAME", "elvern_session").strip()
         or "elvern_session",
-        session_ttl_hours=_get_int("ELVERN_SESSION_TTL_HOURS", 24 * 30),
+        session_ttl_hours=_get_int("ELVERN_SESSION_TTL_HOURS", 8760),
+        session_idle_timeout_hours=_get_int("ELVERN_SESSION_IDLE_TIMEOUT_HOURS", 24),
         cookie_secure=_get_bool("ELVERN_COOKIE_SECURE", True),
         enable_multiuser=_get_bool("ELVERN_ENABLE_MULTIUSER", True),
         private_network_only=_get_bool("ELVERN_PRIVATE_NETWORK_ONLY", True),
@@ -424,6 +426,10 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError(
             "Set ELVERN_ADMIN_PASSWORD_HASH or ELVERN_ADMIN_BOOTSTRAP_PASSWORD"
         )
+    if settings.session_ttl_hours < 1:
+        raise ConfigError("ELVERN_SESSION_TTL_HOURS must be at least 1")
+    if settings.session_idle_timeout_hours < 1:
+        raise ConfigError("ELVERN_SESSION_IDLE_TIMEOUT_HOURS must be at least 1")
     if settings.poster_card_cache_max_width < 400 or settings.poster_card_cache_max_width > 4096:
         raise ConfigError("ELVERN_POSTER_CARD_CACHE_MAX_WIDTH must be between 400 and 4096")
     if settings.poster_card_cache_jpeg_quality < 85 or settings.poster_card_cache_jpeg_quality > 100:

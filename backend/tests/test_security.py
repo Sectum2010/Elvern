@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -16,7 +15,6 @@ from backend.app.config import ConfigError, get_settings, refresh_settings
 from backend.app.db import get_connection, init_db, utcnow_iso
 from backend.app.security import (
     ARGON2_PREFIX,
-    LoginRateLimiter,
     _hash_password_pbkdf2,
     generate_session_token,
     hash_password,
@@ -398,83 +396,6 @@ class TestResolveArgon2Params:
 
         assert params == record.params
         assert "Argon2id calibration is" in caplog.text
-
-
-class TestLoginRateLimiter:
-    def test_failures_accumulate_under_threshold(self) -> None:
-        limiter = LoginRateLimiter(window_seconds=60, max_attempts=3, lockout_seconds=30)
-
-        assert limiter.register_failure("u") == 0
-        assert limiter.register_failure("u") == 0
-        assert limiter.check("u") == 0
-
-    def test_lockout_triggers_at_max_attempts(self) -> None:
-        limiter = LoginRateLimiter(window_seconds=60, max_attempts=2, lockout_seconds=30)
-
-        limiter.register_failure("u")
-
-        assert limiter.register_failure("u") == 30
-        assert limiter.check("u") > 0
-
-    def test_lockout_check_returns_remaining_seconds(self) -> None:
-        limiter = LoginRateLimiter(window_seconds=60, max_attempts=1, lockout_seconds=30)
-
-        limiter.register_failure("u")
-
-        assert 1 <= limiter.check("u") <= 30
-
-    def test_lockout_clears_after_lockout_window(self, monkeypatch) -> None:
-        current = [1000.0]
-        monkeypatch.setattr(security.time, "time", lambda: current[0])
-        limiter = LoginRateLimiter(window_seconds=60, max_attempts=1, lockout_seconds=30)
-
-        limiter.register_failure("u")
-        current[0] += 31
-
-        assert limiter.check("u") == 0
-
-    def test_independent_keys_do_not_interfere(self) -> None:
-        limiter = LoginRateLimiter(window_seconds=60, max_attempts=2, lockout_seconds=30)
-
-        limiter.register_failure("a")
-        limiter.register_failure("a")
-
-        assert limiter.check("a") > 0
-        assert limiter.check("b") == 0
-
-    def test_clear_resets_specific_key(self) -> None:
-        limiter = LoginRateLimiter(window_seconds=60, max_attempts=2, lockout_seconds=30)
-
-        limiter.register_failure("a")
-        limiter.register_failure("a")
-        limiter.clear("a")
-
-        assert limiter.check("a") == 0
-
-    def test_old_failures_outside_window_pruned(self, monkeypatch) -> None:
-        current = [1000.0]
-        monkeypatch.setattr(security.time, "time", lambda: current[0])
-        limiter = LoginRateLimiter(window_seconds=10, max_attempts=2, lockout_seconds=30)
-
-        limiter.register_failure("u")
-        current[0] += 11
-
-        assert limiter.register_failure("u") == 0
-        assert limiter.check("u") == 0
-
-    def test_concurrent_register_failure_thread_safe(self) -> None:
-        limiter = LoginRateLimiter(window_seconds=60, max_attempts=200, lockout_seconds=30)
-        threads = [
-            threading.Thread(target=limiter.register_failure, args=("u",))
-            for _index in range(100)
-        ]
-
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        assert len(limiter._failures["u"]) == 100
 
 
 class TestAuthIntegration:

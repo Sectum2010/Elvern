@@ -68,6 +68,7 @@ def get_system_status(
             "multiuser_enabled": settings.enable_multiuser,
             "private_network_only": settings.private_network_only,
             "session_ttl_hours": settings.session_ttl_hours,
+            "session_idle_timeout_hours": settings.session_idle_timeout_hours,
             "playback_token_ttl_seconds": settings.playback_token_ttl_seconds,
         },
         "last_scan": get_scan_job_summary(settings),

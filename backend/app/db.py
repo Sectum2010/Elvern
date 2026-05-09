@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -12,6 +13,9 @@ from .db_hidden_movie_keys import (
     _build_hidden_movie_key,
     preserve_hidden_movie_keys_for_media_item,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 TABLE_STATEMENTS = (
@@ -34,7 +38,7 @@ TABLE_STATEMENTS = (
         session_token_hash TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
-        last_seen_at TEXT NOT NULL,
+        last_seen_at TEXT,
         last_activity_at TEXT,
         user_agent TEXT,
         ip_address TEXT,
@@ -181,6 +185,12 @@ TABLE_STATEMENTS = (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
     )
     """,
     """
@@ -408,6 +418,36 @@ TABLE_STATEMENTS = (
         session_id INTEGER,
         ip_address TEXT,
         user_agent TEXT,
+        details_json TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS login_failures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bucket_kind TEXT NOT NULL,
+        bucket_key TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        occurred_at_unix REAL NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS login_lockouts (
+        bucket_kind TEXT NOT NULL,
+        bucket_key TEXT NOT NULL,
+        blocked_until_unix REAL NOT NULL,
+        reason TEXT,
+        PRIMARY KEY (bucket_kind, bucket_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS security_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_kind TEXT NOT NULL,
+        actor_user_id INTEGER,
+        actor_username TEXT,
+        ip_address TEXT,
+        user_agent TEXT,
+        occurred_at TEXT NOT NULL,
         details_json TEXT
     )
     """,
@@ -705,6 +745,11 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_native_playback_auth_session ON native_playback_sessions (auth_session_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_login_failures_bucket_time ON login_failures (bucket_kind, bucket_key, occurred_at_unix DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_login_failures_cleanup ON login_failures (occurred_at_unix)",
+    "CREATE INDEX IF NOT EXISTS idx_security_events_time ON security_events (occurred_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events (actor_user_id, occurred_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_security_events_kind ON security_events (event_kind, occurred_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_client_devices_last_user_id ON client_devices (last_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_client_devices_helper_last_seen_at ON client_devices (helper_last_seen_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_helper_releases_channel_runtime_version ON helper_releases (channel, runtime_id, version)",
@@ -779,8 +824,10 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
 
     _ensure_column(connection, "sessions", "revoked_at", "TEXT")
     _ensure_column(connection, "sessions", "revoked_reason", "TEXT")
+    _ensure_column(connection, "sessions", "last_seen_at", "TEXT")
     _ensure_column(connection, "sessions", "last_activity_at", "TEXT")
     _ensure_column(connection, "sessions", "cleanup_confirmed_at", "TEXT")
+    _run_session_idle_timeout_migration(connection)
 
     _ensure_column(connection, "native_playback_sessions", "revoked_at", "TEXT")
     _ensure_column(connection, "native_playback_sessions", "auth_session_id", "INTEGER")
@@ -804,6 +851,30 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)
     _backfill_hidden_movie_keys(connection)
+
+
+def _run_session_idle_timeout_migration(connection: sqlite3.Connection) -> None:
+    migration_name = "session_idle_timeout_v1"
+    row = connection.execute(
+        """
+        SELECT name
+        FROM schema_migrations
+        WHERE name = ?
+        LIMIT 1
+        """,
+        (migration_name,),
+    ).fetchone()
+    if row is not None:
+        return
+    connection.execute("DELETE FROM sessions")
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (name, applied_at)
+        VALUES (?, ?)
+        """,
+        (migration_name, utcnow_iso()),
+    )
+    logger.info("Cleared all sessions for idle-timeout migration. All users must log in again.")
 
 
 def _ensure_column(

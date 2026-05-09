@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -11,8 +10,9 @@ from .db import get_connection, utcnow_iso
 from .models import AuthenticatedUser
 from .services.admin_events_service import emit_admin_event
 from .services.audit_service import log_audit_event
+from .services.rate_limiter_service import SqliteRateLimiter
+from .services.security_event_service import log_security_event
 from .security import (
-    LoginRateLimiter,
     generate_session_token,
     hash_password,
     hash_session_token,
@@ -60,11 +60,22 @@ def _admin_visible_session_state(
     return live, recent_activity
 
 
-def build_login_rate_limiter(settings: Settings) -> LoginRateLimiter:
-    return LoginRateLimiter(
-        window_seconds=settings.login_window_seconds,
-        max_attempts=settings.login_max_attempts,
-        lockout_seconds=settings.login_lockout_seconds,
+def build_login_rate_limiters(settings: Settings) -> tuple[SqliteRateLimiter, SqliteRateLimiter]:
+    return (
+        SqliteRateLimiter(
+            settings,
+            bucket_kind="ip",
+            window_seconds=300,
+            max_attempts=10,
+            lockout_seconds=600,
+        ),
+        SqliteRateLimiter(
+            settings,
+            bucket_kind="username",
+            window_seconds=3600,
+            max_attempts=50,
+            lockout_seconds=600,
+        ),
     )
 
 
@@ -75,13 +86,6 @@ def resolve_client_ip(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
-
-
-def build_login_client_bucket(request: Request) -> str:
-    ip_address = resolve_client_ip(request).strip() or "unknown"
-    user_agent = " ".join((request.headers.get("user-agent") or "").strip().lower().split()) or "unknown"
-    digest = hashlib.sha256(f"{ip_address}\n{user_agent}".encode("utf-8")).hexdigest()
-    return f"login-device:{digest}"
 
 
 def ensure_admin_user(settings: Settings) -> None:
@@ -150,7 +154,7 @@ def authenticate_user(
         ).fetchone()
         if row is None:
             perform_dummy_verify(settings)
-            return None, "invalid_credentials"
+            return None, "user_not_found"
         if not bool(row["enabled"]):
             return None, "disabled"
         ok, new_hash = verify_password(password, row["password_hash"], settings)
@@ -266,13 +270,46 @@ def get_user_by_session_token(
             JOIN users u ON u.id = s.user_id
             LEFT JOIN assistant_user_access a ON a.user_id = u.id
             WHERE s.session_token_hash = ?
-              AND s.expires_at > ?
               AND s.revoked_at IS NULL
               AND u.enabled = 1
             """,
-            (token_hash, now),
+            (token_hash,),
         ).fetchone()
         if row is None:
+            return None
+        expires_at = _parse_iso_datetime(row["expires_at"])
+        last_seen_at = _parse_iso_datetime(row["last_seen_at"])
+        expiry_reason: str | None = None
+        if expires_at is None or expires_at <= now_dt:
+            expiry_reason = "absolute_ttl"
+        elif last_seen_at is None:
+            expiry_reason = "missing_last_seen_at"
+        else:
+            idle_seconds = (now_dt - last_seen_at).total_seconds()
+            if idle_seconds > settings.session_idle_timeout_hours * 3600:
+                expiry_reason = "idle_timeout"
+        if expiry_reason is not None:
+            _delete_session_for_auth_expiry(
+                connection,
+                session_id=int(row["session_id"]),
+                now=now,
+            )
+            connection.commit()
+            log_security_event(
+                settings,
+                event_kind="session_revoked_idle",
+                actor_user_id=int(row["id"]),
+                actor_username=str(row["username"]),
+                details={
+                    "reason": expiry_reason,
+                    "session_id": int(row["session_id"]),
+                },
+            )
+            emit_admin_event(
+                "session_ended",
+                user_id=int(row["id"]),
+                session_id=int(row["session_id"]),
+            )
             return None
         previous_live, previous_recent_activity = _admin_visible_session_state(
             last_seen_at=row["last_seen_at"],
@@ -325,6 +362,38 @@ def get_user_by_session_token(
         enabled=bool(row["enabled"]),
         assistant_beta_enabled=bool(row["assistant_beta_enabled"]),
         session_id=row["session_id"],
+    )
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _delete_session_for_auth_expiry(connection, *, session_id: int, now: str) -> None:
+    connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    connection.execute(
+        """
+        UPDATE native_playback_sessions
+        SET revoked_at = ?
+        WHERE auth_session_id = ? AND revoked_at IS NULL AND closed_at IS NULL
+        """,
+        (now, session_id),
+    )
+    connection.execute(
+        """
+        UPDATE desktop_vlc_handoffs
+        SET revoked_at = ?
+        WHERE auth_session_id = ? AND revoked_at IS NULL
+        """,
+        (now, session_id),
     )
 
 
@@ -410,9 +479,10 @@ def destroy_session(settings: Settings, token: str | None) -> None:
         now = utcnow_iso()
         row = connection.execute(
             """
-            SELECT id, user_id
-            FROM sessions
-            WHERE session_token_hash = ? AND revoked_at IS NULL
+            SELECT s.id, s.user_id, u.username, s.ip_address, s.user_agent
+            FROM sessions s
+            LEFT JOIN users u ON u.id = s.user_id
+            WHERE s.session_token_hash = ? AND s.revoked_at IS NULL
             LIMIT 1
             """,
             (token_hash,),
@@ -444,6 +514,15 @@ def destroy_session(settings: Settings, token: str | None) -> None:
             (now, row["id"]),
         )
         connection.commit()
+    log_security_event(
+        settings,
+        event_kind="session_revoked_manual",
+        actor_user_id=int(row["user_id"]),
+        actor_username=row["username"],
+        ip_address=row["ip_address"],
+        user_agent=row["user_agent"],
+        details={"reason": "logout", "session_id": int(row["id"])},
+    )
     emit_admin_event("session_ended", user_id=int(row["user_id"]), session_id=int(row["id"]))
 
 
@@ -523,9 +602,10 @@ def revoke_session_by_id(
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT id, user_id
-            FROM sessions
-            WHERE id = ? AND revoked_at IS NULL
+            SELECT s.id, s.user_id, u.username, s.ip_address, s.user_agent
+            FROM sessions s
+            LEFT JOIN users u ON u.id = s.user_id
+            WHERE s.id = ? AND s.revoked_at IS NULL
             LIMIT 1
             """,
             (session_id,),
@@ -534,6 +614,15 @@ def revoke_session_by_id(
             return False
         _revoke_session_ids(connection, session_ids=[session_id], reason=reason, now=now)
         connection.commit()
+    log_security_event(
+        settings,
+        event_kind="session_revoked_manual",
+        actor_user_id=int(row["user_id"]),
+        actor_username=row["username"],
+        ip_address=row["ip_address"],
+        user_agent=row["user_agent"],
+        details={"reason": reason, "session_id": int(row["id"])},
+    )
     emit_admin_event("session_revoked", user_id=int(row["user_id"]), session_id=int(row["id"]))
     return True
 

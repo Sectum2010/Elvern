@@ -1,0 +1,12 @@
+{
+  "calibrated_at": "2026-05-09T05:04:34.281494+00:00",
+  "calibration_version": 1,
+  "host_fingerprint": "5f1039343bec8f9c9958b704b57fad57ec8fd63fe7b1589734aac28d88212a57",
+  "measured_verify_ms": 86.653367994586,
+  "params": {
+    "memory_cost": 65536,
+    "parallelism": 4,
+    "time_cost": 6
+  },
+  "target_verify_ms": 100
+}
