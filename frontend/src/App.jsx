@@ -9,6 +9,8 @@ import { LibrarySourcePage } from "./pages/LibrarySourcePage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewUserPage } from "./pages/NewUserPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+import { TotpChallengePage } from "./pages/TotpChallengePage";
+import { TotpSetupPage } from "./pages/TotpSetupPage";
 import { AdminPage } from "./pages/AdminPage";
 import { AdminAssistantRequestDetailPage } from "./pages/AdminAssistantRequestDetailPage";
 import { AdminAssistantRequestsPage } from "./pages/AdminAssistantRequestsPage";
@@ -36,9 +38,11 @@ export default function App() {
         <div aria-hidden="true" className="app-viewport-backdrop" />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/login/totp" element={<TotpChallengePage />} />
           <Route path="/new-user" element={<NewUserPage />} />
           <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route element={<ProtectedShell />}>
+            <Route path="/setup/totp" element={<TotpSetupPage />} />
             <Route path="/" element={<Navigate to="/library" replace />} />
             <Route path="/library" element={<LibraryPage />} />
             <Route path="/library/local" element={<LibrarySourcePage sourceKind="local" />} />

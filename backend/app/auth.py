@@ -12,6 +12,7 @@ from .services.admin_events_service import emit_admin_event
 from .services.audit_service import log_audit_event
 from .services.rate_limiter_service import SqliteRateLimiter
 from .services.security_event_service import log_security_event
+from .services.totp_service import SKIP_GRACE_DAYS
 from .security import (
     generate_session_token,
     hash_password,
@@ -37,6 +38,44 @@ def session_live_cutoff_iso(*, now: datetime | None = None) -> str:
 def session_activity_cutoff_iso(*, now: datetime | None = None) -> str:
     current = now or datetime.now(timezone.utc)
     return (current - timedelta(seconds=SESSION_ACTIVITY_WINDOW_SECONDS)).isoformat()
+
+
+def is_totp_setup_required_for_values(
+    *,
+    role: str,
+    totp_secret: str | None,
+    totp_setup_skipped_at: str | None,
+    now: datetime | None = None,
+) -> bool:
+    if role != "admin" or totp_secret:
+        return False
+    if not totp_setup_skipped_at:
+        return True
+    skipped_at = _parse_iso_datetime(totp_setup_skipped_at)
+    if skipped_at is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    return (current - skipped_at).days >= SKIP_GRACE_DAYS
+
+
+def is_totp_setup_required(settings: Settings, *, user_id: int) -> bool:
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT role, totp_secret, totp_setup_skipped_at
+            FROM users
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+    if row is None:
+        return False
+    return is_totp_setup_required_for_values(
+        role=row["role"] or "standard_user",
+        totp_secret=row["totp_secret"],
+        totp_setup_skipped_at=row["totp_setup_skipped_at"],
+    )
 
 
 def _admin_visible_session_state(
@@ -571,6 +610,7 @@ def _resolve_authenticated_user(request: Request, *, touch_mode: str) -> Authent
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
         )
+    request.state.totp_setup_required = is_totp_setup_required(settings, user_id=user.id)
     return user
 
 

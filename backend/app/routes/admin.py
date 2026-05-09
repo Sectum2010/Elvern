@@ -7,13 +7,18 @@ from queue import Empty
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from ..auth import CurrentAdmin, CurrentHeartbeatAdmin, clear_session_cookie, resolve_client_ip
+from ..auth import CurrentAdmin, CurrentHeartbeatAdmin, clear_session_cookie, resolve_client_ip, revoke_sessions_for_user
 from ..schemas import (
     AdminTechnicalMetadataEnrichmentRequest,
     AdminTechnicalMetadataEnrichmentTriggerResponse,
     AdminTechnicalMetadataStatusResponse,
     AdminDownloadAccessResponse,
     AdminDownloadAccessUpdateRequest,
+    AdminUrlPrefixResponse,
+    AdminUrlPrefixRotateRequest,
+    AdminUrlPrefixRotateResponse,
+    AdminUserTotpDisableRequest,
+    AdminUserTotpDisableResponse,
     AdminInviteCodeListResponse,
     AdminInviteCodeResponse,
     AdminPlaybackWorkersStatusResponse,
@@ -47,8 +52,12 @@ from ..schemas import (
     PosterReferenceLocationResponse,
     PosterReferenceLocationUpdateRequest,
 )
+from ..db import get_connection, utcnow_iso
+from ..security import verify_password
+from ..spa_static import mount_spa
 from ..services.assistant_service import update_assistant_user_access
 from ..services.audit_service import log_audit_event
+from ..services.security_event_service import log_security_event
 from ..services.admin_service import (
     create_user,
     delete_user,
@@ -102,6 +111,7 @@ from ..services.media_technical_metadata_service import (
 )
 from ..services.native_playback_service import get_admin_native_playback_status
 from ..services.local_library_source_service import validate_shared_local_library_path
+from ..url_prefix_service import get_url_prefix_status, rotate_url_prefix
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -123,10 +133,72 @@ def _resolve_admin_checkpoint_path(settings, checkpoint_id: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+def _verify_current_admin_password_for_route(settings, *, actor, current_admin_password: str) -> None:
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT password_hash, enabled, role
+            FROM users
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (actor.id,),
+        ).fetchone()
+        if row is None or not bool(row["enabled"]) or (row["role"] or "standard_user") != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin access is required",
+            )
+        ok, new_hash = verify_password(current_admin_password, row["password_hash"], settings)
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Current admin password is incorrect",
+            )
+        if new_hash is not None:
+            connection.execute(
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (new_hash, utcnow_iso(), actor.id),
+            )
+            connection.commit()
+
+
 @router.get("/users", response_model=AdminUserListResponse)
 def admin_users(request: Request, user=CurrentAdmin) -> AdminUserListResponse:
     del user
     return AdminUserListResponse(users=list_users(request.app.state.settings))
+
+
+@router.get("/url-prefix", response_model=AdminUrlPrefixResponse)
+def admin_url_prefix(request: Request, user=CurrentAdmin) -> AdminUrlPrefixResponse:
+    del user
+    prefix = getattr(request.app.state, "url_prefix", "") or ""
+    return AdminUrlPrefixResponse(**get_url_prefix_status(request.app.state.settings, prefix))
+
+
+@router.post("/url-prefix/rotate", response_model=AdminUrlPrefixRotateResponse)
+def admin_rotate_url_prefix(
+    payload: AdminUrlPrefixRotateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminUrlPrefixRotateResponse:
+    settings = request.app.state.settings
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    with get_connection(settings) as connection:
+        _old_prefix, new_prefix = rotate_url_prefix(
+            settings,
+            connection,
+            actor_user_id=user.id,
+            actor_username=user.username,
+        )
+        connection.commit()
+    request.app.state.url_prefix = new_prefix
+    mount_spa(request.app, prefix=new_prefix)
+    return AdminUrlPrefixRotateResponse(new_prefix=new_prefix, session_revoked=True)
 
 
 @router.post("/users", response_model=AdminUserResponse)
@@ -230,6 +302,54 @@ def admin_delete_user(
     )
     _invalidate_user_sessions_if_available(request, user_id, reason="user_deleted")
     return MessageResponse(message=f"Deleted user {deleted['username']}")
+
+
+@router.post("/users/{user_id}/2fa/disable", response_model=AdminUserTotpDisableResponse)
+def admin_disable_user_totp(
+    user_id: int,
+    payload: AdminUserTotpDisableRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> AdminUserTotpDisableResponse:
+    settings = request.app.state.settings
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            "SELECT id, username FROM users WHERE id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        connection.execute(
+            """
+            UPDATE users
+            SET totp_secret = NULL,
+                totp_enabled_at = NULL,
+                totp_last_used_window = NULL,
+                totp_setup_skipped_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, user_id),
+        )
+        connection.execute("DELETE FROM user_recovery_codes WHERE user_id = ?", (user_id,))
+        connection.commit()
+    revoke_sessions_for_user(settings, user_id=user_id, reason="admin_disabled_totp")
+    log_security_event(
+        settings,
+        event_kind="admin_disabled_user_totp",
+        actor_user_id=user.id,
+        actor_username=user.username,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={"target_user_id": user_id},
+    )
+    return AdminUserTotpDisableResponse(disabled=True, target_user=user_id)
 
 
 @router.get("/invite-codes", response_model=AdminInviteCodeListResponse)

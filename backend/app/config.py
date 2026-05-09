@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from functools import lru_cache
@@ -18,6 +19,7 @@ DEFAULT_VIDEO_EXTENSIONS = (
     ".webm",
     ".avi",
 )
+URL_PREFIX_PATTERN = re.compile(r"^[a-hjkmnp-z2-9]{8,24}$")
 
 
 class ConfigError(ValueError):
@@ -54,6 +56,18 @@ def _get_optional_int(name: str) -> int | None:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer") from exc
+
+
+def _get_optional_url_prefix(name: str) -> str | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    value = raw.strip().strip("/").lower()
+    if not URL_PREFIX_PATTERN.fullmatch(value):
+        raise ConfigError(
+            f"{name} must be 8-24 base32-safe characters using a-h, j-k, m-n, p-z, or 2-9"
+        )
+    return value
 
 
 def _get_first_int(names: tuple[str, ...], default: int) -> int:
@@ -200,10 +214,16 @@ class Settings:
     argon2_time_cost: int | None
     argon2_memory_cost: int | None
     argon2_parallelism: int | None
+    url_prefix: str | None
+    url_prefix_rotation_reminder_days: int
 
     @property
     def argon2_params_manually_set(self) -> bool:
         return self.argon2_time_cost is not None
+
+    @property
+    def data_dir(self) -> Path:
+        return self.db_path.parent
 
 
 def load_settings() -> Settings:
@@ -401,6 +421,11 @@ def load_settings() -> Settings:
         argon2_time_cost=_get_optional_int("ELVERN_ARGON2_TIME_COST"),
         argon2_memory_cost=_get_optional_int("ELVERN_ARGON2_MEMORY_COST"),
         argon2_parallelism=_get_optional_int("ELVERN_ARGON2_PARALLELISM"),
+        url_prefix=_get_optional_url_prefix("ELVERN_URL_PREFIX"),
+        url_prefix_rotation_reminder_days=_get_int(
+            "ELVERN_URL_PREFIX_ROTATION_REMINDER_DAYS",
+            180,
+        ),
     )
     validate_settings(settings)
     return settings
@@ -527,6 +552,8 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("ELVERN_ARGON2_MEMORY_COST must be between 8192 and 1048576")
     if settings.argon2_parallelism is not None and not (1 <= settings.argon2_parallelism <= 16):
         raise ConfigError("ELVERN_ARGON2_PARALLELISM must be between 1 and 16")
+    if settings.url_prefix_rotation_reminder_days < 0 or settings.url_prefix_rotation_reminder_days > 3650:
+        raise ConfigError("ELVERN_URL_PREFIX_ROTATION_REMINDER_DAYS must be between 0 and 3650")
     settings.helper_releases_dir.mkdir(parents=True, exist_ok=True)
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.transcode_dir.mkdir(parents=True, exist_ok=True)

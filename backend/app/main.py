@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 
 from .auth import build_login_rate_limiters, ensure_admin_user
 from .config import refresh_settings
@@ -33,6 +34,8 @@ from .services.admin_events_service import admin_event_hub
 from .services.transcode_service import TranscodeManager
 from .services.mobile_playback_service import MobilePlaybackManager
 from .services.scan_service import ScanService
+from .spa_static import mount_spa
+from .url_prefix_service import resolve_url_prefix
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +55,10 @@ async def lifespan(app: FastAPI):
     resolve_argon2_params(settings, logger)
     init_db(settings)
     ensure_admin_user(settings)
+    url_prefix = resolve_url_prefix(settings, logger)
     app.state.settings = settings
+    app.state.url_prefix = url_prefix
+    mount_spa(app, prefix=url_prefix)
     app.state.scan_service = ScanService(settings)
     app.state.transcode_manager = TranscodeManager(settings)
     app.state.mobile_playback_manager = MobilePlaybackManager(settings)
@@ -96,6 +102,25 @@ app.include_router(stream_router)
 app.include_router(system_router)
 app.include_router(user_hidden_items_router)
 app.include_router(user_settings_router)
+
+
+@app.middleware("http")
+async def require_spa_url_prefix(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") or path == "/health":
+        return await call_next(request)
+    url_prefix = getattr(request.app.state, "url_prefix", None)
+    if url_prefix and (path == f"/{url_prefix}" or path.startswith(f"/{url_prefix}/")):
+        return await call_next(request)
+    return PlainTextResponse("Not found", status_code=404)
+
+
+@app.middleware("http")
+async def add_totp_setup_header(request: Request, call_next):
+    response = await call_next(request)
+    if getattr(request.state, "totp_setup_required", False):
+        response.headers["X-Elvern-Totp-Setup-Required"] = "true"
+    return response
 
 
 @app.get("/health")

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, Navigate } from "react-router-dom";
+import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PasswordInput } from "../components/PasswordInput";
 
@@ -24,6 +24,7 @@ function isEditableElement(element) {
 
 export function LoginPage() {
   const { user, login, loading, authNotice, clearAuthNotice } = useAuth();
+  const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
@@ -67,10 +68,22 @@ export function LoginPage() {
     setError("");
     clearAuthNotice();
     try {
-      await login({
+      const payload = await login({
         username: username.trim(),
         password,
       });
+      if (payload?.session === "pending_totp") {
+        sessionStorage.setItem("elvern_totp_challenge", payload.challenge_token || "");
+        sessionStorage.setItem(
+          "elvern_totp_expires",
+          String(Date.now() + Number(payload.expires_in_seconds || 300) * 1000),
+        );
+        navigate("/login/totp", { replace: true });
+        return;
+      }
+      if (payload?.session === "ok" && payload.totp_setup_required) {
+        navigate("/setup/totp", { replace: true });
+      }
     } catch (requestError) {
       setError(requestError.message || "Login failed");
     } finally {

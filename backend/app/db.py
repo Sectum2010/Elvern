@@ -49,6 +49,35 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS user_recovery_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        code_hash TEXT NOT NULL,
+        used_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS login_challenges (
+        challenge_token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at_unix REAL NOT NULL,
+        ip_address TEXT,
+        user_agent TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS totp_pending_secrets (
+        user_id INTEGER PRIMARY KEY,
+        secret TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS media_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
@@ -750,6 +779,9 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_security_events_time ON security_events (occurred_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events (actor_user_id, occurred_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_security_events_kind ON security_events (event_kind, occurred_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_recovery_codes_hash ON user_recovery_codes (code_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON user_recovery_codes (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_login_challenges_expiry ON login_challenges (expires_at_unix)",
     "CREATE INDEX IF NOT EXISTS idx_client_devices_last_user_id ON client_devices (last_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_client_devices_helper_last_seen_at ON client_devices (helper_last_seen_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_helper_releases_channel_runtime_version ON helper_releases (channel, runtime_id, version)",
@@ -821,6 +853,11 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'standard_user'")
     _ensure_column(connection, "users", "enabled", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(connection, "users", "last_login_at", "TEXT")
+    _ensure_column(connection, "users", "totp_secret", "TEXT")
+    _ensure_column(connection, "users", "totp_enabled_at", "TEXT")
+    _ensure_column(connection, "users", "totp_last_used_window", "INTEGER")
+    _ensure_column(connection, "users", "totp_setup_skipped_at", "TEXT")
+    _mark_totp_migration(connection)
 
     _ensure_column(connection, "sessions", "revoked_at", "TEXT")
     _ensure_column(connection, "sessions", "revoked_reason", "TEXT")
@@ -875,6 +912,28 @@ def _run_session_idle_timeout_migration(connection: sqlite3.Connection) -> None:
         (migration_name, utcnow_iso()),
     )
     logger.info("Cleared all sessions for idle-timeout migration. All users must log in again.")
+
+
+def _mark_totp_migration(connection: sqlite3.Connection) -> None:
+    migration_name = "totp_2fa_v1"
+    row = connection.execute(
+        """
+        SELECT name
+        FROM schema_migrations
+        WHERE name = ?
+        LIMIT 1
+        """,
+        (migration_name,),
+    ).fetchone()
+    if row is not None:
+        return
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (name, applied_at)
+        VALUES (?, ?)
+        """,
+        (migration_name, utcnow_iso()),
+    )
 
 
 def _ensure_column(

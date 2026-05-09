@@ -146,9 +146,19 @@ if ("serviceWorker" in navigator) {
 }
 
 
+function detectBasename() {
+  const segments = window.location.pathname.split("/").filter(Boolean);
+  const prefixCandidate = segments[0] || "";
+  return /^[a-hjkmnp-z2-9]{8,24}$/.test(prefixCandidate) ? `/${prefixCandidate}` : "/";
+}
+
+
+const basename = detectBasename();
+
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename={basename}>
       <App />
     </BrowserRouter>
   </React.StrictMode>,

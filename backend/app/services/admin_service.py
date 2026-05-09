@@ -31,7 +31,16 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
         connection.commit()
         rows = connection.execute(
             """
-            SELECT id, username, role, enabled, created_at, updated_at, last_login_at
+            SELECT
+                id,
+                username,
+                role,
+                enabled,
+                created_at,
+                updated_at,
+                last_login_at,
+                totp_secret,
+                totp_enabled_at
             FROM users
             ORDER BY lower(username) ASC
             """
@@ -77,6 +86,8 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
             "active_sessions": status_by_user[int(row["id"])]["active_sessions"],
             "last_seen_at": status_by_user[int(row["id"])]["last_seen_at"],
             "last_activity_at": status_by_user[int(row["id"])]["last_activity_at"],
+            "totp_enabled": bool(row["totp_secret"]),
+            "totp_enabled_at": row["totp_enabled_at"],
         }
         for row in rows
     ]
@@ -167,7 +178,16 @@ def update_user(
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT id, username, role, enabled, created_at, updated_at, last_login_at
+            SELECT
+                id,
+                username,
+                role,
+                enabled,
+                created_at,
+                updated_at,
+                last_login_at,
+                totp_secret,
+                totp_enabled_at
             FROM users
             WHERE id = ?
             LIMIT 1
@@ -588,6 +608,8 @@ def _get_user_from_row(row) -> dict[str, object]:
         "active_sessions": 0,
         "last_seen_at": None,
         "last_activity_at": None,
+        "totp_enabled": bool(row["totp_secret"]) if "totp_secret" in row.keys() else False,
+        "totp_enabled_at": row["totp_enabled_at"] if "totp_enabled_at" in row.keys() else None,
     }
 
 

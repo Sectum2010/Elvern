@@ -87,6 +87,14 @@ export async function apiRequest(path, options = {}) {
   });
 
   const contentType = response.headers.get("content-type") || "";
+  if (response.headers.get("x-elvern-totp-setup-required") === "true" && typeof window !== "undefined") {
+    const segments = window.location.pathname.split("/").filter(Boolean);
+    const prefixCandidate = segments[0] || "";
+    const base = /^[a-hjkmnp-z2-9]{8,24}$/.test(prefixCandidate) ? `/${prefixCandidate}` : "";
+    if (!window.location.pathname.endsWith("/setup/totp")) {
+      window.location.assign(`${window.location.origin}${base}/setup/totp`);
+    }
+  }
   const payload = contentType.includes("application/json")
     ? await response.json()
     : await response.text();

@@ -84,10 +84,19 @@ export function AuthProvider({ children }) {
 
   async function login(credentials) {
     setAuthNotice("");
-    await apiRequest("/api/auth/login", {
+    const payload = await apiRequest("/api/auth/login", {
       method: "POST",
       data: credentials,
     });
+    if (payload?.session === "pending_totp") {
+      return payload;
+    }
+    if (payload?.user) {
+      setUser(payload.user);
+      userRef.current = payload.user;
+      setLoading(false);
+      return payload;
+    }
     return refreshAuth();
   }
 

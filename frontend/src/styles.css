@@ -1591,6 +1591,38 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   grid-column: 1 / -1;
 }
 
+.totp-setup-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.totp-setup-card__qr {
+  display: grid;
+  place-items: center;
+  background: #fff;
+  border-radius: 16px;
+  padding: 18px;
+  min-height: 240px;
+}
+
+.totp-setup-card__qr svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.totp-skip-link {
+  opacity: 0.4;
+  transition: opacity 160ms ease, color 160ms ease;
+}
+
+.totp-skip-link:hover {
+  opacity: 1;
+  color: #fff;
+}
+
 .player-status {
   display: grid;
   gap: 0.75rem;

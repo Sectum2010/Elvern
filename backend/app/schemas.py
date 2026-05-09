@@ -31,11 +31,87 @@ class UserResponse(BaseModel):
 
 
 class AuthUserEnvelope(BaseModel):
-    user: UserResponse
+    user: UserResponse | None = None
+    session: Literal["ok", "pending_totp"] = "ok"
+    totp_setup_required: bool = False
+    challenge_token: str | None = None
+    expires_in_seconds: int | None = None
+
+
+class TotpLoginRequest(BaseModel):
+    challenge_token: str
+    code: str
+
+
+class TotpSetupStartResponse(BaseModel):
+    secret: str
+    qr_svg: str
+    issuer: str
+    account: str
+
+
+class TotpSetupVerifyRequest(BaseModel):
+    code: str
+
+
+class TotpSetupVerifyResponse(BaseModel):
+    enabled: bool
+    recovery_codes: list[str] = Field(default_factory=list)
+
+
+class TotpSkipResponse(BaseModel):
+    skipped_until: str
+
+
+class TotpStatusResponse(BaseModel):
+    enabled: bool
+    enabled_at: str | None = None
+    recovery_codes_remaining: int = 0
+    setup_required: bool = False
+
+
+class TotpDisableRequest(BaseModel):
+    password: str
+    totp_or_recovery: str
+
+
+class TotpRegenerateRecoveryCodesRequest(BaseModel):
+    password: str
+    totp_code: str
+
+
+class TotpRecoveryCodesResponse(BaseModel):
+    recovery_codes: list[str] = Field(default_factory=list)
+
+
+class AdminUserTotpDisableRequest(BaseModel):
+    current_admin_password: str = Field(min_length=1)
+
+
+class AdminUserTotpDisableResponse(BaseModel):
+    disabled: bool
+    target_user: int
 
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class AdminUrlPrefixResponse(BaseModel):
+    prefix: str
+    generated_at: str | None = None
+    rotated_count: int
+    days_old: int
+    rotation_reminder_due: bool
+
+
+class AdminUrlPrefixRotateRequest(BaseModel):
+    current_admin_password: str = Field(min_length=1)
+
+
+class AdminUrlPrefixRotateResponse(BaseModel):
+    new_prefix: str
+    session_revoked: bool = True
 
 
 class CloudSyncStatusResponse(BaseModel):
@@ -985,6 +1061,8 @@ class AdminUserResponse(BaseModel):
     active_sessions: int = 0
     last_seen_at: str | None = None
     last_activity_at: str | None = None
+    totp_enabled: bool = False
+    totp_enabled_at: str | None = None
 
 
 class AdminUserListResponse(BaseModel):

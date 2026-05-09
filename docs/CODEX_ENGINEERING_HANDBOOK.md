@@ -292,6 +292,47 @@ When a stop rule triggers, report it. Do not force momentum.
 
 ## 9. Reporting Rules For Future Codex Work
 
+## URL prefix obfuscation
+
+Elvern serves the browser SPA under a random base32 path prefix such as
+`/h2k7m4p9/`. The goal is to keep generic scanners from finding known app
+paths like `/admin` or `/login` by accident. This is only an added obscurity
+layer; it does not replace authentication, session checks, rate limiting, or
+server-side authorization.
+
+The prefix can come from four places:
+
+- First start with no `ELVERN_URL_PREFIX`: generate and persist
+  `backend/data/url_prefix_state.json`.
+- Manual env override: set `ELVERN_URL_PREFIX` to a valid 8-24 character
+  safe base32 value.
+- Admin Security panel rotation: generate a new prefix and revoke all sessions.
+- CLI rotation: `python -m backend.app.cli rotate-url-prefix`, also revoking all
+  sessions.
+
+`ELVERN_FORCE_NEW_URL_PREFIX=1` is an emergency manual operation only. Never add
+it to a default systemd unit, default docker compose file, or generated env
+example as an enabled value. Prefix age reminders are soft 180-day prompts by
+default. Every rotation revokes all auth sessions.
+
+## Two-factor authentication
+
+Admin accounts are softly required to enroll in TOTP. An admin without TOTP is
+sent to `/setup/totp` after login unless they use the low-emphasis "Skip for
+now" action; a skip lasts 30 days, then the prompt returns. Standard users may
+enable 2FA, but are not required to.
+
+TOTP secrets are stored in the users table in plaintext for now; backup
+encryption is the future place to harden that storage. Recovery codes are shown
+once, generated as 10 one-time `elvn-...` values, and stored only as SHA-256
+hashes. Login challenges expire after 5 minutes. `totp_last_used_window`
+prevents replay of an already accepted TOTP window.
+
+Break-glass recovery is available from the server shell with
+`python -m backend.app.cli admin-disable-totp <username>`. Admins can also reset
+another user's 2FA from the Security panel with current admin password
+confirmation; that reset revokes the target user's active sessions.
+
 Before editing, state:
 
 - Exact files proposed to touch.

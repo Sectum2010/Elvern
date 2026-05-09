@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 from dataclasses import dataclass
@@ -9,9 +10,9 @@ from pathlib import Path
 
 from .auth import ensure_admin_user
 from .config import ConfigError, DEFAULT_DB_PATH, refresh_settings
-from .db import init_db
+from .db import get_connection, init_db
 from .media_scan import scan_media_library
-from .security import hash_password
+from .security import hash_password, verify_password
 from .services.backup_service import (
     build_restore_dry_run_plan,
     create_backup_checkpoint,
@@ -109,6 +110,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("rescan", help="Run a synchronous media rescan")
     subparsers.add_parser("status", help="Print current system status")
+    subparsers.add_parser(
+        "rotate-url-prefix",
+        help="Rotate the random SPA URL prefix and revoke all sessions",
+    )
+
+    disable_totp_parser = subparsers.add_parser(
+        "admin-disable-totp",
+        help="Disable TOTP for an account from the server shell",
+    )
+    disable_totp_parser.add_argument("username", help="Username to reset")
 
     backup_create_parser = subparsers.add_parser(
         "backup-create",
@@ -215,6 +226,86 @@ def cmd_calibrate_argon2(args, settings) -> int:
     return 0
 
 
+def cmd_rotate_url_prefix(args, settings) -> int:
+    del args
+    from .url_prefix_service import rotate_url_prefix
+
+    password = getpass.getpass("Admin password: ")
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id, username, password_hash
+            FROM users
+            WHERE role = 'admin' AND enabled = 1
+            ORDER BY id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            print("No enabled admin user found.")
+            return 1
+        ok, new_hash = verify_password(password, row["password_hash"], settings)
+        if not ok:
+            print("Current admin password is incorrect.")
+            return 1
+        if new_hash is not None:
+            connection.execute(
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (new_hash, datetime.now(timezone.utc).isoformat(), row["id"]),
+            )
+        _old_prefix, new_prefix = rotate_url_prefix(
+            settings,
+            connection,
+            actor_user_id=int(row["id"]),
+            actor_username=str(row["username"]),
+        )
+        connection.commit()
+    print(f"New URL prefix: /{new_prefix}/")
+    print(f"All sessions revoked. Bookmark this URL: /{new_prefix}/")
+    return 0
+
+
+def cmd_admin_disable_totp(args, settings) -> int:
+    from .services.security_event_service import log_security_event
+
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            "SELECT id, username FROM users WHERE username = ? LIMIT 1",
+            (args.username,),
+        ).fetchone()
+        if row is None:
+            print(f"User not found: {args.username}")
+            return 1
+        user_id = int(row["id"])
+        connection.execute(
+            """
+            UPDATE users
+            SET totp_secret = NULL,
+                totp_enabled_at = NULL,
+                totp_last_used_window = NULL,
+                totp_setup_skipped_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, user_id),
+        )
+        connection.execute("DELETE FROM user_recovery_codes WHERE user_id = ?", (user_id,))
+        connection.execute(
+            "UPDATE sessions SET revoked_at = ?, revoked_reason = ? WHERE user_id = ? AND revoked_at IS NULL",
+            (now, "cli_disabled_totp", user_id),
+        )
+        connection.commit()
+    log_security_event(
+        settings,
+        event_kind="cli_disabled_user_totp",
+        actor_user_id=user_id,
+        actor_username=str(row["username"]),
+    )
+    print(f"TOTP disabled for user {row['username']}. They must re-enroll on next login.")
+    return 0
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -289,6 +380,12 @@ def main() -> None:
         )
         print(json.dumps(payload, indent=2))
         return
+
+    if args.command == "rotate-url-prefix":
+        raise SystemExit(cmd_rotate_url_prefix(args, settings))
+
+    if args.command == "admin-disable-totp":
+        raise SystemExit(cmd_admin_disable_totp(args, settings))
 
     if args.command == "import-helper-releases":
         payload = import_helper_release_artifacts(

@@ -357,6 +357,17 @@ export function AdminPage() {
   const [revealedInviteIds, setRevealedInviteIds] = useState({});
   const [passwordHelpRequests, setPasswordHelpRequests] = useState([]);
   const [passwordHelpPendingId, setPasswordHelpPendingId] = useState(null);
+  const [urlPrefixStatus, setUrlPrefixStatus] = useState(null);
+  const [urlPrefixPending, setUrlPrefixPending] = useState(false);
+  const [urlPrefixReminderDismissed, setUrlPrefixReminderDismissed] = useState(false);
+  const [urlPrefixRotateModal, setUrlPrefixRotateModal] = useState({
+    open: false,
+    currentAdminPassword: "",
+    pending: false,
+    error: "",
+  });
+  const [totpStatus, setTotpStatus] = useState(null);
+  const [totpAdminPendingUserId, setTotpAdminPendingUserId] = useState(null);
   const [downloadAccessState, setDownloadAccessState] = useState({
     userId: null,
     loading: false,
@@ -456,11 +467,13 @@ export function AdminPage() {
       setLoading(true);
     }
     try {
-      const [status, users, sessions, audit] = await Promise.all([
+      const [status, users, sessions, audit, urlPrefix, ownTotpStatus] = await Promise.all([
         apiRequest("/api/system/status"),
         apiRequest("/api/admin/users"),
         apiRequest("/api/admin/sessions"),
         apiRequest("/api/admin/audit?limit=100"),
+        apiRequest("/api/admin/url-prefix"),
+        apiRequest("/api/auth/totp/status"),
       ]);
       if (scanRunningRef.current && !status.scan.running) {
         const completionText = cloudSyncWarningRef.current
@@ -476,6 +489,8 @@ export function AdminPage() {
       setUsersPayload(users.users);
       setSessionsPayload(sessions.sessions);
       setAuditPayload(audit.events);
+      setUrlPrefixStatus(urlPrefix);
+      setTotpStatus(ownTotpStatus);
       if (user?.role === "admin" && activeSection === "panel") {
         await loadPlaybackWorkers({ silent: true });
       }
@@ -514,6 +529,110 @@ export function AdminPage() {
         tone: "error",
         text: requestError.message || "Failed to load password help requests",
       });
+    }
+  }
+
+  async function loadUrlPrefixStatus() {
+    setUrlPrefixPending(true);
+    try {
+      const payload = await apiRequest("/api/admin/url-prefix");
+      setUrlPrefixStatus(payload);
+    } catch (requestError) {
+      setBanner({
+        tone: "error",
+        text: requestError.message || "Failed to load URL prefix status",
+      });
+    } finally {
+      setUrlPrefixPending(false);
+    }
+  }
+
+  async function handleRotateUrlPrefix(event) {
+    event.preventDefault();
+    if (!urlPrefixRotateModal.currentAdminPassword.trim()) {
+      setUrlPrefixRotateModal((current) => ({
+        ...current,
+        error: "Enter your current admin password to rotate the URL prefix.",
+      }));
+      return;
+    }
+    setUrlPrefixRotateModal((current) => ({ ...current, pending: true, error: "" }));
+    try {
+      const payload = await apiRequest("/api/admin/url-prefix/rotate", {
+        method: "POST",
+        data: { current_admin_password: urlPrefixRotateModal.currentAdminPassword },
+      });
+      const nextPrefix = payload.new_prefix;
+      window.alert(`New URL prefix: /${nextPrefix}/. Logging out...`);
+      window.location.assign(`${window.location.origin}/${nextPrefix}/login`);
+    } catch (requestError) {
+      setUrlPrefixRotateModal((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || "Failed to rotate URL prefix.",
+      }));
+    }
+  }
+
+  async function handleAdminResetUserTotp(entry) {
+    const currentAdminPassword = window.prompt(`Confirm with your admin password to reset 2FA for ${entry.username}.`);
+    if (!currentAdminPassword) {
+      return;
+    }
+    setTotpAdminPendingUserId(entry.id);
+    try {
+      await apiRequest(`/api/admin/users/${entry.id}/2fa/disable`, {
+        method: "POST",
+        data: { current_admin_password: currentAdminPassword },
+      });
+      setBanner({ tone: "success", text: `Reset 2FA for ${entry.username}.` });
+      await loadAdminData({ silent: true });
+    } catch (requestError) {
+      setBanner({ tone: "error", text: requestError.message || `Failed to reset 2FA for ${entry.username}.` });
+    } finally {
+      setTotpAdminPendingUserId(null);
+    }
+  }
+
+  async function handleRegenerateOwnRecoveryCodes() {
+    const password = window.prompt("Enter your current password to regenerate recovery codes.");
+    if (!password) {
+      return;
+    }
+    const totpCode = window.prompt("Enter a current 6-digit authenticator code.");
+    if (!totpCode) {
+      return;
+    }
+    try {
+      const payload = await apiRequest("/api/auth/recovery-codes/regenerate", {
+        method: "POST",
+        data: { password, totp_code: totpCode },
+      });
+      window.alert(`Save these recovery codes now:\n\n${(payload.recovery_codes || []).join("\n")}`);
+      await loadAdminData({ silent: true });
+    } catch (requestError) {
+      setBanner({ tone: "error", text: requestError.message || "Failed to regenerate recovery codes." });
+    }
+  }
+
+  async function handleDisableOwnTotp() {
+    const password = window.prompt("Enter your current password to disable 2FA.");
+    if (!password) {
+      return;
+    }
+    const totpOrRecovery = window.prompt("Enter a current authenticator code or recovery code.");
+    if (!totpOrRecovery) {
+      return;
+    }
+    try {
+      await apiRequest("/api/auth/totp/disable", {
+        method: "POST",
+        data: { password, totp_or_recovery: totpOrRecovery },
+      });
+      setBanner({ tone: "success", text: "Two-factor authentication disabled." });
+      await loadAdminData({ silent: true });
+    } catch (requestError) {
+      setBanner({ tone: "error", text: requestError.message || "Failed to disable 2FA." });
     }
   }
 
@@ -2503,6 +2622,135 @@ export function AdminPage() {
 	        <StatusRow label="Session TTL" value={`${statusPayload.security.session_ttl_hours} hour(s)`} />
 	      </section>
 
+      {urlPrefixStatus?.rotation_reminder_due && !urlPrefixReminderDismissed ? (
+        <section className="settings-card settings-card--wide">
+          <div className="settings-inline-header">
+            <div>
+              <h2>URL prefix reminder</h2>
+              <p className="page-subnote">
+                URL prefix is {urlPrefixStatus.days_old} days old. Consider rotating if you've widely shared the URL.
+              </p>
+            </div>
+            <div className="admin-list__actions">
+              <button
+                className="primary-button"
+                onClick={() =>
+                  setUrlPrefixRotateModal({
+                    open: true,
+                    currentAdminPassword: "",
+                    pending: false,
+                    error: "",
+                  })
+                }
+                type="button"
+              >
+                Rotate now
+              </button>
+              <button className="ghost-button" onClick={() => setUrlPrefixReminderDismissed(true)} type="button">
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      <section className="settings-card">
+        <div className="settings-inline-header">
+          <div>
+            <h2>URL Prefix</h2>
+            <p className="page-subnote">
+              Random path prefix that hides the app from automated scanners. Rotating revokes all sessions.
+            </p>
+          </div>
+        </div>
+        <StatusRow label="Current prefix" value={urlPrefixStatus?.prefix ? `/${urlPrefixStatus.prefix}/` : "Unknown"} />
+        <StatusRow label="Generated" value={urlPrefixStatus?.generated_at ? `${formatDate(urlPrefixStatus.generated_at)} (${urlPrefixStatus.days_old} days ago)` : "Manual override"} />
+        <StatusRow label="Manual rotations" value={String(urlPrefixStatus?.rotated_count ?? 0)} />
+        <div className="admin-list__actions">
+          <button
+            className="primary-button"
+            onClick={() =>
+              setUrlPrefixRotateModal({
+                open: true,
+                currentAdminPassword: "",
+                pending: false,
+                error: "",
+              })
+            }
+            type="button"
+          >
+            Rotate prefix...
+          </button>
+          <button
+            className="ghost-button"
+            disabled={urlPrefixPending}
+            onClick={loadUrlPrefixStatus}
+            type="button"
+          >
+            {urlPrefixPending ? "Refreshing..." : "Refresh status"}
+          </button>
+        </div>
+      </section>
+
+      <section className="settings-card settings-card--wide">
+        <div className="settings-inline-header">
+          <div>
+            <h2>Two-factor authentication</h2>
+            <p className="page-subnote">Admins are prompted to enable authenticator-based 2FA.</p>
+          </div>
+          <div className="admin-list__actions">
+            {totpStatus?.enabled ? (
+              <>
+                <button className="ghost-button" onClick={handleRegenerateOwnRecoveryCodes} type="button">
+                  Regenerate recovery codes
+                </button>
+                <button className="ghost-button ghost-button--danger" onClick={handleDisableOwnTotp} type="button">
+                  Disable 2FA
+                </button>
+              </>
+            ) : (
+              <Link className="primary-button" to="/setup/totp">
+                Enable 2FA
+              </Link>
+            )}
+          </div>
+        </div>
+        <StatusRow label="Status" value={totpStatus?.enabled ? `Enabled${totpStatus.enabled_at ? ` since ${formatDate(totpStatus.enabled_at)}` : ""}` : "Not enabled"} />
+        <StatusRow label="Recovery codes remaining" value={String(totpStatus?.recovery_codes_remaining ?? 0)} />
+      </section>
+
+      <section className="settings-card settings-card--wide">
+        <div className="settings-inline-header">
+          <div>
+            <h2>Manage user 2FA</h2>
+            <p className="page-subnote">Resetting removes the pairing and revokes that user's active sessions.</p>
+          </div>
+        </div>
+        <div className="admin-list admin-list--dense">
+          {usersPayload.map((entry) => (
+            <div className="admin-list__row admin-list__row--card" key={`totp-${entry.id}`}>
+              <div>
+                <strong>{entry.username}</strong>
+                <p className="page-subnote">
+                  2FA {entry.totp_enabled ? "enabled" : "disabled"}
+                  {entry.totp_enabled_at ? ` · last enabled ${formatDate(entry.totp_enabled_at)}` : ""}
+                </p>
+              </div>
+              {entry.totp_enabled ? (
+                <button
+                  className="ghost-button ghost-button--danger"
+                  disabled={totpAdminPendingUserId === entry.id}
+                  onClick={() => handleAdminResetUserTotp(entry)}
+                  type="button"
+                >
+                  {totpAdminPendingUserId === entry.id ? "Resetting..." : "Reset 2FA"}
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
+
       <section className="settings-card settings-card--wide">
         <div className="settings-inline-header">
           <div>
@@ -3122,6 +3370,95 @@ export function AdminPage() {
       {userActionsModal}
       {terminateWorkerConfirmationModal}
       {diagnosticIdPopup}
+      {urlPrefixRotateModal.open ? (
+        <div className="browser-resume-modal" role="presentation">
+          <button
+            aria-label="Close URL prefix rotation confirmation"
+            className="browser-resume-modal__backdrop"
+            onClick={() =>
+              setUrlPrefixRotateModal({
+                open: false,
+                currentAdminPassword: "",
+                pending: false,
+                error: "",
+              })
+            }
+            type="button"
+          />
+          <form
+            className="browser-resume-modal__card detail-info-modal__card admin-diagnostic-id-modal"
+            onSubmit={handleRotateUrlPrefix}
+          >
+            <div className="detail-info-modal__header">
+              <div className="detail-info-modal__copy">
+                <p className="detail-info-modal__eyebrow">Security</p>
+                <h2>Rotate URL prefix</h2>
+              </div>
+              <button
+                aria-label="Close URL prefix rotation confirmation"
+                className="detail-info-modal__close"
+                onClick={() =>
+                  setUrlPrefixRotateModal({
+                    open: false,
+                    currentAdminPassword: "",
+                    pending: false,
+                    error: "",
+                  })
+                }
+                type="button"
+              >
+                X
+              </button>
+            </div>
+            <div className="detail-info-modal__body">
+              <p className="page-subnote">
+                This will generate a new random URL prefix. All current sessions will be revoked, including yours.
+                All bookmarks and share links pointing to the old prefix will stop working.
+              </p>
+              <p className="page-subnote">Confirm with your admin password to proceed.</p>
+              <NonLoginSecretInput
+                autoComplete="new-password"
+                disabled={urlPrefixRotateModal.pending}
+                onChange={(event) =>
+                  setUrlPrefixRotateModal((current) => ({
+                    ...current,
+                    currentAdminPassword: event.target.value,
+                    error: "",
+                  }))
+                }
+                placeholder="Current admin password"
+                purpose="url-prefix-rotate-reauth"
+                value={urlPrefixRotateModal.currentAdminPassword}
+              />
+              {urlPrefixRotateModal.error ? (
+                <p className="action-feedback action-feedback--error" role="alert">
+                  {urlPrefixRotateModal.error}
+                </p>
+              ) : null}
+            </div>
+            <div className="browser-resume-modal__actions">
+              <button className="primary-button" disabled={urlPrefixRotateModal.pending} type="submit">
+                {urlPrefixRotateModal.pending ? "Rotating..." : "Rotate now"}
+              </button>
+              <button
+                className="ghost-button"
+                disabled={urlPrefixRotateModal.pending}
+                onClick={() =>
+                  setUrlPrefixRotateModal({
+                    open: false,
+                    currentAdminPassword: "",
+                    pending: false,
+                    error: "",
+                  })
+                }
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </section>
   );
 }

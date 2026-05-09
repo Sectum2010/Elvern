@@ -11,6 +11,7 @@ const backendHost =
 
 
 export default defineConfig({
+  base: "./",
   plugins: [react()],
   test: {
     globals: true,
