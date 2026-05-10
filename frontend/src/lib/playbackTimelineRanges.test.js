@@ -277,4 +277,31 @@ describe("classifySeekTarget", () => {
     });
     assert.equal(kind, SEEK_TARGET_KIND.WINDOW);
   });
+
+  test("active_window_* fields decide window membership when present", () => {
+    // Phase 2: the sliding-window contract uses active_window_*; targets outside
+    // it must classify as UNCACHED so the controller triggers a retarget.
+    const sessionPayload = {
+      engine_mode: "route2",
+      ready_start_seconds: 0,
+      ready_end_seconds: 7200,
+      active_window_start_seconds: 180,
+      active_window_end_seconds: 420,
+    };
+    assert.equal(classifySeekTarget({
+      absoluteTargetSeconds: 300,
+      bufferedAbsoluteRanges: [],
+      sessionPayload,
+    }), SEEK_TARGET_KIND.WINDOW);
+    assert.equal(classifySeekTarget({
+      absoluteTargetSeconds: 50,
+      bufferedAbsoluteRanges: [],
+      sessionPayload,
+    }), SEEK_TARGET_KIND.UNCACHED);
+    assert.equal(classifySeekTarget({
+      absoluteTargetSeconds: 5000,
+      bufferedAbsoluteRanges: [],
+      sessionPayload,
+    }), SEEK_TARGET_KIND.UNCACHED);
+  });
 });

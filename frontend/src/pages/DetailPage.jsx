@@ -3279,6 +3279,7 @@ export function DetailPage() {
               {useElvernCustomShell ? (
                 <ElvernPlayerOverlay
                   cinemaModeActive={elvernCinemaTakeoverActive}
+                  deviceClass={clientDeviceClass}
                   durationSeconds={fullDuration}
                   errorMessage={playbackError || ""}
                   onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}

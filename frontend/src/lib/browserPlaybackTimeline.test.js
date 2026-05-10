@@ -2,9 +2,12 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 
 import {
+  getBrowserPlaybackActiveWindowSeconds,
+  getBrowserPlaybackFullDurationSeconds,
   getBrowserPlaybackTimelineEndSeconds,
   getBrowserPlaybackTimelineStartSeconds,
   isBrowserPlaybackAbsolutePositionReady,
+  isNativeHlsWindowPayload,
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "./browserPlaybackTimeline.js";
@@ -51,4 +54,47 @@ test("ready-window checks use absolute movie time for route2 sessions", () => {
   assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2277, { headroomSeconds: 2 }), true);
   assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2200, { headroomSeconds: 2 }), false);
   assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2310.5, { headroomSeconds: 2 }), false);
+});
+
+test("active window fields are preferred over ready_* in readiness checks", () => {
+  // Phase 2: backend exposes a sliding active_window_*; that wins over ready_*.
+  const payload = buildRoute2Payload({
+    active_window_start_seconds: 2280,
+    active_window_end_seconds: 2400,
+  });
+  const window = getBrowserPlaybackActiveWindowSeconds(payload);
+  assert.deepEqual(window, { startSeconds: 2280, endSeconds: 2400 });
+  assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2350), true);
+  assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2270), false);
+  assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2401), false);
+});
+
+test("missing active_window_* falls back to ready_* fields", () => {
+  const payload = buildRoute2Payload();
+  assert.equal(getBrowserPlaybackActiveWindowSeconds(payload), null);
+  // Falls back to ready_start_seconds=2211 / ready_end_seconds=2311.
+  assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2270), true);
+});
+
+test("isNativeHlsWindowPayload detects the native_hls engine and policy label", () => {
+  assert.equal(isNativeHlsWindowPayload({ selected_hls_engine: "native_hls" }), true);
+  assert.equal(isNativeHlsWindowPayload({ native_hls_window_policy: "native_hls_sliding_window_v1" }), true);
+  assert.equal(isNativeHlsWindowPayload({ selected_hls_engine: "hls_js" }), false);
+  assert.equal(isNativeHlsWindowPayload(null), false);
+});
+
+test("getBrowserPlaybackFullDurationSeconds prefers explicit full_duration_seconds", () => {
+  const payload = { duration_seconds: 100, full_duration_seconds: 7200 };
+  assert.equal(getBrowserPlaybackFullDurationSeconds(payload), 7200);
+});
+
+test("full duration ignores active_window_* (timeline still shows whole movie)", () => {
+  const payload = {
+    duration_seconds: 7200,
+    full_duration_seconds: 7200,
+    active_window_start_seconds: 180,
+    active_window_end_seconds: 420,
+  };
+  // Even with a 240s active window, the timeline base is the full movie.
+  assert.equal(getBrowserPlaybackFullDurationSeconds(payload), 7200);
 });

@@ -5690,6 +5690,126 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
 }
 
+.elvern-overlay--variant-phone .elvern-overlay__time-row {
+  font-size: 0.74rem;
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__icon {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__icon-button {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0.25rem 0.4rem;
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__bottom-bar {
+  gap: 0.35rem;
+  padding: 0.45rem max(0.7rem, env(safe-area-inset-right)) max(0.7rem, env(safe-area-inset-bottom)) max(0.7rem, env(safe-area-inset-left));
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__controls-row {
+  gap: 0.2rem;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__surface-hint {
+  width: 3.4rem;
+  height: 3.4rem;
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__surface-icon {
+  width: 1.6rem;
+  height: 1.6rem;
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__top-bar {
+  padding: max(0.6rem, env(safe-area-inset-top)) max(0.7rem, env(safe-area-inset-right)) 0.55rem max(0.7rem, env(safe-area-inset-left));
+}
+
+.elvern-overlay--variant-phone .elvern-overlay__menu--sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+  border-radius: 1rem 1rem 0 0;
+  padding: 0.85rem max(0.85rem, env(safe-area-inset-right)) calc(1rem + env(safe-area-inset-bottom)) max(0.85rem, env(safe-area-inset-left));
+  max-height: 70vh;
+  z-index: 9100;
+}
+
+.elvern-overlay--variant-tablet .elvern-overlay__icon-button {
+  min-width: 42px;
+  min-height: 42px;
+}
+
+.elvern-overlay__menu-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.45rem 0.1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.elvern-overlay__menu-section:first-of-type {
+  border-top: 0;
+}
+
+.elvern-overlay__menu-section-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(248, 250, 252, 0.55);
+  padding: 0 0.3rem;
+}
+
+.elvern-overlay__menu-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.elvern-overlay__menu-chip {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(248, 250, 252, 0.92);
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  border-radius: 999px;
+  padding: 0.32rem 0.7rem;
+  min-height: 36px;
+  cursor: pointer;
+}
+
+.elvern-overlay__menu-chip[aria-checked="true"] {
+  background: rgba(225, 29, 72, 0.32);
+  border-color: rgba(225, 29, 72, 0.55);
+  color: #ffffff;
+}
+
+.elvern-overlay__menu-item--row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 44px;
+}
+
+.elvern-overlay__menu-item-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+}
+
 @media (max-width: 640px) {
   .elvern-overlay__time-row {
     font-size: 0.78rem;
@@ -5699,15 +5819,9 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
     display: none;
   }
 
-  .elvern-overlay__icon {
-    width: 1.25rem;
-    height: 1.25rem;
-  }
-
   .elvern-overlay__menu {
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
+    right: 0;
+    left: auto;
   }
 }
 

@@ -15,6 +15,7 @@ from .mobile_playback_models import (
     MobilePlaybackSession,
 )
 from .mobile_playback_buffer_contract import resolve_buffer_contract_fields
+from .route2_native_hls_window import build_active_window_snapshot_fields
 
 
 def _route2_snapshot_locked(
@@ -213,6 +214,17 @@ def _route2_snapshot_locked(
         lite_required_runway_source=lite_required_runway_source,
         lite_undersupply_detected=lite_undersupply_detected,
     )
+    active_window_fields = build_active_window_snapshot_fields(
+        selected_hls_engine=session.selected_hls_engine,
+        duration_seconds=session.duration_seconds,
+        buffer_tier=str(buffer_contract_fields.get("buffer_tier") or ""),
+        playback_mode=browser_session.playback_mode,
+        current_position_seconds=session.client_current_time_seconds,
+        target_position_seconds=session.target_position_seconds,
+        attach_position_seconds=attach_position_seconds,
+        active_window_revision=browser_session.attach_revision,
+        active_window_reason=session.lifecycle_state,
+    )
     return {
         "session_id": session.session_id,
         "media_item_id": session.media_item_id,
@@ -279,7 +291,7 @@ def _route2_snapshot_locked(
         else None,
         "lite_required_runway_source": lite_required_runway_source,
         **buffer_contract_fields,
-        "selected_hls_engine": session.selected_hls_engine,
+        **active_window_fields,
         "client_buffered_ahead_seconds": round(float(session.client_buffered_ahead_seconds), 2)
         if session.client_buffered_ahead_seconds is not None
         else None,
