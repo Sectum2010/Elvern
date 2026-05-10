@@ -44,6 +44,7 @@ export function ShellLayout({ children }) {
   });
   const isLibraryRootPage = location.pathname === "/library";
   const isLibrarySourcePage = location.pathname === "/library/local" || location.pathname === "/library/cloud";
+  const hideFloatingIsland = location.pathname === "/setup/totp";
 
   function clearLogoutInteractionState() {
     if (typeof window !== "undefined" && collapseTimerRef.current) {
@@ -353,45 +354,47 @@ export function ShellLayout({ children }) {
         </div>
       ) : null}
 
-      <div
-        className={`floating-island floating-island--${floatingControlsPosition}`}
-        aria-label="Primary navigation and account controls"
-      >
-        <nav className="floating-island__nav" aria-label="Primary">
-          {navigation.map((item) => (
-            <NavLink
-              key={item.to}
-              className={({ isActive }) =>
-                isActive ? "floating-island__link floating-island__link--active" : "floating-island__link"
-              }
-              onClick={(event) => {
-                handleNavigationClick(event, item).catch(() => {
-                  // Fall back to the default route if validation fails unexpectedly.
-                });
-              }}
-              to={item.to}
-              state={item.state}
+      {!hideFloatingIsland ? (
+        <div
+          className={`floating-island floating-island--${floatingControlsPosition}`}
+          aria-label="Primary navigation and account controls"
+        >
+          <nav className="floating-island__nav" aria-label="Primary">
+            {navigation.map((item) => (
+              <NavLink
+                key={item.to}
+                className={({ isActive }) =>
+                  isActive ? "floating-island__link floating-island__link--active" : "floating-island__link"
+                }
+                onClick={(event) => {
+                  handleNavigationClick(event, item).catch(() => {
+                    // Fall back to the default route if validation fails unexpectedly.
+                  });
+                }}
+                to={item.to}
+                state={item.state}
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+          <div className="floating-island__account">
+            <button
+              aria-expanded={accountExpanded}
+              aria-label={accountExpanded ? `Account: ${user?.username}` : "Show account name"}
+              className={accountExpanded ? "account-badge account-badge--expanded" : "account-badge"}
+              onClick={handleAccountToggle}
+              type="button"
             >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="floating-island__account">
-          <button
-            aria-expanded={accountExpanded}
-            aria-label={accountExpanded ? `Account: ${user?.username}` : "Show account name"}
-            className={accountExpanded ? "account-badge account-badge--expanded" : "account-badge"}
-            onClick={handleAccountToggle}
-            type="button"
-          >
-            <span aria-hidden="true" className="account-badge__icon" />
-            {accountExpanded ? <span className="account-badge__label">{user?.username}</span> : null}
-          </button>
-          <button className="ghost-button ghost-button--inline ghost-button--floating" type="button" onClick={handleLogout}>
-            Logout
-          </button>
+              <span aria-hidden="true" className="account-badge__icon" />
+              {accountExpanded ? <span className="account-badge__label">{user?.username}</span> : null}
+            </button>
+            <button className="ghost-button ghost-button--inline ghost-button--floating" type="button" onClick={handleLogout}>
+              Logout
+            </button>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <main className="page-shell">{children}</main>
     </div>
