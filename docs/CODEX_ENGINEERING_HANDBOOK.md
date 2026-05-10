@@ -6,6 +6,18 @@ For core-path executable checks, also use `docs/CODEX_CORE_GUARDRAILS.md`.
 
 For hard-won playback and platform regressions, also use `docs/PLAYBACK_REGRESSION_NOTES.md`. If a task disproves an early playback hypothesis, depends on live-device evidence, or fixes a high-regression-risk platform path, add or update a note there before calling the slice complete.
 
+Before pushing security, auth, download, TOTP, backup, dependency, or CI changes,
+run the local CI mirror:
+
+```bash
+./scripts/elvern-ci-local.sh
+```
+
+That script intentionally mirrors `.github/workflows/ci.yml`: backend tests,
+desktop helper build, frontend install/tests/build, `pip-audit`, `bandit`, and
+`npm audit --audit-level=high`. If the workflow changes, update the script in
+the same PR so local checks and GitHub Actions stay in lockstep.
+
 ## Request flow in deployed Elvern
 
 Production traffic flows through two Python/Node processes, not one:

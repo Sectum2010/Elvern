@@ -30,6 +30,17 @@ def _tar_contains(tarball_bytes: bytes, member_name: str) -> bool:
         return member_name in archive.getnames()
 
 
+def _tar_with_member(member: tarfile.TarInfo, content: bytes = b"payload") -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        if member.isfile():
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        else:
+            archive.addfile(member)
+    return buffer.getvalue()
+
+
 class TestBackupEncryptionFormat:
     def test_round_trip_auto(self, initialized_settings) -> None:
         blob = encrypt_backup(b"tarball-bytes", settings=initialized_settings)
@@ -163,6 +174,33 @@ class TestBackupServiceFlow:
 
         assert inspection["valid"] is False
         assert inspection["key_source"] == "passphrase"
+
+
+class TestBackupTarExtraction:
+    def test_manual_extraction_writes_regular_files(self, tmp_path) -> None:
+        member = tarfile.TarInfo("nested/file.txt")
+        tarball = _tar_with_member(member, b"hello")
+
+        backup_service._extract_tar_gz_bytes(tarball, tmp_path / "restore")
+
+        assert (tmp_path / "restore" / "nested" / "file.txt").read_text(encoding="utf-8") == "hello"
+
+    def test_manual_extraction_rejects_path_traversal(self, tmp_path) -> None:
+        member = tarfile.TarInfo("../evil.txt")
+        tarball = _tar_with_member(member, b"bad")
+
+        with pytest.raises(ValueError, match="unsafe paths"):
+            backup_service._extract_tar_gz_bytes(tarball, tmp_path / "restore")
+        assert not (tmp_path / "evil.txt").exists()
+
+    def test_manual_extraction_rejects_links(self, tmp_path) -> None:
+        member = tarfile.TarInfo("link")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "/etc/passwd"
+        tarball = _tar_with_member(member)
+
+        with pytest.raises(ValueError, match="unsupported member type"):
+            backup_service._extract_tar_gz_bytes(tarball, tmp_path / "restore")
 
 
 class TestLegacyPlaintextBackups:

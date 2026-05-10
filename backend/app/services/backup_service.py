@@ -152,7 +152,18 @@ def _extract_tar_gz_bytes(tarball_bytes: bytes, destination_dir: Path) -> None:
                 target.relative_to(destination_root)
             except ValueError as exc:
                 raise ValueError("Backup archive contains unsafe paths") from exc
-        archive.extractall(destination_root)
+            if member.isdir():
+                _ensure_private_dir(target)
+                continue
+            if not member.isfile():
+                raise ValueError("Backup archive contains unsupported member type")
+            _ensure_private_dir(target.parent)
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise ValueError("Backup archive contains unreadable file")
+            with extracted, target.open("wb") as output:
+                shutil.copyfileobj(extracted, output)
+            _set_private_permissions(target, is_dir=False)
 
 
 def _create_sqlite_snapshot(*, source_db_path: Path, destination_path: Path) -> str:
