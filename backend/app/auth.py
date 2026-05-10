@@ -12,6 +12,7 @@ from .services.admin_events_service import emit_admin_event
 from .services.audit_service import log_audit_event
 from .services.rate_limiter_service import SqliteRateLimiter
 from .services.security_event_service import log_security_event
+from .services.at_rest_encryption import decrypt_at_rest, encrypt_at_rest
 from .services.totp_service import SKIP_GRACE_DAYS
 from .security import (
     generate_session_token,
@@ -48,10 +49,18 @@ def is_totp_setup_required_for_values(
     totp_setup_prompt_enabled: bool | int | None = None,
     now: datetime | None = None,
 ) -> bool:
-    del role, now
+    del role
     if totp_secret:
         return False
-    return bool(totp_setup_prompt_enabled) and not bool(totp_setup_skipped_at)
+    if not bool(totp_setup_prompt_enabled):
+        return False
+    if not totp_setup_skipped_at:
+        return True
+    skipped_at = _parse_iso_datetime(totp_setup_skipped_at)
+    if skipped_at is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    return current - skipped_at >= timedelta(days=SKIP_GRACE_DAYS)
 
 
 def is_totp_setup_required(settings: Settings, *, user_id: int) -> bool:
@@ -65,14 +74,28 @@ def is_totp_setup_required(settings: Settings, *, user_id: int) -> bool:
             """,
             (user_id,),
         ).fetchone()
-    if row is None:
-        return False
-    return is_totp_setup_required_for_values(
-        role=row["role"] or "standard_user",
-        totp_secret=row["totp_secret"],
-        totp_setup_skipped_at=row["totp_setup_skipped_at"],
-        totp_setup_prompt_enabled=row["totp_setup_prompt_enabled"],
-    )
+        if row is None:
+            return False
+        effective_totp_secret = row["totp_secret"]
+        if effective_totp_secret:
+            try:
+                plain_secret, was_encrypted = decrypt_at_rest(str(effective_totp_secret), settings)
+            except (TypeError, ValueError):
+                effective_totp_secret = None
+            else:
+                effective_totp_secret = plain_secret or None
+                if plain_secret and not was_encrypted:
+                    connection.execute(
+                        "UPDATE users SET totp_secret = ?, updated_at = ? WHERE id = ?",
+                        (encrypt_at_rest(plain_secret, settings), utcnow_iso(), user_id),
+                    )
+                    connection.commit()
+        return is_totp_setup_required_for_values(
+            role=row["role"] or "standard_user",
+            totp_secret=effective_totp_secret,
+            totp_setup_skipped_at=row["totp_setup_skipped_at"],
+            totp_setup_prompt_enabled=row["totp_setup_prompt_enabled"],
+        )
 
 
 def _admin_visible_session_state(
@@ -425,6 +448,14 @@ def _parse_iso_datetime(value: object) -> datetime | None:
 
 
 def _delete_session_for_auth_expiry(connection, *, session_id: int, now: str) -> None:
+    from .services.account_access_service import revoke_download_sessions_for_auth_sessions
+
+    revoke_download_sessions_for_auth_sessions(
+        connection,
+        session_ids=[session_id],
+        now=now,
+        reason="auth_session_expired",
+    )
     connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     connection.execute(
         """
@@ -559,6 +590,14 @@ def destroy_session(settings: Settings, token: str | None) -> None:
             WHERE auth_session_id = ? AND revoked_at IS NULL
             """,
             (now, row["id"]),
+        )
+        from .services.account_access_service import revoke_download_sessions_for_auth_sessions
+
+        revoke_download_sessions_for_auth_sessions(
+            connection,
+            session_ids=[int(row["id"])],
+            now=now,
+            reason="auth_session_logout",
         )
         connection.commit()
     log_security_event(
@@ -761,6 +800,14 @@ def _revoke_session_ids(
     if not session_ids:
         return
     placeholders = ",".join("?" for _ in session_ids)
+    from .services.account_access_service import revoke_download_sessions_for_auth_sessions
+
+    revoke_download_sessions_for_auth_sessions(
+        connection,
+        session_ids=session_ids,
+        now=now,
+        reason=reason,
+    )
     revoke_sessions_sql = f"""
         UPDATE sessions
         SET revoked_at = ?, revoked_reason = ?, cleanup_confirmed_at = NULL
@@ -798,6 +845,28 @@ def cleanup_expired_sessions(connection, *, now_iso: str | None = None) -> None:
     retention_cutoff = (
         datetime.fromisoformat(current).astimezone(timezone.utc) - timedelta(days=SESSION_HISTORY_RETENTION_DAYS)
     ).isoformat()
+    connection.execute(
+        """
+        UPDATE download_sessions
+        SET revoked_at = COALESCE(revoked_at, ?),
+            last_error = COALESCE(last_error, 'auth_session_deleted')
+        WHERE auth_session_id IN (
+            SELECT id
+            FROM sessions
+            WHERE (
+                    revoked_at IS NOT NULL
+                    AND revoked_at <= ?
+                  )
+               OR (
+                    revoked_at IS NULL
+                    AND expires_at <= ?
+                  )
+        )
+          AND revoked_at IS NULL
+          AND completed_at IS NULL
+        """,
+        (current, retention_cutoff, retention_cutoff),
+    )
     connection.execute(
         """
         DELETE FROM native_playback_sessions

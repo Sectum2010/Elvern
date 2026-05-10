@@ -12,22 +12,13 @@ function createFieldToken() {
 }
 
 
-function normalizePurpose(value) {
-  return String(value || "secret")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "secret";
-}
-
-
 export function NonLoginSecretInput({
   autoComplete = "new-password",
-  purpose = "secret",
+  purpose: _purpose = "secret",
   ...inputProps
 }) {
   const tokenRef = useRef(createFieldToken());
-  const safePurpose = normalizePurpose(purpose);
-  const fieldName = `elvern-${safePurpose}-${tokenRef.current}`;
+  const fieldName = `elvern-secret-${tokenRef.current}`;
 
   return (
     <PasswordInput

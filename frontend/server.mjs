@@ -13,6 +13,11 @@ const distDir = path.join(__dirname, "dist");
 
 const frontendHost = process.env.ELVERN_FRONTEND_HOST || "127.0.0.1";
 const frontendPort = Number(process.env.ELVERN_FRONTEND_PORT || 4173);
+const configuredProxyBodyLimitBytes = Number(process.env.ELVERN_FRONTEND_PROXY_BODY_LIMIT_BYTES || 2 * 1024 * 1024);
+const proxyBodyLimitBytes =
+  Number.isFinite(configuredProxyBodyLimitBytes) && configuredProxyBodyLimitBytes > 0
+    ? configuredProxyBodyLimitBytes
+    : 2 * 1024 * 1024;
 const configuredBackendHost = process.env.ELVERN_BIND_HOST || "127.0.0.1";
 const backendHost =
   configuredBackendHost === "0.0.0.0" || configuredBackendHost === "::" || configuredBackendHost === "[::]"
@@ -64,10 +69,24 @@ const hopByHopHeaders = new Set([
   "upgrade",
 ]);
 
+const downloadSessionTokenPattern = /\/api\/download\/sessions\/[^/?#\s]+/g;
+
+
+class RequestBodyTooLargeError extends Error {
+  constructor(limitBytes) {
+    super(`Request body exceeds proxy limit of ${limitBytes} bytes`);
+    this.limitBytes = limitBytes;
+  }
+}
+
 
 function sendError(response, statusCode, message) {
   response.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
   response.end(message);
+}
+
+function redactSensitiveUrl(value) {
+  return String(value || "").replace(downloadSessionTokenPattern, "/api/download/sessions/[redacted]");
 }
 
 function normalizeUrlPrefix(value) {
@@ -121,9 +140,19 @@ async function readBody(request) {
   if (request.method === "GET" || request.method === "HEAD") {
     return undefined;
   }
+  const declaredLength = Number(request.headers["content-length"] || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > proxyBodyLimitBytes) {
+    throw new RequestBodyTooLargeError(proxyBodyLimitBytes);
+  }
+  let totalBytes = 0;
   const chunks = [];
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > proxyBodyLimitBytes) {
+      throw new RequestBodyTooLargeError(proxyBodyLimitBytes);
+    }
+    chunks.push(buffer);
   }
   return chunks.length > 0 ? Buffer.concat(chunks) : undefined;
 }
@@ -295,7 +324,14 @@ const server = http.createServer(async (request, response) => {
 
     await serveAsset(request, response);
   } catch (error) {
-    console.error("Elvern frontend server error", error);
+    if (error instanceof RequestBodyTooLargeError) {
+      sendError(response, 413, "Request body too large");
+      return;
+    }
+    console.error("Elvern frontend server error", {
+      url: redactSensitiveUrl(request.url),
+      error,
+    });
     sendError(response, 502, "Upstream request failed");
   }
 });

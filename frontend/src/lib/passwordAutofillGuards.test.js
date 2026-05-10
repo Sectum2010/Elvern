@@ -80,6 +80,15 @@ test("admin and signup password surfaces use the hardened non-login input", () =
 });
 
 
+test("non-login secret input never puts purpose or password-like words in DOM name or id", () => {
+  const source = fs.readFileSync(path.join(SRC_DIR, "components/NonLoginSecretInput.jsx"), "utf8");
+  assert.match(source, /fieldName\s*=\s*`elvern-secret-\$\{tokenRef\.current\}`/);
+  assert.doesNotMatch(source, /fieldName\s*=\s*`[^`]*purpose/i);
+  assert.doesNotMatch(source, /fieldName\s*=\s*`[^`]*password/i);
+  assert.doesNotMatch(source, /\b(?:name|id)\s*=\s*\{[^}]*purpose[^}]*\}/i);
+});
+
+
 test("destructive or admin password state is not persisted in browser storage", () => {
   const sensitiveStatePattern = /currentAdminPassword|deleteUserState|selfDeleteState|passwordEditor|createUserForm|password/i;
   const storagePattern = /(?:localStorage|sessionStorage)\s*\./;
@@ -93,4 +102,11 @@ test("destructive or admin password state is not persisted in browser storage", 
       );
     });
   }
+});
+
+
+test("invite code plaintext is not persisted in browser storage", () => {
+  const adminSource = fs.readFileSync(path.join(SRC_DIR, "pages/AdminPage.jsx"), "utf8");
+  const inviteStoragePattern = /(?:localStorage|sessionStorage)\s*\.[^\n]*(?:invite|Invite|INVITE)/;
+  assert.doesNotMatch(adminSource, inviteStoragePattern);
 });

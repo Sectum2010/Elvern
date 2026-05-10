@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import Settings, URL_PREFIX_PATTERN
 from .db import get_connection, utcnow_iso
+from .services.account_access_service import revoke_all_download_sessions
 from .spa_static import clear_manifest_cache
 
 
@@ -83,7 +84,7 @@ def resolve_url_prefix(settings: Settings, logger: logging.Logger) -> str:
             ),
         )
         with get_connection(settings) as connection:
-            connection.execute("DELETE FROM sessions")
+            _revoke_current_access(connection, now=utcnow_iso(), reason="url_prefix_forced_rotation")
             connection.commit()
         logger.warning("Forced URL prefix rotation via env var, all sessions revoked")
         logger.info("Generated new URL prefix: /%s/", new_prefix)
@@ -129,7 +130,7 @@ def rotate_url_prefix(
         ),
     )
     now = utcnow_iso()
-    connection.execute("DELETE FROM sessions")
+    _revoke_current_access(connection, now=now, reason="url_prefix_rotated")
     details_json = json.dumps({"old": old_prefix, "new": new_prefix}, sort_keys=True)
     connection.execute(
         """
@@ -150,6 +151,42 @@ def rotate_url_prefix(
         ),
     )
     return old_prefix, new_prefix
+
+
+def _revoke_current_access(connection, *, now: str, reason: str) -> None:
+    revoke_all_download_sessions(connection, now=now, reason=reason)
+    connection.execute(
+        """
+        UPDATE native_playback_sessions
+        SET revoked_at = COALESCE(revoked_at, ?)
+        WHERE revoked_at IS NULL
+          AND closed_at IS NULL
+        """,
+        (now,),
+    )
+    connection.execute(
+        """
+        UPDATE desktop_vlc_handoffs
+        SET revoked_at = COALESCE(revoked_at, ?)
+        WHERE revoked_at IS NULL
+        """,
+        (now,),
+    )
+    connection.execute(
+        """
+        UPDATE invite_codes
+        SET revoked_at = COALESCE(revoked_at, ?)
+        WHERE revoked_at IS NULL
+          AND used_at IS NULL
+          AND expires_at > ?
+        """,
+        (now, now),
+    )
+    connection.execute("DELETE FROM login_challenges")
+    connection.execute("DELETE FROM google_oauth_states")
+    connection.execute("DELETE FROM desktop_helper_verifications")
+    connection.execute("DELETE FROM assistant_attachment_external_open_tickets")
+    connection.execute("DELETE FROM sessions")
 
 
 def get_url_prefix_status(settings: Settings, prefix: str) -> dict[str, object]:

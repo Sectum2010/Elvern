@@ -297,6 +297,7 @@ TABLE_STATEMENTS = (
         user_id INTEGER NOT NULL,
         media_item_id INTEGER NOT NULL,
         auth_session_id INTEGER,
+        auth_session_required INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         completed_at TEXT,
@@ -881,6 +882,7 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "desktop_vlc_handoffs", "helper_vlc_detection_path", "TEXT")
     _ensure_column(connection, "desktop_vlc_handoffs", "helper_vlc_detection_checked_at", "TEXT")
     _ensure_column(connection, "desktop_vlc_handoffs", "resolved_at", "TEXT")
+    _ensure_column(connection, "download_sessions", "auth_session_required", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(connection, "client_devices", "helper_vlc_detection_state", "TEXT")
     _ensure_column(connection, "client_devices", "helper_vlc_detection_path", "TEXT")
     _ensure_column(connection, "client_devices", "helper_vlc_detection_checked_at", "TEXT")

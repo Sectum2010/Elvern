@@ -19,11 +19,14 @@ from backend.app.security import hash_session_token
 from backend.app.services.account_access_service import (
     create_user_with_invite,
     generate_invite_code,
+    create_download_session,
     get_download_access_for_user,
     is_item_download_allowed,
     update_download_access_for_user,
+    validate_download_session,
 )
 from backend.app.services.admin_service import create_user, delete_user, update_user
+from backend.app.services.log_redaction import redact_download_session_urls
 from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
     create_native_playback_session,
@@ -35,6 +38,7 @@ from backend.app.services.native_playback_service import (
     should_decouple_external_player_auth_session,
 )
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
+from backend.app.url_prefix_service import rotate_url_prefix
 
 
 def _admin_user(settings):
@@ -136,6 +140,51 @@ def _create_media_item(settings, *, relative_name: str = "movie.mp4") -> dict[st
         "resume_position_seconds": 0,
         "subtitles": [],
     }
+
+
+def _grant_download_for_item(settings, *, user_id: int, media_item_id: int) -> None:
+    with get_connection(settings) as connection:
+        shared_local_source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ? WHERE id = ?",
+            (shared_local_source_id, media_item_id),
+        )
+        connection.commit()
+    update_download_access_for_user(
+        settings,
+        user_id=user_id,
+        access_mode="selected",
+        media_item_ids=[media_item_id],
+        actor=_admin_user(settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+
+def _create_authorized_download_session(settings, *, username: str):
+    created = _create_standard_user(settings, username=username)
+    media_item = _create_media_item(settings, relative_name=f"{username}.mp4")
+    _grant_download_for_item(
+        settings,
+        user_id=int(created["id"]),
+        media_item_id=int(media_item["id"]),
+    )
+    session_user, auth_token = _issue_user_session(
+        settings,
+        username=username,
+        password="family-password",
+    )
+    session_payload = create_download_session(
+        settings,
+        user=session_user,
+        item_id=int(media_item["id"]),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    return created, media_item, session_user, auth_token, session_payload
 
 
 def _set_media_admin_display_fields(
@@ -2052,6 +2101,77 @@ def test_download_session_terminate_revokes_stream_authorization(initialized_set
     assert row is not None
     assert row["revoked_at"] is not None
     assert row["last_error"] == "download_terminated"
+
+
+def test_download_session_rejects_after_parent_auth_session_deleted(initialized_settings) -> None:
+    _created, _media_item, session_user, _auth_token, session_payload = _create_authorized_download_session(
+        initialized_settings,
+        username="download-parent-deleted",
+    )
+    with get_connection(initialized_settings) as connection:
+        connection.execute("DELETE FROM sessions WHERE id = ?", (session_user.session_id,))
+        connection.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        validate_download_session(
+            initialized_settings,
+            token=str(session_payload["session_token"]),
+            user=session_user,
+        )
+    assert exc.value.status_code == 403
+
+
+def test_download_session_rejects_after_logout_revokes_session(initialized_settings) -> None:
+    _created, _media_item, session_user, auth_token, session_payload = _create_authorized_download_session(
+        initialized_settings,
+        username="download-parent-logout",
+    )
+    destroy_session(initialized_settings, auth_token)
+
+    with pytest.raises(HTTPException) as exc:
+        validate_download_session(
+            initialized_settings,
+            token=str(session_payload["session_token"]),
+            user=session_user,
+        )
+    assert exc.value.status_code == 403
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT revoked_at, last_error FROM download_sessions WHERE id = ?",
+            (session_payload["session_id"],),
+        ).fetchone()
+    assert row["revoked_at"] is not None
+    assert row["last_error"] == "auth_session_logout"
+
+
+def test_download_session_rejects_after_url_prefix_rotation(initialized_settings) -> None:
+    _created, _media_item, session_user, _auth_token, session_payload = _create_authorized_download_session(
+        initialized_settings,
+        username="download-prefix-rotated",
+    )
+    with get_connection(initialized_settings) as connection:
+        rotate_url_prefix(initialized_settings, connection, actor_user_id=1, actor_username="admin")
+        connection.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        validate_download_session(
+            initialized_settings,
+            token=str(session_payload["session_token"]),
+            user=session_user,
+        )
+    assert exc.value.status_code == 403
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT revoked_at, last_error FROM download_sessions WHERE id = ?",
+            (session_payload["session_id"],),
+        ).fetchone()
+    assert row["revoked_at"] is not None
+    assert row["last_error"] == "url_prefix_rotated"
+
+
+def test_download_session_url_redaction_hides_token() -> None:
+    raw = "/api/download/sessions/super-secret-token-123?download=1"
+    assert redact_download_session_urls(raw) == "/api/download/sessions/[redacted]?download=1"
 
 
 def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initialized_settings) -> None:

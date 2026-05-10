@@ -42,6 +42,11 @@ path:**
    `localhost:8000` bypassing it.
 5. The bug only shows up in the public path. Always test there.
 
+`server.mjs` must not buffer unbounded request bodies before proxying to
+backend. The current proxy has a conservative non-GET/HEAD body size limit for
+normal JSON and form requests. Any future large upload path needs a streaming
+proxy design instead of raising that limit casually.
+
 ## 1. Project Thesis And Boundaries
 
 Elvern is a private media control plane. Its core job is to organize a private library and hand media off safely to the right playback path.
@@ -202,6 +207,27 @@ Before adding a new allowed host suffix, stop and check the SSRF risk. The
 allowlist should stay limited to Google-owned API, OAuth, static, and Drive CDN
 hosts that Elvern actually needs.
 
+## Download Token URLs
+
+Controlled desktop download mode should avoid placing the download token in the
+URL. Browser-native fallback still needs `/api/download/sessions/<token>`
+because a normal browser download cannot attach custom headers reliably.
+
+That fallback URL is visible to the authorized browser, browser history, and
+network tools. Treat it as sensitive: redact it as
+`/api/download/sessions/[redacted]` in logs, screenshots, support notes, and
+security reports. Do not paste raw fallback download URLs into docs or issues.
+
+## Backup Secrets
+
+Manual backups may contain secrets such as env values, OAuth tokens,
+session-related secrets, and database contents. Do not commit or share them.
+
+Auto encrypted backups are protected by a key derived from
+`ELVERN_SESSION_SECRET`. If that secret is lost or rotated, old auto-key backups
+may not be recoverable. For long-term/off-machine recovery, use a manual
+passphrase backup.
+
 ## 5. Rules For Creating New Files
 
 Create a new file when it gives a real owner a home.
@@ -342,14 +368,17 @@ The prefix can come from four places:
   `backend/data/url_prefix_state.json`.
 - Manual env override: set `ELVERN_URL_PREFIX` to a valid 8-24 character
   safe base32 value.
-- Admin Security panel rotation: generate a new prefix and revoke all sessions.
+- Admin Security panel rotation: generate a new prefix and revoke all current
+  access surfaces.
 - CLI rotation: `python -m backend.app.cli rotate-url-prefix`, also revoking all
-  sessions.
+  current access surfaces.
 
 `ELVERN_FORCE_NEW_URL_PREFIX=1` is an emergency manual operation only. Never add
 it to a default systemd unit, default docker compose file, or generated env
 example as an enabled value. Prefix age reminders are soft 180-day prompts by
-default. Every rotation revokes all auth sessions.
+default. Every rotation revokes auth sessions, download sessions, native and
+desktop handoffs, login challenges, OAuth states, current invite codes, and
+other short-lived tokenized access rows.
 
 ### URL prefix is server-only state
 
@@ -377,11 +406,14 @@ sent to `/setup/totp` after login unless they use the low-emphasis "Skip for
 now" action; a skip lasts 30 days, then the prompt returns. Standard users may
 enable 2FA, but are not required to.
 
-TOTP secrets are stored in the users table in plaintext for now; backup
-encryption is the future place to harden that storage. Recovery codes are shown
-once, generated as 10 one-time `elvn-...` values, and stored only as SHA-256
-hashes. Login challenges expire after 5 minutes. `totp_last_used_window`
-prevents replay of an already accepted TOTP window.
+TOTP secrets, including pending setup secrets, are encrypted at rest with
+`backend/app/services/at_rest_encryption.py`. Legacy plaintext secrets are
+lazily migrated on read; corrupted encrypted secrets fail closed and require
+re-enrollment. Recovery codes are shown once, generated as 10 one-time
+`elvn-...` values, and stored as `hmac1$` HMAC-SHA256 hashes peppered with
+`ELVERN_SESSION_SECRET`. Legacy SHA-256 recovery hashes are accepted only for
+existing codes until they are used. Login challenges expire after 5 minutes.
+`totp_last_used_window` prevents replay of an already accepted TOTP window.
 
 Break-glass recovery is available from the server shell with
 `python -m backend.app.cli admin-disable-totp <username>`. Admins can also reset

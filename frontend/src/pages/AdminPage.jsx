@@ -35,7 +35,6 @@ const ADMIN_STREAM_RELEVANT_EVENTS = [
   "user_enabled",
   "user_deleted",
 ];
-const ADMIN_INVITE_CODE_STORAGE_KEY = "elvern-admin-invite-codes";
 const ADMIN_SECTION_AUTO_COLLAPSE_MS = 15_000;
 const PLAYBACK_WORKERS_POLL_MS = 4_000;
 const RECOVERY_CHECKPOINT_LIMIT = 4;
@@ -108,36 +107,6 @@ function formatBytes(value) {
   }
   const decimals = unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
   return `${size.toFixed(decimals)} ${units[unitIndex]}`;
-}
-
-
-function readStoredInviteCodes() {
-  if (typeof window === "undefined") {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(ADMIN_INVITE_CODE_STORAGE_KEY) || "{}");
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-
-function writeStoredInviteCodes(inviteCodes) {
-  if (typeof window === "undefined") {
-    return;
-  }
-  window.localStorage.setItem(ADMIN_INVITE_CODE_STORAGE_KEY, JSON.stringify(inviteCodes));
-}
-
-
-function mergeInviteCodesWithLocalPlaintext(inviteCodes) {
-  const stored = readStoredInviteCodes();
-  return inviteCodes.map((inviteCode) => ({
-    ...inviteCode,
-    code: inviteCode.code || stored[String(inviteCode.id)]?.code || null,
-  }));
 }
 
 
@@ -540,7 +509,7 @@ export function AdminPage() {
   async function loadInviteCodes() {
     try {
       const payload = await apiRequest("/api/admin/invite-codes");
-      setInviteCodes(mergeInviteCodesWithLocalPlaintext(payload.invite_codes || []));
+      setInviteCodes(payload.invite_codes || []);
     } catch (requestError) {
       setBanner({
         tone: "error",
@@ -1533,15 +1502,10 @@ export function AdminPage() {
     setBanner(null);
     try {
       const payload = await apiRequest("/api/admin/invite-codes", { method: "POST" });
-      const stored = readStoredInviteCodes();
-      if (payload.code) {
-        stored[String(payload.id)] = {
-          code: payload.code,
-          expires_at: payload.expires_at,
-        };
-        writeStoredInviteCodes(stored);
-      }
-      await loadInviteCodes();
+      setInviteCodes((current) => [
+        payload,
+        ...current.filter((inviteCode) => inviteCode.id !== payload.id),
+      ]);
       setRevealedInviteIds((current) => ({ ...current, [payload.id]: false }));
       setBanner({ tone: "success", text: "Invite code generated." });
     } catch (requestError) {
@@ -1561,9 +1525,6 @@ export function AdminPage() {
     }
     try {
       await apiRequest(`/api/admin/invite-codes/${inviteCode.id}/display`, { method: "DELETE" });
-      const stored = readStoredInviteCodes();
-      delete stored[String(inviteCode.id)];
-      writeStoredInviteCodes(stored);
       await loadInviteCodes();
       setBanner({ tone: "success", text: "Invite code hidden." });
     } catch (requestError) {
@@ -3118,7 +3079,10 @@ export function AdminPage() {
           Backups protect Elvern runtime state. They do not include movie files, poster libraries, or playback/transcode cache.
         </p>
         <p className="form-error">
-          Backups may contain secrets. Treat checkpoint folders as private.
+          Manual backups may contain secrets such as env values, OAuth tokens, session-related secrets, and database contents. Do not commit or share them.
+        </p>
+        <p className="page-subnote">
+          Auto encrypted backups are protected by a key derived from ELVERN_SESSION_SECRET. If that secret is lost or rotated, old auto-key backups may not be recoverable. For long-term/off-machine recovery, use a manual passphrase backup.
         </p>
         <div className="admin-list__actions">
           <button
@@ -3510,9 +3474,12 @@ export function AdminPage() {
 	              </section>
 	              <section className="settings-card">
 	                <div className="settings-inline-header">
-	                  <div>
-	                    <h2>Generate invite code</h2>
-	                    <p className="page-subnote">Codes expire after 30 minutes and can be used once.</p>
+		                  <div>
+		                    <h2>Generate invite code</h2>
+		                    <p className="page-subnote">
+                          Codes expire after 30 minutes and can be used once. Invite codes are shown only when generated.
+                          Copy them now; they cannot be revealed again after this page is closed.
+                        </p>
 	                  </div>
 	                  <button className="primary-button" disabled={invitePending} onClick={handleGenerateInviteCode} type="button">
 	                    {invitePending ? "Generating..." : "Generate invite code"}
@@ -3544,7 +3511,7 @@ export function AdminPage() {
                                       name={`elvern-invite-code-${inviteCode.id}`}
 		                                  readOnly
 		                                  type={inviteCode.code && !isRevealed ? "password" : "text"}
-		                                  value={inviteCode.code || "Code is only available in this browser"}
+			                                  value={inviteCode.code || "Code is only shown when generated"}
 		                                />
 		                                <button
 		                                  aria-label={isRevealed ? "Hide invite code" : "Reveal invite code"}
@@ -3633,6 +3600,9 @@ export function AdminPage() {
               <p className="page-subnote">
                 Choose a passphrase to encrypt this backup. You will need this passphrase to inspect or restore later.
                 Elvern cannot recover lost passphrases.
+              </p>
+              <p className="form-error">
+                Manual backups may contain secrets such as env values, OAuth tokens, session-related secrets, and database contents. Do not commit or share them.
               </p>
               <NonLoginSecretInput
                 autoComplete="new-password"

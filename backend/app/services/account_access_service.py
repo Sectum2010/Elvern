@@ -593,6 +593,7 @@ def create_download_session(
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     expires_at = (now_dt + timedelta(minutes=DOWNLOAD_SESSION_TTL_MINUTES)).isoformat()
+    auth_session_required = 1 if user.session_id is not None else 0
     with get_connection(settings) as connection:
         cursor = connection.execute(
             """
@@ -601,11 +602,12 @@ def create_download_session(
                 user_id,
                 media_item_id,
                 auth_session_id,
+                auth_session_required,
                 created_at,
                 expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (token_hash, user.id, item_id, user.session_id, now, expires_at),
+            (token_hash, user.id, item_id, user.session_id, auth_session_required, now, expires_at),
         )
         connection.commit()
         session_id = int(cursor.lastrowid)
@@ -660,6 +662,7 @@ def validate_download_session(
                 d.user_id,
                 d.media_item_id,
                 d.auth_session_id,
+                d.auth_session_required,
                 d.expires_at,
                 d.revoked_at,
                 d.completed_at,
@@ -682,22 +685,25 @@ def validate_download_session(
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download session not found")
-        if int(row["user_id"]) != int(user.id) or (
-            row["auth_session_id"] is not None and int(row["auth_session_id"]) != int(user.session_id or 0)
-        ):
+        auth_session_required = bool(row["auth_session_required"])
+        if int(row["user_id"]) != int(user.id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is not valid for this session")
+        if auth_session_required and row["auth_session_id"] is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is detached from its auth session")
+        if auth_session_required and int(row["auth_session_id"]) != int(user.session_id or 0):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is not valid for this session")
+        if auth_session_required and (
+            row["auth_session_revoked_at"] is not None
+            or row["auth_session_expires_at"] is None
+            or str(row["auth_session_expires_at"]) <= now
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Auth session is no longer active")
         if row["revoked_at"] is not None or row["completed_at"] is not None or (
             not allow_expired_download_session and str(row["expires_at"]) <= now
         ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is no longer active")
         if not bool(row["user_enabled"]):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
-        if row["auth_session_id"] is not None and (
-            row["auth_session_revoked_at"] is not None
-            or row["auth_session_expires_at"] is None
-            or str(row["auth_session_expires_at"]) <= now
-        ):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Auth session is no longer active")
     if not is_item_download_allowed(settings, user_id=user.id, item_id=int(row["media_item_id"])):
         mark_download_session_failed(
             settings,
@@ -833,7 +839,7 @@ def mark_download_session_terminated(
     now = utcnow_iso()
     with get_connection(settings) as connection:
         query = """
-            SELECT id, user_id, media_item_id, auth_session_id
+            SELECT id, user_id, media_item_id, auth_session_id, auth_session_required
             FROM download_sessions
             WHERE session_token_hash = ?
             """
@@ -845,9 +851,12 @@ def mark_download_session_terminated(
         row = connection.execute(query, params).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download session not found")
-        if int(row["user_id"]) != int(user.id) or (
-            row["auth_session_id"] is not None and int(row["auth_session_id"]) != int(user.session_id or 0)
-        ):
+        auth_session_required = bool(row["auth_session_required"])
+        if int(row["user_id"]) != int(user.id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is not valid for this session")
+        if auth_session_required and row["auth_session_id"] is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is detached from its auth session")
+        if auth_session_required and int(row["auth_session_id"]) != int(user.session_id or 0):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is not valid for this session")
         connection.execute(
             """
@@ -876,3 +885,62 @@ def mark_download_session_terminated(
 def safe_download_filename(value: str | None) -> str:
     filename = PurePath(value or "movie").name.strip()
     return filename or "movie"
+
+
+def revoke_download_sessions_for_auth_sessions(
+    connection,
+    *,
+    session_ids: list[int],
+    now: str,
+    reason: str,
+) -> None:
+    if not session_ids:
+        return
+    placeholders = ",".join("?" for _ in session_ids)
+    sql = f"""
+        UPDATE download_sessions
+        SET revoked_at = COALESCE(revoked_at, ?),
+            last_error = COALESCE(last_error, ?)
+        WHERE auth_session_id IN ({placeholders})
+          AND revoked_at IS NULL
+          AND completed_at IS NULL
+        """  # nosec B608 - placeholders generated from trusted session_ids length
+    connection.execute(sql, (now, reason, *session_ids))
+
+
+def revoke_download_sessions_for_user(
+    connection,
+    *,
+    user_id: int,
+    now: str,
+    reason: str,
+) -> None:
+    connection.execute(
+        """
+        UPDATE download_sessions
+        SET revoked_at = COALESCE(revoked_at, ?),
+            last_error = COALESCE(last_error, ?)
+        WHERE user_id = ?
+          AND revoked_at IS NULL
+          AND completed_at IS NULL
+        """,
+        (now, reason, user_id),
+    )
+
+
+def revoke_all_download_sessions(
+    connection,
+    *,
+    now: str,
+    reason: str,
+) -> None:
+    connection.execute(
+        """
+        UPDATE download_sessions
+        SET revoked_at = COALESCE(revoked_at, ?),
+            last_error = COALESCE(last_error, ?)
+        WHERE revoked_at IS NULL
+          AND completed_at IS NULL
+        """,
+        (now, reason),
+    )

@@ -192,6 +192,10 @@ def admin_rotate_url_prefix(
         current_admin_password=payload.current_admin_password,
     )
     with get_connection(settings) as connection:
+        auth_session_ids = [
+            int(row["id"])
+            for row in connection.execute("SELECT id FROM sessions").fetchall()
+        ]
         _old_prefix, new_prefix = rotate_url_prefix(
             settings,
             connection,
@@ -199,6 +203,11 @@ def admin_rotate_url_prefix(
             actor_username=user.username,
         )
         connection.commit()
+    manager = getattr(request.app.state, "mobile_playback_manager", None)
+    invalidate_auth_session = getattr(manager, "invalidate_auth_session", None)
+    if callable(invalidate_auth_session):
+        for auth_session_id in auth_session_ids:
+            invalidate_auth_session(auth_session_id, reason="admin_revoked")
     request.app.state.url_prefix = new_prefix
     mount_spa(request.app, prefix=new_prefix)
     return AdminUrlPrefixRotateResponse(new_prefix=new_prefix, session_revoked=True)

@@ -27,7 +27,10 @@ from .backup_encryption import (
 
 BACKUP_FORMAT_VERSION = 1
 RESTORE_PLAN_FORMAT_VERSION = 1
-BACKUP_WARNING = "This backup may contain secrets. Do not commit or share it."
+BACKUP_WARNING = (
+    "Manual backups may contain secrets such as env values, OAuth tokens, "
+    "session-related secrets, and database contents. Do not commit or share them."
+)
 
 
 def _utc_now() -> datetime:

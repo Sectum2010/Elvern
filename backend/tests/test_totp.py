@@ -8,13 +8,16 @@ import pyotp
 
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.security import hash_password
+from backend.app.services.at_rest_encryption import decrypt_at_rest
 from backend.app.services.totp_service import (
     CHALLENGE_TOKEN_TTL_SECONDS,
     RECOVERY_CODE_COUNT,
+    RECOVERY_CODE_HASH_PREFIX,
     build_provisioning_uri,
     generate_recovery_codes,
     generate_totp_secret,
     hash_recovery_code,
+    legacy_hash_recovery_code,
     normalize_recovery_input,
     render_qr_svg,
     verify_totp_code,
@@ -101,9 +104,17 @@ class TestRecoveryCodes:
     def test_format_is_elvn_dashed(self) -> None:
         assert all(re.fullmatch(r"elvn(-[a-z2-9]{4}){3}", code) for code in generate_recovery_codes())
 
-    def test_normalize_and_hash_are_deterministic(self) -> None:
+    def test_normalize_and_hash_are_deterministic(self, initialized_settings) -> None:
         assert normalize_recovery_input(" ELVN-ABCD-EFGH-JKMN ") == "elvn-abcd-efgh-jkmn"
-        assert hash_recovery_code("ELVN-ABCD-EFGH-JKMN") == hash_recovery_code("elvn-abcd-efgh-jkmn")
+        assert hash_recovery_code("ELVN-ABCD-EFGH-JKMN", initialized_settings) == hash_recovery_code(
+            "elvn-abcd-efgh-jkmn",
+            initialized_settings,
+        )
+
+    def test_new_hash_uses_hmac_marker(self, initialized_settings) -> None:
+        hashed = hash_recovery_code("elvn-abcd-efgh-jkmn", initialized_settings)
+        assert hashed.startswith(RECOVERY_CODE_HASH_PREFIX)
+        assert hashed != legacy_hash_recovery_code("elvn-abcd-efgh-jkmn")
 
 
 class TestLoginFlow:
@@ -122,7 +133,7 @@ class TestLoginFlow:
         response = _login(client)
         assert response.json()["totp_setup_required"] is False
 
-    def test_admin_skipped_setup_does_not_prompt_but_remains_available(self, client, initialized_settings) -> None:
+    def test_admin_skipped_over_30_days_forces_setup_again(self, client, initialized_settings) -> None:
         assert _login(client).status_code == 200
         old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
         with get_connection(initialized_settings) as connection:
@@ -133,7 +144,7 @@ class TestLoginFlow:
             connection.commit()
         _logout(client)
         response = _login(client)
-        assert response.json()["totp_setup_required"] is False
+        assert response.json()["totp_setup_required"] is True
         status = client.get("/api/auth/totp/status")
         assert status.status_code == 200
         assert status.json()["setup_available"] is True
@@ -204,6 +215,29 @@ class TestLoginFlow:
         second = client.post("/api/auth/login/totp", json={"challenge_token": second_challenge, "code": codes[0]})
         assert second.status_code == 401
 
+    def test_legacy_sha256_recovery_code_is_accepted_once(self, client, initialized_settings) -> None:
+        _secret, _codes = _enable_totp(client, initialized_settings)
+        legacy_code = "elvn-abcd-efgh-jkmn"
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                """
+                INSERT INTO user_recovery_codes (user_id, code_hash, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (1, legacy_hash_recovery_code(legacy_code), utcnow_iso()),
+            )
+            connection.commit()
+        _logout(client)
+
+        challenge = _login(client).json()["challenge_token"]
+        first = client.post("/api/auth/login/totp", json={"challenge_token": challenge, "code": legacy_code})
+        assert first.status_code == 200, first.text
+        _logout(client)
+
+        second_challenge = _login(client).json()["challenge_token"]
+        second = client.post("/api/auth/login/totp", json={"challenge_token": second_challenge, "code": legacy_code})
+        assert second.status_code == 401
+
 
 class TestSetupFlow:
     def test_setup_initiation_returns_qr_and_secret(self, client) -> None:
@@ -213,6 +247,19 @@ class TestSetupFlow:
         payload = response.json()
         assert payload["secret"]
         assert "<svg" in payload["qr_svg"]
+
+    def test_pending_secret_is_stored_encrypted(self, client, initialized_settings) -> None:
+        assert _login(client).status_code == 200
+        response = client.post("/api/auth/totp/setup")
+        assert response.status_code == 200
+        secret = response.json()["secret"]
+        with get_connection(initialized_settings) as connection:
+            stored = connection.execute(
+                "SELECT secret FROM totp_pending_secrets WHERE user_id = 1",
+            ).fetchone()[0]
+        assert stored != secret
+        assert str(stored).startswith("fernet1$")
+        assert decrypt_at_rest(stored, initialized_settings) == (secret, True)
 
     def test_setup_verify_with_wrong_code_does_not_enable(self, client, initialized_settings) -> None:
         assert _login(client).status_code == 200
@@ -232,6 +279,67 @@ class TestSetupFlow:
             ).fetchone()[0]
         assert prompt_enabled == 1
 
+    def test_setup_stores_encrypted_totp_secret(self, client, initialized_settings) -> None:
+        secret, _codes = _enable_totp(client, initialized_settings)
+        with get_connection(initialized_settings) as connection:
+            stored = connection.execute(
+                "SELECT totp_secret FROM users WHERE username = ?",
+                ("admin",),
+            ).fetchone()[0]
+        assert stored != secret
+        assert str(stored).startswith("fernet1$")
+        assert decrypt_at_rest(stored, initialized_settings) == (secret, True)
+
+    def test_legacy_plaintext_totp_secret_migrates_on_login(self, client, initialized_settings) -> None:
+        secret = generate_totp_secret()
+        now = utcnow_iso()
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                """
+                UPDATE users
+                SET totp_secret = ?, totp_enabled_at = ?, totp_last_used_window = NULL,
+                    totp_setup_prompt_enabled = 1, updated_at = ?
+                WHERE username = ?
+                """,
+                (secret, now, now, "admin"),
+            )
+            connection.commit()
+        response = _login(client)
+        assert response.status_code == 200
+        assert response.json()["session"] == "pending_totp"
+        with get_connection(initialized_settings) as connection:
+            stored = connection.execute(
+                "SELECT totp_secret FROM users WHERE username = ?",
+                ("admin",),
+            ).fetchone()[0]
+        assert stored != secret
+        assert str(stored).startswith("fernet1$")
+        assert decrypt_at_rest(stored, initialized_settings) == (secret, True)
+
+    def test_corrupted_encrypted_totp_secret_requires_reenrollment(self, client, initialized_settings) -> None:
+        now = utcnow_iso()
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                """
+                UPDATE users
+                SET totp_secret = ?, totp_enabled_at = ?, totp_setup_prompt_enabled = 1, updated_at = ?
+                WHERE username = ?
+                """,
+                ("fernet1$corrupted", now, now, "admin"),
+            )
+            connection.commit()
+        response = _login(client)
+        assert response.status_code == 200
+        assert response.json()["session"] == "ok"
+        assert response.json()["totp_setup_required"] is True
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                "SELECT totp_secret, totp_setup_prompt_enabled FROM users WHERE username = ?",
+                ("admin",),
+            ).fetchone()
+        assert row["totp_secret"] is None
+        assert row["totp_setup_prompt_enabled"] == 1
+
 
 class TestDisableAndAdminReset:
     def test_admin_disable_other_user_requires_admin_password(self, client, initialized_settings) -> None:
@@ -239,7 +347,8 @@ class TestDisableAndAdminReset:
         response = client.post("/api/admin/users/1/2fa/disable", json={"current_admin_password": "wrong"})
         assert response.status_code == 401
         with get_connection(initialized_settings) as connection:
-            assert connection.execute("SELECT totp_secret FROM users WHERE id = 1").fetchone()[0] == secret
+            stored = connection.execute("SELECT totp_secret FROM users WHERE id = 1").fetchone()[0]
+        assert decrypt_at_rest(stored, initialized_settings) == (secret, True)
 
     def test_admin_disable_other_user_clears_secret_codes_and_requirement(self, client, initialized_settings) -> None:
         _enable_totp(client, initialized_settings)

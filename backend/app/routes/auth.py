@@ -21,6 +21,7 @@ from ..db import get_connection, utcnow_iso
 from ..models import AuthenticatedUser
 from ..services.account_access_service import create_password_help_request, create_user_with_invite
 from ..services.audit_service import log_audit_event
+from ..services.at_rest_encryption import decrypt_at_rest, encrypt_at_rest
 from ..services.rate_limiter_service import count_recent_failures
 from ..services.security_event_service import log_security_event
 from ..services.totp_service import (
@@ -33,7 +34,7 @@ from ..services.totp_service import (
     generate_totp_secret,
     hash_challenge_token,
     hash_recovery_code,
-    normalize_recovery_input,
+    recovery_code_hash_candidates,
     render_qr_svg,
     verify_totp_code,
 )
@@ -130,27 +131,29 @@ def _create_challenge(settings, *, user: AuthenticatedUser, ip_address: str, use
     return token
 
 
-def _insert_recovery_codes(connection, *, user_id: int, codes: list[str]) -> None:
+def _insert_recovery_codes(settings, connection, *, user_id: int, codes: list[str]) -> None:
     now = utcnow_iso()
     connection.executemany(
         """
         INSERT INTO user_recovery_codes (user_id, code_hash, created_at)
         VALUES (?, ?, ?)
         """,
-        [(user_id, hash_recovery_code(code), now) for code in codes],
+        [(user_id, hash_recovery_code(code, settings), now) for code in codes],
     )
 
 
-def _consume_recovery_code(connection, *, user_id: int, code: str) -> bool:
-    code_hash = hash_recovery_code(normalize_recovery_input(code))
+def _consume_recovery_code(settings, connection, *, user_id: int, code: str) -> bool:
+    hardened_hash, legacy_hash = recovery_code_hash_candidates(code, settings)
     row = connection.execute(
         """
         SELECT id
         FROM user_recovery_codes
-        WHERE user_id = ? AND code_hash = ? AND used_at IS NULL
+        WHERE user_id = ?
+          AND code_hash IN (?, ?)
+          AND used_at IS NULL
         LIMIT 1
         """,
-        (user_id, code_hash),
+        (user_id, hardened_hash, legacy_hash),
     ).fetchone()
     if row is None:
         return False
@@ -159,6 +162,57 @@ def _consume_recovery_code(connection, *, user_id: int, code: str) -> bool:
         (utcnow_iso(), row["id"]),
     )
     return True
+
+
+def _clear_user_totp_for_reenrollment(connection, *, user_id: int) -> None:
+    now = utcnow_iso()
+    connection.execute(
+        """
+        UPDATE users
+        SET totp_secret = NULL,
+            totp_enabled_at = NULL,
+            totp_last_used_window = NULL,
+            totp_setup_prompt_enabled = 1,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (now, user_id),
+    )
+    connection.execute("DELETE FROM user_recovery_codes WHERE user_id = ?", (user_id,))
+
+
+def _resolve_user_totp_secret(settings, connection, *, user_id: int, stored_secret: object) -> str | None:
+    if not stored_secret:
+        return None
+    try:
+        secret, was_encrypted = decrypt_at_rest(str(stored_secret), settings)
+    except (TypeError, ValueError):
+        _clear_user_totp_for_reenrollment(connection, user_id=user_id)
+        return None
+    if not secret:
+        return None
+    if not was_encrypted:
+        connection.execute(
+            "UPDATE users SET totp_secret = ?, updated_at = ? WHERE id = ?",
+            (encrypt_at_rest(secret, settings), utcnow_iso(), user_id),
+        )
+    return secret
+
+
+def _resolve_pending_totp_secret(settings, connection, *, user_id: int, stored_secret: object) -> str | None:
+    if not stored_secret:
+        return None
+    try:
+        secret, was_encrypted = decrypt_at_rest(str(stored_secret), settings)
+    except (TypeError, ValueError):
+        connection.execute("DELETE FROM totp_pending_secrets WHERE user_id = ?", (user_id,))
+        return None
+    if secret and not was_encrypted:
+        connection.execute(
+            "UPDATE totp_pending_secrets SET secret = ? WHERE user_id = ?",
+            (encrypt_at_rest(secret, settings), user_id),
+        )
+    return secret or None
 
 
 def _verify_user_password(settings, connection, *, user_id: int, password: str) -> bool:
@@ -335,19 +389,33 @@ def login(payload: AuthLoginRequest, request: Request, response: Response) -> Au
         )
     totp_row = _get_totp_row(settings, user_id=user.id)
     if totp_row is not None and totp_row["totp_secret"]:
-        challenge_token = _create_challenge(
-            settings,
-            user=user,
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        return AuthUserEnvelope(
-            session="pending_totp",
-            challenge_token=challenge_token,
-            expires_in_seconds=CHALLENGE_TOKEN_TTL_SECONDS,
-            totp_setup_required=False,
-            user=None,
-        )
+        with get_connection(settings) as connection:
+            fresh_totp_row = connection.execute(
+                "SELECT totp_secret FROM users WHERE id = ? LIMIT 1",
+                (user.id,),
+            ).fetchone()
+            totp_secret = _resolve_user_totp_secret(
+                settings,
+                connection,
+                user_id=user.id,
+                stored_secret=fresh_totp_row["totp_secret"] if fresh_totp_row else None,
+            )
+            connection.commit()
+        if totp_secret:
+            challenge_token = _create_challenge(
+                settings,
+                user=user,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            return AuthUserEnvelope(
+                session="pending_totp",
+                challenge_token=challenge_token,
+                expires_in_seconds=CHALLENGE_TOKEN_TTL_SECONDS,
+                totp_setup_required=False,
+                user=None,
+            )
+        totp_row = _get_totp_row(settings, user_id=user.id)
     token = create_session(
         settings,
         user,
@@ -422,14 +490,25 @@ def login_totp(payload: TotpLoginRequest, request: Request, response: Response) 
         totp_secret = challenge["totp_secret"]
         if not totp_secret:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="totp_not_enabled")
+        totp_secret = _resolve_user_totp_secret(
+            settings,
+            connection,
+            user_id=int(challenge["user_id"]),
+            stored_secret=challenge["totp_secret"],
+        )
+        if not totp_secret:
+            connection.execute("DELETE FROM login_challenges WHERE challenge_token_hash = ?", (token_hash,))
+            connection.commit()
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="totp_setup_required")
         valid, new_window = verify_totp_code(
-            str(totp_secret),
+            totp_secret,
             payload.code.strip(),
             challenge["totp_last_used_window"],
         )
         recovery_used = False
         if not valid:
             recovery_used = _consume_recovery_code(
+                settings,
                 connection,
                 user_id=int(challenge["user_id"]),
                 code=payload.code,
@@ -490,9 +569,21 @@ def login_totp(payload: TotpLoginRequest, request: Request, response: Response) 
 @router.post("/totp/setup", response_model=TotpSetupStartResponse)
 def start_totp_setup(request: Request, user: AuthenticatedUser = CurrentUser) -> TotpSetupStartResponse:
     settings = request.app.state.settings
-    row = _get_totp_row(settings, user_id=user.id)
-    if row is not None and row["totp_secret"]:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="already_enabled")
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            "SELECT totp_secret FROM users WHERE id = ? LIMIT 1",
+            (user.id,),
+        ).fetchone()
+        if row is not None and row["totp_secret"]:
+            existing_secret = _resolve_user_totp_secret(
+                settings,
+                connection,
+                user_id=user.id,
+                stored_secret=row["totp_secret"],
+            )
+            connection.commit()
+            if existing_secret:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="already_enabled")
     secret = generate_totp_secret()
     now = utcnow_iso()
     with get_connection(settings) as connection:
@@ -503,7 +594,7 @@ def start_totp_setup(request: Request, user: AuthenticatedUser = CurrentUser) ->
             INSERT OR REPLACE INTO totp_pending_secrets (user_id, secret, created_at)
             VALUES (?, ?, ?)
             """,
-            (user.id, secret, now),
+            (user.id, encrypt_at_rest(secret, settings), now),
         )
         connection.commit()
     uri = build_provisioning_uri(secret, user.username)
@@ -536,7 +627,16 @@ def verify_totp_setup(
             connection.execute("DELETE FROM totp_pending_secrets WHERE user_id = ?", (user.id,))
             connection.commit()
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="setup_expired")
-        valid, window = verify_totp_code(str(row["secret"]), payload.code.strip(), None)
+        secret = _resolve_pending_totp_secret(
+            settings,
+            connection,
+            user_id=user.id,
+            stored_secret=row["secret"],
+        )
+        if not secret:
+            connection.commit()
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="setup_expired")
+        valid, window = verify_totp_code(secret, payload.code.strip(), None)
         if not valid:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_code")
         codes = generate_recovery_codes()
@@ -550,10 +650,10 @@ def verify_totp_setup(
                 updated_at = ?
             WHERE id = ?
             """,
-            (row["secret"], now, window, now, user.id),
+            (encrypt_at_rest(secret, settings), now, window, now, user.id),
         )
         connection.execute("DELETE FROM user_recovery_codes WHERE user_id = ?", (user.id,))
-        _insert_recovery_codes(connection, user_id=user.id, codes=codes)
+        _insert_recovery_codes(settings, connection, user_id=user.id, codes=codes)
         connection.execute("DELETE FROM totp_pending_secrets WHERE user_id = ?", (user.id,))
         connection.commit()
     log_security_event(settings, event_kind="totp_enabled", actor_user_id=user.id, actor_username=user.username)
@@ -587,16 +687,23 @@ def totp_status(request: Request, user: AuthenticatedUser = CurrentUser) -> Totp
             "SELECT totp_secret, totp_enabled_at, totp_setup_prompt_enabled FROM users WHERE id = ? LIMIT 1",
             (user.id,),
         ).fetchone()
+        totp_secret = _resolve_user_totp_secret(
+            settings,
+            connection,
+            user_id=user.id,
+            stored_secret=row["totp_secret"] if row else None,
+        )
         remaining = connection.execute(
             "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL",
             (user.id,),
         ).fetchone()[0]
+        connection.commit()
     return TotpStatusResponse(
-        enabled=bool(row and row["totp_secret"]),
-        enabled_at=row["totp_enabled_at"] if row else None,
+        enabled=bool(totp_secret),
+        enabled_at=row["totp_enabled_at"] if row and totp_secret else None,
         recovery_codes_remaining=int(remaining),
         setup_required=is_totp_setup_required(settings, user_id=user.id),
-        setup_available=bool(row and row["totp_setup_prompt_enabled"] and not row["totp_secret"]),
+        setup_available=bool(row and row["totp_setup_prompt_enabled"] and not totp_secret),
     )
 
 
@@ -616,9 +723,18 @@ def disable_totp(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not_enabled")
         if not _verify_user_password(settings, connection, user_id=user.id, password=payload.password):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_password")
-        valid, window = verify_totp_code(str(row["totp_secret"]), payload.totp_or_recovery.strip(), row["totp_last_used_window"])
+        totp_secret = _resolve_user_totp_secret(
+            settings,
+            connection,
+            user_id=user.id,
+            stored_secret=row["totp_secret"],
+        )
+        if not totp_secret:
+            connection.commit()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="totp_setup_required")
+        valid, window = verify_totp_code(totp_secret, payload.totp_or_recovery.strip(), row["totp_last_used_window"])
         if not valid:
-            valid = _consume_recovery_code(connection, user_id=user.id, code=payload.totp_or_recovery)
+            valid = _consume_recovery_code(settings, connection, user_id=user.id, code=payload.totp_or_recovery)
         if not valid:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_totp_code")
         now = utcnow_iso()
@@ -655,12 +771,21 @@ def regenerate_recovery_codes(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not_enabled")
         if not _verify_user_password(settings, connection, user_id=user.id, password=payload.password):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_password")
-        valid, window = verify_totp_code(str(row["totp_secret"]), payload.totp_code.strip(), row["totp_last_used_window"])
+        totp_secret = _resolve_user_totp_secret(
+            settings,
+            connection,
+            user_id=user.id,
+            stored_secret=row["totp_secret"],
+        )
+        if not totp_secret:
+            connection.commit()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="totp_setup_required")
+        valid, window = verify_totp_code(totp_secret, payload.totp_code.strip(), row["totp_last_used_window"])
         if not valid:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_totp_code")
         codes = generate_recovery_codes()
         connection.execute("DELETE FROM user_recovery_codes WHERE user_id = ?", (user.id,))
-        _insert_recovery_codes(connection, user_id=user.id, codes=codes)
+        _insert_recovery_codes(settings, connection, user_id=user.id, codes=codes)
         connection.execute(
             "UPDATE users SET totp_last_used_window = ?, updated_at = ? WHERE id = ?",
             (window, utcnow_iso(), user.id),

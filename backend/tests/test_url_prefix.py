@@ -144,6 +144,105 @@ class TestRotateUrlPrefix:
             connection.commit()
             assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
 
+    def test_rotation_revokes_transient_access_surfaces(self, initialized_settings) -> None:
+        save_state(initialized_settings, UrlPrefixState(prefix="abcdefgh", generated_at=utcnow_iso(), rotated_count=0))
+        now = utcnow_iso()
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        with get_connection(initialized_settings) as connection:
+            session_cursor = connection.execute(
+                """
+                INSERT INTO sessions (user_id, session_token_hash, created_at, expires_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (1, "rotate-session-hash", now, future, now),
+            )
+            session_id = int(session_cursor.lastrowid)
+            media_cursor = connection.execute(
+                """
+                INSERT INTO media_items (
+                    title,
+                    original_filename,
+                    file_path,
+                    source_kind,
+                    file_size,
+                    file_mtime,
+                    created_at,
+                    updated_at,
+                    last_scanned_at
+                ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?)
+                """,
+                (
+                    "Rotate Movie",
+                    "rotate.mp4",
+                    str(Path(initialized_settings.media_root) / "rotate.mp4"),
+                    1,
+                    1.0,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            media_id = int(media_cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO download_sessions (
+                    session_token_hash, user_id, media_item_id, auth_session_id, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("download-hash", 1, media_id, session_id, now, future),
+            )
+            connection.execute(
+                """
+                INSERT INTO native_playback_sessions (
+                    session_id, access_token_hash, user_id, media_item_id,
+                    created_at, expires_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("native-session", "native-hash", 1, media_id, now, future, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO desktop_vlc_handoffs (
+                    handoff_id, access_token_hash, auth_session_id, user_id, media_item_id,
+                    platform, strategy, resolved_target, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("handoff-id", "handoff-hash", session_id, 1, media_id, "linux", "backend_url", "vlc", now, future),
+            )
+            connection.execute(
+                """
+                INSERT INTO login_challenges (
+                    challenge_token_hash, user_id, created_at, expires_at_unix, ip_address, user_agent
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("challenge-hash", 1, now, datetime.now(timezone.utc).timestamp() + 300, "127.0.0.1", "pytest"),
+            )
+            connection.execute(
+                """
+                INSERT INTO google_oauth_states (state_token, user_id, created_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("oauth-state", 1, now, future),
+            )
+            connection.execute(
+                """
+                INSERT INTO invite_codes (code_hash, created_by_user_id, created_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("invite-hash", 1, now, future),
+            )
+
+            rotate_url_prefix(initialized_settings, connection)
+            connection.commit()
+
+            assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+            assert connection.execute("SELECT COUNT(*) FROM login_challenges").fetchone()[0] == 0
+            assert connection.execute("SELECT COUNT(*) FROM google_oauth_states").fetchone()[0] == 0
+            assert connection.execute("SELECT revoked_at FROM download_sessions").fetchone()[0] is not None
+            assert connection.execute("SELECT revoked_at FROM native_playback_sessions").fetchone()[0] is not None
+            assert connection.execute("SELECT revoked_at FROM desktop_vlc_handoffs").fetchone()[0] is not None
+            assert connection.execute("SELECT revoked_at FROM invite_codes").fetchone()[0] is not None
+
     def test_rotation_writes_security_event(self, initialized_settings) -> None:
         save_state(initialized_settings, UrlPrefixState(prefix="abcdefgh", generated_at=utcnow_iso(), rotated_count=0))
         with get_connection(initialized_settings) as connection:

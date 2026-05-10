@@ -15,6 +15,8 @@ TOTP_ISSUER = "Elvern"
 RECOVERY_CODE_COUNT = 10
 RECOVERY_CODE_GROUPS = 3
 RECOVERY_CODE_GROUP_LEN = 4
+RECOVERY_CODE_HASH_PREFIX = "hmac1$"
+RECOVERY_CODE_HASH_NAMESPACE = b"elvern-recovery-code-v1"
 CHALLENGE_TOKEN_BYTES = 32
 CHALLENGE_TOKEN_TTL_SECONDS = 300
 SKIP_GRACE_DAYS = 30
@@ -80,9 +82,27 @@ def normalize_recovery_input(raw: str) -> str:
     return raw.strip().lower()
 
 
-def hash_recovery_code(code: str) -> str:
+def hash_recovery_code(code: str, settings) -> str:
+    normalized = normalize_recovery_input(code)
+    digest = hmac.new(
+        settings.session_secret.encode("utf-8"),
+        RECOVERY_CODE_HASH_NAMESPACE + b":" + normalized.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{RECOVERY_CODE_HASH_PREFIX}{digest}"
+
+
+def legacy_hash_recovery_code(code: str) -> str:
     normalized = normalize_recovery_input(code)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def recovery_code_hash_candidates(code: str, settings) -> tuple[str, str]:
+    normalized = normalize_recovery_input(code)
+    return (
+        hash_recovery_code(normalized, settings),
+        legacy_hash_recovery_code(normalized),
+    )
 
 
 def generate_challenge_token() -> str:
