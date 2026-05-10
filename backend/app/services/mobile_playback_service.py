@@ -70,6 +70,7 @@ from .mobile_playback_models import (
     PlaybackEpoch,
     Route2WorkerRecord,
 )
+from .mobile_playback_buffer_contract import resolve_buffer_contract_fields
 from .mobile_playback_route2_metrics import (
     _route2_client_goodput_locked as _route2_client_goodput_locked_impl,
     _route2_effective_playhead_seconds_locked as _route2_effective_playhead_seconds_locked_impl,
@@ -242,7 +243,7 @@ ROUTE2_RECLAIM_TERMINAL_STATES = {
     "reclaim_aborted",
     "reclaim_failed",
 }
-ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS = 1800.0
+ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS = 900.0
 ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X = ROUTE2_STARTUP_MIN_SUPPLY_RATE_X
 ROUTE2_BAD_CONDITION_STRONG_SUPPLY_RATE_X = 1.0
 ROUTE2_OUTPUT_CONTRACT_VERSION = "route2-output-contract-v1"
@@ -1814,6 +1815,18 @@ class MobilePlaybackManager:
         lifecycle_state: str | None = None,
         stalled: bool | None = None,
         playing: bool | None = None,
+        selected_hls_engine: str | None = None,
+        buffer_tier: str | None = None,
+        client_buffered_ahead_seconds: float | None = None,
+        client_target_forward_buffer_seconds: float | None = None,
+        client_back_buffer_seconds: float | None = None,
+        client_max_buffer_size_bytes: int | None = None,
+        client_ready_state: int | None = None,
+        client_network_state: int | None = None,
+        client_current_time_seconds: float | None = None,
+        client_time_advancing: bool | None = None,
+        client_playback_stall_reason: str | None = None,
+        hls_js_config: dict[str, object] | None = None,
     ) -> dict[str, object]:
         with self._lock:
             session = self._get_owned_session_locked(session_id, user_id)
@@ -1821,6 +1834,20 @@ class MobilePlaybackManager:
                 session,
                 auth_session_id=auth_session_id,
                 username=username,
+            )
+            self._record_client_playback_telemetry_locked(
+                session,
+                selected_hls_engine=selected_hls_engine,
+                client_buffered_ahead_seconds=client_buffered_ahead_seconds,
+                client_target_forward_buffer_seconds=client_target_forward_buffer_seconds,
+                client_back_buffer_seconds=client_back_buffer_seconds,
+                client_max_buffer_size_bytes=client_max_buffer_size_bytes,
+                client_ready_state=client_ready_state,
+                client_network_state=client_network_state,
+                client_current_time_seconds=client_current_time_seconds,
+                client_time_advancing=client_time_advancing,
+                client_playback_stall_reason=client_playback_stall_reason,
+                hls_js_config=hls_js_config,
             )
             if session.browser_playback.engine_mode == "route2":
                 if committed_playhead_seconds is not None:
@@ -1883,6 +1910,45 @@ class MobilePlaybackManager:
             self._transition_session_state_locked(session)
         self._ensure_worker_for_session(session_id)
         return self.get_session(session_id, user_id=user_id)
+
+    def _record_client_playback_telemetry_locked(
+        self,
+        session: MobilePlaybackSession,
+        *,
+        selected_hls_engine: str | None = None,
+        client_buffered_ahead_seconds: float | None = None,
+        client_target_forward_buffer_seconds: float | None = None,
+        client_back_buffer_seconds: float | None = None,
+        client_max_buffer_size_bytes: int | None = None,
+        client_ready_state: int | None = None,
+        client_network_state: int | None = None,
+        client_current_time_seconds: float | None = None,
+        client_time_advancing: bool | None = None,
+        client_playback_stall_reason: str | None = None,
+        hls_js_config: dict[str, object] | None = None,
+    ) -> None:
+        if selected_hls_engine:
+            session.selected_hls_engine = str(selected_hls_engine)
+        if client_buffered_ahead_seconds is not None:
+            session.client_buffered_ahead_seconds = max(0.0, float(client_buffered_ahead_seconds))
+        if client_target_forward_buffer_seconds is not None:
+            session.client_target_forward_buffer_seconds = max(0.0, float(client_target_forward_buffer_seconds))
+        if client_back_buffer_seconds is not None:
+            session.client_back_buffer_seconds = max(0.0, float(client_back_buffer_seconds))
+        if client_max_buffer_size_bytes is not None:
+            session.client_max_buffer_size_bytes = max(0, int(client_max_buffer_size_bytes))
+        if client_ready_state is not None:
+            session.client_ready_state = max(0, int(client_ready_state))
+        if client_network_state is not None:
+            session.client_network_state = max(0, int(client_network_state))
+        if client_current_time_seconds is not None:
+            session.client_current_time_seconds = max(0.0, float(client_current_time_seconds))
+        if client_time_advancing is not None:
+            session.client_time_advancing = bool(client_time_advancing)
+        if client_playback_stall_reason is not None:
+            session.client_playback_stall_reason = str(client_playback_stall_reason or "")
+        if hls_js_config is not None:
+            session.hls_js_config = dict(hls_js_config)
 
     def stop_session(self, session_id: str, *, user_id: int) -> bool:
         with self._lock:
@@ -12404,6 +12470,17 @@ class MobilePlaybackManager:
             min(session.duration_seconds, (manifest_end_segment + 1) * SEGMENT_DURATION_SECONDS),
             2,
         )
+        buffer_contract_fields = resolve_buffer_contract_fields(
+            playback_mode=browser_session.playback_mode,
+            client_device_class=session.client_device_class,
+            required_startup_runway_seconds=(
+                ROUTE2_FULL_FAST_START_RUNWAY_SECONDS
+                if browser_session.playback_mode == "full"
+                else ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS
+            ),
+            lite_required_runway_seconds=ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+            lite_required_runway_source="legacy_slow_path_45",
+        )
         return {
             "session_id": session.session_id,
             "media_item_id": session.media_item_id,
@@ -12462,6 +12539,29 @@ class MobilePlaybackManager:
             "mode_ready": playback_commit_ready,
             "mode_estimate_seconds": None,
             "mode_estimate_source": "none",
+            "lite_undersupply_runway_seconds": None,
+            "lite_undersupply_detected": False,
+            "lite_undersupply_reason": None,
+            "lite_required_runway_seconds": (
+                ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS if browser_session.playback_mode == "lite" else None
+            ),
+            "lite_required_runway_source": "legacy_slow_path_45" if browser_session.playback_mode == "lite" else None,
+            **buffer_contract_fields,
+            "selected_hls_engine": session.selected_hls_engine,
+            "client_buffered_ahead_seconds": round(float(session.client_buffered_ahead_seconds), 2)
+            if session.client_buffered_ahead_seconds is not None
+            else None,
+            "client_target_forward_buffer_seconds": round(float(session.client_target_forward_buffer_seconds), 2)
+            if session.client_target_forward_buffer_seconds is not None
+            else None,
+            "client_ready_state": session.client_ready_state,
+            "client_network_state": session.client_network_state,
+            "client_current_time_seconds": round(float(session.client_current_time_seconds), 2)
+            if session.client_current_time_seconds is not None
+            else None,
+            "client_time_advancing": session.client_time_advancing,
+            "client_playback_stall_reason": session.client_playback_stall_reason,
+            "hls_js_config": session.hls_js_config,
             "attach_revision": browser_session.attach_revision,
             "client_attach_revision": browser_session.client_attach_revision,
             "active_epoch_id": browser_session.active_epoch_id,

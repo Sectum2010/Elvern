@@ -529,6 +529,17 @@ class MobilePlaybackSession:
     client_is_playing: bool = False
     client_device_class: str | None = None
     client_user_agent: str | None = None
+    selected_hls_engine: str | None = None
+    client_buffered_ahead_seconds: float | None = None
+    client_target_forward_buffer_seconds: float | None = None
+    client_back_buffer_seconds: float | None = None
+    client_max_buffer_size_bytes: int | None = None
+    client_ready_state: int | None = None
+    client_network_state: int | None = None
+    client_current_time_seconds: float | None = None
+    client_time_advancing: bool | None = None
+    client_playback_stall_reason: str | None = None
+    hls_js_config: dict[str, object] | None = None
     lifecycle_state: str = "attached"
     stalled_recovery_requested: bool = False
     last_refill_start_seconds: float | None = None

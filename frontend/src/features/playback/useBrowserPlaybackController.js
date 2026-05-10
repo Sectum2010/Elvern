@@ -10,6 +10,15 @@ import {
 } from "../../lib/browserPlaybackDevice";
 import { resolveBrowserHlsEngine } from "../../lib/browserHlsEngine";
 import {
+  buildHlsConfig,
+  classifyPlaybackStall,
+  compactHlsBufferConfig,
+  deriveBufferTargetsFromSession,
+  readClientBufferedAheadSeconds,
+  readClientPlaybackLiveness,
+  retuneHlsInstance,
+} from "../../lib/browserPlaybackBufferPolicy";
+import {
   getActivePlaybackWorkerConflict,
   getPlaybackAdmissionError,
   getPlaybackWorkerCooldown,
@@ -64,27 +73,7 @@ function readHlsSupportDiagnostics(video) {
 }
 
 function compactHlsConfig(config = {}) {
-  const keys = [
-    "autoStartLoad",
-    "backBufferLength",
-    "enableWorker",
-    "liveDurationInfinity",
-    "liveMaxLatencyDurationCount",
-    "liveSyncDurationCount",
-    "lowLatencyMode",
-    "maxBufferHole",
-    "maxBufferLength",
-    "maxBufferSize",
-    "nudgeMaxRetry",
-    "nudgeOffset",
-  ];
-  return keys.reduce((result, key) => {
-    const value = config[key];
-    if (["boolean", "number", "string"].includes(typeof value) || value == null) {
-      result[key] = value ?? null;
-    }
-    return result;
-  }, {});
+  return compactHlsBufferConfig(config);
 }
 
 export function useBrowserPlaybackController({
@@ -97,6 +86,10 @@ export function useBrowserPlaybackController({
 }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
+  const nativeLivenessSampleRef = useRef(null);
+  const firstFrameStallTimerRef = useRef(null);
+  const firstFrameStallBaselineRef = useRef(null);
+  const firstFrameRecoveryAttemptsRef = useRef(new Map());
   const playbackStateRef = useRef(null);
   const browserPlaybackActiveRef = useRef(false);
   const playbackOpenedReportedRef = useRef(false);
@@ -269,6 +262,8 @@ export function useBrowserPlaybackController({
     setPlaybackStatus,
     setPlaybackPosition,
     setOptimizedPlaybackPending,
+    hlsRef,
+    hlsEngineDiagnostics,
   });
 
   const resumePosition = useMemo(() => {
@@ -366,7 +361,14 @@ export function useBrowserPlaybackController({
       hlsJsSelected: false,
       hlsJsAttachedToVideo: false,
       hlsJsConfig: null,
+      bufferTier: null,
+      bufferPolicySource: null,
     });
+    nativeLivenessSampleRef.current = null;
+    window.clearTimeout(firstFrameStallTimerRef.current);
+    firstFrameStallTimerRef.current = null;
+    firstFrameStallBaselineRef.current = null;
+    firstFrameRecoveryAttemptsRef.current = new Map();
     clearOptimizedPlaybackPending();
     fallbackAttemptedRef.current = false;
     forceHlsRef.current = false;
@@ -776,6 +778,40 @@ export function useBrowserPlaybackController({
   }
 
   useEffect(() => {
+    if (!hlsRef.current || !mobileSession) {
+      return;
+    }
+    const nextConfig = retuneHlsInstance(hlsRef.current, {
+      session: mobileSession,
+      deviceClass: browserPlaybackDeviceClass,
+    });
+    if (!nextConfig) {
+      return;
+    }
+    setHlsEngineDiagnostics((current) => (
+      current.selectedEngine === "hls.js"
+        ? {
+          ...current,
+          hlsJsConfig: compactHlsConfig(hlsRef.current.config),
+          bufferTier: nextConfig.bufferTier,
+          targetForwardBufferSeconds: nextConfig.maxBufferLength,
+          backBufferSeconds: nextConfig.backBufferLength,
+          maxBufferSizeBytes: nextConfig.maxBufferSize,
+          bufferPolicySource: nextConfig.policySource,
+        }
+        : current
+    ));
+  }, [
+    browserPlaybackDeviceClass,
+    mobileSession?.buffer_tier,
+    mobileSession?.playback_mode,
+    mobileSession?.server_required_runway_seconds,
+    mobileSession?.server_reserve_seconds,
+    mobileSession?.client_recommended_forward_buffer_seconds,
+    mobileSession?.full_bad_condition_detected,
+  ]);
+
+  useEffect(() => {
     const video = videoRef.current;
     if (!video || !streamSource) {
       setHlsEngineDiagnostics((current) => (
@@ -787,6 +823,8 @@ export function useBrowserPlaybackController({
             hlsJsSelected: false,
             hlsJsAttachedToVideo: false,
             hlsJsConfig: null,
+            bufferTier: null,
+            bufferPolicySource: null,
           }
       ));
       return undefined;
@@ -896,6 +934,8 @@ export function useBrowserPlaybackController({
         hlsJsSelected: false,
         hlsJsAttachedToVideo: false,
         hlsJsConfig: null,
+        bufferTier: null,
+        bufferPolicySource: null,
         ...readHlsSupportDiagnostics(video),
       });
       video.addEventListener("loadedmetadata", maybeAutoplay, { once: true });
@@ -917,12 +957,18 @@ export function useBrowserPlaybackController({
     });
 
     if (selectedHlsEngine === "native_hls") {
+      const targets = deriveBufferTargetsFromSession(mobileSessionRef.current || {}, browserPlaybackDeviceClass);
       setHlsEngineDiagnostics({
         selectedEngine: "native_hls",
         nativeHlsSelected: true,
         hlsJsSelected: false,
         hlsJsAttachedToVideo: false,
         hlsJsConfig: null,
+        bufferTier: targets.bufferTier,
+        targetForwardBufferSeconds: targets.forwardBufferSeconds,
+        backBufferSeconds: targets.backBufferSeconds,
+        maxBufferSizeBytes: targets.maxBufferSizeBytes,
+        bufferPolicySource: targets.policySource,
         ...hlsSupportDiagnostics,
       });
       if (!useManualMobileAutoplay) {
@@ -945,6 +991,8 @@ export function useBrowserPlaybackController({
         hlsJsSelected: false,
         hlsJsAttachedToVideo: false,
         hlsJsConfig: null,
+        bufferTier: null,
+        bufferPolicySource: null,
         ...hlsSupportDiagnostics,
       });
       setPlaybackError("This browser cannot play HLS fallback streams");
@@ -953,7 +1001,18 @@ export function useBrowserPlaybackController({
       };
     }
 
-    const hls = new Hls();
+    const initialHlsConfig = buildHlsConfig({
+      session: mobileSessionRef.current || {},
+      deviceClass: browserPlaybackDeviceClass,
+    });
+    const {
+      bufferTier: _bufferTier,
+      policySource: _policySource,
+      ...hlsConstructorConfig
+    } = initialHlsConfig;
+    const hls = new Hls(hlsConstructorConfig);
+    hls.config.bufferTier = initialHlsConfig.bufferTier;
+    hls.config.policySource = initialHlsConfig.policySource;
     hlsRef.current = hls;
     hls.loadSource(streamSource.url);
     hls.attachMedia(video);
@@ -963,6 +1022,11 @@ export function useBrowserPlaybackController({
       hlsJsSelected: true,
       hlsJsAttachedToVideo: true,
       hlsJsConfig: compactHlsConfig(hls.config),
+      bufferTier: initialHlsConfig.bufferTier,
+      targetForwardBufferSeconds: initialHlsConfig.maxBufferLength,
+      backBufferSeconds: initialHlsConfig.backBufferLength,
+      maxBufferSizeBytes: initialHlsConfig.maxBufferSize,
+      bufferPolicySource: initialHlsConfig.policySource,
       ...hlsSupportDiagnostics,
     });
     hls.on(Hls.Events.MANIFEST_PARSED, maybeAutoplay);
@@ -1151,16 +1215,126 @@ export function useBrowserPlaybackController({
     }
 
     function bufferedRunwaySeconds() {
-      const currentTime = video.currentTime || 0;
-      const ranges = video.buffered;
-      for (let index = 0; index < ranges.length; index += 1) {
-        const start = ranges.start(index);
-        const end = ranges.end(index);
-        if (currentTime >= start && currentTime <= end) {
-          return Math.max(0, end - currentTime);
-        }
+      return readClientBufferedAheadSeconds(video);
+    }
+
+    function clearFirstFrameStallMonitor() {
+      window.clearTimeout(firstFrameStallTimerRef.current);
+      firstFrameStallTimerRef.current = null;
+      firstFrameStallBaselineRef.current = null;
+    }
+
+    function sampleNativeClientPlayback() {
+      const previous = nativeLivenessSampleRef.current;
+      const sample = readClientPlaybackLiveness(video, previous);
+      nativeLivenessSampleRef.current = sample;
+      const currentSession = mobileSessionRef.current;
+      const targets = deriveBufferTargetsFromSession(currentSession || {}, browserPlaybackDeviceClass);
+      const stall = classifyPlaybackStall({
+        session: currentSession || {},
+        livenessSample: sample,
+        targetForwardBufferSeconds: targets.forwardBufferSeconds,
+      });
+      setHlsEngineDiagnostics((current) => (
+        current.selectedEngine === "native_hls"
+          ? {
+            ...current,
+            bufferTier: targets.bufferTier,
+            targetForwardBufferSeconds: targets.forwardBufferSeconds,
+            backBufferSeconds: targets.backBufferSeconds,
+            maxBufferSizeBytes: targets.maxBufferSizeBytes,
+            bufferPolicySource: targets.policySource,
+            clientBufferedAheadSeconds: sample.bufferedAheadSeconds,
+            clientBufferSatisfiesTarget: stall.clientBufferSatisfiesTarget,
+            clientTimeAdvancing: sample.timeAdvancing,
+            clientReadyState: sample.readyState,
+            clientNetworkState: sample.networkState,
+            clientPlaybackStallReason: stall.stallReason || "",
+            backendPreparedAheadSeconds: stall.backendPreparedAheadSeconds,
+          }
+          : current
+      ));
+      return { sample, stall, targets };
+    }
+
+    function beginClientStallRecovery(stallReason) {
+      const currentSession = mobileSessionRef.current;
+      if (!currentSession?.session_id || mobileRecoveryInFlightRef.current) {
+        return;
       }
-      return 0;
+      const recoveryKey = `${currentSession.session_id}:${currentSession.manifest_revision || currentSession.attach_revision || 0}`;
+      const attempts = firstFrameRecoveryAttemptsRef.current.get(recoveryKey) || 0;
+      if (attempts >= 2) {
+        setOptimizedPlaybackPending(false);
+        setSeekNotice("");
+        setPlaybackStatus(`${browserPlaybackLabelTitle} buffering`);
+        setPlaybackError("Network is too weak to keep the browser buffer filled.");
+        return;
+      }
+      firstFrameRecoveryAttemptsRef.current.set(recoveryKey, attempts + 1);
+      clearFirstFrameStallMonitor();
+      clearMobileStallRecoveryTimer();
+      try {
+        video.pause();
+      } catch {
+        // Safari can refuse a programmatic pause during teardown.
+      }
+      setOptimizedPlaybackPending(true);
+      setPlaybackError("");
+      setSeekNotice(`Rebuffering ${browserPlaybackLabel} from the current position.`);
+      applyMobileLifecycleStatus("recovering");
+      postMobileRuntimeHeartbeat({
+        lifecycleState: "recovering",
+        stalled: true,
+        playing: true,
+        force: true,
+        clientPlaybackStallReason: stallReason,
+      }).catch(() => {
+        // Recovery still reattaches locally if this diagnostic heartbeat misses.
+      });
+      recoverMobilePlaybackAfterResume("first-frame-stall").catch((requestError) => {
+        clearOptimizedPlaybackPending();
+        setPlaybackError(requestError.message || "Network is too weak to keep the browser buffer filled.");
+      });
+    }
+
+    function armFirstFrameStallMonitor() {
+      if (
+        !iosMobile
+        || !mobileSessionRef.current
+        || !streamSource
+        || video.paused
+        || mobileRecoveryInFlightRef.current
+      ) {
+        return;
+      }
+      if (firstFrameStallTimerRef.current) {
+        return;
+      }
+      firstFrameStallBaselineRef.current = readClientPlaybackLiveness(video, null);
+      firstFrameStallTimerRef.current = window.setTimeout(() => {
+        firstFrameStallTimerRef.current = null;
+        if (
+          !mobileSessionRef.current
+          || video.paused
+          || mobileRecoveryInFlightRef.current
+        ) {
+          return;
+        }
+        const baseline = firstFrameStallBaselineRef.current;
+        const latest = readClientPlaybackLiveness(video, baseline);
+        nativeLivenessSampleRef.current = latest;
+        const targets = deriveBufferTargetsFromSession(mobileSessionRef.current, browserPlaybackDeviceClass);
+        const stall = classifyPlaybackStall({
+          session: mobileSessionRef.current,
+          livenessSample: latest,
+          targetForwardBufferSeconds: targets.forwardBufferSeconds,
+        });
+        if (!stall.firstFrameStall) {
+          return;
+        }
+        beginClientStallRecovery(stall.stallReason || "first_frame_stall");
+      }, 4000);
     }
 
     function handlePageHide() {
@@ -1199,6 +1373,7 @@ export function useBrowserPlaybackController({
         flushProgress(false);
       }
       clearMobileStallRecoveryTimer();
+      clearFirstFrameStallMonitor();
       if (mobileSessionRef.current) {
         postMobileRuntimeHeartbeat({
           lifecycleState:
@@ -1220,6 +1395,7 @@ export function useBrowserPlaybackController({
         flushProgress(true);
       });
       clearMobileStallRecoveryTimer();
+      clearFirstFrameStallMonitor();
     }
 
     function handleVisibilityChange() {
@@ -1267,12 +1443,15 @@ export function useBrowserPlaybackController({
         return;
       }
       const currentSession = mobileSessionRef.current;
+      const { stall } = sampleNativeClientPlayback();
       const bufferedAhead = bufferedRunwaySeconds();
       const backendAhead = currentSession?.ahead_runway_seconds || 0;
       const refillInProgress = Boolean(currentSession?.refill_in_progress);
       const hardStarvation =
         currentSession?.stalled_recovery_needed
         || currentSession?.starvation_risk
+        || stall.stallReason === "client_buffer_starved"
+        || stall.firstFrameStall
         || (backendAhead <= 3 && bufferedAhead <= 0.75 && !refillInProgress);
       if (!hardStarvation) {
         clearMobileStallRecoveryTimer();
@@ -1305,6 +1484,7 @@ export function useBrowserPlaybackController({
           stalled: true,
           playing: true,
           force: true,
+          clientPlaybackStallReason: stall.stallReason || "client_stalled",
         }).catch(() => {
           // Recovery will still try to reattach locally.
         });
@@ -1507,16 +1687,20 @@ export function useBrowserPlaybackController({
     function handleLoadedData() {
       updatePlayerMetrics();
       mobileLoadedDataSeenRef.current = true;
+      sampleNativeClientPlayback();
       maybeAcknowledgeHlsAttachment({ playing: !video.paused });
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();
+      armFirstFrameStallMonitor();
     }
 
     function handleProgress() {
       updatePlayerMetrics();
+      sampleNativeClientPlayback();
       clearMobileStallRecoveryTimer();
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();
+      armFirstFrameStallMonitor();
     }
 
     function handleCanPlay() {
@@ -1533,8 +1717,10 @@ export function useBrowserPlaybackController({
         return;
       }
       mobileCanPlaySeenRef.current = true;
+      sampleNativeClientPlayback();
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();
+      armFirstFrameStallMonitor();
     }
 
     function handleSeeked() {
@@ -1600,6 +1786,8 @@ export function useBrowserPlaybackController({
 
     function handlePlaying() {
       clearMobileStallRecoveryTimer();
+      sampleNativeClientPlayback();
+      armFirstFrameStallMonitor();
       if (!mobileSessionRef.current || mobilePlayerCanPlayRef.current) {
         return;
       }
@@ -1612,6 +1800,7 @@ export function useBrowserPlaybackController({
     function handleTimeUpdate() {
       updatePlayerMetrics();
       clearMobileStallRecoveryTimer();
+      sampleNativeClientPlayback();
       if (mobileSessionRef.current && mobilePlayerCanPlayRef.current && !mobileSeekPendingRef.current) {
         const absoluteCurrentTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
         mobileLastStablePositionRef.current = absoluteCurrentTime;
@@ -1714,6 +1903,7 @@ export function useBrowserPlaybackController({
       if (mobileSessionRef.current) {
         setMobileLifecycleStateValue("attached");
         maybeAcknowledgeHlsAttachment({ playing: true, force: true });
+        sampleNativeClientPlayback();
         postMobileRuntimeHeartbeat({
           lifecycleState: "attached",
           stalled: false,
@@ -1765,6 +1955,7 @@ export function useBrowserPlaybackController({
     return () => {
       stopProgressTimer();
       clearMobileStallRecoveryTimer();
+      clearFirstFrameStallMonitor();
       window.removeEventListener("pagehide", handlePageHide);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pageshow", handlePageShow);

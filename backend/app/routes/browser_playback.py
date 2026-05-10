@@ -203,6 +203,18 @@ def heartbeat_browser_playback_session(
             lifecycle_state=payload.lifecycle_state,
             stalled=payload.stalled,
             playing=payload.playing,
+            selected_hls_engine=payload.selected_hls_engine,
+            buffer_tier=payload.buffer_tier,
+            client_buffered_ahead_seconds=payload.client_buffered_ahead_seconds,
+            client_target_forward_buffer_seconds=payload.client_target_forward_buffer_seconds,
+            client_back_buffer_seconds=payload.client_back_buffer_seconds,
+            client_max_buffer_size_bytes=payload.client_max_buffer_size_bytes,
+            client_ready_state=payload.client_ready_state,
+            client_network_state=payload.client_network_state,
+            client_current_time_seconds=payload.client_current_time_seconds,
+            client_time_advancing=payload.client_time_advancing,
+            client_playback_stall_reason=payload.client_playback_stall_reason,
+            hls_js_config=payload.hls_js_config,
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc

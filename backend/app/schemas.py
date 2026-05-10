@@ -647,6 +647,18 @@ class MobilePlaybackHeartbeatRequest(BaseModel):
     lifecycle_state: MobilePlaybackLifecycleState | None = None
     stalled: bool | None = None
     playing: bool | None = None
+    selected_hls_engine: str | None = None
+    buffer_tier: str | None = None
+    client_buffered_ahead_seconds: float | None = Field(default=None, ge=0)
+    client_target_forward_buffer_seconds: float | None = Field(default=None, ge=0)
+    client_back_buffer_seconds: float | None = Field(default=None, ge=0)
+    client_max_buffer_size_bytes: int | None = Field(default=None, ge=0)
+    client_ready_state: int | None = Field(default=None, ge=0)
+    client_network_state: int | None = Field(default=None, ge=0)
+    client_current_time_seconds: float | None = Field(default=None, ge=0)
+    client_time_advancing: bool | None = None
+    client_playback_stall_reason: str | None = None
+    hls_js_config: dict[str, object] | None = None
 
 
 class MobilePlaybackSessionResponse(BaseModel):
@@ -708,6 +720,24 @@ class MobilePlaybackSessionResponse(BaseModel):
     lite_undersupply_reason: str | None = None
     lite_required_runway_seconds: float | None = Field(default=None, ge=0)
     lite_required_runway_source: str | None = None
+    buffer_tier: str | None = None
+    server_required_runway_seconds: float | None = Field(default=None, ge=0)
+    server_reserve_seconds: float | None = Field(default=None, ge=0)
+    client_recommended_forward_buffer_seconds: float | None = Field(default=None, ge=0)
+    client_max_forward_buffer_seconds: float | None = Field(default=None, ge=0)
+    client_back_buffer_seconds: float | None = Field(default=None, ge=0)
+    client_max_buffer_size_bytes: int | None = Field(default=None, ge=0)
+    client_buffer_policy_source: str | None = None
+    client_buffer_limited_by_memory: bool = False
+    selected_hls_engine: str | None = None
+    client_buffered_ahead_seconds: float | None = Field(default=None, ge=0)
+    client_target_forward_buffer_seconds: float | None = Field(default=None, ge=0)
+    client_ready_state: int | None = Field(default=None, ge=0)
+    client_network_state: int | None = Field(default=None, ge=0)
+    client_current_time_seconds: float | None = Field(default=None, ge=0)
+    client_time_advancing: bool | None = None
+    client_playback_stall_reason: str | None = None
+    hls_js_config: dict[str, object] | None = None
     full_bad_condition_detected: bool = False
     full_bad_condition_reason: str | None = None
     full_bad_condition_reasons: list[str] = Field(default_factory=list)

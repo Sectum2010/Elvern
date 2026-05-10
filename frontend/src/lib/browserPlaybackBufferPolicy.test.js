@@ -1,0 +1,140 @@
+import assert from "node:assert/strict";
+import { describe, test } from "vitest";
+
+import {
+  buildHlsConfig,
+  classifyPlaybackStall,
+  deriveBufferTargetsFromSession,
+  readClientBufferedAheadSeconds,
+  readClientPlaybackLiveness,
+  retuneHlsInstance,
+} from "./browserPlaybackBufferPolicy.js";
+
+const MB = 1024 * 1024;
+const GB = 1024 * 1024 * 1024;
+
+function makeBufferedRange(ranges) {
+  return {
+    length: ranges.length,
+    start(index) {
+      return ranges[index][0];
+    },
+    end(index) {
+      return ranges[index][1];
+    },
+  };
+}
+
+describe("deriveBufferTargetsFromSession", () => {
+  test("maps lite tiers to locked targets", () => {
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_fast" }, "phone").forwardBufferSeconds, 15);
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_uncertain" }, "phone").forwardBufferSeconds, 45);
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_undersupply" }, "phone").forwardBufferSeconds, 180);
+  });
+
+  test("maps full tiers to locked targets", () => {
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "full", buffer_tier: "full_healthy" }, "desktop").forwardBufferSeconds, 120);
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "full", buffer_tier: "full_bad_condition" }, "desktop").forwardBufferSeconds, 900);
+  });
+
+  test("uses universal back buffer and byte ceilings without device seconds caps", () => {
+    const phone = deriveBufferTargetsFromSession({ buffer_tier: "full_bad_condition" }, "phone");
+    const tablet = deriveBufferTargetsFromSession({ buffer_tier: "full_bad_condition" }, "tablet");
+    const desktop = deriveBufferTargetsFromSession({ buffer_tier: "full_bad_condition" }, "desktop");
+    const laptop = deriveBufferTargetsFromSession({ buffer_tier: "full_bad_condition" }, "laptop");
+    assert.equal(phone.forwardBufferSeconds, 900);
+    assert.equal(tablet.forwardBufferSeconds, 900);
+    assert.equal(desktop.forwardBufferSeconds, 900);
+    assert.equal(laptop.forwardBufferSeconds, 900);
+    assert.equal(phone.backBufferSeconds, 120);
+    assert.equal(tablet.backBufferSeconds, 120);
+    assert.equal(desktop.backBufferSeconds, 120);
+    assert.equal(laptop.backBufferSeconds, 120);
+    assert.equal(phone.maxBufferSizeBytes, 250 * MB);
+    assert.equal(tablet.maxBufferSizeBytes, 300 * MB);
+    assert.equal(desktop.maxBufferSizeBytes, 3 * GB);
+    assert.equal(laptop.maxBufferSizeBytes, 3 * GB);
+  });
+
+  test("falls back to lite required runway for uncertain lite sessions", () => {
+    const targets = deriveBufferTargetsFromSession({
+      playback_mode: "lite",
+      lite_required_runway_seconds: 45,
+    }, "phone");
+    assert.equal(targets.forwardBufferSeconds, 45);
+  });
+});
+
+describe("buildHlsConfig", () => {
+  test("uses target, retry settings, and no low-latency mode", () => {
+    const config = buildHlsConfig({
+      session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
+      deviceClass: "phone",
+    });
+    assert.equal(config.maxBufferLength, 900);
+    assert.equal(config.maxMaxBufferLength, 900);
+    assert.equal(config.backBufferLength, 120);
+    assert.equal(config.maxBufferSize, 250 * MB);
+    assert.equal(config.lowLatencyMode, false);
+    assert.equal(config.autoStartLoad, true);
+    assert.equal(config.enableWorker, true);
+    assert.equal(config.fragLoadingMaxRetry, 6);
+    assert.equal(config.manifestLoadingMaxRetry, 4);
+    assert.equal(config.levelLoadingMaxRetry, 4);
+    assert.equal(config.nudgeMaxRetry, 5);
+  });
+
+  test("retunes existing hls instance when tier changes", () => {
+    const hls = { config: buildHlsConfig({ session: { buffer_tier: "lite_fast" }, deviceClass: "phone" }) };
+    retuneHlsInstance(hls, {
+      session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
+      deviceClass: "desktop",
+    });
+    assert.equal(hls.config.maxBufferLength, 900);
+    assert.equal(hls.config.maxMaxBufferLength, 900);
+    assert.equal(hls.config.maxBufferSize, 3 * GB);
+    assert.equal(hls.config.backBufferLength, 120);
+  });
+});
+
+describe("native HLS helpers", () => {
+  test("readClientBufferedAheadSeconds handles no ranges", () => {
+    assert.equal(readClientBufferedAheadSeconds({ currentTime: 5, buffered: makeBufferedRange([]) }), 0);
+  });
+
+  test("readClientBufferedAheadSeconds handles one containing range", () => {
+    assert.equal(readClientBufferedAheadSeconds({ currentTime: 5, buffered: makeBufferedRange([[0, 12]]) }), 7);
+  });
+
+  test("readClientBufferedAheadSeconds handles multiple ranges", () => {
+    assert.equal(readClientBufferedAheadSeconds({ currentTime: 25, buffered: makeBufferedRange([[0, 10], [20, 31]]) }), 6);
+  });
+
+  test("first-frame-stall classification works", () => {
+    const previous = { currentTimeSeconds: 10, sampledAtMs: 0 };
+    const sample = readClientPlaybackLiveness(
+      { currentTime: 10.2, readyState: 3, networkState: 2, paused: false, buffered: makeBufferedRange([[10, 11]]) },
+      previous,
+      4200,
+    );
+    const result = classifyPlaybackStall({
+      session: { playback_mode: "lite", buffer_tier: "lite_fast", ahead_runway_seconds: 20 },
+      livenessSample: sample,
+    });
+    assert.equal(result.firstFrameStall, true);
+    assert.equal(result.stallReason, "first_frame_stall");
+  });
+
+  test("client_buffer_starved vs backend_supply_waiting classification works", () => {
+    const starved = classifyPlaybackStall({
+      session: { playback_mode: "lite", buffer_tier: "lite_fast", ahead_runway_seconds: 20 },
+      livenessSample: { elapsedMs: 1000, currentTimeDeltaSeconds: 1, paused: false, bufferedAheadSeconds: 2 },
+    });
+    assert.equal(starved.stallReason, "client_buffer_starved");
+    const waiting = classifyPlaybackStall({
+      session: { playback_mode: "full", buffer_tier: "full_bad_condition", ahead_runway_seconds: 46 },
+      livenessSample: { elapsedMs: 1000, currentTimeDeltaSeconds: 1, paused: false, bufferedAheadSeconds: 2 },
+    });
+    assert.equal(waiting.stallReason, "backend_supply_waiting");
+  });
+});

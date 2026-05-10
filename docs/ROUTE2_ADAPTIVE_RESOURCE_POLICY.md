@@ -83,8 +83,8 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 
 - Full Playback's normal healthy startup target remains `120s`; this phase does not change the Full attach/readiness gate.
 - Lite Playback behavior is unchanged in this phase, including the existing 45s slow-start path and pre-existing 15s fast-start path.
-- The future Full bad-condition contract is `target_position_seconds + 30 minutes` of actual contiguous published Route2 content, bounded by media duration.
-- The 30-minute reserve must be satisfied by the published frontier; projected goodput or ETA estimates must not mark the reserve as satisfied.
+- The future Full bad-condition contract is `target_position_seconds + 15 minutes` of actual contiguous published Route2 content, bounded by media duration.
+- The 15-minute reserve must be satisfied by the published frontier; projected goodput or ETA estimates must not mark the reserve as satisfied.
 - Phase 1J-1A only exposed reserve status and runway-delta instrumentation in admin/status payloads. Later Phase 1J-3A uses that status for admission/donor protection, but still does not change startup readiness.
 - The reserve status uses the epoch attach/target position as the reserve start so the first reserve window for a Full epoch is stable while the user watches.
 - Mature Full supply below `1.05x` is a bad-condition signal; mature supply below `1.0x` is marked as a stronger bad condition. Immature samples must report immature rather than false-trigger the reserve.
@@ -102,7 +102,7 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Linux PSI and cgroup pressure/throttling telemetry are manager-level diagnostics only. They are not required for current control decisions, and unavailable files must be represented as missing metrics.
 - Source throughput telemetry must not create extra cloud provider requests. Cloud/provider byte visibility should only use bytes already flowing through existing paths.
 - Lite behavior remains unchanged: the existing healthy 15s fast-start path and 45s slow path are not modified by this measurement phase.
-- Full bad-condition 30-minute reserve remains measurement-only for readiness; Phase 1J-3A may use it to protect admission and donor status, but it is not a startup gate yet.
+- Full bad-condition 15-minute reserve remains measurement-only for readiness; Phase 1J-3A may use it to protect admission and donor status, but it is not a startup gate yet.
 - Real 9/12 assignment, downshift, reclaim, shared supply, and coalescing remain future work.
 
 ## Phase 1J-2 Closed-Loop Classification Dry-Run
@@ -112,7 +112,7 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - The real-time playback health floor is `1.05x` mature supply. Mature supply below `1.05x` is not healthy enough for future admission/downshift decisions, and `1.10x` is the comfortable threshold for future maintenance/downshift consideration.
 - The dry-run classifier can label workloads as `prepare_boost_needed`, `steady_state_maintenance`, `downshift_candidate`, `needs_resource`, `donor_candidate`, `protected_bad_condition_reserve`, `source_bound`, `client_bound`, `provider_error`, `io_or_publish_bound`, `host_pressure_limited`, `metrics_immature`, `manifest_complete`, or `neutral`.
 - `donor_candidate` is intentionally conservative and prefers mature supply at or above `1.50x`, comfortable runway, reserve satisfaction, and threads above the protected floor. Donor capacity remains theoretical only.
-- Full bad-condition reserve workloads with an unsatisfied reserve are protected and must not be donors. The Full `target + 30 minutes` reserve is not a startup gate yet.
+- Full bad-condition reserve workloads with an unsatisfied reserve are protected and must not be donors. The Full `target + 15 minutes` reserve is not a startup gate yet.
 - `prepare_boost_needed` is a dry-run acceleration suggestion, not a hard new-admission block by itself. A healthy Full workload can be below the normal `120s` startup target and still allow new admission if active health, reserve, capacity, RAM, provider/source, and external-pressure guards are safe.
 - Host/PSI/cgroup pressure can block an aggressive prepare boost without necessarily blocking new admission. Admin/status separates hard admission fields (`closed_loop_admission_hard_block`, `closed_loop_admission_block_reason`, `closed_loop_admission_block_reasons`) from boost-only fields (`closed_loop_boost_blocked`, `closed_loop_boost_blockers`, `closed_loop_boost_warning_reasons`).
 - Phase 1J-3B adds a unified limiting-factor calculator for Route2 status/dry-run only. It reports `limiting_factor_primary`, confidence, component scores, supporting/blocking/missing signals, and diagnostic rates: `published_rate_x`, `encoder_rate_x`, `source_feed_rate_x`, `publish_efficiency_gap`, and `client_delivery_rate_x`.
@@ -121,7 +121,7 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Missing or unreliable source-feed telemetry is not `0.0`. Admin/status exposes `source_feed_rate_available`, `source_feed_rate_mature`, `source_feed_rate_reason`, and `source_feed_rate_missing_reason` so unknown source throughput is visibly different from a measured low feed.
 - Linux `/proc/<pid>/io` `read_bytes=0` can happen for local files served from page cache and is not proof of local source starvation. Local `source_bound` requires stronger evidence, such as an explicit mature source feed below `1.05x`, source/read errors, or slow encoder/published progress with low CPU/thread pressure.
 - Cloud missing source throughput lowers limiting-factor confidence and should not be treated as proof that cloud is either healthy or source-bound. Cloud can still be `cpu_thread` when observed source feed is healthy and CPU/thread pressure is the limiter.
-- Lite behavior remains unchanged: the healthy 15s fast-start path and 45s slow path are not modified, and Lite does not use the Full 30-minute reserve.
+- Lite behavior remains unchanged: the healthy 15s fast-start path and 45s slow path are not modified, and Lite does not use the Full 15-minute reserve.
 - The classifier uses published frontier/runway/supply as readiness truth, with FFmpeg progress, `/proc/io`, publish latency, PSI, cgroup, host/external CPU, source, client, and provider signals as diagnostic bottleneck evidence.
 - `io_or_publish_bound` requires strong evidence such as ffmpeg progress substantially ahead of the published frontier with high publish latency, high PSI IO pressure, high cgroup IO pressure, or a future explicit publish stall signal. Normal segment publication lag, zero `/proc/io` read bytes, or healthy high-supply playback with low publish latency should not make IO/publish the primary role.
 - IO/publish-bound, source-bound, client-bound, provider-error, and host-pressure-limited workloads must not be mislabeled as CPU-thread needs.
@@ -133,12 +133,12 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Full bad-condition reserve now protects admission and donor status only; it does not change the Full startup/readiness gate.
 - Healthy Full Playback still uses the normal `120s` startup target.
 - Lite behavior remains unchanged: healthy Lite may fast-start at `15s`, and the bad/slow path remains `45s`.
-- A new Route2 playback is blocked with `server_max_capacity` and reason `active_bad_condition_reserve_protection` when an existing active Full Route2 workload has mature bad-condition supply below `1.05x`, its `target + 30 minutes` actual contiguous published reserve is not satisfied, and the workload is not manifest-complete.
+- A new Route2 playback is blocked with `server_max_capacity` and reason `active_bad_condition_reserve_protection` when an existing active Full Route2 workload has mature bad-condition supply below `1.05x`, its `target + 15 minutes` actual contiguous published reserve is not satisfied, and the workload is not manifest-complete.
 - Same compatible reattach/reuse for the protected session remains allowed because it does not create a competing Route2 workload.
-- Lite sessions do not trigger the Full 30-minute reserve protection.
+- Lite sessions do not trigger the Full 15-minute reserve protection.
 - A protected bad-condition Full workload must not be a `donor_candidate`; `closed_loop_role` should be `protected_bad_condition_reserve`, `closed_loop_admission_should_block_new_users` / `closed_loop_admission_hard_block` should be true with reason `active_bad_condition_reserve_protection`, and `runtime_rebalance_role` should not report donor capacity.
 - Mature active stream health below the `1.05x` floor is a hard protection signal (`active_stream_health_protection`). Boost warnings and boost blockers must not be reported as hard admission blocks unless an actual reserve, health, capacity, RAM, provider/source, or external-pressure guard is unsafe.
-- The actual Full 30-minute startup gate, real 9/12 assignment, downshift, reclaim, re-supply, and shared supply remain future work.
+- The actual Full 15-minute startup gate, real 9/12 assignment, downshift, reclaim, re-supply, and shared supply remain future work.
 
 ## Phase 1K-1A Shared Supply Level 0 Detection
 

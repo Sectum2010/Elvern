@@ -8,6 +8,11 @@ import {
   isHlsSessionPayload as isSharedHlsSessionPayload,
 } from "../../lib/browserPlayback";
 import {
+  compactHlsBufferConfig,
+  deriveBufferTargetsFromSession,
+  readClientPlaybackLiveness,
+} from "../../lib/browserPlaybackBufferPolicy";
+import {
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "../../lib/browserPlaybackTimeline";
@@ -102,6 +107,8 @@ export function useOptimizedPlaybackSession({
   setPlaybackStatus,
   setPlaybackPosition,
   setOptimizedPlaybackPending,
+  hlsRef = null,
+  hlsEngineDiagnostics = null,
 }) {
   const mobileSessionRef = useRef(null);
   const mobilePollRef = useRef(null);
@@ -141,6 +148,7 @@ export function useOptimizedPlaybackSession({
   const route2LastAttachAttemptRevisionRef = useRef(0);
   const committedPlayheadSecondsRef = useRef(0);
   const actualMediaElementTimeRef = useRef(0);
+  const clientPlaybackLivenessSampleRef = useRef(null);
   const fullProbeInFlightRef = useRef(false);
   const browserPlaybackAttemptCounterRef = useRef(0);
   const browserPlaybackLatestAttemptRef = useRef(null);
@@ -970,6 +978,38 @@ export function useOptimizedPlaybackSession({
     return Math.max(committedPlayheadSecondsRef.current || 0, 0);
   }
 
+  function buildClientPlaybackTelemetry({ stallReason = null } = {}) {
+    const activeSession = mobileSessionRef.current;
+    if (!activeSession?.session_id) {
+      return {};
+    }
+    const video = videoRef.current;
+    const targets = deriveBufferTargetsFromSession(activeSession, browserPlaybackDeviceClass);
+    const previousSample = clientPlaybackLivenessSampleRef.current;
+    const livenessSample = readClientPlaybackLiveness(video, previousSample);
+    clientPlaybackLivenessSampleRef.current = livenessSample;
+    const selectedEngine =
+      hlsEngineDiagnostics?.selectedEngine
+      || (hlsRef?.current ? "hls.js" : "native_hls");
+    const payload = {
+      selected_hls_engine: selectedEngine,
+      buffer_tier: targets.bufferTier,
+      client_buffered_ahead_seconds: livenessSample.bufferedAheadSeconds,
+      client_target_forward_buffer_seconds: targets.forwardBufferSeconds,
+      client_back_buffer_seconds: targets.backBufferSeconds,
+      client_max_buffer_size_bytes: targets.maxBufferSizeBytes,
+      client_ready_state: livenessSample.readyState,
+      client_network_state: livenessSample.networkState,
+      client_current_time_seconds: livenessSample.currentTimeSeconds,
+      client_time_advancing: livenessSample.timeAdvancing,
+      client_playback_stall_reason: stallReason || "",
+    };
+    if (hlsRef?.current?.config) {
+      payload.hls_js_config = compactHlsBufferConfig(hlsRef.current.config);
+    }
+    return payload;
+  }
+
   function resolveMobileAuthorityPosition(payload = mobileSessionRef.current) {
     if (typeof payload?.pending_target_seconds === "number") {
       return Math.max(payload.pending_target_seconds, 0);
@@ -989,6 +1029,7 @@ export function useOptimizedPlaybackSession({
     clientProbeDurationMs = null,
     force = false,
     useBeacon = false,
+    clientPlaybackStallReason = null,
   } = {}) {
     const activeSession = mobileSessionRef.current;
     if (!activeSession?.session_id) {
@@ -997,6 +1038,9 @@ export function useOptimizedPlaybackSession({
     const payload = {
       committed_playhead_seconds: resolveMobileCommittedPosition(activeSession),
       actual_media_element_time_seconds: actualMediaElementTimeRef.current || 0,
+      ...buildClientPlaybackTelemetry({
+        stallReason: clientPlaybackStallReason || (stalled ? "client_reported_stall" : null),
+      }),
     };
     if (isRoute2SessionPayload(activeSession)) {
       const nextAttachRevision =

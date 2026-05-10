@@ -14,6 +14,7 @@ from .mobile_playback_models import (
     STATUS_POLL_PREPARE_SECONDS,
     MobilePlaybackSession,
 )
+from .mobile_playback_buffer_contract import resolve_buffer_contract_fields
 
 
 def _route2_snapshot_locked(
@@ -200,6 +201,18 @@ def _route2_snapshot_locked(
         and route2_position_in_epoch_locked(session, active_epoch, session.target_position_seconds)
         and session.pending_target_seconds is None
     )
+    buffer_contract_fields = resolve_buffer_contract_fields(
+        playback_mode=browser_session.playback_mode,
+        client_device_class=session.client_device_class,
+        required_startup_runway_seconds=required_startup_runway_seconds,
+        full_bad_condition_detected=bool(full_bad_condition_fields["full_bad_condition_detected"]),
+        full_bad_condition_reserve_required_seconds=full_bad_condition_fields[
+            "full_bad_condition_reserve_required_seconds"
+        ],
+        lite_required_runway_seconds=lite_required_runway_seconds,
+        lite_required_runway_source=lite_required_runway_source,
+        lite_undersupply_detected=lite_undersupply_detected,
+    )
     return {
         "session_id": session.session_id,
         "media_item_id": session.media_item_id,
@@ -265,6 +278,22 @@ def _route2_snapshot_locked(
         if lite_required_runway_seconds is not None
         else None,
         "lite_required_runway_source": lite_required_runway_source,
+        **buffer_contract_fields,
+        "selected_hls_engine": session.selected_hls_engine,
+        "client_buffered_ahead_seconds": round(float(session.client_buffered_ahead_seconds), 2)
+        if session.client_buffered_ahead_seconds is not None
+        else None,
+        "client_target_forward_buffer_seconds": round(float(session.client_target_forward_buffer_seconds), 2)
+        if session.client_target_forward_buffer_seconds is not None
+        else None,
+        "client_ready_state": session.client_ready_state,
+        "client_network_state": session.client_network_state,
+        "client_current_time_seconds": round(float(session.client_current_time_seconds), 2)
+        if session.client_current_time_seconds is not None
+        else None,
+        "client_time_advancing": session.client_time_advancing,
+        "client_playback_stall_reason": session.client_playback_stall_reason,
+        "hls_js_config": session.hls_js_config,
         "prepare_estimate_seconds": round(prepare_estimate_seconds, 2)
         if prepare_estimate_seconds is not None
         else None,
