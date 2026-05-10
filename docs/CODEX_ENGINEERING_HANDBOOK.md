@@ -361,6 +361,15 @@ git rm --cached backend/data/url_prefix_state.json
 echo "backend/data/url_prefix_state.json" >> .gitignore
 ```
 
+### Insider-only archives stay out of git
+
+ZIPs or other archives made for private inspection, local handoff, unpublished
+security notes, or insider-only analysis must be ignored. They often contain
+clean source snapshots plus sensitive context that is not meant for GitHub. If
+one appears in the repo, add a specific `.gitignore` entry for that archive and,
+if it is already tracked, remove only the git index entry while keeping the
+local file.
+
 ## Two-factor authentication
 
 Admin accounts are softly required to enroll in TOTP. An admin without TOTP is

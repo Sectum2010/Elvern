@@ -390,6 +390,13 @@ export function AdminPage() {
   });
   const [totpStatus, setTotpStatus] = useState(null);
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
+  const [totpDisableUserModal, setTotpDisableUserModal] = useState({
+    userId: null,
+    username: "",
+    currentAdminPassword: "",
+    pending: false,
+    error: "",
+  });
   const [downloadAccessState, setDownloadAccessState] = useState({
     userId: null,
     loading: false,
@@ -599,29 +606,25 @@ export function AdminPage() {
   async function handleToggleUserTotpRequirement(entry) {
     const currentlyEnabled = Boolean(entry.totp_setup_prompt_enabled || entry.totp_enabled);
     const nextEnabled = !currentlyEnabled;
-    let currentAdminPassword = "";
     if (!nextEnabled) {
-      currentAdminPassword = window.prompt(`Confirm with your current admin password to disable 2FA for ${entry.username}.`) || "";
-      if (!currentAdminPassword) {
-        return;
-      }
+      setTotpDisableUserModal({
+        userId: entry.id,
+        username: entry.username,
+        currentAdminPassword: "",
+        pending: false,
+        error: "",
+      });
+      return;
     }
     setTotpPromptPendingUserId(entry.id);
     try {
-      if (nextEnabled) {
-        await apiRequest(`/api/admin/users/${entry.id}/2fa/setup-prompt`, {
-          method: "PATCH",
-          data: { enabled: true },
-        });
-      } else {
-        await apiRequest(`/api/admin/users/${entry.id}/2fa/disable`, {
-          method: "POST",
-          data: { current_admin_password: currentAdminPassword },
-        });
-      }
+      await apiRequest(`/api/admin/users/${entry.id}/2fa/setup-prompt`, {
+        method: "PATCH",
+        data: { enabled: true },
+      });
       setBanner({
         tone: "success",
-        text: `${nextEnabled ? "Enabled" : "Disabled"} 2FA for ${entry.username}.`,
+        text: `Enabled 2FA for ${entry.username}.`,
       });
       await loadAdminData({ silent: true });
     } catch (requestError) {
@@ -629,6 +632,63 @@ export function AdminPage() {
         tone: "error",
         text: requestError.message || `Failed to update 2FA for ${entry.username}.`,
       });
+    } finally {
+      setTotpPromptPendingUserId(null);
+    }
+  }
+
+  function closeTotpDisableUserModal() {
+    if (totpDisableUserModal.pending) {
+      return;
+    }
+    setTotpDisableUserModal({
+      userId: null,
+      username: "",
+      currentAdminPassword: "",
+      pending: false,
+      error: "",
+    });
+  }
+
+  async function handleConfirmDisableUserTotp(event) {
+    event.preventDefault();
+    if (!totpDisableUserModal.userId) {
+      return;
+    }
+    if (!totpDisableUserModal.currentAdminPassword.trim()) {
+      setTotpDisableUserModal((current) => ({
+        ...current,
+        error: "Enter your current admin password to disable 2FA.",
+      }));
+      return;
+    }
+    const userId = totpDisableUserModal.userId;
+    const username = totpDisableUserModal.username;
+    setTotpDisableUserModal((current) => ({ ...current, pending: true, error: "" }));
+    setTotpPromptPendingUserId(userId);
+    try {
+      await apiRequest(`/api/admin/users/${userId}/2fa/disable`, {
+        method: "POST",
+        data: { current_admin_password: totpDisableUserModal.currentAdminPassword },
+      });
+      setBanner({
+        tone: "success",
+        text: `Disabled 2FA for ${username}.`,
+      });
+      setTotpDisableUserModal({
+        userId: null,
+        username: "",
+        currentAdminPassword: "",
+        pending: false,
+        error: "",
+      });
+      await loadAdminData({ silent: true });
+    } catch (requestError) {
+      setTotpDisableUserModal((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || `Failed to disable 2FA for ${username}.`,
+      }));
     } finally {
       setTotpPromptPendingUserId(null);
     }
@@ -3683,6 +3743,75 @@ export function AdminPage() {
                 className="ghost-button"
                 disabled={inspectPending || restorePlanPending}
                 onClick={closeBackupPassphraseModal}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {totpDisableUserModal.userId ? (
+        <div className="browser-resume-modal" role="presentation">
+          <button
+            aria-label="Close 2FA disable confirmation"
+            className="browser-resume-modal__backdrop"
+            onClick={closeTotpDisableUserModal}
+            type="button"
+          />
+          <form
+            className="browser-resume-modal__card detail-info-modal__card admin-diagnostic-id-modal"
+            onSubmit={handleConfirmDisableUserTotp}
+          >
+            <div className="detail-info-modal__header">
+              <div className="detail-info-modal__copy">
+                <p className="detail-info-modal__eyebrow">Security</p>
+                <h2>Disable 2FA</h2>
+              </div>
+              <button
+                aria-label="Close 2FA disable confirmation"
+                className="detail-info-modal__close"
+                disabled={totpDisableUserModal.pending}
+                onClick={closeTotpDisableUserModal}
+                type="button"
+              >
+                X
+              </button>
+            </div>
+            <div className="detail-info-modal__body">
+              <p className="page-subnote">
+                This will remove the authenticator pairing for {totpDisableUserModal.username}
+                and revoke that user's active sessions.
+              </p>
+              <p className="page-subnote">Confirm with your current admin password to proceed.</p>
+              <NonLoginSecretInput
+                autoComplete="new-password"
+                disabled={totpDisableUserModal.pending}
+                onChange={(event) =>
+                  setTotpDisableUserModal((current) => ({
+                    ...current,
+                    currentAdminPassword: event.target.value,
+                    error: "",
+                  }))
+                }
+                placeholder="Current admin password"
+                purpose="user-2fa-disable-reauth"
+                value={totpDisableUserModal.currentAdminPassword}
+              />
+              {totpDisableUserModal.error ? (
+                <p className="action-feedback action-feedback--error" role="alert">
+                  {totpDisableUserModal.error}
+                </p>
+              ) : null}
+            </div>
+            <div className="browser-resume-modal__actions">
+              <button className="ghost-button ghost-button--danger" disabled={totpDisableUserModal.pending} type="submit">
+                {totpDisableUserModal.pending ? "Disabling..." : "Disable 2FA"}
+              </button>
+              <button
+                className="ghost-button"
+                disabled={totpDisableUserModal.pending}
+                onClick={closeTotpDisableUserModal}
                 type="button"
               >
                 Cancel

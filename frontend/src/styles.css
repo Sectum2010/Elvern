@@ -1598,6 +1598,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   align-items: start;
 }
 
+.totp-setup-card__intro {
+  grid-column: 1 / -1;
+}
+
 .totp-setup-card__qr-panel {
   display: grid;
   gap: 0.75rem;
@@ -1657,6 +1661,22 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 @media (min-width: 860px) {
   .totp-setup-card__actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 859px) {
+  .totp-setup-card {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .totp-setup-card__qr-panel {
+    justify-items: stretch;
+  }
+
+  .totp-setup-card__qr {
+    max-width: 320px;
+    justify-self: center;
   }
 }
 

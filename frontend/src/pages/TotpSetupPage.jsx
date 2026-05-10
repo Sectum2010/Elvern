@@ -76,14 +76,14 @@ export function TotpSetupPage() {
 
   return (
     <div className="settings-page">
-      <section className="settings-card">
-        <p className="eyebrow">TWO-FACTOR AUTHENTICATION</p>
-        <h1>Secure your admin account</h1>
-        <p className="page-subnote">
-          Scan the QR code with an authenticator app like Google Authenticator, 1Password, or Apple Passwords.
-        </p>
-      </section>
       <section className="settings-card totp-setup-card">
+        <div className="totp-setup-card__intro">
+          <p className="eyebrow">TWO-FACTOR AUTHENTICATION</p>
+          <h1>Secure your admin account</h1>
+          <p className="page-subnote">
+            Scan the QR code with an authenticator app like Google Authenticator, 1Password, or Apple Passwords.
+          </p>
+        </div>
         <div className="totp-setup-card__qr-panel">
           <div className="totp-setup-card__qr">
             {setup?.qr_svg ? <div dangerouslySetInnerHTML={{ __html: setup.qr_svg }} /> : <p>Loading QR...</p>}
