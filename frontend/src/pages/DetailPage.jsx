@@ -20,6 +20,7 @@ import {
   shouldShowMacAppFullscreenControl,
 } from "../lib/playbackRouting";
 import { useBrowserPlaybackController } from "../features/playback/useBrowserPlaybackController";
+import ElvernPlayerOverlay from "../features/playback/ElvernPlayerOverlay";
 import {
   extractLibraryReturnState,
   readLibraryReturnTarget,
@@ -469,6 +470,8 @@ export function DetailPage() {
   const [desktopSeekDraft, setDesktopSeekDraft] = useState(null);
   const [macAppFullscreenActive, setMacAppFullscreenActive] = useState(false);
   const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
+  const [elvernCinemaModeActive, setElvernCinemaModeActive] = useState(false);
+  const useNativeControlsFallback = false;
   const playerShellRef = useRef(null);
   const desktopSeekCommitPendingRef = useRef(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
@@ -621,7 +624,8 @@ export function DetailPage() {
     }
     const className = "elvern-player-fullscreen-active";
     const body = document.body;
-    if (macAppFullscreenActive) {
+    const shouldApply = macAppFullscreenActive || elvernCinemaModeActive;
+    if (shouldApply) {
       document.documentElement.classList.add(className);
       body?.classList.add(className);
     } else {
@@ -632,7 +636,7 @@ export function DetailPage() {
       document.documentElement.classList.remove(className);
       body?.classList.remove(className);
     };
-  }, [macAppFullscreenActive]);
+  }, [macAppFullscreenActive, elvernCinemaModeActive]);
 
   const {
     videoRef,
@@ -2481,13 +2485,30 @@ export function DetailPage() {
     iosMobile,
     showPlayerShell,
   });
-  const resolvedPlayerClassName = showMacAppFullscreenControl
-    ? `${playerClassName} player--app-fullscreen-managed`
-    : playerClassName;
+  const useElvernCustomShell = showPlayerShell && !useNativeControlsFallback;
+  const elvernOverlaySessionPayload = useElvernCustomShell ? mobileSession : null;
+  const elvernOverlayPreparing = useElvernCustomShell
+    ? Boolean(optimizedPlaybackPending) || Boolean(seekNotice)
+    : false;
+  const elvernOverlayPreparingTargetSeconds = useElvernCustomShell
+    ? (mobilePendingTargetRef.current != null
+      ? mobilePendingTargetRef.current
+      : mobileSession?.target_position_seconds ?? null)
+    : null;
+  const resolvedPlayerClassName = [
+    playerClassName,
+    showMacAppFullscreenControl ? "player--app-fullscreen-managed" : "",
+    useElvernCustomShell ? "player--elvern-no-controls" : "",
+  ].filter(Boolean).join(" ");
+  const elvernEffectiveVideoControls = useElvernCustomShell ? false : videoControlsEnabled;
+  const elvernHideMacAppFullscreenButton = useElvernCustomShell;
+  const elvernCinemaTakeoverActive = useElvernCustomShell && elvernCinemaModeActive && !macAppFullscreenActive;
   const playerShellClassName = [
     "player-shell",
+    useElvernCustomShell ? "player-shell--elvern-custom" : "",
     showMacAppFullscreenControl ? "player-shell--app-fullscreen" : "",
     macAppFullscreenActive ? "player-shell--app-fullscreen-active" : "",
+    elvernCinemaTakeoverActive ? "player-shell--cinema-takeover" : "",
   ].filter(Boolean).join(" ");
   const desktopSeekPosition = Math.max(
     0,
@@ -2621,6 +2642,43 @@ export function DetailPage() {
       );
 	    }
 	  }
+
+  async function toggleElvernPlayerFullscreen() {
+    if (typeof document === "undefined") {
+      return;
+    }
+    const shell = playerShellRef.current;
+    if (!shell) {
+      return;
+    }
+    setMacAppFullscreenError("");
+    const activeElement = document.fullscreenElement || document.webkitFullscreenElement || null;
+    try {
+      if (activeElement === shell) {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        }
+        return;
+      }
+      if (elvernCinemaModeActive) {
+        setElvernCinemaModeActive(false);
+        return;
+      }
+      const requestFullscreen = shell.requestFullscreen
+        || shell.webkitRequestFullscreen
+        || shell.mozRequestFullScreen
+        || shell.msRequestFullscreen;
+      if (typeof requestFullscreen === "function") {
+        await requestFullscreen.call(shell);
+        return;
+      }
+      setElvernCinemaModeActive(true);
+    } catch (fullscreenError) {
+      setElvernCinemaModeActive(true);
+    }
+  }
 
   const downloadProgressPercent = downloadState.totalBytes > 0
     ? Math.min(100, Math.max(0, (downloadState.receivedBytes / downloadState.totalBytes) * 100))
@@ -3207,15 +3265,34 @@ export function DetailPage() {
               <video
                 key={videoElementKey}
                 className={resolvedPlayerClassName}
-                controls={videoControlsEnabled}
-                controlsList={showMacAppFullscreenControl ? "nofullscreen nodownload noremoteplayback" : undefined}
+                controls={elvernEffectiveVideoControls}
+                controlsList={
+                  showMacAppFullscreenControl || useElvernCustomShell
+                    ? "nofullscreen nodownload noremoteplayback"
+                    : undefined
+                }
                 disablePictureInPicture={showMacAppFullscreenControl ? true : undefined}
                 playsInline
                 preload="metadata"
                 ref={videoRef}
               />
+              {useElvernCustomShell ? (
+                <ElvernPlayerOverlay
+                  cinemaModeActive={elvernCinemaTakeoverActive}
+                  durationSeconds={fullDuration}
+                  errorMessage={playbackError || ""}
+                  onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}
+                  onToggleFullscreen={toggleElvernPlayerFullscreen}
+                  preparing={elvernOverlayPreparing}
+                  preparingMessage={seekNotice || ""}
+                  preparingTargetSeconds={elvernOverlayPreparingTargetSeconds}
+                  sessionPayload={elvernOverlaySessionPayload}
+                  shellRef={playerShellRef}
+                  videoRef={videoRef}
+                />
+              ) : null}
             </div>
-            {showMacAppFullscreenControl ? (
+            {showMacAppFullscreenControl && !elvernHideMacAppFullscreenButton ? (
               <button
                 className="player-app-fullscreen-button"
                 onClick={toggleMacAppFullscreen}
@@ -3227,7 +3304,7 @@ export function DetailPage() {
           </div>
         ) : null}
         {macAppFullscreenError ? <p className="form-error">{macAppFullscreenError}</p> : null}
-        {showDesktopBrowserSeekControl ? (
+        {showDesktopBrowserSeekControl && !useElvernCustomShell ? (
           <div className="desktop-browser-seek" aria-label="Movie seek controls">
             <input
               aria-label="Seek movie position"
