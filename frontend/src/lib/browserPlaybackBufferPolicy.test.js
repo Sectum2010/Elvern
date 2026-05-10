@@ -3,11 +3,14 @@ import { describe, test } from "vitest";
 
 import {
   buildHlsConfig,
+  classifyManifestWindowState,
   classifyPlaybackStall,
   deriveBufferTargetsFromSession,
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
+  resolvePlaybackRecoveryTargetSeconds,
   retuneHlsInstance,
+  shouldDisarmFirstFrameStallMonitor,
 } from "./browserPlaybackBufferPolicy.js";
 
 const MB = 1024 * 1024;
@@ -125,6 +128,39 @@ describe("native HLS helpers", () => {
     assert.equal(result.stallReason, "first_frame_stall");
   });
 
+  test("first-frame-stall disarms after real playback progression", () => {
+    assert.equal(shouldDisarmFirstFrameStallMonitor({
+      attachmentStartSeconds: 80,
+      currentAbsolutePositionSeconds: 83.5,
+    }), true);
+    assert.equal(shouldDisarmFirstFrameStallMonitor({
+      attachmentStartSeconds: 80,
+      currentAbsolutePositionSeconds: 80.5,
+      successfulTimeupdateCount: 3,
+    }), true);
+    assert.equal(shouldDisarmFirstFrameStallMonitor({
+      attachmentStartSeconds: 80,
+      currentAbsolutePositionSeconds: 80.5,
+      advancingDurationMs: 6000,
+    }), true);
+  });
+
+  test("mid-playback stalls are not classified as first-frame stalls after disarm", () => {
+    const result = classifyPlaybackStall({
+      session: { playback_mode: "lite", buffer_tier: "lite_fast", ahead_runway_seconds: 20 },
+      livenessSample: {
+        elapsedMs: 4200,
+        currentTimeDeltaSeconds: 0.2,
+        paused: false,
+        bufferedAheadSeconds: 10,
+      },
+      firstFrameEligible: false,
+    });
+    assert.equal(result.firstFrameStall, false);
+    assert.equal(result.midPlaybackStall, true);
+    assert.equal(result.stallReason, "mid_playback_stall");
+  });
+
   test("client_buffer_starved vs backend_supply_waiting classification works", () => {
     const starved = classifyPlaybackStall({
       session: { playback_mode: "lite", buffer_tier: "lite_fast", ahead_runway_seconds: 20 },
@@ -136,5 +172,55 @@ describe("native HLS helpers", () => {
       livenessSample: { elapsedMs: 1000, currentTimeDeltaSeconds: 1, paused: false, bufferedAheadSeconds: 2 },
     });
     assert.equal(waiting.stallReason, "backend_supply_waiting");
+  });
+});
+
+describe("recovery and manifest window helpers", () => {
+  test("manifest window exhaustion is not movie completion when far from full duration", () => {
+    const state = classifyManifestWindowState({
+      absolutePositionSeconds: 118,
+      manifestEndSeconds: 120,
+      fullDurationSeconds: 3600,
+      completionGraceSeconds: 15,
+      refreshRunwaySeconds: 12,
+    });
+    assert.equal(state.realCompletion, false);
+    assert.equal(state.manifestWindowExhausted, true);
+    assert.equal(state.shouldRefreshManifest, true);
+  });
+
+  test("movie completion only applies near full duration", () => {
+    const state = classifyManifestWindowState({
+      absolutePositionSeconds: 3590,
+      manifestEndSeconds: 3600,
+      fullDurationSeconds: 3600,
+      completionGraceSeconds: 15,
+      refreshRunwaySeconds: 12,
+    });
+    assert.equal(state.realCompletion, true);
+    assert.equal(state.manifestWindowExhausted, false);
+  });
+
+  test("mid-playback recovery preserves the strongest absolute position", () => {
+    assert.equal(resolvePlaybackRecoveryTargetSeconds({
+      currentAbsolutePositionSeconds: 121,
+      committedPlayheadSeconds: 120,
+      actualMediaElementTimeSeconds: 120,
+      targetPositionSeconds: 0,
+    }), 121);
+  });
+
+  test("backBufferLength stays an hls.js config field past 120s", () => {
+    const hls = { config: buildHlsConfig({ session: { buffer_tier: "full_healthy" }, deviceClass: "desktop" }) };
+    retuneHlsInstance(hls, {
+      session: { buffer_tier: "full_healthy", target_position_seconds: 180 },
+      deviceClass: "desktop",
+    });
+    assert.equal(hls.config.backBufferLength, 120);
+    assert.equal(resolvePlaybackRecoveryTargetSeconds({
+      currentAbsolutePositionSeconds: 180,
+      committedPlayheadSeconds: 180,
+      targetPositionSeconds: 180,
+    }), 180);
   });
 });

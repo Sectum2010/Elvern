@@ -206,6 +206,7 @@ export function classifyPlaybackStall({
   livenessSample = {},
   targetForwardBufferSeconds = null,
   firstFrameWindowMs = 4000,
+  firstFrameEligible = true,
 } = {}) {
   const target = finitePositiveNumber(targetForwardBufferSeconds)
     || finitePositiveNumber(session?.client_recommended_forward_buffer_seconds)
@@ -216,27 +217,95 @@ export function classifyPlaybackStall({
   const clientBufferedAheadSeconds = Number(livenessSample.bufferedAheadSeconds || 0);
   const backendPreparedAheadSeconds = resolveBackendPreparedAheadSeconds(session);
   const paused = Boolean(livenessSample.paused);
-  const firstFrameStall =
+  const timeStalled =
     !paused
     && elapsedMs >= firstFrameWindowMs
     && currentTimeDeltaSeconds < 0.5;
+  const firstFrameStall = Boolean(firstFrameEligible && timeStalled);
+  const midPlaybackStall = Boolean(!firstFrameEligible && timeStalled);
   const clientBufferSatisfiesTarget = clientBufferedAheadSeconds + 0.001 >= target;
   let stallReason = "";
   if (firstFrameStall) {
     stallReason = "first_frame_stall";
+  } else if (midPlaybackStall) {
+    stallReason = "mid_playback_stall";
   }
-  if (backendPreparedAheadSeconds + 0.001 >= target && !clientBufferSatisfiesTarget) {
+  if (!stallReason && backendPreparedAheadSeconds + 0.001 >= target && !clientBufferSatisfiesTarget) {
     stallReason = stallReason || "client_buffer_starved";
-  } else if (backendPreparedAheadSeconds + 0.001 < target) {
+  } else if (!stallReason && backendPreparedAheadSeconds + 0.001 < target) {
     stallReason = stallReason || "backend_supply_waiting";
   }
   return {
     firstFrameStall,
+    midPlaybackStall,
     stallReason,
     backendPreparedAheadSeconds,
     clientBufferedAheadSeconds,
     clientTargetForwardBufferSeconds: target,
     clientBufferSatisfiesTarget,
     currentTimeAdvancing: livenessSample.timeAdvancing,
+  };
+}
+
+export function shouldDisarmFirstFrameStallMonitor({
+  attachmentStartSeconds = 0,
+  currentAbsolutePositionSeconds = 0,
+  successfulTimeupdateCount = 0,
+  advancingDurationMs = 0,
+} = {}) {
+  const start = Number(attachmentStartSeconds || 0);
+  const current = Number(currentAbsolutePositionSeconds || 0);
+  return Boolean(
+    (Number.isFinite(current) && Number.isFinite(start) && current > start + 3)
+    || Number(successfulTimeupdateCount || 0) >= 3
+    || Number(advancingDurationMs || 0) >= 6000
+  );
+}
+
+export function resolvePlaybackRecoveryTargetSeconds({
+  currentAbsolutePositionSeconds = null,
+  committedPlayheadSeconds = null,
+  actualMediaElementTimeSeconds = null,
+  targetPositionSeconds = null,
+} = {}) {
+  const candidates = [
+    currentAbsolutePositionSeconds,
+    committedPlayheadSeconds,
+    actualMediaElementTimeSeconds,
+    targetPositionSeconds,
+  ]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  return candidates.length ? Math.max(...candidates) : 0;
+}
+
+export function classifyManifestWindowState({
+  absolutePositionSeconds = 0,
+  manifestEndSeconds = 0,
+  fullDurationSeconds = 0,
+  completionGraceSeconds = 15,
+  refreshRunwaySeconds = 12,
+} = {}) {
+  const absolutePosition = Number(absolutePositionSeconds || 0);
+  const manifestEnd = Number(manifestEndSeconds || 0);
+  const fullDuration = Number(fullDurationSeconds || 0);
+  const completionGrace = Math.max(0, Number(completionGraceSeconds || 0));
+  const refreshRunway = Math.max(0, Number(refreshRunwaySeconds || 0));
+  const fullDurationKnown = Number.isFinite(fullDuration) && fullDuration > 0;
+  const realCompletion = Boolean(
+    fullDurationKnown
+    && Number.isFinite(absolutePosition)
+    && absolutePosition >= Math.max(0, fullDuration - completionGrace)
+  );
+  const nearManifestEnd = Boolean(
+    Number.isFinite(absolutePosition)
+    && Number.isFinite(manifestEnd)
+    && manifestEnd > 0
+    && absolutePosition >= Math.max(0, manifestEnd - refreshRunway)
+  );
+  return {
+    realCompletion,
+    manifestWindowExhausted: Boolean(nearManifestEnd && !realCompletion),
+    shouldRefreshManifest: Boolean(nearManifestEnd && !realCompletion),
   };
 }

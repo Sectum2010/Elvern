@@ -9,8 +9,10 @@ import {
 } from "../../lib/browserPlayback";
 import {
   compactHlsBufferConfig,
+  classifyManifestWindowState,
   deriveBufferTargetsFromSession,
   readClientPlaybackLiveness,
+  resolvePlaybackRecoveryTargetSeconds,
 } from "../../lib/browserPlaybackBufferPolicy";
 import {
   toBrowserPlaybackAbsoluteSeconds,
@@ -616,10 +618,24 @@ export function useOptimizedPlaybackSession({
     if (!payload) {
       return 0;
     }
-    if (isRoute2SessionPayload(payload)) {
-      return resolveRoute2AttachPosition(payload);
+    const video = videoRef.current;
+    if (video) {
+      return resolvePlaybackRecoveryTargetSeconds({
+        currentAbsolutePositionSeconds: resolveSessionAbsoluteTime(payload, Math.max(video.currentTime || 0, 0)),
+        committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+        actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+        targetPositionSeconds: isRoute2SessionPayload(payload)
+          ? resolveRoute2AttachPosition(payload)
+          : payload.target_position_seconds,
+      });
     }
-    return Math.max(payload.target_position_seconds || 0, 0);
+    return resolvePlaybackRecoveryTargetSeconds({
+      committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+      actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+      targetPositionSeconds: isRoute2SessionPayload(payload)
+        ? resolveRoute2AttachPosition(payload)
+        : payload.target_position_seconds,
+    });
   }
 
   function maybeRefreshAttachedMobileManifest(payload = mobileSessionRef.current) {
@@ -633,7 +649,13 @@ export function useOptimizedPlaybackSession({
     }
     const currentPosition = resolveCurrentManifestPosition(payload);
     const currentManifestEnd = resolveAttachedManifestEndSeconds(payload);
-    if (currentPosition < currentManifestEnd - SESSION_MANIFEST_REFRESH_RUNWAY_SECONDS) {
+    const manifestState = classifyManifestWindowState({
+      absolutePositionSeconds: currentPosition,
+      manifestEndSeconds: currentManifestEnd,
+      fullDurationSeconds: payload.duration_seconds || 0,
+      refreshRunwaySeconds: SESSION_MANIFEST_REFRESH_RUNWAY_SECONDS,
+    });
+    if (!manifestState.shouldRefreshManifest) {
       return false;
     }
     armMobileManifestAttachment(payload, {
@@ -1020,6 +1042,31 @@ export function useOptimizedPlaybackSession({
     return Math.max(resolveMobileCommittedPosition(payload), 0);
   }
 
+  function resolveLivePlaybackRecoveryTarget(payload = mobileSessionRef.current) {
+    const video = videoRef.current;
+    const currentAbsolutePositionSeconds = video && payload
+      ? resolveSessionAbsoluteTime(payload, Math.max(video.currentTime || 0, 0))
+      : null;
+    return resolvePlaybackRecoveryTargetSeconds({
+      currentAbsolutePositionSeconds,
+      committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+      actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+      targetPositionSeconds: resolveMobileAuthorityPosition(payload),
+    });
+  }
+
+  function preservePlaybackRecoveryTarget(targetPosition) {
+    const safeTarget = Math.max(Number(targetPosition || 0), 0);
+    committedPlayheadSecondsRef.current = safeTarget;
+    actualMediaElementTimeRef.current = safeTarget;
+    mobileLastStablePositionRef.current = safeTarget;
+    requestedTargetSecondsRef.current = safeTarget;
+    setCommittedPlayheadSeconds(safeTarget);
+    setActualMediaElementTime(safeTarget);
+    setRequestedTargetSeconds(safeTarget);
+    setPlaybackPosition(safeTarget);
+  }
+
   async function postMobileRuntimeHeartbeat({
     lifecycleState = null,
     stalled = null,
@@ -1193,6 +1240,7 @@ export function useOptimizedPlaybackSession({
     if ((!iosMobile && !explicitRoute2Session) || !activeSession?.session_id || mobileRecoveryInFlightRef.current) {
       return;
     }
+    const capturedRecoveryTarget = resolveLivePlaybackRecoveryTarget(activeSession);
     mobileRecoveryInFlightRef.current = true;
     applyMobileLifecycleStatus("resuming");
     setOptimizedPlaybackPending(true);
@@ -1217,7 +1265,7 @@ export function useOptimizedPlaybackSession({
           handleMissingBrowserPlaybackSession(activeSession.session_id);
           return;
         }
-        const recoveryTarget = resolveMobileCommittedPosition(activeSession);
+        const recoveryTarget = capturedRecoveryTarget;
         const recoveryAttempt =
           browserPlaybackLatestAttemptRef.current
           || buildSyntheticBrowserPlaybackAttempt(browserPlaybackCurrentSessionRef.current, activeSession);
@@ -1244,7 +1292,12 @@ export function useOptimizedPlaybackSession({
         }
       }
       if (payload.state === "failed" || payload.state === "expired" || payload.state === "stopped") {
-        const recoveryTarget = resolveMobileCommittedPosition(payload);
+        const recoveryTarget = resolvePlaybackRecoveryTargetSeconds({
+          currentAbsolutePositionSeconds: capturedRecoveryTarget,
+          committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+          actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+          targetPositionSeconds: resolveMobileAuthorityPosition(payload),
+        });
         const recoveryAttempt =
           browserPlaybackLatestAttemptRef.current
           || buildSyntheticBrowserPlaybackAttempt(browserPlaybackCurrentSessionRef.current, payload);
@@ -1274,7 +1327,13 @@ export function useOptimizedPlaybackSession({
           return;
         }
       }
-      const recoveryTarget = resolveMobileAuthorityPosition(payload);
+      const recoveryTarget = resolvePlaybackRecoveryTargetSeconds({
+        currentAbsolutePositionSeconds: capturedRecoveryTarget,
+        committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+        actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+        targetPositionSeconds: resolveMobileAuthorityPosition(payload),
+      });
+      preservePlaybackRecoveryTarget(recoveryTarget);
       if (video && mobilePlayerCanPlayRef.current) {
         const frozenFrameUrl = captureVideoFrameSnapshot(video);
         if (frozenFrameUrl) {
