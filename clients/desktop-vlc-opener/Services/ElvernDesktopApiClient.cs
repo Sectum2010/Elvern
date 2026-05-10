@@ -14,6 +14,13 @@ internal sealed class ElvernDesktopApiClient : IDisposable
     };
 
     private readonly HttpClient _httpClient = new();
+    private readonly string _allowedOrigin;
+
+    public ElvernDesktopApiClient(string allowedOrigin)
+    {
+        _allowedOrigin = HelperOriginPolicy.ResolveAllowedOrigin(allowedOrigin);
+        _httpClient.BaseAddress = new Uri(_allowedOrigin);
+    }
 
     public async Task<DesktopVlcHandoff> ResolveHandoffAsync(
         string resolveUrl,
@@ -24,6 +31,7 @@ internal sealed class ElvernDesktopApiClient : IDisposable
         var helperPlatform = ResolveHelperPlatform();
         var helperArch = RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
 
+        EnsureAllowedRequestUrl(resolveUrl);
         using var request = new HttpRequestMessage(HttpMethod.Get, resolveUrl);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.TryAddWithoutValidation("X-Elvern-Helper-Version", helperVersion);
@@ -69,6 +77,7 @@ internal sealed class ElvernDesktopApiClient : IDisposable
         var helperPlatform = ResolveHelperPlatform();
         var helperArch = RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
 
+        EnsureAllowedRequestUrl(verifyUrl);
         using var request = new HttpRequestMessage(HttpMethod.Get, verifyUrl);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.TryAddWithoutValidation("X-Elvern-Helper-Version", helperVersion);
@@ -98,6 +107,7 @@ internal sealed class ElvernDesktopApiClient : IDisposable
         string targetUrl,
         CancellationToken cancellationToken = default)
     {
+        EnsureAllowedRequestUrl(targetUrl);
         if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out var targetUri)
             || (targetUri.Scheme != Uri.UriSchemeHttp && targetUri.Scheme != Uri.UriSchemeHttps))
         {
@@ -138,6 +148,7 @@ internal sealed class ElvernDesktopApiClient : IDisposable
         string startedUrl,
         CancellationToken cancellationToken = default)
     {
+        EnsureAllowedRequestUrl(startedUrl);
         using var request = new HttpRequestMessage(HttpMethod.Post, startedUrl);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -219,6 +230,20 @@ internal sealed class ElvernDesktopApiClient : IDisposable
     }
 
     private sealed record PreflightResult(bool Success, string Summary);
+
+    private void EnsureAllowedRequestUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            throw new InvalidOperationException($"Elvern helper refused invalid backend URL: {url}");
+        }
+        var origin = uri.GetLeftPart(UriPartial.Authority);
+        if (!HelperOriginPolicy.OriginsMatch(origin, _allowedOrigin))
+        {
+            OpenerLog.Info($"helper_origin_rejected allowed={_allowedOrigin} attempted={origin}");
+            throw new InvalidOperationException("Elvern helper refused to contact a backend origin outside this helper build.");
+        }
+    }
 
     private static string ExtractErrorMessage(string payload)
     {

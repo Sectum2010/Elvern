@@ -33,7 +33,7 @@ internal static class Program
             var vlcDetection = VlcLocator.ProbeInstalledVlc();
             OpenerLog.Info($"Local VLC detection result: status={vlcDetection.Status} path={vlcDetection.Path ?? "(none)"}");
 
-            using var apiClient = new ElvernDesktopApiClient();
+            using var apiClient = new ElvernDesktopApiClient(context.ApiOrigin);
             if (string.Equals(context.Action, "verify", StringComparison.OrdinalIgnoreCase))
             {
                 await apiClient.VerifyVlcAsync(context.VerifyUrl, vlcDetection).ConfigureAwait(false);

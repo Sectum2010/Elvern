@@ -823,8 +823,11 @@ def test_admin_backup_endpoints_list_create_inspect_and_restore_plan(
     assert checkpoint["backup_trigger"] == "manual_admin_ui"
     assert checkpoint["auto_checkpoint"] is False
     assert checkpoint["contains_secrets"] is True
+    assert checkpoint["backup_encrypted"] is True
+    assert checkpoint["backup_key_source"] == "auto"
     assert checkpoint["inspect_valid"] is True
-    assert Path(checkpoint["path"]).is_dir()
+    assert Path(checkpoint["path"]).is_file()
+    assert checkpoint["path"].endswith(".tar.gz.enc")
 
     listed = client.get("/api/admin/backups").json()["checkpoints"]
     assert [entry["checkpoint_id"] for entry in listed] == [checkpoint_id]

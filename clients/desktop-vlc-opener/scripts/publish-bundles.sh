@@ -39,6 +39,20 @@ for required_key in HELPER_VERSION HELPER_CHANNEL DOTNET_RUNTIME_MAJOR DOTNET_RU
   fi
 done
 
+if [[ -z "${ELVERN_BACKEND_ORIGIN:-}" ]]; then
+  echo "Set ELVERN_BACKEND_ORIGIN before publishing helper bundles." >&2
+  exit 1
+fi
+
+case "${ELVERN_BACKEND_ORIGIN}" in
+  http://*|https://*)
+    ;;
+  *)
+    echo "ELVERN_BACKEND_ORIGIN must be an absolute http(s) origin." >&2
+    exit 1
+    ;;
+esac
+
 usage() {
   cat <<'EOF'
 Usage: ./scripts/publish-bundles.sh [options]
@@ -235,6 +249,7 @@ prepare_portable_publish() {
     -p:UseAppHost=false \
     -p:PublishSingleFile=false \
     -p:PublishTrimmed=false \
+    -p:ElvernAllowedOrigin="${ELVERN_BACKEND_ORIGIN}" \
     -o "${output_dir}" >&2
   echo "${output_dir}"
 }
@@ -252,6 +267,7 @@ prepare_self_contained_publish() {
     -p:PublishSingleFile=true \
     -p:IncludeNativeLibrariesForSelfExtract=true \
     -p:PublishTrimmed=false \
+    -p:ElvernAllowedOrigin="${ELVERN_BACKEND_ORIGIN}" \
     -o "${output_dir}" >&2
   echo "${output_dir}"
 }
@@ -268,6 +284,8 @@ write_package_readme() {
     echo "Package details:"
     echo "- Runtime target label: ${runtime}"
     echo "- Packaging mode: ${mode}"
+    echo "- Bound backend origin: ${ELVERN_BACKEND_ORIGIN}"
+    echo "- If the backend domain or port changes, republish and redistribute the helper bundle."
     if [[ "${mode}" == "portable" ]]; then
       echo "- This package is framework-dependent."
       echo "- Install the ${DOTNET_RUNTIME_DISPLAY} on the client machine before first use."

@@ -2,9 +2,9 @@ using Elvern.VlcOpener.Models;
 
 namespace Elvern.VlcOpener.Services;
 
-internal static class LaunchUrlParser
+public static class LaunchUrlParser
 {
-    public static LaunchContext Parse(string rawArgument)
+    public static LaunchContext Parse(string rawArgument, string? allowedOriginOverride = null)
     {
         var raw = NormalizeRawArgument(rawArgument);
         if (string.IsNullOrWhiteSpace(raw))
@@ -28,7 +28,11 @@ internal static class LaunchUrlParser
         }
 
         var query = ParseQueryString(uri.Query);
-        var apiOrigin = GetRequiredQueryValue(query, "api");
+        var allowedOrigin = HelperOriginPolicy.ResolveAllowedOrigin(allowedOriginOverride);
+        var apiOrigin = query.TryGetValue("api", out var providedApiOrigin)
+            && !string.IsNullOrWhiteSpace(providedApiOrigin)
+            ? providedApiOrigin
+            : allowedOrigin;
         var accessToken = GetRequiredQueryValue(query, "token");
         var handoffId = string.Equals(action, "play", StringComparison.OrdinalIgnoreCase)
             ? GetRequiredQueryValue(query, "handoff")
@@ -42,13 +46,20 @@ internal static class LaunchUrlParser
         {
             throw new InvalidOperationException("Invalid Elvern VLC handoff URL: api must be an absolute http(s) origin.");
         }
+        var normalizedApiOrigin = apiUri.GetLeftPart(UriPartial.Authority);
+        if (!HelperOriginPolicy.OriginsMatch(normalizedApiOrigin, allowedOrigin))
+        {
+            OpenerLog.Info(
+                $"helper_origin_rejected allowed={allowedOrigin} attempted={normalizedApiOrigin}");
+            throw new InvalidOperationException("Invalid Elvern VLC handoff URL: api origin is not allowed by this helper build.");
+        }
 
         return new LaunchContext
         {
             Action = action,
             RawLaunchUrl = raw,
             Scheme = uri.Scheme,
-            ApiOrigin = apiUri.GetLeftPart(UriPartial.Authority),
+            ApiOrigin = normalizedApiOrigin,
             HandoffId = handoffId,
             VerificationId = verificationId,
             AccessToken = accessToken,

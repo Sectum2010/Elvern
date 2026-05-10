@@ -6,6 +6,42 @@ For core-path executable checks, also use `docs/CODEX_CORE_GUARDRAILS.md`.
 
 For hard-won playback and platform regressions, also use `docs/PLAYBACK_REGRESSION_NOTES.md`. If a task disproves an early playback hypothesis, depends on live-device evidence, or fixes a high-regression-risk platform path, add or update a note there before calling the slice complete.
 
+## Request flow in deployed Elvern
+
+Production traffic flows through two Python/Node processes, not one:
+
+```text
+Public internet
+    ↓
+Tailscale Funnel edge
+    ↓
+frontend/server.mjs (Node, port 4173)
+    ↓ (only /api/* and /health proxied)
+backend uvicorn (Python, port 8000)
+```
+
+`server.mjs` is a reverse proxy and static file server. By default it only
+forwards `/api/*` and `/health` to backend. Everything else is served directly
+from `frontend/dist/`.
+
+**Implication for any feature that wants dynamic backend response on a non-API
+path:**
+
+- backend FastAPI middleware/route alone is not enough.
+- `server.mjs` must be updated to proxy that specific path to backend.
+- Example: dynamic manifest serving (dvmnbcbw bug, May 2026) had correct
+  backend middleware, but `server.mjs` intercepted `/<prefix>/manifest.webmanifest`
+  and served the static dist file.
+
+**Checklist before adding any new dynamic-content backend route:**
+
+1. `cat frontend/server.mjs` and read the routing logic.
+2. If the new path is not `/api/*` or `/health`, `server.mjs` will hijack it.
+3. Add an explicit proxy rule in `server.mjs` for that path.
+4. Test with `curl` against the public URL going through `server.mjs`, not just
+   `localhost:8000` bypassing it.
+5. The bug only shows up in the public path. Always test there.
+
 ## 1. Project Thesis And Boundaries
 
 Elvern is a private media control plane. Its core job is to organize a private library and hand media off safely to the right playback path.
@@ -370,6 +406,21 @@ Forbidden claims without evidence:
 - “Protected” without distinguishing prepared vs playable.
 - “Safe” for lifecycle/process code based only on compile/build.
 - “No route contract change” unless routes/schemas/callers were checked or unchanged by construction.
+
+## Desktop helper
+
+Helper bundles are bound to a single backend origin at build time. Build with
+`ELVERN_BACKEND_ORIGIN` set:
+
+```bash
+export ELVERN_BACKEND_ORIGIN="https://your-server.tailnet.ts.net"
+./clients/desktop-vlc-opener/scripts/publish-bundles.sh
+```
+
+If the backend origin changes, including domain or port, republish bundles and
+redistribute them to helper users. The helper rejects `elvern-vlc://` URLs that
+point to any other origin. URL prefix changes do not require republishing:
+origin is scheme, host, and port, not path.
 
 ## 10. Practical Examples From Current Repo History
 

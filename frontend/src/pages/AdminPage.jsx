@@ -167,6 +167,16 @@ function formatRecoveryCheckpointId(checkpointId) {
   return checkpointId.length > 18 ? `...${checkpointId.slice(-12)}` : checkpointId;
 }
 
+function formatBackupProtectionLabel(checkpoint) {
+  if (checkpoint?.backup_encrypted && checkpoint?.backup_key_source === "passphrase") {
+    return "passphrase-protected";
+  }
+  if (checkpoint?.backup_encrypted) {
+    return "auto-encrypted (tied to server secret)";
+  }
+  return "legacy plaintext";
+}
+
 
 function UserStatusIndicator({ color, label }) {
   return (
@@ -335,6 +345,18 @@ export function AdminPage() {
   const [inspectPayload, setInspectPayload] = useState(null);
   const [restorePlanPending, setRestorePlanPending] = useState(false);
   const [restorePlanPayload, setRestorePlanPayload] = useState(null);
+  const [backupCreateModal, setBackupCreateModal] = useState({
+    open: false,
+    passphrase: "",
+    confirmPassphrase: "",
+    error: "",
+  });
+  const [backupPassphraseModal, setBackupPassphraseModal] = useState({
+    mode: null,
+    checkpointId: "",
+    passphrase: "",
+    error: "",
+  });
   const [showAllRecoveryCheckpoints, setShowAllRecoveryCheckpoints] = useState(false);
   const [showAllRecoveryWarnings, setShowAllRecoveryWarnings] = useState(false);
   const [userActionPending, setUserActionPending] = useState(null);
@@ -1047,20 +1069,51 @@ export function AdminPage() {
     setInspectPayload(null);
     setRestorePlanPayload(null);
     setShowAllRecoveryWarnings(false);
+    setBackupPassphraseModal({ mode: null, checkpointId: "", passphrase: "", error: "" });
   }
 
-  async function handleCreateBackupNow() {
+  function openCreateBackupModal() {
+    setBackupCreateModal({
+      open: true,
+      passphrase: "",
+      confirmPassphrase: "",
+      error: "",
+    });
+  }
+
+  function closeCreateBackupModal() {
+    if (createBackupPending) {
+      return;
+    }
+    setBackupCreateModal({
+      open: false,
+      passphrase: "",
+      confirmPassphrase: "",
+      error: "",
+    });
+  }
+
+  async function handleCreateBackupNow(passphrase) {
     if (createBackupPending) {
       return;
     }
     setCreateBackupPending(true);
     setRecoveryFeedback(null);
     try {
-      const payload = await apiRequest("/api/admin/backups", { method: "POST" });
+      const payload = await apiRequest("/api/admin/backups", {
+        method: "POST",
+        data: { passphrase },
+      });
       const checkpoint = payload.checkpoint || {};
       const checkpointId = checkpoint.checkpoint_id || "";
       setInspectPayload(null);
       setRestorePlanPayload(null);
+      setBackupCreateModal({
+        open: false,
+        passphrase: "",
+        confirmPassphrase: "",
+        error: "",
+      });
       await loadRecoveryData({
         silent: true,
         preserveFeedback: true,
@@ -1086,16 +1139,65 @@ export function AdminPage() {
     }
   }
 
-  async function handleInspectCheckpoint() {
+  function handleConfirmCreateBackup() {
+    const passphrase = backupCreateModal.passphrase;
+    if (passphrase.length < 12) {
+      setBackupCreateModal((current) => ({
+        ...current,
+        error: "Use at least 12 characters.",
+      }));
+      return;
+    }
+    if (passphrase !== backupCreateModal.confirmPassphrase) {
+      setBackupCreateModal((current) => ({
+        ...current,
+        error: "Passphrases do not match.",
+      }));
+      return;
+    }
+    handleCreateBackupNow(passphrase);
+  }
+
+  function selectedCheckpointRequiresPassphrase() {
+    return selectedCheckpoint?.backup_encrypted && selectedCheckpoint?.backup_key_source === "passphrase";
+  }
+
+  function openBackupPassphraseModal(mode) {
+    setBackupPassphraseModal({
+      mode,
+      checkpointId: selectedCheckpointId,
+      passphrase: "",
+      error: "",
+    });
+  }
+
+  function closeBackupPassphraseModal() {
+    if (inspectPending || restorePlanPending) {
+      return;
+    }
+    setBackupPassphraseModal({ mode: null, checkpointId: "", passphrase: "", error: "" });
+  }
+
+  async function handleInspectCheckpoint(passphrase = null) {
     if (!selectedCheckpointId || inspectPending) {
       return;
     }
     setInspectPending(true);
     setRecoveryFeedback(null);
     try {
-      const payload = await apiRequest(`/api/admin/backups/${encodeURIComponent(selectedCheckpointId)}/inspect`);
+      const endpoint = `/api/admin/backups/${encodeURIComponent(selectedCheckpointId)}/inspect`;
+      const payload = passphrase
+        ? await apiRequest(endpoint, { method: "POST", data: { passphrase } })
+        : await apiRequest(endpoint);
       setInspectPayload(payload);
+      setBackupPassphraseModal({ mode: null, checkpointId: "", passphrase: "", error: "" });
     } catch (requestError) {
+      if (passphrase) {
+        setBackupPassphraseModal((current) => ({
+          ...current,
+          error: requestError.message || "Wrong backup passphrase.",
+        }));
+      }
       setRecoveryFeedback({
         tone: "error",
         text: requestError.message || "Failed to inspect checkpoint.",
@@ -1105,7 +1207,7 @@ export function AdminPage() {
     }
   }
 
-  async function handleGenerateRestorePlan() {
+  async function handleGenerateRestorePlan(passphrase = null) {
     if (!selectedCheckpointId || restorePlanPending) {
       return;
     }
@@ -1113,15 +1215,57 @@ export function AdminPage() {
     setRecoveryFeedback(null);
     setShowAllRecoveryWarnings(false);
     try {
-      const payload = await apiRequest(`/api/admin/backups/${encodeURIComponent(selectedCheckpointId)}/restore-plan`);
+      const endpoint = `/api/admin/backups/${encodeURIComponent(selectedCheckpointId)}/restore-plan`;
+      const payload = passphrase
+        ? await apiRequest(endpoint, { method: "POST", data: { passphrase } })
+        : await apiRequest(endpoint);
       setRestorePlanPayload(payload);
+      setBackupPassphraseModal({ mode: null, checkpointId: "", passphrase: "", error: "" });
     } catch (requestError) {
+      if (passphrase) {
+        setBackupPassphraseModal((current) => ({
+          ...current,
+          error: requestError.message || "Wrong backup passphrase.",
+        }));
+      }
       setRecoveryFeedback({
         tone: "error",
         text: requestError.message || "Failed to build recovery preview.",
       });
     } finally {
       setRestorePlanPending(false);
+    }
+  }
+
+  function handleProtectedInspectClick() {
+    if (selectedCheckpointRequiresPassphrase()) {
+      openBackupPassphraseModal("inspect");
+      return;
+    }
+    handleInspectCheckpoint();
+  }
+
+  function handleProtectedRestorePlanClick() {
+    if (selectedCheckpointRequiresPassphrase()) {
+      openBackupPassphraseModal("restore-plan");
+      return;
+    }
+    handleGenerateRestorePlan();
+  }
+
+  function handleSubmitBackupPassphrase() {
+    const passphrase = backupPassphraseModal.passphrase;
+    if (!passphrase) {
+      setBackupPassphraseModal((current) => ({
+        ...current,
+        error: "Enter the backup passphrase.",
+      }));
+      return;
+    }
+    if (backupPassphraseModal.mode === "inspect") {
+      handleInspectCheckpoint(passphrase);
+    } else if (backupPassphraseModal.mode === "restore-plan") {
+      handleGenerateRestorePlan(passphrase);
     }
   }
 
@@ -2920,10 +3064,10 @@ export function AdminPage() {
           <button
             className="primary-button"
             disabled={createBackupPending}
-            onClick={handleCreateBackupNow}
+            onClick={openCreateBackupModal}
             type="button"
           >
-            {createBackupPending ? "Creating backup..." : "Create backup now"}
+            {createBackupPending ? "Creating backup..." : "Create encrypted backup"}
           </button>
           <button
             className="ghost-button"
@@ -2981,7 +3125,7 @@ export function AdminPage() {
                         ID {formatRecoveryCheckpointId(checkpoint.checkpoint_id)}
                       </p>
                       <p className="page-subnote">
-                        {checkpoint.contains_secrets ? "Contains secrets" : "No secrets flagged"} · DB integrity {checkpoint.db_integrity_check_result || "unknown"} · {formatBytes(checkpoint.total_size_bytes)} · {checkpoint.file_count} files
+                        {formatBackupProtectionLabel(checkpoint)} · {checkpoint.contains_secrets ? "Contains secrets" : "No secrets flagged"} · DB integrity {checkpoint.db_integrity_check_result || "unknown"} · {formatBytes(checkpoint.total_size_bytes)} · {checkpoint.file_count} files
                       </p>
                       <p className="page-subnote">
                         Inspect {checkpoint.inspect_valid ? "valid" : "invalid"}{checkpoint.inspect_error ? ` · ${checkpoint.inspect_error}` : ""}
@@ -3018,7 +3162,7 @@ export function AdminPage() {
             <button
               className="ghost-button ghost-button--inline"
               disabled={!selectedCheckpointId || inspectPending}
-              onClick={handleInspectCheckpoint}
+              onClick={handleProtectedInspectClick}
               type="button"
             >
               {inspectPending ? "Inspecting..." : "Inspect"}
@@ -3091,7 +3235,7 @@ export function AdminPage() {
             <button
               className="ghost-button ghost-button--inline"
               disabled={!selectedCheckpointId || restorePlanPending}
-              onClick={handleGenerateRestorePlan}
+              onClick={handleProtectedRestorePlanClick}
               type="button"
             >
               {restorePlanPending ? "Previewing..." : "Preview recovery"}
@@ -3395,6 +3539,158 @@ export function AdminPage() {
       {userActionsModal}
       {terminateWorkerConfirmationModal}
       {diagnosticIdPopup}
+      {backupCreateModal.open ? (
+        <div className="browser-resume-modal" role="presentation">
+          <button
+            aria-label="Close backup creation"
+            className="browser-resume-modal__backdrop"
+            onClick={closeCreateBackupModal}
+            type="button"
+          />
+          <form
+            className="browser-resume-modal__card detail-info-modal__card admin-diagnostic-id-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleConfirmCreateBackup();
+            }}
+          >
+            <div className="detail-info-modal__header">
+              <div className="detail-info-modal__copy">
+                <p className="detail-info-modal__eyebrow">Backup</p>
+                <h2>Create encrypted backup</h2>
+              </div>
+              <button
+                aria-label="Close backup creation"
+                className="detail-info-modal__close"
+                disabled={createBackupPending}
+                onClick={closeCreateBackupModal}
+                type="button"
+              >
+                X
+              </button>
+            </div>
+            <div className="detail-info-modal__body">
+              <p className="page-subnote">
+                Choose a passphrase to encrypt this backup. You will need this passphrase to inspect or restore later.
+                Elvern cannot recover lost passphrases.
+              </p>
+              <NonLoginSecretInput
+                autoComplete="new-password"
+                disabled={createBackupPending}
+                onChange={(event) =>
+                  setBackupCreateModal((current) => ({
+                    ...current,
+                    passphrase: event.target.value,
+                    error: "",
+                  }))
+                }
+                placeholder="Backup passphrase"
+                purpose="backup-passphrase"
+                value={backupCreateModal.passphrase}
+              />
+              <NonLoginSecretInput
+                autoComplete="new-password"
+                disabled={createBackupPending}
+                onChange={(event) =>
+                  setBackupCreateModal((current) => ({
+                    ...current,
+                    confirmPassphrase: event.target.value,
+                    error: "",
+                  }))
+                }
+                placeholder="Confirm passphrase"
+                purpose="backup-passphrase-confirm"
+                value={backupCreateModal.confirmPassphrase}
+              />
+              {backupCreateModal.error ? (
+                <p className="action-feedback action-feedback--error" role="alert">
+                  {backupCreateModal.error}
+                </p>
+              ) : null}
+            </div>
+            <div className="browser-resume-modal__actions">
+              <button className="primary-button" disabled={createBackupPending} type="submit">
+                {createBackupPending ? "Creating..." : "Create encrypted backup"}
+              </button>
+              <button className="ghost-button" disabled={createBackupPending} onClick={closeCreateBackupModal} type="button">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {backupPassphraseModal.mode ? (
+        <div className="browser-resume-modal" role="presentation">
+          <button
+            aria-label="Close backup passphrase"
+            className="browser-resume-modal__backdrop"
+            onClick={closeBackupPassphraseModal}
+            type="button"
+          />
+          <form
+            className="browser-resume-modal__card detail-info-modal__card admin-diagnostic-id-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleSubmitBackupPassphrase();
+            }}
+          >
+            <div className="detail-info-modal__header">
+              <div className="detail-info-modal__copy">
+                <p className="detail-info-modal__eyebrow">Backup</p>
+                <h2>{backupPassphraseModal.mode === "inspect" ? "Inspect backup" : "Preview recovery"}</h2>
+              </div>
+              <button
+                aria-label="Close backup passphrase"
+                className="detail-info-modal__close"
+                disabled={inspectPending || restorePlanPending}
+                onClick={closeBackupPassphraseModal}
+                type="button"
+              >
+                X
+              </button>
+            </div>
+            <div className="detail-info-modal__body">
+              <p className="page-subnote">
+                This backup is encrypted. Enter the passphrase used when creating it.
+              </p>
+              <NonLoginSecretInput
+                autoComplete="new-password"
+                disabled={inspectPending || restorePlanPending}
+                onChange={(event) =>
+                  setBackupPassphraseModal((current) => ({
+                    ...current,
+                    passphrase: event.target.value,
+                    error: "",
+                  }))
+                }
+                placeholder="Backup passphrase"
+                purpose="backup-open-passphrase"
+                value={backupPassphraseModal.passphrase}
+              />
+              {backupPassphraseModal.error ? (
+                <p className="action-feedback action-feedback--error" role="alert">
+                  {backupPassphraseModal.error}
+                </p>
+              ) : null}
+            </div>
+            <div className="browser-resume-modal__actions">
+              <button className="primary-button" disabled={inspectPending || restorePlanPending} type="submit">
+                {backupPassphraseModal.mode === "inspect"
+                  ? (inspectPending ? "Inspecting..." : "Inspect")
+                  : (restorePlanPending ? "Previewing..." : "Preview recovery")}
+              </button>
+              <button
+                className="ghost-button"
+                disabled={inspectPending || restorePlanPending}
+                onClick={closeBackupPassphraseModal}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
       {urlPrefixRotateModal.open ? (
         <div className="browser-resume-modal" role="presentation">
           <button

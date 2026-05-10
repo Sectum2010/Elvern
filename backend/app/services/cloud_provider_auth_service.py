@@ -10,8 +10,10 @@ from fastapi import HTTPException, status
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..security import generate_session_token
+from .at_rest_encryption import decrypt_at_rest, encrypt_at_rest
 from .app_settings_service import get_effective_google_drive_https_origin
 from .google_drive_service import (
+    build_google_drive_provider_auth_required_detail,
     build_google_drive_authorization_url,
     exchange_google_oauth_code,
     fetch_google_userinfo,
@@ -19,9 +21,57 @@ from .google_drive_service import (
     refresh_google_access_token,
     require_google_drive_enabled,
 )
+from .security_event_service import log_security_event
 
 
 GOOGLE_STATE_TTL_MINUTES = 15
+
+
+def _provider_auth_required_for_corrupted_token() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=build_google_drive_provider_auth_required_detail(
+            reason="token_corrupted",
+            message="Reconnect Google Drive to continue this action.",
+        ),
+    )
+
+
+def _decrypt_stored_oauth_value(
+    stored: object,
+    settings: Settings,
+) -> tuple[str, bool, bool]:
+    """
+    Return (plaintext, was_encrypted, corrupted).
+
+    Legacy plaintext values are accepted so callers can lazily migrate them.
+    Corrupted encrypted values are treated as missing provider auth.
+    """
+    try:
+        plaintext, was_encrypted = decrypt_at_rest(str(stored or ""), settings)
+    except ValueError:
+        return "", False, True
+    return plaintext, was_encrypted, False
+
+
+def _log_oauth_token_encryption_upgrade(
+    settings: Settings,
+    *,
+    user_id: int | None,
+    account_id: int,
+    columns: list[str],
+) -> None:
+    if not columns:
+        return
+    log_security_event(
+        settings,
+        event_kind="oauth_token_encryption_upgraded",
+        actor_user_id=user_id,
+        details={
+            "google_drive_account_id": account_id,
+            "columns": sorted(columns),
+        },
+    )
 
 
 def _normalize_google_connect_return_path(return_path: str | None) -> str | None:
@@ -141,17 +191,26 @@ def complete_google_drive_connect(
     with get_connection(settings) as connection:
         existing = connection.execute(
             """
-            SELECT refresh_token
+            SELECT id, refresh_token
             FROM google_drive_accounts
             WHERE user_id = ?
             LIMIT 1
             """,
             (user_id,),
         ).fetchone()
+        upgraded_columns: list[str] = []
+        existing_account_id = int(existing["id"]) if existing else None
         if refresh_token:
             stored_refresh_token = str(refresh_token)
         elif existing and existing["refresh_token"]:
-            stored_refresh_token = str(existing["refresh_token"])
+            stored_refresh_token, was_encrypted, corrupted = _decrypt_stored_oauth_value(
+                existing["refresh_token"],
+                settings,
+            )
+            if corrupted:
+                stored_refresh_token = ""
+            elif not was_encrypted:
+                upgraded_columns.append("refresh_token")
         else:
             stored_refresh_token = ""
         if not stored_refresh_token:
@@ -159,6 +218,8 @@ def complete_google_drive_connect(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Google Drive did not provide a refresh token. Please try connecting again.",
             )
+        encrypted_refresh_token = encrypt_at_rest(stored_refresh_token, settings)
+        encrypted_access_token = encrypt_at_rest(access_token, settings)
         connection.execute(
             """
             INSERT INTO google_drive_accounts (
@@ -186,8 +247,8 @@ def complete_google_drive_connect(
                 google_account_id,
                 userinfo.get("email"),
                 userinfo.get("name") or userinfo.get("email"),
-                stored_refresh_token,
-                access_token,
+                encrypted_refresh_token,
+                encrypted_access_token,
                 access_token_expires_at,
                 now,
                 now,
@@ -195,6 +256,13 @@ def complete_google_drive_connect(
         )
         connection.execute("DELETE FROM google_oauth_states WHERE state_token = ?", (resolved_state_token,))
         connection.commit()
+        if upgraded_columns and existing_account_id is not None:
+            _log_oauth_token_encryption_upgrade(
+                settings,
+                user_id=user_id,
+                account_id=existing_account_id,
+                columns=upgraded_columns,
+            )
     return {
         "user_id": user_id,
         "account_email": userinfo.get("email"),
@@ -207,7 +275,7 @@ def get_google_drive_account_access_token(settings: Settings, *, user_id: int) -
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT id, refresh_token, access_token, access_token_expires_at
+            SELECT id, user_id, refresh_token, access_token, access_token_expires_at
             FROM google_drive_accounts
             WHERE user_id = ?
             LIMIT 1
@@ -232,7 +300,7 @@ def get_google_drive_account_access_token_by_account_id(
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT id, refresh_token, access_token, access_token_expires_at
+            SELECT id, user_id, refresh_token, access_token, access_token_expires_at
             FROM google_drive_accounts
             WHERE id = ?
             LIMIT 1
@@ -249,7 +317,17 @@ def get_google_drive_account_access_token_by_account_id(
 
 
 def _ensure_access_token(settings: Settings, *, row: dict[str, object]) -> tuple[str, dict[str, object]]:
-    access_token = str(row.get("access_token") or "")
+    account_id = int(row["id"])
+    user_id = int(row["user_id"]) if row.get("user_id") is not None else None
+    upgraded_columns: list[str] = []
+    access_token, access_was_encrypted, access_corrupted = _decrypt_stored_oauth_value(
+        row.get("access_token"),
+        settings,
+    )
+    if access_corrupted:
+        access_token = ""
+    elif access_token and not access_was_encrypted:
+        upgraded_columns.append("access_token")
     access_token_expires_at = str(row.get("access_token_expires_at") or "")
     if access_token and access_token_expires_at:
         try:
@@ -260,9 +338,36 @@ def _ensure_access_token(settings: Settings, *, row: dict[str, object]) -> tuple
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
             if expires_at > datetime.now(timezone.utc) + timedelta(seconds=30):
+                if upgraded_columns:
+                    with get_connection(settings) as connection:
+                        connection.execute(
+                            """
+                            UPDATE google_drive_accounts
+                            SET access_token = ?, updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (encrypt_at_rest(access_token, settings), utcnow_iso(), account_id),
+                        )
+                        connection.commit()
+                    _log_oauth_token_encryption_upgrade(
+                        settings,
+                        user_id=user_id,
+                        account_id=account_id,
+                        columns=upgraded_columns,
+                    )
+                    row["access_token"] = access_token
                 return access_token, row
 
-    refreshed = refresh_google_access_token(settings, refresh_token=str(row["refresh_token"]))
+    refresh_token, refresh_was_encrypted, refresh_corrupted = _decrypt_stored_oauth_value(
+        row.get("refresh_token"),
+        settings,
+    )
+    if refresh_corrupted or not refresh_token:
+        _provider_auth_required_for_corrupted_token()
+    if not refresh_was_encrypted:
+        upgraded_columns.append("refresh_token")
+
+    refreshed = refresh_google_access_token(settings, refresh_token=refresh_token)
     next_access_token = str(refreshed.get("access_token") or "")
     if not next_access_token:
         raise HTTPException(
@@ -274,12 +379,25 @@ def _ensure_access_token(settings: Settings, *, row: dict[str, object]) -> tuple
         connection.execute(
             """
             UPDATE google_drive_accounts
-            SET access_token = ?, access_token_expires_at = ?, updated_at = ?
+            SET refresh_token = ?, access_token = ?, access_token_expires_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (next_access_token, access_token_expires_at, utcnow_iso(), int(row["id"])),
+            (
+                encrypt_at_rest(refresh_token, settings),
+                encrypt_at_rest(next_access_token, settings),
+                access_token_expires_at,
+                utcnow_iso(),
+                account_id,
+            ),
         )
         connection.commit()
+    if upgraded_columns:
+        _log_oauth_token_encryption_upgrade(
+            settings,
+            user_id=user_id,
+            account_id=account_id,
+            columns=upgraded_columns,
+        )
     row["access_token"] = next_access_token
     row["access_token_expires_at"] = access_token_expires_at
     return next_access_token, row

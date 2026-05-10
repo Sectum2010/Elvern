@@ -10,4 +10,13 @@
     <FileVersion>0.8.0.0</FileVersion>
     <InformationalVersion>0.8.0</InformationalVersion>
   </PropertyGroup>
+  <ItemGroup Condition="'$(ElvernAllowedOrigin)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>ElvernAllowedOrigin</_Parameter1>
+      <_Parameter2>$(ElvernAllowedOrigin)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Tests/**" />
+  </ItemGroup>
 </Project>

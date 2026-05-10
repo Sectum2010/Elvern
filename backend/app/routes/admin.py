@@ -4,7 +4,7 @@ import asyncio
 import json
 from queue import Empty
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from ..auth import CurrentAdmin, CurrentHeartbeatAdmin, clear_session_cookie, resolve_client_ip, revoke_sessions_for_user
@@ -28,8 +28,10 @@ from ..schemas import (
     AdminSelfDeleteRequest,
     AdminUserDeleteRequest,
     BackupCheckpointCreateResponse,
+    BackupCheckpointCreateRequest,
     BackupCheckpointInspectResponse,
     BackupCheckpointListResponse,
+    BackupCheckpointPassphraseRequest,
     BackupRestorePlanResponse,
     AdminUserCreateRequest,
     AdminUserListResponse,
@@ -651,11 +653,18 @@ def admin_list_backups(request: Request, user=CurrentAdmin) -> BackupCheckpointL
 
 
 @router.post("/backups", response_model=BackupCheckpointCreateResponse)
-def admin_create_backup(request: Request, user=CurrentAdmin) -> BackupCheckpointCreateResponse:
+def admin_create_backup(
+    request: Request,
+    payload: BackupCheckpointCreateRequest | None = Body(default=None),
+    user=CurrentAdmin,
+) -> BackupCheckpointCreateResponse:
+    passphrase = (payload.passphrase if payload else None) or None
     created = create_backup_checkpoint(
         request.app.state.settings,
         backup_trigger="manual_admin_ui",
         auto_checkpoint=False,
+        trigger_kind="manual",
+        passphrase=passphrase,
         reason="admin_ui",
         initiated_by_user_id=user.id,
         initiated_by_username=user.username,
@@ -664,7 +673,23 @@ def admin_create_backup(request: Request, user=CurrentAdmin) -> BackupCheckpoint
             "action": "admin.backup.create",
         },
     )
-    summary = summarize_backup_checkpoint(created["backup_path"])
+    summary = summarize_backup_checkpoint(
+        created["backup_path"],
+        settings=request.app.state.settings,
+        passphrase=passphrase,
+    )
+    log_security_event(
+        request.app.state.settings,
+        event_kind="backup_created_encrypted_manual",
+        actor_user_id=user.id,
+        actor_username=user.username,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={
+            "checkpoint_id": summary["checkpoint_id"],
+            "backup_key_source": summary.get("backup_key_source"),
+        },
+    )
     log_audit_event(
         request.app.state.settings,
         action="admin.backup.create",
@@ -696,9 +721,54 @@ def admin_inspect_backup(
     user=CurrentAdmin,
 ) -> BackupCheckpointInspectResponse:
     del user
+    return _admin_inspect_backup_with_passphrase(
+        checkpoint_id,
+        request,
+        passphrase=None,
+    )
+
+
+@router.post("/backups/{checkpoint_id}/inspect", response_model=BackupCheckpointInspectResponse)
+def admin_inspect_backup_with_passphrase(
+    checkpoint_id: str,
+    payload: BackupCheckpointPassphraseRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> BackupCheckpointInspectResponse:
+    del user
+    return _admin_inspect_backup_with_passphrase(
+        checkpoint_id,
+        request,
+        passphrase=payload.passphrase,
+    )
+
+
+def _admin_inspect_backup_with_passphrase(
+    checkpoint_id: str,
+    request: Request,
+    *,
+    passphrase: str | None,
+) -> BackupCheckpointInspectResponse:
     checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
-    inspection = inspect_backup_checkpoint(checkpoint_path)
-    summary = summarize_backup_checkpoint(checkpoint_path)
+    inspection = inspect_backup_checkpoint(
+        checkpoint_path,
+        settings=request.app.state.settings,
+        passphrase=passphrase,
+    )
+    summary = summarize_backup_checkpoint(
+        checkpoint_path,
+        settings=request.app.state.settings,
+        passphrase=passphrase,
+    )
+    if inspection.get("encrypted") and not inspection.get("valid") and passphrase:
+        log_security_event(
+            request.app.state.settings,
+            event_kind="backup_inspect_failed_wrong_passphrase",
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            details={"checkpoint_id": checkpoint_id},
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong backup passphrase.")
     manifest = inspection.get("manifest") or {}
     return BackupCheckpointInspectResponse(
         checkpoint_id=summary["checkpoint_id"],
@@ -706,12 +776,15 @@ def admin_inspect_backup(
         created_at_utc=summary["created_at_utc"],
         backup_trigger=summary["backup_trigger"],
         auto_checkpoint=summary["auto_checkpoint"],
+        backup_storage=summary.get("backup_storage"),
+        backup_encrypted=bool(summary.get("backup_encrypted")),
+        backup_key_source=summary.get("backup_key_source"),
         contains_secrets=summary["contains_secrets"],
         warning=str(inspection.get("warning") or "") or None,
         valid=bool(inspection.get("valid")),
         db_integrity_check_result=summary["db_integrity_check_result"],
-        total_size_bytes=summary["total_size_bytes"],
-        file_count=summary["file_count"],
+        total_size_bytes=int(inspection.get("total_size_bytes") or summary["total_size_bytes"]),
+        file_count=int(inspection.get("file_count") or summary["file_count"]),
         files_verified=int(inspection.get("files_verified") or 0),
         missing_files=list(inspection.get("missing_files") or []),
         hash_mismatches=list(inspection.get("hash_mismatches") or []),
@@ -726,10 +799,48 @@ def admin_backup_restore_plan(
     user=CurrentAdmin,
 ) -> BackupRestorePlanResponse:
     del user
-    checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
-    return BackupRestorePlanResponse(
-        **build_restore_dry_run_plan(request.app.state.settings, checkpoint_path)
+    return _admin_backup_restore_plan_with_passphrase(checkpoint_id, request, passphrase=None)
+
+
+@router.post("/backups/{checkpoint_id}/restore-plan", response_model=BackupRestorePlanResponse)
+def admin_backup_restore_plan_with_passphrase(
+    checkpoint_id: str,
+    payload: BackupCheckpointPassphraseRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> BackupRestorePlanResponse:
+    del user
+    return _admin_backup_restore_plan_with_passphrase(
+        checkpoint_id,
+        request,
+        passphrase=payload.passphrase,
     )
+
+
+def _admin_backup_restore_plan_with_passphrase(
+    checkpoint_id: str,
+    request: Request,
+    *,
+    passphrase: str | None,
+) -> BackupRestorePlanResponse:
+    checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    try:
+        return BackupRestorePlanResponse(
+            **build_restore_dry_run_plan(
+                request.app.state.settings,
+                checkpoint_path,
+                passphrase=passphrase,
+            )
+        )
+    except ValueError:
+        log_security_event(
+            request.app.state.settings,
+            event_kind="backup_inspect_failed_wrong_passphrase",
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            details={"checkpoint_id": checkpoint_id, "operation": "restore_plan"},
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong backup passphrase.")
 
 
 @router.get("/global-hidden-items", response_model=HiddenMovieListResponse)
@@ -847,6 +958,7 @@ def admin_update_media_library_reference(
             request.app.state.settings,
             backup_trigger="auto_before_shared_local_path_update",
             auto_checkpoint=True,
+            trigger_kind="auto",
             reason="shared_local_path_update",
             initiated_by_user_id=user.id,
             initiated_by_username=user.username,
@@ -860,6 +972,18 @@ def admin_update_media_library_reference(
         auto_backup_status = "failed"
         auto_backup_error = str(exc)
     else:
+        log_security_event(
+            request.app.state.settings,
+            event_kind="backup_created_encrypted_auto",
+            actor_user_id=user.id,
+            actor_username=user.username,
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            details={
+                "checkpoint_id": auto_checkpoint.get("checkpoint_id") if auto_checkpoint else None,
+                "backup_trigger": "auto_before_shared_local_path_update",
+            },
+        )
         try:
             prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
         except Exception:

@@ -18,6 +18,7 @@ from ..services.account_access_service import is_item_download_allowed
 from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
 from ..services.user_settings_service import get_poster_card_display_max_width
 from ..services.audit_service import log_audit_event
+from ..services.security_event_service import log_security_event
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
@@ -172,6 +173,7 @@ def rescan(request: Request, user=CurrentUser) -> ScanResponse:
             request.app.state.settings,
             backup_trigger="auto_before_admin_rescan",
             auto_checkpoint=True,
+            trigger_kind="auto",
             reason="manual",
             initiated_by_user_id=user.id,
             initiated_by_username=user.username,
@@ -185,6 +187,18 @@ def rescan(request: Request, user=CurrentUser) -> ScanResponse:
         auto_backup_status = "failed"
         auto_backup_error = str(exc)
     else:
+        log_security_event(
+            request.app.state.settings,
+            event_kind="backup_created_encrypted_auto",
+            actor_user_id=user.id,
+            actor_username=user.username,
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            details={
+                "checkpoint_id": auto_checkpoint.get("checkpoint_id") if auto_checkpoint else None,
+                "backup_trigger": "auto_before_admin_rescan",
+            },
+        )
         try:
             prune_summary = prune_backup_checkpoints(request.app.state.settings, keep_auto=10)
         except Exception:

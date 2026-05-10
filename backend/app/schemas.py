@@ -258,6 +258,9 @@ class BackupCheckpointSummaryResponse(BaseModel):
     backup_format_version: int | None = None
     backup_trigger: str | None = None
     auto_checkpoint: bool = False
+    backup_storage: str | None = None
+    backup_encrypted: bool = False
+    backup_key_source: str | None = None
     contains_secrets: bool = False
     db_integrity_check_result: str | None = None
     total_size_bytes: int = 0
@@ -279,6 +282,10 @@ class BackupCheckpointCreateResponse(BaseModel):
     checkpoint: BackupCheckpointSummaryResponse
 
 
+class BackupCheckpointCreateRequest(BaseModel):
+    passphrase: str | None = None
+
+
 class BackupCheckpointHashMismatchResponse(BaseModel):
     relative_path: str
     expected_sha256: str
@@ -291,6 +298,9 @@ class BackupCheckpointInspectResponse(BaseModel):
     created_at_utc: str | None = None
     backup_trigger: str | None = None
     auto_checkpoint: bool = False
+    backup_storage: str | None = None
+    backup_encrypted: bool = False
+    backup_key_source: str | None = None
     contains_secrets: bool = False
     warning: str | None = None
     valid: bool = False
@@ -301,6 +311,10 @@ class BackupCheckpointInspectResponse(BaseModel):
     missing_files: list[str] = Field(default_factory=list)
     hash_mismatches: list[BackupCheckpointHashMismatchResponse] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+
+class BackupCheckpointPassphraseRequest(BaseModel):
+    passphrase: str | None = None
 
 
 class BackupRestorePlanMetadataResponse(BaseModel):

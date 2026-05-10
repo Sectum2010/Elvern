@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from datetime import datetime, timezone
@@ -8,8 +9,20 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import tarfile
+import tempfile
+from contextlib import contextmanager
+from typing import Iterator, Literal
 
 from ..config import PROJECT_ROOT, Settings
+from .backup_encryption import (
+    HEADER_MAGIC,
+    KEY_SOURCE_AUTO,
+    KEY_SOURCE_PASSPHRASE,
+    decrypt_backup,
+    encrypt_backup,
+    inspect_encrypted_backup_header,
+)
 
 
 BACKUP_FORMAT_VERSION = 1
@@ -66,6 +79,21 @@ def _allocate_default_checkpoint_dir(created_at: datetime) -> Path:
         suffix += 1
 
 
+def _allocate_default_encrypted_backup_path(created_at: datetime) -> Path:
+    backups_dir = _resolve_backups_dir(None)
+    base_name = f"elvern-backup-{_timestamp_for_directory(created_at)}"
+    candidate = (backups_dir / f"{base_name}.tar.gz.enc").resolve()
+    if not candidate.exists():
+        return candidate
+
+    suffix = 2
+    while True:
+        candidate = (backups_dir / f"{base_name}-{suffix}.tar.gz.enc").resolve()
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
 def _set_private_permissions(path: Path, *, is_dir: bool) -> None:
     if os.name == "nt":
         return
@@ -101,6 +129,27 @@ def _copy_tree(source_dir: Path, destination_dir: Path) -> None:
             continue
         if path.is_file():
             _copy_file(path, target_path)
+
+
+def _create_tar_gz_bytes(source_dir: Path) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for path in sorted(source_dir.rglob("*")):
+            archive.add(path, arcname=path.relative_to(source_dir).as_posix())
+    return buffer.getvalue()
+
+
+def _extract_tar_gz_bytes(tarball_bytes: bytes, destination_dir: Path) -> None:
+    _ensure_private_dir(destination_dir)
+    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as archive:
+        destination_root = destination_dir.resolve()
+        for member in archive.getmembers():
+            target = (destination_root / member.name).resolve()
+            try:
+                target.relative_to(destination_root)
+            except ValueError as exc:
+                raise ValueError("Backup archive contains unsafe paths") from exc
+        archive.extractall(destination_root)
 
 
 def _create_sqlite_snapshot(*, source_db_path: Path, destination_path: Path) -> str:
@@ -213,6 +262,69 @@ def _resolve_checkpoint_dir(path: str | Path) -> Path:
     return requested_path if requested_path.is_dir() else requested_path.parent
 
 
+@contextmanager
+def _materialized_checkpoint(
+    path: str | Path,
+    *,
+    settings: Settings | None = None,
+    passphrase: str | None = None,
+) -> Iterator[tuple[Path, dict[str, object]]]:
+    requested_path = Path(path).expanduser().resolve()
+    if requested_path.is_dir():
+        yield requested_path, {
+            "storage_kind": "legacy_plaintext_directory",
+            "encrypted": False,
+            "key_source": None,
+            "archive_path": None,
+        }
+        return
+
+    if not requested_path.is_file():
+        yield requested_path.parent, {
+            "storage_kind": "missing",
+            "encrypted": False,
+            "key_source": None,
+            "archive_path": str(requested_path),
+        }
+        return
+
+    blob = requested_path.read_bytes()
+    if blob.startswith(HEADER_MAGIC):
+        if settings is None:
+            raise ValueError("Encrypted backup inspection requires settings")
+        header = inspect_encrypted_backup_header(blob)
+        tarball_bytes = decrypt_backup(blob, settings=settings, passphrase=passphrase)
+        with tempfile.TemporaryDirectory(prefix="elvern-backup-inspect-") as tmp_dir:
+            checkpoint_dir = Path(tmp_dir) / requested_path.stem.removesuffix(".tar.gz")
+            _extract_tar_gz_bytes(tarball_bytes, checkpoint_dir)
+            yield checkpoint_dir, {
+                "storage_kind": "encrypted_archive",
+                "encrypted": True,
+                "key_source": header.get("key_source"),
+                "archive_path": str(requested_path),
+            }
+        return
+
+    if requested_path.name.endswith(".tar.gz"):
+        with tempfile.TemporaryDirectory(prefix="elvern-backup-legacy-") as tmp_dir:
+            checkpoint_dir = Path(tmp_dir) / requested_path.stem.removesuffix(".tar")
+            _extract_tar_gz_bytes(blob, checkpoint_dir)
+            yield checkpoint_dir, {
+                "storage_kind": "legacy_plaintext_archive",
+                "encrypted": False,
+                "key_source": None,
+                "archive_path": str(requested_path),
+            }
+        return
+
+    yield requested_path.parent, {
+        "storage_kind": "unknown_file",
+        "encrypted": False,
+        "key_source": None,
+        "archive_path": str(requested_path),
+    }
+
+
 def _safe_resolved_path(path: Path) -> str:
     return str(path.expanduser().resolve())
 
@@ -241,24 +353,30 @@ def create_backup_checkpoint(
     settings: Settings,
     output_dir: str | Path | None = None,
     *,
-    include_env: bool = True,
+    include_env: bool | None = None,
     include_helper_releases: bool = True,
     include_assistant_uploads: bool = True,
     backup_trigger: str = "manual_cli",
     auto_checkpoint: bool = False,
+    trigger_kind: Literal["auto", "manual"] | None = None,
+    passphrase: str | None = None,
     reason: str | None = None,
     initiated_by_user_id: int | None = None,
     initiated_by_username: str | None = None,
     operation_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     created_at = _utc_now()
-    checkpoint_dir = (
-        Path(output_dir).expanduser().resolve()
-        if output_dir is not None
-        else _allocate_default_checkpoint_dir(created_at)
-    )
+    resolved_trigger_kind = trigger_kind or ("auto" if auto_checkpoint else "manual")
+    resolved_include_env = (resolved_trigger_kind == "manual") if include_env is None else bool(include_env)
+    encrypted_output = output_dir is None
+    encrypted_backup_path = _allocate_default_encrypted_backup_path(created_at) if encrypted_output else None
+    checkpoint_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else (
+        _resolve_backups_dir(None) / f".staging-{encrypted_backup_path.name.removesuffix('.tar.gz.enc')}"
+    ).resolve()
     if checkpoint_dir.exists():
         raise FileExistsError(f"Backup checkpoint already exists: {checkpoint_dir}")
+    if encrypted_backup_path is not None and encrypted_backup_path.exists():
+        raise FileExistsError(f"Backup checkpoint already exists: {encrypted_backup_path}")
 
     _ensure_private_dir(_resolve_backups_dir(None))
     _ensure_private_dir(checkpoint_dir)
@@ -271,7 +389,7 @@ def create_backup_checkpoint(
     )
 
     env_source = (PROJECT_ROOT / "deploy" / "env" / "elvern.env").resolve()
-    env_included = bool(include_env and env_source.exists())
+    env_included = bool(resolved_include_env and env_source.exists())
     if env_included:
         _copy_file(env_source, checkpoint_dir / "deploy" / "env" / "elvern.env")
 
@@ -312,6 +430,16 @@ def create_backup_checkpoint(
         "contains_secrets": True,
         "backup_trigger": backup_trigger,
         "auto_checkpoint": bool(auto_checkpoint),
+        "trigger_kind": resolved_trigger_kind,
+        "backup_storage": "encrypted_archive" if encrypted_output else "legacy_plaintext_directory",
+        "backup_encrypted": bool(encrypted_output),
+        "backup_key_source": (
+            KEY_SOURCE_PASSPHRASE
+            if encrypted_output and resolved_trigger_kind == "manual" and passphrase
+            else KEY_SOURCE_AUTO
+            if encrypted_output
+            else None
+        ),
         "reason": reason,
         "initiated_by_user_id": initiated_by_user_id,
         "initiated_by_username": initiated_by_username,
@@ -322,21 +450,44 @@ def create_backup_checkpoint(
     }
     _write_manifest(checkpoint_dir / "manifest.json", manifest)
 
+    backup_path = checkpoint_dir
+    manifest_path = checkpoint_dir / "manifest.json"
+    total_size_bytes, file_count = _directory_file_stats(checkpoint_dir)
+    if encrypted_output and encrypted_backup_path is not None:
+        tarball_bytes = _create_tar_gz_bytes(checkpoint_dir)
+        encrypted = encrypt_backup(
+            tarball_bytes,
+            settings=settings,
+            passphrase=passphrase if resolved_trigger_kind == "manual" else None,
+        )
+        _ensure_private_dir(encrypted_backup_path.parent)
+        encrypted_backup_path.write_bytes(encrypted)
+        _set_private_permissions(encrypted_backup_path, is_dir=False)
+        shutil.rmtree(checkpoint_dir)
+        backup_path = encrypted_backup_path
+        manifest_path = encrypted_backup_path
+        total_size_bytes = int(encrypted_backup_path.stat().st_size)
+        file_count = 1
+
     return {
-        "checkpoint_id": checkpoint_dir.name,
-        "backup_path": str(checkpoint_dir),
-        "manifest_path": str((checkpoint_dir / "manifest.json").resolve()),
+        "checkpoint_id": backup_path.name,
+        "backup_path": str(backup_path),
+        "manifest_path": str(manifest_path.resolve()),
         "created_at_utc": manifest["created_at_utc"],
         "backup_trigger": backup_trigger,
         "auto_checkpoint": bool(auto_checkpoint),
         "warning": BACKUP_WARNING,
         "contains_secrets": True,
+        "backup_storage": manifest["backup_storage"],
+        "backup_encrypted": bool(encrypted_output),
+        "backup_key_source": manifest["backup_key_source"],
+        "total_size_bytes": total_size_bytes,
+        "file_count": file_count,
         "manifest": manifest,
     }
 
 
-def inspect_backup_checkpoint(path: str | Path) -> dict[str, object]:
-    checkpoint_dir = _resolve_checkpoint_dir(path)
+def _inspect_plaintext_checkpoint_dir(checkpoint_dir: Path) -> dict[str, object]:
     manifest_path = checkpoint_dir / "manifest.json"
 
     errors: list[str] = []
@@ -397,6 +548,7 @@ def inspect_backup_checkpoint(path: str | Path) -> dict[str, object]:
         and not missing_files
         and not hash_mismatches
     )
+    total_size_bytes, file_count = _directory_file_stats(checkpoint_dir)
     return {
         "checkpoint_id": checkpoint_dir.name,
         "backup_path": str(checkpoint_dir),
@@ -405,6 +557,8 @@ def inspect_backup_checkpoint(path: str | Path) -> dict[str, object]:
         "db_snapshot_exists": db_snapshot_exists,
         "db_integrity_check_result": db_integrity_check_result,
         "files_verified": files_verified,
+        "total_size_bytes": total_size_bytes,
+        "file_count": file_count,
         "missing_files": sorted(dict.fromkeys(missing_files)),
         "hash_mismatches": hash_mismatches,
         "errors": errors,
@@ -413,6 +567,54 @@ def inspect_backup_checkpoint(path: str | Path) -> dict[str, object]:
         "warning": BACKUP_WARNING if bool((manifest_payload or {}).get("contains_secrets")) else None,
         "manifest": manifest_payload,
     }
+
+
+def inspect_backup_checkpoint(
+    path: str | Path,
+    *,
+    settings: Settings | None = None,
+    passphrase: str | None = None,
+) -> dict[str, object]:
+    try:
+        with _materialized_checkpoint(path, settings=settings, passphrase=passphrase) as (
+            checkpoint_dir,
+            storage_metadata,
+        ):
+            inspection = _inspect_plaintext_checkpoint_dir(checkpoint_dir)
+            archive_path = storage_metadata.get("archive_path")
+            if archive_path:
+                inspection["checkpoint_id"] = Path(str(archive_path)).name
+                inspection["backup_path"] = str(archive_path)
+                inspection["manifest_path"] = f"{archive_path}:manifest.json"
+            inspection.update(storage_metadata)
+            return inspection
+    except ValueError as exc:
+        requested_path = Path(path).expanduser().resolve()
+        header = (
+            inspect_encrypted_backup_header(requested_path.read_bytes())
+            if requested_path.is_file() and requested_path.suffix == ".enc"
+            else {"encrypted": False, "key_source": None}
+        )
+        return {
+            "checkpoint_id": requested_path.name,
+            "backup_path": str(requested_path),
+            "manifest_path": str(requested_path),
+            "manifest_exists": False,
+            "db_snapshot_exists": False,
+            "db_integrity_check_result": "unavailable",
+            "files_verified": 0,
+            "missing_files": [],
+            "hash_mismatches": [],
+            "errors": [str(exc)],
+            "valid": False,
+            "contains_secrets": True,
+            "warning": BACKUP_WARNING,
+            "manifest": None,
+            "storage_kind": "encrypted_archive" if requested_path.suffix == ".enc" else "unknown_file",
+            "encrypted": bool(header.get("encrypted")),
+            "key_source": header.get("key_source"),
+            "archive_path": str(requested_path),
+        }
 
 
 def resolve_backup_checkpoint_path(
@@ -439,25 +641,42 @@ def resolve_backup_checkpoint_path(
     except ValueError as exc:
         raise ValueError("Checkpoint id must resolve under the backup directory.") from exc
 
+    if candidate.is_file() and (
+        candidate.name.endswith(".tar.gz.enc") or candidate.name.endswith(".tar.gz")
+    ):
+        return candidate
     if not candidate.is_dir() or not (candidate / "manifest.json").is_file():
         raise FileNotFoundError(f"Unknown checkpoint: {normalized_id}")
     return candidate
 
 
-def summarize_backup_checkpoint(path: str | Path) -> dict[str, object]:
-    checkpoint_dir = _resolve_checkpoint_dir(path)
-    inspection = inspect_backup_checkpoint(checkpoint_dir)
+def summarize_backup_checkpoint(
+    path: str | Path,
+    *,
+    settings: Settings | None = None,
+    passphrase: str | None = None,
+) -> dict[str, object]:
+    requested_path = Path(path).expanduser().resolve()
+    inspection = inspect_backup_checkpoint(requested_path, settings=settings, passphrase=passphrase)
     manifest = inspection.get("manifest") or {}
-    total_size_bytes, file_count = _directory_file_stats(checkpoint_dir)
+    if requested_path.is_dir():
+        total_size_bytes, file_count = _directory_file_stats(requested_path)
+    elif requested_path.is_file():
+        total_size_bytes, file_count = int(requested_path.stat().st_size), 1
+    else:
+        total_size_bytes, file_count = 0, 0
     errors = _collect_inspection_errors(inspection)
     return {
-        "checkpoint_id": checkpoint_dir.name,
-        "path": str(checkpoint_dir),
+        "checkpoint_id": requested_path.name,
+        "path": str(requested_path),
         "created_at_utc": manifest.get("created_at_utc"),
         "backup_format_version": manifest.get("backup_format_version"),
         "backup_trigger": manifest.get("backup_trigger"),
         "auto_checkpoint": bool(manifest.get("auto_checkpoint") is True),
         "contains_secrets": bool(manifest.get("contains_secrets")),
+        "backup_storage": inspection.get("storage_kind") or manifest.get("backup_storage"),
+        "backup_encrypted": bool(inspection.get("encrypted") or manifest.get("backup_encrypted")),
+        "backup_key_source": inspection.get("key_source") or manifest.get("backup_key_source"),
         "db_integrity_check_result": inspection.get("db_integrity_check_result"),
         "total_size_bytes": total_size_bytes,
         "file_count": file_count,
@@ -471,44 +690,51 @@ def summarize_backup_checkpoint(path: str | Path) -> dict[str, object]:
 def build_restore_dry_run_plan(
     settings: Settings,
     checkpoint_path: str | Path,
+    *,
+    passphrase: str | None = None,
 ) -> dict[str, object]:
-    inspection = inspect_backup_checkpoint(checkpoint_path)
-    checkpoint_dir = Path(str(inspection["backup_path"]))
-    manifest = inspection.get("manifest") or {}
+    with _materialized_checkpoint(checkpoint_path, settings=settings, passphrase=passphrase) as (
+        checkpoint_dir,
+        storage_metadata,
+    ):
+        inspection = _inspect_plaintext_checkpoint_dir(checkpoint_dir)
+        manifest = inspection.get("manifest") or {}
+        checkpoint_display_path = str(storage_metadata.get("archive_path") or checkpoint_dir)
+        checkpoint_id = Path(checkpoint_display_path).name
 
-    source_metadata = {
-        "source_db_path": manifest.get("source_db_path"),
-        "source_project_root": manifest.get("project_root"),
-        "source_public_app_origin": manifest.get("public_app_origin") or "",
-        "source_backend_origin": manifest.get("backend_origin") or "",
-        "source_media_root_path": manifest.get("media_root_path"),
-        "source_transcode_dir": manifest.get("transcode_dir"),
-    }
-    current_metadata = {
-        "current_db_path": _safe_resolved_path(settings.db_path),
-        "current_project_root": _safe_resolved_path(PROJECT_ROOT),
-        "current_public_app_origin": settings.public_app_origin,
-        "current_backend_origin": settings.backend_origin,
-        "current_media_root_path": _safe_resolved_path(settings.media_root),
-        "current_transcode_dir": _safe_resolved_path(settings.transcode_dir),
-    }
-    comparison = {
-        "same_project_root": source_metadata["source_project_root"] == current_metadata["current_project_root"],
-        "same_db_path": source_metadata["source_db_path"] == current_metadata["current_db_path"],
-        "same_public_app_origin": source_metadata["source_public_app_origin"] == current_metadata["current_public_app_origin"],
-        "same_backend_origin": source_metadata["source_backend_origin"] == current_metadata["current_backend_origin"],
-        "same_media_root_path": source_metadata["source_media_root_path"] == current_metadata["current_media_root_path"],
-    }
+        source_metadata = {
+            "source_db_path": manifest.get("source_db_path"),
+            "source_project_root": manifest.get("project_root"),
+            "source_public_app_origin": manifest.get("public_app_origin") or "",
+            "source_backend_origin": manifest.get("backend_origin") or "",
+            "source_media_root_path": manifest.get("media_root_path"),
+            "source_transcode_dir": manifest.get("transcode_dir"),
+        }
+        current_metadata = {
+            "current_db_path": _safe_resolved_path(settings.db_path),
+            "current_project_root": _safe_resolved_path(PROJECT_ROOT),
+            "current_public_app_origin": settings.public_app_origin,
+            "current_backend_origin": settings.backend_origin,
+            "current_media_root_path": _safe_resolved_path(settings.media_root),
+            "current_transcode_dir": _safe_resolved_path(settings.transcode_dir),
+        }
+        comparison = {
+            "same_project_root": source_metadata["source_project_root"] == current_metadata["current_project_root"],
+            "same_db_path": source_metadata["source_db_path"] == current_metadata["current_db_path"],
+            "same_public_app_origin": source_metadata["source_public_app_origin"] == current_metadata["current_public_app_origin"],
+            "same_backend_origin": source_metadata["source_backend_origin"] == current_metadata["current_backend_origin"],
+            "same_media_root_path": source_metadata["source_media_root_path"] == current_metadata["current_media_root_path"],
+        }
 
-    restore_scope = {
-        "db_snapshot_available": bool(inspection.get("db_snapshot_exists")),
-        "env_snapshot_available": (checkpoint_dir / "deploy" / "env" / "elvern.env").is_file(),
-        "helper_releases_available": (checkpoint_dir / "backend" / "data" / "helper_releases").exists(),
-        "assistant_uploads_available": (checkpoint_dir / "backend" / "data" / "assistant_uploads").exists(),
-        "media_files_included": False,
-        "poster_files_included": False,
-        "transcodes_included": False,
-    }
+        restore_scope = {
+            "db_snapshot_available": bool(inspection.get("db_snapshot_exists")),
+            "env_snapshot_available": (checkpoint_dir / "deploy" / "env" / "elvern.env").is_file(),
+            "helper_releases_available": (checkpoint_dir / "backend" / "data" / "helper_releases").exists(),
+            "assistant_uploads_available": (checkpoint_dir / "backend" / "data" / "assistant_uploads").exists(),
+            "media_files_included": False,
+            "poster_files_included": False,
+            "transcodes_included": False,
+        }
 
     blocking_errors: list[str] = []
     blocking_errors.extend(str(value) for value in inspection.get("errors") or [])
@@ -552,8 +778,8 @@ def build_restore_dry_run_plan(
 
     return {
         "restore_plan_format_version": RESTORE_PLAN_FORMAT_VERSION,
-        "checkpoint_id": inspection["checkpoint_id"],
-        "checkpoint_path": inspection["backup_path"],
+        "checkpoint_id": checkpoint_id,
+        "checkpoint_path": checkpoint_display_path,
         "checkpoint_created_at_utc": manifest.get("created_at_utc"),
         "checkpoint_valid": checkpoint_valid,
         "blocking_errors": blocking_errors,
@@ -603,20 +829,23 @@ def list_backup_checkpoints(
     settings: Settings,
     backups_dir: str | Path | None = None,
 ) -> list[dict[str, object]]:
-    del settings
     resolved_backups_dir = _resolve_backups_dir(backups_dir)
     if not resolved_backups_dir.exists():
         return []
 
     entries: list[dict[str, object]] = []
-    for checkpoint_dir in sorted(
-        (candidate for candidate in resolved_backups_dir.iterdir() if candidate.is_dir()),
+    for candidate in sorted(
+        (
+            item
+            for item in resolved_backups_dir.iterdir()
+            if (item.is_dir() and (item / "manifest.json").is_file())
+            or item.name.endswith(".tar.gz.enc")
+            or item.name.endswith(".tar.gz")
+        ),
         key=lambda candidate: candidate.name,
         reverse=True,
     ):
-        if not (checkpoint_dir / "manifest.json").is_file():
-            continue
-        entries.append(summarize_backup_checkpoint(checkpoint_dir))
+        entries.append(summarize_backup_checkpoint(candidate, settings=settings))
 
     entries.sort(
         key=lambda entry: (
@@ -640,8 +869,7 @@ def prune_backup_checkpoints(
     skipped_manual_count = 0
     skipped_unknown_count = 0
     for entry in entries:
-        manifest = _load_manifest_if_present(Path(str(entry["path"])))
-        auto_flag = None if manifest is None else manifest.get("auto_checkpoint")
+        auto_flag = entry.get("auto_checkpoint") if entry.get("inspect_valid") else None
         if auto_flag is True:
             auto_entries.append(entry)
         elif auto_flag is False:
@@ -663,7 +891,10 @@ def prune_backup_checkpoints(
     for entry in to_delete:
         checkpoint_path = Path(str(entry["path"]))
         try:
-            shutil.rmtree(checkpoint_path)
+            if checkpoint_path.is_dir():
+                shutil.rmtree(checkpoint_path)
+            else:
+                checkpoint_path.unlink()
         except OSError as exc:
             errors.append(f"Failed to delete {checkpoint_path}: {exc}")
             continue
