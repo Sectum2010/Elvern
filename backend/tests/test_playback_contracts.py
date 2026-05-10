@@ -7950,8 +7950,14 @@ def test_route2_logout_keep_preparing_reconnects_same_movie_without_duplicate_wo
         assert len({worker.worker_id for worker in manager._route2_workers.values() if worker.session_id == first["session_id"]}) == 1
 
 
-def test_route2_another_user_is_not_blocked_by_active_preparation(initialized_settings) -> None:
-    manager, settings = _make_route2_manager(initialized_settings)
+def test_route2_another_user_is_not_blocked_by_active_preparation(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 8)
+    _set_route2_resource_snapshot(manager, host_cpu_total_cores=8, host_cpu_used_cores=0.5)
     item_a = _make_local_item(settings, item_id=336, relative_name="route2/user-a.mp4")
     item_b = _make_local_item(settings, item_id=337, relative_name="route2/user-b.mp4")
 
@@ -14176,8 +14182,14 @@ def test_route2_disable_user_invalidates_owned_workers(initialized_settings) -> 
     assert payload["session_id"] not in manager._sessions
 
 
-def test_route2_revoke_auth_session_invalidates_matching_workers(initialized_settings) -> None:
-    manager, settings = _make_route2_manager(initialized_settings)
+def test_route2_revoke_auth_session_invalidates_matching_workers(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(
+        initialized_settings,
+        route2_cpu_budget_percent=90,
+        route2_max_worker_threads=2,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 8)
+    _set_route2_resource_snapshot(manager, host_cpu_total_cores=8, host_cpu_used_cores=0.5)
     item_a = _make_local_item(settings, item_id=361, relative_name="route2/revoke-a.mp4")
     item_b = _make_local_item(settings, item_id=362, relative_name="route2/revoke-b.mp4")
 

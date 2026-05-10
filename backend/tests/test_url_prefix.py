@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 
 from backend.app.config import refresh_settings
@@ -29,6 +29,56 @@ from backend.app.url_prefix_service import (
 def _login(client, *, username: str = "admin", password: str = "test-admin-password") -> None:
     response = client.post("/api/auth/login", json={"username": username, "password": password})
     assert response.status_code == 200, response.text
+
+
+@pytest.fixture()
+def spa_frontend_dist(tmp_path):
+    dist = tmp_path / "frontend-dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "icons").mkdir()
+    (dist / "index.html").write_text(
+        "<!doctype html><html><head><title>Elvern</title></head><body><div id=\"root\"></div></body></html>",
+        encoding="utf-8",
+    )
+    (dist / "manifest.webmanifest").write_text(
+        json.dumps(
+            {
+                "name": "Elvern",
+                "start_url": "/library",
+                "scope": "/",
+                "icons": [
+                    {
+                        "src": "/icons/icon-192.png",
+                        "sizes": "192x192",
+                        "type": "image/png",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (dist / "assets" / "test.js").write_text(
+        "export const elvernSpaAssetMimeCheck = true;\n",
+        encoding="utf-8",
+    )
+    return dist
+
+
+@pytest.fixture()
+def spa_client(spa_frontend_dist):
+    clear_manifest_cache()
+    app = FastAPI()
+    app.state.url_prefix = "testprefix"
+
+    @app.get("/api/auth/me")
+    def auth_me():
+        return Response(status_code=401)
+
+    install_manifest_middleware(app, frontend_dist=spa_frontend_dist)
+    mount_spa(app, prefix="testprefix", frontend_dist=spa_frontend_dist)
+    with TestClient(app) as test_client:
+        yield test_client
+    clear_manifest_cache()
 
 
 class TestUrlPrefixGeneration:
@@ -265,60 +315,52 @@ class TestRotateUrlPrefix:
 
 
 class TestUrlPrefixRouting:
-    def test_root_path_404(self, client) -> None:
-        assert client.get("/").status_code == 404
+    def test_root_path_404(self, spa_client) -> None:
+        assert spa_client.get("/").status_code == 404
 
-    def test_unknown_prefix_404(self, client) -> None:
-        assert client.get("/wrongprefix/library").status_code == 404
+    def test_unknown_prefix_404(self, spa_client) -> None:
+        assert spa_client.get("/wrongprefix/library").status_code == 404
 
-    def test_correct_prefix_serves_spa(self, client) -> None:
-        prefix = client.app.state.url_prefix
-        response = client.get(f"/{prefix}/library")
+    def test_correct_prefix_serves_spa(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/library")
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
 
-    def test_api_path_unaffected(self, client) -> None:
-        assert client.get("/api/auth/me").status_code in {200, 401}
+    def test_api_path_unaffected(self, spa_client) -> None:
+        assert spa_client.get("/api/auth/me").status_code in {200, 401}
 
 
 class TestSpaServing:
-    def test_html_route_falls_back_to_index(self, client) -> None:
-        prefix = client.app.state.url_prefix
-        response = client.get(f"/{prefix}/library")
+    def test_html_route_falls_back_to_index(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/library")
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         assert f'<base href="/{prefix}/">' in response.text
 
-    def test_nested_html_route_uses_prefix_base_href(self, client) -> None:
-        prefix = client.app.state.url_prefix
-        response = client.get(f"/{prefix}/setup/totp")
+    def test_nested_html_route_uses_prefix_base_href(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/setup/totp")
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         assert f'<base href="/{prefix}/">' in response.text
 
-    def test_missing_asset_returns_404_not_index(self, client) -> None:
-        prefix = client.app.state.url_prefix
-        response = client.get(f"/{prefix}/assets/nonexistent.js")
+    def test_missing_asset_returns_404_not_index(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/assets/nonexistent.js")
         assert response.status_code == 404
         assert b"<html" not in response.content.lower()
 
-    def test_nested_missing_asset_returns_404_not_index(self, client) -> None:
-        prefix = client.app.state.url_prefix
-        response = client.get(f"/{prefix}/setup/assets/nonexistent.js")
+    def test_nested_missing_asset_returns_404_not_index(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/setup/assets/nonexistent.js")
         assert response.status_code == 404
         assert b"<html" not in response.content.lower()
 
-    def test_existing_asset_returns_correct_mime(self, client) -> None:
-        from backend.app.spa_static import FRONTEND_DIST
-
-        asset_path = Path(FRONTEND_DIST) / "assets" / "test.js"
-        asset_path.parent.mkdir(parents=True, exist_ok=True)
-        asset_path.write_text("export const elvernSpaAssetMimeCheck = true;\n", encoding="utf-8")
-        try:
-            prefix = client.app.state.url_prefix
-            response = client.get(f"/{prefix}/assets/test.js")
-        finally:
-            asset_path.unlink(missing_ok=True)
+    def test_existing_asset_returns_correct_mime(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/assets/test.js")
         assert response.status_code == 200
         assert response.headers["content-type"].split(";")[0] in {
             "text/javascript",
@@ -326,9 +368,9 @@ class TestSpaServing:
         }
         assert b"elvernSpaAssetMimeCheck" in response.content
 
-    def test_root_prefix_serves_index_html(self, client) -> None:
-        prefix = client.app.state.url_prefix
-        response = client.get(f"/{prefix}/")
+    def test_root_prefix_serves_index_html(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/")
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         assert b"<html" in response.content.lower()
@@ -415,9 +457,9 @@ class TestManifestRendering:
 
 
 class TestManifestEndpoint:
-    def test_manifest_served_at_prefixed_path(self, client) -> None:
-        prefix = client.app.state.url_prefix
-        response = client.get(f"/{prefix}/manifest.webmanifest")
+    def test_manifest_served_at_prefixed_path(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/manifest.webmanifest")
         assert response.status_code == 200
         assert response.headers["content-type"].split(";")[0] == "application/manifest+json"
         payload = response.json()
@@ -425,11 +467,11 @@ class TestManifestEndpoint:
         assert payload["scope"] == f"/{prefix}/"
         assert all(icon["src"].startswith(f"/{prefix}/icons/") for icon in payload["icons"])
 
-    def test_manifest_at_root_path_404(self, client) -> None:
-        assert client.get("/manifest.webmanifest").status_code == 404
+    def test_manifest_at_root_path_404(self, spa_client) -> None:
+        assert spa_client.get("/manifest.webmanifest").status_code == 404
 
-    def test_manifest_at_wrong_prefix_404(self, client) -> None:
-        assert client.get("/wrongprefix/manifest.webmanifest").status_code == 404
+    def test_manifest_at_wrong_prefix_404(self, spa_client) -> None:
+        assert spa_client.get("/wrongprefix/manifest.webmanifest").status_code == 404
 
 
 class TestManifestMiddleware:

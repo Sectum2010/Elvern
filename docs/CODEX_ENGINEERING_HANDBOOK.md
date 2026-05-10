@@ -18,6 +18,22 @@ desktop helper build, frontend install/tests/build, `pip-audit`, `bandit`, and
 `npm audit --audit-level=high`. If the workflow changes, update the script in
 the same PR so local checks and GitHub Actions stay in lockstep.
 
+Use the fresh CI mirror before claiming GitHub parity:
+
+```bash
+./scripts/elvern-ci-local.sh --fresh
+```
+
+Fresh mode creates a temporary Python virtual environment and hides any existing
+`frontend/dist` while backend pytest runs, so tests cannot silently depend on a
+developer machine's cached frontend build or installed tools. Codex must not
+claim CI passes for security, auth, download, TOTP, backup, dependency, CI,
+SPA-routing, or playback-contract changes unless fresh mode passes.
+
+Backend tests must be hermetic. Do not rely on local `/usr/bin/ffprobe`,
+leftover build artifacts, or machine-specific Route2 capacity when writing
+tests that need to pass on GitHub-hosted runners.
+
 ## Request flow in deployed Elvern
 
 Production traffic flows through two Python/Node processes, not one:

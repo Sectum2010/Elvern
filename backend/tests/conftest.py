@@ -100,6 +100,17 @@ def test_settings(tmp_path, monkeypatch):
     db_path = tmp_path / "backend" / "data" / "test.db"
     helper_releases_dir = tmp_path / "backend" / "data" / "helper_releases"
     transcode_dir = tmp_path / "backend" / "data" / "transcodes"
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_ffprobe = fake_bin_dir / "ffprobe"
+    fake_ffprobe.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "json.dump({'format': {'format_name': 'mov,mp4,m4a,3gp,3g2,mj2'}, 'streams': []}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    fake_ffprobe.chmod(0o755)
 
     monkeypatch.setenv("ELVERN_MEDIA_ROOT", str(media_root))
     monkeypatch.setenv("ELVERN_DB_PATH", str(db_path))
@@ -116,6 +127,7 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("ELVERN_LIBRARY_ROOT_LINUX", str(media_root))
     monkeypatch.setenv("ELVERN_HELPER_RELEASES_DIR", str(helper_releases_dir))
     monkeypatch.setenv("ELVERN_TRANSCODE_DIR", str(transcode_dir))
+    monkeypatch.setenv("ELVERN_FFPROBE_PATH", str(fake_ffprobe))
     monkeypatch.setenv("ELVERN_ARGON2_TIME_COST", "1")
     monkeypatch.setenv("ELVERN_ARGON2_MEMORY_COST", "8192")
     monkeypatch.setenv("ELVERN_ARGON2_PARALLELISM", "1")
