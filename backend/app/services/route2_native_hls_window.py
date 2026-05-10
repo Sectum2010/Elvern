@@ -256,6 +256,155 @@ def should_refresh_native_hls_window(
     return {"should_refresh": False, "reason": None}
 
 
+def slice_manifest_segments_for_window(
+    *,
+    manifest_end_segment: int,
+    segment_duration_seconds: float,
+    epoch_start_seconds: float,
+    window_start_seconds: object,
+    window_end_seconds: object,
+) -> dict[str, object]:
+    """Compute the segment slice that satisfies a sliding active window.
+
+    Inputs describe the published epoch (segment 0 starts at
+    ``epoch_start_seconds``; ``manifest_end_segment`` is the last contiguous
+    segment Route2 has published) and the target window in absolute movie
+    seconds.
+
+    Returns a dict with keys:
+
+      * ``first_segment_index``     — first index to include in the playlist.
+      * ``last_segment_index``      — last index to include (inclusive).
+      * ``media_sequence_number``   — value for ``#EXT-X-MEDIA-SEQUENCE``;
+                                      always equal to ``first_segment_index``.
+      * ``first_segment_start_seconds`` — absolute start time of that segment;
+                                      callers use this to recompute
+                                      ``#EXT-X-START:TIME-OFFSET``.
+
+    Slice rules:
+      * The first segment kept is the one whose end time is strictly greater
+        than ``window_start_seconds`` — so the playhead at ``window_start``
+        is always inside a listed segment.
+      * The last segment kept is the one whose start time is strictly less
+        than ``window_end_seconds`` — so the listed playlist contains every
+        segment the playhead might enter inside the window.
+      * The slice is then clamped to ``[0, manifest_end_segment]``.
+
+    If the inputs do not yield any included segment (e.g. window entirely
+    behind segment 0), the slice degenerates to a single-segment playlist
+    starting at ``max(0, manifest_end_segment)`` so HLS clients still have
+    something to attach to. (The runtime refresh trigger should have moved
+    the window before this happens; the degeneration is a safety net.)
+    """
+    safe_end = max(0, int(manifest_end_segment))
+    seg_duration = max(0.001, float(segment_duration_seconds))
+    epoch_start = max(0.0, _coerce_finite_seconds(epoch_start_seconds))
+    win_start = _coerce_finite_seconds(window_start_seconds)
+    win_end = _coerce_finite_seconds(window_end_seconds)
+    if win_end <= win_start:
+        first = safe_end
+        last = safe_end
+        seg_start = epoch_start + first * seg_duration
+        return {
+            "first_segment_index": first,
+            "last_segment_index": last,
+            "media_sequence_number": first,
+            "first_segment_start_seconds": round(seg_start, 3),
+        }
+    relative_start = max(0.0, win_start - epoch_start)
+    relative_end = max(relative_start, win_end - epoch_start)
+    first_candidate = int(relative_start // seg_duration)
+    last_candidate = int(relative_end // seg_duration)
+    if (first_candidate + 1) * seg_duration <= relative_start + 1e-6:
+        first_candidate += 1
+    if last_candidate * seg_duration >= relative_end - 1e-6 and last_candidate > 0:
+        last_candidate -= 1
+    first = max(0, min(safe_end, first_candidate))
+    last = max(first, min(safe_end, last_candidate))
+    seg_start = epoch_start + first * seg_duration
+    return {
+        "first_segment_index": first,
+        "last_segment_index": last,
+        "media_sequence_number": first,
+        "first_segment_start_seconds": round(seg_start, 3),
+    }
+
+
+def render_route2_epoch_manifest_text(
+    *,
+    epoch_start_seconds: float,
+    attach_position_seconds: float,
+    manifest_end_segment: int,
+    duration_seconds: float,
+    segment_duration_seconds: float,
+    manifest_complete: bool,
+    window_start_seconds: float | None = None,
+    window_end_seconds: float | None = None,
+    init_uri: str = "init.mp4",
+    segment_uri_template: str = "segments/{index}.m4s",
+) -> str:
+    """Render the Route2 epoch ``.m3u8`` body.
+
+    When ``window_start_seconds`` and ``window_end_seconds`` are provided the
+    output is a sliced playlist starting at the segment whose end is past
+    ``window_start_seconds`` (so the playhead at window_start is inside a
+    listed segment). When they are ``None`` (or the window is degenerate) the
+    full epoch playlist is emitted from segment 0 — that's the hls.js / legacy
+    path and is preserved unchanged.
+
+    The renderer is pure: no I/O, no session state. It is callable from
+    `MobilePlaybackManager.get_route2_epoch_manifest_content` after the lock
+    setup, and from focused unit tests that don't need a live manager.
+    """
+    import math
+
+    safe_segment_duration = max(0.001, float(segment_duration_seconds))
+    safe_end_segment = max(0, int(manifest_end_segment))
+    epoch_start = max(0.0, _coerce_finite_seconds(epoch_start_seconds))
+    duration = max(0.0, _coerce_finite_seconds(duration_seconds))
+    attach_abs = max(0.0, _coerce_finite_seconds(attach_position_seconds))
+    use_window = (
+        window_start_seconds is not None
+        and window_end_seconds is not None
+        and float(window_end_seconds) > float(window_start_seconds)
+    )
+    if use_window:
+        slice_result = slice_manifest_segments_for_window(
+            manifest_end_segment=safe_end_segment,
+            segment_duration_seconds=safe_segment_duration,
+            epoch_start_seconds=epoch_start,
+            window_start_seconds=window_start_seconds,
+            window_end_seconds=window_end_seconds,
+        )
+        first_index = int(slice_result["first_segment_index"])
+        media_sequence = int(slice_result["media_sequence_number"])
+        first_segment_start = float(slice_result["first_segment_start_seconds"])
+    else:
+        first_index = 0
+        media_sequence = 0
+        first_segment_start = epoch_start
+    relative_attach_offset = max(0.0, attach_abs - first_segment_start)
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:7",
+        f"#EXT-X-TARGETDURATION:{math.ceil(safe_segment_duration)}",
+        f"#EXT-X-MEDIA-SEQUENCE:{media_sequence}",
+        "#EXT-X-PLAYLIST-TYPE:EVENT",
+        "#EXT-X-INDEPENDENT-SEGMENTS",
+        f'#EXT-X-MAP:URI="{init_uri}"',
+        f"#EXT-X-START:TIME-OFFSET={relative_attach_offset:.3f},PRECISE=YES",
+    ]
+    for index in range(first_index, safe_end_segment + 1):
+        segment_start = epoch_start + index * safe_segment_duration
+        remaining = max(0.0, duration - segment_start) if duration > 0 else safe_segment_duration
+        seg_extinf = min(safe_segment_duration, remaining) if duration > 0 else safe_segment_duration
+        lines.append(f"#EXTINF:{seg_extinf:.3f},")
+        lines.append(segment_uri_template.format(index=index))
+    if manifest_complete:
+        lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
+
+
 def build_active_window_snapshot_fields(
     *,
     selected_hls_engine: str | None,

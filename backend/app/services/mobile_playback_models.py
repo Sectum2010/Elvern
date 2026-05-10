@@ -494,6 +494,20 @@ class BrowserPlaybackSession:
     full_source_bin_bytes: list[int] = field(default_factory=list, repr=False)
     client_probe_samples: list[tuple[float, int, float]] = field(default_factory=list, repr=False)
     epochs: dict[str, PlaybackEpoch] = field(default_factory=dict)
+    # Phase 2B native-HLS sliding manifest window state. Updated by
+    # `_maybe_advance_native_hls_window_locked` and read by both the snapshot
+    # generator and the .m3u8 writer so the contract field
+    # `active_window_start_seconds`/`_end_seconds` and the bytes Safari sees
+    # always agree.
+    last_emitted_window_initialized: bool = False
+    last_emitted_window_start_seconds: float = 0.0
+    last_emitted_window_end_seconds: float = 0.0
+    last_emitted_window_anchor_seconds: float = 0.0
+    last_emitted_window_back_seconds: float = 0.0
+    last_emitted_window_forward_seconds: float = 0.0
+    last_emitted_window_buffer_tier: str = ""
+    last_emitted_window_revision: int = 0
+    last_emitted_window_reason: str = ""
 
 
 @dataclass(slots=True)

@@ -4,8 +4,10 @@ import { describe, test } from "vitest";
 import {
   ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS,
   ELVERN_OVERLAY_LAYOUT_VARIANTS,
+  describeReattachAutoplayPrompt,
   formatPlaybackDuration,
   formatPlaybackTime,
+  isAutoplayBlockedError,
   resolveOverlayLayoutCapabilities,
   resolveOverlayLayoutVariant,
   shouldOverlayBeVisible,
@@ -194,5 +196,47 @@ describe("shouldOverlayBeVisible", () => {
       lastInteractionAtMs: 0,
       nowMs: ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS + 1,
     }), false);
+  });
+});
+
+describe("isAutoplayBlockedError", () => {
+  test("recognises Safari NotAllowedError after a window-slide reattach", () => {
+    assert.equal(isAutoplayBlockedError({ name: "NotAllowedError", message: "play() failed" }), true);
+  });
+
+  test("recognises Chrome 'user didn't interact' message", () => {
+    assert.equal(
+      isAutoplayBlockedError({ name: "Error", message: "play() failed because the user didn't interact with the document first." }),
+      true,
+    );
+  });
+
+  test("returns false for unrelated playback failures", () => {
+    assert.equal(isAutoplayBlockedError({ name: "MediaError", message: "Network error" }), false);
+    assert.equal(isAutoplayBlockedError(null), false);
+    assert.equal(isAutoplayBlockedError(undefined), false);
+  });
+});
+
+describe("describeReattachAutoplayPrompt", () => {
+  test("returns null when nothing was blocked", () => {
+    assert.equal(
+      describeReattachAutoplayPrompt({ isAutoplayBlocked: false, reattachReason: "native_hls_window_slide" }),
+      null,
+    );
+  });
+
+  test("uses the resume-aware wording when reattach was a window slide", () => {
+    assert.equal(
+      describeReattachAutoplayPrompt({ isAutoplayBlocked: true, reattachReason: "native_hls_window_anchor_drift" }),
+      "Tap play to resume from where you were.",
+    );
+  });
+
+  test("uses the generic prompt for non-window reattaches", () => {
+    assert.equal(
+      describeReattachAutoplayPrompt({ isAutoplayBlocked: true, reattachReason: "" }),
+      "Tap play to resume.",
+    );
   });
 });

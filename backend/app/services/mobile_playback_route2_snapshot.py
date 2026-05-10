@@ -222,9 +222,36 @@ def _route2_snapshot_locked(
         current_position_seconds=session.client_current_time_seconds,
         target_position_seconds=session.target_position_seconds,
         attach_position_seconds=attach_position_seconds,
-        active_window_revision=browser_session.attach_revision,
-        active_window_reason=session.lifecycle_state,
+        active_window_revision=max(
+            browser_session.last_emitted_window_revision,
+            browser_session.attach_revision,
+        ),
+        active_window_reason=(
+            browser_session.last_emitted_window_reason or session.lifecycle_state
+        ),
     )
+    # Phase 2B: when the orchestrator has actually emitted a sliding window
+    # (so the .m3u8 is already sliced), surface those persisted bounds so the
+    # snapshot's active_window_* fields and the manifest bytes always agree.
+    if browser_session.last_emitted_window_initialized:
+        active_window_fields = dict(active_window_fields)
+        active_window_fields["active_window_start_seconds"] = round(
+            browser_session.last_emitted_window_start_seconds, 2,
+        )
+        active_window_fields["active_window_end_seconds"] = round(
+            browser_session.last_emitted_window_end_seconds, 2,
+        )
+        active_window_fields["active_window_anchor_seconds"] = round(
+            browser_session.last_emitted_window_anchor_seconds, 2,
+        )
+        if browser_session.last_emitted_window_back_seconds > 0:
+            active_window_fields["active_window_back_seconds"] = round(
+                browser_session.last_emitted_window_back_seconds, 2,
+            )
+        if browser_session.last_emitted_window_forward_seconds > 0:
+            active_window_fields["active_window_forward_seconds"] = round(
+                browser_session.last_emitted_window_forward_seconds, 2,
+            )
     return {
         "session_id": session.session_id,
         "media_item_id": session.media_item_id,

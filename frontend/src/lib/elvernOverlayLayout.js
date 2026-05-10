@@ -90,6 +90,47 @@ export function resolveOverlayLayoutCapabilities(deviceClass) {
   });
 }
 
+const AUTOPLAY_BLOCKED_ERROR_NAMES = new Set([
+  "NotAllowedError",
+  "NotAllowed",
+  "AbortError",
+  "SecurityError",
+]);
+
+export function isAutoplayBlockedError(error) {
+  if (!error) {
+    return false;
+  }
+  const name = typeof error.name === "string" ? error.name : "";
+  if (AUTOPLAY_BLOCKED_ERROR_NAMES.has(name)) {
+    return true;
+  }
+  const message = typeof error.message === "string" ? error.message.toLowerCase() : "";
+  if (!message) {
+    return false;
+  }
+  return (
+    message.includes("user gesture")
+    || message.includes("user didn't interact")
+    || message.includes("user did not interact")
+    || message.includes("autoplay")
+    || message.includes("not allowed by user agent")
+  );
+}
+
+export function describeReattachAutoplayPrompt({
+  isAutoplayBlocked = false,
+  reattachReason = "",
+} = {}) {
+  if (!isAutoplayBlocked) {
+    return null;
+  }
+  if (reattachReason === "native_hls_window_slide" || String(reattachReason).startsWith("native_hls_window_")) {
+    return "Tap play to resume from where you were.";
+  }
+  return "Tap play to resume.";
+}
+
 export function shouldOverlayBeVisible({
   isPlaying = false,
   preparing = false,

@@ -16,8 +16,10 @@ from backend.app.services.route2_native_hls_window import (
     compute_window_forward_seconds,
     is_native_hls_engine,
     is_position_in_active_window,
+    render_route2_epoch_manifest_text,
     resolve_window_anchor_seconds,
     should_refresh_native_hls_window,
+    slice_manifest_segments_for_window,
 )
 
 
@@ -345,3 +347,215 @@ class TestBuildActiveWindowSnapshotFields:
         )
         assert fields["active_window_anchor_seconds"] == pytest.approx(300.0)
         assert fields["active_window_start_seconds"] == pytest.approx(180.0)
+
+
+class TestSliceManifestSegmentsForWindow:
+    def test_window_starting_at_zero_keeps_first_segment(self) -> None:
+        result = slice_manifest_segments_for_window(
+            manifest_end_segment=200,
+            segment_duration_seconds=2.0,
+            epoch_start_seconds=0.0,
+            window_start_seconds=0.0,
+            window_end_seconds=15.0,
+        )
+        assert result["first_segment_index"] == 0
+        assert result["last_segment_index"] == 7
+        assert result["media_sequence_number"] == 0
+        assert result["first_segment_start_seconds"] == pytest.approx(0.0)
+
+    def test_window_180_to_420_excludes_segments_before_180(self) -> None:
+        # SEGMENT_DURATION = 2 → segment 90 starts at 180s, segment 209 ends at 420s.
+        result = slice_manifest_segments_for_window(
+            manifest_end_segment=400,
+            segment_duration_seconds=2.0,
+            epoch_start_seconds=0.0,
+            window_start_seconds=180.0,
+            window_end_seconds=420.0,
+        )
+        assert result["first_segment_index"] == 90
+        assert result["media_sequence_number"] == 90
+        assert result["first_segment_start_seconds"] == pytest.approx(180.0)
+        # Last included segment must start strictly before the window end.
+        first_kept_start = result["first_segment_start_seconds"]
+        last_kept_start = first_kept_start + (result["last_segment_index"] - result["first_segment_index"]) * 2.0
+        assert last_kept_start < 420.0
+
+    def test_first_segment_keeps_window_start_inside_a_segment(self) -> None:
+        # window_start=181 falls inside segment 90 (180–182), keep segment 90.
+        result = slice_manifest_segments_for_window(
+            manifest_end_segment=400,
+            segment_duration_seconds=2.0,
+            epoch_start_seconds=0.0,
+            window_start_seconds=181.0,
+            window_end_seconds=240.0,
+        )
+        assert result["first_segment_index"] == 90
+        assert result["first_segment_start_seconds"] == pytest.approx(180.0)
+
+    def test_slice_is_clamped_to_published_frontier(self) -> None:
+        result = slice_manifest_segments_for_window(
+            manifest_end_segment=10,
+            segment_duration_seconds=2.0,
+            epoch_start_seconds=0.0,
+            window_start_seconds=0.0,
+            window_end_seconds=120.0,
+        )
+        assert result["last_segment_index"] == 10
+
+    def test_slice_with_epoch_start_offset(self) -> None:
+        # Epoch starts at absolute 1000s; window 1180→1240 ⇒ first segment 90.
+        result = slice_manifest_segments_for_window(
+            manifest_end_segment=400,
+            segment_duration_seconds=2.0,
+            epoch_start_seconds=1000.0,
+            window_start_seconds=1180.0,
+            window_end_seconds=1240.0,
+        )
+        assert result["first_segment_index"] == 90
+        assert result["first_segment_start_seconds"] == pytest.approx(1180.0)
+
+    def test_degenerate_window_returns_safe_terminal_slice(self) -> None:
+        # window_end <= window_start ⇒ degenerate; helper returns last published.
+        result = slice_manifest_segments_for_window(
+            manifest_end_segment=42,
+            segment_duration_seconds=2.0,
+            epoch_start_seconds=0.0,
+            window_start_seconds=200.0,
+            window_end_seconds=200.0,
+        )
+        assert result["first_segment_index"] == 42
+        assert result["last_segment_index"] == 42
+        assert result["media_sequence_number"] == 42
+
+    def test_media_sequence_always_equals_first_index(self) -> None:
+        # Phase 2B contract: HLS clients require MEDIA-SEQUENCE == first segment index.
+        result = slice_manifest_segments_for_window(
+            manifest_end_segment=500,
+            segment_duration_seconds=2.0,
+            epoch_start_seconds=0.0,
+            window_start_seconds=300.0,
+            window_end_seconds=420.0,
+        )
+        assert result["media_sequence_number"] == result["first_segment_index"]
+
+
+class TestRenderRoute2EpochManifestText:
+    def _common_kwargs(self, **overrides):
+        kwargs = dict(
+            epoch_start_seconds=0.0,
+            attach_position_seconds=200.0,
+            manifest_end_segment=400,
+            duration_seconds=3600.0,
+            segment_duration_seconds=2.0,
+            manifest_complete=False,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_no_window_emits_full_playlist_from_segment_zero(self) -> None:
+        # hls.js / legacy path: no window passed → playlist starts at segment 0.
+        body = render_route2_epoch_manifest_text(**self._common_kwargs())
+        assert "#EXT-X-MEDIA-SEQUENCE:0" in body
+        assert "segments/0.m4s" in body
+        assert "segments/400.m4s" in body
+        assert body.startswith("#EXTM3U\n#EXT-X-VERSION:7\n")
+
+    def test_window_180_to_420_excludes_pre_180_segments(self) -> None:
+        # Native_hls slide. Segment 90 starts at 180s, segment 209 starts at 418s.
+        body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(
+                window_start_seconds=180.0,
+                window_end_seconds=420.0,
+            )
+        )
+        assert "#EXT-X-MEDIA-SEQUENCE:90" in body
+        assert "segments/90.m4s" in body
+        assert "segments/89.m4s" not in body
+        assert "segments/0.m4s" not in body
+
+    def test_window_emits_relative_time_offset(self) -> None:
+        # Attach point 300s, first segment in window starts at 180s.
+        # The TIME-OFFSET written into the manifest is RELATIVE to the playlist
+        # head, so the emitted offset must be 300 - 180 = 120s.
+        body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(
+                attach_position_seconds=300.0,
+                window_start_seconds=180.0,
+                window_end_seconds=420.0,
+            )
+        )
+        assert "#EXT-X-START:TIME-OFFSET=120.000,PRECISE=YES" in body
+
+    def test_extinf_durations_remain_correct_inside_window(self) -> None:
+        body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(
+                window_start_seconds=180.0,
+                window_end_seconds=240.0,
+            )
+        )
+        # Every kept segment is 2 seconds long; check at least three of them.
+        assert "#EXTINF:2.000,\nsegments/90.m4s" in body
+        assert "#EXTINF:2.000,\nsegments/91.m4s" in body
+        assert "#EXTINF:2.000,\nsegments/92.m4s" in body
+
+    def test_endlist_only_when_manifest_complete(self) -> None:
+        open_body = render_route2_epoch_manifest_text(**self._common_kwargs())
+        assert "#EXT-X-ENDLIST" not in open_body
+        closed_body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(manifest_complete=True),
+        )
+        assert closed_body.rstrip().endswith("#EXT-X-ENDLIST")
+
+    def test_init_map_uri_present(self) -> None:
+        body = render_route2_epoch_manifest_text(**self._common_kwargs())
+        assert '#EXT-X-MAP:URI="init.mp4"' in body
+
+    def test_window_with_epoch_start_offset(self) -> None:
+        body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(
+                epoch_start_seconds=1000.0,
+                attach_position_seconds=1300.0,
+                window_start_seconds=1180.0,
+                window_end_seconds=1420.0,
+            )
+        )
+        assert "#EXT-X-MEDIA-SEQUENCE:90" in body
+        # 1300 - (1000 + 90*2) = 1300 - 1180 = 120
+        assert "#EXT-X-START:TIME-OFFSET=120.000,PRECISE=YES" in body
+
+
+class TestNativeHlsRefreshTriggerHysteresis:
+    """Phase 2B safeguard: continuous forward playback must not bump revisions
+    every single heartbeat. The orchestrator-side wrapper passes a generous
+    forward-drift threshold so refresh fires near the window edge, not on
+    every 10s of playback.
+    """
+
+    def test_refresh_does_not_fire_every_heartbeat_during_steady_playback(self) -> None:
+        # window [0, 120], anchor 0, forward window 120 (full_healthy).
+        # Generous drift threshold: max(10, 120 * 0.5) = 60.
+        # At current=30, we're not within 20s of the end (120) and drift=30 < 60.
+        # Should NOT refresh.
+        forward_drift_threshold = max(WINDOW_ANCHOR_DRIFT_REFRESH_SECONDS, 120.0 * 0.5)
+        decision = should_refresh_native_hls_window(
+            current_position_seconds=30,
+            window_start_seconds=0,
+            window_end_seconds=120,
+            window_anchor_seconds=0,
+            edge_runway_seconds=WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
+            anchor_drift_seconds=forward_drift_threshold,
+        )
+        assert decision["should_refresh"] is False
+
+    def test_refresh_fires_when_playhead_approaches_window_end(self) -> None:
+        forward_drift_threshold = max(WINDOW_ANCHOR_DRIFT_REFRESH_SECONDS, 120.0 * 0.5)
+        decision = should_refresh_native_hls_window(
+            current_position_seconds=105,
+            window_start_seconds=0,
+            window_end_seconds=120,
+            window_anchor_seconds=0,
+            edge_runway_seconds=WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
+            anchor_drift_seconds=forward_drift_threshold,
+        )
+        assert decision["should_refresh"] is True
+        assert decision["reason"] == "approaching_window_end"

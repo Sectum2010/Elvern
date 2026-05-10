@@ -1879,6 +1879,7 @@ class MobilePlaybackManager:
                 )
                 self._touch_session_locked(session, media_access=bool(playing))
                 self._refresh_route2_session_authority_locked(session)
+                self._maybe_advance_native_hls_window_locked(session)
                 return self._route2_snapshot_locked(session)
             cache_state = self._load_cache_state_locked(
                 cache_key=session.cache_key,
@@ -2058,6 +2059,11 @@ class MobilePlaybackManager:
         return "\n".join(lines) + "\n"
 
     def get_route2_epoch_manifest_content(self, epoch_id: str, *, user_id: int) -> str:
+        from .route2_native_hls_window import (
+            is_native_hls_engine,
+            render_route2_epoch_manifest_text,
+        )
+
         with self._lock:
             session, epoch = self._get_owned_route2_epoch_locked(epoch_id, user_id)
             self._prepare_route2_epoch_access_locked(session, epoch, media_kind="manifest")
@@ -2070,38 +2076,33 @@ class MobilePlaybackManager:
                         epoch=epoch,
                     )
                 raise FileNotFoundError("Route 2 epoch manifest is not published yet")
-            ready_start_seconds = epoch.epoch_start_seconds
-            attach_offset_seconds = max(0.0, epoch.attach_position_seconds - ready_start_seconds)
             total_epoch_segments = max(
                 1,
                 math.ceil(max(session.duration_seconds - epoch.epoch_start_seconds, 0.0) / SEGMENT_DURATION_SECONDS),
             )
             manifest_end_segment = min(epoch.contiguous_published_through_segment, total_epoch_segments - 1)
             manifest_complete = epoch.transcoder_completed and manifest_end_segment >= (total_epoch_segments - 1)
-            lines = [
-                "#EXTM3U",
-                "#EXT-X-VERSION:7",
-                f"#EXT-X-TARGETDURATION:{math.ceil(SEGMENT_DURATION_SECONDS)}",
-                "#EXT-X-MEDIA-SEQUENCE:0",
-                "#EXT-X-PLAYLIST-TYPE:EVENT",
-                "#EXT-X-INDEPENDENT-SEGMENTS",
-                '#EXT-X-MAP:URI="init.mp4"',
-            ]
-            # Route 2 manifests stay open while the epoch transcoder publishes ahead.
-            # Always emit the authoritative attach point so clients do not drift to the
-            # published frontier and start behaving like a live-edge stream.
-            lines.append(f"#EXT-X-START:TIME-OFFSET={attach_offset_seconds:.3f},PRECISE=YES")
-            for index in range(0, manifest_end_segment + 1):
-                segment_start_seconds = epoch.epoch_start_seconds + (index * SEGMENT_DURATION_SECONDS)
-                duration = min(
-                    SEGMENT_DURATION_SECONDS,
-                    max(session.duration_seconds - segment_start_seconds, 0.0),
-                )
-                lines.append(f"#EXTINF:{duration:.3f},")
-                lines.append(f"segments/{index}.m4s")
-            if manifest_complete:
-                lines.append("#EXT-X-ENDLIST")
-        return "\n".join(lines) + "\n"
+            browser_session = session.browser_playback
+            window_active = (
+                is_native_hls_engine(session.selected_hls_engine)
+                and browser_session.last_emitted_window_initialized
+            )
+            window_start = (
+                browser_session.last_emitted_window_start_seconds if window_active else None
+            )
+            window_end = (
+                browser_session.last_emitted_window_end_seconds if window_active else None
+            )
+            return render_route2_epoch_manifest_text(
+                epoch_start_seconds=epoch.epoch_start_seconds,
+                attach_position_seconds=epoch.attach_position_seconds,
+                manifest_end_segment=manifest_end_segment,
+                duration_seconds=session.duration_seconds,
+                segment_duration_seconds=SEGMENT_DURATION_SECONDS,
+                manifest_complete=manifest_complete,
+                window_start_seconds=window_start,
+                window_end_seconds=window_end,
+            )
 
     def get_init_path(self, session_id: str, *, user_id: int) -> Path:
         with self._lock:
@@ -12219,6 +12220,142 @@ class MobilePlaybackManager:
                 session.manifest_end_segment = total_segments - 1
             return session.manifest_start_segment, session.manifest_end_segment, total_segments
         return self._manifest_window_locked(session, cache_state)
+
+    def _maybe_advance_native_hls_window_locked(self, session: MobilePlaybackSession) -> None:
+        """Slide the active native-HLS manifest window when the playhead moves.
+
+        Phase 2B: native_hls Safari sessions get a server-side sliding window so
+        the manifest never exposes more than ``[anchor - 120, anchor + forward]``.
+        This runs inside the heartbeat path. The bump cost is one additional
+        attach_revision per refresh — the existing frontend reattach machinery
+        consumes it. Hls.js sessions are skipped because they prune client-side
+        and a new manifest URL would just churn their MediaSource.
+        """
+        from .route2_native_hls_window import (  # local import: avoid eager dependency at module import time
+            HLS_JS_ENGINE_LABEL,
+            WINDOW_ANCHOR_DRIFT_REFRESH_SECONDS,
+            WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
+            compute_native_hls_window,
+            is_native_hls_engine,
+            resolve_window_anchor_seconds,
+            should_refresh_native_hls_window,
+        )
+
+        if not is_native_hls_engine(session.selected_hls_engine):
+            return
+        if session.browser_playback.engine_mode != "route2":
+            return
+        active_epoch = (
+            session.browser_playback.epochs.get(session.browser_playback.active_epoch_id)
+            if session.browser_playback.active_epoch_id
+            else None
+        )
+        if active_epoch is None:
+            return
+        # Only slide when the session is past initial preparation. While
+        # preparing/recovering the orchestrator may issue its own attach
+        # revisions; piling on would interleave reattach signals.
+        if session.lifecycle_state not in {"attached", "playing"}:
+            if not session.browser_playback.last_emitted_window_initialized:
+                pass  # still allow first init below
+            else:
+                return
+        # Compute the desired window from current session telemetry.
+        anchor = resolve_window_anchor_seconds(
+            current_position_seconds=session.client_current_time_seconds,
+            target_position_seconds=session.target_position_seconds,
+            attach_position_seconds=active_epoch.attach_position_seconds,
+        )
+        window = compute_native_hls_window(
+            anchor_seconds=anchor,
+            duration_seconds=session.duration_seconds,
+            buffer_tier=str(self._latest_buffer_tier_locked(session) or ""),
+            playback_mode=session.browser_playback.playback_mode,
+        )
+        desired_start = float(window["active_window_start_seconds"])
+        desired_end = float(window["active_window_end_seconds"])
+        desired_anchor = float(window["active_window_anchor_seconds"])
+        desired_back = float(window["active_window_back_seconds"])
+        desired_forward = float(window["active_window_forward_seconds"])
+        desired_tier = str(self._latest_buffer_tier_locked(session) or "")
+        browser_session = session.browser_playback
+        if not browser_session.last_emitted_window_initialized:
+            browser_session.last_emitted_window_initialized = True
+            browser_session.last_emitted_window_start_seconds = desired_start
+            browser_session.last_emitted_window_end_seconds = desired_end
+            browser_session.last_emitted_window_anchor_seconds = desired_anchor
+            browser_session.last_emitted_window_back_seconds = desired_back
+            browser_session.last_emitted_window_forward_seconds = desired_forward
+            browser_session.last_emitted_window_buffer_tier = desired_tier
+            browser_session.last_emitted_window_reason = "initial"
+            browser_session.last_emitted_window_revision = max(
+                browser_session.last_emitted_window_revision,
+                browser_session.attach_revision,
+            )
+            return
+        # Use a generous orchestrator-side anchor drift threshold so continuous
+        # forward playback inside a healthy window does not churn revisions.
+        forward_drift_threshold = max(
+            WINDOW_ANCHOR_DRIFT_REFRESH_SECONDS,
+            desired_forward * 0.5,
+        )
+        decision = should_refresh_native_hls_window(
+            current_position_seconds=session.client_current_time_seconds,
+            window_start_seconds=browser_session.last_emitted_window_start_seconds,
+            window_end_seconds=browser_session.last_emitted_window_end_seconds,
+            window_anchor_seconds=browser_session.last_emitted_window_anchor_seconds,
+            buffer_tier_changed=(
+                bool(desired_tier)
+                and desired_tier != browser_session.last_emitted_window_buffer_tier
+            ),
+            edge_runway_seconds=WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
+            anchor_drift_seconds=forward_drift_threshold,
+        )
+        if not decision["should_refresh"]:
+            return
+        # Reason "anchor_drift" with a tiny forward delta is the chatty case;
+        # apply a strict equality check so a noop slide never bumps revisions.
+        start_changed = abs(desired_start - browser_session.last_emitted_window_start_seconds) > 0.5
+        end_changed = abs(desired_end - browser_session.last_emitted_window_end_seconds) > 0.5
+        tier_changed = desired_tier != browser_session.last_emitted_window_buffer_tier
+        if not (start_changed or end_changed or tier_changed):
+            browser_session.last_emitted_window_anchor_seconds = desired_anchor
+            return
+        browser_session.last_emitted_window_start_seconds = desired_start
+        browser_session.last_emitted_window_end_seconds = desired_end
+        browser_session.last_emitted_window_anchor_seconds = desired_anchor
+        browser_session.last_emitted_window_back_seconds = desired_back
+        browser_session.last_emitted_window_forward_seconds = desired_forward
+        browser_session.last_emitted_window_buffer_tier = desired_tier
+        browser_session.last_emitted_window_reason = str(decision.get("reason") or "slide")
+        browser_session.last_emitted_window_revision += 1
+        # Bump the existing attach_revision so the frontend's existing reattach
+        # machinery picks up the fresh manifest URL automatically.
+        self._issue_route2_attach_revision_locked(
+            session,
+            next_revision=browser_session.attach_revision + 1,
+            reason=f"native_hls_window_{decision.get('reason') or 'slide'}",
+            epoch=active_epoch,
+        )
+
+    def _latest_buffer_tier_locked(self, session: MobilePlaybackSession) -> str | None:
+        """Best-effort buffer-tier snapshot for native-HLS window sizing.
+
+        The authoritative tier is recomputed inside ``_route2_snapshot_locked``;
+        this lightweight read mirrors that derivation just for the window
+        decision so we do not need a full snapshot before bumping revisions.
+        """
+        from .mobile_playback_buffer_contract import resolve_buffer_contract_fields
+
+        try:
+            fields = resolve_buffer_contract_fields(
+                playback_mode=session.browser_playback.playback_mode,
+                client_device_class=session.client_device_class,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        tier = fields.get("buffer_tier")
+        return str(tier) if tier else None
 
     def _maybe_advance_manifest_window_locked(self, session: MobilePlaybackSession) -> None:
         if (
