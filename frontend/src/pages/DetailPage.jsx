@@ -3289,6 +3289,7 @@ export function DetailPage() {
                   preparingTargetSeconds={elvernOverlayPreparingTargetSeconds}
                   sessionPayload={elvernOverlaySessionPayload}
                   shellRef={playerShellRef}
+                  videoElementKey={videoElementKey}
                   videoRef={videoRef}
                 />
               ) : null}

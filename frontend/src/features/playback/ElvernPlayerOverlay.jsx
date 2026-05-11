@@ -189,6 +189,7 @@ async function exitDocumentFullscreen() {
 export default function ElvernPlayerOverlay({
   videoRef,
   shellRef,
+  videoElementKey = 0,
   durationSeconds,
   sessionPayload,
   onSeekCommit,
@@ -226,6 +227,7 @@ export default function ElvernPlayerOverlay({
   const lastSampledAbsoluteRef = useRef(null);
   const idleTimerRef = useRef(null);
   const overlayRootRef = useRef(null);
+  const lastPointerFocusAtRef = useRef(0);
 
   const safeDuration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
 
@@ -279,6 +281,12 @@ export default function ElvernPlayerOverlay({
     if (!video) {
       return undefined;
     }
+    const disableNativeControls = () => {
+      if (video.controls) {
+        video.controls = false;
+      }
+      video.removeAttribute("controls");
+    };
     const updatePlaybackState = () => {
       setIsPlaying(!video.paused && !video.ended);
     };
@@ -350,6 +358,7 @@ export default function ElvernPlayerOverlay({
       setAudioTracks(collected);
     };
 
+    disableNativeControls();
     updatePlaybackState();
     updateVolumeState();
     updateRateState();
@@ -359,8 +368,11 @@ export default function ElvernPlayerOverlay({
     refreshAudioTracks();
 
     video.addEventListener("play", updatePlaybackState);
+    video.addEventListener("playing", disableNativeControls);
     video.addEventListener("pause", updatePlaybackState);
     video.addEventListener("ended", updatePlaybackState);
+    video.addEventListener("loadeddata", disableNativeControls);
+    video.addEventListener("canplay", disableNativeControls);
     video.addEventListener("volumechange", updateVolumeState);
     video.addEventListener("ratechange", updateRateState);
     video.addEventListener("timeupdate", handleTimeUpdate);
@@ -382,8 +394,11 @@ export default function ElvernPlayerOverlay({
 
     return () => {
       video.removeEventListener("play", updatePlaybackState);
+      video.removeEventListener("playing", disableNativeControls);
       video.removeEventListener("pause", updatePlaybackState);
       video.removeEventListener("ended", updatePlaybackState);
+      video.removeEventListener("loadeddata", disableNativeControls);
+      video.removeEventListener("canplay", disableNativeControls);
       video.removeEventListener("volumechange", updateVolumeState);
       video.removeEventListener("ratechange", updateRateState);
       video.removeEventListener("timeupdate", handleTimeUpdate);
@@ -402,7 +417,7 @@ export default function ElvernPlayerOverlay({
         video.audioTracks.removeEventListener("removetrack", refreshAudioTracks);
       }
     };
-  }, [sessionPayload, videoRef]);
+  }, [sessionPayload, videoElementKey, videoRef]);
 
   useEffect(() => {
     if (!sessionPayload) {
@@ -593,22 +608,38 @@ export default function ElvernPlayerOverlay({
       return;
     }
     const pointerType = event?.nativeEvent?.pointerType;
-    if (pointerType === "touch" || pointerType === "pen") {
-      // Touch surfaces toggle controls visibility instead of toggling play.
-      // The user uses the explicit play/pause button for transport.
-      if (controlsVisible && isPlaying) {
-        setControlsVisible(false);
-        if (idleTimerRef.current) {
-          clearTimeout(idleTimerRef.current);
-          idleTimerRef.current = null;
-        }
-        return;
-      }
+    if ((pointerType === "touch" || pointerType === "pen") && !controlsVisible && isPlaying) {
+      // First tap on a hidden touch overlay reveals controls; visible taps use
+      // the center transport button.
       refreshControlsTimer();
       return;
     }
     togglePlay();
   }, [controlsVisible, isPlaying, refreshControlsTimer, togglePlay]);
+
+  const handlePointerEnter = useCallback((event) => {
+    if (event?.pointerType && event.pointerType !== "mouse") {
+      return;
+    }
+    refreshControlsTimer();
+  }, [refreshControlsTimer]);
+
+  const handlePointerDownCapture = useCallback(() => {
+    lastPointerFocusAtRef.current = Date.now();
+    setControlsFocused(false);
+  }, []);
+
+  const handleKeyDownCapture = useCallback((event) => {
+    if (event?.key === "Tab") {
+      lastPointerFocusAtRef.current = 0;
+    }
+  }, []);
+
+  const handleTouchStart = useCallback(() => {
+    if (isPlaying && !controlsVisible) {
+      refreshControlsTimer();
+    }
+  }, [controlsVisible, isPlaying, refreshControlsTimer]);
 
   const handlePointerMove = useCallback((event) => {
     if (event?.pointerType && event.pointerType !== "mouse") {
@@ -628,7 +659,17 @@ export default function ElvernPlayerOverlay({
     setControlsVisible(false);
   }, [controlsFocused, isAnyMenuOpen, isDraggingTimeline, isPlaying, preparing]);
 
-  const handleFocusCapture = useCallback(() => {
+  const handleFocusCapture = useCallback((event) => {
+    if (event?.target?.closest?.(".elvern-overlay__surface")) {
+      setControlsFocused(false);
+      refreshControlsTimer();
+      return;
+    }
+    if (Date.now() - lastPointerFocusAtRef.current < 800) {
+      setControlsFocused(false);
+      refreshControlsTimer();
+      return;
+    }
     setControlsFocused(true);
     refreshControlsTimer();
   }, [refreshControlsTimer]);
@@ -678,7 +719,7 @@ export default function ElvernPlayerOverlay({
     isDraggingTimeline,
     anyMenuOpen: isAnyMenuOpen,
     controlsFocused,
-    lastInteractionAtMs: controlsVisible ? 1 : 0,
+    lastInteractionAtMs: controlsVisible ? 0 : -(ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS + 1),
     nowMs: 0,
     idleHideDelayMs: ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS,
   });
@@ -740,10 +781,14 @@ export default function ElvernPlayerOverlay({
       ref={overlayRootRef}
       className={`elvern-overlay elvern-overlay--variant-${layoutCapabilities.variant}${visibilityClass}`}
       data-preparing={preparing ? "true" : "false"}
+      onPointerEnter={handlePointerEnter}
+      onPointerDownCapture={handlePointerDownCapture}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
+      onKeyDownCapture={handleKeyDownCapture}
       onFocusCapture={handleFocusCapture}
       onBlurCapture={handleBlurCapture}
+      onTouchStart={handleTouchStart}
     >
       <button
         aria-label={isPlaying ? "Pause" : "Play"}
@@ -800,15 +845,6 @@ export default function ElvernPlayerOverlay({
         />
 
         <div className="elvern-overlay__controls-row">
-          <button
-            aria-label={isPlaying ? "Pause" : "Play"}
-            className="elvern-overlay__icon-button"
-            onClick={togglePlay}
-            type="button"
-          >
-            {isPlaying ? <PauseIcon className="elvern-overlay__icon" /> : <PlayIcon className="elvern-overlay__icon" />}
-          </button>
-
           {layoutCapabilities.showInlineMuteToggle ? (
             <div className="elvern-overlay__volume-group">
               <button
