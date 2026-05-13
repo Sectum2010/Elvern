@@ -21,6 +21,7 @@ import {
   resolveOverlayLayoutCapabilities,
   shouldOverlayBeVisible,
 } from "../../lib/elvernOverlayLayout.js";
+import { normalizeVideoFitMode } from "../../lib/playerFitMode.js";
 
 import ElvernTimeline from "./ElvernTimeline.jsx";
 import { usePlaybackTrackControls } from "./usePlaybackTrackControls.js";
@@ -227,7 +228,7 @@ export default function ElvernPlayerOverlay({
   fallbackFullscreenButtonLabel = null,
   cinemaModeActive = false,
   onToggleFullscreen = null,
-  videoFitMode = "fit",
+  videoFitMode = "default-fit",
   onVideoFitModeChange = null,
   deviceClass = "desktop",
   hlsRef = null,
@@ -266,7 +267,7 @@ export default function ElvernPlayerOverlay({
   const fullscreenLikeActive = fullscreenActive || cinemaModeActive;
   const phoneInlineMinimal = layoutCapabilities.variant === "phone" && !fullscreenLikeActive;
   const phoneFullscreenCinema = layoutCapabilities.variant === "phone" && fullscreenLikeActive;
-  const currentVideoFitMode = videoFitMode === "fill" ? "fill" : "fit";
+  const currentVideoFitMode = normalizeVideoFitMode(videoFitMode);
   const videoFitToggleAvailable = fullscreenLikeActive && typeof onVideoFitModeChange === "function";
   const touchOptimizedOverlay = layoutCapabilities.variant === "phone" || layoutCapabilities.variant === "tablet";
   const idleHideDelayMs = layoutCapabilities.variant === "phone"
@@ -633,7 +634,7 @@ export default function ElvernPlayerOverlay({
     if (typeof onVideoFitModeChange !== "function") {
       return;
     }
-    onVideoFitModeChange(currentVideoFitMode === "fill" ? "fit" : "fill");
+    onVideoFitModeChange(currentVideoFitMode === "fill-cover" ? "default-fit" : "fill-cover");
     closeAllMenus();
     refreshControlsTimer();
   }, [closeAllMenus, currentVideoFitMode, onVideoFitModeChange, refreshControlsTimer]);
@@ -1214,7 +1215,7 @@ export default function ElvernPlayerOverlay({
               </button>
             ) : null}
 
-            {phoneTrackShortcutButtons && captionsMenuAvailable ? (
+            {phoneTrackShortcutButtons ? (
               <div className="elvern-overlay__menu-host elvern-overlay__track-shortcut">
                 <button
                   aria-expanded={showCaptionsMenu}
@@ -1242,24 +1243,30 @@ export default function ElvernPlayerOverlay({
                     >
                       Off
                     </button>
-                    {textTracks.map((track) => (
-                      <button
-                        aria-checked={track.selected || track.mode === "showing"}
-                        className="elvern-overlay__menu-item"
-                        key={track.id}
-                        onClick={() => handleTextTrackSelect(track.id)}
-                        role="menuitemradio"
-                        type="button"
-                      >
-                        {track.label}
-                      </button>
-                    ))}
+                    {textTracks.length > 0 ? (
+                      textTracks.map((track) => (
+                        <button
+                          aria-checked={track.selected || track.mode === "showing"}
+                          className="elvern-overlay__menu-item"
+                          key={track.id}
+                          onClick={() => handleTextTrackSelect(track.id)}
+                          role="menuitemradio"
+                          type="button"
+                        >
+                          {track.label}
+                        </button>
+                      ))
+                    ) : (
+                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled" role="menuitem">
+                        No subtitle tracks
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </div>
             ) : null}
 
-            {phoneTrackShortcutButtons && audioMenuAvailable ? (
+            {phoneTrackShortcutButtons ? (
               <div className="elvern-overlay__menu-host elvern-overlay__track-shortcut">
                 <button
                   aria-expanded={showAudioMenu}
@@ -1278,18 +1285,24 @@ export default function ElvernPlayerOverlay({
                 </button>
                 {showAudioMenu ? (
                   <div className="elvern-overlay__menu" role="menu">
-                    {audioTracks.map((track) => (
-                      <button
-                        aria-checked={track.selected || track.enabled}
-                        className="elvern-overlay__menu-item"
-                        key={track.id}
-                        onClick={() => handleAudioTrackSelect(track.id)}
-                        role="menuitemradio"
-                        type="button"
-                      >
-                        {track.label}
-                      </button>
-                    ))}
+                    {audioMenuAvailable ? (
+                      audioTracks.map((track) => (
+                        <button
+                          aria-checked={track.selected || track.enabled}
+                          className="elvern-overlay__menu-item"
+                          key={track.id}
+                          onClick={() => handleAudioTrackSelect(track.id)}
+                          role="menuitemradio"
+                          type="button"
+                        >
+                          {track.label}
+                        </button>
+                      ))
+                    ) : (
+                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled" role="menuitem">
+                        No alternate audio tracks
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -1332,7 +1345,7 @@ export default function ElvernPlayerOverlay({
                     ) : null}
                     {moreMenuItems.includes("video-fit") ? (
                       <button
-                        aria-pressed={currentVideoFitMode === "fill"}
+                        aria-pressed={currentVideoFitMode === "fill-cover"}
                         className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
                         onClick={handleVideoFitModeToggle}
                         role="menuitem"
@@ -1341,7 +1354,7 @@ export default function ElvernPlayerOverlay({
                         <span className="elvern-overlay__menu-item-icon">
                           <InlineExpandIcon className="elvern-overlay__icon" />
                         </span>
-                        <span>{currentVideoFitMode === "fill" ? "Fit screen" : "Fill screen"}</span>
+                        <span>{currentVideoFitMode === "fill-cover" ? "Fit screen" : "Fill screen"}</span>
                       </button>
                     ) : null}
                     {moreMenuItems.includes("speed") ? (

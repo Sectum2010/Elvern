@@ -10,6 +10,7 @@ import {
   readClientPlaybackLiveness,
   resolvePlaybackRecoveryTargetSeconds,
   retuneHlsInstance,
+  shouldRecoverNativeHlsStalePlaylist,
   shouldDisarmFirstFrameStallMonitor,
 } from "./browserPlaybackBufferPolicy.js";
 
@@ -217,6 +218,24 @@ describe("recovery and manifest window helpers", () => {
       actualMediaElementTimeSeconds: 0,
       targetPositionSeconds: 0,
     }), 8.2);
+  });
+
+  test("native HLS stale playlist recovery is allowed when backend is far ahead but client is starved", () => {
+    assert.equal(shouldRecoverNativeHlsStalePlaylist({
+      hlsJsAttached: false,
+      backendPreparedAheadSeconds: 46,
+      stallReason: "client_buffer_starved",
+    }), true);
+    assert.equal(shouldRecoverNativeHlsStalePlaylist({
+      hlsJsAttached: false,
+      backendPreparedAheadSeconds: 46,
+      stallReason: "mid_playback_stall",
+    }), true);
+    assert.equal(shouldRecoverNativeHlsStalePlaylist({
+      hlsJsAttached: true,
+      backendPreparedAheadSeconds: 46,
+      stallReason: "client_buffer_starved",
+    }), false);
   });
 
   test("backBufferLength stays an hls.js config field past 120s", () => {

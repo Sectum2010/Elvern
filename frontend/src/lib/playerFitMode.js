@@ -1,13 +1,15 @@
 export const VIDEO_FIT_MODE_STORAGE_KEY = "elvern_video_fit_mode";
 export const VIDEO_FIT_PINCH_THRESHOLD_PX = 28;
+export const VIDEO_FIT_DEFAULT = "default-fit";
+export const VIDEO_FIT_FILL_COVER = "fill-cover";
 
 export function normalizeVideoFitMode(value) {
-  return value === "fill" ? "fill" : "fit";
+  return value === VIDEO_FIT_FILL_COVER || value === "fill" ? VIDEO_FIT_FILL_COVER : VIDEO_FIT_DEFAULT;
 }
 
 export function readStoredVideoFitMode(storage = globalThis?.localStorage) {
   void storage;
-  return "fit";
+  return VIDEO_FIT_DEFAULT;
 }
 
 export function persistVideoFitMode(mode, storage = globalThis?.localStorage) {
@@ -35,7 +37,7 @@ export function measureTouchDistance(touches) {
 export function deriveVideoFitModeFromPinch({
   startDistance,
   currentDistance,
-  currentMode = "fit",
+  currentMode = VIDEO_FIT_DEFAULT,
   thresholdPx = VIDEO_FIT_PINCH_THRESHOLD_PX,
 }) {
   if (!Number.isFinite(startDistance) || !Number.isFinite(currentDistance)) {
@@ -46,10 +48,10 @@ export function deriveVideoFitModeFromPinch({
     : VIDEO_FIT_PINCH_THRESHOLD_PX;
   const delta = currentDistance - startDistance;
   if (delta >= threshold) {
-    return "fill";
+    return VIDEO_FIT_FILL_COVER;
   }
   if (delta <= -threshold) {
-    return "fit";
+    return VIDEO_FIT_DEFAULT;
   }
   return normalizeVideoFitMode(currentMode);
 }

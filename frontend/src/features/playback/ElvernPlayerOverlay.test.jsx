@@ -14,7 +14,7 @@ function renderOverlay({
   preparingMessage = "",
   setupVideo = null,
   trackRefreshKey = "",
-  videoFitMode = "fit",
+  videoFitMode = "default-fit",
   videoElementKey = 0,
 } = {}) {
   const video = document.createElement("video");
@@ -383,7 +383,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(fillButton);
     });
 
-    expect(onVideoFitModeChange).toHaveBeenCalledWith("fill");
+    expect(onVideoFitModeChange).toHaveBeenCalledWith("fill-cover");
   });
 
   test("fill mode survives overlay rerender and offers fit action", () => {
@@ -392,14 +392,14 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       cinemaModeActive: true,
       deviceClass: "phone",
       onVideoFitModeChange,
-      videoFitMode: "fill",
+      videoFitMode: "fill-cover",
     });
 
     rerenderOverlay({
       cinemaModeActive: true,
       onVideoFitModeChange,
       videoElementKey: 1,
-      videoFitMode: "fill",
+      videoFitMode: "fill-cover",
     });
     act(() => {
       fireEvent.click(getMoreButton());
@@ -844,15 +844,26 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(labels.indexOf("More options")).toBeLessThan(labels.indexOf("Exit fullscreen"));
   });
 
-  test("phone cinema hides subtitle and audio icons when tracks are unavailable", () => {
-    const { queryByRole } = renderOverlay({
+  test("phone cinema keeps subtitle and audio icons visible with unavailable messages", () => {
+    const { getByRole, queryByRole } = renderOverlay({
       cinemaModeActive: true,
       deviceClass: "phone",
+      onToggleFullscreen: vi.fn(),
       onVideoFitModeChange: vi.fn(),
     });
 
-    expect(queryByRole("button", { name: "Subtitles" })).toBeNull();
-    expect(queryByRole("button", { name: "Audio track" })).toBeNull();
+    expect(queryByRole("button", { name: "Subtitles" })).not.toBeNull();
+    expect(queryByRole("button", { name: "Audio track" })).not.toBeNull();
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    expect(getByRole("menuitem", { name: "No subtitle tracks" })).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    expect(getByRole("menuitem", { name: "No alternate audio tracks" })).toBeTruthy();
   });
 
   test("desktop mouse leave still hides controls", () => {

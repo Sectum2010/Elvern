@@ -5658,6 +5658,16 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   color: #ffffff;
 }
 
+.elvern-overlay__menu-item--disabled,
+.elvern-overlay__menu-item--disabled:hover,
+.elvern-overlay__menu-item--disabled:focus-visible {
+  background: transparent;
+  color: rgba(248, 250, 252, 0.55);
+  cursor: default;
+  outline: none;
+  pointer-events: none;
+}
+
 /* ─── Elvern Timeline ─────────────────────────────────────────────────── */
 
 .elvern-timeline {
@@ -5845,29 +5855,44 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   transform: none;
 }
 
-.player-shell--elvern-custom.player-shell--video-fit-fit .player,
-.player-shell--elvern-custom.player-shell--video-fit-fit .player-frozen-frame {
-  object-fit: contain;
-  object-position: center center;
+.player-shell--elvern-custom .player-fullscreen-surface {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.player-shell--elvern-custom.player-shell--video-fit-fill .player,
-.player-shell--elvern-custom.player-shell--video-fit-fill .player-frozen-frame {
+.player-shell--elvern-custom.player-shell--video-fit-default-fit .player,
+.player-shell--elvern-custom.player-shell--video-fit-default-fit .player-frozen-frame {
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: fill;
+  object-position: center center;
+  transform: none;
+}
+
+.player-shell--elvern-custom.player-shell--video-fit-fill-cover .player,
+.player-shell--elvern-custom.player-shell--video-fit-fill-cover .player-frozen-frame {
+  width: 100%;
+  height: 100%;
   object-fit: cover;
   object-position: center center;
   transform: none;
 }
 
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill.player-shell--cinema-takeover .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill:fullscreen .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill:-webkit-full-screen .player {
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover.player-shell--cinema-takeover .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover:fullscreen .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover:-webkit-full-screen .player {
   object-fit: cover;
 }
 
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fit.player-shell--cinema-takeover .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fit:fullscreen .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fit:-webkit-full-screen .player {
-  object-fit: contain;
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-default-fit.player-shell--cinema-takeover .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-default-fit:fullscreen .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-default-fit:-webkit-full-screen .player {
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: fill;
 }
 
 .player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__bottom-bar,

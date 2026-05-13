@@ -120,23 +120,26 @@ describe("Elvern player mobile CSS guards", () => {
     expect(block).not.toContain("border-radius");
   });
 
-  test("fit and fill modes control video object-fit", () => {
+  test("default-fit fills width while fill-cover covers the viewport", () => {
     const styles = readStyles();
-    const fitBlock = cssBlockForSelectorListItem(
+    const defaultFitBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-custom.player-shell--video-fit-fit .player",
+      ".player-shell--elvern-custom.player-shell--video-fit-default-fit .player",
     );
-    const fillBlock = cssBlockForSelectorListItem(
+    const fillCoverBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-custom.player-shell--video-fit-fill .player",
+      ".player-shell--elvern-custom.player-shell--video-fit-fill-cover .player",
     );
     const phoneFillBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill.player-shell--cinema-takeover .player",
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover.player-shell--cinema-takeover .player",
     );
 
-    expect(fitBlock).toContain("object-fit: contain");
-    expect(fillBlock).toContain("object-fit: cover");
+    expect(defaultFitBlock).toContain("width: 100%");
+    expect(defaultFitBlock).toContain("height: auto");
+    expect(defaultFitBlock).not.toContain("object-fit: contain");
+    expect(fillCoverBlock).toContain("height: 100%");
+    expect(fillCoverBlock).toContain("object-fit: cover");
     expect(phoneFillBlock).toContain("object-fit: cover");
   });
 
@@ -190,7 +193,7 @@ describe("Elvern player mobile CSS guards", () => {
     );
     const fillBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-custom.player-shell--video-fit-fill .player",
+      ".player-shell--elvern-custom.player-shell--video-fit-fill-cover .player",
     );
 
     expect(shellBlock).toContain("position: fixed");

@@ -18,6 +18,7 @@ import {
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
   retuneHlsInstance,
+  shouldRecoverNativeHlsStalePlaylist,
   shouldDisarmFirstFrameStallMonitor,
 } from "../../lib/browserPlaybackBufferPolicy";
 import {
@@ -1578,19 +1579,37 @@ export function useBrowserPlaybackController({
         }
         const latestSession = mobileSessionRef.current;
         const latestBackendAhead = latestSession?.ahead_runway_seconds || 0;
-        if (latestBackendAhead > 6 && !latestSession?.stalled_recovery_needed) {
+        const staleNativePlaylistStall = shouldRecoverNativeHlsStalePlaylist({
+          hlsJsAttached: Boolean(hlsRef.current),
+          backendPreparedAheadSeconds: latestBackendAhead,
+          stallReason: stall.stallReason,
+        });
+        if (latestBackendAhead > 6 && !latestSession?.stalled_recovery_needed && !staleNativePlaylistStall) {
           return;
         }
         setOptimizedPlaybackPending(true);
         setSeekNotice(`Reconnecting the current ${browserPlaybackLabel} session.`);
         applyMobileLifecycleStatus("recovering");
         mobileWasPlayingBeforeSuspendRef.current = Boolean(!video.paused);
+        setHlsEngineDiagnostics((current) => (
+          current.selectedEngine === "native_hls"
+            ? {
+              ...current,
+              nativeHlsStallRecoveryReason: staleNativePlaylistStall
+                ? "native_hls_playlist_stale"
+                : (stall.stallReason || "client_stalled"),
+              nativeHlsStallRecoveryPreservedPositionSeconds: resolveCurrentVideoAbsolutePosition(latestSession, video),
+            }
+            : current
+        ));
         postMobileRuntimeHeartbeat({
           lifecycleState: "recovering",
           stalled: true,
           playing: true,
           force: true,
-          clientPlaybackStallReason: stall.stallReason || "client_stalled",
+          clientPlaybackStallReason: staleNativePlaylistStall
+            ? "native_hls_playlist_stale"
+            : (stall.stallReason || "client_stalled"),
         }).catch(() => {
           // Recovery will still try to reattach locally.
         });

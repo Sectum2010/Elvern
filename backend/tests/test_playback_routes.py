@@ -36,6 +36,7 @@ class BrowserPlaybackRouteManagerStub:
         self.browser_cooldown_exception: Exception | None = None
         self.create_calls = 0
         self.create_kwargs: list[dict[str, object]] = []
+        self.manifest_content = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n"
 
     def start(self) -> None:
         return None
@@ -77,6 +78,12 @@ class BrowserPlaybackRouteManagerStub:
         payload["session_id"] = session_id
         return payload
 
+    def get_manifest_content(self, session_id: str, *, user_id: int) -> str:
+        return self.manifest_content
+
+    def get_route2_epoch_manifest_content(self, epoch_id: str, *, user_id: int) -> str:
+        return self.manifest_content
+
 
 class AdminPlaybackWorkerManagerStub:
     def __init__(self, payload: dict[str, object]) -> None:
@@ -112,6 +119,7 @@ class AdminPlaybackWorkerManagerStub:
 
 class RouteTranscodeManagerStub:
     def __init__(self, *, status: str = "queued") -> None:
+        self.manifest_content = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n"
         self._snapshot = {
             "manifest_ready": False,
             "expected_duration_seconds": 120.0,
@@ -130,6 +138,15 @@ class RouteTranscodeManagerStub:
 
     def get_job_snapshot(self, item: dict[str, object]) -> dict[str, object]:
         return dict(self._snapshot)
+
+    def get_manifest_content(self, item: dict[str, object]) -> str:
+        return self.manifest_content
+
+
+def _assert_dynamic_hls_playlist_headers(response) -> None:
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["expires"] == "0"
 
 
 def _admin_user(settings):
@@ -962,6 +979,53 @@ def test_browser_playback_routes_accept_full_fast_start_estimate_source(
     assert heartbeat_response.status_code == 200
     assert heartbeat_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
     assert heartbeat_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+
+
+@pytest.mark.parametrize(
+    "manifest_path",
+    [
+        "/api/browser-playback/sessions/route2-session/index.m3u8",
+        "/api/browser-playback/epochs/epoch-1/index.m3u8",
+        "/api/mobile-playback/sessions/route2-session/index.m3u8",
+        "/api/mobile-playback/epochs/epoch-1/index.m3u8",
+    ],
+)
+def test_dynamic_route2_manifest_responses_disable_cache(
+    initialized_settings,
+    client,
+    admin_credentials,
+    manifest_path: str,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name=f"browser/no-cache-{manifest_path.strip('/').replace('/', '-')}.mp4",
+    )
+    payload = _make_browser_playback_route2_payload(item_id=int(item["id"]))
+    client.app.state.mobile_playback_manager = BrowserPlaybackRouteManagerStub(payload)
+
+    response = client.get(manifest_path)
+
+    assert response.status_code == 200
+    _assert_dynamic_hls_playlist_headers(response)
+
+
+def test_legacy_hls_manifest_response_disables_cache(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/legacy-hls-no-cache.mp4",
+    )
+    client.app.state.transcode_manager = RouteTranscodeManagerStub(status="running")
+
+    response = client.get(f"/api/hls/{item['id']}/index.m3u8")
+
+    assert response.status_code == 200
+    _assert_dynamic_hls_playlist_headers(response)
 
 
 @pytest.mark.parametrize(

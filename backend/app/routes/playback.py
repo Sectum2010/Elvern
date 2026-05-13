@@ -16,6 +16,12 @@ from ..services.playback_service import build_playback_decision, start_playback,
 
 router = APIRouter(tags=["playback"])
 
+DYNAMIC_HLS_PLAYLIST_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
 
 def _get_item_or_404(request: Request, item_id: int, *, user_id: int) -> dict[str, object]:
     item = get_media_item_detail(
@@ -89,7 +95,7 @@ def hls_manifest(item_id: int, request: Request, user=CurrentUser):
     return Response(
         content=manifest_content,
         media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "private, no-store"},
+        headers=DYNAMIC_HLS_PLAYLIST_HEADERS,
     )
 
 

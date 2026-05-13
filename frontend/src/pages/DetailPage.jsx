@@ -31,6 +31,7 @@ import { resolveAuthoritativeBrowserPlaybackResumePosition } from "../lib/browse
 import {
   deriveVideoFitModeFromPinch,
   measureTouchDistance,
+  normalizeVideoFitMode,
 } from "../lib/playerFitMode";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
@@ -475,7 +476,7 @@ export function DetailPage() {
   const [macAppFullscreenActive, setMacAppFullscreenActive] = useState(false);
   const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
   const [elvernCinemaModeActive, setElvernCinemaModeActive] = useState(false);
-  const [elvernVideoFitMode, setElvernVideoFitMode] = useState("fit");
+  const [elvernVideoFitMode, setElvernVideoFitMode] = useState("default-fit");
   const useNativeControlsFallback = false;
   const playerShellRef = useRef(null);
   const playerFitPinchRef = useRef(null);
@@ -2528,7 +2529,9 @@ export function DetailPage() {
   const elvernEffectiveVideoControls = useElvernCustomShell ? false : videoControlsEnabled;
   const elvernHideMacAppFullscreenButton = useElvernCustomShell;
   const elvernCinemaTakeoverActive = useElvernCustomShell && elvernCinemaModeActive && !macAppFullscreenActive;
-  const elvernShellVideoFitMode = macAppFullscreenActive || elvernCinemaTakeoverActive ? elvernVideoFitMode : "fit";
+  const elvernShellVideoFitMode = normalizeVideoFitMode(
+    macAppFullscreenActive || elvernCinemaTakeoverActive ? elvernVideoFitMode : "default-fit",
+  );
   const playerShellClassName = [
     "player-shell",
     useElvernCustomShell ? "player-shell--elvern-custom" : "",
@@ -2744,7 +2747,7 @@ export function DetailPage() {
     if (nextMode === pinch.mode) {
       return;
     }
-    setElvernVideoFitMode(nextMode);
+    setElvernVideoFitMode(normalizeVideoFitMode(nextMode));
     playerFitPinchRef.current = {
       startDistance: distance,
       mode: nextMode,

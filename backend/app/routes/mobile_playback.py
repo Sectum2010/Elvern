@@ -19,6 +19,12 @@ from ..services.mobile_playback_service import ActivePlaybackWorkerConflictError
 
 router = APIRouter(tags=["mobile_playback"])
 
+DYNAMIC_HLS_PLAYLIST_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
 
 def _get_mobile_manager(request: Request):
     return request.app.state.mobile_playback_manager
@@ -215,7 +221,7 @@ def mobile_playback_manifest(
     return Response(
         content=manifest_content,
         media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "private, no-store"},
+        headers=DYNAMIC_HLS_PLAYLIST_HEADERS,
     )
 
 
@@ -286,7 +292,7 @@ def mobile_playback_epoch_manifest(
     return Response(
         content=manifest_content,
         media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "private, no-store"},
+        headers=DYNAMIC_HLS_PLAYLIST_HEADERS,
     )
 
 

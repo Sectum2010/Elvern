@@ -279,6 +279,22 @@ export function resolvePlaybackRecoveryTargetSeconds({
   return candidates.length ? Math.max(...candidates) : 0;
 }
 
+export function shouldRecoverNativeHlsStalePlaylist({
+  hlsJsAttached = false,
+  backendPreparedAheadSeconds = 0,
+  stallReason = "",
+} = {}) {
+  const backendAhead = Number(backendPreparedAheadSeconds || 0);
+  return Boolean(
+    !hlsJsAttached
+    && backendAhead > 6
+    && (
+      stallReason === "client_buffer_starved"
+      || stallReason === "mid_playback_stall"
+    )
+  );
+}
+
 export function classifyManifestWindowState({
   absolutePositionSeconds = 0,
   manifestEndSeconds = 0,

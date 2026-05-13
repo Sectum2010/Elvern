@@ -8,18 +8,20 @@ import {
 } from "./playerFitMode.js";
 
 describe("player fit mode helpers", () => {
-  test("normalizes unknown values to fit", () => {
-    expect(normalizeVideoFitMode("fill")).toBe("fill");
-    expect(normalizeVideoFitMode("fit")).toBe("fit");
-    expect(normalizeVideoFitMode("cover")).toBe("fit");
+  test("normalizes unknown values to default-fit", () => {
+    expect(normalizeVideoFitMode("fill-cover")).toBe("fill-cover");
+    expect(normalizeVideoFitMode("fill")).toBe("fill-cover");
+    expect(normalizeVideoFitMode("default-fit")).toBe("default-fit");
+    expect(normalizeVideoFitMode("fit")).toBe("default-fit");
+    expect(normalizeVideoFitMode("cover")).toBe("default-fit");
   });
 
-  test("new player sessions default to fit even when old storage says fill", () => {
+  test("new player sessions default to default-fit even when old storage says fill", () => {
     const storage = {
       getItem: () => "fill",
     };
 
-    expect(readStoredVideoFitMode(storage)).toBe("fit");
+    expect(readStoredVideoFitMode(storage)).toBe("default-fit");
   });
 
   test("measures two-touch distance", () => {
@@ -29,27 +31,27 @@ describe("player fit mode helpers", () => {
     ])).toBe(5);
   });
 
-  test("pinch outward selects fill", () => {
+  test("pinch outward selects fill-cover", () => {
     expect(deriveVideoFitModeFromPinch({
       startDistance: 100,
       currentDistance: 140,
-      currentMode: "fit",
-    })).toBe("fill");
+      currentMode: "default-fit",
+    })).toBe("fill-cover");
   });
 
-  test("pinch inward selects fit", () => {
+  test("pinch inward selects default-fit", () => {
     expect(deriveVideoFitModeFromPinch({
       startDistance: 140,
       currentDistance: 100,
-      currentMode: "fill",
-    })).toBe("fit");
+      currentMode: "fill-cover",
+    })).toBe("default-fit");
   });
 
   test("small pinch movement keeps current mode", () => {
     expect(deriveVideoFitModeFromPinch({
       startDistance: 100,
       currentDistance: 112,
-      currentMode: "fill",
-    })).toBe("fill");
+      currentMode: "fill-cover",
+    })).toBe("fill-cover");
   });
 });

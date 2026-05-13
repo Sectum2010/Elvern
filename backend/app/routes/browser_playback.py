@@ -24,6 +24,12 @@ from ..services.mobile_playback_service import (
 
 router = APIRouter(tags=["browser_playback"])
 
+DYNAMIC_HLS_PLAYLIST_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
 
 def _resolve_browser_playback_profile(
     requested_profile: str,
@@ -253,7 +259,7 @@ def browser_playback_manifest(
     return Response(
         content=manifest_content,
         media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "private, no-store"},
+        headers=DYNAMIC_HLS_PLAYLIST_HEADERS,
     )
 
 
@@ -324,7 +330,7 @@ def browser_playback_epoch_manifest(
     return Response(
         content=manifest_content,
         media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "private, no-store"},
+        headers=DYNAMIC_HLS_PLAYLIST_HEADERS,
     )
 
 
