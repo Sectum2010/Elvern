@@ -21,7 +21,11 @@ import {
   resolveOverlayLayoutCapabilities,
   shouldOverlayBeVisible,
 } from "../../lib/elvernOverlayLayout.js";
-import { normalizeVideoFitMode } from "../../lib/playerFitMode.js";
+import {
+  VIDEO_FIT_STANDARD,
+  VIDEO_FIT_ZOOM_FILL,
+  normalizeVideoFitMode,
+} from "../../lib/playerFitMode.js";
 
 import ElvernTimeline from "./ElvernTimeline.jsx";
 import { usePlaybackTrackControls } from "./usePlaybackTrackControls.js";
@@ -118,8 +122,8 @@ function PipIcon({ className }) {
 function CaptionsIcon({ className }) {
   return (
     <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
-      <rect height="13" rx="2" width="18" x="3" y="5.5" fill="none" stroke="currentColor" strokeWidth="1.6" />
-      <path d="M8.5 11.5a1.5 1.5 0 1 0-1.5 1.5M16 11.5a1.5 1.5 0 1 0-1.5 1.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" />
+      <path d="M5.5 5.5h13A2.5 2.5 0 0 1 21 8v6.2a2.5 2.5 0 0 1-2.5 2.5H12l-4.1 3.1a.7.7 0 0 1-1.12-.56V16.7H5.5A2.5 2.5 0 0 1 3 14.2V8a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.65" />
+      <path d="M7.4 10.1h4.2M7.4 13h2.9M13.1 10.1h3.5M12.1 13h4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.55" />
     </svg>
   );
 }
@@ -138,7 +142,8 @@ function SpeedIcon({ className }) {
 function AudioTrackIcon({ className }) {
   return (
     <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
-      <path d="M5 14V10M9 17V7M13 19V5M17 14V10M21 12v0" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+      <rect height="10" rx="3" width="6" x="9" y="4" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M6.8 11.2a5.2 5.2 0 0 0 10.4 0M12 16.4V20M8.8 20h6.4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
     </svg>
   );
 }
@@ -150,6 +155,41 @@ function MoreIcon({ className }) {
       <circle cx="12" cy="12" fill="currentColor" r="1.6" />
       <circle cx="18" cy="12" fill="currentColor" r="1.6" />
     </svg>
+  );
+}
+
+function isBackendUnsupportedTrack(track) {
+  return track?.source === "backend" && track?.browserSupported === false;
+}
+
+function TrackMenuItem({
+  checked = false,
+  kind,
+  onSelect,
+  track,
+}) {
+  const unsupported = isBackendUnsupportedTrack(track);
+  const note = kind === "audio"
+    ? "Detected in the source file; this browser stream has not exposed alternate audio yet."
+    : "Detected in the source file; this browser stream has not exposed selectable subtitles yet.";
+  if (unsupported) {
+    return (
+      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
+        <span className="elvern-overlay__track-menu-label">{track.label}</span>
+        <span className="elvern-overlay__track-menu-note">{note}</span>
+      </div>
+    );
+  }
+  return (
+    <button
+      aria-checked={checked}
+      className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
+      onClick={() => onSelect(track.id)}
+      role="menuitemradio"
+      type="button"
+    >
+      <span className="elvern-overlay__track-menu-label">{track.label}</span>
+    </button>
   );
 }
 
@@ -228,11 +268,13 @@ export default function ElvernPlayerOverlay({
   fallbackFullscreenButtonLabel = null,
   cinemaModeActive = false,
   onToggleFullscreen = null,
-  videoFitMode = "default-fit",
+  videoFitMode = VIDEO_FIT_STANDARD,
   onVideoFitModeChange = null,
   deviceClass = "desktop",
   hlsRef = null,
   trackRefreshKey = "",
+  backendAudioTracks = [],
+  backendSubtitleTracks = [],
 }) {
   const layoutCapabilities = useMemo(() => resolveOverlayLayoutCapabilities(deviceClass), [deviceClass]);
 
@@ -284,6 +326,8 @@ export default function ElvernPlayerOverlay({
     subtitleTracks: textTracks,
     subtitlesOff,
   } = usePlaybackTrackControls({
+    backendAudioTracks,
+    backendSubtitleTracks,
     hlsRef,
     trackRefreshKey,
     videoElementKey,
@@ -634,7 +678,7 @@ export default function ElvernPlayerOverlay({
     if (typeof onVideoFitModeChange !== "function") {
       return;
     }
-    onVideoFitModeChange(currentVideoFitMode === "fill-cover" ? "default-fit" : "fill-cover");
+    onVideoFitModeChange(currentVideoFitMode === VIDEO_FIT_ZOOM_FILL ? VIDEO_FIT_STANDARD : VIDEO_FIT_ZOOM_FILL);
     closeAllMenus();
     refreshControlsTimer();
   }, [closeAllMenus, currentVideoFitMode, onVideoFitModeChange, refreshControlsTimer]);
@@ -1103,9 +1147,9 @@ export default function ElvernPlayerOverlay({
                   <CaptionsIcon className="elvern-overlay__icon" />
                 </button>
                 {showCaptionsMenu ? (
-                  <div className="elvern-overlay__menu" role="menu">
+                  <div className="elvern-overlay__menu elvern-overlay__track-menu" role="menu">
                     <button
-                      className="elvern-overlay__menu-item"
+                      className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
                       onClick={handleTextTrackOff}
                       role="menuitemradio"
                       aria-checked={captionActiveCount === 0}
@@ -1114,16 +1158,13 @@ export default function ElvernPlayerOverlay({
                       Off
                     </button>
                     {textTracks.map((track) => (
-                      <button
-                        aria-checked={track.selected || track.mode === "showing"}
-                        className="elvern-overlay__menu-item"
+                      <TrackMenuItem
+                        checked={track.selected || track.mode === "showing"}
                         key={track.id}
-                        onClick={() => handleTextTrackSelect(track.id)}
-                        role="menuitemradio"
-                        type="button"
-                      >
-                        {track.label}
-                      </button>
+                        kind="subtitle"
+                        onSelect={handleTextTrackSelect}
+                        track={track}
+                      />
                     ))}
                   </div>
                 ) : null}
@@ -1150,16 +1191,13 @@ export default function ElvernPlayerOverlay({
                 {showAudioMenu ? (
                   <div className="elvern-overlay__menu" role="menu">
                     {audioTracks.map((track) => (
-                      <button
-                        aria-checked={track.selected || track.enabled}
-                        className="elvern-overlay__menu-item"
+                      <TrackMenuItem
+                        checked={track.selected || track.enabled}
                         key={track.id}
-                        onClick={() => handleAudioTrackSelect(track.id)}
-                        role="menuitemradio"
-                        type="button"
-                      >
-                        {track.label}
-                      </button>
+                        kind="audio"
+                        onSelect={handleAudioTrackSelect}
+                        track={track}
+                      />
                     ))}
                   </div>
                 ) : null}
@@ -1245,20 +1283,17 @@ export default function ElvernPlayerOverlay({
                     </button>
                     {textTracks.length > 0 ? (
                       textTracks.map((track) => (
-                        <button
-                          aria-checked={track.selected || track.mode === "showing"}
-                          className="elvern-overlay__menu-item"
+                        <TrackMenuItem
+                          checked={track.selected || track.mode === "showing"}
                           key={track.id}
-                          onClick={() => handleTextTrackSelect(track.id)}
-                          role="menuitemradio"
-                          type="button"
-                        >
-                          {track.label}
-                        </button>
+                          kind="subtitle"
+                          onSelect={handleTextTrackSelect}
+                          track={track}
+                        />
                       ))
                     ) : (
-                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled" role="menuitem">
-                        No subtitle tracks
+                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
+                        No subtitle tracks found
                       </div>
                     )}
                   </div>
@@ -1284,23 +1319,20 @@ export default function ElvernPlayerOverlay({
                   <AudioTrackIcon className="elvern-overlay__icon" />
                 </button>
                 {showAudioMenu ? (
-                  <div className="elvern-overlay__menu" role="menu">
-                    {audioMenuAvailable ? (
+                  <div className="elvern-overlay__menu elvern-overlay__track-menu" role="menu">
+                    {audioTracks.length > 0 ? (
                       audioTracks.map((track) => (
-                        <button
-                          aria-checked={track.selected || track.enabled}
-                          className="elvern-overlay__menu-item"
+                        <TrackMenuItem
+                          checked={track.selected || track.enabled}
                           key={track.id}
-                          onClick={() => handleAudioTrackSelect(track.id)}
-                          role="menuitemradio"
-                          type="button"
-                        >
-                          {track.label}
-                        </button>
+                          kind="audio"
+                          onSelect={handleAudioTrackSelect}
+                          track={track}
+                        />
                       ))
                     ) : (
-                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled" role="menuitem">
-                        No alternate audio tracks
+                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
+                        No alternate audio tracks found
                       </div>
                     )}
                   </div>
@@ -1345,7 +1377,7 @@ export default function ElvernPlayerOverlay({
                     ) : null}
                     {moreMenuItems.includes("video-fit") ? (
                       <button
-                        aria-pressed={currentVideoFitMode === "fill-cover"}
+                        aria-pressed={currentVideoFitMode === VIDEO_FIT_ZOOM_FILL}
                         className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
                         onClick={handleVideoFitModeToggle}
                         role="menuitem"
@@ -1354,7 +1386,7 @@ export default function ElvernPlayerOverlay({
                         <span className="elvern-overlay__menu-item-icon">
                           <InlineExpandIcon className="elvern-overlay__icon" />
                         </span>
-                        <span>{currentVideoFitMode === "fill-cover" ? "Fit screen" : "Fill screen"}</span>
+                        <span>{currentVideoFitMode === VIDEO_FIT_ZOOM_FILL ? "Fit screen" : "Fill screen"}</span>
                       </button>
                     ) : null}
                     {moreMenuItems.includes("speed") ? (
@@ -1389,16 +1421,13 @@ export default function ElvernPlayerOverlay({
                           Off
                         </button>
                         {textTracks.map((track) => (
-                          <button
-                            aria-checked={track.selected || track.mode === "showing"}
-                            className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                          <TrackMenuItem
+                            checked={track.selected || track.mode === "showing"}
                             key={track.id}
-                            onClick={() => handleTextTrackSelect(track.id)}
-                            role="menuitemradio"
-                            type="button"
-                          >
-                            {track.label}
-                          </button>
+                            kind="subtitle"
+                            onSelect={handleTextTrackSelect}
+                            track={track}
+                          />
                         ))}
                       </div>
                     ) : null}
@@ -1406,16 +1435,13 @@ export default function ElvernPlayerOverlay({
                       <div className="elvern-overlay__menu-section">
                         <span className="elvern-overlay__menu-section-label">Audio track</span>
                         {audioTracks.map((track) => (
-                          <button
-                            aria-checked={track.selected || track.enabled}
-                            className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                          <TrackMenuItem
+                            checked={track.selected || track.enabled}
                             key={track.id}
-                            onClick={() => handleAudioTrackSelect(track.id)}
-                            role="menuitemradio"
-                            type="button"
-                          >
-                            {track.label}
-                          </button>
+                            kind="audio"
+                            onSelect={handleAudioTrackSelect}
+                            track={track}
+                          />
                         ))}
                       </div>
                     ) : null}

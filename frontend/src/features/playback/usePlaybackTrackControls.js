@@ -14,7 +14,15 @@ function readHls(hlsRef) {
 }
 
 function buildTrackLabel(track, fallback) {
-  return track?.label || track?.name || track?.lang || track?.language || fallback;
+  if (track?.label) {
+    return track.label;
+  }
+  const title = track?.label || track?.title || track?.name;
+  const language = track?.lang || track?.language;
+  const codec = track?.codec;
+  const main = title || language || fallback;
+  const details = [language && title && language !== title ? language : "", codec].filter(Boolean).join(" · ");
+  return details ? `${main} (${details})` : main;
 }
 
 function collectNativeSubtitleTracks(video) {
@@ -93,20 +101,69 @@ function collectHlsAudioTracks(hls) {
   }));
 }
 
-function resolveTrackState({ video, hls }) {
+function normalizeBackendSubtitleTracks(tracks) {
+  if (!Array.isArray(tracks)) {
+    return [];
+  }
+  return tracks.map((track, index) => ({
+    id: `backend-subtitle-${track.index ?? track.id ?? index}`,
+    index: Number.isInteger(track.index) ? track.index : index,
+    label: buildTrackLabel(track, `Subtitle ${index + 1}`),
+    language: track.language || "",
+    mode: "disabled",
+    selected: false,
+    source: "backend",
+    codec: track.codec || "",
+    browserSupported: Boolean(track.browser_supported),
+    unsupportedReason: track.browser_supported ? "" : "This subtitle track is in the source file, but this browser stream does not expose it as a selectable WebVTT track yet.",
+  }));
+}
+
+function normalizeBackendAudioTracks(tracks) {
+  if (!Array.isArray(tracks)) {
+    return [];
+  }
+  return tracks.map((track, index) => ({
+    id: `backend-audio-${track.index ?? index}`,
+    index: Number.isInteger(track.index) ? track.index : index,
+    label: buildTrackLabel(track, `Audio ${index + 1}`),
+    language: track.language || "",
+    enabled: Boolean(track.disposition_default) || index === 0,
+    selected: Boolean(track.disposition_default) || index === 0,
+    source: "backend",
+    codec: track.codec || "",
+    browserSupported: Boolean(track.browser_supported),
+    unsupportedReason: "This audio track is in the source file. Switching it requires a Route2 audio remap; this stream has not exposed alternate audio renditions yet.",
+  }));
+}
+
+function resolveTrackState({
+  backendAudioTracks = [],
+  backendSubtitleTracks = [],
+  video,
+  hls,
+}) {
   const hlsSubtitleTracks = collectHlsSubtitleTracks(hls);
   const hlsAudioTracks = collectHlsAudioTracks(hls);
+  const nativeSubtitleTracks = collectNativeSubtitleTracks(video);
+  const nativeAudioTracks = collectNativeAudioTracks(video);
   const subtitleTracks = hlsSubtitleTracks.length > 0
     ? hlsSubtitleTracks
-    : collectNativeSubtitleTracks(video);
+    : nativeSubtitleTracks.length > 0
+      ? nativeSubtitleTracks
+      : normalizeBackendSubtitleTracks(backendSubtitleTracks);
   const audioTracks = hlsAudioTracks.length > 0
     ? hlsAudioTracks
-    : collectNativeAudioTracks(video);
+    : nativeAudioTracks.length > 0
+      ? nativeAudioTracks
+      : normalizeBackendAudioTracks(backendAudioTracks);
   const source = hlsSubtitleTracks.length > 0 || hlsAudioTracks.length > 0
     ? "hls_js"
-    : subtitleTracks.length > 0 || audioTracks.length > 0
+    : nativeSubtitleTracks.length > 0 || nativeAudioTracks.length > 0
       ? "native"
-      : "none";
+      : subtitleTracks.length > 0 || audioTracks.length > 0
+        ? "backend"
+        : "none";
 
   return {
     audioTracks,
@@ -118,22 +175,28 @@ function resolveTrackState({ video, hls }) {
 }
 
 export function usePlaybackTrackControls({
+  backendAudioTracks = [],
+  backendSubtitleTracks = [],
   hlsRef = null,
   trackRefreshKey = "",
   videoElementKey = 0,
   videoRef = null,
 } = {}) {
   const [trackState, setTrackState] = useState(() => resolveTrackState({
+    backendAudioTracks,
+    backendSubtitleTracks,
     hls: readHls(hlsRef),
     video: videoRef?.current || null,
   }));
 
   const refreshTrackState = useCallback(() => {
     setTrackState(resolveTrackState({
+      backendAudioTracks,
+      backendSubtitleTracks,
       hls: readHls(hlsRef),
       video: videoRef?.current || null,
     }));
-  }, [hlsRef, videoRef]);
+  }, [backendAudioTracks, backendSubtitleTracks, hlsRef, videoRef]);
 
   useEffect(() => {
     const video = videoRef?.current || null;
@@ -198,7 +261,7 @@ export function usePlaybackTrackControls({
         hls.subtitleTrack = selected.index;
         hls.subtitleDisplay = true;
       }
-    } else {
+    } else if (selected.source === "native") {
       const video = videoRef?.current || null;
       if (video?.textTracks) {
         for (let index = 0; index < video.textTracks.length; index += 1) {
@@ -219,7 +282,7 @@ export function usePlaybackTrackControls({
       if (hls) {
         hls.audioTrack = selected.index;
       }
-    } else {
+    } else if (selected.source === "native") {
       const native = videoRef?.current?.audioTracks;
       if (native) {
         for (let index = 0; index < native.length; index += 1) {
@@ -244,5 +307,7 @@ export {
   collectHlsSubtitleTracks,
   collectNativeAudioTracks,
   collectNativeSubtitleTracks,
+  normalizeBackendAudioTracks,
+  normalizeBackendSubtitleTracks,
   resolveTrackState,
 };

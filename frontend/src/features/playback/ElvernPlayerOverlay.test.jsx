@@ -5,6 +5,8 @@ import ElvernPlayerOverlay from "./ElvernPlayerOverlay.jsx";
 import { ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS } from "../../lib/elvernOverlayLayout.js";
 
 function renderOverlay({
+  backendAudioTracks = [],
+  backendSubtitleTracks = [],
   cinemaModeActive = false,
   deviceClass = "desktop",
   hlsRef = null,
@@ -14,7 +16,7 @@ function renderOverlay({
   preparingMessage = "",
   setupVideo = null,
   trackRefreshKey = "",
-  videoFitMode = "default-fit",
+  videoFitMode = "standard-fit",
   videoElementKey = 0,
 } = {}) {
   const video = document.createElement("video");
@@ -73,6 +75,8 @@ function renderOverlay({
 
   const renderProps = (overrides = {}) => ({
     cinemaModeActive,
+    backendAudioTracks,
+    backendSubtitleTracks,
     durationSeconds: 600,
     deviceClass,
     hlsRef,
@@ -383,23 +387,23 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(fillButton);
     });
 
-    expect(onVideoFitModeChange).toHaveBeenCalledWith("fill-cover");
+    expect(onVideoFitModeChange).toHaveBeenCalledWith("zoom-fill");
   });
 
-  test("fill mode survives overlay rerender and offers fit action", () => {
+  test("zoom-fill mode survives overlay rerender and offers fit action", () => {
     const onVideoFitModeChange = vi.fn();
     const { getMoreButton, queryByRole, rerenderOverlay } = renderOverlay({
       cinemaModeActive: true,
       deviceClass: "phone",
       onVideoFitModeChange,
-      videoFitMode: "fill-cover",
+      videoFitMode: "zoom-fill",
     });
 
     rerenderOverlay({
       cinemaModeActive: true,
       onVideoFitModeChange,
       videoElementKey: 1,
-      videoFitMode: "fill-cover",
+      videoFitMode: "zoom-fill",
     });
     act(() => {
       fireEvent.click(getMoreButton());
@@ -720,7 +724,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   test("native subtitle tracks can be selected and turned off", () => {
     const english = { kind: "subtitles", label: "English", language: "en", mode: "disabled" };
     const spanish = { kind: "captions", label: "Spanish", language: "es", mode: "disabled" };
-    const { getByRole } = renderOverlay({
+    const { getByRole, getByText } = renderOverlay({
       cinemaModeActive: true,
       setupVideo(video) {
         Object.defineProperty(video, "textTracks", {
@@ -751,7 +755,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   test("native audio tracks can be selected", () => {
     const english = { label: "English", language: "en", enabled: true };
     const commentary = { label: "Commentary", language: "en", enabled: false };
-    const { getByRole } = renderOverlay({
+    const { getByRole, getByText } = renderOverlay({
       cinemaModeActive: true,
       setupVideo(video) {
         Object.defineProperty(video, "audioTracks", {
@@ -816,6 +820,31 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(hls.audioTrack).toBe(1);
   });
 
+  test("backend-discovered tracks appear when browser exposes no tracks", () => {
+    const { getByRole, getByText } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, label: "English (aac)", codec: "aac", disposition_default: true },
+        { index: 2, label: "Commentary (aac)", codec: "aac" },
+      ],
+      backendSubtitleTracks: [
+        { index: 3, label: "English subtitles (subrip)", codec: "subrip", language: "en" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onToggleFullscreen: vi.fn(),
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    expect(getByText("English subtitles (subrip)")).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    expect(getByText("Commentary (aac)")).toBeTruthy();
+  });
+
   test("phone cinema places subtitle and audio icons before More when tracks exist", () => {
     const hls = {
       audioTrack: 0,
@@ -858,12 +887,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     act(() => {
       fireEvent.click(getByRole("button", { name: "Subtitles" }));
     });
-    expect(getByRole("menuitem", { name: "No subtitle tracks" })).toBeTruthy();
+    expect(getByRole("menuitem", { name: "No subtitle tracks found" })).toBeTruthy();
 
     act(() => {
       fireEvent.click(getByRole("button", { name: "Audio track" }));
     });
-    expect(getByRole("menuitem", { name: "No alternate audio tracks" })).toBeTruthy();
+    expect(getByRole("menuitem", { name: "No alternate audio tracks found" })).toBeTruthy();
   });
 
   test("desktop mouse leave still hides controls", () => {

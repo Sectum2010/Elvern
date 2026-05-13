@@ -5861,18 +5861,17 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   justify-content: center;
 }
 
-.player-shell--elvern-custom.player-shell--video-fit-default-fit .player,
-.player-shell--elvern-custom.player-shell--video-fit-default-fit .player-frozen-frame {
+.player-shell--elvern-custom.player-shell--video-fit-standard-fit .player,
+.player-shell--elvern-custom.player-shell--video-fit-standard-fit .player-frozen-frame {
   width: 100%;
-  height: auto;
-  max-height: 100%;
-  object-fit: fill;
+  height: 100%;
+  object-fit: contain;
   object-position: center center;
   transform: none;
 }
 
-.player-shell--elvern-custom.player-shell--video-fit-fill-cover .player,
-.player-shell--elvern-custom.player-shell--video-fit-fill-cover .player-frozen-frame {
+.player-shell--elvern-custom.player-shell--video-fit-zoom-fill .player,
+.player-shell--elvern-custom.player-shell--video-fit-zoom-fill .player-frozen-frame {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -5880,19 +5879,18 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   transform: none;
 }
 
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover.player-shell--cinema-takeover .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover:fullscreen .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover:-webkit-full-screen .player {
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-zoom-fill.player-shell--cinema-takeover .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-zoom-fill:fullscreen .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-zoom-fill:-webkit-full-screen .player {
   object-fit: cover;
 }
 
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-default-fit.player-shell--cinema-takeover .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-default-fit:fullscreen .player,
-.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-default-fit:-webkit-full-screen .player {
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-standard-fit.player-shell--cinema-takeover .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-standard-fit:fullscreen .player,
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-standard-fit:-webkit-full-screen .player {
   width: 100%;
-  height: auto;
-  max-height: 100%;
-  object-fit: fill;
+  height: 100%;
+  object-fit: contain;
 }
 
 .player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__bottom-bar,
@@ -5947,6 +5945,39 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   padding: 0.65rem;
   max-height: min(60dvh, 20rem);
   z-index: 6;
+}
+
+.elvern-overlay--phone .elvern-overlay__track-menu {
+  width: min(18rem, calc(100vw - 1.2rem));
+  min-width: min(18rem, calc(100vw - 1.2rem));
+  max-width: calc(100vw - 1.2rem);
+  max-height: min(58dvh, 22rem);
+  padding: 0.6rem;
+  gap: 0.25rem;
+  border-radius: 0.85rem;
+}
+
+.elvern-overlay--phone .elvern-overlay__track-menu-item {
+  min-height: 2.55rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding: 0.55rem 0.7rem;
+}
+
+.elvern-overlay__track-menu-label,
+.elvern-overlay__track-menu-note {
+  display: block;
+  width: 100%;
+}
+
+.elvern-overlay__track-menu-note {
+  margin-top: 0.18rem;
+  color: rgba(248, 250, 252, 0.58);
+  font-size: 0.72rem;
 }
 
 .elvern-overlay--tablet .elvern-overlay__icon-button {

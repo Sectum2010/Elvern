@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   getBrowserPlaybackActiveWindowSeconds,
+  getBrowserPlaybackAttachedManifestEndSeconds,
   getBrowserPlaybackFullDurationSeconds,
   getBrowserPlaybackTimelineEndSeconds,
   getBrowserPlaybackTimelineStartSeconds,
@@ -67,6 +68,27 @@ test("active window fields are preferred over ready_* in readiness checks", () =
   assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2350), true);
   assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2270), false);
   assert.equal(isBrowserPlaybackAbsolutePositionReady(payload, 2401), false);
+});
+
+test("native HLS attached manifest end uses active window end instead of server ready end", () => {
+  const payload = buildRoute2Payload({
+    selected_hls_engine: "native_hls",
+    active_window_start_seconds: 5,
+    active_window_end_seconds: 20,
+    ready_end_seconds: 300,
+  });
+  assert.equal(getBrowserPlaybackAttachedManifestEndSeconds(payload), 20);
+});
+
+test("hls.js attached manifest end can still use ready end when no native sliding window is active", () => {
+  const payload = buildRoute2Payload({
+    selected_hls_engine: "hls_js",
+    active_window_start_seconds: 5,
+    active_window_end_seconds: 20,
+    ready_start_seconds: 0,
+    ready_end_seconds: 300,
+  });
+  assert.equal(getBrowserPlaybackAttachedManifestEndSeconds(payload), 300);
 });
 
 test("missing active_window_* falls back to ready_* fields", () => {

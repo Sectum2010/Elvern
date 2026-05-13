@@ -28,6 +28,7 @@ import {
 } from "../../lib/playbackWorkerOwnership";
 import { getProviderAuthRequirement } from "../../lib/providerAuth";
 import {
+  getBrowserPlaybackAttachedManifestEndSeconds,
   isBrowserPlaybackAbsolutePositionReady,
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
@@ -1469,7 +1470,7 @@ export function useBrowserPlaybackController({
         const absoluteCurrentTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
         const manifestState = classifyManifestWindowState({
           absolutePositionSeconds: absoluteCurrentTime,
-          manifestEndSeconds: mobileSessionRef.current.ready_end_seconds || 0,
+          manifestEndSeconds: getBrowserPlaybackAttachedManifestEndSeconds(mobileSessionRef.current),
           fullDurationSeconds: fullDuration,
           completionGraceSeconds: COMPLETION_GRACE_SECONDS,
         });

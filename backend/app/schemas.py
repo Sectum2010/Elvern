@@ -147,6 +147,20 @@ class SubtitleTrackResponse(BaseModel):
     disposition_default: bool = False
 
 
+class MediaPlaybackTrackResponse(BaseModel):
+    index: int
+    codec: str | None = None
+    language: str | None = None
+    title: str | None = None
+    channels: int | None = None
+    disposition_default: bool = False
+    disposition_forced: bool = False
+    text_based: bool | None = None
+    image_based: bool | None = None
+    browser_supported: bool = False
+    label: str | None = None
+
+
 class ParsedTitleResponse(BaseModel):
     display_title: str
     base_title: str
@@ -476,6 +490,8 @@ class MediaItemDetail(LibraryItemSummary):
     stream_url: str
     resume_position_seconds: float = 0
     subtitles: list[SubtitleTrackResponse] = Field(default_factory=list)
+    subtitle_tracks: list[MediaPlaybackTrackResponse] = Field(default_factory=list)
+    audio_tracks: list[MediaPlaybackTrackResponse] = Field(default_factory=list)
 
 
 class GoogleDriveConnectionResponse(BaseModel):
@@ -805,6 +821,11 @@ class NativeTrackResponse(BaseModel):
     title: str | None = None
     channels: int | None = None
     disposition_default: bool = False
+    disposition_forced: bool = False
+    text_based: bool | None = None
+    image_based: bool | None = None
+    browser_supported: bool = False
+    label: str | None = None
 
 
 TransportSelectedMode = Literal[

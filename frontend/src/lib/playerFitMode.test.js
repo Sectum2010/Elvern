@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  deriveVideoFitModeGestureChange,
   deriveVideoFitModeFromPinch,
   measureTouchDistance,
   normalizeVideoFitMode,
@@ -8,20 +9,22 @@ import {
 } from "./playerFitMode.js";
 
 describe("player fit mode helpers", () => {
-  test("normalizes unknown values to default-fit", () => {
-    expect(normalizeVideoFitMode("fill-cover")).toBe("fill-cover");
-    expect(normalizeVideoFitMode("fill")).toBe("fill-cover");
-    expect(normalizeVideoFitMode("default-fit")).toBe("default-fit");
-    expect(normalizeVideoFitMode("fit")).toBe("default-fit");
-    expect(normalizeVideoFitMode("cover")).toBe("default-fit");
+  test("normalizes unknown values to standard-fit", () => {
+    expect(normalizeVideoFitMode("zoom-fill")).toBe("zoom-fill");
+    expect(normalizeVideoFitMode("fill-cover")).toBe("zoom-fill");
+    expect(normalizeVideoFitMode("fill")).toBe("zoom-fill");
+    expect(normalizeVideoFitMode("standard-fit")).toBe("standard-fit");
+    expect(normalizeVideoFitMode("default-fit")).toBe("standard-fit");
+    expect(normalizeVideoFitMode("fit")).toBe("standard-fit");
+    expect(normalizeVideoFitMode("cover")).toBe("standard-fit");
   });
 
-  test("new player sessions default to default-fit even when old storage says fill", () => {
+  test("new player sessions default to standard-fit even when old storage says fill", () => {
     const storage = {
       getItem: () => "fill",
     };
 
-    expect(readStoredVideoFitMode(storage)).toBe("default-fit");
+    expect(readStoredVideoFitMode(storage)).toBe("standard-fit");
   });
 
   test("measures two-touch distance", () => {
@@ -31,27 +34,51 @@ describe("player fit mode helpers", () => {
     ])).toBe(5);
   });
 
-  test("pinch outward selects fill-cover", () => {
+  test("pinch outward selects zoom-fill", () => {
     expect(deriveVideoFitModeFromPinch({
       startDistance: 100,
       currentDistance: 140,
-      currentMode: "default-fit",
-    })).toBe("fill-cover");
+      currentMode: "standard-fit",
+    })).toBe("zoom-fill");
   });
 
-  test("pinch inward selects default-fit", () => {
+  test("pinch inward selects standard-fit", () => {
     expect(deriveVideoFitModeFromPinch({
       startDistance: 140,
       currentDistance: 100,
-      currentMode: "fill-cover",
-    })).toBe("default-fit");
+      currentMode: "zoom-fill",
+    })).toBe("standard-fit");
   });
 
   test("small pinch movement keeps current mode", () => {
     expect(deriveVideoFitModeFromPinch({
       startDistance: 100,
       currentDistance: 112,
-      currentMode: "fill-cover",
-    })).toBe("fill-cover");
+      currentMode: "zoom-fill",
+    })).toBe("zoom-fill");
+  });
+
+  test("one pinch gesture commits only one mode change", () => {
+    const gesture = {
+      startDistance: 100,
+      startMode: "standard-fit",
+      hasCommittedModeChange: false,
+    };
+    const first = deriveVideoFitModeGestureChange({
+      gesture,
+      currentDistance: 140,
+    });
+    expect(first).toEqual({
+      changed: true,
+      hasCommittedModeChange: true,
+      nextMode: "zoom-fill",
+    });
+    const second = deriveVideoFitModeGestureChange({
+      gesture: { ...gesture, hasCommittedModeChange: true },
+      currentDistance: 70,
+    });
+    expect(second.changed).toBe(false);
+    expect(second.hasCommittedModeChange).toBe(true);
+    expect(second.nextMode).toBe("standard-fit");
   });
 });

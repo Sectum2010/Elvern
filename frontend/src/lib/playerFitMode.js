@@ -1,15 +1,18 @@
 export const VIDEO_FIT_MODE_STORAGE_KEY = "elvern_video_fit_mode";
 export const VIDEO_FIT_PINCH_THRESHOLD_PX = 28;
-export const VIDEO_FIT_DEFAULT = "default-fit";
-export const VIDEO_FIT_FILL_COVER = "fill-cover";
+export const VIDEO_FIT_STANDARD = "standard-fit";
+export const VIDEO_FIT_ZOOM_FILL = "zoom-fill";
 
 export function normalizeVideoFitMode(value) {
-  return value === VIDEO_FIT_FILL_COVER || value === "fill" ? VIDEO_FIT_FILL_COVER : VIDEO_FIT_DEFAULT;
+  if (value === VIDEO_FIT_ZOOM_FILL || value === "fill-cover" || value === "fill") {
+    return VIDEO_FIT_ZOOM_FILL;
+  }
+  return VIDEO_FIT_STANDARD;
 }
 
 export function readStoredVideoFitMode(storage = globalThis?.localStorage) {
   void storage;
-  return VIDEO_FIT_DEFAULT;
+  return VIDEO_FIT_STANDARD;
 }
 
 export function persistVideoFitMode(mode, storage = globalThis?.localStorage) {
@@ -37,7 +40,7 @@ export function measureTouchDistance(touches) {
 export function deriveVideoFitModeFromPinch({
   startDistance,
   currentDistance,
-  currentMode = VIDEO_FIT_DEFAULT,
+  currentMode = VIDEO_FIT_STANDARD,
   thresholdPx = VIDEO_FIT_PINCH_THRESHOLD_PX,
 }) {
   if (!Number.isFinite(startDistance) || !Number.isFinite(currentDistance)) {
@@ -48,10 +51,37 @@ export function deriveVideoFitModeFromPinch({
     : VIDEO_FIT_PINCH_THRESHOLD_PX;
   const delta = currentDistance - startDistance;
   if (delta >= threshold) {
-    return VIDEO_FIT_FILL_COVER;
+    return VIDEO_FIT_ZOOM_FILL;
   }
   if (delta <= -threshold) {
-    return VIDEO_FIT_DEFAULT;
+    return VIDEO_FIT_STANDARD;
   }
   return normalizeVideoFitMode(currentMode);
+}
+
+export function deriveVideoFitModeGestureChange({
+  gesture,
+  currentDistance,
+  thresholdPx = VIDEO_FIT_PINCH_THRESHOLD_PX,
+}) {
+  if (!gesture || gesture.hasCommittedModeChange) {
+    return {
+      changed: false,
+      hasCommittedModeChange: Boolean(gesture?.hasCommittedModeChange),
+      nextMode: normalizeVideoFitMode(gesture?.startMode),
+    };
+  }
+  const startMode = normalizeVideoFitMode(gesture.startMode);
+  const nextMode = deriveVideoFitModeFromPinch({
+    startDistance: gesture.startDistance,
+    currentDistance,
+    currentMode: startMode,
+    thresholdPx,
+  });
+  const changed = nextMode !== startMode;
+  return {
+    changed,
+    hasCommittedModeChange: changed,
+    nextMode,
+  };
 }

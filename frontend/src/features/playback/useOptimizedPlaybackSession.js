@@ -15,6 +15,7 @@ import {
   resolvePlaybackRecoveryTargetSeconds,
 } from "../../lib/browserPlaybackBufferPolicy";
 import {
+  getBrowserPlaybackAttachedManifestEndSeconds,
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "../../lib/browserPlaybackTimeline";
@@ -611,7 +612,7 @@ export function useOptimizedPlaybackSession({
     if (!payload) {
       return 0;
     }
-    return Math.max(payload.ready_end_seconds || 0, 0);
+    return getBrowserPlaybackAttachedManifestEndSeconds(payload);
   }
 
   function resolveCurrentManifestPosition(payload = mobileSessionRef.current) {

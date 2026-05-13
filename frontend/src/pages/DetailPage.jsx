@@ -29,7 +29,7 @@ import {
 import { resolveBrowserPlaybackPlayerViewState } from "../lib/browserPlaybackPlayerState";
 import { resolveAuthoritativeBrowserPlaybackResumePosition } from "../lib/browserPlaybackResume";
 import {
-  deriveVideoFitModeFromPinch,
+  deriveVideoFitModeGestureChange,
   measureTouchDistance,
   normalizeVideoFitMode,
 } from "../lib/playerFitMode";
@@ -476,7 +476,7 @@ export function DetailPage() {
   const [macAppFullscreenActive, setMacAppFullscreenActive] = useState(false);
   const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
   const [elvernCinemaModeActive, setElvernCinemaModeActive] = useState(false);
-  const [elvernVideoFitMode, setElvernVideoFitMode] = useState("default-fit");
+  const [elvernVideoFitMode, setElvernVideoFitMode] = useState("standard-fit");
   const useNativeControlsFallback = false;
   const playerShellRef = useRef(null);
   const playerFitPinchRef = useRef(null);
@@ -2456,6 +2456,8 @@ export function DetailPage() {
   }
 
   const subtitleTracks = Array.isArray(item.subtitles) ? item.subtitles : [];
+  const playbackAudioTracks = Array.isArray(item.audio_tracks) ? item.audio_tracks : [];
+  const playbackSubtitleTracks = Array.isArray(item.subtitle_tracks) ? item.subtitle_tracks : subtitleTracks;
   const detailSourceLabel = item.source_label || (item.source_kind === "cloud" ? "Cloud" : "DGX");
   const sourceDescription = item.source_kind === "cloud"
     ? (item.library_source_name
@@ -2530,7 +2532,7 @@ export function DetailPage() {
   const elvernHideMacAppFullscreenButton = useElvernCustomShell;
   const elvernCinemaTakeoverActive = useElvernCustomShell && elvernCinemaModeActive && !macAppFullscreenActive;
   const elvernShellVideoFitMode = normalizeVideoFitMode(
-    macAppFullscreenActive || elvernCinemaTakeoverActive ? elvernVideoFitMode : "default-fit",
+    macAppFullscreenActive || elvernCinemaTakeoverActive ? elvernVideoFitMode : "standard-fit",
   );
   const playerShellClassName = [
     "player-shell",
@@ -2725,7 +2727,8 @@ export function DetailPage() {
     event.preventDefault();
     playerFitPinchRef.current = {
       startDistance: distance,
-      mode: elvernVideoFitMode,
+      startMode: normalizeVideoFitMode(elvernVideoFitMode),
+      hasCommittedModeChange: false,
     };
   }
 
@@ -2739,18 +2742,20 @@ export function DetailPage() {
       return;
     }
     event.preventDefault();
-    const nextMode = deriveVideoFitModeFromPinch({
-      startDistance: pinch.startDistance,
-      currentDistance: distance,
-      currentMode: pinch.mode,
-    });
-    if (nextMode === pinch.mode) {
+    if (pinch.hasCommittedModeChange) {
       return;
     }
-    setElvernVideoFitMode(normalizeVideoFitMode(nextMode));
+    const transition = deriveVideoFitModeGestureChange({
+      gesture: pinch,
+      currentDistance: distance,
+    });
+    if (!transition.changed) {
+      return;
+    }
+    setElvernVideoFitMode(normalizeVideoFitMode(transition.nextMode));
     playerFitPinchRef.current = {
-      startDistance: distance,
-      mode: nextMode,
+      ...pinch,
+      hasCommittedModeChange: transition.hasCommittedModeChange,
     };
   }
 
@@ -3370,6 +3375,8 @@ export function DetailPage() {
                   durationSeconds={fullDuration}
                   errorMessage={playbackError || ""}
                   hlsRef={hlsRef}
+                  backendAudioTracks={playbackAudioTracks}
+                  backendSubtitleTracks={playbackSubtitleTracks}
                   onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}
                   onToggleFullscreen={toggleElvernPlayerFullscreen}
                   onVideoFitModeChange={setElvernVideoFitMode}

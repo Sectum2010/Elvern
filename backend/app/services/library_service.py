@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,6 +48,10 @@ from ..config import Settings
 from ..db import get_connection
 
 
+TEXT_SUBTITLE_CODECS = {"ass", "ssa", "subrip", "text", "webvtt", "mov_text"}
+IMAGE_SUBTITLE_CODECS = {"dvd_subtitle", "hdmv_pgs_subtitle", "xsub"}
+
+
 def _utc_iso_to_epoch_seconds(value: object) -> int:
     if not value:
         return 0
@@ -59,6 +64,101 @@ def _utc_iso_to_epoch_seconds(value: object) -> int:
     else:
         parsed = parsed.astimezone(timezone.utc)
     return int(parsed.timestamp())
+
+
+def _stream_tags(stream: dict[str, object]) -> dict[str, object]:
+    tags = stream.get("tags")
+    return tags if isinstance(tags, dict) else {}
+
+
+def _stream_disposition(stream: dict[str, object]) -> dict[str, object]:
+    disposition = stream.get("disposition")
+    return disposition if isinstance(disposition, dict) else {}
+
+
+def _stream_track_label(
+    *,
+    fallback: str,
+    language: object,
+    title: object,
+    codec: object,
+) -> str:
+    main = str(title or language or fallback)
+    details = [str(value) for value in (language if title else None, codec) if value]
+    return f"{main} ({' / '.join(details)})" if details else main
+
+
+def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    if not raw_probe_summary_json:
+        return [], []
+    try:
+        payload = json.loads(str(raw_probe_summary_json))
+    except json.JSONDecodeError:
+        return [], []
+    streams = payload.get("streams")
+    if not isinstance(streams, list):
+        return [], []
+    audio_tracks: list[dict[str, object]] = []
+    subtitle_tracks: list[dict[str, object]] = []
+    audio_ordinal = 0
+    subtitle_ordinal = 0
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        codec_type = stream.get("codec_type")
+        if codec_type not in {"audio", "subtitle"}:
+            continue
+        tags = _stream_tags(stream)
+        disposition = _stream_disposition(stream)
+        codec = stream.get("codec_name")
+        language = tags.get("language")
+        title = tags.get("title")
+        stream_index = int(stream.get("index") or 0)
+        if codec_type == "audio":
+            audio_ordinal += 1
+            audio_tracks.append(
+                {
+                    "index": stream_index,
+                    "codec": codec,
+                    "language": language,
+                    "title": title,
+                    "channels": int(stream["channels"]) if stream.get("channels") else None,
+                    "disposition_default": bool(disposition.get("default", 0)),
+                    "label": _stream_track_label(
+                        fallback=f"Audio {audio_ordinal}",
+                        language=language,
+                        title=title,
+                        codec=codec,
+                    ),
+                    "browser_supported": False,
+                }
+            )
+            continue
+        subtitle_ordinal += 1
+        codec_name = str(codec or "").lower()
+        text_based = codec_name in TEXT_SUBTITLE_CODECS
+        image_based = codec_name in IMAGE_SUBTITLE_CODECS
+        subtitle_tracks.append(
+            {
+                "index": stream_index,
+                "codec": codec,
+                "language": language,
+                "title": title,
+                "channels": None,
+                "disposition_default": bool(disposition.get("default", 0)),
+                "disposition_forced": bool(disposition.get("forced", 0)),
+                "text_based": text_based,
+                "image_based": image_based,
+                "browser_supported": codec_name == "webvtt",
+                "label": _stream_track_label(
+                    fallback=f"Subtitle {subtitle_ordinal}",
+                    language=language,
+                    title=title,
+                    codec=codec,
+                ),
+            }
+        )
+    return audio_tracks, subtitle_tracks
 
 
 def _base_query() -> str:
@@ -356,6 +456,15 @@ def get_media_item_detail(
             """,
             (item_id,),
         ).fetchall()
+        technical_row = connection.execute(
+            """
+            SELECT raw_probe_summary_json
+            FROM media_item_technical_metadata
+            WHERE media_item_id = ? AND probe_status = 'probed'
+            LIMIT 1
+            """,
+            (item_id,),
+        ).fetchone()
         media_row = connection.execute(
             "SELECT file_path FROM media_items WHERE id = ?",
             (item_id,),
@@ -387,6 +496,59 @@ def get_media_item_detail(
     )
     if hidden_globally and not allow_globally_hidden:
         return None
+    audio_tracks, subtitle_stream_tracks = _extract_playback_tracks_from_probe_summary(
+        technical_row["raw_probe_summary_json"] if technical_row else None
+    )
+    subtitle_payload = [
+        {
+            "id": subtitle["id"],
+            "language": subtitle["language"],
+            "title": subtitle["title"],
+            "codec": subtitle["codec"],
+            "disposition_default": bool(subtitle["disposition_default"]),
+        }
+        for subtitle in subtitles
+    ]
+    if not subtitle_stream_tracks:
+        subtitle_stream_tracks = [
+            {
+                "index": index,
+                "codec": subtitle.get("codec"),
+                "language": subtitle.get("language"),
+                "title": subtitle.get("title"),
+                "channels": None,
+                "disposition_default": bool(subtitle.get("disposition_default")),
+                "disposition_forced": False,
+                "text_based": str(subtitle.get("codec") or "").lower() in TEXT_SUBTITLE_CODECS,
+                "image_based": str(subtitle.get("codec") or "").lower() in IMAGE_SUBTITLE_CODECS,
+                "browser_supported": str(subtitle.get("codec") or "").lower() == "webvtt",
+                "label": _stream_track_label(
+                    fallback=f"Subtitle {index + 1}",
+                    language=subtitle.get("language"),
+                    title=subtitle.get("title"),
+                    codec=subtitle.get("codec"),
+                ),
+            }
+            for index, subtitle in enumerate(subtitle_payload)
+        ]
+    if not audio_tracks and row["audio_codec"]:
+        audio_tracks = [
+            {
+                "index": 0,
+                "codec": row["audio_codec"],
+                "language": None,
+                "title": "Default audio",
+                "channels": None,
+                "disposition_default": True,
+                "label": _stream_track_label(
+                    fallback="Default audio",
+                    language=None,
+                    title="Default audio",
+                    codec=row["audio_codec"],
+                ),
+                "browser_supported": False,
+            }
+        ]
     payload = _serialize_media_item(settings, row, poster_dir=poster_dir)
     payload.update(
         {
@@ -395,16 +557,9 @@ def get_media_item_detail(
             "file_path": media_row["file_path"],
             "stream_url": f"/api/stream/{item_id}",
             "resume_position_seconds": float(row["progress_seconds"] or 0),
-            "subtitles": [
-                {
-                    "id": subtitle["id"],
-                    "language": subtitle["language"],
-                    "title": subtitle["title"],
-                    "codec": subtitle["codec"],
-                    "disposition_default": bool(subtitle["disposition_default"]),
-                }
-                for subtitle in subtitles
-            ],
+            "subtitles": subtitle_payload,
+            "subtitle_tracks": subtitle_stream_tracks,
+            "audio_tracks": audio_tracks,
         }
     )
     return payload

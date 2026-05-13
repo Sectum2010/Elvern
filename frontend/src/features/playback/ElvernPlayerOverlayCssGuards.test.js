@@ -120,26 +120,27 @@ describe("Elvern player mobile CSS guards", () => {
     expect(block).not.toContain("border-radius");
   });
 
-  test("default-fit fills width while fill-cover covers the viewport", () => {
+  test("standard-fit contains the full frame while zoom-fill covers the viewport", () => {
     const styles = readStyles();
-    const defaultFitBlock = cssBlockForSelectorListItem(
+    const standardFitBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-custom.player-shell--video-fit-default-fit .player",
+      ".player-shell--elvern-custom.player-shell--video-fit-standard-fit .player",
     );
-    const fillCoverBlock = cssBlockForSelectorListItem(
+    const zoomFillBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-custom.player-shell--video-fit-fill-cover .player",
+      ".player-shell--elvern-custom.player-shell--video-fit-zoom-fill .player",
     );
     const phoneFillBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill-cover.player-shell--cinema-takeover .player",
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-zoom-fill.player-shell--cinema-takeover .player",
     );
 
-    expect(defaultFitBlock).toContain("width: 100%");
-    expect(defaultFitBlock).toContain("height: auto");
-    expect(defaultFitBlock).not.toContain("object-fit: contain");
-    expect(fillCoverBlock).toContain("height: 100%");
-    expect(fillCoverBlock).toContain("object-fit: cover");
+    expect(standardFitBlock).toContain("width: 100%");
+    expect(standardFitBlock).toContain("height: 100%");
+    expect(standardFitBlock).toContain("object-fit: contain");
+    expect(standardFitBlock).toContain("transform: none");
+    expect(zoomFillBlock).toContain("height: 100%");
+    expect(zoomFillBlock).toContain("object-fit: cover");
     expect(phoneFillBlock).toContain("object-fit: cover");
   });
 
@@ -175,6 +176,18 @@ describe("Elvern player mobile CSS guards", () => {
     expect(spacer).toContain("flex: 0 0 auto");
   });
 
+  test("phone track menus use readable row layout", () => {
+    const styles = readStyles();
+    const menuBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-menu");
+    const rowBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-menu-item");
+
+    expect(menuBlock).toContain("width: min(18rem");
+    expect(menuBlock).toContain("max-height: min(58dvh");
+    expect(rowBlock).toContain("min-height: 2.55rem");
+    expect(rowBlock).toContain("overflow-wrap: anywhere");
+    expect(rowBlock).toContain("white-space: normal");
+  });
+
   test("timeline has no standalone playhead knob styling", () => {
     const styles = readStyles();
 
@@ -193,7 +206,7 @@ describe("Elvern player mobile CSS guards", () => {
     );
     const fillBlock = cssBlockForSelectorListItem(
       styles,
-      ".player-shell--elvern-custom.player-shell--video-fit-fill-cover .player",
+      ".player-shell--elvern-custom.player-shell--video-fit-zoom-fill .player",
     );
 
     expect(shellBlock).toContain("position: fixed");

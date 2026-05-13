@@ -70,6 +70,17 @@ export function getBrowserPlaybackTimelineEndSeconds(payload) {
   );
 }
 
+export function getBrowserPlaybackAttachedManifestEndSeconds(payload) {
+  if (!isHlsSessionPayload(payload)) {
+    return 0;
+  }
+  const activeWindow = getBrowserPlaybackActiveWindowSeconds(payload);
+  if (isNativeHlsWindowPayload(payload) && activeWindow) {
+    return activeWindow.endSeconds;
+  }
+  return getBrowserPlaybackTimelineEndSeconds(payload);
+}
+
 export function toBrowserPlaybackMediaElementSeconds(payload, absoluteSeconds) {
   const absolute = coerceNonNegativeNumber(absoluteSeconds);
   if (!isHlsSessionPayload(payload)) {
