@@ -27,6 +27,7 @@ import ElvernTimeline from "./ElvernTimeline.jsx";
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const SUPPORTS_DOCUMENT = typeof document !== "undefined";
 const TOUCH_OVERLAY_IDLE_HIDE_DELAY_MS = 5000;
+const PHONE_INLINE_MINIMAL_HIDE_DELAY_MS = 3000;
 
 function readPointerType(event) {
   return event?.pointerType || event?.nativeEvent?.pointerType || "";
@@ -247,10 +248,14 @@ export default function ElvernPlayerOverlay({
   const lastTouchTapSurfacePointerAtRef = useRef(0);
 
   const safeDuration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
+  const fullscreenLikeActive = fullscreenActive || cinemaModeActive;
+  const phoneInlineMinimal = layoutCapabilities.variant === "phone" && !fullscreenLikeActive;
   const touchOptimizedOverlay = layoutCapabilities.variant === "phone" || layoutCapabilities.variant === "tablet";
-  const idleHideDelayMs = touchOptimizedOverlay
-    ? TOUCH_OVERLAY_IDLE_HIDE_DELAY_MS
-    : ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS;
+  const idleHideDelayMs = phoneInlineMinimal
+    ? PHONE_INLINE_MINIMAL_HIDE_DELAY_MS
+    : (touchOptimizedOverlay
+      ? TOUCH_OVERLAY_IDLE_HIDE_DELAY_MS
+      : ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS);
 
   const isAnyMenuOpen = showSpeedMenu || showCaptionsMenu || showAudioMenu || showMoreMenu;
   const closeAllMenus = useCallback(() => {
@@ -483,6 +488,14 @@ export default function ElvernPlayerOverlay({
     closeAllMenus();
   }, [cinemaModeActive, fullscreenActive, closeAllMenus]);
 
+  useEffect(() => {
+    if (phoneInlineMinimal) {
+      closeAllMenus();
+      return;
+    }
+    setControlsVisibleValue(true);
+  }, [closeAllMenus, phoneInlineMinimal, setControlsVisibleValue]);
+
   const sessionIdentity = sessionPayload?.session_id || sessionPayload?.session_token || "";
   useEffect(() => {
     closeAllMenus();
@@ -667,14 +680,26 @@ export default function ElvernPlayerOverlay({
   }, [closeAllMenus, onToggleFullscreen, refreshControlsTimer, shellRef]);
 
   const handleTapSurfaceClick = useCallback((event) => {
+    const pointerType = readPointerType(event);
+    const handledTouchRecently = Date.now() - lastTouchTapSurfacePointerAtRef.current < 700;
     if (isAnyMenuOpen) {
       closeAllMenus();
       refreshControlsTimer();
       return;
     }
-    const pointerType = readPointerType(event);
-    const handledTouchRecently = Date.now() - lastTouchTapSurfacePointerAtRef.current < 700;
     if (pointerType === "touch" || pointerType === "pen" || handledTouchRecently) {
+      return;
+    }
+    if (phoneInlineMinimal) {
+      if (controlsVisibleRef.current) {
+        if (idleTimerRef.current) {
+          clearTimeout(idleTimerRef.current);
+          idleTimerRef.current = null;
+        }
+        setControlsVisibleValue(false);
+        return;
+      }
+      refreshControlsTimer();
       return;
     }
     if (event?.detail === 0) {
@@ -682,7 +707,7 @@ export default function ElvernPlayerOverlay({
       return;
     }
     togglePlay();
-  }, [closeAllMenus, isAnyMenuOpen, refreshControlsTimer, togglePlay]);
+  }, [closeAllMenus, isAnyMenuOpen, phoneInlineMinimal, refreshControlsTimer, setControlsVisibleValue, togglePlay]);
 
   const handleTapSurfacePointerUp = useCallback((event) => {
     const pointerType = readPointerType(event);
@@ -692,6 +717,18 @@ export default function ElvernPlayerOverlay({
     lastTouchTapSurfacePointerAtRef.current = Date.now();
     if (isAnyMenuOpen) {
       closeAllMenus();
+      refreshControlsTimer();
+      return;
+    }
+    if (phoneInlineMinimal) {
+      if (controlsVisibleRef.current) {
+        if (idleTimerRef.current) {
+          clearTimeout(idleTimerRef.current);
+          idleTimerRef.current = null;
+        }
+        setControlsVisibleValue(false);
+        return;
+      }
       refreshControlsTimer();
       return;
     }
@@ -708,7 +745,7 @@ export default function ElvernPlayerOverlay({
       return;
     }
     refreshControlsTimer();
-  }, [closeAllMenus, isAnyMenuOpen, isPlaying, refreshControlsTimer, setControlsVisibleValue]);
+  }, [closeAllMenus, isAnyMenuOpen, isPlaying, phoneInlineMinimal, refreshControlsTimer, setControlsVisibleValue]);
 
   const handleCenterTransportClick = useCallback((event) => {
     event?.preventDefault?.();
@@ -835,20 +872,22 @@ export default function ElvernPlayerOverlay({
     }
   }, [errorMessage, preparing, setControlsVisibleValue]);
 
-  const visible = shouldOverlayBeVisible({
-    isPlaying,
-    preparing,
-    hasError: Boolean(errorMessage),
-    isDraggingTimeline,
-    anyMenuOpen: isAnyMenuOpen,
-    controlsFocused,
-    lastInteractionAtMs: controlsVisible ? 0 : -(idleHideDelayMs + 1),
-    nowMs: 0,
-    idleHideDelayMs,
-  });
+  const visible = phoneInlineMinimal
+    ? controlsVisible
+    : shouldOverlayBeVisible({
+      isPlaying,
+      preparing,
+      hasError: Boolean(errorMessage),
+      isDraggingTimeline,
+      anyMenuOpen: isAnyMenuOpen,
+      controlsFocused,
+      lastInteractionAtMs: controlsVisible ? 0 : -(idleHideDelayMs + 1),
+      nowMs: 0,
+      idleHideDelayMs,
+    });
 
   const visibilityClass = visible ? " elvern-overlay--visible" : " elvern-overlay--idle";
-  const variantClass = ` elvern-overlay--variant-${layoutCapabilities.variant} elvern-overlay--${layoutCapabilities.variant}`;
+  const variantClass = ` elvern-overlay--variant-${layoutCapabilities.variant} elvern-overlay--${layoutCapabilities.variant}${phoneInlineMinimal ? " elvern-overlay--phone-inline-minimal" : ""}`;
 
   const captionActiveCount = textTracks.filter((track) => track.mode === "showing").length;
   const audioMenuAvailable = audioTracks.length > 1;
@@ -859,7 +898,6 @@ export default function ElvernPlayerOverlay({
     && Boolean(videoRef?.current?.requestPictureInPicture)
     && !videoRef?.current?.disablePictureInPicture;
 
-  const fullscreenLikeActive = fullscreenActive || cinemaModeActive;
   const fullscreenButtonLabel = fullscreenLikeActive
     ? "Exit fullscreen"
     : (fallbackFullscreenButtonLabel || "Fullscreen");
@@ -898,7 +936,7 @@ export default function ElvernPlayerOverlay({
     pipAvailable,
   ]);
 
-  const moreButtonAvailable = moreMenuItems.length > 0;
+  const moreButtonAvailable = !phoneInlineMinimal && moreMenuItems.length > 0;
 
   return (
     <div
@@ -933,14 +971,14 @@ export default function ElvernPlayerOverlay({
         {isPlaying ? <PauseIcon className="elvern-overlay__center-transport-icon" /> : <PlayIcon className="elvern-overlay__center-transport-icon" />}
       </button>
 
-      {title || preparing || errorMessage ? (
+      {!phoneInlineMinimal && (title || preparing || errorMessage) ? (
         <div className="elvern-overlay__top-bar" aria-hidden={visible ? undefined : true}>
           {title ? <span className="elvern-overlay__title">{title}</span> : null}
           {errorMessage ? <span className="elvern-overlay__error">{errorMessage}</span> : null}
         </div>
       ) : null}
 
-      {preparing ? (
+      {!phoneInlineMinimal && preparing ? (
         <div className="elvern-overlay__preparing" role="status" aria-live="polite">
           <span className="elvern-overlay__preparing-spinner" aria-hidden="true" />
           <span className="elvern-overlay__preparing-text">
@@ -951,317 +989,319 @@ export default function ElvernPlayerOverlay({
         </div>
       ) : null}
 
-      <div className="elvern-overlay__bottom-bar">
-        <div className="elvern-overlay__time-row">
-          <span className="elvern-overlay__time-current" aria-label="Current time">
-            {formatPlaybackTime(currentTimeSeconds)}
-          </span>
-          <span className="elvern-overlay__time-separator" aria-hidden="true">/</span>
-          <span className="elvern-overlay__time-duration" aria-label="Movie duration">
-            {formatPlaybackDuration(safeDuration)}
-          </span>
-        </div>
+      {!phoneInlineMinimal ? (
+        <div className="elvern-overlay__bottom-bar">
+          <div className="elvern-overlay__time-row">
+            <span className="elvern-overlay__time-current" aria-label="Current time">
+              {formatPlaybackTime(currentTimeSeconds)}
+            </span>
+            <span className="elvern-overlay__time-separator" aria-hidden="true">/</span>
+            <span className="elvern-overlay__time-duration" aria-label="Movie duration">
+              {formatPlaybackDuration(safeDuration)}
+            </span>
+          </div>
 
-        <ElvernTimeline
-          ariaLabel="Movie timeline"
-          bufferedAbsoluteRanges={bufferedAbsoluteRanges}
-          currentTimeSeconds={currentTimeSeconds}
-          disabled={safeDuration <= 0}
-          durationSeconds={safeDuration}
-          onDragEnd={handleTimelineDragEnd}
-          onDragStart={handleTimelineDragStart}
-          onSeekCommit={handleTimelineCommit}
-          onSeekPreview={handleTimelinePreview}
-          playedNotCachedAbsoluteRanges={playedNotCachedAbsoluteRanges}
-          preparingTargetSeconds={preparing ? preparingTargetSeconds : null}
-        />
+          <ElvernTimeline
+            ariaLabel="Movie timeline"
+            bufferedAbsoluteRanges={bufferedAbsoluteRanges}
+            currentTimeSeconds={currentTimeSeconds}
+            disabled={safeDuration <= 0}
+            durationSeconds={safeDuration}
+            onDragEnd={handleTimelineDragEnd}
+            onDragStart={handleTimelineDragStart}
+            onSeekCommit={handleTimelineCommit}
+            onSeekPreview={handleTimelinePreview}
+            playedNotCachedAbsoluteRanges={playedNotCachedAbsoluteRanges}
+            preparingTargetSeconds={preparing ? preparingTargetSeconds : null}
+          />
 
-        <div className="elvern-overlay__controls-row">
-          {layoutCapabilities.showInlineMuteToggle ? (
-            <div className="elvern-overlay__volume-group">
-              <button
-                aria-label={isMuted || volume === 0 ? "Unmute" : "Mute"}
-                className="elvern-overlay__icon-button"
-                onClick={toggleMute}
-                type="button"
-              >
-                {isMuted || volume === 0 ? <VolumeMuteIcon className="elvern-overlay__icon" /> : <VolumeOnIcon className="elvern-overlay__icon" />}
-              </button>
-              {layoutCapabilities.showInlineVolumeSlider ? (
-                <input
-                  aria-label="Volume"
-                  className="elvern-overlay__volume-slider"
-                  max="1"
-                  min="0"
-                  onChange={handleVolumeChange}
-                  step="0.05"
-                  type="range"
-                  value={isMuted ? 0 : volume}
-                />
-              ) : null}
-            </div>
-          ) : null}
+          <div className="elvern-overlay__controls-row">
+            {layoutCapabilities.showInlineMuteToggle ? (
+              <div className="elvern-overlay__volume-group">
+                <button
+                  aria-label={isMuted || volume === 0 ? "Unmute" : "Mute"}
+                  className="elvern-overlay__icon-button"
+                  onClick={toggleMute}
+                  type="button"
+                >
+                  {isMuted || volume === 0 ? <VolumeMuteIcon className="elvern-overlay__icon" /> : <VolumeOnIcon className="elvern-overlay__icon" />}
+                </button>
+                {layoutCapabilities.showInlineVolumeSlider ? (
+                  <input
+                    aria-label="Volume"
+                    className="elvern-overlay__volume-slider"
+                    max="1"
+                    min="0"
+                    onChange={handleVolumeChange}
+                    step="0.05"
+                    type="range"
+                    value={isMuted ? 0 : volume}
+                  />
+                ) : null}
+              </div>
+            ) : null}
 
-          <div className="elvern-overlay__spacer" aria-hidden="true" />
+            <div className="elvern-overlay__spacer" aria-hidden="true" />
 
-          {captionsMenuAvailable && layoutCapabilities.showInlineCaptions ? (
-            <div className="elvern-overlay__menu-host">
-              <button
-                aria-expanded={showCaptionsMenu}
-                aria-label="Subtitles"
-                className={`elvern-overlay__icon-button${captionActiveCount > 0 ? " elvern-overlay__icon-button--active" : ""}`}
-                onClick={() => {
-                  setShowCaptionsMenu((value) => !value);
-                  setShowSpeedMenu(false);
-                  setShowAudioMenu(false);
-                  setShowMoreMenu(false);
-                  refreshControlsTimer();
-                }}
-                type="button"
-              >
-                <CaptionsIcon className="elvern-overlay__icon" />
-              </button>
-              {showCaptionsMenu ? (
-                <div className="elvern-overlay__menu" role="menu">
-                  <button
-                    className="elvern-overlay__menu-item"
-                    onClick={handleTextTrackOff}
-                    role="menuitemradio"
-                    aria-checked={captionActiveCount === 0}
-                    type="button"
-                  >
-                    Off
-                  </button>
-                  {textTracks.map((track) => (
+            {captionsMenuAvailable && layoutCapabilities.showInlineCaptions ? (
+              <div className="elvern-overlay__menu-host">
+                <button
+                  aria-expanded={showCaptionsMenu}
+                  aria-label="Subtitles"
+                  className={`elvern-overlay__icon-button${captionActiveCount > 0 ? " elvern-overlay__icon-button--active" : ""}`}
+                  onClick={() => {
+                    setShowCaptionsMenu((value) => !value);
+                    setShowSpeedMenu(false);
+                    setShowAudioMenu(false);
+                    setShowMoreMenu(false);
+                    refreshControlsTimer();
+                  }}
+                  type="button"
+                >
+                  <CaptionsIcon className="elvern-overlay__icon" />
+                </button>
+                {showCaptionsMenu ? (
+                  <div className="elvern-overlay__menu" role="menu">
                     <button
-                      aria-checked={track.mode === "showing"}
                       className="elvern-overlay__menu-item"
-                      key={track.id}
-                      onClick={() => handleTextTrackSelect(track.index)}
+                      onClick={handleTextTrackOff}
                       role="menuitemradio"
+                      aria-checked={captionActiveCount === 0}
                       type="button"
                     >
-                      {track.label}
+                      Off
                     </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {audioMenuAvailable && layoutCapabilities.showInlineAudio ? (
-            <div className="elvern-overlay__menu-host">
-              <button
-                aria-expanded={showAudioMenu}
-                aria-label="Audio track"
-                className="elvern-overlay__icon-button"
-                onClick={() => {
-                  setShowAudioMenu((value) => !value);
-                  setShowSpeedMenu(false);
-                  setShowCaptionsMenu(false);
-                  setShowMoreMenu(false);
-                  refreshControlsTimer();
-                }}
-                type="button"
-              >
-                <AudioTrackIcon className="elvern-overlay__icon" />
-              </button>
-              {showAudioMenu ? (
-                <div className="elvern-overlay__menu" role="menu">
-                  {audioTracks.map((track) => (
-                    <button
-                      aria-checked={track.enabled}
-                      className="elvern-overlay__menu-item"
-                      key={track.id}
-                      onClick={() => handleAudioTrackSelect(track.index)}
-                      role="menuitemradio"
-                      type="button"
-                    >
-                      {track.label}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {layoutCapabilities.showInlineSpeed ? (
-            <div className="elvern-overlay__menu-host">
-              <button
-                aria-expanded={showSpeedMenu}
-                aria-label={`Playback speed ${playbackRate.toFixed(2)}x`}
-                className={`elvern-overlay__icon-button${playbackRate !== 1 ? " elvern-overlay__icon-button--active" : ""}`}
-                onClick={() => {
-                  setShowSpeedMenu((value) => !value);
-                  setShowCaptionsMenu(false);
-                  setShowAudioMenu(false);
-                  setShowMoreMenu(false);
-                  refreshControlsTimer();
-                }}
-                type="button"
-              >
-                <SpeedIcon className="elvern-overlay__icon" />
-                {playbackRate !== 1 ? <span className="elvern-overlay__icon-badge">{`${playbackRate}x`}</span> : null}
-              </button>
-              {showSpeedMenu ? (
-                <div className="elvern-overlay__menu" role="menu">
-                  {PLAYBACK_RATES.map((rate) => (
-                    <button
-                      aria-checked={Math.abs(rate - playbackRate) < 0.01}
-                      className="elvern-overlay__menu-item"
-                      key={rate}
-                      onClick={() => handleRateSelect(rate)}
-                      role="menuitemradio"
-                      type="button"
-                    >
-                      {`${rate}x`}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {pipAvailable && layoutCapabilities.showInlinePip ? (
-            <button
-              aria-label={pipActive ? "Exit picture in picture" : "Picture in picture"}
-              aria-pressed={pipActive}
-              className={`elvern-overlay__icon-button${pipActive ? " elvern-overlay__icon-button--active" : ""}`}
-              onClick={togglePip}
-              type="button"
-            >
-              <PipIcon className="elvern-overlay__icon" />
-            </button>
-          ) : null}
-
-          {moreButtonAvailable ? (
-            <div className="elvern-overlay__menu-host">
-              <button
-                aria-expanded={showMoreMenu}
-                aria-label="More options"
-                className="elvern-overlay__icon-button"
-                onClick={() => {
-                  setShowMoreMenu((value) => !value);
-                  setShowSpeedMenu(false);
-                  setShowCaptionsMenu(false);
-                  setShowAudioMenu(false);
-                  refreshControlsTimer();
-                }}
-                type="button"
-              >
-                <MoreIcon className="elvern-overlay__icon" />
-              </button>
-              {showMoreMenu ? (
-                <div className="elvern-overlay__menu elvern-overlay__menu--sheet" role="menu">
-                  {moreMenuItems.includes("mute") ? (
-                    <button
-                      className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
-                      onClick={() => {
-                        toggleMute();
-                        setShowMoreMenu(false);
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      <span className="elvern-overlay__menu-item-icon">
-                        {isMuted ? <VolumeMuteIcon className="elvern-overlay__icon" /> : <VolumeOnIcon className="elvern-overlay__icon" />}
-                      </span>
-                      <span>{isMuted ? "Unmute" : "Mute"}</span>
-                    </button>
-                  ) : null}
-                  {moreMenuItems.includes("speed") ? (
-                    <div className="elvern-overlay__menu-section">
-                      <span className="elvern-overlay__menu-section-label">Speed</span>
-                      <div className="elvern-overlay__menu-chip-row">
-                        {PLAYBACK_RATES.map((rate) => (
-                          <button
-                            aria-checked={Math.abs(rate - playbackRate) < 0.01}
-                            className="elvern-overlay__menu-chip"
-                            key={rate}
-                            onClick={() => handleRateSelect(rate)}
-                            role="menuitemradio"
-                            type="button"
-                          >
-                            {`${rate}x`}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                  {moreMenuItems.includes("captions") ? (
-                    <div className="elvern-overlay__menu-section">
-                      <span className="elvern-overlay__menu-section-label">Subtitles</span>
+                    {textTracks.map((track) => (
                       <button
-                        aria-checked={captionActiveCount === 0}
-                        className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
-                        onClick={handleTextTrackOff}
+                        aria-checked={track.mode === "showing"}
+                        className="elvern-overlay__menu-item"
+                        key={track.id}
+                        onClick={() => handleTextTrackSelect(track.index)}
                         role="menuitemradio"
                         type="button"
                       >
-                        Off
+                        {track.label}
                       </button>
-                      {textTracks.map((track) => (
-                        <button
-                          aria-checked={track.mode === "showing"}
-                          className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
-                          key={track.id}
-                          onClick={() => handleTextTrackSelect(track.index)}
-                          role="menuitemradio"
-                          type="button"
-                        >
-                          {track.label}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  {moreMenuItems.includes("audio") ? (
-                    <div className="elvern-overlay__menu-section">
-                      <span className="elvern-overlay__menu-section-label">Audio track</span>
-                      {audioTracks.map((track) => (
-                        <button
-                          aria-checked={track.enabled}
-                          className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
-                          key={track.id}
-                          onClick={() => handleAudioTrackSelect(track.index)}
-                          role="menuitemradio"
-                          type="button"
-                        >
-                          {track.label}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  {moreMenuItems.includes("pip") ? (
-                    <button
-                      className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
-                      onClick={togglePip}
-                      role="menuitem"
-                      type="button"
-                    >
-                      <span className="elvern-overlay__menu-item-icon">
-                        <PipIcon className="elvern-overlay__icon" />
-                      </span>
-                      <span>{pipActive ? "Exit picture in picture" : "Picture in picture"}</span>
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
-          {fullscreenButtonRendered ? (
-            <button
-              aria-label={fullscreenButtonLabel}
-              aria-pressed={fullscreenLikeActive}
-              className="elvern-overlay__icon-button"
-              onClick={toggleFullscreen}
-              type="button"
-            >
-              {fullscreenLikeActive ? <FullscreenExitIcon className="elvern-overlay__icon" /> : <FullscreenEnterIcon className="elvern-overlay__icon" />}
-            </button>
-          ) : null}
+            {audioMenuAvailable && layoutCapabilities.showInlineAudio ? (
+              <div className="elvern-overlay__menu-host">
+                <button
+                  aria-expanded={showAudioMenu}
+                  aria-label="Audio track"
+                  className="elvern-overlay__icon-button"
+                  onClick={() => {
+                    setShowAudioMenu((value) => !value);
+                    setShowSpeedMenu(false);
+                    setShowCaptionsMenu(false);
+                    setShowMoreMenu(false);
+                    refreshControlsTimer();
+                  }}
+                  type="button"
+                >
+                  <AudioTrackIcon className="elvern-overlay__icon" />
+                </button>
+                {showAudioMenu ? (
+                  <div className="elvern-overlay__menu" role="menu">
+                    {audioTracks.map((track) => (
+                      <button
+                        aria-checked={track.enabled}
+                        className="elvern-overlay__menu-item"
+                        key={track.id}
+                        onClick={() => handleAudioTrackSelect(track.index)}
+                        role="menuitemradio"
+                        type="button"
+                      >
+                        {track.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {layoutCapabilities.showInlineSpeed ? (
+              <div className="elvern-overlay__menu-host">
+                <button
+                  aria-expanded={showSpeedMenu}
+                  aria-label={`Playback speed ${playbackRate.toFixed(2)}x`}
+                  className={`elvern-overlay__icon-button${playbackRate !== 1 ? " elvern-overlay__icon-button--active" : ""}`}
+                  onClick={() => {
+                    setShowSpeedMenu((value) => !value);
+                    setShowCaptionsMenu(false);
+                    setShowAudioMenu(false);
+                    setShowMoreMenu(false);
+                    refreshControlsTimer();
+                  }}
+                  type="button"
+                >
+                  <SpeedIcon className="elvern-overlay__icon" />
+                  {playbackRate !== 1 ? <span className="elvern-overlay__icon-badge">{`${playbackRate}x`}</span> : null}
+                </button>
+                {showSpeedMenu ? (
+                  <div className="elvern-overlay__menu" role="menu">
+                    {PLAYBACK_RATES.map((rate) => (
+                      <button
+                        aria-checked={Math.abs(rate - playbackRate) < 0.01}
+                        className="elvern-overlay__menu-item"
+                        key={rate}
+                        onClick={() => handleRateSelect(rate)}
+                        role="menuitemradio"
+                        type="button"
+                      >
+                        {`${rate}x`}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {pipAvailable && layoutCapabilities.showInlinePip ? (
+              <button
+                aria-label={pipActive ? "Exit picture in picture" : "Picture in picture"}
+                aria-pressed={pipActive}
+                className={`elvern-overlay__icon-button${pipActive ? " elvern-overlay__icon-button--active" : ""}`}
+                onClick={togglePip}
+                type="button"
+              >
+                <PipIcon className="elvern-overlay__icon" />
+              </button>
+            ) : null}
+
+            {moreButtonAvailable ? (
+              <div className="elvern-overlay__menu-host">
+                <button
+                  aria-expanded={showMoreMenu}
+                  aria-label="More options"
+                  className="elvern-overlay__icon-button"
+                  onClick={() => {
+                    setShowMoreMenu((value) => !value);
+                    setShowSpeedMenu(false);
+                    setShowCaptionsMenu(false);
+                    setShowAudioMenu(false);
+                    refreshControlsTimer();
+                  }}
+                  type="button"
+                >
+                  <MoreIcon className="elvern-overlay__icon" />
+                </button>
+                {showMoreMenu ? (
+                  <div className="elvern-overlay__menu elvern-overlay__menu--sheet" role="menu">
+                    {moreMenuItems.includes("mute") ? (
+                      <button
+                        className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                        onClick={() => {
+                          toggleMute();
+                          setShowMoreMenu(false);
+                        }}
+                        role="menuitem"
+                        type="button"
+                      >
+                        <span className="elvern-overlay__menu-item-icon">
+                          {isMuted ? <VolumeMuteIcon className="elvern-overlay__icon" /> : <VolumeOnIcon className="elvern-overlay__icon" />}
+                        </span>
+                        <span>{isMuted ? "Unmute" : "Mute"}</span>
+                      </button>
+                    ) : null}
+                    {moreMenuItems.includes("speed") ? (
+                      <div className="elvern-overlay__menu-section">
+                        <span className="elvern-overlay__menu-section-label">Speed</span>
+                        <div className="elvern-overlay__menu-chip-row">
+                          {PLAYBACK_RATES.map((rate) => (
+                            <button
+                              aria-checked={Math.abs(rate - playbackRate) < 0.01}
+                              className="elvern-overlay__menu-chip"
+                              key={rate}
+                              onClick={() => handleRateSelect(rate)}
+                              role="menuitemradio"
+                              type="button"
+                            >
+                              {`${rate}x`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    {moreMenuItems.includes("captions") ? (
+                      <div className="elvern-overlay__menu-section">
+                        <span className="elvern-overlay__menu-section-label">Subtitles</span>
+                        <button
+                          aria-checked={captionActiveCount === 0}
+                          className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                          onClick={handleTextTrackOff}
+                          role="menuitemradio"
+                          type="button"
+                        >
+                          Off
+                        </button>
+                        {textTracks.map((track) => (
+                          <button
+                            aria-checked={track.mode === "showing"}
+                            className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                            key={track.id}
+                            onClick={() => handleTextTrackSelect(track.index)}
+                            role="menuitemradio"
+                            type="button"
+                          >
+                            {track.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    {moreMenuItems.includes("audio") ? (
+                      <div className="elvern-overlay__menu-section">
+                        <span className="elvern-overlay__menu-section-label">Audio track</span>
+                        {audioTracks.map((track) => (
+                          <button
+                            aria-checked={track.enabled}
+                            className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                            key={track.id}
+                            onClick={() => handleAudioTrackSelect(track.index)}
+                            role="menuitemradio"
+                            type="button"
+                          >
+                            {track.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    {moreMenuItems.includes("pip") ? (
+                      <button
+                        className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                        onClick={togglePip}
+                        role="menuitem"
+                        type="button"
+                      >
+                        <span className="elvern-overlay__menu-item-icon">
+                          <PipIcon className="elvern-overlay__icon" />
+                        </span>
+                        <span>{pipActive ? "Exit picture in picture" : "Picture in picture"}</span>
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {fullscreenButtonRendered ? (
+              <button
+                aria-label={fullscreenButtonLabel}
+                aria-pressed={fullscreenLikeActive}
+                className="elvern-overlay__icon-button"
+                onClick={toggleFullscreen}
+                type="button"
+              >
+                {fullscreenLikeActive ? <FullscreenExitIcon className="elvern-overlay__icon" /> : <FullscreenEnterIcon className="elvern-overlay__icon" />}
+              </button>
+            ) : null}
+          </div>
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }

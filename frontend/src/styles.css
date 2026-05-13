@@ -5275,6 +5275,10 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   opacity: 0;
 }
 
+.elvern-overlay--phone-inline-minimal {
+  display: block;
+}
+
 .elvern-overlay--desktop.elvern-overlay--idle,
 .elvern-overlay--desktop.elvern-overlay--idle .elvern-overlay__tap-surface {
   cursor: none;

@@ -85,6 +85,15 @@ describe("Elvern player mobile CSS guards", () => {
     expect(block).toContain("bottom:");
   });
 
+  test("phone inline minimal mode has no bottom-bar positioning dependency", () => {
+    const styles = readStyles();
+    const block = cssBlock(styles, ".elvern-overlay--phone-inline-minimal");
+
+    expect(block).toContain("display: block");
+    expect(styles).not.toContain(".elvern-overlay--phone-inline-minimal .elvern-overlay__bottom-bar");
+    expect(styles).not.toContain(".elvern-overlay--phone-inline-minimal .elvern-timeline");
+  });
+
   test("phone More menu is a popover, not a fullscreen-blocking fixed sheet", () => {
     const styles = readStyles();
     const block = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__menu--sheet");

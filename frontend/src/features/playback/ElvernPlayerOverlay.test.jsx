@@ -245,18 +245,38 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
   });
 
-  test("phone layout uses phone class, More menu, and no inline volume controls", () => {
-    const { getMoreButton, queryByLabelText, root } = renderOverlay({ deviceClass: "phone" });
+  test("phone inline minimal renders only the center transport shell", () => {
+    const { centerTransport, getMoreButton, queryByLabelText, root } = renderOverlay({ deviceClass: "phone" });
 
     expect(root).toHaveClass("elvern-overlay--variant-phone");
     expect(root).toHaveClass("elvern-overlay--phone");
+    expect(root).toHaveClass("elvern-overlay--phone-inline-minimal");
+    expect(centerTransport).not.toBeNull();
+    expect(document.querySelector(".elvern-timeline__track")).toBeNull();
+    expect(document.querySelector(".elvern-overlay__bottom-bar")).toBeNull();
+    expect(document.querySelector(".elvern-overlay__time-row")).toBeNull();
+    expect(document.querySelector(".elvern-overlay__controls-row")).toBeNull();
+    expect(getMoreButton()).toBeNull();
+    expect(queryByLabelText("Volume")).toBeNull();
+    expect(queryByLabelText("Mute")).toBeNull();
+  });
+
+  test("phone cinema renders full controls again", () => {
+    const { getMoreButton, queryByLabelText, root } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    expect(root).toHaveClass("elvern-overlay--phone");
+    expect(root).not.toHaveClass("elvern-overlay--phone-inline-minimal");
+    expect(document.querySelector(".elvern-timeline__track")).not.toBeNull();
+    expect(document.querySelector(".elvern-overlay__bottom-bar")).not.toBeNull();
+    expect(document.querySelector(".elvern-overlay__time-row")).not.toBeNull();
+    expect(document.querySelector(".elvern-overlay__controls-row")).not.toBeNull();
     expect(getMoreButton()).not.toBeNull();
     expect(queryByLabelText("Volume")).toBeNull();
     expect(queryByLabelText("Mute")).toBeNull();
   });
 
   test("opening More then tapping player surface closes More without toggling playback", () => {
-    const { getMoreButton, pauseMock, queryByRole, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
+    const { getMoreButton, pauseMock, queryByRole, setPlaying, tapSurface } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
 
     setPlaying();
     act(() => {
@@ -274,7 +294,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("opening More then tapping outside the player closes More", () => {
-    const { getMoreButton, queryByRole } = renderOverlay({ deviceClass: "phone" });
+    const { getMoreButton, queryByRole } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
 
     act(() => {
       fireEvent.click(getMoreButton());
@@ -289,7 +309,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("Escape closes More menu", () => {
-    const { getMoreButton, queryByRole, root } = renderOverlay({ deviceClass: "phone" });
+    const { getMoreButton, queryByRole, root } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
 
     act(() => {
       fireEvent.click(getMoreButton());
@@ -305,7 +325,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
   test("fullscreen remains accessible and closes More before toggling", () => {
     const onToggleFullscreen = vi.fn();
-    const { getFullscreenButton, getMoreButton, queryByRole } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
+    const { getFullscreenButton, getMoreButton, queryByRole } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone", onToggleFullscreen });
 
     act(() => {
       fireEvent.click(getMoreButton());
@@ -322,7 +342,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("cinema state changes close More menu", () => {
-    const { getMoreButton, queryByRole, rerenderOverlay } = renderOverlay({ deviceClass: "phone" });
+    const { getMoreButton, queryByRole, rerenderOverlay } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
 
     act(() => {
       fireEvent.click(getMoreButton());
@@ -330,14 +350,14 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(queryByRole("menu")).not.toBeNull();
 
     act(() => {
-      rerenderOverlay({ cinemaModeActive: true });
+      rerenderOverlay({ cinemaModeActive: false });
     });
 
     expect(queryByRole("menu")).toBeNull();
   });
 
   test("timeline drag closes More menu", () => {
-    const { getMoreButton, queryByRole } = renderOverlay({ deviceClass: "phone" });
+    const { getMoreButton, queryByRole } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
 
     act(() => {
       fireEvent.click(getMoreButton());
@@ -355,12 +375,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(queryByRole("menu")).toBeNull();
   });
 
-  test("phone touch reveal stays visible for five seconds before hiding", () => {
+  test("phone inline center transport auto-hides after three seconds while playing", () => {
     const { root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
 
     setPlaying();
     act(() => {
-      vi.advanceTimersByTime(5001);
+      vi.advanceTimersByTime(3001);
     });
     expect(root).toHaveClass("elvern-overlay--idle");
 
@@ -370,7 +390,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(root).toHaveClass("elvern-overlay--visible");
 
     act(() => {
-      vi.advanceTimersByTime(4999);
+      vi.advanceTimersByTime(2999);
     });
     expect(root).toHaveClass("elvern-overlay--visible");
 
@@ -385,7 +405,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
     setPlaying();
     act(() => {
-      vi.advanceTimersByTime(5001);
+      vi.advanceTimersByTime(3001);
       fireTouchPointerUp(tapSurface);
       firePointerOut(root, "touch");
     });
@@ -393,12 +413,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(root).toHaveClass("elvern-overlay--visible");
   });
 
-  test("second phone background tap hides controls before five seconds", () => {
+  test("second phone background tap hides controls before three seconds", () => {
     const { root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
 
     setPlaying();
     act(() => {
-      vi.advanceTimersByTime(5001);
+      vi.advanceTimersByTime(3001);
       fireTouchPointerUp(tapSurface);
     });
     expect(root).toHaveClass("elvern-overlay--visible");
@@ -449,7 +469,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
     setPlaying();
     act(() => {
-      vi.advanceTimersByTime(5001);
+      vi.advanceTimersByTime(3001);
     });
     expect(root).toHaveClass("elvern-overlay--idle");
 
