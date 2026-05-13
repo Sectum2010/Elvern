@@ -2126,6 +2126,7 @@ export function useBrowserPlaybackController({
   }, [availableDuration, playback?.manifest_complete, playback?.mode, streamSource]);
 
   return {
+    hlsRef,
     videoRef,
     mobilePendingTargetRef,
     mobileRetargetTransitionRef,

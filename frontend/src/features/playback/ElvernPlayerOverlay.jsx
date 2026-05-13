@@ -23,6 +23,7 @@ import {
 } from "../../lib/elvernOverlayLayout.js";
 
 import ElvernTimeline from "./ElvernTimeline.jsx";
+import { usePlaybackTrackControls } from "./usePlaybackTrackControls.js";
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const SUPPORTS_DOCUMENT = typeof document !== "undefined";
@@ -229,6 +230,8 @@ export default function ElvernPlayerOverlay({
   videoFitMode = "fit",
   onVideoFitModeChange = null,
   deviceClass = "desktop",
+  hlsRef = null,
+  trackRefreshKey = "",
 }) {
   const layoutCapabilities = useMemo(() => resolveOverlayLayoutCapabilities(deviceClass), [deviceClass]);
 
@@ -243,15 +246,15 @@ export default function ElvernPlayerOverlay({
   const [showCaptionsMenu, setShowCaptionsMenu] = useState(false);
   const [showAudioMenu, setShowAudioMenu] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
-  const [textTracks, setTextTracks] = useState([]);
-  const [audioTracks, setAudioTracks] = useState([]);
   const [pipActive, setPipActive] = useState(false);
   const [fullscreenActive, setFullscreenActive] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [controlsManuallyHidden, setControlsManuallyHidden] = useState(false);
   const [controlsFocused, setControlsFocused] = useState(false);
   const [isDraggingTimeline, setIsDraggingTimeline] = useState(false);
 
   const controlsVisibleRef = useRef(true);
+  const controlsManuallyHiddenRef = useRef(false);
   const lastSampledAbsoluteRef = useRef(null);
   const idleTimerRef = useRef(null);
   const overlayRootRef = useRef(null);
@@ -273,6 +276,18 @@ export default function ElvernPlayerOverlay({
       : ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS);
 
   const isAnyMenuOpen = showSpeedMenu || showCaptionsMenu || showAudioMenu || showMoreMenu;
+  const {
+    audioTracks,
+    selectAudioTrack,
+    selectSubtitleTrack,
+    subtitleTracks: textTracks,
+    subtitlesOff,
+  } = usePlaybackTrackControls({
+    hlsRef,
+    trackRefreshKey,
+    videoElementKey,
+    videoRef,
+  });
   const closeAllMenus = useCallback(() => {
     setShowSpeedMenu(false);
     setShowCaptionsMenu(false);
@@ -294,6 +309,11 @@ export default function ElvernPlayerOverlay({
     }
   }, [closeAllMenus]);
 
+  const setControlsManuallyHiddenValue = useCallback((nextValue) => {
+    controlsManuallyHiddenRef.current = nextValue;
+    setControlsManuallyHidden(nextValue);
+  }, []);
+
   const hideControlsNow = useCallback(() => {
     if (idleTimerRef.current) {
       clearTimeout(idleTimerRef.current);
@@ -302,7 +322,15 @@ export default function ElvernPlayerOverlay({
     setControlsVisibleValue(false);
   }, [setControlsVisibleValue]);
 
+  const hidePhoneFullscreenControlsNow = useCallback(() => {
+    setControlsManuallyHiddenValue(true);
+    hideControlsNow();
+  }, [hideControlsNow, setControlsManuallyHiddenValue]);
+
   const refreshControlsTimer = useCallback(() => {
+    if (!phoneFullscreenCinema) {
+      setControlsManuallyHiddenValue(false);
+    }
     setControlsVisibleValue(true);
     if (idleTimerRef.current) {
       clearTimeout(idleTimerRef.current);
@@ -322,6 +350,8 @@ export default function ElvernPlayerOverlay({
     isDraggingTimeline,
     isPlaying,
     preparing,
+    phoneFullscreenCinema,
+    setControlsManuallyHiddenValue,
     setControlsVisibleValue,
   ]);
 
@@ -377,54 +407,12 @@ export default function ElvernPlayerOverlay({
       handleTimeUpdate();
       handleProgress();
     };
-    const refreshTextTracks = () => {
-      if (!video.textTracks) {
-        setTextTracks([]);
-        return;
-      }
-      const collected = [];
-      for (let index = 0; index < video.textTracks.length; index += 1) {
-        const track = video.textTracks[index];
-        if (track.kind === "subtitles" || track.kind === "captions") {
-          collected.push({
-            id: track.id || `track-${index}`,
-            label: track.label || track.language || `Track ${index + 1}`,
-            language: track.language || "",
-            mode: track.mode,
-            index,
-          });
-        }
-      }
-      setTextTracks(collected);
-    };
-    const refreshAudioTracks = () => {
-      const native = video.audioTracks;
-      if (!native || typeof native.length !== "number") {
-        setAudioTracks([]);
-        return;
-      }
-      const collected = [];
-      for (let index = 0; index < native.length; index += 1) {
-        const track = native[index];
-        collected.push({
-          id: track.id || `audio-${index}`,
-          label: track.label || track.language || `Audio ${index + 1}`,
-          language: track.language || "",
-          enabled: Boolean(track.enabled),
-          index,
-        });
-      }
-      setAudioTracks(collected);
-    };
-
     disableNativeControls();
     updatePlaybackState();
     updateVolumeState();
     updateRateState();
     handleTimeUpdate();
     handleProgress();
-    refreshTextTracks();
-    refreshAudioTracks();
 
     video.addEventListener("play", updatePlaybackState);
     video.addEventListener("playing", disableNativeControls);
@@ -440,17 +428,6 @@ export default function ElvernPlayerOverlay({
     video.addEventListener("seeked", handleSeeked);
     video.addEventListener("loadedmetadata", handleProgress);
 
-    if (video.textTracks?.addEventListener) {
-      video.textTracks.addEventListener("change", refreshTextTracks);
-      video.textTracks.addEventListener("addtrack", refreshTextTracks);
-      video.textTracks.addEventListener("removetrack", refreshTextTracks);
-    }
-    if (video.audioTracks?.addEventListener) {
-      video.audioTracks.addEventListener("change", refreshAudioTracks);
-      video.audioTracks.addEventListener("addtrack", refreshAudioTracks);
-      video.audioTracks.addEventListener("removetrack", refreshAudioTracks);
-    }
-
     return () => {
       video.removeEventListener("play", updatePlaybackState);
       video.removeEventListener("playing", disableNativeControls);
@@ -465,16 +442,6 @@ export default function ElvernPlayerOverlay({
       video.removeEventListener("seeking", handleSeeking);
       video.removeEventListener("seeked", handleSeeked);
       video.removeEventListener("loadedmetadata", handleProgress);
-      if (video.textTracks?.removeEventListener) {
-        video.textTracks.removeEventListener("change", refreshTextTracks);
-        video.textTracks.removeEventListener("addtrack", refreshTextTracks);
-        video.textTracks.removeEventListener("removetrack", refreshTextTracks);
-      }
-      if (video.audioTracks?.removeEventListener) {
-        video.audioTracks.removeEventListener("change", refreshAudioTracks);
-        video.audioTracks.removeEventListener("addtrack", refreshAudioTracks);
-        video.audioTracks.removeEventListener("removetrack", refreshAudioTracks);
-      }
     };
   }, [sessionPayload, videoElementKey, videoRef]);
 
@@ -519,10 +486,17 @@ export default function ElvernPlayerOverlay({
     setControlsVisibleValue(true);
   }, [closeAllMenus, phoneInlineMinimal, setControlsVisibleValue]);
 
+  useEffect(() => {
+    if (!phoneFullscreenCinema) {
+      setControlsManuallyHiddenValue(false);
+    }
+  }, [phoneFullscreenCinema, setControlsManuallyHiddenValue]);
+
   const sessionIdentity = sessionPayload?.session_id || sessionPayload?.session_token || "";
   useEffect(() => {
     closeAllMenus();
-  }, [closeAllMenus, sessionIdentity, videoElementKey]);
+    setControlsManuallyHiddenValue(false);
+  }, [closeAllMenus, sessionIdentity, setControlsManuallyHiddenValue, videoElementKey]);
 
   useEffect(() => {
     if (!SUPPORTS_DOCUMENT || !isAnyMenuOpen) {
@@ -568,6 +542,7 @@ export default function ElvernPlayerOverlay({
     if (!video) {
       return;
     }
+    setControlsManuallyHiddenValue(false);
     if (video.paused || video.ended) {
       const playPromise = video.play();
       if (playPromise && typeof playPromise.catch === "function") {
@@ -579,7 +554,7 @@ export default function ElvernPlayerOverlay({
       video.pause();
     }
     refreshControlsTimer();
-  }, [refreshControlsTimer, videoRef]);
+  }, [refreshControlsTimer, setControlsManuallyHiddenValue, videoRef]);
 
   const toggleMute = useCallback(() => {
     const video = videoRef?.current;
@@ -615,45 +590,23 @@ export default function ElvernPlayerOverlay({
     refreshControlsTimer();
   }, [closeAllMenus, refreshControlsTimer, videoRef]);
 
-  const handleTextTrackSelect = useCallback((trackIndex) => {
-    const video = videoRef?.current;
-    if (!video || !video.textTracks) {
-      return;
-    }
-    for (let index = 0; index < video.textTracks.length; index += 1) {
-      const track = video.textTracks[index];
-      if (index === trackIndex) {
-        track.mode = track.mode === "showing" ? "disabled" : "showing";
-      } else if (track.mode === "showing") {
-        track.mode = "disabled";
-      }
-    }
+  const handleTextTrackSelect = useCallback((trackId) => {
+    selectSubtitleTrack(trackId);
     closeAllMenus();
     refreshControlsTimer();
-  }, [closeAllMenus, refreshControlsTimer, videoRef]);
+  }, [closeAllMenus, refreshControlsTimer, selectSubtitleTrack]);
 
   const handleTextTrackOff = useCallback(() => {
-    const video = videoRef?.current;
-    if (video?.textTracks) {
-      for (let index = 0; index < video.textTracks.length; index += 1) {
-        video.textTracks[index].mode = "disabled";
-      }
-    }
+    subtitlesOff();
     closeAllMenus();
     refreshControlsTimer();
-  }, [closeAllMenus, refreshControlsTimer, videoRef]);
+  }, [closeAllMenus, refreshControlsTimer, subtitlesOff]);
 
-  const handleAudioTrackSelect = useCallback((trackIndex) => {
-    const video = videoRef?.current;
-    const native = video?.audioTracks;
-    if (native) {
-      for (let index = 0; index < native.length; index += 1) {
-        native[index].enabled = index === trackIndex;
-      }
-    }
+  const handleAudioTrackSelect = useCallback((trackId) => {
+    selectAudioTrack(trackId);
     closeAllMenus();
     refreshControlsTimer();
-  }, [closeAllMenus, refreshControlsTimer, videoRef]);
+  }, [closeAllMenus, refreshControlsTimer, selectAudioTrack]);
 
   const togglePip = useCallback(async () => {
     const video = videoRef?.current;
@@ -737,14 +690,12 @@ export default function ElvernPlayerOverlay({
       return;
     }
     if (phoneFullscreenCinema) {
-      if (!isPlaying) {
-        refreshControlsTimer();
+      const controlsAreVisuallyShown = controlsVisibleRef.current && !controlsManuallyHiddenRef.current;
+      if (controlsAreVisuallyShown) {
+        hidePhoneFullscreenControlsNow();
         return;
       }
-      if (controlsVisibleRef.current) {
-        hideControlsNow();
-        return;
-      }
+      setControlsManuallyHiddenValue(false);
       refreshControlsTimer();
       return;
     }
@@ -756,11 +707,12 @@ export default function ElvernPlayerOverlay({
   }, [
     closeAllMenus,
     hideControlsNow,
+    hidePhoneFullscreenControlsNow,
     isAnyMenuOpen,
-    isPlaying,
     phoneFullscreenCinema,
     phoneInlineMinimal,
     refreshControlsTimer,
+    setControlsManuallyHiddenValue,
     togglePlay,
   ]);
 
@@ -785,14 +737,12 @@ export default function ElvernPlayerOverlay({
       return;
     }
     if (phoneFullscreenCinema) {
-      if (!isPlaying) {
-        refreshControlsTimer();
+      const controlsAreVisuallyShown = controlsVisibleRef.current && !controlsManuallyHiddenRef.current;
+      if (controlsAreVisuallyShown) {
+        hidePhoneFullscreenControlsNow();
         return;
       }
-      if (controlsVisibleRef.current) {
-        hideControlsNow();
-        return;
-      }
+      setControlsManuallyHiddenValue(false);
       refreshControlsTimer();
       return;
     }
@@ -808,19 +758,22 @@ export default function ElvernPlayerOverlay({
   }, [
     closeAllMenus,
     hideControlsNow,
+    hidePhoneFullscreenControlsNow,
     isAnyMenuOpen,
     isPlaying,
     phoneFullscreenCinema,
     phoneInlineMinimal,
     refreshControlsTimer,
+    setControlsManuallyHiddenValue,
   ]);
 
   const handleCenterTransportClick = useCallback((event) => {
     event?.preventDefault?.();
     event?.stopPropagation?.();
     closeAllMenus();
+    setControlsManuallyHiddenValue(false);
     togglePlay();
-  }, [closeAllMenus, togglePlay]);
+  }, [closeAllMenus, setControlsManuallyHiddenValue, togglePlay]);
 
   const handleCenterTransportPointerUp = useCallback((event) => {
     event?.stopPropagation?.();
@@ -950,9 +903,11 @@ export default function ElvernPlayerOverlay({
     }
   }, [errorMessage, preparing, setControlsVisibleValue]);
 
-  const visible = phoneInlineMinimal
-    ? controlsVisible
-    : shouldOverlayBeVisible({
+  const visible = phoneFullscreenCinema && controlsManuallyHidden
+    ? false
+    : phoneInlineMinimal
+      ? controlsVisible
+      : shouldOverlayBeVisible({
       isPlaying,
       preparing,
       hasError: Boolean(errorMessage),
@@ -967,9 +922,10 @@ export default function ElvernPlayerOverlay({
   const visibilityClass = visible ? " elvern-overlay--visible" : " elvern-overlay--idle";
   const variantClass = ` elvern-overlay--variant-${layoutCapabilities.variant} elvern-overlay--${layoutCapabilities.variant}${phoneInlineMinimal ? " elvern-overlay--phone-inline-minimal" : ""}`;
 
-  const captionActiveCount = textTracks.filter((track) => track.mode === "showing").length;
+  const captionActiveCount = textTracks.filter((track) => track.selected || track.mode === "showing").length;
   const audioMenuAvailable = audioTracks.length > 1;
   const captionsMenuAvailable = textTracks.length > 0;
+  const phoneTrackShortcutButtons = phoneFullscreenCinema;
 
   const pipAvailable = SUPPORTS_DOCUMENT
     && Boolean(document.pictureInPictureEnabled)
@@ -986,10 +942,10 @@ export default function ElvernPlayerOverlay({
       return [];
     }
     const items = [];
-    if (captionsMenuAvailable && !layoutCapabilities.showInlineCaptions) {
+    if (captionsMenuAvailable && !layoutCapabilities.showInlineCaptions && !phoneTrackShortcutButtons) {
       items.push("captions");
     }
-    if (audioMenuAvailable && !layoutCapabilities.showInlineAudio) {
+    if (audioMenuAvailable && !layoutCapabilities.showInlineAudio && !phoneTrackShortcutButtons) {
       items.push("audio");
     }
     if (!layoutCapabilities.showInlineSpeed) {
@@ -1015,6 +971,7 @@ export default function ElvernPlayerOverlay({
     layoutCapabilities.showInlineSpeed,
     layoutCapabilities.useMoreMenu,
     pipAvailable,
+    phoneTrackShortcutButtons,
     videoFitToggleAvailable,
   ]);
 
@@ -1157,10 +1114,10 @@ export default function ElvernPlayerOverlay({
                     </button>
                     {textTracks.map((track) => (
                       <button
-                        aria-checked={track.mode === "showing"}
+                        aria-checked={track.selected || track.mode === "showing"}
                         className="elvern-overlay__menu-item"
                         key={track.id}
-                        onClick={() => handleTextTrackSelect(track.index)}
+                        onClick={() => handleTextTrackSelect(track.id)}
                         role="menuitemradio"
                         type="button"
                       >
@@ -1193,10 +1150,10 @@ export default function ElvernPlayerOverlay({
                   <div className="elvern-overlay__menu" role="menu">
                     {audioTracks.map((track) => (
                       <button
-                        aria-checked={track.enabled}
+                        aria-checked={track.selected || track.enabled}
                         className="elvern-overlay__menu-item"
                         key={track.id}
-                        onClick={() => handleAudioTrackSelect(track.index)}
+                        onClick={() => handleAudioTrackSelect(track.id)}
                         role="menuitemradio"
                         type="button"
                       >
@@ -1255,6 +1212,87 @@ export default function ElvernPlayerOverlay({
               >
                 <PipIcon className="elvern-overlay__icon" />
               </button>
+            ) : null}
+
+            {phoneTrackShortcutButtons && captionsMenuAvailable ? (
+              <div className="elvern-overlay__menu-host elvern-overlay__track-shortcut">
+                <button
+                  aria-expanded={showCaptionsMenu}
+                  aria-label="Subtitles"
+                  className={`elvern-overlay__icon-button${captionActiveCount > 0 ? " elvern-overlay__icon-button--active" : ""}`}
+                  onClick={() => {
+                    setShowCaptionsMenu((value) => !value);
+                    setShowSpeedMenu(false);
+                    setShowAudioMenu(false);
+                    setShowMoreMenu(false);
+                    refreshControlsTimer();
+                  }}
+                  type="button"
+                >
+                  <CaptionsIcon className="elvern-overlay__icon" />
+                </button>
+                {showCaptionsMenu ? (
+                  <div className="elvern-overlay__menu" role="menu">
+                    <button
+                      aria-checked={captionActiveCount === 0}
+                      className="elvern-overlay__menu-item"
+                      onClick={handleTextTrackOff}
+                      role="menuitemradio"
+                      type="button"
+                    >
+                      Off
+                    </button>
+                    {textTracks.map((track) => (
+                      <button
+                        aria-checked={track.selected || track.mode === "showing"}
+                        className="elvern-overlay__menu-item"
+                        key={track.id}
+                        onClick={() => handleTextTrackSelect(track.id)}
+                        role="menuitemradio"
+                        type="button"
+                      >
+                        {track.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {phoneTrackShortcutButtons && audioMenuAvailable ? (
+              <div className="elvern-overlay__menu-host elvern-overlay__track-shortcut">
+                <button
+                  aria-expanded={showAudioMenu}
+                  aria-label="Audio track"
+                  className="elvern-overlay__icon-button"
+                  onClick={() => {
+                    setShowAudioMenu((value) => !value);
+                    setShowSpeedMenu(false);
+                    setShowCaptionsMenu(false);
+                    setShowMoreMenu(false);
+                    refreshControlsTimer();
+                  }}
+                  type="button"
+                >
+                  <AudioTrackIcon className="elvern-overlay__icon" />
+                </button>
+                {showAudioMenu ? (
+                  <div className="elvern-overlay__menu" role="menu">
+                    {audioTracks.map((track) => (
+                      <button
+                        aria-checked={track.selected || track.enabled}
+                        className="elvern-overlay__menu-item"
+                        key={track.id}
+                        onClick={() => handleAudioTrackSelect(track.id)}
+                        role="menuitemradio"
+                        type="button"
+                      >
+                        {track.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
             {moreButtonAvailable ? (
@@ -1339,10 +1377,10 @@ export default function ElvernPlayerOverlay({
                         </button>
                         {textTracks.map((track) => (
                           <button
-                            aria-checked={track.mode === "showing"}
+                            aria-checked={track.selected || track.mode === "showing"}
                             className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
                             key={track.id}
-                            onClick={() => handleTextTrackSelect(track.index)}
+                            onClick={() => handleTextTrackSelect(track.id)}
                             role="menuitemradio"
                             type="button"
                           >
@@ -1356,10 +1394,10 @@ export default function ElvernPlayerOverlay({
                         <span className="elvern-overlay__menu-section-label">Audio track</span>
                         {audioTracks.map((track) => (
                           <button
-                            aria-checked={track.enabled}
+                            aria-checked={track.selected || track.enabled}
                             className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
                             key={track.id}
-                            onClick={() => handleAudioTrackSelect(track.index)}
+                            onClick={() => handleAudioTrackSelect(track.id)}
                             role="menuitemradio"
                             type="button"
                           >

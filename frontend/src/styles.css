@@ -5731,24 +5731,6 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   background: #e11d48;
 }
 
-.elvern-timeline__playhead {
-  position: absolute;
-  top: 50%;
-  width: 0.95rem;
-  height: 0.95rem;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: #ffffff;
-  border: 2px solid #e11d48;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
-  pointer-events: none;
-  transition: transform 80ms ease;
-}
-
-.elvern-timeline__track:hover .elvern-timeline__playhead {
-  transform: translate(-50%, -50%) scale(1.15);
-}
-
 .elvern-timeline__preparing-marker {
   position: absolute;
   top: 50%;
@@ -5891,13 +5873,35 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__bottom-bar,
 .player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__bottom-bar,
 .player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__bottom-bar {
-  bottom: max(0.65rem, env(safe-area-inset-bottom, 0px));
-  padding-bottom: 0.65rem;
+  left: max(0.35rem, env(safe-area-inset-left, 0px));
+  right: max(0.35rem, env(safe-area-inset-right, 0px));
+  bottom: max(0.2rem, env(safe-area-inset-bottom, 0px));
+  gap: 0.18rem;
+  padding: 0;
   background: transparent;
   border-radius: 0;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   box-shadow: none;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__time-row,
+.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__time-row,
+.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__time-row {
+  padding: 0 0.2rem;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__controls-row,
+.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__controls-row,
+.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__controls-row {
+  justify-content: flex-end;
+  gap: 0.18rem;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__spacer,
+.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__spacer,
+.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__spacer {
+  flex: 0 0 auto;
 }
 
 .player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay,
@@ -6004,8 +6008,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 @media (prefers-reduced-motion: reduce) {
   .elvern-overlay,
   .elvern-overlay__icon-button,
-  .elvern-overlay__center-transport,
-  .elvern-timeline__playhead {
+  .elvern-overlay__center-transport {
     transition: none;
   }
   .elvern-overlay__preparing-spinner,

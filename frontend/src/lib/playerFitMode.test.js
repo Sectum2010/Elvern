@@ -4,6 +4,7 @@ import {
   deriveVideoFitModeFromPinch,
   measureTouchDistance,
   normalizeVideoFitMode,
+  readStoredVideoFitMode,
 } from "./playerFitMode.js";
 
 describe("player fit mode helpers", () => {
@@ -11,6 +12,14 @@ describe("player fit mode helpers", () => {
     expect(normalizeVideoFitMode("fill")).toBe("fill");
     expect(normalizeVideoFitMode("fit")).toBe("fit");
     expect(normalizeVideoFitMode("cover")).toBe("fit");
+  });
+
+  test("new player sessions default to fit even when old storage says fill", () => {
+    const storage = {
+      getItem: () => "fill",
+    };
+
+    expect(readStoredVideoFitMode(storage)).toBe("fit");
   });
 
   test("measures two-touch distance", () => {

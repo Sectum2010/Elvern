@@ -31,8 +31,6 @@ import { resolveAuthoritativeBrowserPlaybackResumePosition } from "../lib/browse
 import {
   deriveVideoFitModeFromPinch,
   measureTouchDistance,
-  persistVideoFitMode,
-  readStoredVideoFitMode,
 } from "../lib/playerFitMode";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
@@ -477,7 +475,7 @@ export function DetailPage() {
   const [macAppFullscreenActive, setMacAppFullscreenActive] = useState(false);
   const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
   const [elvernCinemaModeActive, setElvernCinemaModeActive] = useState(false);
-  const [elvernVideoFitMode, setElvernVideoFitMode] = useState(() => readStoredVideoFitMode());
+  const [elvernVideoFitMode, setElvernVideoFitMode] = useState("fit");
   const useNativeControlsFallback = false;
   const playerShellRef = useRef(null);
   const playerFitPinchRef = useRef(null);
@@ -647,10 +645,6 @@ export function DetailPage() {
   }, [macAppFullscreenActive, elvernCinemaModeActive]);
 
   useEffect(() => {
-    persistVideoFitMode(elvernVideoFitMode);
-  }, [elvernVideoFitMode]);
-
-  useEffect(() => {
     const shell = playerShellRef.current;
     const fullscreenGestureLockActive = macAppFullscreenActive || elvernCinemaModeActive;
     if (!fullscreenGestureLockActive || !shell?.classList?.contains("player-shell--elvern-custom")) {
@@ -668,6 +662,7 @@ export function DetailPage() {
   }, [macAppFullscreenActive, elvernCinemaModeActive]);
 
   const {
+    hlsRef,
     videoRef,
     mobilePendingTargetRef,
     mobileRetargetTransitionRef,
@@ -682,6 +677,7 @@ export function DetailPage() {
     playbackPosition,
     playbackStatus,
     playbackModeIntent,
+    hlsEngineDiagnostics,
     prepareEstimateObservedAtMs,
     prepareEstimateNowMs,
     videoElementKey,
@@ -3370,6 +3366,7 @@ export function DetailPage() {
                   deviceClass={clientDeviceClass}
                   durationSeconds={fullDuration}
                   errorMessage={playbackError || ""}
+                  hlsRef={hlsRef}
                   onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}
                   onToggleFullscreen={toggleElvernPlayerFullscreen}
                   onVideoFitModeChange={setElvernVideoFitMode}
@@ -3378,6 +3375,7 @@ export function DetailPage() {
                   preparingTargetSeconds={elvernOverlayPreparingTargetSeconds}
                   sessionPayload={elvernOverlaySessionPayload}
                   shellRef={playerShellRef}
+                  trackRefreshKey={hlsEngineDiagnostics?.selectedEngine || ""}
                   videoElementKey={videoElementKey}
                   videoFitMode={elvernVideoFitMode}
                   videoRef={videoRef}

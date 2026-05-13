@@ -152,6 +152,32 @@ describe("Elvern player mobile CSS guards", () => {
     expect(block).not.toContain("linear-gradient");
   });
 
+  test("phone fullscreen controls are bottom-right aligned without a spacer push", () => {
+    const styles = readStyles();
+    const bottomBar = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__bottom-bar",
+    );
+    const controlsRow = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__controls-row",
+    );
+    const spacer = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__spacer",
+    );
+
+    expect(bottomBar).toContain("bottom: max(0.2rem");
+    expect(controlsRow).toContain("justify-content: flex-end");
+    expect(spacer).toContain("flex: 0 0 auto");
+  });
+
+  test("timeline has no standalone playhead knob styling", () => {
+    const styles = readStyles();
+
+    expect(styles).not.toContain(".elvern-timeline__playhead");
+  });
+
   test("phone fullscreen shell locks touch panning", () => {
     const styles = readStyles();
     const shellBlock = cssBlockForSelectorListItem(

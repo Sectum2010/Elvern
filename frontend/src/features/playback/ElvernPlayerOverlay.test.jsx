@@ -7,10 +7,13 @@ import { ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS } from "../../lib/elvernOverlayLayout
 function renderOverlay({
   cinemaModeActive = false,
   deviceClass = "desktop",
+  hlsRef = null,
   onToggleFullscreen = null,
   onVideoFitModeChange = null,
   preparing = false,
   preparingMessage = "",
+  setupVideo = null,
+  trackRefreshKey = "",
   videoFitMode = "fit",
   videoElementKey = 0,
 } = {}) {
@@ -64,17 +67,22 @@ function renderOverlay({
     configurable: true,
     value: pauseMock,
   });
+  if (typeof setupVideo === "function") {
+    setupVideo(video);
+  }
 
   const renderProps = (overrides = {}) => ({
     cinemaModeActive,
     durationSeconds: 600,
     deviceClass,
+    hlsRef,
     onSeekCommit: () => {},
     onToggleFullscreen,
     onVideoFitModeChange,
     preparing,
     preparingMessage,
     shellRef: { current: shell },
+    trackRefreshKey,
     videoFitMode,
     videoElementKey,
     videoRef: { current: video },
@@ -143,6 +151,24 @@ function fireTouchPointerUp(element) {
 
 function firePointerOut(element, pointerType) {
   firePointerEvent(element, "pointerout", pointerType);
+}
+
+function makeTrackList(tracks) {
+  const listeners = new Map();
+  const list = {
+    length: tracks.length,
+    addEventListener: vi.fn((eventName, listener) => {
+      listeners.set(eventName, listener);
+    }),
+    removeEventListener: vi.fn(),
+    dispatch(eventName) {
+      listeners.get(eventName)?.();
+    },
+  };
+  tracks.forEach((track, index) => {
+    list[index] = track;
+  });
+  return list;
 }
 
 describe("ElvernPlayerOverlay controls visibility", () => {
@@ -443,6 +469,37 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(root).toHaveClass("elvern-overlay--idle");
   });
 
+  test("phone cinema paused background tap can manually hide controls", () => {
+    const { playMock, root, tapSurface } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    expect(root).toHaveClass("elvern-overlay--visible");
+
+    act(() => {
+      fireTouchPointerUp(tapSurface);
+      fireEvent.click(tapSurface);
+    });
+
+    expect(root).toHaveClass("elvern-overlay--idle");
+    expect(playMock).not.toHaveBeenCalled();
+  });
+
+  test("phone cinema center transport clears manual hide and toggles playback", () => {
+    const { centerTransport, playMock, root, tapSurface } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    act(() => {
+      fireTouchPointerUp(tapSurface);
+    });
+    expect(root).toHaveClass("elvern-overlay--idle");
+
+    act(() => {
+      fireTouchPointerUp(centerTransport);
+      fireEvent.click(centerTransport);
+    });
+
+    expect(playMock).toHaveBeenCalledTimes(1);
+    expect(root).toHaveClass("elvern-overlay--visible");
+  });
+
   test("opening More then tapping outside the player closes More", () => {
     const { getMoreButton, queryByRole } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
 
@@ -658,6 +715,144 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     });
 
     expect(pauseMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("native subtitle tracks can be selected and turned off", () => {
+    const english = { kind: "subtitles", label: "English", language: "en", mode: "disabled" };
+    const spanish = { kind: "captions", label: "Spanish", language: "es", mode: "disabled" };
+    const { getByRole } = renderOverlay({
+      cinemaModeActive: true,
+      setupVideo(video) {
+        Object.defineProperty(video, "textTracks", {
+          configurable: true,
+          value: makeTrackList([english, spanish]),
+        });
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "Spanish" }));
+    });
+    expect(english.mode).toBe("disabled");
+    expect(spanish.mode).toBe("showing");
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "Off" }));
+    });
+    expect(spanish.mode).toBe("disabled");
+  });
+
+  test("native audio tracks can be selected", () => {
+    const english = { label: "English", language: "en", enabled: true };
+    const commentary = { label: "Commentary", language: "en", enabled: false };
+    const { getByRole } = renderOverlay({
+      cinemaModeActive: true,
+      setupVideo(video) {
+        Object.defineProperty(video, "audioTracks", {
+          configurable: true,
+          value: makeTrackList([english, commentary]),
+        });
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "Commentary" }));
+    });
+
+    expect(english.enabled).toBe(false);
+    expect(commentary.enabled).toBe(true);
+  });
+
+  test("hls.js subtitle and audio track APIs are used when available", () => {
+    const hls = {
+      audioTrack: 0,
+      audioTracks: [{ name: "English" }, { name: "Director" }],
+      off: vi.fn(),
+      on: vi.fn(),
+      subtitleDisplay: false,
+      subtitleTrack: -1,
+      subtitleTracks: [{ name: "English CC" }, { name: "French" }],
+    };
+    const { getByRole } = renderOverlay({
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      hlsRef: { current: hls },
+      trackRefreshKey: "hls.js",
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+    });
+    expect(hls.subtitleTrack).toBe(1);
+    expect(hls.subtitleDisplay).toBe(true);
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "Off" }));
+    });
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(hls.subtitleDisplay).toBe(false);
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "Director" }));
+    });
+    expect(hls.audioTrack).toBe(1);
+  });
+
+  test("phone cinema places subtitle and audio icons before More when tracks exist", () => {
+    const hls = {
+      audioTrack: 0,
+      audioTracks: [{ name: "English" }, { name: "Director" }],
+      off: vi.fn(),
+      on: vi.fn(),
+      subtitleDisplay: false,
+      subtitleTrack: -1,
+      subtitleTracks: [{ name: "English CC" }],
+    };
+    const { container } = renderOverlay({
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      hlsRef: { current: hls },
+      onToggleFullscreen: vi.fn(),
+      onVideoFitModeChange: vi.fn(),
+      trackRefreshKey: "hls.js",
+    });
+
+    const labels = Array.from(container.querySelectorAll(".elvern-overlay__controls-row button"))
+      .map((button) => button.getAttribute("aria-label"))
+      .filter(Boolean);
+
+    expect(labels.indexOf("Subtitles")).toBeLessThan(labels.indexOf("Audio track"));
+    expect(labels.indexOf("Audio track")).toBeLessThan(labels.indexOf("More options"));
+    expect(labels.indexOf("More options")).toBeLessThan(labels.indexOf("Exit fullscreen"));
+  });
+
+  test("phone cinema hides subtitle and audio icons when tracks are unavailable", () => {
+    const { queryByRole } = renderOverlay({
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onVideoFitModeChange: vi.fn(),
+    });
+
+    expect(queryByRole("button", { name: "Subtitles" })).toBeNull();
+    expect(queryByRole("button", { name: "Audio track" })).toBeNull();
   });
 
   test("desktop mouse leave still hides controls", () => {

@@ -6,19 +6,13 @@ export function normalizeVideoFitMode(value) {
 }
 
 export function readStoredVideoFitMode(storage = globalThis?.localStorage) {
-  try {
-    return normalizeVideoFitMode(storage?.getItem(VIDEO_FIT_MODE_STORAGE_KEY));
-  } catch {
-    return "fit";
-  }
+  void storage;
+  return "fit";
 }
 
 export function persistVideoFitMode(mode, storage = globalThis?.localStorage) {
-  try {
-    storage?.setItem(VIDEO_FIT_MODE_STORAGE_KEY, normalizeVideoFitMode(mode));
-  } catch {
-    // Storage may be blocked in private browsing; keep the in-memory mode.
-  }
+  void mode;
+  void storage;
 }
 
 export function measureTouchDistance(touches) {

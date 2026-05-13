@@ -267,11 +267,6 @@ export default function ElvernTimeline({
             style={{ left: `${preparingPercent}%` }}
           />
         ) : null}
-        <div
-          aria-hidden="true"
-          className="elvern-timeline__playhead"
-          style={{ left: `${playheadPercent}%` }}
-        />
         {tooltipPercent != null ? (
           <div
             aria-hidden="true"
