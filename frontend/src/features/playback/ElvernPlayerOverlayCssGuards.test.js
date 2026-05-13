@@ -71,6 +71,26 @@ describe("Elvern player mobile CSS guards", () => {
     expect(numericZIndex(topBar)).toBeGreaterThan(numericZIndex(surface));
   });
 
+  test("phone bottom controls are explicitly anchored to the player bottom", () => {
+    const styles = readStyles();
+    const block = cssBlock(styles, ".elvern-overlay--variant-phone .elvern-overlay__bottom-bar");
+
+    expect(block).toContain("position: absolute");
+    expect(block).toContain("left:");
+    expect(block).toContain("right:");
+    expect(block).toContain("bottom:");
+  });
+
+  test("phone More menu is a popover, not a fullscreen-blocking fixed sheet", () => {
+    const styles = readStyles();
+    const block = cssBlock(styles, ".elvern-overlay--variant-phone .elvern-overlay__menu--sheet");
+
+    expect(block).toContain("position: absolute");
+    expect(block).toContain("bottom: calc(100% + 0.45rem)");
+    expect(block).not.toContain("position: fixed");
+    expect(block).not.toContain("width: 100%");
+  });
+
   test("phone fullscreen selectors override the phone inline shell specificity", () => {
     const styles = readStyles();
     const selector = ".player-shell--elvern-phone.player-shell--elvern-custom:fullscreen";

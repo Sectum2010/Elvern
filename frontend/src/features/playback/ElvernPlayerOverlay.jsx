@@ -269,7 +269,10 @@ export default function ElvernPlayerOverlay({
   const setControlsVisibleValue = useCallback((nextValue) => {
     controlsVisibleRef.current = nextValue;
     setControlsVisible(nextValue);
-  }, []);
+    if (!nextValue) {
+      closeAllMenus();
+    }
+  }, [closeAllMenus]);
 
   const refreshControlsTimer = useCallback(() => {
     setControlsVisibleValue(true);
@@ -477,6 +480,39 @@ export default function ElvernPlayerOverlay({
   }, [shellRef]);
 
   useEffect(() => {
+    closeAllMenus();
+  }, [cinemaModeActive, fullscreenActive, closeAllMenus]);
+
+  const sessionIdentity = sessionPayload?.session_id || sessionPayload?.session_token || "";
+  useEffect(() => {
+    closeAllMenus();
+  }, [closeAllMenus, sessionIdentity, videoElementKey]);
+
+  useEffect(() => {
+    if (!SUPPORTS_DOCUMENT || !isAnyMenuOpen) {
+      return undefined;
+    }
+    const handleDocumentPointerDown = (event) => {
+      const target = event?.target;
+      if (!target || typeof target.closest !== "function") {
+        return;
+      }
+      if (target.closest(".elvern-overlay__menu") || target.closest(".elvern-overlay__menu-host")) {
+        return;
+      }
+      closeAllMenus();
+    };
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+    document.addEventListener("mousedown", handleDocumentPointerDown, true);
+    document.addEventListener("touchstart", handleDocumentPointerDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+      document.removeEventListener("mousedown", handleDocumentPointerDown, true);
+      document.removeEventListener("touchstart", handleDocumentPointerDown, true);
+    };
+  }, [closeAllMenus, isAnyMenuOpen]);
+
+  useEffect(() => {
     const video = videoRef?.current;
     if (!video) {
       return undefined;
@@ -605,6 +641,7 @@ export default function ElvernPlayerOverlay({
   }, [closeAllMenus, refreshControlsTimer, videoRef]);
 
   const toggleFullscreen = useCallback(async () => {
+    closeAllMenus();
     if (typeof onToggleFullscreen === "function") {
       onToggleFullscreen();
       refreshControlsTimer();
@@ -627,9 +664,14 @@ export default function ElvernPlayerOverlay({
       // Fullscreen may be denied; the caller may surface a notice.
     }
     refreshControlsTimer();
-  }, [onToggleFullscreen, refreshControlsTimer, shellRef]);
+  }, [closeAllMenus, onToggleFullscreen, refreshControlsTimer, shellRef]);
 
   const handleSurfaceClick = useCallback((event) => {
+    if (isAnyMenuOpen) {
+      closeAllMenus();
+      refreshControlsTimer();
+      return;
+    }
     if (event?.detail === 0) {
       // Synthetic click triggered by keyboard or screen reader; treat as a play toggle.
       togglePlay();
@@ -641,7 +683,7 @@ export default function ElvernPlayerOverlay({
       return;
     }
     togglePlay();
-  }, [isPlaying, togglePlay]);
+  }, [closeAllMenus, isAnyMenuOpen, isPlaying, refreshControlsTimer, togglePlay]);
 
   const handleSurfacePointerUp = useCallback((event) => {
     const pointerType = readPointerType(event);
@@ -649,6 +691,11 @@ export default function ElvernPlayerOverlay({
       return;
     }
     lastTouchSurfacePointerAtRef.current = Date.now();
+    if (isAnyMenuOpen) {
+      closeAllMenus();
+      refreshControlsTimer();
+      return;
+    }
     if (!isPlaying) {
       togglePlay();
       return;
@@ -667,7 +714,7 @@ export default function ElvernPlayerOverlay({
       return;
     }
     refreshControlsTimer();
-  }, [isPlaying, refreshControlsTimer, setControlsVisibleValue, togglePlay]);
+  }, [closeAllMenus, isAnyMenuOpen, isPlaying, refreshControlsTimer, setControlsVisibleValue, togglePlay]);
 
   const handlePointerEnter = useCallback((event) => {
     if (event?.pointerType && event.pointerType !== "mouse") {
@@ -686,13 +733,19 @@ export default function ElvernPlayerOverlay({
       lastPointerFocusAtRef.current = 0;
       return;
     }
+    if (event?.key === "Escape" && isAnyMenuOpen) {
+      consumeKeyboardEvent(event);
+      closeAllMenus();
+      refreshControlsTimer();
+      return;
+    }
     if (isSpaceKey(event)) {
       consumeKeyboardEvent(event);
       if (!event.repeat) {
         togglePlay();
       }
     }
-  }, [togglePlay]);
+  }, [closeAllMenus, isAnyMenuOpen, refreshControlsTimer, togglePlay]);
 
   const handleKeyUpCapture = useCallback((event) => {
     if (isSpaceKey(event)) {
@@ -745,17 +798,20 @@ export default function ElvernPlayerOverlay({
   }, []);
 
   const handleTimelinePreview = useCallback(() => {
+    closeAllMenus();
     refreshControlsTimer();
-  }, [refreshControlsTimer]);
+  }, [closeAllMenus, refreshControlsTimer]);
 
   const handleTimelineCommit = useCallback((targetSeconds) => {
+    closeAllMenus();
     onSeekCommit?.(targetSeconds);
-  }, [onSeekCommit]);
+  }, [closeAllMenus, onSeekCommit]);
 
   const handleTimelineDragStart = useCallback(() => {
+    closeAllMenus();
     setIsDraggingTimeline(true);
     refreshControlsTimer();
-  }, [refreshControlsTimer]);
+  }, [closeAllMenus, refreshControlsTimer]);
 
   const handleTimelineDragEnd = useCallback(() => {
     setIsDraggingTimeline(false);
@@ -787,6 +843,7 @@ export default function ElvernPlayerOverlay({
   });
 
   const visibilityClass = visible ? " elvern-overlay--visible" : " elvern-overlay--idle";
+  const variantClass = ` elvern-overlay--variant-${layoutCapabilities.variant} elvern-overlay--${layoutCapabilities.variant}`;
 
   const captionActiveCount = textTracks.filter((track) => track.mode === "showing").length;
   const audioMenuAvailable = audioTracks.length > 1;
@@ -841,7 +898,7 @@ export default function ElvernPlayerOverlay({
   return (
     <div
       ref={overlayRootRef}
-      className={`elvern-overlay elvern-overlay--variant-${layoutCapabilities.variant}${visibilityClass}`}
+      className={`elvern-overlay${variantClass}${visibilityClass}`}
       data-preparing={preparing ? "true" : "false"}
       onPointerEnter={handlePointerEnter}
       onPointerDownCapture={handlePointerDownCapture}

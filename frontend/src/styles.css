@@ -5740,8 +5740,14 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 }
 
 .elvern-overlay--variant-phone .elvern-overlay__bottom-bar {
+  position: absolute;
+  left: max(0.55rem, env(safe-area-inset-left, 0px));
+  right: max(0.55rem, env(safe-area-inset-right, 0px));
+  bottom: max(0.45rem, env(safe-area-inset-bottom, 0px));
   gap: 0.35rem;
-  padding: 0.45rem max(0.7rem, env(safe-area-inset-right)) max(0.7rem, env(safe-area-inset-bottom)) max(0.7rem, env(safe-area-inset-left));
+  padding: 0.45rem 0.55rem 0.55rem;
+  border-radius: 0.85rem;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.54) 72%, rgba(0, 0, 0, 0) 100%);
 }
 
 .elvern-overlay--variant-phone .elvern-overlay__controls-row {
@@ -5795,21 +5801,22 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__bottom-bar,
 .player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__bottom-bar,
 .player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__bottom-bar {
-  padding-bottom: max(0.95rem, calc(env(safe-area-inset-bottom) + 0.65rem));
+  bottom: max(0.65rem, env(safe-area-inset-bottom, 0px));
+  padding-bottom: 0.65rem;
 }
 
 .elvern-overlay--variant-phone .elvern-overlay__menu--sheet {
-  position: fixed;
-  bottom: 0;
-  left: 0;
+  position: absolute;
+  bottom: calc(100% + 0.45rem);
+  left: auto;
   right: 0;
-  max-width: 100%;
+  max-width: calc(100vw - 1.4rem);
   min-width: 0;
-  width: 100%;
-  border-radius: 1rem 1rem 0 0;
-  padding: 0.85rem max(0.85rem, env(safe-area-inset-right)) calc(1rem + env(safe-area-inset-bottom)) max(0.85rem, env(safe-area-inset-left));
-  max-height: 70vh;
-  z-index: 9100;
+  width: min(17rem, calc(100vw - 1.4rem));
+  border-radius: 0.85rem;
+  padding: 0.65rem;
+  max-height: min(60dvh, 20rem);
+  z-index: 6;
 }
 
 .elvern-overlay--variant-tablet .elvern-overlay__icon-button {

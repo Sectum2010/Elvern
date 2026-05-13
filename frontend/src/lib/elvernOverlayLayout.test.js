@@ -169,6 +169,21 @@ describe("shouldOverlayBeVisible", () => {
     }), true);
   });
 
+  test("playing controls can hide only after menus are closed", () => {
+    assert.equal(shouldOverlayBeVisible({
+      isPlaying: true,
+      anyMenuOpen: true,
+      lastInteractionAtMs: 0,
+      nowMs: ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS + 1,
+    }), true);
+    assert.equal(shouldOverlayBeVisible({
+      isPlaying: true,
+      anyMenuOpen: false,
+      lastInteractionAtMs: 0,
+      nowMs: ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS + 1,
+    }), false);
+  });
+
   test("focused controls keep overlay visible", () => {
     assert.equal(shouldOverlayBeVisible({
       isPlaying: true,

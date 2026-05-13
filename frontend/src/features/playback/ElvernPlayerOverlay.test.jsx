@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import ElvernPlayerOverlay from "./ElvernPlayerOverlay.jsx";
 import { ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS } from "../../lib/elvernOverlayLayout.js";
 
-function renderOverlay({ deviceClass = "desktop", onToggleFullscreen = null } = {}) {
+function renderOverlay({
+  cinemaModeActive = false,
+  deviceClass = "desktop",
+  onToggleFullscreen = null,
+  videoElementKey = 0,
+} = {}) {
   const video = document.createElement("video");
   const shell = document.createElement("div");
   let paused = true;
@@ -56,23 +61,45 @@ function renderOverlay({ deviceClass = "desktop", onToggleFullscreen = null } = 
     value: pauseMock,
   });
 
+  const renderProps = (overrides = {}) => ({
+    cinemaModeActive,
+    durationSeconds: 600,
+    deviceClass,
+    onSeekCommit: () => {},
+    onToggleFullscreen,
+    shellRef: { current: shell },
+    videoElementKey,
+    videoRef: { current: video },
+    ...overrides,
+  });
+
   const view = render(
     <ElvernPlayerOverlay
-      durationSeconds={600}
-      deviceClass={deviceClass}
-      onSeekCommit={() => {}}
-      onToggleFullscreen={onToggleFullscreen}
-      shellRef={{ current: shell }}
-      videoRef={{ current: video }}
+      {...renderProps()}
     />,
   );
 
+  const rerenderOverlay = (overrides = {}) => {
+    view.rerender(
+      <ElvernPlayerOverlay
+        {...renderProps(overrides)}
+      />,
+    );
+  };
+
   return {
     ...view,
+    fullscreenButton: view.queryByRole("button", { name: cinemaModeActive ? "Exit fullscreen" : "Fullscreen" }),
+    getFullscreenButton() {
+      return view.queryByRole("button", { name: /fullscreen/i });
+    },
+    getMoreButton() {
+      return view.queryByRole("button", { name: "More options" });
+    },
     muteButton: view.queryByRole("button", { name: "Mute" }),
-    fullscreenButton: view.queryByRole("button", { name: "Fullscreen" }),
     pauseMock,
     playMock,
+    rerenderOverlay,
     root: view.container.querySelector(".elvern-overlay"),
     surface: view.container.querySelector(".elvern-overlay__surface"),
     video,
@@ -85,6 +112,12 @@ function renderOverlay({ deviceClass = "desktop", onToggleFullscreen = null } = 
     },
   };
 }
+
+/*
+  Keep the shape above explicit. The player overlay is easy to regress because
+  jsdom does not perform real mobile hit testing; these tests exercise state
+  transitions while CSS guards cover stacking and phone anchoring.
+*/
 
 function firePointerEvent(element, type, pointerType) {
   const event = new Event(type, { bubbles: true, cancelable: true });
@@ -209,6 +242,116 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     });
 
     expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+  });
+
+  test("phone layout uses phone class, More menu, and no inline volume controls", () => {
+    const { getMoreButton, queryByLabelText, root } = renderOverlay({ deviceClass: "phone" });
+
+    expect(root).toHaveClass("elvern-overlay--variant-phone");
+    expect(root).toHaveClass("elvern-overlay--phone");
+    expect(getMoreButton()).not.toBeNull();
+    expect(queryByLabelText("Volume")).toBeNull();
+    expect(queryByLabelText("Mute")).toBeNull();
+  });
+
+  test("opening More then tapping player surface closes More without toggling playback", () => {
+    const { getMoreButton, pauseMock, queryByRole, setPlaying, surface } = renderOverlay({ deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+    expect(queryByRole("menu")).not.toBeNull();
+
+    act(() => {
+      fireTouchPointerUp(surface);
+      fireEvent.click(surface);
+    });
+
+    expect(queryByRole("menu")).toBeNull();
+    expect(pauseMock).not.toHaveBeenCalled();
+  });
+
+  test("opening More then tapping outside the player closes More", () => {
+    const { getMoreButton, queryByRole } = renderOverlay({ deviceClass: "phone" });
+
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+    expect(queryByRole("menu")).not.toBeNull();
+
+    act(() => {
+      fireEvent.pointerDown(document.body);
+    });
+
+    expect(queryByRole("menu")).toBeNull();
+  });
+
+  test("Escape closes More menu", () => {
+    const { getMoreButton, queryByRole, root } = renderOverlay({ deviceClass: "phone" });
+
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+    expect(queryByRole("menu")).not.toBeNull();
+
+    act(() => {
+      fireEvent.keyDown(root, { key: "Escape" });
+    });
+
+    expect(queryByRole("menu")).toBeNull();
+  });
+
+  test("fullscreen remains accessible and closes More before toggling", () => {
+    const onToggleFullscreen = vi.fn();
+    const { getFullscreenButton, getMoreButton, queryByRole } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
+
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+    expect(queryByRole("menu")).not.toBeNull();
+    expect(getFullscreenButton()).not.toBeNull();
+
+    act(() => {
+      fireEvent.click(getFullscreenButton());
+    });
+
+    expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+    expect(queryByRole("menu")).toBeNull();
+  });
+
+  test("cinema state changes close More menu", () => {
+    const { getMoreButton, queryByRole, rerenderOverlay } = renderOverlay({ deviceClass: "phone" });
+
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+    expect(queryByRole("menu")).not.toBeNull();
+
+    act(() => {
+      rerenderOverlay({ cinemaModeActive: true });
+    });
+
+    expect(queryByRole("menu")).toBeNull();
+  });
+
+  test("timeline drag closes More menu", () => {
+    const { getMoreButton, queryByRole } = renderOverlay({ deviceClass: "phone" });
+
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+    expect(queryByRole("menu")).not.toBeNull();
+
+    act(() => {
+      fireEvent.pointerDown(document.querySelector(".elvern-timeline__track"), {
+        button: 0,
+        clientX: 10,
+        pointerId: 1,
+      });
+    });
+
+    expect(queryByRole("menu")).toBeNull();
   });
 
   test("phone touch reveal stays visible for five seconds before hiding", () => {
