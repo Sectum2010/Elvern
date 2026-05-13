@@ -245,13 +245,16 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
   });
 
-  test("phone inline minimal renders only the center transport shell", () => {
-    const { centerTransport, getMoreButton, queryByLabelText, root } = renderOverlay({ deviceClass: "phone" });
+  test("phone inline minimal renders only center transport and inline maximize", () => {
+    const onToggleFullscreen = vi.fn();
+    const { centerTransport, getFullscreenButton, getMoreButton, queryByLabelText, root } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
 
     expect(root).toHaveClass("elvern-overlay--variant-phone");
     expect(root).toHaveClass("elvern-overlay--phone");
     expect(root).toHaveClass("elvern-overlay--phone-inline-minimal");
     expect(centerTransport).not.toBeNull();
+    expect(getFullscreenButton()).not.toBeNull();
+    expect(getFullscreenButton()).toHaveClass("elvern-overlay__inline-maximize");
     expect(document.querySelector(".elvern-timeline__track")).toBeNull();
     expect(document.querySelector(".elvern-overlay__bottom-bar")).toBeNull();
     expect(document.querySelector(".elvern-overlay__time-row")).toBeNull();
@@ -259,6 +262,21 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getMoreButton()).toBeNull();
     expect(queryByLabelText("Volume")).toBeNull();
     expect(queryByLabelText("Mute")).toBeNull();
+  });
+
+  test("phone inline maximize calls fullscreen without toggling playback", () => {
+    const onToggleFullscreen = vi.fn();
+    const { getFullscreenButton, pauseMock, playMock, setPlaying } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
+
+    setPlaying();
+    act(() => {
+      fireTouchPointerUp(getFullscreenButton());
+      fireEvent.click(getFullscreenButton());
+    });
+
+    expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+    expect(playMock).not.toHaveBeenCalled();
+    expect(pauseMock).not.toHaveBeenCalled();
   });
 
   test("phone cinema renders full controls again", () => {
@@ -376,13 +394,15 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("phone inline center transport auto-hides after three seconds while playing", () => {
-    const { root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
+    const onToggleFullscreen = vi.fn();
+    const { getFullscreenButton, root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
 
     setPlaying();
     act(() => {
       vi.advanceTimersByTime(3001);
     });
     expect(root).toHaveClass("elvern-overlay--idle");
+    expect(getFullscreenButton()).toHaveClass("elvern-overlay__inline-maximize");
 
     act(() => {
       fireTouchPointerUp(tapSurface);
@@ -414,7 +434,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("second phone background tap hides controls before three seconds", () => {
-    const { root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
+    const onToggleFullscreen = vi.fn();
+    const { getFullscreenButton, root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
 
     setPlaying();
     act(() => {
@@ -422,6 +443,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireTouchPointerUp(tapSurface);
     });
     expect(root).toHaveClass("elvern-overlay--visible");
+    expect(getFullscreenButton()).not.toBeNull();
 
     act(() => {
       fireTouchPointerUp(tapSurface);

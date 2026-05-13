@@ -12226,13 +12226,13 @@ class MobilePlaybackManager:
 
         Phase 2B: native_hls Safari sessions get a server-side sliding window so
         the manifest never exposes more than ``[anchor - 120, anchor + forward]``.
-        This runs inside the heartbeat path. The bump cost is one additional
-        attach_revision per refresh — the existing frontend reattach machinery
-        consumes it. Hls.js sessions are skipped because they prune client-side
-        and a new manifest URL would just churn their MediaSource.
+        This runs inside the heartbeat path. Normal forward window slides update
+        the served manifest bytes and window diagnostics only; they must not bump
+        attach_revision because that remounts native-HLS playback on iOS. Hls.js
+        sessions are skipped because they prune client-side and a new manifest
+        URL would just churn their MediaSource.
         """
         from .route2_native_hls_window import (  # local import: avoid eager dependency at module import time
-            HLS_JS_ENGINE_LABEL,
             WINDOW_ANCHOR_DRIFT_REFRESH_SECONDS,
             WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
             compute_native_hls_window,
@@ -12308,6 +12308,7 @@ class MobilePlaybackManager:
                 bool(desired_tier)
                 and desired_tier != browser_session.last_emitted_window_buffer_tier
             ),
+            active_forward_window_seconds=browser_session.last_emitted_window_forward_seconds,
             edge_runway_seconds=WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
             anchor_drift_seconds=forward_drift_threshold,
         )
@@ -12329,13 +12330,15 @@ class MobilePlaybackManager:
         browser_session.last_emitted_window_buffer_tier = desired_tier
         browser_session.last_emitted_window_reason = str(decision.get("reason") or "slide")
         browser_session.last_emitted_window_revision += 1
-        # Bump the existing attach_revision so the frontend's existing reattach
-        # machinery picks up the fresh manifest URL automatically.
-        self._issue_route2_attach_revision_locked(
-            session,
-            next_revision=browser_session.attach_revision + 1,
-            reason=f"native_hls_window_{decision.get('reason') or 'slide'}",
+        self._log_route2_event(
+            "native_hls_window_slid",
+            session=session,
             epoch=active_epoch,
+            reason=browser_session.last_emitted_window_reason,
+            active_window_revision=browser_session.last_emitted_window_revision,
+            active_window_start_seconds=round(desired_start, 2),
+            active_window_end_seconds=round(desired_end, 2),
+            attach_revision=browser_session.attach_revision,
         )
 
     def _latest_buffer_tier_locked(self, session: MobilePlaybackSession) -> str | None:

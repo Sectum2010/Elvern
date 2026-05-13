@@ -13,6 +13,7 @@ from backend.app.services.route2_native_hls_window import (
     build_active_window_snapshot_fields,
     client_back_buffer_prune_supported,
     compute_native_hls_window,
+    compute_window_edge_refresh_runway,
     compute_window_forward_seconds,
     is_native_hls_engine,
     is_position_in_active_window,
@@ -286,6 +287,50 @@ class TestShouldRefreshNativeHlsWindow:
         assert ok["should_refresh"] is False
         assert edge["should_refresh"] is True
 
+    def test_lite_fast_dynamic_edge_threshold_does_not_fire_at_start(self) -> None:
+        for current in (1, 5, 8):
+            result = should_refresh_native_hls_window(
+                current_position_seconds=current,
+                window_start_seconds=0,
+                window_end_seconds=15,
+                window_anchor_seconds=0,
+                active_forward_window_seconds=15,
+            )
+            assert result["should_refresh"] is False
+
+    def test_lite_fast_dynamic_edge_threshold_fires_near_real_edge(self) -> None:
+        assert compute_window_edge_refresh_runway(15) == pytest.approx(5.25)
+        result = should_refresh_native_hls_window(
+            current_position_seconds=10,
+            window_start_seconds=0,
+            window_end_seconds=15,
+            window_anchor_seconds=0,
+            active_forward_window_seconds=15,
+        )
+        assert result["should_refresh"] is True
+        assert result["reason"] == "approaching_window_end"
+
+    def test_full_bad_condition_dynamic_edge_threshold_is_capped_at_twenty(self) -> None:
+        assert compute_window_edge_refresh_runway(900) == pytest.approx(20.0)
+        not_yet = should_refresh_native_hls_window(
+            current_position_seconds=879,
+            window_start_seconds=0,
+            window_end_seconds=900,
+            window_anchor_seconds=0,
+            active_forward_window_seconds=900,
+            anchor_drift_seconds=1000,
+        )
+        edge = should_refresh_native_hls_window(
+            current_position_seconds=880,
+            window_start_seconds=0,
+            window_end_seconds=900,
+            window_anchor_seconds=0,
+            active_forward_window_seconds=900,
+            anchor_drift_seconds=1000,
+        )
+        assert not_yet["should_refresh"] is False
+        assert edge["should_refresh"] is True
+
 
 class TestBuildActiveWindowSnapshotFields:
     def test_native_hls_session_marks_prune_unsupported(self) -> None:
@@ -459,6 +504,7 @@ class TestRenderRoute2EpochManifestText:
         # hls.js / legacy path: no window passed → playlist starts at segment 0.
         body = render_route2_epoch_manifest_text(**self._common_kwargs())
         assert "#EXT-X-MEDIA-SEQUENCE:0" in body
+        assert "#EXT-X-PLAYLIST-TYPE:EVENT" in body
         assert "segments/0.m4s" in body
         assert "segments/400.m4s" in body
         assert self._segment_uris(body)[0] == "segments/0.m4s"
@@ -474,6 +520,7 @@ class TestRenderRoute2EpochManifestText:
             )
         )
         assert "#EXT-X-MEDIA-SEQUENCE:90" in body
+        assert "#EXT-X-PLAYLIST-TYPE:EVENT" not in body
         assert "segments/90.m4s" in body
         assert "segments/89.m4s" not in body
         assert "segments/0.m4s" not in body

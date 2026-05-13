@@ -47,6 +47,8 @@ NATIVE_HLS_ENGINE_LABEL: Final[str] = "native_hls"
 HLS_JS_ENGINE_LABEL: Final[str] = "hls_js"
 WINDOW_EDGE_REFRESH_RUNWAY_SECONDS: Final[float] = 20.0
 WINDOW_ANCHOR_DRIFT_REFRESH_SECONDS: Final[float] = 10.0
+WINDOW_EDGE_REFRESH_MIN_SECONDS: Final[float] = 4.0
+WINDOW_EDGE_REFRESH_RATIO: Final[float] = 0.35
 
 
 BUFFER_TIER_FORWARD_SECONDS: Final[Mapping[str, float]] = {
@@ -206,6 +208,21 @@ def is_position_in_active_window(
     return start <= position <= max(start, end - safe_headroom)
 
 
+def compute_window_edge_refresh_runway(
+    active_forward_window_seconds: object,
+    *,
+    max_runway_seconds: float = WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
+) -> float:
+    """Return a refresh runway that scales down for short native-HLS windows."""
+    forward = _coerce_finite_seconds(active_forward_window_seconds, fallback=float("nan"))
+    if forward != forward or forward <= 0:
+        return max(0.0, float(max_runway_seconds))
+    return min(
+        max(0.0, float(max_runway_seconds)),
+        max(WINDOW_EDGE_REFRESH_MIN_SECONDS, forward * WINDOW_EDGE_REFRESH_RATIO),
+    )
+
+
 def should_refresh_native_hls_window(
     *,
     current_position_seconds: object,
@@ -214,6 +231,7 @@ def should_refresh_native_hls_window(
     window_anchor_seconds: object = None,
     seek_target_seconds: object = None,
     buffer_tier_changed: bool = False,
+    active_forward_window_seconds: object = None,
     edge_runway_seconds: float = WINDOW_EDGE_REFRESH_RUNWAY_SECONDS,
     anchor_drift_seconds: float = WINDOW_ANCHOR_DRIFT_REFRESH_SECONDS,
 ) -> dict[str, object]:
@@ -247,7 +265,23 @@ def should_refresh_native_hls_window(
             return {"should_refresh": True, "reason": "seek_target_outside_window"}
     if current != current:
         return {"should_refresh": False, "reason": None}
-    if end > start and (end - current) <= max(0.0, float(edge_runway_seconds)):
+    if active_forward_window_seconds is not None:
+        effective_edge_runway = compute_window_edge_refresh_runway(
+            active_forward_window_seconds,
+            max_runway_seconds=edge_runway_seconds,
+        )
+    elif window_anchor_seconds is not None:
+        anchor_for_forward = _coerce_finite_seconds(window_anchor_seconds, fallback=float("nan"))
+        if anchor_for_forward == anchor_for_forward:
+            effective_edge_runway = compute_window_edge_refresh_runway(
+                max(0.0, end - anchor_for_forward),
+                max_runway_seconds=edge_runway_seconds,
+            )
+        else:
+            effective_edge_runway = max(0.0, float(edge_runway_seconds))
+    else:
+        effective_edge_runway = max(0.0, float(edge_runway_seconds))
+    if end > start and (end - current) <= effective_edge_runway:
         return {"should_refresh": True, "reason": "approaching_window_end"}
     if window_anchor_seconds is not None:
         anchor = _coerce_finite_seconds(window_anchor_seconds, fallback=float("nan"))
@@ -391,11 +425,12 @@ def render_route2_epoch_manifest_text(
         "#EXT-X-VERSION:7",
         f"#EXT-X-TARGETDURATION:{math.ceil(safe_segment_duration)}",
         f"#EXT-X-MEDIA-SEQUENCE:{media_sequence}",
-        "#EXT-X-PLAYLIST-TYPE:EVENT",
         "#EXT-X-INDEPENDENT-SEGMENTS",
         f'#EXT-X-MAP:URI="{init_uri}"',
         f"#EXT-X-START:TIME-OFFSET={relative_attach_offset:.3f},PRECISE=YES",
     ]
+    if not use_window:
+        lines.insert(4, "#EXT-X-PLAYLIST-TYPE:EVENT")
     for index in range(first_index, last_index + 1):
         segment_start = epoch_start + index * safe_segment_duration
         remaining = max(0.0, duration - segment_start) if duration > 0 else safe_segment_duration

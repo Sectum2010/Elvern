@@ -210,6 +210,15 @@ describe("recovery and manifest window helpers", () => {
     }), 121);
   });
 
+  test("native HLS reattach at eight seconds resumes from live playhead instead of zero", () => {
+    assert.equal(resolvePlaybackRecoveryTargetSeconds({
+      currentAbsolutePositionSeconds: 8.2,
+      committedPlayheadSeconds: 0,
+      actualMediaElementTimeSeconds: 0,
+      targetPositionSeconds: 0,
+    }), 8.2);
+  });
+
   test("backBufferLength stays an hls.js config field past 120s", () => {
     const hls = { config: buildHlsConfig({ session: { buffer_tier: "full_healthy" }, deviceClass: "desktop" }) };
     retuneHlsInstance(hls, {

@@ -824,12 +824,19 @@ export function useOptimizedPlaybackSession({
     if (!isHlsAttachReady(payload) || !hlsAttachmentNeedsReattach(payload)) {
       return false;
     }
+    const reattachingExistingManifest = Boolean(attachedOptimizedManifestUrlRef.current);
+    const explicitRetargetPending = Boolean(
+      mobileSeekPendingRef.current
+      || payload.pending_target_seconds != null
+    );
     armMobileManifestAttachment(payload, {
       autoplay,
-      targetPosition: resolveHlsAttachPosition(payload),
+      targetPosition: reattachingExistingManifest && !explicitRetargetPending
+        ? resolveLivePlaybackRecoveryTarget(payload)
+        : resolveHlsAttachPosition(payload),
       preserveAuthority: true,
       resetSeekPreparation: true,
-      forceReattach: Boolean(attachedOptimizedManifestUrlRef.current),
+      forceReattach: reattachingExistingManifest,
     });
     return true;
   }

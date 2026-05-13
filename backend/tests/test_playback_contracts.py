@@ -9319,6 +9319,60 @@ def _publish_route2_epoch_dummy_range(epoch: PlaybackEpoch, *, through_segment: 
         (epoch.published_dir / f"segment_{index:06d}.m4s").write_bytes(f"segment-{index}".encode("ascii"))
 
 
+def test_native_hls_lite_fast_window_slides_without_attach_revision_churn(initialized_settings, monkeypatch) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    monkeypatch.setattr(manager, "_latest_buffer_tier_locked", lambda _session: "lite_fast")
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=1)
+    epoch = _make_route2_epoch()
+    browser_session = session.browser_playback
+    browser_session.active_epoch_id = epoch.epoch_id
+    browser_session.epochs[epoch.epoch_id] = epoch
+    browser_session.attach_revision = 1
+    browser_session.client_attach_revision = 1
+    session.selected_hls_engine = "native_hls"
+    session.lifecycle_state = "playing"
+    session.pending_target_seconds = None
+
+    with manager._lock:
+        manager._sessions[session.session_id] = session
+        manager._maybe_advance_native_hls_window_locked(session)
+        original_attach_revision = browser_session.attach_revision
+
+        for current in (1, 5, 8, 10, 16, 22, 30, 32):
+            session.client_current_time_seconds = float(current)
+            manager._maybe_advance_native_hls_window_locked(session)
+
+    assert browser_session.attach_revision == original_attach_revision == 1
+    assert browser_session.last_emitted_window_revision > 1
+    assert browser_session.last_emitted_window_initialized is True
+    assert browser_session.last_emitted_window_end_seconds >= 45.0
+
+
+def test_route2_replacement_promotion_still_bumps_attach_revision(initialized_settings) -> None:
+    manager, _settings = _make_route2_manager(initialized_settings)
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=1)
+    active_epoch = _make_route2_epoch()
+    replacement_epoch = _make_route2_epoch()
+    replacement_epoch.epoch_id = "route2-replacement-epoch"
+    replacement_epoch.attach_position_seconds = 60.0
+    replacement_epoch.target_position_seconds = 60.0
+    replacement_epoch.state = "attach_ready"
+    browser_session = session.browser_playback
+    browser_session.active_epoch_id = active_epoch.epoch_id
+    browser_session.epochs[active_epoch.epoch_id] = active_epoch
+    browser_session.epochs[replacement_epoch.epoch_id] = replacement_epoch
+    browser_session.replacement_epoch_id = replacement_epoch.epoch_id
+    browser_session.attach_revision = 1
+    browser_session.client_attach_revision = 1
+
+    with manager._lock:
+        manager._sessions[session.session_id] = session
+        manager._promote_route2_replacement_epoch_locked(session, replacement_epoch)
+
+    assert browser_session.attach_revision == 2
+    assert browser_session.active_epoch_id == replacement_epoch.epoch_id
+
+
 def test_route2_adaptive_downshift_real_disabled_stays_dry_run_candidate_only(
     initialized_settings,
     monkeypatch,

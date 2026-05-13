@@ -758,6 +758,16 @@ export default function ElvernPlayerOverlay({
     event?.stopPropagation?.();
   }, []);
 
+  const handleInlineMaximizeClick = useCallback((event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    toggleFullscreen();
+  }, [toggleFullscreen]);
+
+  const handleInlineMaximizePointerUp = useCallback((event) => {
+    event?.stopPropagation?.();
+  }, []);
+
   const handlePointerEnter = useCallback((event) => {
     if (event?.pointerType && event.pointerType !== "mouse") {
       return;
@@ -970,6 +980,19 @@ export default function ElvernPlayerOverlay({
       >
         {isPlaying ? <PauseIcon className="elvern-overlay__center-transport-icon" /> : <PlayIcon className="elvern-overlay__center-transport-icon" />}
       </button>
+
+      {phoneInlineMinimal && fullscreenButtonRendered ? (
+        <button
+          aria-label={fullscreenButtonLabel}
+          aria-pressed={fullscreenLikeActive}
+          className="elvern-overlay__inline-maximize"
+          onClick={handleInlineMaximizeClick}
+          onPointerUp={handleInlineMaximizePointerUp}
+          type="button"
+        >
+          <FullscreenEnterIcon className="elvern-overlay__inline-maximize-icon" />
+        </button>
+      ) : null}
 
       {!phoneInlineMinimal && (title || preparing || errorMessage) ? (
         <div className="elvern-overlay__top-bar" aria-hidden={visible ? undefined : true}>

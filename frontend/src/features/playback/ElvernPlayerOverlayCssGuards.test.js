@@ -62,15 +62,18 @@ describe("Elvern player mobile CSS guards", () => {
     const styles = readStyles();
     const tapSurface = cssBlock(styles, ".elvern-overlay__tap-surface");
     const centerTransport = cssBlock(styles, ".elvern-overlay__center-transport");
+    const inlineMaximize = cssBlock(styles, ".elvern-overlay__inline-maximize");
     const bottomBar = cssBlock(styles, ".elvern-overlay__bottom-bar");
     const topBar = cssBlock(styles, ".elvern-overlay__top-bar");
 
     expect(tapSurface).toContain("position: absolute");
     expect(tapSurface).toContain("inset: 0");
     expect(centerTransport).toContain("position: absolute");
+    expect(inlineMaximize).toContain("position: absolute");
     expect(bottomBar).toContain("position: relative");
     expect(topBar).toContain("position: relative");
     expect(numericZIndex(centerTransport)).toBeGreaterThan(numericZIndex(tapSurface));
+    expect(numericZIndex(inlineMaximize)).toBeGreaterThan(numericZIndex(tapSurface));
     expect(numericZIndex(bottomBar)).toBeGreaterThan(numericZIndex(tapSurface));
     expect(numericZIndex(topBar)).toBeGreaterThan(numericZIndex(tapSurface));
   });
@@ -92,6 +95,17 @@ describe("Elvern player mobile CSS guards", () => {
     expect(block).toContain("display: block");
     expect(styles).not.toContain(".elvern-overlay--phone-inline-minimal .elvern-overlay__bottom-bar");
     expect(styles).not.toContain(".elvern-overlay--phone-inline-minimal .elvern-timeline");
+  });
+
+  test("phone inline maximize is safe-area anchored above the tap surface", () => {
+    const styles = readStyles();
+    const block = cssBlock(styles, ".elvern-overlay__inline-maximize");
+
+    expect(block).toContain("top: calc(env(safe-area-inset-top");
+    expect(block).toContain("right: calc(env(safe-area-inset-right");
+    expect(block).toContain("width: 2.75rem");
+    expect(block).toContain("height: 2.75rem");
+    expect(numericZIndex(block)).toBeGreaterThan(1);
   });
 
   test("phone More menu is a popover, not a fullscreen-blocking fixed sheet", () => {
