@@ -5259,6 +5259,8 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-overlay {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   z-index: 5;
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -5273,26 +5275,27 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   opacity: 0;
 }
 
-.elvern-overlay--variant-desktop.elvern-overlay--idle,
-.elvern-overlay--variant-desktop.elvern-overlay--idle .elvern-overlay__surface {
+.elvern-overlay--desktop.elvern-overlay--idle,
+.elvern-overlay--desktop.elvern-overlay--idle .elvern-overlay__tap-surface {
   cursor: none;
 }
 
 .elvern-overlay--idle .elvern-overlay__top-bar,
-.elvern-overlay--idle .elvern-overlay__bottom-bar {
+.elvern-overlay--idle .elvern-overlay__bottom-bar,
+.elvern-overlay--idle .elvern-overlay__center-transport {
   pointer-events: none;
 }
 
 .elvern-overlay--visible .elvern-overlay__top-bar,
 .elvern-overlay--visible .elvern-overlay__bottom-bar,
-.elvern-overlay--visible .elvern-overlay__surface {
+.elvern-overlay--visible .elvern-overlay__center-transport,
+.elvern-overlay--visible .elvern-overlay__tap-surface {
   pointer-events: auto;
 }
 
-.elvern-overlay__surface {
-  grid-row: 1 / span 3;
-  grid-column: 1;
-  position: relative;
+.elvern-overlay__tap-surface {
+  position: absolute;
+  inset: 0;
   z-index: 1;
   appearance: none;
   background: transparent;
@@ -5303,42 +5306,48 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   height: 100%;
   cursor: pointer;
   pointer-events: auto;
-  display: grid;
-  place-items: center;
   outline: none;
   color: inherit;
 }
 
-.elvern-overlay__surface:focus-visible {
-  outline: 2px solid rgba(248, 250, 252, 0.65);
-  outline-offset: -6px;
-}
-
-.elvern-overlay__surface-hint {
+.elvern-overlay__center-transport {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 3;
   display: grid;
   place-items: center;
   width: 4.4rem;
   height: 4.4rem;
+  padding: 0;
+  appearance: none;
   border-radius: 999px;
   background: rgba(15, 15, 35, 0.55);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.12);
+  color: inherit;
+  cursor: pointer;
   opacity: 0;
-  transform: scale(0.92);
+  transform: translate(-50%, -50%) scale(0.92);
   transition: opacity 180ms ease, transform 180ms ease;
 }
 
-.elvern-overlay--visible .elvern-overlay__surface-hint {
-  opacity: 0.92;
-  transform: scale(1);
+.elvern-overlay__center-transport:focus-visible {
+  outline: 2px solid rgba(248, 250, 252, 0.65);
+  outline-offset: 4px;
 }
 
-.elvern-overlay--idle .elvern-overlay__surface-hint {
+.elvern-overlay--visible .elvern-overlay__center-transport {
+  opacity: 0.92;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.elvern-overlay--idle .elvern-overlay__center-transport {
   opacity: 0;
 }
 
-.elvern-overlay__surface-icon {
+.elvern-overlay__center-transport-icon {
   width: 2rem;
   height: 2rem;
 }
@@ -5724,22 +5733,22 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__time-row {
+.elvern-overlay--phone .elvern-overlay__time-row {
   font-size: 0.74rem;
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__icon {
+.elvern-overlay--phone .elvern-overlay__icon {
   width: 1.2rem;
   height: 1.2rem;
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__icon-button {
+.elvern-overlay--phone .elvern-overlay__icon-button {
   min-width: 40px;
   min-height: 40px;
   padding: 0.25rem 0.4rem;
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__bottom-bar {
+.elvern-overlay--phone .elvern-overlay__bottom-bar {
   position: absolute;
   left: max(0.55rem, env(safe-area-inset-left, 0px));
   right: max(0.55rem, env(safe-area-inset-right, 0px));
@@ -5750,23 +5759,23 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.54) 72%, rgba(0, 0, 0, 0) 100%);
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__controls-row {
+.elvern-overlay--phone .elvern-overlay__controls-row {
   gap: 0.2rem;
   flex-wrap: nowrap;
   justify-content: space-between;
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__surface-hint {
+.elvern-overlay--phone .elvern-overlay__center-transport {
   width: 3.4rem;
   height: 3.4rem;
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__surface-icon {
+.elvern-overlay--phone .elvern-overlay__center-transport-icon {
   width: 1.6rem;
   height: 1.6rem;
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__top-bar {
+.elvern-overlay--phone .elvern-overlay__top-bar {
   padding: max(0.6rem, env(safe-area-inset-top)) max(0.7rem, env(safe-area-inset-right)) 0.55rem max(0.7rem, env(safe-area-inset-left));
 }
 
@@ -5805,7 +5814,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   padding-bottom: 0.65rem;
 }
 
-.elvern-overlay--variant-phone .elvern-overlay__menu--sheet {
+.elvern-overlay--phone .elvern-overlay__menu--sheet {
   position: absolute;
   bottom: calc(100% + 0.45rem);
   left: auto;
@@ -5819,7 +5828,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   z-index: 6;
 }
 
-.elvern-overlay--variant-tablet .elvern-overlay__icon-button {
+.elvern-overlay--tablet .elvern-overlay__icon-button {
   min-width: 42px;
   min-height: 42px;
 }
@@ -5903,7 +5912,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 @media (prefers-reduced-motion: reduce) {
   .elvern-overlay,
   .elvern-overlay__icon-button,
-  .elvern-overlay__surface-hint,
+  .elvern-overlay__center-transport,
   .elvern-timeline__playhead {
     transition: none;
   }

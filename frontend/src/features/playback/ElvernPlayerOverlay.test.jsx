@@ -101,7 +101,8 @@ function renderOverlay({
     playMock,
     rerenderOverlay,
     root: view.container.querySelector(".elvern-overlay"),
-    surface: view.container.querySelector(".elvern-overlay__surface"),
+    centerTransport: view.container.querySelector(".elvern-overlay__center-transport"),
+    tapSurface: view.container.querySelector(".elvern-overlay__tap-surface"),
     video,
     setPlaying() {
       paused = false;
@@ -160,12 +161,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(root).toHaveClass("elvern-overlay--idle");
   });
 
-  test("center surface focus does not pin the controls visible while playing", () => {
-    const { root, setPlaying, surface } = renderOverlay();
+  test("background tap surface focus does not pin the controls visible while playing", () => {
+    const { root, setPlaying, tapSurface } = renderOverlay();
 
     setPlaying();
     act(() => {
-      surface.focus();
+      tapSurface.focus();
       vi.advanceTimersByTime(ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS + 1);
     });
 
@@ -212,22 +213,22 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("repeated space keydown does not toggle playback repeatedly", () => {
-    const { playMock, surface } = renderOverlay();
+    const { centerTransport, playMock } = renderOverlay();
 
     act(() => {
-      fireEvent.keyDown(surface, { key: " ", code: "Space" });
-      fireEvent.keyDown(surface, { key: " ", code: "Space", repeat: true });
+      fireEvent.keyDown(centerTransport, { key: " ", code: "Space" });
+      fireEvent.keyDown(centerTransport, { key: " ", code: "Space", repeat: true });
     });
 
     expect(playMock).toHaveBeenCalledTimes(1);
   });
 
   test("space pauses while playing", () => {
-    const { pauseMock, setPlaying, surface } = renderOverlay();
+    const { centerTransport, pauseMock, setPlaying } = renderOverlay();
 
     setPlaying();
     act(() => {
-      fireEvent.keyDown(surface, { key: " ", code: "Space" });
+      fireEvent.keyDown(centerTransport, { key: " ", code: "Space" });
     });
 
     expect(pauseMock).toHaveBeenCalledTimes(1);
@@ -255,7 +256,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("opening More then tapping player surface closes More without toggling playback", () => {
-    const { getMoreButton, pauseMock, queryByRole, setPlaying, surface } = renderOverlay({ deviceClass: "phone" });
+    const { getMoreButton, pauseMock, queryByRole, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
 
     setPlaying();
     act(() => {
@@ -264,8 +265,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(queryByRole("menu")).not.toBeNull();
 
     act(() => {
-      fireTouchPointerUp(surface);
-      fireEvent.click(surface);
+      fireTouchPointerUp(tapSurface);
+      fireEvent.click(tapSurface);
     });
 
     expect(queryByRole("menu")).toBeNull();
@@ -355,7 +356,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("phone touch reveal stays visible for five seconds before hiding", () => {
-    const { root, setPlaying, surface } = renderOverlay({ deviceClass: "phone" });
+    const { root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
 
     setPlaying();
     act(() => {
@@ -364,7 +365,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(root).toHaveClass("elvern-overlay--idle");
 
     act(() => {
-      fireTouchPointerUp(surface);
+      fireTouchPointerUp(tapSurface);
     });
     expect(root).toHaveClass("elvern-overlay--visible");
 
@@ -380,12 +381,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("touch pointer leave does not immediately hide phone controls", () => {
-    const { root, setPlaying, surface } = renderOverlay({ deviceClass: "phone" });
+    const { root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
 
     setPlaying();
     act(() => {
       vi.advanceTimersByTime(5001);
-      fireTouchPointerUp(surface);
+      fireTouchPointerUp(tapSurface);
       firePointerOut(root, "touch");
     });
 
@@ -393,19 +394,96 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("second phone background tap hides controls before five seconds", () => {
-    const { root, setPlaying, surface } = renderOverlay({ deviceClass: "phone" });
+    const { root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
 
     setPlaying();
     act(() => {
       vi.advanceTimersByTime(5001);
-      fireTouchPointerUp(surface);
+      fireTouchPointerUp(tapSurface);
     });
     expect(root).toHaveClass("elvern-overlay--visible");
 
     act(() => {
-      fireTouchPointerUp(surface);
+      fireTouchPointerUp(tapSurface);
     });
     expect(root).toHaveClass("elvern-overlay--idle");
+  });
+
+  test("phone center transport pauses while controls are visible", () => {
+    const { centerTransport, pauseMock, setPlaying } = renderOverlay({ deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      fireTouchPointerUp(centerTransport);
+      fireEvent.click(centerTransport);
+    });
+
+    expect(pauseMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("phone center transport plays when paused", () => {
+    const { centerTransport, playMock } = renderOverlay({ deviceClass: "phone" });
+
+    act(() => {
+      fireTouchPointerUp(centerTransport);
+      fireEvent.click(centerTransport);
+    });
+
+    expect(playMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("phone visible background tap hides controls without pausing", () => {
+    const { pauseMock, root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      fireTouchPointerUp(tapSurface);
+    });
+
+    expect(root).toHaveClass("elvern-overlay--idle");
+    expect(pauseMock).not.toHaveBeenCalled();
+  });
+
+  test("phone hidden background tap reveals controls without pausing", () => {
+    const { pauseMock, root, setPlaying, tapSurface } = renderOverlay({ deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      vi.advanceTimersByTime(5001);
+    });
+    expect(root).toHaveClass("elvern-overlay--idle");
+
+    act(() => {
+      fireTouchPointerUp(tapSurface);
+    });
+
+    expect(root).toHaveClass("elvern-overlay--visible");
+    expect(pauseMock).not.toHaveBeenCalled();
+  });
+
+  test("center transport click does not run the background tap handler", () => {
+    const { centerTransport, pauseMock, root, setPlaying } = renderOverlay({ deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      fireTouchPointerUp(centerTransport);
+      fireEvent.click(centerTransport);
+    });
+
+    expect(pauseMock).toHaveBeenCalledTimes(1);
+    expect(root).toHaveClass("elvern-overlay--visible");
+  });
+
+  test("cinema phone center transport still toggles playback", () => {
+    const { centerTransport, pauseMock, setPlaying } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      fireTouchPointerUp(centerTransport);
+      fireEvent.click(centerTransport);
+    });
+
+    expect(pauseMock).toHaveBeenCalledTimes(1);
   });
 
   test("desktop mouse leave still hides controls", () => {

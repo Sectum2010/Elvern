@@ -60,20 +60,24 @@ describe("Elvern player mobile CSS guards", () => {
 
   test("real controls stack above the full-surface tap target", () => {
     const styles = readStyles();
-    const surface = cssBlock(styles, ".elvern-overlay__surface");
+    const tapSurface = cssBlock(styles, ".elvern-overlay__tap-surface");
+    const centerTransport = cssBlock(styles, ".elvern-overlay__center-transport");
     const bottomBar = cssBlock(styles, ".elvern-overlay__bottom-bar");
     const topBar = cssBlock(styles, ".elvern-overlay__top-bar");
 
-    expect(surface).toContain("position: relative");
+    expect(tapSurface).toContain("position: absolute");
+    expect(tapSurface).toContain("inset: 0");
+    expect(centerTransport).toContain("position: absolute");
     expect(bottomBar).toContain("position: relative");
     expect(topBar).toContain("position: relative");
-    expect(numericZIndex(bottomBar)).toBeGreaterThan(numericZIndex(surface));
-    expect(numericZIndex(topBar)).toBeGreaterThan(numericZIndex(surface));
+    expect(numericZIndex(centerTransport)).toBeGreaterThan(numericZIndex(tapSurface));
+    expect(numericZIndex(bottomBar)).toBeGreaterThan(numericZIndex(tapSurface));
+    expect(numericZIndex(topBar)).toBeGreaterThan(numericZIndex(tapSurface));
   });
 
   test("phone bottom controls are explicitly anchored to the player bottom", () => {
     const styles = readStyles();
-    const block = cssBlock(styles, ".elvern-overlay--variant-phone .elvern-overlay__bottom-bar");
+    const block = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__bottom-bar");
 
     expect(block).toContain("position: absolute");
     expect(block).toContain("left:");
@@ -83,12 +87,39 @@ describe("Elvern player mobile CSS guards", () => {
 
   test("phone More menu is a popover, not a fullscreen-blocking fixed sheet", () => {
     const styles = readStyles();
-    const block = cssBlock(styles, ".elvern-overlay--variant-phone .elvern-overlay__menu--sheet");
+    const block = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__menu--sheet");
 
     expect(block).toContain("position: absolute");
     expect(block).toContain("bottom: calc(100% + 0.45rem)");
     expect(block).not.toContain("position: fixed");
     expect(block).not.toContain("width: 100%");
+  });
+
+  test("overlay root and split tap/transport layers fill the player shell", () => {
+    const styles = readStyles();
+    const root = cssBlock(styles, ".elvern-overlay");
+    const tapSurface = cssBlock(styles, ".elvern-overlay__tap-surface");
+    const centerTransport = cssBlock(styles, ".elvern-overlay__center-transport");
+
+    expect(root).toContain("position: absolute");
+    expect(root).toContain("inset: 0");
+    expect(root).toContain("width: 100%");
+    expect(root).toContain("height: 100%");
+    expect(tapSurface).toContain("position: absolute");
+    expect(tapSurface).toContain("inset: 0");
+    expect(tapSurface).toContain("width: 100%");
+    expect(tapSurface).toContain("height: 100%");
+    expect(centerTransport).toContain("position: absolute");
+    expect(centerTransport).toContain("left: 50%");
+    expect(centerTransport).toContain("top: 50%");
+    expect(centerTransport).toContain("transform: translate(-50%, -50%)");
+  });
+
+  test("phone transport no longer depends on the old surface-hint hit target", () => {
+    const styles = readStyles();
+
+    expect(styles).not.toContain(".elvern-overlay__surface-hint");
+    expect(styles).not.toContain(".elvern-overlay__surface ");
   });
 
   test("phone fullscreen selectors override the phone inline shell specificity", () => {

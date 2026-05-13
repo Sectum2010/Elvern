@@ -244,7 +244,7 @@ export default function ElvernPlayerOverlay({
   const idleTimerRef = useRef(null);
   const overlayRootRef = useRef(null);
   const lastPointerFocusAtRef = useRef(0);
-  const lastTouchSurfacePointerAtRef = useRef(0);
+  const lastTouchTapSurfacePointerAtRef = useRef(0);
 
   const safeDuration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
   const touchOptimizedOverlay = layoutCapabilities.variant === "phone" || layoutCapabilities.variant === "tablet";
@@ -666,43 +666,37 @@ export default function ElvernPlayerOverlay({
     refreshControlsTimer();
   }, [closeAllMenus, onToggleFullscreen, refreshControlsTimer, shellRef]);
 
-  const handleSurfaceClick = useCallback((event) => {
+  const handleTapSurfaceClick = useCallback((event) => {
     if (isAnyMenuOpen) {
       closeAllMenus();
       refreshControlsTimer();
       return;
     }
+    const pointerType = readPointerType(event);
+    const handledTouchRecently = Date.now() - lastTouchTapSurfacePointerAtRef.current < 700;
+    if (pointerType === "touch" || pointerType === "pen" || handledTouchRecently) {
+      return;
+    }
     if (event?.detail === 0) {
-      // Synthetic click triggered by keyboard or screen reader; treat as a play toggle.
       togglePlay();
       return;
     }
-    const pointerType = readPointerType(event);
-    const handledTouchRecently = Date.now() - lastTouchSurfacePointerAtRef.current < 700;
-    if ((pointerType === "touch" || pointerType === "pen" || handledTouchRecently) && isPlaying) {
-      return;
-    }
     togglePlay();
-  }, [closeAllMenus, isAnyMenuOpen, isPlaying, refreshControlsTimer, togglePlay]);
+  }, [closeAllMenus, isAnyMenuOpen, refreshControlsTimer, togglePlay]);
 
-  const handleSurfacePointerUp = useCallback((event) => {
+  const handleTapSurfacePointerUp = useCallback((event) => {
     const pointerType = readPointerType(event);
     if (pointerType !== "touch" && pointerType !== "pen") {
       return;
     }
-    lastTouchSurfacePointerAtRef.current = Date.now();
+    lastTouchTapSurfacePointerAtRef.current = Date.now();
     if (isAnyMenuOpen) {
       closeAllMenus();
       refreshControlsTimer();
       return;
     }
     if (!isPlaying) {
-      togglePlay();
-      return;
-    }
-    const tappedCenterTransport = Boolean(event?.target?.closest?.(".elvern-overlay__surface-hint"));
-    if (controlsVisibleRef.current && tappedCenterTransport) {
-      togglePlay();
+      refreshControlsTimer();
       return;
     }
     if (controlsVisibleRef.current) {
@@ -714,7 +708,18 @@ export default function ElvernPlayerOverlay({
       return;
     }
     refreshControlsTimer();
-  }, [closeAllMenus, isAnyMenuOpen, isPlaying, refreshControlsTimer, setControlsVisibleValue, togglePlay]);
+  }, [closeAllMenus, isAnyMenuOpen, isPlaying, refreshControlsTimer, setControlsVisibleValue]);
+
+  const handleCenterTransportClick = useCallback((event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    closeAllMenus();
+    togglePlay();
+  }, [closeAllMenus, togglePlay]);
+
+  const handleCenterTransportPointerUp = useCallback((event) => {
+    event?.stopPropagation?.();
+  }, []);
 
   const handlePointerEnter = useCallback((event) => {
     if (event?.pointerType && event.pointerType !== "mouse") {
@@ -775,7 +780,7 @@ export default function ElvernPlayerOverlay({
   }, [controlsFocused, isAnyMenuOpen, isDraggingTimeline, isPlaying, preparing, setControlsVisibleValue]);
 
   const handleFocusCapture = useCallback((event) => {
-    if (event?.target?.closest?.(".elvern-overlay__surface")) {
+    if (event?.target?.closest?.(".elvern-overlay__tap-surface")) {
       setControlsFocused(false);
       refreshControlsTimer();
       return;
@@ -910,15 +915,22 @@ export default function ElvernPlayerOverlay({
       onBlurCapture={handleBlurCapture}
     >
       <button
+        aria-label={visible ? "Hide playback controls" : "Show playback controls"}
+        className="elvern-overlay__tap-surface"
+        onClick={handleTapSurfaceClick}
+        onPointerUp={handleTapSurfacePointerUp}
+        tabIndex={-1}
+        type="button"
+      />
+
+      <button
         aria-label={isPlaying ? "Pause" : "Play"}
-        className="elvern-overlay__surface"
-        onClick={handleSurfaceClick}
-        onPointerUp={handleSurfacePointerUp}
+        className="elvern-overlay__center-transport"
+        onClick={handleCenterTransportClick}
+        onPointerUp={handleCenterTransportPointerUp}
         type="button"
       >
-        <span className="elvern-overlay__surface-hint" aria-hidden="true">
-          {isPlaying ? <PauseIcon className="elvern-overlay__surface-icon" /> : <PlayIcon className="elvern-overlay__surface-icon" />}
-        </span>
+        {isPlaying ? <PauseIcon className="elvern-overlay__center-transport-icon" /> : <PlayIcon className="elvern-overlay__center-transport-icon" />}
       </button>
 
       {title || preparing || errorMessage ? (
