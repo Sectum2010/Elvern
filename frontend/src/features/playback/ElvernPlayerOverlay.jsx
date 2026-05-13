@@ -27,7 +27,7 @@ import ElvernTimeline from "./ElvernTimeline.jsx";
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const SUPPORTS_DOCUMENT = typeof document !== "undefined";
 const TOUCH_OVERLAY_IDLE_HIDE_DELAY_MS = 5000;
-const PHONE_INLINE_MINIMAL_HIDE_DELAY_MS = 3000;
+const PHONE_OVERLAY_IDLE_HIDE_DELAY_MS = 3000;
 
 function readPointerType(event) {
   return event?.pointerType || event?.nativeEvent?.pointerType || "";
@@ -257,15 +257,17 @@ export default function ElvernPlayerOverlay({
   const overlayRootRef = useRef(null);
   const lastPointerFocusAtRef = useRef(0);
   const lastTouchTapSurfacePointerAtRef = useRef(0);
+  const ignoreNextTapSurfaceClickRef = useRef(false);
 
   const safeDuration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
   const fullscreenLikeActive = fullscreenActive || cinemaModeActive;
   const phoneInlineMinimal = layoutCapabilities.variant === "phone" && !fullscreenLikeActive;
+  const phoneFullscreenCinema = layoutCapabilities.variant === "phone" && fullscreenLikeActive;
   const currentVideoFitMode = videoFitMode === "fill" ? "fill" : "fit";
   const videoFitToggleAvailable = fullscreenLikeActive && typeof onVideoFitModeChange === "function";
   const touchOptimizedOverlay = layoutCapabilities.variant === "phone" || layoutCapabilities.variant === "tablet";
-  const idleHideDelayMs = phoneInlineMinimal
-    ? PHONE_INLINE_MINIMAL_HIDE_DELAY_MS
+  const idleHideDelayMs = layoutCapabilities.variant === "phone"
+    ? PHONE_OVERLAY_IDLE_HIDE_DELAY_MS
     : (touchOptimizedOverlay
       ? TOUCH_OVERLAY_IDLE_HIDE_DELAY_MS
       : ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS);
@@ -291,6 +293,14 @@ export default function ElvernPlayerOverlay({
       closeAllMenus();
     }
   }, [closeAllMenus]);
+
+  const hideControlsNow = useCallback(() => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+    setControlsVisibleValue(false);
+  }, [setControlsVisibleValue]);
 
   const refreshControlsTimer = useCallback(() => {
     setControlsVisibleValue(true);
@@ -703,6 +713,12 @@ export default function ElvernPlayerOverlay({
 
   const handleTapSurfaceClick = useCallback((event) => {
     const pointerType = readPointerType(event);
+    if (ignoreNextTapSurfaceClickRef.current) {
+      ignoreNextTapSurfaceClickRef.current = false;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      return;
+    }
     const handledTouchRecently = Date.now() - lastTouchTapSurfacePointerAtRef.current < 700;
     if (isAnyMenuOpen) {
       closeAllMenus();
@@ -714,11 +730,19 @@ export default function ElvernPlayerOverlay({
     }
     if (phoneInlineMinimal) {
       if (controlsVisibleRef.current) {
-        if (idleTimerRef.current) {
-          clearTimeout(idleTimerRef.current);
-          idleTimerRef.current = null;
-        }
-        setControlsVisibleValue(false);
+        hideControlsNow();
+        return;
+      }
+      refreshControlsTimer();
+      return;
+    }
+    if (phoneFullscreenCinema) {
+      if (!isPlaying) {
+        refreshControlsTimer();
+        return;
+      }
+      if (controlsVisibleRef.current) {
+        hideControlsNow();
         return;
       }
       refreshControlsTimer();
@@ -729,7 +753,16 @@ export default function ElvernPlayerOverlay({
       return;
     }
     togglePlay();
-  }, [closeAllMenus, isAnyMenuOpen, phoneInlineMinimal, refreshControlsTimer, setControlsVisibleValue, togglePlay]);
+  }, [
+    closeAllMenus,
+    hideControlsNow,
+    isAnyMenuOpen,
+    isPlaying,
+    phoneFullscreenCinema,
+    phoneInlineMinimal,
+    refreshControlsTimer,
+    togglePlay,
+  ]);
 
   const handleTapSurfacePointerUp = useCallback((event) => {
     const pointerType = readPointerType(event);
@@ -737,6 +770,7 @@ export default function ElvernPlayerOverlay({
       return;
     }
     lastTouchTapSurfacePointerAtRef.current = Date.now();
+    ignoreNextTapSurfaceClickRef.current = true;
     if (isAnyMenuOpen) {
       closeAllMenus();
       refreshControlsTimer();
@@ -744,11 +778,19 @@ export default function ElvernPlayerOverlay({
     }
     if (phoneInlineMinimal) {
       if (controlsVisibleRef.current) {
-        if (idleTimerRef.current) {
-          clearTimeout(idleTimerRef.current);
-          idleTimerRef.current = null;
-        }
-        setControlsVisibleValue(false);
+        hideControlsNow();
+        return;
+      }
+      refreshControlsTimer();
+      return;
+    }
+    if (phoneFullscreenCinema) {
+      if (!isPlaying) {
+        refreshControlsTimer();
+        return;
+      }
+      if (controlsVisibleRef.current) {
+        hideControlsNow();
         return;
       }
       refreshControlsTimer();
@@ -759,15 +801,19 @@ export default function ElvernPlayerOverlay({
       return;
     }
     if (controlsVisibleRef.current) {
-      if (idleTimerRef.current) {
-        clearTimeout(idleTimerRef.current);
-        idleTimerRef.current = null;
-      }
-      setControlsVisibleValue(false);
+      hideControlsNow();
       return;
     }
     refreshControlsTimer();
-  }, [closeAllMenus, isAnyMenuOpen, isPlaying, phoneInlineMinimal, refreshControlsTimer, setControlsVisibleValue]);
+  }, [
+    closeAllMenus,
+    hideControlsNow,
+    isAnyMenuOpen,
+    isPlaying,
+    phoneFullscreenCinema,
+    phoneInlineMinimal,
+    refreshControlsTimer,
+  ]);
 
   const handleCenterTransportClick = useCallback((event) => {
     event?.preventDefault?.();

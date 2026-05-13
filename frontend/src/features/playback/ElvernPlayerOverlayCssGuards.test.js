@@ -97,12 +97,14 @@ describe("Elvern player mobile CSS guards", () => {
     expect(styles).not.toContain(".elvern-overlay--phone-inline-minimal .elvern-timeline");
   });
 
-  test("phone inline maximize is safe-area anchored above the tap surface", () => {
+  test("phone inline maximize is card-corner anchored above the tap surface", () => {
     const styles = readStyles();
     const block = cssBlock(styles, ".elvern-overlay__inline-maximize");
 
-    expect(block).toContain("top: calc(env(safe-area-inset-top");
-    expect(block).toContain("right: calc(env(safe-area-inset-right");
+    expect(block).toContain("top: 0.3rem");
+    expect(block).toContain("right: 0.3rem");
+    expect(block).not.toContain("env(safe-area-inset-top");
+    expect(block).not.toContain("env(safe-area-inset-right");
     expect(block).toContain("width: 44px");
     expect(block).toContain("height: 44px");
     expect(numericZIndex(block)).toBeGreaterThan(1);
@@ -136,6 +138,42 @@ describe("Elvern player mobile CSS guards", () => {
     expect(fitBlock).toContain("object-fit: contain");
     expect(fillBlock).toContain("object-fit: cover");
     expect(phoneFillBlock).toContain("object-fit: cover");
+  });
+
+  test("phone fullscreen bottom bar does not paint a panel over the movie", () => {
+    const styles = readStyles();
+    const block = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__bottom-bar",
+    );
+
+    expect(block).toContain("background: transparent");
+    expect(block).toContain("backdrop-filter: none");
+    expect(block).not.toContain("linear-gradient");
+  });
+
+  test("phone fullscreen shell locks touch panning", () => {
+    const styles = readStyles();
+    const shellBlock = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover",
+    );
+    const surfaceBlock = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .player-fullscreen-surface",
+    );
+    const fillBlock = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-custom.player-shell--video-fit-fill .player",
+    );
+
+    expect(shellBlock).toContain("position: fixed");
+    expect(shellBlock).toContain("overflow: hidden");
+    expect(shellBlock).toContain("overscroll-behavior: none");
+    expect(shellBlock).toContain("touch-action: none");
+    expect(surfaceBlock).toContain("touch-action: none");
+    expect(fillBlock).toContain("object-fit: cover");
+    expect(fillBlock).toContain("transform: none");
   });
 
   test("phone More menu is a popover, not a fullscreen-blocking fixed sheet", () => {

@@ -650,6 +650,23 @@ export function DetailPage() {
     persistVideoFitMode(elvernVideoFitMode);
   }, [elvernVideoFitMode]);
 
+  useEffect(() => {
+    const shell = playerShellRef.current;
+    const fullscreenGestureLockActive = macAppFullscreenActive || elvernCinemaModeActive;
+    if (!fullscreenGestureLockActive || !shell?.classList?.contains("player-shell--elvern-custom")) {
+      return undefined;
+    }
+    const preventViewportPan = (event) => {
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+    };
+    shell.addEventListener("touchmove", preventViewportPan, { passive: false });
+    return () => {
+      shell.removeEventListener("touchmove", preventViewportPan);
+    };
+  }, [macAppFullscreenActive, elvernCinemaModeActive]);
+
   const {
     videoRef,
     mobilePendingTargetRef,
@@ -2525,6 +2542,7 @@ export function DetailPage() {
     macAppFullscreenActive ? "player-shell--app-fullscreen-active" : "",
     elvernCinemaTakeoverActive ? "player-shell--cinema-takeover" : "",
   ].filter(Boolean).join(" ");
+
   const desktopSeekPosition = Math.max(
     0,
     Math.min(

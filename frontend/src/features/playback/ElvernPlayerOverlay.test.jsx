@@ -310,6 +310,21 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(queryByLabelText("Mute")).toBeNull();
   });
 
+  test("phone cinema controls auto-hide after three seconds while playing", () => {
+    const { root, setPlaying } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      vi.advanceTimersByTime(2999);
+    });
+    expect(root).toHaveClass("elvern-overlay--visible");
+
+    act(() => {
+      vi.advanceTimersByTime(2);
+    });
+    expect(root).toHaveClass("elvern-overlay--idle");
+  });
+
   test("preparing state does not render blocking player-shell prep text", () => {
     const { queryByText, container } = renderOverlay({
       cinemaModeActive: true,
@@ -383,6 +398,49 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
     expect(queryByRole("menu")).toBeNull();
     expect(pauseMock).not.toHaveBeenCalled();
+  });
+
+  test("phone cinema visible background tap hides controls without pausing", () => {
+    const { pauseMock, root, setPlaying, tapSurface } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    setPlaying();
+    expect(root).toHaveClass("elvern-overlay--visible");
+
+    act(() => {
+      fireTouchPointerUp(tapSurface);
+    });
+
+    expect(root).toHaveClass("elvern-overlay--idle");
+    expect(pauseMock).not.toHaveBeenCalled();
+  });
+
+  test("phone cinema hidden background tap reveals controls without pausing", () => {
+    const { pauseMock, root, setPlaying, tapSurface } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      vi.advanceTimersByTime(3001);
+    });
+    expect(root).toHaveClass("elvern-overlay--idle");
+
+    act(() => {
+      fireTouchPointerUp(tapSurface);
+    });
+
+    expect(root).toHaveClass("elvern-overlay--visible");
+    expect(pauseMock).not.toHaveBeenCalled();
+  });
+
+  test("phone cinema synthetic click after touch hide does not flash controls back on", () => {
+    const { root, setPlaying, tapSurface } = renderOverlay({ cinemaModeActive: true, deviceClass: "phone" });
+
+    setPlaying();
+    act(() => {
+      fireTouchPointerUp(tapSurface);
+      fireEvent.click(tapSurface);
+    });
+
+    expect(root).toHaveClass("elvern-overlay--idle");
   });
 
   test("opening More then tapping outside the player closes More", () => {
