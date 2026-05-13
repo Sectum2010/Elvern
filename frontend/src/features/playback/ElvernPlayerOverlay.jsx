@@ -95,6 +95,15 @@ function FullscreenExitIcon({ className }) {
   );
 }
 
+function InlineExpandIcon({ className }) {
+  return (
+    <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+      <path d="M8.5 15.5 4.5 19.5M4.5 15.5v4h4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.15" />
+      <path d="M15.5 8.5 19.5 4.5M15.5 4.5h4v4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.15" />
+    </svg>
+  );
+}
+
 function PipIcon({ className }) {
   return (
     <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
@@ -217,6 +226,8 @@ export default function ElvernPlayerOverlay({
   fallbackFullscreenButtonLabel = null,
   cinemaModeActive = false,
   onToggleFullscreen = null,
+  videoFitMode = "fit",
+  onVideoFitModeChange = null,
   deviceClass = "desktop",
 }) {
   const layoutCapabilities = useMemo(() => resolveOverlayLayoutCapabilities(deviceClass), [deviceClass]);
@@ -250,6 +261,8 @@ export default function ElvernPlayerOverlay({
   const safeDuration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
   const fullscreenLikeActive = fullscreenActive || cinemaModeActive;
   const phoneInlineMinimal = layoutCapabilities.variant === "phone" && !fullscreenLikeActive;
+  const currentVideoFitMode = videoFitMode === "fill" ? "fill" : "fit";
+  const videoFitToggleAvailable = fullscreenLikeActive && typeof onVideoFitModeChange === "function";
   const touchOptimizedOverlay = layoutCapabilities.variant === "phone" || layoutCapabilities.variant === "tablet";
   const idleHideDelayMs = phoneInlineMinimal
     ? PHONE_INLINE_MINIMAL_HIDE_DELAY_MS
@@ -653,6 +666,15 @@ export default function ElvernPlayerOverlay({
     refreshControlsTimer();
   }, [closeAllMenus, refreshControlsTimer, videoRef]);
 
+  const handleVideoFitModeToggle = useCallback(() => {
+    if (typeof onVideoFitModeChange !== "function") {
+      return;
+    }
+    onVideoFitModeChange(currentVideoFitMode === "fill" ? "fit" : "fill");
+    closeAllMenus();
+    refreshControlsTimer();
+  }, [closeAllMenus, currentVideoFitMode, onVideoFitModeChange, refreshControlsTimer]);
+
   const toggleFullscreen = useCallback(async () => {
     closeAllMenus();
     if (typeof onToggleFullscreen === "function") {
@@ -933,6 +955,9 @@ export default function ElvernPlayerOverlay({
     if (!layoutCapabilities.showInlineMuteToggle) {
       items.push("mute");
     }
+    if (videoFitToggleAvailable) {
+      items.push("video-fit");
+    }
     return items;
   }, [
     audioMenuAvailable,
@@ -944,6 +969,7 @@ export default function ElvernPlayerOverlay({
     layoutCapabilities.showInlineSpeed,
     layoutCapabilities.useMoreMenu,
     pipAvailable,
+    videoFitToggleAvailable,
   ]);
 
   const moreButtonAvailable = !phoneInlineMinimal && moreMenuItems.length > 0;
@@ -990,25 +1016,14 @@ export default function ElvernPlayerOverlay({
           onPointerUp={handleInlineMaximizePointerUp}
           type="button"
         >
-          <FullscreenEnterIcon className="elvern-overlay__inline-maximize-icon" />
+          <InlineExpandIcon className="elvern-overlay__inline-maximize-icon" />
         </button>
       ) : null}
 
-      {!phoneInlineMinimal && (title || preparing || errorMessage) ? (
+      {!phoneInlineMinimal && (title || errorMessage) ? (
         <div className="elvern-overlay__top-bar" aria-hidden={visible ? undefined : true}>
           {title ? <span className="elvern-overlay__title">{title}</span> : null}
           {errorMessage ? <span className="elvern-overlay__error">{errorMessage}</span> : null}
-        </div>
-      ) : null}
-
-      {!phoneInlineMinimal && preparing ? (
-        <div className="elvern-overlay__preparing" role="status" aria-live="polite">
-          <span className="elvern-overlay__preparing-spinner" aria-hidden="true" />
-          <span className="elvern-overlay__preparing-text">
-            {preparingMessage || (preparingTargetSeconds != null
-              ? `Preparing ${formatPlaybackTime(preparingTargetSeconds)}`
-              : "Preparing selected position")}
-          </span>
         </div>
       ) : null}
 
@@ -1229,6 +1244,20 @@ export default function ElvernPlayerOverlay({
                           {isMuted ? <VolumeMuteIcon className="elvern-overlay__icon" /> : <VolumeOnIcon className="elvern-overlay__icon" />}
                         </span>
                         <span>{isMuted ? "Unmute" : "Mute"}</span>
+                      </button>
+                    ) : null}
+                    {moreMenuItems.includes("video-fit") ? (
+                      <button
+                        aria-pressed={currentVideoFitMode === "fill"}
+                        className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                        onClick={handleVideoFitModeToggle}
+                        role="menuitem"
+                        type="button"
+                      >
+                        <span className="elvern-overlay__menu-item-icon">
+                          <InlineExpandIcon className="elvern-overlay__icon" />
+                        </span>
+                        <span>{currentVideoFitMode === "fill" ? "Fit screen" : "Fill screen"}</span>
                       </button>
                     ) : null}
                     {moreMenuItems.includes("speed") ? (

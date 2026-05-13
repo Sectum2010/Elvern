@@ -8,6 +8,10 @@ function renderOverlay({
   cinemaModeActive = false,
   deviceClass = "desktop",
   onToggleFullscreen = null,
+  onVideoFitModeChange = null,
+  preparing = false,
+  preparingMessage = "",
+  videoFitMode = "fit",
   videoElementKey = 0,
 } = {}) {
   const video = document.createElement("video");
@@ -67,7 +71,11 @@ function renderOverlay({
     deviceClass,
     onSeekCommit: () => {},
     onToggleFullscreen,
+    onVideoFitModeChange,
+    preparing,
+    preparingMessage,
     shellRef: { current: shell },
+    videoFitMode,
     videoElementKey,
     videoRef: { current: video },
     ...overrides,
@@ -264,6 +272,15 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(queryByLabelText("Mute")).toBeNull();
   });
 
+  test("phone inline maximize uses the chrome-free dedicated button class", () => {
+    const onToggleFullscreen = vi.fn();
+    const { getFullscreenButton } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
+
+    expect(getFullscreenButton()).toHaveClass("elvern-overlay__inline-maximize");
+    expect(getFullscreenButton()).not.toHaveClass("elvern-overlay__icon-button");
+    expect(getFullscreenButton().querySelector(".elvern-overlay__inline-maximize-icon")).not.toBeNull();
+  });
+
   test("phone inline maximize calls fullscreen without toggling playback", () => {
     const onToggleFullscreen = vi.fn();
     const { getFullscreenButton, pauseMock, playMock, setPlaying } = renderOverlay({ deviceClass: "phone", onToggleFullscreen });
@@ -291,6 +308,63 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getMoreButton()).not.toBeNull();
     expect(queryByLabelText("Volume")).toBeNull();
     expect(queryByLabelText("Mute")).toBeNull();
+  });
+
+  test("preparing state does not render blocking player-shell prep text", () => {
+    const { queryByText, container } = renderOverlay({
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      preparing: true,
+      preparingMessage: "Elvern is still preparing enough playback",
+    });
+
+    expect(container.querySelector(".elvern-overlay__preparing")).toBeNull();
+    expect(queryByText(/Elvern is preparing playback/i)).toBeNull();
+    expect(queryByText(/still preparing enough playback/i)).toBeNull();
+  });
+
+  test("fullscreen More menu exposes fit/fill toggle", () => {
+    const onVideoFitModeChange = vi.fn();
+    const { getMoreButton, queryByRole } = renderOverlay({
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onVideoFitModeChange,
+    });
+
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+
+    const fillButton = queryByRole("menuitem", { name: /Fill screen/i });
+    expect(fillButton).not.toBeNull();
+
+    act(() => {
+      fireEvent.click(fillButton);
+    });
+
+    expect(onVideoFitModeChange).toHaveBeenCalledWith("fill");
+  });
+
+  test("fill mode survives overlay rerender and offers fit action", () => {
+    const onVideoFitModeChange = vi.fn();
+    const { getMoreButton, queryByRole, rerenderOverlay } = renderOverlay({
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onVideoFitModeChange,
+      videoFitMode: "fill",
+    });
+
+    rerenderOverlay({
+      cinemaModeActive: true,
+      onVideoFitModeChange,
+      videoElementKey: 1,
+      videoFitMode: "fill",
+    });
+    act(() => {
+      fireEvent.click(getMoreButton());
+    });
+
+    expect(queryByRole("menuitem", { name: /Fit screen/i })).not.toBeNull();
   });
 
   test("opening More then tapping player surface closes More without toggling playback", () => {

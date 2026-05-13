@@ -28,6 +28,12 @@ import {
 } from "../lib/libraryNavigation";
 import { resolveBrowserPlaybackPlayerViewState } from "../lib/browserPlaybackPlayerState";
 import { resolveAuthoritativeBrowserPlaybackResumePosition } from "../lib/browserPlaybackResume";
+import {
+  deriveVideoFitModeFromPinch,
+  measureTouchDistance,
+  persistVideoFitMode,
+  readStoredVideoFitMode,
+} from "../lib/playerFitMode";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
@@ -471,8 +477,10 @@ export function DetailPage() {
   const [macAppFullscreenActive, setMacAppFullscreenActive] = useState(false);
   const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
   const [elvernCinemaModeActive, setElvernCinemaModeActive] = useState(false);
+  const [elvernVideoFitMode, setElvernVideoFitMode] = useState(() => readStoredVideoFitMode());
   const useNativeControlsFallback = false;
   const playerShellRef = useRef(null);
+  const playerFitPinchRef = useRef(null);
   const desktopSeekCommitPendingRef = useRef(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
@@ -637,6 +645,10 @@ export function DetailPage() {
       body?.classList.remove(className);
     };
   }, [macAppFullscreenActive, elvernCinemaModeActive]);
+
+  useEffect(() => {
+    persistVideoFitMode(elvernVideoFitMode);
+  }, [elvernVideoFitMode]);
 
   const {
     videoRef,
@@ -2503,10 +2515,12 @@ export function DetailPage() {
   const elvernEffectiveVideoControls = useElvernCustomShell ? false : videoControlsEnabled;
   const elvernHideMacAppFullscreenButton = useElvernCustomShell;
   const elvernCinemaTakeoverActive = useElvernCustomShell && elvernCinemaModeActive && !macAppFullscreenActive;
+  const elvernShellVideoFitMode = macAppFullscreenActive || elvernCinemaTakeoverActive ? elvernVideoFitMode : "fit";
   const playerShellClassName = [
     "player-shell",
     useElvernCustomShell ? "player-shell--elvern-custom" : "",
     useElvernCustomShell ? `player-shell--elvern-${clientDeviceClass}` : "",
+    useElvernCustomShell ? `player-shell--video-fit-${elvernShellVideoFitMode}` : "",
     showMacAppFullscreenControl ? "player-shell--app-fullscreen" : "",
     macAppFullscreenActive ? "player-shell--app-fullscreen-active" : "",
     elvernCinemaTakeoverActive ? "player-shell--cinema-takeover" : "",
@@ -2678,6 +2692,54 @@ export function DetailPage() {
       setElvernCinemaModeActive(true);
     } catch (fullscreenError) {
       setElvernCinemaModeActive(true);
+    }
+  }
+
+  function handleElvernPlayerTouchStart(event) {
+    if (!useElvernCustomShell || !(macAppFullscreenActive || elvernCinemaTakeoverActive)) {
+      playerFitPinchRef.current = null;
+      return;
+    }
+    const distance = measureTouchDistance(event.touches);
+    if (distance == null) {
+      playerFitPinchRef.current = null;
+      return;
+    }
+    event.preventDefault();
+    playerFitPinchRef.current = {
+      startDistance: distance,
+      mode: elvernVideoFitMode,
+    };
+  }
+
+  function handleElvernPlayerTouchMove(event) {
+    const pinch = playerFitPinchRef.current;
+    if (!pinch || !useElvernCustomShell || !(macAppFullscreenActive || elvernCinemaTakeoverActive)) {
+      return;
+    }
+    const distance = measureTouchDistance(event.touches);
+    if (distance == null) {
+      return;
+    }
+    event.preventDefault();
+    const nextMode = deriveVideoFitModeFromPinch({
+      startDistance: pinch.startDistance,
+      currentDistance: distance,
+      currentMode: pinch.mode,
+    });
+    if (nextMode === pinch.mode) {
+      return;
+    }
+    setElvernVideoFitMode(nextMode);
+    playerFitPinchRef.current = {
+      startDistance: distance,
+      mode: nextMode,
+    };
+  }
+
+  function handleElvernPlayerTouchEnd(event) {
+    if (!event.touches || event.touches.length < 2) {
+      playerFitPinchRef.current = null;
     }
   }
 
@@ -3253,7 +3315,14 @@ export function DetailPage() {
         </div>
 
         {showPlayerShell ? (
-          <div className={playerShellClassName} ref={playerShellRef}>
+          <div
+            className={playerShellClassName}
+            onTouchCancel={handleElvernPlayerTouchEnd}
+            onTouchEnd={handleElvernPlayerTouchEnd}
+            onTouchMove={handleElvernPlayerTouchMove}
+            onTouchStart={handleElvernPlayerTouchStart}
+            ref={playerShellRef}
+          >
             <div className="player-fullscreen-surface">
               {mobileFrozenFrameUrl && (mobileRetargetTransitionRef.current || !mobilePlayerCanPlay) ? (
                 <img
@@ -3285,12 +3354,14 @@ export function DetailPage() {
                   errorMessage={playbackError || ""}
                   onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}
                   onToggleFullscreen={toggleElvernPlayerFullscreen}
+                  onVideoFitModeChange={setElvernVideoFitMode}
                   preparing={elvernOverlayPreparing}
                   preparingMessage={seekNotice || ""}
                   preparingTargetSeconds={elvernOverlayPreparingTargetSeconds}
                   sessionPayload={elvernOverlaySessionPayload}
                   shellRef={playerShellRef}
                   videoElementKey={videoElementKey}
+                  videoFitMode={elvernVideoFitMode}
                   videoRef={videoRef}
                 />
               ) : null}

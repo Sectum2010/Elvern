@@ -103,9 +103,39 @@ describe("Elvern player mobile CSS guards", () => {
 
     expect(block).toContain("top: calc(env(safe-area-inset-top");
     expect(block).toContain("right: calc(env(safe-area-inset-right");
-    expect(block).toContain("width: 2.75rem");
-    expect(block).toContain("height: 2.75rem");
+    expect(block).toContain("width: 44px");
+    expect(block).toContain("height: 44px");
     expect(numericZIndex(block)).toBeGreaterThan(1);
+  });
+
+  test("phone inline maximize has invisible visual chrome", () => {
+    const styles = readStyles();
+    const block = cssBlock(styles, ".elvern-overlay__inline-maximize");
+
+    expect(block).toContain("border: 0");
+    expect(block).toContain("background: transparent");
+    expect(block).not.toContain("backdrop-filter");
+    expect(block).not.toContain("border-radius");
+  });
+
+  test("fit and fill modes control video object-fit", () => {
+    const styles = readStyles();
+    const fitBlock = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-custom.player-shell--video-fit-fit .player",
+    );
+    const fillBlock = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-custom.player-shell--video-fit-fill .player",
+    );
+    const phoneFillBlock = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--elvern-phone.player-shell--elvern-custom.player-shell--video-fit-fill.player-shell--cinema-takeover .player",
+    );
+
+    expect(fitBlock).toContain("object-fit: contain");
+    expect(fillBlock).toContain("object-fit: cover");
+    expect(phoneFillBlock).toContain("object-fit: cover");
   });
 
   test("phone More menu is a popover, not a fullscreen-blocking fixed sheet", () => {
