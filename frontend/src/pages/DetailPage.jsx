@@ -2506,6 +2506,7 @@ export function DetailPage() {
   const playerShellClassName = [
     "player-shell",
     useElvernCustomShell ? "player-shell--elvern-custom" : "",
+    useElvernCustomShell ? `player-shell--elvern-${clientDeviceClass}` : "",
     showMacAppFullscreenControl ? "player-shell--app-fullscreen" : "",
     macAppFullscreenActive ? "player-shell--app-fullscreen-active" : "",
     elvernCinemaTakeoverActive ? "player-shell--cinema-takeover" : "",

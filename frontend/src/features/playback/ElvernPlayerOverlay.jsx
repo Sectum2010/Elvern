@@ -26,6 +26,21 @@ import ElvernTimeline from "./ElvernTimeline.jsx";
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const SUPPORTS_DOCUMENT = typeof document !== "undefined";
+const TOUCH_OVERLAY_IDLE_HIDE_DELAY_MS = 5000;
+
+function readPointerType(event) {
+  return event?.pointerType || event?.nativeEvent?.pointerType || "";
+}
+
+function isSpaceKey(event) {
+  return event?.key === " " || event?.key === "Spacebar" || event?.code === "Space";
+}
+
+function consumeKeyboardEvent(event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  event?.nativeEvent?.stopImmediatePropagation?.();
+}
 
 function PlayIcon({ className }) {
   return (
@@ -224,12 +239,18 @@ export default function ElvernPlayerOverlay({
   const [controlsFocused, setControlsFocused] = useState(false);
   const [isDraggingTimeline, setIsDraggingTimeline] = useState(false);
 
+  const controlsVisibleRef = useRef(true);
   const lastSampledAbsoluteRef = useRef(null);
   const idleTimerRef = useRef(null);
   const overlayRootRef = useRef(null);
   const lastPointerFocusAtRef = useRef(0);
+  const lastTouchSurfacePointerAtRef = useRef(0);
 
   const safeDuration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 0;
+  const touchOptimizedOverlay = layoutCapabilities.variant === "phone" || layoutCapabilities.variant === "tablet";
+  const idleHideDelayMs = touchOptimizedOverlay
+    ? TOUCH_OVERLAY_IDLE_HIDE_DELAY_MS
+    : ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS;
 
   const isAnyMenuOpen = showSpeedMenu || showCaptionsMenu || showAudioMenu || showMoreMenu;
   const closeAllMenus = useCallback(() => {
@@ -245,8 +266,13 @@ export default function ElvernPlayerOverlay({
 
   const fullscreenApiAvailable = isFullscreenApiAvailable(shellRef?.current || null);
 
+  const setControlsVisibleValue = useCallback((nextValue) => {
+    controlsVisibleRef.current = nextValue;
+    setControlsVisible(nextValue);
+  }, []);
+
   const refreshControlsTimer = useCallback(() => {
-    setControlsVisible(true);
+    setControlsVisibleValue(true);
     if (idleTimerRef.current) {
       clearTimeout(idleTimerRef.current);
       idleTimerRef.current = null;
@@ -255,15 +281,17 @@ export default function ElvernPlayerOverlay({
       return;
     }
     idleTimerRef.current = setTimeout(() => {
-      setControlsVisible(false);
+      setControlsVisibleValue(false);
       idleTimerRef.current = null;
-    }, ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS);
+    }, idleHideDelayMs);
   }, [
     controlsFocused,
+    idleHideDelayMs,
     isAnyMenuOpen,
     isDraggingTimeline,
     isPlaying,
     preparing,
+    setControlsVisibleValue,
   ]);
 
   useEffect(() => {
@@ -607,15 +635,39 @@ export default function ElvernPlayerOverlay({
       togglePlay();
       return;
     }
-    const pointerType = event?.nativeEvent?.pointerType;
-    if ((pointerType === "touch" || pointerType === "pen") && !controlsVisible && isPlaying) {
-      // First tap on a hidden touch overlay reveals controls; visible taps use
-      // the center transport button.
-      refreshControlsTimer();
+    const pointerType = readPointerType(event);
+    const handledTouchRecently = Date.now() - lastTouchSurfacePointerAtRef.current < 700;
+    if ((pointerType === "touch" || pointerType === "pen" || handledTouchRecently) && isPlaying) {
       return;
     }
     togglePlay();
-  }, [controlsVisible, isPlaying, refreshControlsTimer, togglePlay]);
+  }, [isPlaying, togglePlay]);
+
+  const handleSurfacePointerUp = useCallback((event) => {
+    const pointerType = readPointerType(event);
+    if (pointerType !== "touch" && pointerType !== "pen") {
+      return;
+    }
+    lastTouchSurfacePointerAtRef.current = Date.now();
+    if (!isPlaying) {
+      togglePlay();
+      return;
+    }
+    const tappedCenterTransport = Boolean(event?.target?.closest?.(".elvern-overlay__surface-hint"));
+    if (controlsVisibleRef.current && tappedCenterTransport) {
+      togglePlay();
+      return;
+    }
+    if (controlsVisibleRef.current) {
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = null;
+      }
+      setControlsVisibleValue(false);
+      return;
+    }
+    refreshControlsTimer();
+  }, [isPlaying, refreshControlsTimer, setControlsVisibleValue, togglePlay]);
 
   const handlePointerEnter = useCallback((event) => {
     if (event?.pointerType && event.pointerType !== "mouse") {
@@ -632,14 +684,21 @@ export default function ElvernPlayerOverlay({
   const handleKeyDownCapture = useCallback((event) => {
     if (event?.key === "Tab") {
       lastPointerFocusAtRef.current = 0;
+      return;
+    }
+    if (isSpaceKey(event)) {
+      consumeKeyboardEvent(event);
+      if (!event.repeat) {
+        togglePlay();
+      }
+    }
+  }, [togglePlay]);
+
+  const handleKeyUpCapture = useCallback((event) => {
+    if (isSpaceKey(event)) {
+      consumeKeyboardEvent(event);
     }
   }, []);
-
-  const handleTouchStart = useCallback(() => {
-    if (isPlaying && !controlsVisible) {
-      refreshControlsTimer();
-    }
-  }, [controlsVisible, isPlaying, refreshControlsTimer]);
 
   const handlePointerMove = useCallback((event) => {
     if (event?.pointerType && event.pointerType !== "mouse") {
@@ -648,7 +707,10 @@ export default function ElvernPlayerOverlay({
     refreshControlsTimer();
   }, [refreshControlsTimer]);
 
-  const handlePointerLeave = useCallback(() => {
+  const handlePointerLeave = useCallback((event) => {
+    if (readPointerType(event) && readPointerType(event) !== "mouse") {
+      return;
+    }
     if (!isPlaying || preparing || isDraggingTimeline || isAnyMenuOpen || controlsFocused) {
       return;
     }
@@ -656,8 +718,8 @@ export default function ElvernPlayerOverlay({
       clearTimeout(idleTimerRef.current);
       idleTimerRef.current = null;
     }
-    setControlsVisible(false);
-  }, [controlsFocused, isAnyMenuOpen, isDraggingTimeline, isPlaying, preparing]);
+    setControlsVisibleValue(false);
+  }, [controlsFocused, isAnyMenuOpen, isDraggingTimeline, isPlaying, preparing, setControlsVisibleValue]);
 
   const handleFocusCapture = useCallback((event) => {
     if (event?.target?.closest?.(".elvern-overlay__surface")) {
@@ -702,15 +764,15 @@ export default function ElvernPlayerOverlay({
 
   useEffect(() => {
     if (!isPlaying) {
-      setControlsVisible(true);
+      setControlsVisibleValue(true);
     }
-  }, [isPlaying]);
+  }, [isPlaying, setControlsVisibleValue]);
 
   useEffect(() => {
     if (preparing || errorMessage) {
-      setControlsVisible(true);
+      setControlsVisibleValue(true);
     }
-  }, [errorMessage, preparing]);
+  }, [errorMessage, preparing, setControlsVisibleValue]);
 
   const visible = shouldOverlayBeVisible({
     isPlaying,
@@ -719,9 +781,9 @@ export default function ElvernPlayerOverlay({
     isDraggingTimeline,
     anyMenuOpen: isAnyMenuOpen,
     controlsFocused,
-    lastInteractionAtMs: controlsVisible ? 0 : -(ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS + 1),
+    lastInteractionAtMs: controlsVisible ? 0 : -(idleHideDelayMs + 1),
     nowMs: 0,
-    idleHideDelayMs: ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS,
+    idleHideDelayMs,
   });
 
   const visibilityClass = visible ? " elvern-overlay--visible" : " elvern-overlay--idle";
@@ -786,14 +848,15 @@ export default function ElvernPlayerOverlay({
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
       onKeyDownCapture={handleKeyDownCapture}
+      onKeyUpCapture={handleKeyUpCapture}
       onFocusCapture={handleFocusCapture}
       onBlurCapture={handleBlurCapture}
-      onTouchStart={handleTouchStart}
     >
       <button
         aria-label={isPlaying ? "Pause" : "Play"}
         className="elvern-overlay__surface"
         onClick={handleSurfaceClick}
+        onPointerUp={handleSurfacePointerUp}
         type="button"
       >
         <span className="elvern-overlay__surface-hint" aria-hidden="true">

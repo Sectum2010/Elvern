@@ -134,6 +134,35 @@ Keep `frontend/src/lib/platformDetection.test.js` and `frontend/src/lib/playback
 - iPad must not receive Mac-only fullscreen/absolute scrub UI.
 - iPhone/mobile/cellular must not receive desktop-only scrub UI.
 
+## iPhone Custom Player Inline Layout / Tap Interception
+
+### Status
+Fixed with CSS regression guards.
+
+### Affected Platforms
+iPhone browser/PWA custom player on the default movie detail page, especially inline non-fullscreen mode.
+
+### Symptoms
+Inline iPhone playback could show the progress bar around the middle of the player instead of anchored to the bottom. In fullscreen the visual layout could look closer to correct, but taps on controls could flash the overlay instead of activating the button.
+
+### Real Root Cause
+The phone inline player surface relied on `height: 100%` inside an aspect-ratio shell. Mobile Safari can treat that percentage height as non-definite, so the absolute overlay anchored to the wrong box. Separately, the transparent full-surface tap target lived in the same grid as the real controls and could stack above them, intercepting taps meant for the timeline/fullscreen/buttons.
+
+### Correct Fix
+For phone inline custom playback, make `player-fullscreen-surface` absolutely fill the 16:9 shell (`position: absolute; inset: 0`) instead of relying on percentage height. Stack real overlay controls above the transparent tap target with explicit positioned z-index rules. Keep fullscreen/cinema selectors specific enough to override the inline 16:9 shell.
+
+### Regression Guards
+Keep `frontend/src/features/playback/ElvernPlayerOverlayCssGuards.test.js`. It checks that:
+
+- Phone inline surface uses absolute inset fill, not `height: 100%`.
+- Top and bottom controls stack above the full-surface tap target.
+- Phone fullscreen selectors use `100dvh` and override the inline shell.
+
+### Do Not Regress
+- Do not reuse desktop player controls or desktop hit-target assumptions for iPhone.
+- Do not let the transparent surface button sit above real controls.
+- Do not rely on percentage-height sizing for the iPhone inline player surface.
+
 ## Logout Active Playback Warning
 
 ### Status
@@ -241,3 +270,49 @@ Keep tests that verify:
 - Do not make unbounded Google Drive media requests for large cloud files from playback/proxy validation, including explicit `bytes=N-` client ranges.
 - Do not log access tokens, refresh tokens, cookies, signed URLs, or full private provider URLs.
 - Do not hide cloud provider/source errors as server busy or generic playback failures.
+
+## Custom Browser Player Overlay Auto-Hide Regression
+
+### Status
+Fixed.
+
+### Affected Platforms
+Lite and Full browser playback on desktop/laptop, tablet, and phone when Elvern's custom player overlay is active.
+
+### Symptoms
+The duplicate lower-left play/pause button was visible beside the volume controls. After removing it, the control bar could still remain visible forever while video was playing. On touch devices, a tap could reveal the controls only for a moment, making the buttons nearly impossible to use. On desktop/laptop, the buttons could hide while the mouse cursor remained visible over the movie. Later live testing also showed Space could activate the focused fullscreen/minimize button instead of toggling playback, and iPhone fullscreen/cinema sizing could push controls into an unusable flash loop.
+
+### Wrong Or Incomplete Hypotheses
+Treating this as only a CSS opacity problem was incomplete. Treating the helper's pure visibility calculation as proof of live behavior was also incomplete, because the live component can be pinned visible by focus state, stale video bindings, and native video controls.
+
+### Evidence That Identified The Real Cause
+Live testing showed the controls stayed visible after the duplicate button was removed. The component was passing fake time values into the visibility helper, pointer-created focus was treated like keyboard focus, and the keyed `<video>` element can be replaced without changing the ref object. A mobile warmup path could also set `video.controls = true`, which conflicts with the custom overlay.
+
+### Real Root Cause
+The custom overlay visibility state was not tied tightly enough to real runtime state. Pointer/touch focus could pin `controlsFocused`, the overlay did not explicitly rebind when the keyed video node changed, native controls were not forcibly disabled by the custom overlay, and touch taps shared the desktop hide timer instead of using a touch-friendly reveal window. Space was not owned by the player overlay, so it could bubble into the focused fullscreen button's native activation path. Touch `pointerleave` was also treated like mouse leave, allowing iOS touch/fullscreen transitions to hide controls immediately after reveal. A later generic fullscreen CSS rule could override the phone-specific `100dvh` sizing with `100vh`.
+
+### Correct Fix
+Remove the redundant lower-left transport button and let the volume controls lead the bottom row. Keep keyboard focus accessible, but do not let pointer-created focus pin controls visible. Rebind overlay listeners when `videoElementKey` changes. Force native controls off while the custom overlay is mounted. Use a five-second touch reveal timer for phone/tablet; a second background tap before the timer ends hides controls immediately. Hide the desktop/laptop cursor when the overlay is idle. Capture Space in the custom overlay for play/pause so fullscreen/minimize remains Escape-or-button only. Ignore non-mouse pointer leave for auto-hide. Keep phone custom player sizing scoped to the shell and preserve `100dvh` in fullscreen/cinema mode.
+
+### Regression Guards
+Keep tests that verify:
+
+- Playing custom overlay auto-hides after the idle delay.
+- Center-surface focus does not pin controls visible.
+- Pointer-created control focus does not pin controls visible.
+- Native video controls are disabled while the custom overlay is active.
+- Phone touch reveal remains visible for five seconds.
+- Touch pointer leave does not immediately hide phone controls.
+- A second phone background tap hides controls before five seconds.
+- Space toggles play/pause without activating the focused fullscreen button.
+- Desktop mouse leave still hides controls.
+
+### Do Not Regress
+- Do not reintroduce a lower-left play/pause button in the bottom control row.
+- Do not use pointer-created focus as a permanent visibility reason.
+- Do not treat helper-unit tests as enough proof for live overlay behavior.
+- Do not let iOS/mobile warmup paths leave native browser controls enabled under the custom overlay.
+- Do not use the short desktop idle delay for phone/tablet touch controls.
+- Do not let Space activate fullscreen/minimize while the custom overlay owns playback.
+- Do not let touch/pen pointer leave hide phone/tablet controls.
+- Do not reintroduce `100vh` overrides that defeat phone `100dvh` fullscreen/cinema sizing.

@@ -377,10 +377,12 @@ def render_route2_epoch_manifest_text(
             window_end_seconds=window_end_seconds,
         )
         first_index = int(slice_result["first_segment_index"])
+        last_index = int(slice_result["last_segment_index"])
         media_sequence = int(slice_result["media_sequence_number"])
         first_segment_start = float(slice_result["first_segment_start_seconds"])
     else:
         first_index = 0
+        last_index = safe_end_segment
         media_sequence = 0
         first_segment_start = epoch_start
     relative_attach_offset = max(0.0, attach_abs - first_segment_start)
@@ -394,7 +396,7 @@ def render_route2_epoch_manifest_text(
         f'#EXT-X-MAP:URI="{init_uri}"',
         f"#EXT-X-START:TIME-OFFSET={relative_attach_offset:.3f},PRECISE=YES",
     ]
-    for index in range(first_index, safe_end_segment + 1):
+    for index in range(first_index, last_index + 1):
         segment_start = epoch_start + index * safe_segment_duration
         remaining = max(0.0, duration - segment_start) if duration > 0 else safe_segment_duration
         seg_extinf = min(safe_segment_duration, remaining) if duration > 0 else safe_segment_duration

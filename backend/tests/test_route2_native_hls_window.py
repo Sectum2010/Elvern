@@ -452,12 +452,17 @@ class TestRenderRoute2EpochManifestText:
         kwargs.update(overrides)
         return kwargs
 
+    def _segment_uris(self, body: str) -> list[str]:
+        return [line for line in body.splitlines() if line.startswith("segments/")]
+
     def test_no_window_emits_full_playlist_from_segment_zero(self) -> None:
         # hls.js / legacy path: no window passed → playlist starts at segment 0.
         body = render_route2_epoch_manifest_text(**self._common_kwargs())
         assert "#EXT-X-MEDIA-SEQUENCE:0" in body
         assert "segments/0.m4s" in body
         assert "segments/400.m4s" in body
+        assert self._segment_uris(body)[0] == "segments/0.m4s"
+        assert self._segment_uris(body)[-1] == "segments/400.m4s"
         assert body.startswith("#EXTM3U\n#EXT-X-VERSION:7\n")
 
     def test_window_180_to_420_excludes_pre_180_segments(self) -> None:
@@ -472,6 +477,43 @@ class TestRenderRoute2EpochManifestText:
         assert "segments/90.m4s" in body
         assert "segments/89.m4s" not in body
         assert "segments/0.m4s" not in body
+
+    def test_window_180_to_420_excludes_segments_after_window_end(self) -> None:
+        # Segment 209 spans 418→420 and is the final segment intersecting the active window.
+        body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(
+                window_start_seconds=180.0,
+                window_end_seconds=420.0,
+            )
+        )
+        segment_uris = self._segment_uris(body)
+        assert segment_uris[0] == "segments/90.m4s"
+        assert segment_uris[-1] == "segments/209.m4s"
+        assert "segments/210.m4s" not in segment_uris
+        assert "segments/400.m4s" not in segment_uris
+
+    def test_window_manifest_includes_neither_old_nor_future_segments(self) -> None:
+        body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(
+                window_start_seconds=180.0,
+                window_end_seconds=420.0,
+            )
+        )
+        segment_uris = self._segment_uris(body)
+        segment_indices = [int(uri.removeprefix("segments/").removesuffix(".m4s")) for uri in segment_uris]
+        assert min(segment_indices) == 90
+        assert max(segment_indices) == 209
+        assert all(90 <= index <= 209 for index in segment_indices)
+
+    def test_media_sequence_still_equals_first_included_segment(self) -> None:
+        body = render_route2_epoch_manifest_text(
+            **self._common_kwargs(
+                window_start_seconds=180.0,
+                window_end_seconds=420.0,
+            )
+        )
+        assert "#EXT-X-MEDIA-SEQUENCE:90" in body
+        assert self._segment_uris(body)[0] == "segments/90.m4s"
 
     def test_window_emits_relative_time_offset(self) -> None:
         # Attach point 300s, first segment in window starts at 180s.

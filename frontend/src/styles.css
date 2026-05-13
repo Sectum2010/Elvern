@@ -5203,6 +5203,30 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   overflow: hidden;
 }
 
+.player-shell--elvern-phone.player-shell--elvern-custom:not(.player-shell--cinema-takeover) {
+  min-height: 0;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom:not(.player-shell--cinema-takeover) .player-fullscreen-surface {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  aspect-ratio: auto;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom:not(.player-shell--cinema-takeover) .player {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+
 .player-shell--cinema-takeover {
   position: fixed;
   inset: 0;
@@ -5249,6 +5273,11 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   opacity: 0;
 }
 
+.elvern-overlay--variant-desktop.elvern-overlay--idle,
+.elvern-overlay--variant-desktop.elvern-overlay--idle .elvern-overlay__surface {
+  cursor: none;
+}
+
 .elvern-overlay--idle .elvern-overlay__top-bar,
 .elvern-overlay--idle .elvern-overlay__bottom-bar {
   pointer-events: none;
@@ -5263,6 +5292,8 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-overlay__surface {
   grid-row: 1 / span 3;
   grid-column: 1;
+  position: relative;
+  z-index: 1;
   appearance: none;
   background: transparent;
   border: 0;
@@ -5315,6 +5346,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-overlay__top-bar {
   grid-row: 1;
   grid-column: 1;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -5323,7 +5355,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   background: linear-gradient(180deg, rgba(0, 0, 0, 0.62) 0%, rgba(0, 0, 0, 0) 100%);
   pointer-events: none;
   transition: opacity 220ms ease;
-  z-index: 2;
+  z-index: 4;
 }
 
 .elvern-overlay__title {
@@ -5346,6 +5378,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-overlay__preparing {
   grid-row: 2;
   grid-column: 1;
+  position: relative;
   align-self: center;
   justify-self: center;
   display: flex;
@@ -5360,7 +5393,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   font-size: 0.85rem;
   font-weight: 500;
   pointer-events: none;
-  z-index: 3;
+  z-index: 5;
 }
 
 .elvern-overlay__preparing-spinner {
@@ -5380,12 +5413,13 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-overlay__bottom-bar {
   grid-row: 3;
   grid-column: 1;
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
   padding: 0.5rem max(1rem, env(safe-area-inset-right)) max(0.85rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.78) 0%, rgba(0, 0, 0, 0) 100%);
-  z-index: 2;
+  z-index: 4;
 }
 
 .elvern-overlay__time-row {
@@ -5541,7 +5575,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
-  z-index: 4;
+  z-index: 6;
   pointer-events: auto;
 }
 
@@ -5730,6 +5764,40 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   padding: max(0.6rem, env(safe-area-inset-top)) max(0.7rem, env(safe-area-inset-right)) 0.55rem max(0.7rem, env(safe-area-inset-left));
 }
 
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover,
+.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen,
+.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen {
+  height: 100dvh;
+  min-height: 100dvh;
+  aspect-ratio: auto;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .player-fullscreen-surface,
+.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .player-fullscreen-surface,
+.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .player-fullscreen-surface {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .player,
+.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .player,
+.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .player {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+
+.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__bottom-bar,
+.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__bottom-bar,
+.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__bottom-bar {
+  padding-bottom: max(0.95rem, calc(env(safe-area-inset-bottom) + 0.65rem));
+}
+
 .elvern-overlay--variant-phone .elvern-overlay__menu--sheet {
   position: fixed;
   bottom: 0;
@@ -5839,5 +5907,6 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 }
 
 .elvern-player-fullscreen-active .player-shell--cinema-takeover {
-  height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
 }
