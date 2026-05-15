@@ -179,9 +179,23 @@ describe("Elvern player mobile CSS guards", () => {
   test("phone track menus use readable row layout", () => {
     const styles = readStyles();
     const menuBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-menu");
+    const sheetBlock = cssBlock(styles, ".elvern-overlay__track-sheet");
+    const sheetScrollBlock = cssBlock(styles, ".elvern-overlay__track-sheet-scroll");
+    const shellOpenBlock = cssBlockForSelectorListItem(
+      styles,
+      ".player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover",
+    );
     const rowBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-menu-item");
     const shortcutBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-shortcut");
 
+    expect(sheetBlock).toContain("position: absolute");
+    expect(sheetBlock).toContain("z-index: 12");
+    expect(sheetBlock).toContain("touch-action: pan-y");
+    expect(sheetScrollBlock).toContain("max-height: min(70dvh");
+    expect(sheetScrollBlock).toContain("overflow-y: auto");
+    expect(sheetScrollBlock).toContain("-webkit-overflow-scrolling: touch");
+    expect(sheetScrollBlock).toContain("touch-action: pan-y");
+    expect(shellOpenBlock).toContain("touch-action: pan-y");
     expect(menuBlock).toContain("width: min(18rem");
     expect(menuBlock).toContain("max-height: min(72dvh");
     expect(menuBlock).toContain("overflow-y: auto");

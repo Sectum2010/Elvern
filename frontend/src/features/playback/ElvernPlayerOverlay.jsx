@@ -166,6 +166,10 @@ function isBackendUnsupportedTrack(track) {
   return track?.source === "backend" && track?.browserSupported === false;
 }
 
+function shouldShowSubtitleWarning(track) {
+  return track?.source === "backend" && Boolean(track?.imageBased);
+}
+
 function TrackMenuItem({
   checked = false,
   kind,
@@ -177,7 +181,9 @@ function TrackMenuItem({
   if (unsupported) {
     return (
       <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
-        {kind === "subtitle" ? <span className="elvern-overlay__track-menu-warning" aria-hidden="true">!</span> : null}
+        {kind === "subtitle" && shouldShowSubtitleWarning(track) ? (
+          <span className="elvern-overlay__track-menu-warning" aria-hidden="true">!</span>
+        ) : null}
       <span className="elvern-overlay__track-menu-label">{track.label}</span>
     </div>
   );
@@ -746,7 +752,6 @@ export default function ElvernPlayerOverlay({
     try {
       await selectAudioTrack(trackId);
       setPendingAudioTrackId("");
-      closeAllMenus();
       refreshControlsTimer();
     } catch (trackError) {
       setPendingAudioTrackId("");
@@ -1123,11 +1128,98 @@ export default function ElvernPlayerOverlay({
   ]);
 
   const moreButtonAvailable = !phoneInlineMinimal && moreMenuItems.length > 0;
+  const phoneTrackSheetOpen = phoneTrackShortcutButtons && (showCaptionsMenu || showAudioMenu);
+  const trackSheetClass = phoneTrackSheetOpen ? " elvern-overlay--track-sheet-open" : "";
+
+  useEffect(() => {
+    const shell = shellRef?.current || null;
+    if (!shell?.classList) {
+      return undefined;
+    }
+    if (phoneTrackSheetOpen) {
+      shell.classList.add("player-shell--track-sheet-open");
+    } else {
+      shell.classList.remove("player-shell--track-sheet-open");
+    }
+    return () => {
+      shell.classList.remove("player-shell--track-sheet-open");
+    };
+  }, [phoneTrackSheetOpen, shellRef]);
+
+  const trackMenuSurfaceHandlers = {
+    onClick: stopTrackMenuSurfaceEvent,
+    onPointerDown: stopTrackMenuSurfaceEvent,
+    onPointerMove: stopTrackMenuSurfaceEvent,
+    onTouchMove: stopTrackMenuSurfaceEvent,
+    onTouchStart: stopTrackMenuSurfaceEvent,
+  };
+
+  const subtitleTrackMenuContent = (
+    <>
+      <button
+        aria-checked={captionActiveCount === 0}
+        className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
+        onClick={handleTextTrackOff}
+        role="menuitemradio"
+        type="button"
+      >
+        Off
+      </button>
+      {textTracks.length > 0 ? (
+        textTracks.map((track) => (
+          <TrackMenuItem
+            checked={track.selected || track.mode === "showing"}
+            key={track.id}
+            kind="subtitle"
+            onSelect={handleTextTrackSelect}
+            pending={pendingSubtitleTrackId === track.id || track.pending}
+            track={track}
+          />
+        ))
+      ) : (
+        <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
+          No subtitle tracks found
+        </div>
+      )}
+      {subtitleTrackError ? (
+        <div className="elvern-overlay__track-menu-feedback" role="alert">{subtitleTrackError}</div>
+      ) : null}
+    </>
+  );
+
+  const audioTrackMenuContent = (
+    <>
+      {audioTracks.length > 0 ? (
+        audioTracks.map((track) => (
+          <TrackMenuItem
+            checked={track.selected || track.enabled}
+            key={track.id}
+            kind="audio"
+            onSelect={handleAudioTrackSelect}
+            pending={pendingAudioTrackId === track.id || track.pending}
+            track={track}
+          />
+        ))
+      ) : (
+        <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
+          No alternate audio tracks found
+        </div>
+      )}
+      {pendingAudioTrackId ? (
+        <div className="elvern-overlay__track-menu-feedback" role="status">
+          Preparing {audioTracks.find((track) => track.id === pendingAudioTrackId)?.label || "audio"}...
+        </div>
+      ) : null}
+      {audioTrackError ? (
+        <div className="elvern-overlay__track-menu-feedback" role="alert">{audioTrackError}</div>
+      ) : null}
+    </>
+  );
 
   return (
     <div
       ref={overlayRootRef}
-      className={`elvern-overlay${variantClass}${visibilityClass}`}
+      className={`elvern-overlay${variantClass}${visibilityClass}${trackSheetClass}`}
       data-preparing={preparing ? "true" : "false"}
       onPointerEnter={handlePointerEnter}
       onPointerDownCapture={handlePointerDownCapture}
@@ -1177,6 +1269,20 @@ export default function ElvernPlayerOverlay({
               {cueText}
             </span>
           ))}
+        </div>
+      ) : null}
+
+      {phoneTrackSheetOpen ? (
+        <div
+          className={`elvern-overlay__track-sheet${showAudioMenu ? " elvern-overlay__track-sheet--audio" : " elvern-overlay__track-sheet--subtitles"}`}
+          {...trackMenuSurfaceHandlers}
+        >
+          <div
+            className="elvern-overlay__track-sheet-scroll elvern-overlay__track-menu"
+            role="menu"
+          >
+            {showAudioMenu ? audioTrackMenuContent : subtitleTrackMenuContent}
+          </div>
         </div>
       ) : null}
 
@@ -1406,46 +1512,6 @@ export default function ElvernPlayerOverlay({
                 >
                   <CaptionsIcon className="elvern-overlay__icon" />
                 </button>
-                {showCaptionsMenu ? (
-                  <div
-                    className="elvern-overlay__menu elvern-overlay__track-menu"
-                    onClick={stopTrackMenuSurfaceEvent}
-                    onPointerDown={stopTrackMenuSurfaceEvent}
-                    onPointerMove={stopTrackMenuSurfaceEvent}
-                    onTouchMove={stopTrackMenuSurfaceEvent}
-                    onTouchStart={stopTrackMenuSurfaceEvent}
-                    role="menu"
-                  >
-                    <button
-                      aria-checked={captionActiveCount === 0}
-                      className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
-                      onClick={handleTextTrackOff}
-                      role="menuitemradio"
-                      type="button"
-                    >
-                      Off
-                    </button>
-                    {textTracks.length > 0 ? (
-                      textTracks.map((track) => (
-                        <TrackMenuItem
-                          checked={track.selected || track.mode === "showing"}
-                          key={track.id}
-                          kind="subtitle"
-                          onSelect={handleTextTrackSelect}
-                          pending={pendingSubtitleTrackId === track.id || track.pending}
-                          track={track}
-                        />
-                      ))
-                    ) : (
-                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
-                        No subtitle tracks found
-                      </div>
-                    )}
-                    {subtitleTrackError ? (
-                      <div className="elvern-overlay__track-menu-feedback" role="alert">{subtitleTrackError}</div>
-                    ) : null}
-                  </div>
-                ) : null}
               </div>
             ) : null}
 
@@ -1466,42 +1532,6 @@ export default function ElvernPlayerOverlay({
                 >
                   <AudioTrackIcon className="elvern-overlay__icon" />
                 </button>
-                {showAudioMenu ? (
-                  <div
-                    className="elvern-overlay__menu elvern-overlay__track-menu"
-                    onClick={stopTrackMenuSurfaceEvent}
-                    onPointerDown={stopTrackMenuSurfaceEvent}
-                    onPointerMove={stopTrackMenuSurfaceEvent}
-                    onTouchMove={stopTrackMenuSurfaceEvent}
-                    onTouchStart={stopTrackMenuSurfaceEvent}
-                    role="menu"
-                  >
-                    {audioTracks.length > 0 ? (
-                      audioTracks.map((track) => (
-                        <TrackMenuItem
-                          checked={track.selected || track.enabled}
-                          key={track.id}
-                          kind="audio"
-                          onSelect={handleAudioTrackSelect}
-                          pending={pendingAudioTrackId === track.id || track.pending}
-                          track={track}
-                        />
-                      ))
-                    ) : (
-                      <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
-                        No alternate audio tracks found
-                      </div>
-                    )}
-                    {pendingAudioTrackId ? (
-                      <div className="elvern-overlay__track-menu-feedback" role="status">
-                        Preparing {audioTracks.find((track) => track.id === pendingAudioTrackId)?.label || "audio"}...
-                      </div>
-                    ) : null}
-                    {audioTrackError ? (
-                      <div className="elvern-overlay__track-menu-feedback" role="alert">{audioTrackError}</div>
-                    ) : null}
-                  </div>
-                ) : null}
               </div>
             ) : null}
 

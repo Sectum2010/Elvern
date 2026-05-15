@@ -8,8 +8,8 @@ const HLS_TRACK_EVENTS = [
   "hlsSubtitleTrackSwitch",
   "hlsSubtitleTrackLoaded",
 ];
-const TEXT_SUBTITLE_CODECS = new Set(["ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", "mov_text"]);
-const IMAGE_SUBTITLE_CODECS = new Set(["dvd_subtitle", "dvdsub", "hdmv_pgs_subtitle", "pgs", "xsub"]);
+const TEXT_SUBTITLE_CODECS = new Set(["ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", "mov_text", "tx3g"]);
+const IMAGE_SUBTITLE_CODECS = new Set(["dvd_subtitle", "dvdsub", "dvb_subtitle", "hdmv_pgs_subtitle", "pgs", "xsub"]);
 const COMMENTARY_PATTERN = /\b(commentary|commentaries|commentaire|commentaires|director[’']?s?\s+commentary|audio\s+commentary|commentary\s+track)\b/i;
 const GENERIC_AUDIO_LABEL_PATTERN = /^(audio|default audio|main audio|track)\s*\d*$/i;
 const GENERIC_SUBTITLE_LABEL_PATTERN = /^(subtitle|subtitles|caption|captions|track)\s*\d*$/i;
@@ -50,9 +50,11 @@ const SUBTITLE_CODEC_LABELS = new Map([
   ["webvtt", "VTT"],
   ["vtt", "VTT"],
   ["mov_text", "Text"],
+  ["tx3g", "Text"],
   ["hdmv_pgs_subtitle", "PGS"],
   ["pgs", "PGS"],
   ["dvd_subtitle", "DVD"],
+  ["dvb_subtitle", "DVB"],
   ["dvdsub", "DVD"],
   ["xsub", "XSUB"],
 ]);
@@ -398,25 +400,35 @@ function normalizeBackendSubtitleTracks(tracks) {
   }
   const normalized = tracks
     .filter((track) => !isCommentaryTrack(track))
-    .map((track, index) => ({
-      id: `backend-subtitle-${track.index ?? track.id ?? index}`,
-      index: Number.isInteger(track.index) ? track.index : index,
-      label: buildBackendSubtitleLabel(track, `Subtitle ${index + 1}`),
-      language: track.language || "",
-      mode: "disabled",
-      selected: false,
-      source: "backend",
-      codec: track.codec || "",
-      browserSupported: Boolean(
-        track.browser_supported
-        || track.text_based
-        || TEXT_SUBTITLE_CODECS.has(normalizeCodec(track.codec)),
-      ),
-      unsupportedReason: "",
-      textBased: Boolean(track.text_based || TEXT_SUBTITLE_CODECS.has(normalizeCodec(track.codec))),
-      imageBased: Boolean(track.image_based || IMAGE_SUBTITLE_CODECS.has(normalizeCodec(track.codec))),
-      _disambiguators: buildSubtitleDisambiguators(track),
-    }))
+    .map((track, index) => {
+      const trackSource = track.track_source || track.source || "";
+      const textBased = Boolean(track.text_based || TEXT_SUBTITLE_CODECS.has(normalizeCodec(track.codec)));
+      const imageBased = Boolean(track.image_based || IMAGE_SUBTITLE_CODECS.has(normalizeCodec(track.codec)));
+      const fallbackOnly = trackSource === "subtitle_table_fallback";
+      return {
+        id: `backend-subtitle-${track.index ?? track.id ?? index}`,
+        index: Number.isInteger(track.index) ? track.index : index,
+        label: buildBackendSubtitleLabel(track, `Subtitle ${index + 1}`),
+        language: track.language || "",
+        mode: "disabled",
+        selected: false,
+        source: "backend",
+        codec: track.codec || "",
+        codecLongName: track.codec_long_name || "",
+        browserSupported: Boolean(
+          !fallbackOnly && (
+            track.browser_supported
+            || textBased
+            || TEXT_SUBTITLE_CODECS.has(normalizeCodec(track.codec))
+          ),
+        ),
+        unsupportedReason: "",
+        textBased,
+        imageBased,
+        trackSource,
+        _disambiguators: buildSubtitleDisambiguators(track),
+      };
+    })
     .sort((left, right) => {
       const leftRank = left.browserSupported ? 0 : left.imageBased ? 2 : 1;
       const rightRank = right.browserSupported ? 0 : right.imageBased ? 2 : 1;
@@ -446,7 +458,18 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
   const pendingIndex = Number.isInteger(sessionPayload?.pending_audio_stream_index)
     ? sessionPayload.pending_audio_stream_index
     : null;
-  const normalized = tracks.filter((track) => !isCommentaryTrack(track)).map((track, index) => {
+  const filteredTracks = tracks.filter((track) => !isCommentaryTrack(track));
+  let fallbackSelectedStreamIndex = null;
+  if (activeIndex == null && filteredTracks.length > 0) {
+    const defaultTrack = filteredTracks.find((track) => Boolean(track?.disposition_default));
+    const fallbackTrack = defaultTrack || filteredTracks[0];
+    const fallbackOrdinal = filteredTracks.indexOf(fallbackTrack);
+    fallbackSelectedStreamIndex = Number.isInteger(fallbackTrack?.index)
+      ? fallbackTrack.index
+      : fallbackOrdinal;
+  }
+  const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
+  const normalized = filteredTracks.map((track, index) => {
     const streamIndex = Number.isInteger(track.index) ? track.index : index;
     const label = buildBackendAudioLabel(track, `Audio ${index + 1}`);
     const hasExplicitName = Boolean(
@@ -455,7 +478,7 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
     );
     const selected = activeIndex != null
       ? streamIndex === activeIndex
-      : Boolean(track.disposition_default) || index === 0;
+      : streamIndex === fallbackSelectedStreamIndex;
     return {
       id: `backend-audio-${streamIndex}`,
       index: streamIndex,
@@ -463,12 +486,14 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
       language: track.language || "",
       enabled: selected,
       selected,
-      pending: pendingIndex === streamIndex,
+      pending: pendingIndex === streamIndex && switchState !== "active",
       source: "backend",
       codec: track.codec || "",
+      codecLongName: track.codec_long_name || "",
       browserSupported: true,
       switchRequiresPreparation: true,
       switchState: sessionPayload?.audio_switch_state || "",
+      trackSource: track.track_source || track.source || "",
       _disambiguators: buildAudioDisambiguators({ ...track, index: streamIndex }),
       _labelNeedsAudioDetails: !hasExplicitName,
     };
@@ -532,7 +557,6 @@ export function usePlaybackTrackControls({
   videoRef = null,
 } = {}) {
   const [selectedBackendSubtitleTrackId, setSelectedBackendSubtitleTrackId] = useState(null);
-  const [selectedBackendAudioTrackId, setSelectedBackendAudioTrackId] = useState(null);
   const [trackState, setTrackState] = useState(() => resolveTrackState({
     backendAudioTracks,
     backendSubtitleTracks,
@@ -650,18 +674,15 @@ export function usePlaybackTrackControls({
         }
       }
     } else if (selected.source === "backend" && selected.browserSupported) {
-      setSelectedBackendAudioTrackId(selected.id);
-      await onBackendAudioTrackSelect?.(selected);
+      const response = await onBackendAudioTrackSelect?.(selected);
+      refreshTrackState();
+      return { ...selected, sessionPayload: response || null };
     }
     refreshTrackState();
     return selected;
   }, [hlsRef, onBackendAudioTrackSelect, refreshTrackState, trackState.audioTracks, videoRef]);
 
-  const resolvedAudioTracks = trackState.audioTracks.map((track) => (
-    track.source === "backend"
-      ? { ...track, selected: selectedBackendAudioTrackId ? track.id === selectedBackendAudioTrackId : track.selected }
-      : track
-  ));
+  const resolvedAudioTracks = trackState.audioTracks;
   const resolvedSubtitleTracks = trackState.subtitleTracks.map((track) => (
     track.source === "backend"
       ? { ...track, selected: track.id === selectedBackendSubtitleTrackId }

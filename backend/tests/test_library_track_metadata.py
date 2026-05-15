@@ -40,6 +40,7 @@ def test_extracts_audio_and_subtitle_tracks_from_probe_summary() -> None:
                 "index": 4,
                 "codec_type": "subtitle",
                 "codec_name": "hdmv_pgs_subtitle",
+                "codec_long_name": "HDMV Presentation Graphic Stream subtitles",
                 "tags": {"language": "eng", "title": "PGS"},
             },
         ],
@@ -57,6 +58,8 @@ def test_extracts_audio_and_subtitle_tracks_from_probe_summary() -> None:
     assert subtitle_tracks[0]["disposition_forced"] is True
     assert subtitle_tracks[1]["image_based"] is True
     assert subtitle_tracks[1]["browser_supported"] is False
+    assert subtitle_tracks[1]["codec_long_name"] == "HDMV Presentation Graphic Stream subtitles"
+    assert subtitle_tracks[1]["track_source"] == "raw_probe_summary_json"
 
 
 def test_extracts_multiple_audio_tracks_with_global_stream_indexes() -> None:
@@ -97,3 +100,23 @@ def test_extracts_multiple_audio_tracks_with_global_stream_indexes() -> None:
     assert audio_tracks[0]["channels"] == 8
     assert audio_tracks[1]["codec"] == "ac3"
     assert audio_tracks[2]["disposition_commentary"] is True
+
+
+def test_subtitle_codec_aliases_classify_text_and_image_tracks() -> None:
+    payload = {
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "h264"},
+            {"index": 3, "codec_type": "subtitle", "codec_name": "tx3g", "tags": {"language": "eng"}},
+            {"index": 4, "codec_type": "subtitle", "codec_name": "dvb_subtitle", "tags": {"language": "eng"}},
+            {"index": 5, "codec_type": "subtitle", "codec_name": "mystery_subtitle", "tags": {"language": "eng"}},
+        ],
+    }
+
+    _audio_tracks, subtitle_tracks = _extract_playback_tracks_from_probe_summary(json.dumps(payload))
+
+    assert subtitle_tracks[0]["text_based"] is True
+    assert subtitle_tracks[0]["browser_supported"] is True
+    assert subtitle_tracks[1]["image_based"] is True
+    assert subtitle_tracks[1]["browser_supported"] is False
+    assert subtitle_tracks[2]["text_based"] is False
+    assert subtitle_tracks[2]["image_based"] is False

@@ -956,6 +956,95 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(queryByText("Audio Commentary")).toBeNull();
   });
 
+  test("backend audio snapshot state keeps exactly one selected row", () => {
+    const { container, getByRole, getByText } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true },
+        { index: 2, title: "French", codec: "ac3", disposition_default: true },
+        { index: 3, title: "Japanese", codec: "aac" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 2,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 2,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+
+    const checkedRows = Array.from(container.querySelectorAll('[role="menuitemradio"][aria-checked="true"]'));
+    expect(checkedRows).toHaveLength(1);
+    expect(checkedRows[0].textContent).toContain("French");
+  });
+
+  test("clicking backend audio shows row pending until backend active state changes", async () => {
+    let resolveSwitch;
+    const onBackendAudioTrackSelect = vi.fn(() => new Promise((resolve) => {
+      resolveSwitch = () => resolve({
+        active_audio_stream_index: 1,
+        pending_audio_stream_index: 2,
+        audio_switch_state: "preparing",
+      });
+    }));
+    const { getByRole, rerenderOverlay } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true },
+        { index: 2, title: "French", codec: "ac3" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendAudioTrackSelect,
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 1,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+    });
+
+    expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({ index: 2 }));
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
+
+    await act(async () => {
+      resolveSwitch();
+      await Promise.resolve();
+    });
+    rerenderOverlay({
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        pending_audio_stream_index: 2,
+        audio_switch_state: "preparing",
+        selected_audio_stream_index: 2,
+      },
+    });
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
+
+    rerenderOverlay({
+      sessionPayload: {
+        active_audio_stream_index: 2,
+        pending_audio_stream_index: null,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 2,
+      },
+    });
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "true");
+  });
+
   test("text backend subtitles are clickable while image subtitles are marked unsupported", async () => {
     let resolvePrepare;
     const delayedSubtitlePrepare = vi.fn(() => new Promise((resolve) => {
@@ -999,6 +1088,33 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     });
   });
 
+  test("fallback subtitle rows are not shown as confirmed burn-in warnings", () => {
+    const { getByRole, getByText, queryByText } = renderOverlay({
+      backendSubtitleTracks: [
+        {
+          index: 0,
+          label: "Indexed SRT",
+          codec: "subrip",
+          text_based: true,
+          browser_supported: false,
+          track_source: "subtitle_table_fallback",
+        },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendSubtitleTrackSelect: vi.fn(),
+      onToggleFullscreen: vi.fn(),
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+
+    expect(getByText("Indexed SRT")).toBeTruthy();
+    expect(queryByText("!")).toBeNull();
+    expect(queryByText("Indexed SRT").closest("button")).toBeNull();
+  });
+
   test("phone subtitle menu renders many backend tracks in a scrollable list", () => {
     const manySubtitles = Array.from({ length: 30 }, (_, index) => ({
       index: index + 3,
@@ -1019,10 +1135,38 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(getByRole("button", { name: "Subtitles" }));
     });
 
-    expect(container.querySelector(".elvern-overlay__track-menu")).toBeTruthy();
+    expect(container.querySelector(".elvern-overlay__track-sheet")).toBeTruthy();
+    expect(container.querySelector(".elvern-overlay__track-sheet-scroll")).toBeTruthy();
     expect(container.querySelectorAll(".elvern-overlay__track-menu-item").length).toBeGreaterThanOrEqual(31);
     expect(getByText("Subtitle 1")).toBeTruthy();
     expect(getByText("Subtitle 30 · PGS")).toBeTruthy();
+  });
+
+  test("phone track sheet keeps touch scrolling away from the tap surface", () => {
+    const { container, getByRole, root } = renderOverlay({
+      backendSubtitleTracks: Array.from({ length: 30 }, (_, index) => ({
+        index: index + 3,
+        label: `Subtitle ${index + 1}`,
+        codec: "subrip",
+        text_based: true,
+      })),
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendSubtitleTrackSelect: vi.fn(),
+      onToggleFullscreen: vi.fn(),
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    const sheet = container.querySelector(".elvern-overlay__track-sheet-scroll");
+    expect(sheet).toBeTruthy();
+
+    act(() => {
+      fireEvent.touchMove(sheet);
+    });
+
+    expect(root).toHaveClass("elvern-overlay--visible");
   });
 
   test("phone cinema places subtitle and audio icons before More when tracks exist", () => {

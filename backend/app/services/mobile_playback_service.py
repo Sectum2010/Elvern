@@ -1920,38 +1920,12 @@ class MobilePlaybackManager:
             audio_tracks, subtitle_tracks = _extract_playback_tracks_from_probe_summary(
                 technical_row["raw_probe_summary_json"] if technical_row else None
             )
-            if subtitle_tracks:
-                return audio_tracks, subtitle_tracks
-            rows = connection.execute(
-                """
-                SELECT id, language, title, codec, disposition_default
-                FROM subtitle_tracks
-                WHERE media_item_id = ?
-                ORDER BY id ASC
-                """,
-                (media_item_id,),
-            ).fetchall()
-        fallback_subtitles: list[dict[str, object]] = []
-        for index, row in enumerate(rows):
-            codec = _normalize_subtitle_codec(row["codec"])
-            fallback_subtitles.append(
-                {
-                    "index": index,
-                    "codec": row["codec"],
-                    "language": row["language"],
-                    "title": row["title"],
-                    "disposition_default": bool(row["disposition_default"]),
-                    "disposition_forced": False,
-                    "text_based": codec in TEXT_SUBTITLE_CODECS,
-                    "image_based": codec in IMAGE_SUBTITLE_CODECS,
-                    "browser_supported": codec == "webvtt",
-                    "label": str(row["title"] or row["language"] or f"Subtitle {index + 1}"),
-                }
-            )
-        return audio_tracks, fallback_subtitles
+            return audio_tracks, subtitle_tracks
 
     def _resolve_text_subtitle_track(self, media_item_id: int, stream_index: int) -> dict[str, object]:
         _audio_tracks, subtitle_tracks = self._playback_tracks_for_media_item(media_item_id)
+        if not subtitle_tracks:
+            raise ValueError("Trusted subtitle stream metadata is required before Browser Playback subtitle preparation")
         for track in subtitle_tracks:
             if int(track.get("index") or 0) != stream_index:
                 continue
@@ -11336,11 +11310,29 @@ class MobilePlaybackManager:
         )
         return replacement_epoch
 
+    def _route2_downshift_promotion_would_interrupt_active_client_locked(
+        self,
+        session: MobilePlaybackSession,
+        replacement_epoch: PlaybackEpoch,
+    ) -> bool:
+        if replacement_epoch.replacement_reason != "maintenance_downshift":
+            return False
+        if replacement_epoch.adaptive_reclaim_request_id:
+            return False
+        if session.preparation_parked:
+            return False
+        return bool(
+            session.browser_playback.engine_mode == "route2"
+            and session.lifecycle_state == "attached"
+            and session.client_is_playing
+            and session.pending_target_seconds is None
+        )
+
     def _promote_route2_downshift_replacement_epoch_locked(
         self,
         session: MobilePlaybackSession,
         replacement_epoch: PlaybackEpoch,
-    ) -> None:
+    ) -> bool:
         browser_session = session.browser_playback
         previous_active = (
             browser_session.epochs.get(browser_session.active_epoch_id)
@@ -11348,7 +11340,18 @@ class MobilePlaybackManager:
             else None
         )
         if previous_active is replacement_epoch:
-            return
+            return True
+        if self._route2_downshift_promotion_would_interrupt_active_client_locked(session, replacement_epoch):
+            replacement_epoch.state = "attach_ready"
+            self._write_route2_epoch_metadata_locked(replacement_epoch)
+            self._log_route2_event(
+                "maintenance_downshift_promotion_deferred_for_active_playback",
+                session=session,
+                epoch=replacement_epoch,
+                lifecycle_state=session.lifecycle_state,
+                client_is_playing=session.client_is_playing,
+            )
+            return False
         next_revision = max(1, int(browser_session.attach_revision or 0) + 1)
         replacement_epoch.adaptive_downshift_switched_at = utcnow_iso()
         replacement_epoch.state = "attach_ready"
@@ -11392,6 +11395,7 @@ class MobilePlaybackManager:
             previous_epoch_id=previous_active.epoch_id if previous_active is not None else None,
             target_threads=replacement_epoch.maintenance_downshift_target_threads,
         )
+        return True
 
     def _route2_resupply_health_after_switch_locked(
         self,
@@ -12455,10 +12459,11 @@ class MobilePlaybackManager:
                 )
                 replacement_epoch = None
             elif self._route2_downshift_replacement_ready_locked(session, replacement_epoch):
-                self._promote_route2_downshift_replacement_epoch_locked(session, replacement_epoch)
-                active_epoch = replacement_epoch
-                replacement_epoch = None
-                self._rebuild_route2_published_frontier_locked(active_epoch)
+                promoted = self._promote_route2_downshift_replacement_epoch_locked(session, replacement_epoch)
+                if promoted:
+                    active_epoch = replacement_epoch
+                    replacement_epoch = None
+                    self._rebuild_route2_published_frontier_locked(active_epoch)
             else:
                 if replacement_epoch.active_worker_id or (replacement_epoch.process and replacement_epoch.process.poll() is None):
                     replacement_epoch.state = "warming"

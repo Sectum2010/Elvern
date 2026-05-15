@@ -1934,6 +1934,7 @@ export function useOptimizedPlaybackSession({
       payload.session_id,
       Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
     );
+    return payload;
   }
 
   async function prepareBrowserPlaybackSubtitleTrack(track) {

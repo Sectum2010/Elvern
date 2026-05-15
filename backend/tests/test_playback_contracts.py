@@ -1018,6 +1018,64 @@ def test_browser_playback_image_subtitle_prepare_stays_unsupported(initialized_s
         manager.prepare_subtitle_track(session.session_id, stream_index=4, user_id=session.user_id)
 
 
+def test_browser_playback_subtitle_prepare_requires_trusted_probe_metadata(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings, ffmpeg_path="/fake/ffmpeg")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5021, relative_name="route2/subtitles/fallback-subtitle.mkv"),
+    )
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO subtitle_tracks (
+                media_item_id,
+                language,
+                title,
+                codec,
+                disposition_default
+            ) VALUES (?, 'eng', 'Indexed SRT', 'subrip', 0)
+            """,
+            (int(item["id"]),),
+        )
+        connection.commit()
+    session = _register_route2_test_session(manager, settings, item, session_id="fallback-subtitle-session")
+
+    with pytest.raises(ValueError, match="Trusted subtitle stream metadata"):
+        manager.prepare_subtitle_track(session.session_id, stream_index=0, user_id=session.user_id)
+
+
+def test_route2_audio_selection_reports_pending_then_active_stream(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5022, relative_name="route2/audio/select.mkv"),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-select-session")
+
+    response = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+
+    assert response["selected_audio_stream_index"] == 5
+    assert response["pending_audio_stream_index"] == 5
+    assert response["active_audio_stream_index"] is None
+    assert response["audio_switch_state"] == "preparing"
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    assert replacement.audio_stream_index == 5
+
+    manager._promote_route2_replacement_epoch_locked(session, replacement)
+    promoted = manager._route2_snapshot_locked(session)
+
+    assert promoted["selected_audio_stream_index"] == 5
+    assert promoted["active_audio_stream_index"] == 5
+    assert promoted["pending_audio_stream_index"] is None
+    assert promoted["audio_switch_state"] == "active"
+
+
 def test_background_suspended_zero_heartbeat_does_not_reset_route2_playhead(initialized_settings) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
     item = _insert_media_item_record(
@@ -9843,7 +9901,9 @@ def test_route2_adaptive_downshift_replacement_ready_switches_without_target_mut
         runway_seconds=260.0,
         effective_playhead_seconds=40.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
+    session.client_is_playing = False
     session.target_position_seconds = 5.0
     original_target = session.target_position_seconds
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
@@ -10014,8 +10074,9 @@ def test_route2_adaptive_downshift_transient_moderate_pressure_does_not_abort_wa
         external_pressure_reason="external_cpu_moderate",
     )
 
-    manager._refresh_route2_session_authority_locked(session)
+    abort_reason = manager._route2_downshift_abort_reason_locked(session, replacement)
 
+    assert abort_reason is None
     assert session.browser_playback.active_epoch_id == epoch.epoch_id
     assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
     assert epoch.adaptive_downshift_aborted_reason is None
@@ -10324,6 +10385,53 @@ def test_route2_adaptive_downshift_status_payload_exposes_transition_fields(
     assert item_payload["adaptive_downshift_replacement_epoch_cap_remaining"] == (
         ROUTE2_ADAPTIVE_DOWNSHIFT_MAX_RETRIES_PER_SESSION
     )
+
+
+def test_route2_autonomous_downshift_ready_defers_promotion_for_active_playback(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=True,
+        route2_adaptive_maintenance_downshift_enabled=True,
+    )
+    monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
+    _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
+    _capture_route2_worker_threads(monkeypatch)
+    _install_route2_downshift_inputs(manager, session, epoch, record)
+    _mark_route2_runtime_supply(
+        session,
+        epoch,
+        record,
+        supply_rate_x=1.2,
+        observation_seconds=24.0,
+        runway_seconds=260.0,
+        cpu_cores_used=1.0,
+        client_is_playing=True,
+    )
+    session.lifecycle_state = "attached"
+    session.client_is_playing = True
+    session.browser_playback.attach_revision = 3
+    replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
+    assert replacement is not None
+    manager._ensure_route2_epoch_workers_locked(session)
+    replacement_record = manager._route2_workers[replacement.active_worker_id]
+    replacement_record.state = "running"
+    replacement_record.assigned_threads = 6
+    replacement_record.process_exists = True
+    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
+    replacement.transcoder_completed = True
+
+    promoted = manager._promote_route2_downshift_replacement_epoch_locked(session, replacement)
+
+    assert promoted is False
+    assert session.browser_playback.active_epoch_id == epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
+    assert session.browser_playback.attach_revision == 3
+    assert record.state == "running"
+    assert replacement.state == "attach_ready"
 
 
 def test_route2_adaptive_reclaim_dry_run_candidate_does_not_start_replacement(

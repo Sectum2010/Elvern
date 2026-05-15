@@ -150,6 +150,7 @@ class SubtitleTrackResponse(BaseModel):
 class MediaPlaybackTrackResponse(BaseModel):
     index: int
     codec: str | None = None
+    codec_long_name: str | None = None
     language: str | None = None
     title: str | None = None
     channels: int | None = None
@@ -160,6 +161,7 @@ class MediaPlaybackTrackResponse(BaseModel):
     image_based: bool | None = None
     browser_supported: bool = False
     label: str | None = None
+    track_source: str | None = None
 
 
 class ParsedTitleResponse(BaseModel):
@@ -495,6 +497,8 @@ class MediaItemDetail(LibraryItemSummary):
     audio_tracks: list[MediaPlaybackTrackResponse] = Field(default_factory=list)
     track_scan_status: str = "not_scanned"
     track_scan_error: str = ""
+    track_scan_source: str = ""
+    subtitle_track_diagnostics: dict[str, object] = Field(default_factory=dict)
 
 
 class GoogleDriveConnectionResponse(BaseModel):

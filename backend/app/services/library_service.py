@@ -48,8 +48,8 @@ from ..config import Settings
 from ..db import get_connection
 
 
-TEXT_SUBTITLE_CODECS = {"ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", "mov_text"}
-IMAGE_SUBTITLE_CODECS = {"dvd_subtitle", "dvdsub", "hdmv_pgs_subtitle", "pgs", "xsub"}
+TEXT_SUBTITLE_CODECS = {"ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", "mov_text", "tx3g"}
+IMAGE_SUBTITLE_CODECS = {"dvd_subtitle", "dvdsub", "dvb_subtitle", "hdmv_pgs_subtitle", "pgs", "xsub"}
 
 
 def _utc_iso_to_epoch_seconds(value: object) -> int:
@@ -119,6 +119,7 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
         tags = _stream_tags(stream)
         disposition = _stream_disposition(stream)
         codec = stream.get("codec_name")
+        codec_long_name = stream.get("codec_long_name")
         language = tags.get("language")
         title = tags.get("title")
         stream_index = int(stream.get("index") or 0)
@@ -129,6 +130,7 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
                 {
                     "index": stream_index,
                     "codec": codec,
+                    "codec_long_name": codec_long_name,
                     "language": language,
                     "title": title,
                     "channels": channels,
@@ -142,6 +144,7 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
                         channels=channels,
                     ),
                     "browser_supported": False,
+                    "track_source": "raw_probe_summary_json",
                 }
             )
             continue
@@ -153,6 +156,7 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
             {
                 "index": stream_index,
                 "codec": codec,
+                "codec_long_name": codec_long_name,
                 "language": language,
                 "title": title,
                 "channels": None,
@@ -162,6 +166,7 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
                 "text_based": text_based,
                 "image_based": image_based,
                 "browser_supported": text_based,
+                "track_source": "raw_probe_summary_json",
                 "label": _stream_track_label(
                     fallback=f"Subtitle {subtitle_ordinal}",
                     language=language,
@@ -508,9 +513,10 @@ def get_media_item_detail(
     )
     if hidden_globally and not allow_globally_hidden:
         return None
+    trusted_probe = bool(technical_row and technical_row["probe_status"] == "probed")
     audio_tracks, subtitle_stream_tracks = _extract_playback_tracks_from_probe_summary(
         technical_row["raw_probe_summary_json"]
-        if technical_row and technical_row["probe_status"] == "probed"
+        if trusted_probe
         else None
     )
     subtitle_payload = [
@@ -528,6 +534,7 @@ def get_media_item_detail(
             {
                 "index": index,
                 "codec": subtitle.get("codec"),
+                "codec_long_name": None,
                 "language": subtitle.get("language"),
                 "title": subtitle.get("title"),
                 "channels": None,
@@ -536,7 +543,8 @@ def get_media_item_detail(
                 "disposition_commentary": False,
                 "text_based": str(subtitle.get("codec") or "").lower() in TEXT_SUBTITLE_CODECS,
                 "image_based": str(subtitle.get("codec") or "").lower() in IMAGE_SUBTITLE_CODECS,
-                "browser_supported": str(subtitle.get("codec") or "").lower() in TEXT_SUBTITLE_CODECS,
+                "browser_supported": False,
+                "track_source": "subtitle_table_fallback",
                 "label": _stream_track_label(
                     fallback=f"Subtitle {index + 1}",
                     language=subtitle.get("language"),
@@ -551,6 +559,7 @@ def get_media_item_detail(
             {
                 "index": 0,
                 "codec": row["audio_codec"],
+                "codec_long_name": None,
                 "language": None,
                 "title": "Default audio",
                 "channels": None,
@@ -563,8 +572,28 @@ def get_media_item_detail(
                     codec=row["audio_codec"],
                 ),
                 "browser_supported": False,
+                "track_source": "media_row_fallback",
             }
         ]
+    subtitle_counts = {
+        "text_count": sum(1 for track in subtitle_stream_tracks if track.get("text_based")),
+        "image_count": sum(1 for track in subtitle_stream_tracks if track.get("image_based")),
+        "unknown_count": sum(
+            1
+            for track in subtitle_stream_tracks
+            if not track.get("text_based") and not track.get("image_based")
+        ),
+        "total_count": len(subtitle_stream_tracks),
+    }
+    track_scan_status = str(technical_row["probe_status"] if technical_row else "not_scanned")
+    if trusted_probe:
+        track_scan_source = "raw_probe_summary_json"
+    elif subtitle_payload:
+        track_scan_source = "subtitle_table_fallback"
+    elif track_scan_status == "failed":
+        track_scan_source = "failed"
+    else:
+        track_scan_source = "not_scanned"
     payload = _serialize_media_item(settings, row, poster_dir=poster_dir)
     payload.update(
         {
@@ -576,8 +605,27 @@ def get_media_item_detail(
             "subtitles": subtitle_payload,
             "subtitle_tracks": subtitle_stream_tracks,
             "audio_tracks": audio_tracks,
-            "track_scan_status": str(technical_row["probe_status"] if technical_row else "not_scanned"),
+            "track_scan_status": track_scan_status,
             "track_scan_error": str(technical_row["probe_error"] or "") if technical_row else "",
+            "track_scan_source": track_scan_source,
+            "subtitle_track_diagnostics": {
+                **subtitle_counts,
+                "source": track_scan_source,
+                "tracks": [
+                    {
+                        "index": track.get("index"),
+                        "codec": track.get("codec"),
+                        "codec_long_name": track.get("codec_long_name"),
+                        "language": track.get("language"),
+                        "title": track.get("title"),
+                        "text_based": bool(track.get("text_based")),
+                        "image_based": bool(track.get("image_based")),
+                        "browser_supported": bool(track.get("browser_supported")),
+                        "track_source": track.get("track_source"),
+                    }
+                    for track in subtitle_stream_tracks
+                ],
+            },
         }
     )
     return payload
