@@ -5651,31 +5651,6 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   touch-action: pan-y;
 }
 
-.elvern-overlay__track-sheet {
-  position: absolute;
-  left: max(0.6rem, env(safe-area-inset-left, 0px));
-  right: max(0.6rem, env(safe-area-inset-right, 0px));
-  bottom: calc(env(safe-area-inset-bottom, 0px) + 3.35rem);
-  z-index: 12;
-  pointer-events: auto;
-  touch-action: pan-y;
-}
-
-.elvern-overlay__track-sheet-scroll {
-  position: static;
-  width: 100%;
-  max-height: min(70dvh, 30rem);
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
-  touch-action: pan-y;
-}
-
-.elvern-overlay__track-sheet,
-.elvern-overlay__track-sheet * {
-  touch-action: pan-y;
-}
-
 .elvern-overlay__menu {
   position: absolute;
   bottom: calc(100% + 0.35rem);
@@ -5996,23 +5971,23 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   touch-action: none;
 }
 
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover,
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen,
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen {
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover,
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen,
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen {
   touch-action: pan-y;
 }
 
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .player-fullscreen-surface,
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .player-fullscreen-surface,
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .player-fullscreen-surface,
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay,
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay,
-.player-shell--track-sheet-open.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay {
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__menu-host,
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__menu-host,
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__menu-host,
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom.player-shell--cinema-takeover .elvern-overlay__track-menu,
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom:fullscreen .elvern-overlay__track-menu,
+.player-shell--track-menu-open.player-shell--elvern-phone.player-shell--elvern-custom:-webkit-full-screen .elvern-overlay__track-menu {
   touch-action: pan-y;
 }
 
-.elvern-overlay--phone.elvern-overlay--track-sheet-open,
-.player-shell--track-sheet-open .elvern-overlay--phone {
+.elvern-overlay--phone.elvern-overlay--track-menu-open,
+.player-shell--track-menu-open .elvern-overlay--phone {
   touch-action: pan-y;
 }
 

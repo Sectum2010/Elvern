@@ -167,7 +167,9 @@ function isBackendUnsupportedTrack(track) {
 }
 
 function shouldShowSubtitleWarning(track) {
-  return track?.source === "backend" && Boolean(track?.imageBased);
+  return track?.source === "backend"
+    && track?.trackSource === "raw_probe_summary_json"
+    && Boolean(track?.imageBased);
 }
 
 function TrackMenuItem({
@@ -1128,23 +1130,24 @@ export default function ElvernPlayerOverlay({
   ]);
 
   const moreButtonAvailable = !phoneInlineMinimal && moreMenuItems.length > 0;
-  const phoneTrackSheetOpen = phoneTrackShortcutButtons && (showCaptionsMenu || showAudioMenu);
-  const trackSheetClass = phoneTrackSheetOpen ? " elvern-overlay--track-sheet-open" : "";
+  const trackMenuOpen = showCaptionsMenu || showAudioMenu;
+  const trackMenuClass = trackMenuOpen ? " elvern-overlay--track-menu-open" : "";
 
   useEffect(() => {
     const shell = shellRef?.current || null;
     if (!shell?.classList) {
       return undefined;
     }
-    if (phoneTrackSheetOpen) {
-      shell.classList.add("player-shell--track-sheet-open");
+    const shouldRelaxTrackMenuTouch = phoneFullscreenCinema && trackMenuOpen;
+    if (shouldRelaxTrackMenuTouch) {
+      shell.classList.add("player-shell--track-menu-open");
     } else {
-      shell.classList.remove("player-shell--track-sheet-open");
+      shell.classList.remove("player-shell--track-menu-open");
     }
     return () => {
-      shell.classList.remove("player-shell--track-sheet-open");
+      shell.classList.remove("player-shell--track-menu-open");
     };
-  }, [phoneTrackSheetOpen, shellRef]);
+  }, [phoneFullscreenCinema, shellRef, trackMenuOpen]);
 
   const trackMenuSurfaceHandlers = {
     onClick: stopTrackMenuSurfaceEvent,
@@ -1219,7 +1222,7 @@ export default function ElvernPlayerOverlay({
   return (
     <div
       ref={overlayRootRef}
-      className={`elvern-overlay${variantClass}${visibilityClass}${trackSheetClass}`}
+      className={`elvern-overlay${variantClass}${visibilityClass}${trackMenuClass}`}
       data-preparing={preparing ? "true" : "false"}
       onPointerEnter={handlePointerEnter}
       onPointerDownCapture={handlePointerDownCapture}
@@ -1269,20 +1272,6 @@ export default function ElvernPlayerOverlay({
               {cueText}
             </span>
           ))}
-        </div>
-      ) : null}
-
-      {phoneTrackSheetOpen ? (
-        <div
-          className={`elvern-overlay__track-sheet${showAudioMenu ? " elvern-overlay__track-sheet--audio" : " elvern-overlay__track-sheet--subtitles"}`}
-          {...trackMenuSurfaceHandlers}
-        >
-          <div
-            className="elvern-overlay__track-sheet-scroll elvern-overlay__track-menu"
-            role="menu"
-          >
-            {showAudioMenu ? audioTrackMenuContent : subtitleTrackMenuContent}
-          </div>
         </div>
       ) : null}
 
@@ -1367,35 +1356,10 @@ export default function ElvernPlayerOverlay({
                 {showCaptionsMenu ? (
                   <div
                     className="elvern-overlay__menu elvern-overlay__track-menu"
-                    onClick={stopTrackMenuSurfaceEvent}
-                    onPointerDown={stopTrackMenuSurfaceEvent}
-                    onPointerMove={stopTrackMenuSurfaceEvent}
-                    onTouchMove={stopTrackMenuSurfaceEvent}
-                    onTouchStart={stopTrackMenuSurfaceEvent}
+                    {...trackMenuSurfaceHandlers}
                     role="menu"
                   >
-                    <button
-                      className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
-                      onClick={handleTextTrackOff}
-                      role="menuitemradio"
-                      aria-checked={captionActiveCount === 0}
-                      type="button"
-                    >
-                      Off
-                    </button>
-                    {textTracks.map((track) => (
-                      <TrackMenuItem
-                        checked={track.selected || track.mode === "showing"}
-                        key={track.id}
-                        kind="subtitle"
-                        onSelect={handleTextTrackSelect}
-                        pending={pendingSubtitleTrackId === track.id || track.pending}
-                        track={track}
-                      />
-                    ))}
-                    {subtitleTrackError ? (
-                      <div className="elvern-overlay__track-menu-feedback" role="alert">{subtitleTrackError}</div>
-                    ) : null}
+                    {subtitleTrackMenuContent}
                   </div>
                 ) : null}
               </div>
@@ -1421,26 +1385,10 @@ export default function ElvernPlayerOverlay({
                 {showAudioMenu ? (
                   <div
                     className="elvern-overlay__menu elvern-overlay__track-menu"
-                    onClick={stopTrackMenuSurfaceEvent}
-                    onPointerDown={stopTrackMenuSurfaceEvent}
-                    onPointerMove={stopTrackMenuSurfaceEvent}
-                    onTouchMove={stopTrackMenuSurfaceEvent}
-                    onTouchStart={stopTrackMenuSurfaceEvent}
+                    {...trackMenuSurfaceHandlers}
                     role="menu"
                   >
-                    {audioTracks.map((track) => (
-                      <TrackMenuItem
-                        checked={track.selected || track.enabled}
-                        key={track.id}
-                        kind="audio"
-                        onSelect={handleAudioTrackSelect}
-                        pending={pendingAudioTrackId === track.id || track.pending}
-                        track={track}
-                      />
-                    ))}
-                    {audioTrackError ? (
-                      <div className="elvern-overlay__track-menu-feedback" role="alert">{audioTrackError}</div>
-                    ) : null}
+                    {audioTrackMenuContent}
                   </div>
                 ) : null}
               </div>
@@ -1512,6 +1460,15 @@ export default function ElvernPlayerOverlay({
                 >
                   <CaptionsIcon className="elvern-overlay__icon" />
                 </button>
+                {showCaptionsMenu ? (
+                  <div
+                    className="elvern-overlay__menu elvern-overlay__track-menu"
+                    {...trackMenuSurfaceHandlers}
+                    role="menu"
+                  >
+                    {subtitleTrackMenuContent}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -1532,6 +1489,15 @@ export default function ElvernPlayerOverlay({
                 >
                   <AudioTrackIcon className="elvern-overlay__icon" />
                 </button>
+                {showAudioMenu ? (
+                  <div
+                    className="elvern-overlay__menu elvern-overlay__track-menu"
+                    {...trackMenuSurfaceHandlers}
+                    role="menu"
+                  >
+                    {audioTrackMenuContent}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 

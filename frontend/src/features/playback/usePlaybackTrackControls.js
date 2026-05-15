@@ -450,14 +450,19 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
   if (!Array.isArray(tracks)) {
     return [];
   }
-  const activeIndex = Number.isInteger(sessionPayload?.active_audio_stream_index)
-    ? sessionPayload.active_audio_stream_index
-    : Number.isInteger(sessionPayload?.selected_audio_stream_index)
-      ? sessionPayload.selected_audio_stream_index
-      : null;
   const pendingIndex = Number.isInteger(sessionPayload?.pending_audio_stream_index)
     ? sessionPayload.pending_audio_stream_index
     : null;
+  const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
+  const selectedIndex = Number.isInteger(sessionPayload?.selected_audio_stream_index)
+    ? sessionPayload.selected_audio_stream_index
+    : null;
+  const pendingSwitchInProgress = pendingIndex != null && switchState !== "active";
+  const activeIndex = Number.isInteger(sessionPayload?.active_audio_stream_index)
+    ? sessionPayload.active_audio_stream_index
+    : !pendingSwitchInProgress && selectedIndex != null
+      ? selectedIndex
+      : null;
   const filteredTracks = tracks.filter((track) => !isCommentaryTrack(track));
   let fallbackSelectedStreamIndex = null;
   if (activeIndex == null && filteredTracks.length > 0) {
@@ -468,7 +473,6 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
       ? fallbackTrack.index
       : fallbackOrdinal;
   }
-  const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
   const normalized = filteredTracks.map((track, index) => {
     const streamIndex = Number.isInteger(track.index) ? track.index : index;
     const label = buildBackendAudioLabel(track, `Audio ${index + 1}`);
@@ -498,6 +502,12 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
       _labelNeedsAudioDetails: !hasExplicitName,
     };
   });
+  if (!normalized.some((track) => track.selected) && normalized.length > 0) {
+    const fallbackTrack = normalized.find((track, index) => Boolean(filteredTracks[index]?.disposition_default))
+      || normalized[0];
+    fallbackTrack.selected = true;
+    fallbackTrack.enabled = true;
+  }
   return disambiguateLabels(normalized, "audio");
 }
 

@@ -2462,6 +2462,21 @@ export function DetailPage() {
     ? []
     : rawPlaybackAudioTracks;
   const playbackSubtitleTracks = Array.isArray(item.subtitle_tracks) ? item.subtitle_tracks : subtitleTracks;
+  const subtitleTrackDiagnostics = (
+    item.subtitle_track_diagnostics
+    && typeof item.subtitle_track_diagnostics === "object"
+  )
+    ? item.subtitle_track_diagnostics
+    : null;
+  const subtitleTrackDiagnosticText = subtitleTrackDiagnostics
+    ? [
+      `Subtitle scan: ${trackScanStatus || "not_scanned"}`,
+      `source ${item.track_scan_source || subtitleTrackDiagnostics.source || "unknown"}`,
+      `${Number(subtitleTrackDiagnostics.text_count || 0)} text`,
+      `${Number(subtitleTrackDiagnostics.image_count || 0)} image`,
+      `${Number(subtitleTrackDiagnostics.unknown_count || 0)} unknown`,
+    ].join(" · ")
+    : "";
   const detailSourceLabel = item.source_label || (item.source_kind === "cloud" ? "Cloud" : "DGX");
   const sourceDescription = item.source_kind === "cloud"
     ? (item.library_source_name
@@ -3049,6 +3064,9 @@ export function DetailPage() {
                         );
                       })}
                     </div>
+                  ) : null}
+                  {subtitleTrackDiagnosticText ? (
+                    <p className="page-subnote">{subtitleTrackDiagnosticText}</p>
                   ) : null}
                 </div>
 

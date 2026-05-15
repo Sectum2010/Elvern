@@ -5355,6 +5355,8 @@ class MobilePlaybackManager:
             "adaptive_downshift_replacement_epoch_id": None,
             "adaptive_downshift_replacement_worker_id": None,
             "adaptive_downshift_state": "none",
+            "adaptive_downshift_action_deferred": False,
+            "adaptive_downshift_action_defer_reason": None,
             "adaptive_downshift_transition_started_at": None,
             "adaptive_downshift_switched_at": None,
             "adaptive_downshift_aborted_reason": None,
@@ -5398,6 +5400,10 @@ class MobilePlaybackManager:
         record.adaptive_downshift_replacement_epoch_id = payload["adaptive_downshift_replacement_epoch_id"]  # type: ignore[assignment]
         record.adaptive_downshift_replacement_worker_id = payload["adaptive_downshift_replacement_worker_id"]  # type: ignore[assignment]
         record.adaptive_downshift_state = str(payload["adaptive_downshift_state"])
+        record.adaptive_downshift_action_deferred = bool(payload.get("adaptive_downshift_action_deferred", False))
+        record.adaptive_downshift_action_defer_reason = payload.get(  # type: ignore[assignment]
+            "adaptive_downshift_action_defer_reason"
+        )
         record.adaptive_downshift_transition_started_at = payload["adaptive_downshift_transition_started_at"]  # type: ignore[assignment]
         record.adaptive_downshift_switched_at = payload["adaptive_downshift_switched_at"]  # type: ignore[assignment]
         record.adaptive_downshift_aborted_reason = payload["adaptive_downshift_aborted_reason"]  # type: ignore[assignment]
@@ -5584,11 +5590,22 @@ class MobilePlaybackManager:
             autonomous_blockers.append("autonomous_maintenance_downshift_disabled")
         reclaim_mode_allowed = bool(pending_reclaim is not None or reclaim_downshift_active)
         maintenance_mode_allowed = bool(maintenance_enabled and not maintenance_downshift_suppressed_by_reclaim)
+        foreground_action_deferred = bool(
+            candidate
+            and downshift_enabled
+            and (reclaim_mode_allowed or maintenance_mode_allowed)
+            and self._route2_downshift_action_would_interrupt_active_client_locked(session)
+        )
+        if foreground_action_deferred:
+            autonomous_blockers.append("foreground_active_playback_defer")
+            if state == "candidate":
+                state = "recommended_deferred"
         safe_to_apply = bool(
             candidate
             and downshift_enabled
             and not transition_headroom_blocked
             and (reclaim_mode_allowed or maintenance_mode_allowed)
+            and not foreground_action_deferred
         )
         if transition_headroom_blocked:
             blockers.append("downshift_transition_headroom_unavailable")
@@ -5606,6 +5623,11 @@ class MobilePlaybackManager:
             reason = "Dry-run candidate only; autonomous maintenance downshift flag is disabled."
         if candidate and downshift_enabled and transition_headroom_blocked:
             reason = "Dry-run candidate only; transition headroom cannot safely hold old and replacement workers together."
+        elif candidate and foreground_action_deferred:
+            reason = (
+                "Active ffmpeg thread count cannot be safely changed in-place; foreground visible downshift "
+                "is deferred until playback is paused, backgrounded, or otherwise safe."
+            )
         elif candidate and donor_reserved_for_reclaim:
             reason = "Maintenance downshift is suppressed; donor is reserved for an admission-triggered reclaim transaction."
         elif candidate and downshift_enabled and reclaim_mode_allowed:
@@ -5644,6 +5666,10 @@ class MobilePlaybackManager:
             "adaptive_downshift_replacement_epoch_id": replacement_epoch_id,
             "adaptive_downshift_replacement_worker_id": replacement_worker_id,
             "adaptive_downshift_state": state,
+            "adaptive_downshift_action_deferred": foreground_action_deferred,
+            "adaptive_downshift_action_defer_reason": (
+                "foreground_active_playback" if foreground_action_deferred else None
+            ),
             "adaptive_downshift_transition_started_at": transition_started_at,
             "adaptive_downshift_switched_at": switched_at,
             "adaptive_downshift_aborted_reason": aborted_reason,
@@ -9478,6 +9504,8 @@ class MobilePlaybackManager:
                     "adaptive_downshift_replacement_epoch_id": record.adaptive_downshift_replacement_epoch_id,
                     "adaptive_downshift_replacement_worker_id": record.adaptive_downshift_replacement_worker_id,
                     "adaptive_downshift_state": record.adaptive_downshift_state,
+                    "adaptive_downshift_action_deferred": record.adaptive_downshift_action_deferred,
+                    "adaptive_downshift_action_defer_reason": record.adaptive_downshift_action_defer_reason,
                     "adaptive_downshift_transition_started_at": record.adaptive_downshift_transition_started_at,
                     "adaptive_downshift_switched_at": record.adaptive_downshift_switched_at,
                     "adaptive_downshift_aborted_reason": record.adaptive_downshift_aborted_reason,
@@ -11253,6 +11281,21 @@ class MobilePlaybackManager:
         else:
             browser_session.adaptive_reclaim_failed_reason = "insufficient_measured_capacity_after_resupply"
 
+    def _route2_downshift_action_would_interrupt_active_client_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> bool:
+        browser_session = session.browser_playback
+        if browser_session.engine_mode != "route2":
+            return False
+        if session.preparation_parked:
+            return False
+        if session.pending_target_seconds is not None:
+            return False
+        if session.lifecycle_state not in {"attached", "playing", "resuming"}:
+            return False
+        return bool(session.client_is_playing)
+
     def _create_route2_downshift_replacement_epoch_locked(
         self,
         session: MobilePlaybackSession,
@@ -11271,6 +11314,13 @@ class MobilePlaybackManager:
         if self._route2_downshift_retry_cap_remaining(browser_session) <= 0:
             browser_session.adaptive_downshift_retry_blocker = "adaptive_downshift_retry_cap_exceeded"
             active_epoch.adaptive_downshift_aborted_reason = "adaptive_downshift_retry_cap_exceeded"
+            self._write_route2_epoch_metadata_locked(active_epoch)
+            return None
+        if self._route2_downshift_action_would_interrupt_active_client_locked(session):
+            # Active ffmpeg thread count cannot be changed in-place safely. Starting
+            # a replacement worker for a visible foreground session can steal CPU/IO
+            # and cause jitter, so foreground downshift stays recommendation-only.
+            active_epoch.adaptive_downshift_aborted_reason = None
             self._write_route2_epoch_metadata_locked(active_epoch)
             return None
         retry_seconds = self._route2_downshift_retry_seconds_remaining(browser_session)
@@ -11319,14 +11369,7 @@ class MobilePlaybackManager:
             return False
         if replacement_epoch.adaptive_reclaim_request_id:
             return False
-        if session.preparation_parked:
-            return False
-        return bool(
-            session.browser_playback.engine_mode == "route2"
-            and session.lifecycle_state == "attached"
-            and session.client_is_playing
-            and session.pending_target_seconds is None
-        )
+        return self._route2_downshift_action_would_interrupt_active_client_locked(session)
 
     def _promote_route2_downshift_replacement_epoch_locked(
         self,

@@ -278,6 +278,8 @@ class Route2WorkerRecord:
     adaptive_downshift_replacement_epoch_id: str | None = None
     adaptive_downshift_replacement_worker_id: str | None = None
     adaptive_downshift_state: str = "none"
+    adaptive_downshift_action_deferred: bool = False
+    adaptive_downshift_action_defer_reason: str | None = None
     adaptive_downshift_transition_started_at: str | None = None
     adaptive_downshift_switched_at: str | None = None
     adaptive_downshift_aborted_reason: str | None = None

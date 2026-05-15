@@ -1056,7 +1056,13 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const { getByRole, getByText, queryByText } = renderOverlay({
       backendSubtitleTracks: [
         { index: 3, label: "English SRT", codec: "subrip", language: "en", text_based: true },
-        { index: 4, label: "PGS English", codec: "hdmv_pgs_subtitle", image_based: true },
+        {
+          index: 4,
+          label: "PGS English",
+          codec: "hdmv_pgs_subtitle",
+          image_based: true,
+          track_source: "raw_probe_summary_json",
+        },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
@@ -1135,14 +1141,14 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(getByRole("button", { name: "Subtitles" }));
     });
 
-    expect(container.querySelector(".elvern-overlay__track-sheet")).toBeTruthy();
-    expect(container.querySelector(".elvern-overlay__track-sheet-scroll")).toBeTruthy();
+    expect(container.querySelector(".elvern-overlay__track-sheet")).toBeNull();
+    expect(container.querySelector(".elvern-overlay__menu.elvern-overlay__track-menu")).toBeTruthy();
     expect(container.querySelectorAll(".elvern-overlay__track-menu-item").length).toBeGreaterThanOrEqual(31);
     expect(getByText("Subtitle 1")).toBeTruthy();
     expect(getByText("Subtitle 30 · PGS")).toBeTruthy();
   });
 
-  test("phone track sheet keeps touch scrolling away from the tap surface", () => {
+  test("phone rectangular track menu keeps touch scrolling away from the tap surface", () => {
     const { container, getByRole, root } = renderOverlay({
       backendSubtitleTracks: Array.from({ length: 30 }, (_, index) => ({
         index: index + 3,
@@ -1159,14 +1165,20 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     act(() => {
       fireEvent.click(getByRole("button", { name: "Subtitles" }));
     });
-    const sheet = container.querySelector(".elvern-overlay__track-sheet-scroll");
-    expect(sheet).toBeTruthy();
+    const menu = container.querySelector(".elvern-overlay__menu.elvern-overlay__track-menu");
+    expect(menu).toBeTruthy();
 
     act(() => {
-      fireEvent.touchMove(sheet);
+      fireEvent.touchMove(menu);
     });
 
     expect(root).toHaveClass("elvern-overlay--visible");
+
+    const event = new Event("touchmove", { bubbles: true, cancelable: true });
+    act(() => {
+      menu.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
   });
 
   test("phone cinema places subtitle and audio icons before More when tracks exist", () => {

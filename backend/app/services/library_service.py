@@ -610,6 +610,9 @@ def get_media_item_detail(
             "track_scan_source": track_scan_source,
             "subtitle_track_diagnostics": {
                 **subtitle_counts,
+                "track_scan_status": track_scan_status,
+                "track_scan_source": track_scan_source,
+                "track_scan_error": str(technical_row["probe_error"] or "") if technical_row else "",
                 "source": track_scan_source,
                 "tracks": [
                     {

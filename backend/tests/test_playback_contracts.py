@@ -9385,6 +9385,7 @@ def test_route2_closed_loop_marks_stable_surplus_as_downshift_candidate(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
 
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
@@ -9416,6 +9417,7 @@ def test_route2_adaptive_downshift_dry_run_boosted_twelve_comfortable_targets_si
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
 
@@ -9480,6 +9482,7 @@ def test_route2_adaptive_downshift_dry_run_boosted_nine_comfortable_targets_six(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
 
@@ -9547,6 +9550,7 @@ def test_route2_adaptive_downshift_dry_run_blocks_marginal_supply(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
 
@@ -9577,6 +9581,7 @@ def test_route2_adaptive_downshift_dry_run_allows_comfortable_io_publish_bound(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     pressure_root = tmp_path / "pressure"
     pressure_root.mkdir()
@@ -9777,6 +9782,7 @@ def test_route2_adaptive_downshift_real_disabled_stays_dry_run_candidate_only(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
     payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
@@ -9814,6 +9820,7 @@ def test_route2_adaptive_maintenance_downshift_disabled_suppresses_autonomous_re
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
     payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
@@ -9853,6 +9860,7 @@ def test_route2_adaptive_downshift_real_starts_maintenance_replacement_with_lowe
         runway_seconds=260.0,
         effective_playhead_seconds=40.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
 
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
@@ -9955,6 +9963,7 @@ def test_route2_adaptive_downshift_replacement_failure_aborts_without_losing_act
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -9991,6 +10000,7 @@ def test_route2_adaptive_downshift_client_seek_aborts_warming_replacement(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10024,6 +10034,7 @@ def test_route2_adaptive_downshift_external_pressure_aborts_warming_replacement(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10060,6 +10071,7 @@ def test_route2_adaptive_downshift_transient_moderate_pressure_does_not_abort_wa
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10106,6 +10118,7 @@ def test_route2_adaptive_downshift_sustained_moderate_pressure_aborts_warming_re
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10152,6 +10165,7 @@ def test_route2_adaptive_downshift_high_pressure_aborts_immediately(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10193,6 +10207,7 @@ def test_route2_adaptive_downshift_route2_dominated_high_cpu_sample_does_not_abo
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10241,6 +10256,7 @@ def test_route2_adaptive_downshift_retry_cooldown_blocks_retry_without_replaceme
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10286,6 +10302,7 @@ def test_route2_adaptive_downshift_retry_cap_is_separate_from_seek_recovery_cap(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
     payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
@@ -10322,6 +10339,7 @@ def test_route2_adaptive_downshift_real_blocks_without_transition_headroom(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
     payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
@@ -10356,6 +10374,7 @@ def test_route2_adaptive_downshift_status_payload_exposes_transition_fields(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
     assert replacement is not None
@@ -10387,7 +10406,7 @@ def test_route2_adaptive_downshift_status_payload_exposes_transition_fields(
     )
 
 
-def test_route2_autonomous_downshift_ready_defers_promotion_for_active_playback(
+def test_route2_autonomous_downshift_defers_start_for_active_playback(
     initialized_settings,
     monkeypatch,
 ) -> None:
@@ -10399,7 +10418,7 @@ def test_route2_autonomous_downshift_ready_defers_promotion_for_active_playback(
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 1.0})
-    _capture_route2_worker_threads(monkeypatch)
+    started_workers = _capture_route2_worker_threads(monkeypatch)
     _install_route2_downshift_inputs(manager, session, epoch, record)
     _mark_route2_runtime_supply(
         session,
@@ -10414,24 +10433,21 @@ def test_route2_autonomous_downshift_ready_defers_promotion_for_active_playback(
     session.lifecycle_state = "attached"
     session.client_is_playing = True
     session.browser_playback.attach_revision = 3
+    decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
+    payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
-    assert replacement is not None
-    manager._ensure_route2_epoch_workers_locked(session)
-    replacement_record = manager._route2_workers[replacement.active_worker_id]
-    replacement_record.state = "running"
-    replacement_record.assigned_threads = 6
-    replacement_record.process_exists = True
-    _publish_route2_epoch_dummy_range(replacement, through_segment=80)
-    replacement.transcoder_completed = True
 
-    promoted = manager._promote_route2_downshift_replacement_epoch_locked(session, replacement)
-
-    assert promoted is False
+    assert replacement is None
     assert session.browser_playback.active_epoch_id == epoch.epoch_id
-    assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
     assert session.browser_playback.attach_revision == 3
     assert record.state == "running"
-    assert replacement.state == "attach_ready"
+    assert len(started_workers) == 0
+    assert payload["adaptive_downshift_candidate"] is True
+    assert payload["adaptive_downshift_state"] == "recommended_deferred"
+    assert payload["adaptive_downshift_action_deferred"] is True
+    assert payload["adaptive_downshift_action_defer_reason"] == "foreground_active_playback"
+    assert payload["downshift_safe_to_apply"] is False
 
 
 def test_route2_adaptive_reclaim_dry_run_candidate_does_not_start_replacement(
@@ -10458,6 +10474,7 @@ def test_route2_adaptive_reclaim_dry_run_candidate_does_not_start_replacement(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     decision = manager._evaluate_route2_closed_loop_dry_run_locked(session, epoch, record)
     downshift_payload = manager._route2_adaptive_downshift_payload_locked(session, epoch, record, decision)
@@ -10578,6 +10595,7 @@ def test_route2_adaptive_reclaim_real_starts_downshift_and_denies_admission_unti
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
 
     with pytest.raises(PlaybackAdmissionError) as exc_info:
@@ -10795,6 +10813,7 @@ def test_route2_maintenance_downshift_without_reclaim_id_does_not_count_as_recla
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._create_route2_downshift_replacement_epoch_locked(
         session,
@@ -10866,6 +10885,7 @@ def test_route2_pending_admission_reclaim_converts_later_downshift_to_reclaim_do
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
 
     replacement = manager._maybe_start_route2_downshift_locked(session, epoch)
