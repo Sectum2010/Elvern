@@ -10,10 +10,14 @@ function renderOverlay({
   cinemaModeActive = false,
   deviceClass = "desktop",
   hlsRef = null,
+  onBackendAudioTrackSelect = null,
+  onBackendSubtitleTrackSelect = null,
+  onClientPreparedThruChange = null,
   onToggleFullscreen = null,
   onVideoFitModeChange = null,
   preparing = false,
   preparingMessage = "",
+  sessionPayload = null,
   setupVideo = null,
   trackRefreshKey = "",
   videoFitMode = "standard-fit",
@@ -80,11 +84,15 @@ function renderOverlay({
     durationSeconds: 600,
     deviceClass,
     hlsRef,
+    onBackendAudioTrackSelect,
+    onBackendSubtitleTrackSelect,
     onSeekCommit: () => {},
+    onClientPreparedThruChange,
     onToggleFullscreen,
     onVideoFitModeChange,
     preparing,
     preparingMessage,
+    sessionPayload,
     shellRef: { current: shell },
     trackRefreshKey,
     videoFitMode,
@@ -173,6 +181,18 @@ function makeTrackList(tracks) {
     list[index] = track;
   });
   return list;
+}
+
+function makeTimeRanges(ranges) {
+  return {
+    length: ranges.length,
+    start(index) {
+      return ranges[index][0];
+    },
+    end(index) {
+      return ranges[index][1];
+    },
+  };
 }
 
 describe("ElvernPlayerOverlay controls visibility", () => {
@@ -366,6 +386,36 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(container.querySelector(".elvern-overlay__preparing")).toBeNull();
     expect(queryByText(/Elvern is preparing playback/i)).toBeNull();
     expect(queryByText(/still preparing enough playback/i)).toBeNull();
+  });
+
+  test("prepared-through callback reports contiguous client buffer instead of server cache ranges", () => {
+    const onClientPreparedThruChange = vi.fn();
+    const { video } = renderOverlay({
+      onClientPreparedThruChange,
+      sessionPayload: {
+        cache_ranges: [[0, 300]],
+        engine_mode: "route2",
+        ready_start_seconds: 0,
+        ready_end_seconds: 300,
+      },
+      setupVideo(videoElement) {
+        Object.defineProperty(videoElement, "currentTime", {
+          configurable: true,
+          get: () => 12,
+        });
+        Object.defineProperty(videoElement, "buffered", {
+          configurable: true,
+          get: () => makeTimeRanges([[10, 35]]),
+        });
+      },
+    });
+
+    act(() => {
+      video.dispatchEvent(new Event("progress"));
+    });
+
+    expect(onClientPreparedThruChange).toHaveBeenLastCalledWith(35);
+    expect(onClientPreparedThruChange).not.toHaveBeenCalledWith(300);
   });
 
   test("fullscreen More menu exposes fit/fill toggle", () => {
@@ -820,7 +870,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(hls.audioTrack).toBe(1);
   });
 
-  test("backend-discovered tracks appear when browser exposes no tracks", () => {
+  test("backend-discovered tracks appear and selectable audio prepares through backend", () => {
+    const onBackendAudioTrackSelect = vi.fn();
     const { getByRole, getByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, label: "English (aac)", codec: "aac", disposition_default: true },
@@ -831,6 +882,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
+      onBackendAudioTrackSelect,
       onToggleFullscreen: vi.fn(),
     });
 
@@ -843,6 +895,45 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(getByRole("button", { name: "Audio track" }));
     });
     expect(getByText("Commentary (aac)")).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "Commentary (aac)" }));
+    });
+    expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({
+      index: 2,
+      source: "backend",
+      switchRequiresPreparation: true,
+    }));
+  });
+
+  test("text backend subtitles are clickable while image subtitles are marked unsupported", () => {
+    const onBackendSubtitleTrackSelect = vi.fn();
+    const { getByRole, getByText } = renderOverlay({
+      backendSubtitleTracks: [
+        { index: 3, label: "English SRT", codec: "subrip", language: "en", text_based: true },
+        { index: 4, label: "PGS English", codec: "hdmv_pgs_subtitle", image_based: true },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendSubtitleTrackSelect,
+      onToggleFullscreen: vi.fn(),
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+
+    expect(getByText("PGS English")).toBeTruthy();
+    expect(getByText(/Image subtitles need future burn-in support/i)).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "English SRT" }));
+    });
+    expect(onBackendSubtitleTrackSelect).toHaveBeenCalledWith(expect.objectContaining({
+      index: 3,
+      source: "backend",
+      textBased: true,
+    }));
   });
 
   test("phone cinema places subtitle and audio icons before More when tracks exist", () => {

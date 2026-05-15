@@ -46,6 +46,7 @@ def _write_route2_epoch_metadata_locked(
             "drain_target_attach_revision": epoch.drain_target_attach_revision,
             "last_media_access_at_ts": epoch.last_media_access_at_ts,
             "replacement_reason": epoch.replacement_reason,
+            "audio_stream_index": epoch.audio_stream_index,
             "maintenance_downshift_target_threads": epoch.maintenance_downshift_target_threads,
             "maintenance_downshift_source_epoch_id": epoch.maintenance_downshift_source_epoch_id,
             "adaptive_downshift_transition_started_at": epoch.adaptive_downshift_transition_started_at,

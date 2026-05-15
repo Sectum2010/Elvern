@@ -646,12 +646,19 @@ class MobilePlaybackSessionCreateRequest(BaseModel):
     engine_mode: BrowserPlaybackEngineMode | None = None
     playback_mode: BrowserPlaybackMode | None = None
     client_device_class: BrowserPlaybackClientDeviceClass | None = None
+    selected_audio_stream_index: int | None = Field(default=None, ge=0)
 
 
 class MobilePlaybackSeekRequest(BaseModel):
     target_position_seconds: float = Field(ge=0)
     last_stable_position_seconds: float | None = Field(default=None, ge=0)
     playing_before_seek: bool | None = None
+
+
+class MobilePlaybackAudioTrackRequest(BaseModel):
+    selected_audio_stream_index: int = Field(ge=0)
+    current_position_seconds: float | None = Field(default=None, ge=0)
+    playing_before_switch: bool | None = None
 
 
 class MobilePlaybackHeartbeatRequest(BaseModel):
@@ -767,8 +774,8 @@ class MobilePlaybackSessionResponse(BaseModel):
     full_bad_condition_reserve_satisfied: bool = False
     full_bad_condition_reserve_progress_source: str | None = None
     full_bad_condition_reserve_eta_seconds: float | None = Field(default=None, ge=0)
-    full_bad_condition_gate_enabled: bool = False
-    full_bad_condition_gate_dry_run_enabled: bool = True
+    full_bad_condition_gate_enabled: bool = True
+    full_bad_condition_gate_dry_run_enabled: bool = False
     full_bad_condition_gate_would_block_ready: bool = False
     full_bad_condition_gate_blocks_ready: bool = False
     full_bad_condition_gate_blockers: list[str] = Field(default_factory=list)
@@ -782,6 +789,10 @@ class MobilePlaybackSessionResponse(BaseModel):
     attach_ready: bool = False
     browser_session_state: BrowserPlaybackSessionEngineState = "legacy"
     active_epoch_state: BrowserPlaybackEpochState | None = None
+    selected_audio_stream_index: int | None = Field(default=None, ge=0)
+    active_audio_stream_index: int | None = Field(default=None, ge=0)
+    pending_audio_stream_index: int | None = Field(default=None, ge=0)
+    audio_switch_state: str | None = None
 
 
 class MobilePlaybackStopResponse(BaseModel):
@@ -2044,22 +2055,22 @@ class AdminPlaybackWorkersStatusResponse(BaseModel):
     per_user_budget_cores: int = Field(default=0, ge=0)
     max_worker_threads: int = Field(default=0, ge=0)
     adaptive_max_worker_threads: int = Field(default=0, ge=0)
-    adaptive_thread_control_enabled: bool = False
-    adaptive_thread_control_local_only: bool = True
-    adaptive_thread_control_cloud_enabled: bool = False
-    adaptive_thread_control_strict_12_enabled: bool = False
-    adaptive_thread_control_real_9_prepare_enabled: bool = False
-    adaptive_downshift_enabled: bool = False
-    adaptive_downshift_dry_run_enabled: bool = True
-    autonomous_maintenance_downshift_enabled: bool = False
-    autonomous_maintenance_downshift_dry_run_enabled: bool = True
-    adaptive_reclaim_enabled: bool = False
-    adaptive_reclaim_dry_run_enabled: bool = True
-    adaptive_resupply_enabled: bool = False
-    adaptive_resupply_dry_run_enabled: bool = True
+    adaptive_thread_control_enabled: bool = True
+    adaptive_thread_control_local_only: bool = False
+    adaptive_thread_control_cloud_enabled: bool = True
+    adaptive_thread_control_strict_12_enabled: bool = True
+    adaptive_thread_control_real_9_prepare_enabled: bool = True
+    adaptive_downshift_enabled: bool = True
+    adaptive_downshift_dry_run_enabled: bool = False
+    autonomous_maintenance_downshift_enabled: bool = True
+    autonomous_maintenance_downshift_dry_run_enabled: bool = False
+    adaptive_reclaim_enabled: bool = True
+    adaptive_reclaim_dry_run_enabled: bool = False
+    adaptive_resupply_enabled: bool = True
+    adaptive_resupply_dry_run_enabled: bool = False
     adaptive_resupply_stabilization_seconds: int = Field(default=120, ge=0)
-    full_bad_condition_gate_enabled: bool = False
-    full_bad_condition_gate_dry_run_enabled: bool = True
+    full_bad_condition_gate_enabled: bool = True
+    full_bad_condition_gate_dry_run_enabled: bool = False
     workers_by_user: list[AdminPlaybackWorkersUserSummaryResponse] = Field(default_factory=list)
     native_playback_count: int = Field(default=0, ge=0)
     native_playback_running_count: int = Field(default=0, ge=0)

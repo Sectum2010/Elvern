@@ -311,18 +311,6 @@ function isIosTransportDebugEnabled(search = "") {
   }
 }
 
-function formatTimeRange(startSeconds, endSeconds) {
-  if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
-    return "";
-  }
-  const safeStart = Math.max(startSeconds || 0, 0);
-  const safeEnd = Math.max(endSeconds || 0, 0);
-  if (safeEnd <= safeStart + 0.25) {
-    return formatDuration(safeStart);
-  }
-  return `${formatDuration(safeStart)}-${formatDuration(safeEnd)}`;
-}
-
 function formatEstimateDuration(seconds) {
   const numericSeconds = Number(seconds) || 0;
   const totalSeconds = Math.max(0, numericSeconds > 0 ? Math.ceil(numericSeconds) : 0);
@@ -477,6 +465,7 @@ export function DetailPage() {
   const [macAppFullscreenError, setMacAppFullscreenError] = useState("");
   const [elvernCinemaModeActive, setElvernCinemaModeActive] = useState(false);
   const [elvernVideoFitMode, setElvernVideoFitMode] = useState("standard-fit");
+  const [clientPreparedThruSeconds, setClientPreparedThruSeconds] = useState(0);
   const useNativeControlsFallback = false;
   const playerShellRef = useRef(null);
   const playerFitPinchRef = useRef(null);
@@ -710,6 +699,7 @@ export function DetailPage() {
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
     seekBrowserPlaybackTo,
+    selectBrowserPlaybackAudioTrack,
     stopCurrentBrowserPlaybackSession,
   } = useBrowserPlaybackController({
     itemId,
@@ -743,6 +733,11 @@ export function DetailPage() {
       });
     },
   });
+
+  useEffect(() => {
+    setClientPreparedThruSeconds(0);
+  }, [itemId, mobileSession?.session_id, videoElementKey]);
+
   const activeLibraryReturn = useMemo(() => {
     const fromLocation = extractLibraryReturnState(location.state);
     if (fromLocation) {
@@ -2586,16 +2581,10 @@ export function DetailPage() {
       ? "status-pill"
       : "status-pill status-pill--live";
   const preparedDurationLabel = availableDuration > 0 ? formatDuration(availableDuration) : "0:00";
+  const clientPreparedThruLabel = formatDuration(Math.max(0, clientPreparedThruSeconds || 0));
   const effectiveBrowserResumePromptPosition = browserResumePromptPosition > 0
     ? browserResumePromptPosition
     : resumableStartPosition;
-  const mobileCacheRangesLabel =
-    mobileSession?.cache_ranges?.length
-      ? mobileSession.cache_ranges
-        .slice(0, 3)
-        .map(([start, end]) => formatTimeRange(start, end))
-        .join(", ")
-      : "";
   const optimizedProgressNote =
     mobileSession
       ? mobileSeekPendingRef.current || mobileSession.pending_target_seconds != null
@@ -2604,13 +2593,9 @@ export function DetailPage() {
               ? mobilePendingTargetRef.current
               : mobileSession.target_position_seconds,
           )}.`
-        : mobileCacheRangesLabel
-          ? `Reusable cached ranges: ${mobileCacheRangesLabel}${mobileSession.cache_ranges.length > 3 ? "..." : ""}.`
-          : availableDuration <= 0
-            ? `Elvern is preparing ${browserPlaybackLabel}.`
-            : fullDuration > 0
-              ? `Cached playback around ${formatTimeRange(mobileSession.ready_start_seconds || 0, mobileSession.ready_end_seconds || 0)} of ${formatDuration(fullDuration)}.`
-              : `Cached playback around ${formatTimeRange(mobileSession.ready_start_seconds || 0, mobileSession.ready_end_seconds || 0)}.`
+        : fullDuration > 0
+          ? `Prepared through ${clientPreparedThruLabel} of ${formatDuration(fullDuration)} while Elvern transcodes ahead.`
+          : `Prepared through ${clientPreparedThruLabel} while Elvern transcodes ahead.`
       : playback?.mode === "hls"
       ? playback.manifest_complete
         ? "Full movie is ready for optimized playback."
@@ -3378,6 +3363,8 @@ export function DetailPage() {
                   backendAudioTracks={playbackAudioTracks}
                   backendSubtitleTracks={playbackSubtitleTracks}
                   onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}
+                  onBackendAudioTrackSelect={selectBrowserPlaybackAudioTrack}
+                  onClientPreparedThruChange={setClientPreparedThruSeconds}
                   onToggleFullscreen={toggleElvernPlayerFullscreen}
                   onVideoFitModeChange={setElvernVideoFitMode}
                   preparing={elvernOverlayPreparing}

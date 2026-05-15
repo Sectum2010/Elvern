@@ -114,8 +114,12 @@ function normalizeBackendSubtitleTracks(tracks) {
     selected: false,
     source: "backend",
     codec: track.codec || "",
-    browserSupported: Boolean(track.browser_supported),
-    unsupportedReason: track.browser_supported ? "" : "This subtitle track is in the source file, but this browser stream does not expose it as a selectable WebVTT track yet.",
+    browserSupported: Boolean(track.browser_supported || track.text_based),
+    unsupportedReason: track.image_based
+      ? "Image subtitles need future burn-in support for browser playback."
+      : "This subtitle track needs WebVTT preparation before the browser can display it.",
+    textBased: Boolean(track.text_based),
+    imageBased: Boolean(track.image_based),
   }));
 }
 
@@ -132,8 +136,8 @@ function normalizeBackendAudioTracks(tracks) {
     selected: Boolean(track.disposition_default) || index === 0,
     source: "backend",
     codec: track.codec || "",
-    browserSupported: Boolean(track.browser_supported),
-    unsupportedReason: "This audio track is in the source file. Switching it requires a Route2 audio remap; this stream has not exposed alternate audio renditions yet.",
+    browserSupported: true,
+    switchRequiresPreparation: true,
   }));
 }
 
@@ -178,10 +182,14 @@ export function usePlaybackTrackControls({
   backendAudioTracks = [],
   backendSubtitleTracks = [],
   hlsRef = null,
+  onBackendAudioTrackSelect = null,
+  onBackendSubtitleTrackSelect = null,
   trackRefreshKey = "",
   videoElementKey = 0,
   videoRef = null,
 } = {}) {
+  const [selectedBackendSubtitleTrackId, setSelectedBackendSubtitleTrackId] = useState(null);
+  const [selectedBackendAudioTrackId, setSelectedBackendAudioTrackId] = useState(null);
   const [trackState, setTrackState] = useState(() => resolveTrackState({
     backendAudioTracks,
     backendSubtitleTracks,
@@ -247,6 +255,7 @@ export function usePlaybackTrackControls({
         video.textTracks[index].mode = "disabled";
       }
     }
+    setSelectedBackendSubtitleTrackId(null);
     refreshTrackState();
   }, [hlsRef, refreshTrackState, videoRef]);
 
@@ -268,9 +277,12 @@ export function usePlaybackTrackControls({
           video.textTracks[index].mode = index === selected.index ? "showing" : "disabled";
         }
       }
+    } else if (selected.source === "backend" && selected.browserSupported) {
+      setSelectedBackendSubtitleTrackId(selected.id);
+      onBackendSubtitleTrackSelect?.(selected);
     }
     refreshTrackState();
-  }, [hlsRef, refreshTrackState, trackState.subtitleTracks, videoRef]);
+  }, [hlsRef, onBackendSubtitleTrackSelect, refreshTrackState, trackState.subtitleTracks, videoRef]);
 
   const selectAudioTrack = useCallback((trackId) => {
     const selected = trackState.audioTracks.find((track) => track.id === trackId);
@@ -289,15 +301,33 @@ export function usePlaybackTrackControls({
           native[index].enabled = index === selected.index;
         }
       }
+    } else if (selected.source === "backend" && selected.browserSupported) {
+      setSelectedBackendAudioTrackId(selected.id);
+      onBackendAudioTrackSelect?.(selected);
     }
     refreshTrackState();
-  }, [hlsRef, refreshTrackState, trackState.audioTracks, videoRef]);
+  }, [hlsRef, onBackendAudioTrackSelect, refreshTrackState, trackState.audioTracks, videoRef]);
+
+  const resolvedAudioTracks = trackState.audioTracks.map((track) => (
+    track.source === "backend"
+      ? { ...track, selected: selectedBackendAudioTrackId ? track.id === selectedBackendAudioTrackId : track.selected }
+      : track
+  ));
+  const resolvedSubtitleTracks = trackState.subtitleTracks.map((track) => (
+    track.source === "backend"
+      ? { ...track, selected: track.id === selectedBackendSubtitleTrackId }
+      : track
+  ));
 
   return {
     ...trackState,
+    audioTracks: resolvedAudioTracks,
     refreshTrackState,
     selectAudioTrack,
     selectSubtitleTrack,
+    selectedAudioTrackId: resolvedAudioTracks.find((track) => track.selected)?.id || null,
+    selectedSubtitleTrackId: resolvedSubtitleTracks.find((track) => track.selected)?.id || null,
+    subtitleTracks: resolvedSubtitleTracks,
     subtitlesOff,
   };
 }

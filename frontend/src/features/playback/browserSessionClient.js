@@ -122,6 +122,23 @@ export function seekOptimizedPlaybackSession({
   });
 }
 
+export function selectOptimizedPlaybackAudioTrack({
+  browserPlaybackSessionRoot,
+  sessionId,
+  selectedAudioStreamIndex,
+  currentPositionSeconds,
+  playingBeforeSwitch,
+}) {
+  return apiRequest(`${browserPlaybackSessionRoot}/sessions/${sessionId}/audio`, {
+    method: "POST",
+    data: {
+      selected_audio_stream_index: selectedAudioStreamIndex,
+      current_position_seconds: currentPositionSeconds,
+      playing_before_switch: playingBeforeSwitch,
+    },
+  });
+}
+
 export function fetchActiveOptimizedPlaybackSession({
   browserPlaybackSessionRoot,
   itemId,

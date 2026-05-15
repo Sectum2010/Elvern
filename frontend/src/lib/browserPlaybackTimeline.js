@@ -81,6 +81,13 @@ export function getBrowserPlaybackAttachedManifestEndSeconds(payload) {
   return getBrowserPlaybackTimelineEndSeconds(payload);
 }
 
+export function shouldForceReattachForManifestWindowRefresh(payload) {
+  if (!isHlsSessionPayload(payload)) {
+    return true;
+  }
+  return !isNativeHlsWindowPayload(payload);
+}
+
 export function toBrowserPlaybackMediaElementSeconds(payload, absoluteSeconds) {
   const absolute = coerceNonNegativeNumber(absoluteSeconds);
   if (!isHlsSessionPayload(payload)) {

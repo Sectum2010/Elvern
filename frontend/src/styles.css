@@ -5961,11 +5961,12 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   min-height: 2.55rem;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   line-height: 1.25;
   white-space: normal;
   overflow-wrap: anywhere;
   padding: 0.55rem 0.7rem;
+  text-align: left;
 }
 
 .elvern-overlay__track-menu-label,

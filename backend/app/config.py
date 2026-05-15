@@ -301,55 +301,55 @@ def load_settings() -> Settings:
         ),
         route2_adaptive_thread_control_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_thread_control_local_only=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY",
-            True,
+            False,
         ),
         route2_adaptive_thread_control_cloud_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_thread_control_strict_12_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_thread_control_real_9_prepare_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_REAL_9_PREPARE_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_downshift_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_downshift_dry_run_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_DOWNSHIFT_DRY_RUN_ENABLED",
-            True,
+            False,
         ),
         route2_adaptive_maintenance_downshift_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_MAINTENANCE_DOWNSHIFT_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_maintenance_downshift_dry_run_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_MAINTENANCE_DOWNSHIFT_DRY_RUN_ENABLED",
-            True,
+            False,
         ),
         route2_adaptive_reclaim_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_RECLAIM_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_reclaim_dry_run_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_RECLAIM_DRY_RUN_ENABLED",
-            True,
+            False,
         ),
         route2_adaptive_resupply_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_RESUPPLY_ENABLED",
-            False,
+            True,
         ),
         route2_adaptive_resupply_dry_run_enabled=_get_bool(
             "ELVERN_ROUTE2_ADAPTIVE_RESUPPLY_DRY_RUN_ENABLED",
-            True,
+            False,
         ),
         route2_adaptive_resupply_stabilization_seconds=_get_int(
             "ELVERN_ROUTE2_ADAPTIVE_RESUPPLY_STABILIZATION_SECONDS",
@@ -357,11 +357,11 @@ def load_settings() -> Settings:
         ),
         route2_full_bad_condition_30min_gate_enabled=_get_bool(
             "ELVERN_ROUTE2_FULL_BAD_CONDITION_30MIN_GATE_ENABLED",
-            False,
+            True,
         ),
         route2_full_bad_condition_30min_gate_dry_run_enabled=_get_bool(
             "ELVERN_ROUTE2_FULL_BAD_CONDITION_30MIN_GATE_DRY_RUN_ENABLED",
-            True,
+            False,
         ),
         route2_shared_output_init_writer_enabled=_get_bool(
             "ELVERN_ROUTE2_SHARED_OUTPUT_INIT_WRITER_ENABLED",

@@ -9,9 +9,8 @@ import {
 import {
   appendPlayedSample,
   computePlayedNotCachedRanges,
-  mergeRanges,
+  getContiguousBufferedEndFromPosition,
   readBufferedAbsoluteRanges,
-  rangesToAbsolute,
 } from "../../lib/playbackTimelineRanges.js";
 import { toBrowserPlaybackAbsoluteSeconds } from "../../lib/browserPlaybackTimeline.js";
 import {
@@ -169,9 +168,9 @@ function TrackMenuItem({
   track,
 }) {
   const unsupported = isBackendUnsupportedTrack(track);
-  const note = kind === "audio"
+  const note = track?.unsupportedReason || (kind === "audio"
     ? "Detected in the source file; this browser stream has not exposed alternate audio yet."
-    : "Detected in the source file; this browser stream has not exposed selectable subtitles yet.";
+    : "Detected in the source file; this browser stream has not exposed selectable subtitles yet.");
   if (unsupported) {
     return (
       <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
@@ -272,6 +271,9 @@ export default function ElvernPlayerOverlay({
   onVideoFitModeChange = null,
   deviceClass = "desktop",
   hlsRef = null,
+  onBackendAudioTrackSelect = null,
+  onBackendSubtitleTrackSelect = null,
+  onClientPreparedThruChange = null,
   trackRefreshKey = "",
   backendAudioTracks = [],
   backendSubtitleTracks = [],
@@ -329,6 +331,8 @@ export default function ElvernPlayerOverlay({
     backendAudioTracks,
     backendSubtitleTracks,
     hlsRef,
+    onBackendAudioTrackSelect,
+    onBackendSubtitleTrackSelect,
     trackRefreshKey,
     videoElementKey,
     videoRef,
@@ -441,7 +445,15 @@ export default function ElvernPlayerOverlay({
       lastSampledAbsoluteRef.current = absolute;
     };
     const handleProgress = () => {
-      setBufferedAbsoluteRanges(readBufferedAbsoluteRanges(video, sessionPayload));
+      const nextBufferedRanges = readBufferedAbsoluteRanges(video, sessionPayload);
+      const localTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      const absolutePlayhead = toBrowserPlaybackAbsoluteSeconds(sessionPayload, localTime);
+      setBufferedAbsoluteRanges(nextBufferedRanges);
+      if (typeof onClientPreparedThruChange === "function") {
+        onClientPreparedThruChange(
+          getContiguousBufferedEndFromPosition(absolutePlayhead, nextBufferedRanges),
+        );
+      }
     };
     const handleSeeking = () => {
       lastSampledAbsoluteRef.current = null;
@@ -488,19 +500,7 @@ export default function ElvernPlayerOverlay({
       video.removeEventListener("seeked", handleSeeked);
       video.removeEventListener("loadedmetadata", handleProgress);
     };
-  }, [sessionPayload, videoElementKey, videoRef]);
-
-  useEffect(() => {
-    if (!sessionPayload) {
-      return;
-    }
-    const cacheRanges = sessionPayload?.cache_ranges;
-    if (!Array.isArray(cacheRanges) || cacheRanges.length === 0) {
-      return;
-    }
-    const absolute = rangesToAbsolute(sessionPayload, cacheRanges);
-    setBufferedAbsoluteRanges((previous) => mergeRanges([...previous, ...absolute]));
-  }, [sessionPayload]);
+  }, [onClientPreparedThruChange, sessionPayload, videoElementKey, videoRef]);
 
   useEffect(() => {
     if (!SUPPORTS_DOCUMENT) {
@@ -1271,10 +1271,10 @@ export default function ElvernPlayerOverlay({
                   <CaptionsIcon className="elvern-overlay__icon" />
                 </button>
                 {showCaptionsMenu ? (
-                  <div className="elvern-overlay__menu" role="menu">
+                  <div className="elvern-overlay__menu elvern-overlay__track-menu" role="menu">
                     <button
                       aria-checked={captionActiveCount === 0}
-                      className="elvern-overlay__menu-item"
+                      className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
                       onClick={handleTextTrackOff}
                       role="menuitemradio"
                       type="button"

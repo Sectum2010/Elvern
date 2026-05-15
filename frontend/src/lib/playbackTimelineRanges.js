@@ -193,6 +193,19 @@ export function readBufferedAbsoluteRanges(videoElement, sessionPayload) {
   return rangesToAbsolute(sessionPayload, local);
 }
 
+export function getContiguousBufferedEndFromPosition(absoluteSeconds, bufferedRanges) {
+  const position = isFiniteNumber(absoluteSeconds) ? absoluteSeconds : Number(absoluteSeconds);
+  if (!Number.isFinite(position) || position < 0) {
+    return 0;
+  }
+  for (const [start, end] of mergeRanges(bufferedRanges || [])) {
+    if (position >= start && position <= end) {
+      return end;
+    }
+  }
+  return 0;
+}
+
 export function readPlayedAbsoluteRanges(videoElement, sessionPayload) {
   if (!videoElement) {
     return [];

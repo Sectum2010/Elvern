@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from ..auth import CurrentUser
 from ..schemas import (
     BrowserPlaybackClientDeviceClass,
+    MobilePlaybackAudioTrackRequest,
     MobilePlaybackHeartbeatRequest,
     MobilePlaybackSeekRequest,
     MobilePlaybackSessionCreateRequest,
@@ -102,6 +103,7 @@ def create_browser_playback_session(
             engine_mode=payload.engine_mode,
             playback_mode=payload.playback_mode,
             client_device_class=payload.client_device_class,
+            selected_audio_stream_index=payload.selected_audio_stream_index,
             client_user_agent=request.headers.get("user-agent"),
             user_role=user.role,
         )
@@ -182,6 +184,28 @@ def seek_browser_playback_session(
             target_position_seconds=payload.target_position_seconds,
             last_stable_position_seconds=payload.last_stable_position_seconds,
             playing_before_seek=payload.playing_before_seek,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _coerce_session_error(exc) from exc
+    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+
+
+@router.post("/api/browser-playback/sessions/{session_id}/audio", response_model=MobilePlaybackSessionResponse)
+def select_browser_playback_audio_track(
+    session_id: str,
+    payload: MobilePlaybackAudioTrackRequest,
+    request: Request,
+    user=CurrentUser,
+) -> MobilePlaybackSessionResponse:
+    try:
+        response = _get_browser_manager(request).select_audio_track(
+            session_id,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+            selected_audio_stream_index=payload.selected_audio_stream_index,
+            current_position_seconds=payload.current_position_seconds,
+            playing_before_switch=payload.playing_before_switch,
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc

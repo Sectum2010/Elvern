@@ -9,6 +9,7 @@ import {
   getBrowserPlaybackTimelineStartSeconds,
   isBrowserPlaybackAbsolutePositionReady,
   isNativeHlsWindowPayload,
+  shouldForceReattachForManifestWindowRefresh,
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "./browserPlaybackTimeline.js";
@@ -78,6 +79,23 @@ test("native HLS attached manifest end uses active window end instead of server 
     ready_end_seconds: 300,
   });
   assert.equal(getBrowserPlaybackAttachedManifestEndSeconds(payload), 20);
+});
+
+test("native HLS window refresh does not force frontend reattach", () => {
+  const payload = buildRoute2Payload({
+    selected_hls_engine: "native_hls",
+    active_window_start_seconds: 0,
+    active_window_end_seconds: 15,
+    ready_end_seconds: 300,
+  });
+  assert.equal(shouldForceReattachForManifestWindowRefresh(payload), false);
+});
+
+test("non-native HLS manifest refresh may still force reattach", () => {
+  assert.equal(shouldForceReattachForManifestWindowRefresh(buildRoute2Payload({
+    selected_hls_engine: "hls_js",
+  })), true);
+  assert.equal(shouldForceReattachForManifestWindowRefresh({ engine_mode: "legacy" }), true);
 });
 
 test("hls.js attached manifest end can still use ready end when no native sliding window is active", () => {

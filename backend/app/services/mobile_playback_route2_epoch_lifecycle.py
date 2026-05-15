@@ -71,6 +71,7 @@ def _build_route2_epoch_locked(
         metadata_path=epoch_dir / "epoch.json",
         frontier_path=(epoch_dir / "published" / "frontier.json"),
         published_init_path=(epoch_dir / "published" / "init.mp4"),
+        audio_stream_index=session.browser_playback.selected_audio_stream_index,
     )
 
 

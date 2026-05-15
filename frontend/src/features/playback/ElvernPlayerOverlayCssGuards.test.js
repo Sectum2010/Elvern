@@ -184,8 +184,10 @@ describe("Elvern player mobile CSS guards", () => {
     expect(menuBlock).toContain("width: min(18rem");
     expect(menuBlock).toContain("max-height: min(58dvh");
     expect(rowBlock).toContain("min-height: 2.55rem");
+    expect(rowBlock).toContain("align-items: flex-start");
     expect(rowBlock).toContain("overflow-wrap: anywhere");
     expect(rowBlock).toContain("white-space: normal");
+    expect(rowBlock).toContain("text-align: left");
   });
 
   test("timeline has no standalone playhead knob styling", () => {

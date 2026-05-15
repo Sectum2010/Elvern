@@ -201,6 +201,23 @@ from .route2_shared_output_store import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_audio_stream_index(value: int | None) -> int | None:
+    if value is None:
+        return None
+    coerced = int(value)
+    if coerced < 0:
+        raise ValueError("selected_audio_stream_index must be non-negative")
+    return coerced
+
+
+def _ffmpeg_audio_map(audio_stream_index: int | None) -> str:
+    if audio_stream_index is None:
+        return "0:a:0?"
+    return f"0:{int(audio_stream_index)}?"
+
+
 ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
 ROUTE2_RESOURCE_TELEMETRY_INTERVAL_SECONDS = 1.0
 ROUTE2_RESOURCE_SNAPSHOT_STALE_SECONDS = 5.0
@@ -1391,6 +1408,7 @@ class MobilePlaybackManager:
         engine_mode: str | None = None,
         playback_mode: str | None = None,
         client_device_class: str | None = None,
+        selected_audio_stream_index: int | None = None,
         client_user_agent: str | None = None,
         user_role: str | None = None,
     ) -> dict[str, object]:
@@ -1398,6 +1416,7 @@ class MobilePlaybackManager:
         profile_key = self._normalize_profile(profile)
         selected_engine_mode = self._select_engine_mode(engine_mode)
         selected_playback_mode = self._select_playback_mode(playback_mode)
+        selected_audio_stream_index = _coerce_audio_stream_index(selected_audio_stream_index)
         normalized_client_device_class = _normalize_client_device_class(client_device_class)
         normalized_client_user_agent = (client_user_agent or "").strip() or None
         normalized_user_role = self._normalize_user_role(user_role)
@@ -1451,6 +1470,7 @@ class MobilePlaybackManager:
                         candidate.media_item_id != int(item["id"])
                         or candidate.profile != profile_key
                         or candidate.browser_playback.playback_mode != selected_playback_mode
+                        or candidate.browser_playback.selected_audio_stream_index != selected_audio_stream_index
                         or candidate.source_fingerprint != source_fingerprint
                         or candidate.cache_key != cache_key
                     ):
@@ -1558,6 +1578,7 @@ class MobilePlaybackManager:
             browser_playback=self._build_browser_playback_session(
                 engine_mode=selected_engine_mode,
                 playback_mode=selected_playback_mode,
+                selected_audio_stream_index=selected_audio_stream_index,
             ),
             client_device_class=normalized_client_device_class,
             client_user_agent=normalized_client_user_agent,
@@ -1799,6 +1820,71 @@ class MobilePlaybackManager:
             auth_session_id=auth_session_id,
             username=username,
         )
+
+    def select_audio_track(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+        selected_audio_stream_index: int,
+        current_position_seconds: float | None = None,
+        playing_before_switch: bool | None = None,
+    ) -> dict[str, object]:
+        selected_audio_stream_index = _coerce_audio_stream_index(selected_audio_stream_index)
+        with self._lock:
+            session = self._get_owned_session_locked(session_id, user_id)
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
+            if session.browser_playback.engine_mode != "route2":
+                raise ValueError("Audio track switching requires Browser Playback Route 2")
+            if selected_audio_stream_index is None:
+                raise ValueError("selected_audio_stream_index is required")
+            browser_session = session.browser_playback
+            if (
+                browser_session.active_audio_stream_index == selected_audio_stream_index
+                and browser_session.pending_audio_stream_index is None
+            ):
+                browser_session.selected_audio_stream_index = selected_audio_stream_index
+                browser_session.audio_switch_state = "active"
+                self._refresh_route2_session_authority_locked(session)
+                return self._route2_snapshot_locked(session)
+            active_epoch = (
+                browser_session.epochs.get(browser_session.active_epoch_id)
+                if browser_session.active_epoch_id
+                else None
+            )
+            switch_position = self._clamp_time(
+                current_position_seconds
+                if current_position_seconds is not None
+                else self._route2_effective_playhead_seconds_locked(session, active_epoch)
+                if active_epoch is not None
+                else session.target_position_seconds,
+                session.duration_seconds,
+            )
+            if playing_before_switch is not None:
+                session.playing_before_seek = bool(playing_before_switch)
+                session.client_is_playing = bool(playing_before_switch)
+            session.last_stable_position_seconds = switch_position
+            session.committed_playhead_seconds = switch_position
+            session.actual_media_element_time_seconds = switch_position
+            browser_session.selected_audio_stream_index = selected_audio_stream_index
+            browser_session.pending_audio_stream_index = selected_audio_stream_index
+            browser_session.audio_switch_state = "preparing"
+            replacement = self._create_route2_replacement_epoch_locked(
+                session,
+                target_position_seconds=switch_position,
+                reason="audio_track_switch",
+            )
+            if replacement is not None:
+                replacement.audio_stream_index = selected_audio_stream_index
+                self._write_route2_epoch_metadata_locked(replacement)
+            self._refresh_route2_session_authority_locked(session)
+            return self._route2_snapshot_locked(session)
 
     def update_runtime(
         self,
@@ -6049,7 +6135,7 @@ class MobilePlaybackManager:
             },
             "stream_selection": {
                 "video": "0:v:0",
-                "audio": "0:a:0?",
+                "audio": _ffmpeg_audio_map(session.browser_playback.selected_audio_stream_index),
                 "subtitles": "disabled",
                 "data": "disabled",
             },
@@ -6076,6 +6162,7 @@ class MobilePlaybackManager:
                 "max_height": profile.max_height,
             },
             "audio": audio_contract,
+            "stream_selection": contract["stream_selection"],
             "hls": {
                 "segment_duration_seconds": SEGMENT_DURATION_SECONDS,
                 "segment_type": hls_contract["segment_type"],
@@ -8736,6 +8823,7 @@ class MobilePlaybackManager:
                 ),
                 source_input_kind=session.source_input_kind if session is not None else "path",
                 epoch_start_seconds=epoch.epoch_start_seconds if epoch is not None else 0.0,
+                audio_stream_index=epoch.audio_stream_index if epoch is not None else None,
                 segment_pattern=str(epoch.staging_dir / "segment_%06d.m4s") if epoch is not None else "segment_%06d.m4s",
                 staging_manifest_path=str(epoch.staging_manifest_path) if epoch is not None else "ffmpeg.m3u8",
                 strategy=strategy_decision.strategy,
@@ -9896,11 +9984,20 @@ class MobilePlaybackManager:
         candidate = (value or "").strip().lower()
         return ADMIN_USER_ROLE if candidate == ADMIN_USER_ROLE else STANDARD_USER_ROLE
 
-    def _build_browser_playback_session(self, *, engine_mode: str, playback_mode: str) -> BrowserPlaybackSession:
+    def _build_browser_playback_session(
+        self,
+        *,
+        engine_mode: str,
+        playback_mode: str,
+        selected_audio_stream_index: int | None = None,
+    ) -> BrowserPlaybackSession:
         return BrowserPlaybackSession(
             engine_mode=engine_mode,
             playback_mode=playback_mode,
             state="legacy" if engine_mode == "legacy" else "starting",
+            selected_audio_stream_index=selected_audio_stream_index,
+            active_audio_stream_index=selected_audio_stream_index,
+            audio_switch_state="active",
         )
 
     def _initialize_route2_session_locked(self, session: MobilePlaybackSession) -> None:
@@ -10621,6 +10718,7 @@ class MobilePlaybackManager:
         session.target_position_seconds = self._clamp_time(target_position_seconds, session.duration_seconds)
         session.pending_target_seconds = session.target_position_seconds
         replacement_epoch = self._build_route2_epoch_locked(session)
+        replacement_epoch.replacement_reason = reason
         browser_session.replacement_epoch_id = replacement_epoch.epoch_id
         browser_session.epochs[replacement_epoch.epoch_id] = replacement_epoch
         browser_session.replacement_epoch_count += 1
@@ -10659,6 +10757,11 @@ class MobilePlaybackManager:
             self._write_route2_epoch_metadata_locked(previous_active)
         browser_session.active_epoch_id = replacement_epoch.epoch_id
         browser_session.replacement_epoch_id = None
+        if replacement_epoch.replacement_reason == "audio_track_switch":
+            browser_session.active_audio_stream_index = replacement_epoch.audio_stream_index
+            browser_session.selected_audio_stream_index = replacement_epoch.audio_stream_index
+            browser_session.pending_audio_stream_index = None
+            browser_session.audio_switch_state = "active"
         self._issue_route2_attach_revision_locked(
             session,
             next_revision=next_attach_revision,
@@ -11588,7 +11691,7 @@ class MobilePlaybackManager:
                 "-map",
                 "0:v:0",
                 "-map",
-                "0:a:0?",
+                _ffmpeg_audio_map(epoch.audio_stream_index),
                 "-sn",
                 "-dn",
                 "-vf",
@@ -12711,6 +12814,10 @@ class MobilePlaybackManager:
             "attach_ready": False,
             "browser_session_state": self._browser_session_state(session),
             "active_epoch_state": active_epoch.state if active_epoch is not None else None,
+            "selected_audio_stream_index": browser_session.selected_audio_stream_index,
+            "active_audio_stream_index": browser_session.active_audio_stream_index,
+            "pending_audio_stream_index": browser_session.pending_audio_stream_index,
+            "audio_switch_state": browser_session.audio_switch_state,
         }
 
     def _target_is_ready(self, session: MobilePlaybackSession) -> bool:

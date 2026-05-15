@@ -67,17 +67,17 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 
 ## Real Adaptive Thread Control Flags
 
-- Real adaptive thread control is now wired behind feature flags and remains disabled by default.
-- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED` defaults to `false`. When it is false, real `assigned_threads` must use the existing fixed dispatch calculation.
-- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY` defaults to `true`. The first real-control phase is local-only.
-- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED` defaults to `false`. Cloud real adaptive assignment remains deferred.
-- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED` defaults to `false`. Real strict-12 assignment is not implemented in the first phase.
-- If the global flag is enabled, the only real adaptive assignment currently allowed is an initial local 6-thread spawn after mature telemetry, no external pressure, no external ffmpeg, RAM safety, active playback health, user/global headroom, protected-floor capacity, and adaptive ceiling checks all pass.
+- Real adaptive thread control is wired behind feature flags and defaults enabled for the mature control paths.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_ENABLED` defaults to `true`. When explicitly set false, real `assigned_threads` must use the fixed dispatch calculation.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_LOCAL_ONLY` defaults to `false`.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_CLOUD_ENABLED` defaults to `true`.
+- `ELVERN_ROUTE2_ADAPTIVE_THREAD_CONTROL_STRICT_12_ENABLED` defaults to `true`.
+- If the global flag is enabled, adaptive assignment still requires mature telemetry, no external pressure, no external ffmpeg, RAM safety, active playback health, user/global headroom, protected-floor capacity, and adaptive ceiling checks all pass.
 - The initial 6-thread boost is gated on a single active Route2 playback workload, not merely a single account. Standard users usually map one-to-one with workloads because they are limited to one active playback, but an admin running multiple playbacks is running multiple Route2 workloads.
 - Admin multi-playback remains allowed when capacity permits. Only the first admin playback is eligible for the single-workload initial 6 boost; additional admin playbacks fall back to the conservative fixed assignment in this phase.
-- Real 9-thread and 12-thread tiers remain future phases. The benchmark-informed 4/6/9/strict-12 ladder is still available to shadow/runtime recommendations, but real assignment currently supports only the initial local 6 path.
-- Cloud, stale telemetry, pressure, RAM, active-stream protection, exceptions, or unsupported targets must fall back to the fixed assignment instead of failing playback.
-- No reclaim/downshift is implemented. The dispatcher must not count theoretical reclaimable capacity as current capacity.
+- Real 9-thread and strict-12 prepare paths are default-open when the benchmark-informed ladder and safety guards allow them.
+- Cloud, stale telemetry, pressure, RAM, active-stream protection, exceptions, or unsupported targets must fall back to conservative assignment instead of failing playback.
+- Reclaim, resupply, downshift, and full bad-condition gate controls default enabled with dry-run defaults off, but each still honors its own capacity, pressure, stabilization, and safety blockers.
 
 ## Phase 1J-1A Bad-Condition Reserve Instrumentation
 
@@ -218,13 +218,13 @@ Running ffmpeg workers cannot safely have `-threads` mutated in place. Any futur
 - Shared-store metadata, ranges, and segments distinguish `media_bytes_present`, `byte_integrity_validated`, `segment_bytes_stable`, and `serving_allowed`. In the current phase, `serving_allowed=false` and `serving_blocked=true` remain mandatory.
 - If a segment writer observes `segment_hash_conflict`, it must never overwrite the finalized segment. It records conflict metadata such as `conflict_indexes`, `conflict_count`, `first_conflict_at`, `last_conflict_at`, `mixed_writer_conflict=true`, `segment_bytes_stable=false`, and `serving_blocked_reasons` including `segment_hash_conflict`.
 - Existing or legacy shared-store records that have `media_bytes_present=true` but no servability fields must default to `serving_allowed=false`. If no historical conflict metadata exists, stability is not assumed; serving remains blocked by `canonical_generation_required` / `stability_not_proven`.
-- Safe serving still requires future canonical generation, init compatibility, stable absolute segments, permission checks, active leases, cleanup protection, and sparse manifest correctness. This phase still serves nothing from the shared store and implements no reuse, attach, shared worker, downshift, reclaim, or adaptive control behavior.
+- Safe serving still requires future canonical generation, init compatibility, stable absolute segments, permission checks, active leases, cleanup protection, and sparse manifest correctness. This phase still serves nothing from the shared store and implements no shared-store reuse, attach, or shared worker behavior.
 
 ## Current State
 
-- Real adaptive control remains disabled by default, so `assigned_threads` remains controlled by the fixed Route2 dispatch path unless an operator explicitly enables the new flag.
-- Adaptive spawn/runtime decisions remain dry-run or shadow-only in default configuration.
-- Reclaim/downshift is not implemented.
+- Real adaptive control defaults enabled. `assigned_threads` may be raised or lowered only when the adaptive classifier and safety guards permit it; otherwise Route2 falls back to conservative fixed assignment.
+- Adaptive spawn/runtime decisions are active by default for mature paths. Shadow/dry-run telemetry may still exist as diagnostics, but default behavior must not claim a dry-run-only decision as an applied change.
+- Reclaim, resupply, and downshift default active but remain gated by their capacity, pressure, stabilization, and safety checks.
 - Admission failures use structured machine-readable codes such as `same_user_active_playback_limit` and `server_max_capacity`.
 
 ## Worker Count Config Semantics

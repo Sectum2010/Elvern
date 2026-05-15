@@ -8,6 +8,7 @@ import {
   classifySeekTarget,
   clampRangesToDuration,
   computePlayedNotCachedRanges,
+  getContiguousBufferedEndFromPosition,
   isAbsolutePositionInRanges,
   mapAbsoluteToMediaElementSeconds,
   mapMediaElementSecondsToAbsolute,
@@ -178,6 +179,20 @@ describe("readBufferedAbsoluteRanges + readPlayedAbsoluteRanges", () => {
   test("returns [] for null videoElement", () => {
     assert.deepEqual(readBufferedAbsoluteRanges(null, null), []);
     assert.deepEqual(readPlayedAbsoluteRanges(null, null), []);
+  });
+});
+
+describe("getContiguousBufferedEndFromPosition", () => {
+  test("returns the buffered end containing the current playhead", () => {
+    assert.equal(getContiguousBufferedEndFromPosition(12, [[10, 35]]), 35);
+  });
+
+  test("returns 0 when the video exposes no client buffer", () => {
+    assert.equal(getContiguousBufferedEndFromPosition(12, []), 0);
+  });
+
+  test("does not use disjoint future ranges as prepared-through", () => {
+    assert.equal(getContiguousBufferedEndFromPosition(12, [[60, 90]]), 0);
   });
 });
 

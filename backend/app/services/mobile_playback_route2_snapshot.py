@@ -363,5 +363,9 @@ def _route2_snapshot_locked(
         "attach_ready": attach_ready,
         "browser_session_state": browser_session.state,
         "active_epoch_state": active_epoch.state if active_epoch is not None else None,
+        "selected_audio_stream_index": browser_session.selected_audio_stream_index,
+        "active_audio_stream_index": browser_session.active_audio_stream_index,
+        "pending_audio_stream_index": browser_session.pending_audio_stream_index,
+        "audio_switch_state": browser_session.audio_switch_state,
         **full_bad_condition_fields,
     }

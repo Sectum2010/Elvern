@@ -16,6 +16,7 @@ import {
 } from "../../lib/browserPlaybackBufferPolicy";
 import {
   getBrowserPlaybackAttachedManifestEndSeconds,
+  shouldForceReattachForManifestWindowRefresh,
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "../../lib/browserPlaybackTimeline";
@@ -35,6 +36,7 @@ import {
   fetchActiveOptimizedPlaybackSession,
   fetchOptimizedPlaybackSessionStatus,
   postOptimizedPlaybackHeartbeat,
+  selectOptimizedPlaybackAudioTrack,
   seekOptimizedPlaybackSession,
 } from "./browserSessionClient";
 
@@ -657,6 +659,12 @@ export function useOptimizedPlaybackSession({
       refreshRunwaySeconds: SESSION_MANIFEST_REFRESH_RUNWAY_SECONDS,
     });
     if (!manifestState.shouldRefreshManifest) {
+      return false;
+    }
+    if (!shouldForceReattachForManifestWindowRefresh(payload)) {
+      mobileAttachedManifestEndRef.current = currentManifestEnd;
+      mobileAttachedManifestRevisionRef.current = String(payload.attach_revision || 0);
+      mobileAttachedEpochRef.current = resolveSessionAttachmentIdentity(payload);
       return false;
     }
     armMobileManifestAttachment(payload, {
@@ -1664,6 +1672,39 @@ export function useOptimizedPlaybackSession({
     );
   }
 
+  async function selectBrowserPlaybackAudioTrack(track) {
+    const activeSession = mobileSessionRef.current;
+    const streamIndex = Number(track?.index);
+    if (!activeSession?.session_id || !Number.isInteger(streamIndex) || streamIndex < 0) {
+      return;
+    }
+    const video = videoRef.current;
+    const currentPosition = resolvePlaybackRecoveryTargetSeconds({
+      currentAbsolutePositionSeconds: video
+        ? resolveSessionAbsoluteTime(activeSession, Math.max(video.currentTime || 0, 0))
+        : null,
+      committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+      actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+      targetPositionSeconds: resolveMobileAuthorityPosition(activeSession),
+    });
+    setSeekNotice(`Preparing audio track: ${track.label || `Audio ${streamIndex}`}`);
+    const payload = await selectOptimizedPlaybackAudioTrack({
+      browserPlaybackSessionRoot,
+      sessionId: activeSession.session_id,
+      selectedAudioStreamIndex: streamIndex,
+      currentPositionSeconds: currentPosition,
+      playingBeforeSwitch: video ? !video.paused : activeSession.client_is_playing,
+    });
+    const acceptedPayload = acceptBrowserPlaybackSessionPayload(payload, SESSION_SOURCE_STATUS);
+    if (!acceptedPayload.accepted) {
+      return;
+    }
+    scheduleMobilePlaybackPoll(
+      payload.session_id,
+      Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
+    );
+  }
+
   async function restoreActiveBrowserPlaybackSession() {
     // Route 2's reusable preparation cache lives on the backend session/epoch
     // workspace. Browser buffers are transient and should not be treated as
@@ -1829,6 +1870,7 @@ export function useOptimizedPlaybackSession({
     recoverMobilePlaybackAfterResume,
     startMobileOptimizedPlayback,
     retargetMobileOptimizedPlayback,
+    selectBrowserPlaybackAudioTrack,
     restoreActiveBrowserPlaybackSession,
     finalizeRetargetVisibility,
   };

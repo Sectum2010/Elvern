@@ -39,6 +39,7 @@ class Route2FFmpegCommandAdapterInput:
     source_input: str | None = None
     source_input_kind: str = "path"
     epoch_start_seconds: float = 0.0
+    audio_stream_index: int | None = None
     segment_pattern: str = "segment_%06d.m4s"
     staging_manifest_path: str = "ffmpeg.m3u8"
     strategy: Route2TranscodeStrategy = "full_transcode"
@@ -77,6 +78,7 @@ def _redact_source_input(value: str | None) -> str:
 
 
 def _common_command_prefix(payload: Route2FFmpegCommandAdapterInput) -> list[str]:
+    audio_map = "0:a:0?" if payload.audio_stream_index is None else f"0:{int(payload.audio_stream_index)}?"
     command = [
         str(payload.ffmpeg_path),
         "-hide_banner",
@@ -115,7 +117,7 @@ def _common_command_prefix(payload: Route2FFmpegCommandAdapterInput) -> list[str
             "-map",
             "0:v:0",
             "-map",
-            "0:a:0?",
+            audio_map,
             "-sn",
             "-dn",
         ]

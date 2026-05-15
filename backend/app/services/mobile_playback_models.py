@@ -198,6 +198,7 @@ class PlaybackEpoch:
     adaptive_resupply_started_at: str | None = None
     adaptive_resupply_switched_at: str | None = None
     adaptive_resupply_abort_reason: str | None = None
+    audio_stream_index: int | None = None
 
 
 @dataclass(slots=True)
@@ -493,6 +494,10 @@ class BrowserPlaybackSession:
     full_prepare_started_at_ts: float = 0.0
     full_source_bin_bytes: list[int] = field(default_factory=list, repr=False)
     client_probe_samples: list[tuple[float, int, float]] = field(default_factory=list, repr=False)
+    selected_audio_stream_index: int | None = None
+    active_audio_stream_index: int | None = None
+    pending_audio_stream_index: int | None = None
+    audio_switch_state: str = "active"
     epochs: dict[str, PlaybackEpoch] = field(default_factory=dict)
     # Phase 2B native-HLS sliding manifest window state. Updated by
     # `_maybe_advance_native_hls_window_locked` and read by both the snapshot

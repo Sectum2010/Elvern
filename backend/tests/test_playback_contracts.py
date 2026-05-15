@@ -1658,6 +1658,35 @@ def test_route2_ffmpeg_command_adapter_full_transcode_preview_keeps_libx264_aac_
     assert preview.active_enabled is False
 
 
+def test_route2_ffmpeg_command_adapter_default_audio_maps_first_audio() -> None:
+    preview = build_route2_ffmpeg_command_preview(_make_route2_ffmpeg_command_adapter_input())
+
+    map_values = [
+        preview.command_preview[index + 1]
+        for index, value in enumerate(preview.command_preview)
+        if value == "-map"
+    ]
+
+    assert "0:v:0" in map_values
+    assert "0:a:0?" in map_values
+
+
+def test_route2_ffmpeg_command_adapter_selected_audio_maps_global_stream_index() -> None:
+    preview = build_route2_ffmpeg_command_preview(
+        _make_route2_ffmpeg_command_adapter_input(audio_stream_index=2)
+    )
+
+    map_values = [
+        preview.command_preview[index + 1]
+        for index, value in enumerate(preview.command_preview)
+        if value == "-map"
+    ]
+
+    assert "0:v:0" in map_values
+    assert "0:2?" in map_values
+    assert "0:a:0?" not in map_values
+
+
 def test_route2_ffmpeg_command_adapter_stream_copy_preview_uses_copy_copy() -> None:
     preview = build_route2_ffmpeg_command_preview(
         _make_route2_ffmpeg_command_adapter_input(
@@ -3720,19 +3749,19 @@ def test_route2_adaptive_max_worker_threads_defaults_to_min_ten_or_detected_core
     assert settings.route2_max_worker_threads == 4
     assert settings.route2_adaptive_max_worker_threads == 10
     assert settings.route2_protected_min_threads_per_active_user == 2
-    assert settings.route2_adaptive_thread_control_enabled is False
-    assert settings.route2_adaptive_thread_control_local_only is True
-    assert settings.route2_adaptive_thread_control_cloud_enabled is False
-    assert settings.route2_adaptive_thread_control_strict_12_enabled is False
-    assert settings.route2_adaptive_thread_control_real_9_prepare_enabled is False
-    assert settings.route2_adaptive_downshift_enabled is False
-    assert settings.route2_adaptive_downshift_dry_run_enabled is True
-    assert settings.route2_adaptive_maintenance_downshift_enabled is False
-    assert settings.route2_adaptive_maintenance_downshift_dry_run_enabled is True
-    assert settings.route2_adaptive_reclaim_enabled is False
-    assert settings.route2_adaptive_reclaim_dry_run_enabled is True
-    assert settings.route2_adaptive_resupply_enabled is False
-    assert settings.route2_adaptive_resupply_dry_run_enabled is True
+    assert settings.route2_adaptive_thread_control_enabled is True
+    assert settings.route2_adaptive_thread_control_local_only is False
+    assert settings.route2_adaptive_thread_control_cloud_enabled is True
+    assert settings.route2_adaptive_thread_control_strict_12_enabled is True
+    assert settings.route2_adaptive_thread_control_real_9_prepare_enabled is True
+    assert settings.route2_adaptive_downshift_enabled is True
+    assert settings.route2_adaptive_downshift_dry_run_enabled is False
+    assert settings.route2_adaptive_maintenance_downshift_enabled is True
+    assert settings.route2_adaptive_maintenance_downshift_dry_run_enabled is False
+    assert settings.route2_adaptive_reclaim_enabled is True
+    assert settings.route2_adaptive_reclaim_dry_run_enabled is False
+    assert settings.route2_adaptive_resupply_enabled is True
+    assert settings.route2_adaptive_resupply_dry_run_enabled is False
     assert settings.route2_adaptive_resupply_stabilization_seconds == 120
     assert settings.route2_shared_output_init_writer_enabled is False
     assert settings.route2_shared_output_segment_writer_enabled is False
@@ -3757,7 +3786,7 @@ def test_route2_adaptive_max_worker_threads_env_override_is_shadow_only_config(m
     assert settings.route2_adaptive_max_worker_threads == 10
 
 
-def test_route2_adaptive_thread_control_flags_parse_as_disabled_by_default(
+def test_route2_adaptive_thread_control_flags_parse_and_can_be_disabled(
     monkeypatch,
     test_settings,
 ) -> None:
@@ -5349,6 +5378,8 @@ def test_route2_adaptive_spawn_dry_run_local_single_user_recommends_six(initiali
         initialized_settings,
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_strict_12_enabled=False,
+        route2_adaptive_thread_control_real_9_prepare_enabled=False,
     )
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
     record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
@@ -5375,6 +5406,7 @@ def test_route2_adaptive_spawn_dry_run_real_nine_prepare_flag_recommends_nine(in
         initialized_settings,
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_strict_12_enabled=False,
         route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
@@ -5402,6 +5434,7 @@ def test_route2_adaptive_spawn_dry_run_real_nine_prepare_cap_falls_back_to_six(i
         initialized_settings,
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=8,
+        route2_adaptive_thread_control_strict_12_enabled=False,
         route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
@@ -5465,7 +5498,7 @@ def test_route2_adaptive_spawn_dry_run_same_user_multiple_workloads_remain_conse
     assert "not a single active playback workload" in decision.reason
 
 
-def test_route2_adaptive_spawn_dry_run_cloud_disabled_by_default(initialized_settings) -> None:
+def test_route2_adaptive_spawn_dry_run_cloud_enabled_by_default(initialized_settings) -> None:
     manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
     record = _make_route2_worker_record_for_spawn_dry_run(source_kind="cloud", user_id=1)
@@ -5480,9 +5513,9 @@ def test_route2_adaptive_spawn_dry_run_cloud_disabled_by_default(initialized_set
         active_route2_user_count=1,
     )
 
-    assert decision.recommended_threads == 4
-    assert "cloud_adaptive_disabled" in decision.blockers
-    assert "cloud real adaptive initial spawn is disabled" in decision.reason
+    assert decision.recommended_threads > 4
+    assert "cloud_adaptive_disabled" not in decision.blockers
+    assert "cloud real adaptive initial spawn is disabled" not in decision.reason
 
 
 def test_route2_adaptive_spawn_dry_run_external_cpu_remains_conservative(initialized_settings) -> None:
@@ -5539,7 +5572,12 @@ def test_route2_adaptive_spawn_dry_run_external_ffmpeg_remains_conservative(init
 
 
 def test_route2_adaptive_spawn_dry_run_elvern_helper_ffprobe_does_not_block_first_tier(initialized_settings) -> None:
-    manager, _settings = _make_route2_manager(initialized_settings, route2_adaptive_max_worker_threads=12)
+    manager, _settings = _make_route2_manager(
+        initialized_settings,
+        route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_strict_12_enabled=False,
+        route2_adaptive_thread_control_real_9_prepare_enabled=False,
+    )
     _set_route2_resource_snapshot(
         manager,
         host_cpu_used_cores=17.5,
@@ -5656,6 +5694,8 @@ def test_route2_adaptive_spawn_dry_run_respects_route2_min_worker_threads(initia
         route2_min_worker_threads=7,
         route2_max_worker_threads=7,
         route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_strict_12_enabled=False,
+        route2_adaptive_thread_control_real_9_prepare_enabled=False,
     )
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
     record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
@@ -5683,6 +5723,11 @@ def test_route2_dispatch_stores_spawn_dry_run_without_changing_assigned_threads(
         route2_cpu_budget_percent=90,
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
+        route2_adaptive_thread_control_enabled=False,
+        route2_adaptive_thread_control_strict_12_enabled=False,
+        route2_adaptive_thread_control_real_9_prepare_enabled=False,
+        route2_full_bad_condition_30min_gate_enabled=False,
+        route2_full_bad_condition_30min_gate_dry_run_enabled=True,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
@@ -5890,8 +5935,8 @@ def test_route2_full_bad_condition_reserve_not_required_for_healthy_supply(initi
     assert status["bad_condition_supply_floor"] == pytest.approx(1.05)
     assert status["reserve_blocks_admission"] is False
     assert status["full_bad_condition_detected"] is False
-    assert status["full_bad_condition_gate_enabled"] is False
-    assert status["full_bad_condition_gate_dry_run_enabled"] is True
+    assert status["full_bad_condition_gate_enabled"] is True
+    assert status["full_bad_condition_gate_dry_run_enabled"] is False
     assert status["full_bad_condition_gate_would_block_ready"] is False
 
 
@@ -5927,8 +5972,8 @@ def test_route2_full_bad_condition_reserve_required_for_mature_supply_below_floo
     assert status["full_bad_condition_actual_contiguous_seconds_after_target"] == pytest.approx(120.0)
     assert status["full_bad_condition_reserve_remaining_seconds"] == pytest.approx(780.0)
     assert status["full_bad_condition_reserve_progress_source"] == "published_frontier"
-    assert status["full_bad_condition_gate_would_block_ready"] is True
-    assert status["full_bad_condition_gate_blocks_ready"] is False
+    assert status["full_bad_condition_gate_would_block_ready"] is False
+    assert status["full_bad_condition_gate_blocks_ready"] is True
     assert "full_bad_condition_reserve_unsatisfied" in status["full_bad_condition_gate_blockers"]
 
 
@@ -6125,13 +6170,13 @@ def test_route2_full_bad_condition_reserve_remaining_and_runway_delta(
     assert positive_status["runway_delta_per_second"] == pytest.approx(0.2)
 
 
-def test_route2_full_bad_condition_gate_defaults_to_dry_run_only(initialized_settings) -> None:
+def test_route2_full_bad_condition_gate_defaults_to_active(initialized_settings) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
 
-    assert settings.route2_full_bad_condition_30min_gate_enabled is False
-    assert settings.route2_full_bad_condition_30min_gate_dry_run_enabled is True
-    assert manager.settings.route2_full_bad_condition_30min_gate_enabled is False
-    assert manager.settings.route2_full_bad_condition_30min_gate_dry_run_enabled is True
+    assert settings.route2_full_bad_condition_30min_gate_enabled is True
+    assert settings.route2_full_bad_condition_30min_gate_dry_run_enabled is False
+    assert manager.settings.route2_full_bad_condition_30min_gate_enabled is True
+    assert manager.settings.route2_full_bad_condition_30min_gate_dry_run_enabled is False
 
 
 def test_route2_full_bad_condition_dry_run_does_not_change_mode_ready(
@@ -6337,7 +6382,8 @@ def test_route2_full_bad_condition_replacement_epoch_recalculates_reserve_from_r
     assert status["reserve_start_seconds"] == pytest.approx(750.0)
     assert status["full_bad_condition_reserve_target_seconds"] == pytest.approx(1650.0)
     assert status["full_bad_condition_reserve_remaining_seconds"] == pytest.approx(660.0)
-    assert status["full_bad_condition_gate_would_block_ready"] is True
+    assert status["full_bad_condition_gate_would_block_ready"] is False
+    assert status["full_bad_condition_gate_blocks_ready"] is True
 
 
 @pytest.mark.parametrize(
@@ -6548,6 +6594,8 @@ def test_route2_dispatch_adaptive_enabled_local_single_user_can_assign_six(
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
         route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=False,
+        route2_adaptive_thread_control_real_9_prepare_enabled=False,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
@@ -6593,6 +6641,7 @@ def test_route2_dispatch_adaptive_enabled_real_nine_prepare_assigns_nine(
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
         route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=False,
         route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
@@ -6692,6 +6741,8 @@ def test_route2_dispatch_adaptive_enabled_second_standard_user_falls_back_fixed(
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
         route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=False,
+        route2_adaptive_thread_control_real_9_prepare_enabled=False,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0, 2: 0.0})
@@ -6747,6 +6798,7 @@ def test_route2_dispatch_adaptive_enabled_admin_second_playback_falls_back_fixed
         route2_max_worker_threads=4,
         route2_adaptive_max_worker_threads=12,
         route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=False,
         route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
@@ -6858,7 +6910,7 @@ def test_route2_real_assignment_nine_target_requires_real_nine_flag(initialized_
     assert decision.real_9_prepare_applied is False
 
 
-def test_route2_real_assignment_enabled_cloud_uses_fixed_fallback_by_default(initialized_settings) -> None:
+def test_route2_real_assignment_enabled_cloud_still_requires_source_feed_context(initialized_settings) -> None:
     manager, _settings = _make_route2_manager(
         initialized_settings,
         route2_adaptive_max_worker_threads=12,
@@ -6881,11 +6933,13 @@ def test_route2_real_assignment_enabled_cloud_uses_fixed_fallback_by_default(ini
     )
 
     assert decision.assigned_threads == 4
-    assert decision.assigned_threads_source == "cloud_disabled"
+    assert decision.assigned_threads_source == "safety_fallback"
     assert decision.adaptive_control_applied is False
     assert decision.fallback_used is True
-    assert "cloud_adaptive_thread_control_local_only" in decision.assignment_blockers
-    assert "cloud real adaptive thread control" in decision.assignment_reason
+    assert decision.cloud_adaptive_prepare_enabled is True
+    assert decision.cloud_adaptive_prepare_candidate is True
+    assert "cloud_source_feed_unavailable" in decision.cloud_adaptive_prepare_blockers
+    assert "cloud_adaptive_thread_control_local_only" not in decision.assignment_blockers
 
 
 def test_route2_real_assignment_lite_local_low_runway_cpu_thread_can_assign_nine(initialized_settings) -> None:
@@ -7006,6 +7060,8 @@ def test_route2_real_assignment_cloud_flag_false_blocks_prepare_boost(initialize
         playback_mode="lite",
         source_kind="cloud",
         route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_local_only=True,
+        route2_adaptive_thread_control_cloud_enabled=False,
         route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 0.0})
@@ -7382,18 +7438,19 @@ def test_route2_real_assignment_status_payload_includes_lite_and_cloud_fields(in
     assert item_payload["lite_adaptive_prepare_candidate"] is True
     assert item_payload["lite_adaptive_prepare_applied"] is True
     assert item_payload["lite_adaptive_prepare_blockers"] == []
-    assert item_payload["cloud_adaptive_prepare_enabled"] is False
+    assert item_payload["cloud_adaptive_prepare_enabled"] is True
     assert item_payload["cloud_adaptive_prepare_candidate"] is False
     assert item_payload["cloud_adaptive_prepare_applied"] is False
     assert item_payload["cloud_adaptive_prepare_blockers"] == []
     assert len(started_workers) == 1
 
 
-def test_route2_real_assignment_strict_twelve_default_false_falls_back_to_nine(initialized_settings) -> None:
+def test_route2_real_assignment_strict_twelve_flag_false_falls_back_to_nine(initialized_settings) -> None:
     manager, _settings = _make_route2_manager(
         initialized_settings,
         route2_adaptive_max_worker_threads=12,
         route2_adaptive_thread_control_enabled=True,
+        route2_adaptive_thread_control_strict_12_enabled=False,
         route2_adaptive_thread_control_real_9_prepare_enabled=True,
     )
     record = _make_route2_worker_record_for_spawn_dry_run(source_kind="local", user_id=1)
@@ -7653,7 +7710,7 @@ def test_route2_real_assignment_status_payload_includes_strict_twelve_fields(ini
     assert item_payload["strict_12_prepare_applied"] is True
     assert item_payload["strict_12_prepare_blockers"] == []
     assert item_payload["strict_12_prepare_reason"] == "Strict 12 prepare gates passed."
-    assert item_payload["adaptive_downshift_enabled"] is False
+    assert item_payload["adaptive_downshift_enabled"] is True
     assert item_payload["adaptive_downshift_candidate"] is False
     assert item_payload["adaptive_downshift_state"] in {"none", "candidate"}
     assert "adaptive_downshift_blockers" in item_payload
@@ -8113,6 +8170,7 @@ def test_route2_reclaimable_threads_are_not_counted_as_available_for_admission(
         initialized_settings,
         route2_cpu_budget_percent=90,
         route2_max_worker_threads=4,
+        route2_adaptive_reclaim_enabled=False,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 6)
     _capture_route2_worker_threads(monkeypatch)
@@ -9045,7 +9103,14 @@ def test_route2_closed_loop_marks_stable_surplus_as_downshift_candidate(
 def test_route2_adaptive_downshift_dry_run_boosted_twelve_comfortable_targets_six(
     initialized_settings,
 ) -> None:
-    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=False,
+        route2_adaptive_downshift_dry_run_enabled=True,
+        route2_adaptive_maintenance_downshift_enabled=False,
+        route2_adaptive_maintenance_downshift_dry_run_enabled=True,
+    )
     record.process_exists = True
     _mark_route2_runtime_supply(
         session,
@@ -9072,7 +9137,14 @@ def test_route2_adaptive_downshift_dry_run_boosted_twelve_comfortable_targets_si
 def test_route2_adaptive_downshift_dry_run_very_oversupplied_targets_four(
     initialized_settings,
 ) -> None:
-    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=False,
+        route2_adaptive_downshift_dry_run_enabled=True,
+        route2_adaptive_maintenance_downshift_enabled=False,
+        route2_adaptive_maintenance_downshift_dry_run_enabled=True,
+    )
     record.process_exists = True
     _mark_route2_runtime_supply(
         session,
@@ -9095,7 +9167,14 @@ def test_route2_adaptive_downshift_dry_run_very_oversupplied_targets_four(
 def test_route2_adaptive_downshift_dry_run_boosted_nine_comfortable_targets_six(
     initialized_settings,
 ) -> None:
-    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=9)
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=9,
+        route2_adaptive_downshift_enabled=False,
+        route2_adaptive_downshift_dry_run_enabled=True,
+        route2_adaptive_maintenance_downshift_enabled=False,
+        route2_adaptive_maintenance_downshift_dry_run_enabled=True,
+    )
     record.process_exists = True
     _mark_route2_runtime_supply(
         session,
@@ -9185,7 +9264,14 @@ def test_route2_adaptive_downshift_dry_run_allows_comfortable_io_publish_bound(
     initialized_settings,
     tmp_path,
 ) -> None:
-    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=False,
+        route2_adaptive_downshift_dry_run_enabled=True,
+        route2_adaptive_maintenance_downshift_enabled=False,
+        route2_adaptive_maintenance_downshift_dry_run_enabled=True,
+    )
     record.process_exists = True
     _mark_route2_runtime_supply(
         session,
@@ -9377,7 +9463,14 @@ def test_route2_adaptive_downshift_real_disabled_stays_dry_run_candidate_only(
     initialized_settings,
     monkeypatch,
 ) -> None:
-    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=False,
+        route2_adaptive_downshift_dry_run_enabled=True,
+        route2_adaptive_maintenance_downshift_enabled=False,
+        route2_adaptive_maintenance_downshift_dry_run_enabled=True,
+    )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _install_route2_downshift_inputs(manager, session, epoch, record)
     _mark_route2_runtime_supply(
@@ -9999,7 +10092,16 @@ def test_route2_adaptive_reclaim_dry_run_candidate_does_not_start_replacement(
     initialized_settings,
     monkeypatch,
 ) -> None:
-    manager, session, epoch, record = _make_route2_closed_loop_inputs(initialized_settings, assigned_threads=12)
+    manager, session, epoch, record = _make_route2_closed_loop_inputs(
+        initialized_settings,
+        assigned_threads=12,
+        route2_adaptive_downshift_enabled=False,
+        route2_adaptive_downshift_dry_run_enabled=True,
+        route2_adaptive_maintenance_downshift_enabled=False,
+        route2_adaptive_maintenance_downshift_dry_run_enabled=True,
+        route2_adaptive_reclaim_enabled=False,
+        route2_adaptive_reclaim_dry_run_enabled=True,
+    )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _install_route2_downshift_inputs(manager, session, epoch, record)
     _mark_route2_runtime_supply(
@@ -10436,7 +10538,8 @@ def test_route2_pending_admission_reclaim_converts_later_downshift_to_reclaim_do
     replacement_payload = _route2_status_item(manager.get_route2_worker_status(), replacement_record.worker_id)
     assert replacement_payload["adaptive_downshift_mode"] == "reclaim_donor"
     assert replacement_payload["adaptive_downshift_policy"] == "reclaim_donor"
-    assert replacement_payload["autonomous_maintenance_downshift_enabled"] is False
+    assert replacement_payload["autonomous_maintenance_downshift_enabled"] is True
+    assert replacement_payload["maintenance_downshift_suppressed_by_reclaim"] is False
     assert replacement_payload["reclaim_donor_downshift_active"] is True
 
 
@@ -10527,6 +10630,8 @@ def test_route2_adaptive_resupply_disabled_blocks_admission_with_dry_run_priorit
         initialized_settings,
         assigned_threads=6,
         route2_max_worker_threads=12,
+        route2_adaptive_resupply_enabled=False,
+        route2_adaptive_resupply_dry_run_enabled=True,
     )
     monkeypatch.setattr("backend.app.services.mobile_playback_service.os.cpu_count", lambda: 20)
     _set_route2_resource_snapshot(manager, per_user_cpu_cores_used_total={1: 4.0})
