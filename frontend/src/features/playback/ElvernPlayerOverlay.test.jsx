@@ -771,10 +771,10 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(pauseMock).toHaveBeenCalledTimes(1);
   });
 
-  test("native subtitle tracks can be selected and turned off", () => {
+  test("native subtitle tracks can be selected and turned off", async () => {
     const english = { kind: "subtitles", label: "English", language: "en", mode: "disabled" };
     const spanish = { kind: "captions", label: "Spanish", language: "es", mode: "disabled" };
-    const { getByRole, getByText } = renderOverlay({
+    const { getByRole } = renderOverlay({
       cinemaModeActive: true,
       setupVideo(video) {
         Object.defineProperty(video, "textTracks", {
@@ -787,8 +787,9 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     act(() => {
       fireEvent.click(getByRole("button", { name: "Subtitles" }));
     });
-    act(() => {
+    await act(async () => {
       fireEvent.click(getByRole("menuitemradio", { name: "Spanish" }));
+      await Promise.resolve();
     });
     expect(english.mode).toBe("disabled");
     expect(spanish.mode).toBe("showing");
@@ -802,15 +803,15 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(spanish.mode).toBe("disabled");
   });
 
-  test("native audio tracks can be selected", () => {
+  test("native audio tracks can be selected", async () => {
     const english = { label: "English", language: "en", enabled: true };
-    const commentary = { label: "Commentary", language: "en", enabled: false };
+    const french = { label: "French", language: "fr", enabled: false };
     const { getByRole, getByText } = renderOverlay({
       cinemaModeActive: true,
       setupVideo(video) {
         Object.defineProperty(video, "audioTracks", {
           configurable: true,
-          value: makeTrackList([english, commentary]),
+          value: makeTrackList([english, french]),
         });
       },
     });
@@ -818,15 +819,16 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     act(() => {
       fireEvent.click(getByRole("button", { name: "Audio track" }));
     });
-    act(() => {
-      fireEvent.click(getByRole("menuitemradio", { name: "Commentary" }));
+    await act(async () => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+      await Promise.resolve();
     });
 
     expect(english.enabled).toBe(false);
-    expect(commentary.enabled).toBe(true);
+    expect(french.enabled).toBe(true);
   });
 
-  test("hls.js subtitle and audio track APIs are used when available", () => {
+  test("hls.js subtitle and audio track APIs are used when available", async () => {
     const hls = {
       audioTrack: 0,
       audioTracks: [{ name: "English" }, { name: "Director" }],
@@ -846,8 +848,9 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     act(() => {
       fireEvent.click(getByRole("button", { name: "Subtitles" }));
     });
-    act(() => {
+    await act(async () => {
       fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+      await Promise.resolve();
     });
     expect(hls.subtitleTrack).toBe(1);
     expect(hls.subtitleDisplay).toBe(true);
@@ -864,21 +867,24 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     act(() => {
       fireEvent.click(getByRole("button", { name: "Audio track" }));
     });
-    act(() => {
+    await act(async () => {
       fireEvent.click(getByRole("menuitemradio", { name: "Director" }));
+      await Promise.resolve();
     });
     expect(hls.audioTrack).toBe(1);
   });
 
-  test("backend-discovered tracks appear and selectable audio prepares through backend", () => {
+  test("backend-discovered tracks override browser tracks and hide commentary rows", async () => {
     const onBackendAudioTrackSelect = vi.fn();
     const { getByRole, getByText, queryByText } = renderOverlay({
       backendAudioTracks: [
-        { index: 1, label: "English (aac)", codec: "aac", disposition_default: true },
+        { index: 1, title: "English", codec: "aac", disposition_default: true },
+        { index: 2, title: "French", codec: "ac3" },
         { index: 2, label: "Commentary (aac)", codec: "aac" },
       ],
       backendSubtitleTracks: [
         { index: 3, label: "English subtitles (subrip)", codec: "subrip", language: "en" },
+        { index: 5, label: "Director commentary", codec: "subrip", language: "en" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
@@ -895,16 +901,19 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     act(() => {
       fireEvent.click(getByRole("button", { name: "Subtitles" }));
     });
-    expect(getByText("English subtitles (subrip)")).toBeTruthy();
+    expect(getByText("English subtitles")).toBeTruthy();
+    expect(queryByText("Director commentary")).toBeNull();
 
     act(() => {
       fireEvent.click(getByRole("button", { name: "Audio track" }));
     });
-    expect(getByText("Commentary (aac)")).toBeTruthy();
+    expect(getByText("French")).toBeTruthy();
+    expect(queryByText("Commentary")).toBeNull();
     expect(queryByText("Audio 1")).toBeNull();
 
-    act(() => {
-      fireEvent.click(getByRole("menuitemradio", { name: "Commentary (aac)" }));
+    await act(async () => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+      await Promise.resolve();
     });
     expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({
       index: 2,
@@ -914,9 +923,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   });
 
   test("text backend subtitles are clickable while image subtitles are marked unsupported", async () => {
-    const onBackendSubtitleTrackSelect = vi.fn(() => ({
-      label: "English SRT",
-      vtt_url: "/api/browser-playback/sessions/demo/subtitles/3.vtt",
+    let resolvePrepare;
+    const delayedSubtitlePrepare = vi.fn(() => new Promise((resolve) => {
+      resolvePrepare = () => resolve({
+        label: "English SRT",
+        vtt_url: "/api/browser-playback/sessions/demo/subtitles/3.vtt",
+      });
     }));
     const { getByRole, getByText, queryByText } = renderOverlay({
       backendSubtitleTracks: [
@@ -925,7 +937,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
-      onBackendSubtitleTrackSelect,
+      onBackendSubtitleTrackSelect: delayedSubtitlePrepare,
       onToggleFullscreen: vi.fn(),
     });
 
@@ -937,15 +949,46 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByText("!")).toBeTruthy();
     expect(queryByText(/Image subtitles need future burn-in support/i)).toBeNull();
 
-    await act(async () => {
+    act(() => {
       fireEvent.click(getByRole("menuitemradio", { name: "English SRT" }));
-      await Promise.resolve();
     });
-    expect(onBackendSubtitleTrackSelect).toHaveBeenCalledWith(expect.objectContaining({
+    expect(delayedSubtitlePrepare).toHaveBeenCalledWith(expect.objectContaining({
       index: 3,
       source: "backend",
       textBased: true,
     }));
+    expect(getByRole("menuitemradio", { name: "English SRT" })).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => {
+      resolvePrepare();
+      await Promise.resolve();
+    });
+  });
+
+  test("phone subtitle menu renders many backend tracks in a scrollable list", () => {
+    const manySubtitles = Array.from({ length: 30 }, (_, index) => ({
+      index: index + 3,
+      label: `Subtitle ${index + 1}`,
+      codec: index < 24 ? "subrip" : "hdmv_pgs_subtitle",
+      text_based: index < 24,
+      image_based: index >= 24,
+    }));
+    const { container, getByRole, getByText } = renderOverlay({
+      backendSubtitleTracks: manySubtitles,
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendSubtitleTrackSelect: vi.fn(),
+      onToggleFullscreen: vi.fn(),
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+
+    expect(container.querySelector(".elvern-overlay__track-menu")).toBeTruthy();
+    expect(container.querySelectorAll(".elvern-overlay__track-menu-item").length).toBeGreaterThanOrEqual(31);
+    expect(getByText("Subtitle 1")).toBeTruthy();
+    expect(getByText("Subtitle 30")).toBeTruthy();
   });
 
   test("phone cinema places subtitle and audio icons before More when tracks exist", () => {

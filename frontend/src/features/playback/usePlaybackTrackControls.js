@@ -8,6 +8,9 @@ const HLS_TRACK_EVENTS = [
   "hlsSubtitleTrackSwitch",
   "hlsSubtitleTrackLoaded",
 ];
+const TEXT_SUBTITLE_CODECS = new Set(["ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", "mov_text"]);
+const IMAGE_SUBTITLE_CODECS = new Set(["dvd_subtitle", "dvdsub", "hdmv_pgs_subtitle", "pgs", "xsub"]);
+const COMMENTARY_PATTERN = /\b(commentary|commentaries|commentaire|commentaires|comment|director[’']?s?\s+commentary|audio\s+commentary|commentary\s+track)\b/i;
 
 function readHls(hlsRef) {
   return hlsRef?.current || null;
@@ -26,6 +29,55 @@ function buildTrackLabel(track, fallback) {
   const main = title || language || fallback;
   const details = [language && title && language !== title ? language : "", codec, channels].filter(Boolean).join(" · ");
   return details ? `${main} (${details})` : main;
+}
+
+function normalizeCodec(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function stripTrackDetails(value) {
+  return String(value || "")
+    .replace(/\s*\([^)]*\)\s*$/u, "")
+    .trim();
+}
+
+function isCommentaryTrack(track) {
+  if (!track) {
+    return false;
+  }
+  if (track.disposition_commentary || track.commentary) {
+    return true;
+  }
+  const haystack = [
+    track.title,
+    track.label,
+    track.name,
+    track.language,
+    track.lang,
+  ].filter(Boolean).join(" ");
+  return COMMENTARY_PATTERN.test(haystack);
+}
+
+function buildBackendSubtitleLabel(track, fallback) {
+  return stripTrackDetails(track?.title || track?.label || track?.language || fallback) || fallback;
+}
+
+function buildBackendAudioLabel(track, fallback) {
+  const title = stripTrackDetails(track?.title || "");
+  if (title) {
+    return title;
+  }
+  const label = stripTrackDetails(track?.label || "");
+  if (label && !/^audio\s+\d+$/i.test(label) && !/^default audio$/i.test(label)) {
+    return label;
+  }
+  const language = String(track?.language || "").trim();
+  const codec = String(track?.codec || "").trim();
+  const channels = Number.isFinite(Number(track?.channels)) && Number(track.channels) > 0
+    ? `${Number(track.channels)}ch`
+    : "";
+  const parts = [language, codec, channels].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : fallback;
 }
 
 function collectNativeSubtitleTracks(video) {
@@ -47,7 +99,7 @@ function collectNativeSubtitleTracks(video) {
       });
     }
   }
-  return collected;
+  return collected.filter((track) => !isCommentaryTrack(track));
 }
 
 function collectNativeAudioTracks(video) {
@@ -68,7 +120,7 @@ function collectNativeAudioTracks(video) {
       source: "native",
     });
   }
-  return collected;
+  return collected.filter((track) => !isCommentaryTrack(track));
 }
 
 function collectHlsSubtitleTracks(hls) {
@@ -85,7 +137,7 @@ function collectHlsSubtitleTracks(hls) {
     mode: displayEnabled && selectedIndex === index ? "showing" : "disabled",
     selected: displayEnabled && selectedIndex === index,
     source: "hls_js",
-  }));
+  })).filter((track) => !isCommentaryTrack(track));
 }
 
 function collectHlsAudioTracks(hls) {
@@ -101,7 +153,7 @@ function collectHlsAudioTracks(hls) {
     enabled: selectedIndex === index,
     selected: selectedIndex === index,
     source: "hls_js",
-  }));
+  })).filter((track) => !isCommentaryTrack(track));
 }
 
 function normalizeBackendSubtitleTracks(tracks) {
@@ -109,21 +161,31 @@ function normalizeBackendSubtitleTracks(tracks) {
     return [];
   }
   return tracks
+    .filter((track) => !isCommentaryTrack(track))
     .map((track, index) => ({
       id: `backend-subtitle-${track.index ?? track.id ?? index}`,
       index: Number.isInteger(track.index) ? track.index : index,
-      label: buildTrackLabel(track, `Subtitle ${index + 1}`),
+      label: buildBackendSubtitleLabel(track, `Subtitle ${index + 1}`),
       language: track.language || "",
       mode: "disabled",
       selected: false,
       source: "backend",
       codec: track.codec || "",
-      browserSupported: Boolean(track.browser_supported || track.text_based),
-      unsupportedReason: track.image_based ? "Burn-in required" : "Needs WebVTT preparation",
-      textBased: Boolean(track.text_based),
-      imageBased: Boolean(track.image_based),
+      browserSupported: Boolean(
+        track.browser_supported
+        || track.text_based
+        || TEXT_SUBTITLE_CODECS.has(normalizeCodec(track.codec)),
+      ),
+      unsupportedReason: "",
+      textBased: Boolean(track.text_based || TEXT_SUBTITLE_CODECS.has(normalizeCodec(track.codec))),
+      imageBased: Boolean(track.image_based || IMAGE_SUBTITLE_CODECS.has(normalizeCodec(track.codec))),
     }))
     .sort((left, right) => {
+      const leftRank = left.browserSupported ? 0 : left.imageBased ? 2 : 1;
+      const rightRank = right.browserSupported ? 0 : right.imageBased ? 2 : 1;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
       if (left.browserSupported !== right.browserSupported) {
         return left.browserSupported ? -1 : 1;
       }
@@ -138,10 +200,10 @@ function normalizeBackendAudioTracks(tracks) {
   if (!Array.isArray(tracks)) {
     return [];
   }
-  return tracks.map((track, index) => ({
+  return tracks.filter((track) => !isCommentaryTrack(track)).map((track, index) => ({
     id: `backend-audio-${track.index ?? index}`,
     index: Number.isInteger(track.index) ? track.index : index,
-    label: buildTrackLabel(track, `Audio ${index + 1}`),
+    label: buildBackendAudioLabel(track, `Audio ${index + 1}`),
     language: track.language || "",
     enabled: Boolean(track.disposition_default) || index === 0,
     selected: Boolean(track.disposition_default) || index === 0,
@@ -164,25 +226,27 @@ function resolveTrackState({
   const nativeAudioTracks = collectNativeAudioTracks(video);
   const backendSubtitleList = normalizeBackendSubtitleTracks(backendSubtitleTracks);
   const backendAudioList = normalizeBackendAudioTracks(backendAudioTracks);
-  const subtitleTracks = hlsSubtitleTracks.length > 0
-    ? hlsSubtitleTracks
-    : nativeSubtitleTracks.length > 0
-      ? nativeSubtitleTracks
-      : backendSubtitleList;
-  const audioTracks = backendAudioList.length > 1
+  const backendSubtitlesAuthoritative = Array.isArray(backendSubtitleTracks) && backendSubtitleTracks.length > 0;
+  const backendAudioAuthoritative = Array.isArray(backendAudioTracks) && backendAudioTracks.length > 0;
+  const subtitleTracks = backendSubtitlesAuthoritative
+    ? backendSubtitleList
+    : hlsSubtitleTracks.length > 0
+      ? hlsSubtitleTracks
+      : nativeSubtitleTracks;
+  const audioTracks = backendAudioAuthoritative
     ? backendAudioList
     : hlsAudioTracks.length > 0
     ? hlsAudioTracks
     : nativeAudioTracks.length > 0
       ? nativeAudioTracks
-      : backendAudioList;
-  const source = hlsSubtitleTracks.length > 0 || hlsAudioTracks.length > 0
+      : [];
+  const source = backendSubtitlesAuthoritative || backendAudioAuthoritative
+    ? "backend"
+    : hlsSubtitleTracks.length > 0 || hlsAudioTracks.length > 0
     ? "hls_js"
     : nativeSubtitleTracks.length > 0 || nativeAudioTracks.length > 0
       ? "native"
-      : backendSubtitleList.length > 0 || backendAudioList.length > 0
-        ? "backend"
-        : "none";
+      : "none";
 
   return {
     audioTracks,
@@ -302,10 +366,10 @@ export function usePlaybackTrackControls({
     return selected;
   }, [hlsRef, onBackendSubtitleTrackSelect, refreshTrackState, trackState.subtitleTracks, videoRef]);
 
-  const selectAudioTrack = useCallback((trackId) => {
+  const selectAudioTrack = useCallback(async (trackId) => {
     const selected = trackState.audioTracks.find((track) => track.id === trackId);
     if (!selected) {
-      return;
+      return null;
     }
     if (selected.source === "hls_js") {
       const hls = readHls(hlsRef);
@@ -321,9 +385,10 @@ export function usePlaybackTrackControls({
       }
     } else if (selected.source === "backend" && selected.browserSupported) {
       setSelectedBackendAudioTrackId(selected.id);
-      onBackendAudioTrackSelect?.(selected);
+      await onBackendAudioTrackSelect?.(selected);
     }
     refreshTrackState();
+    return selected;
   }, [hlsRef, onBackendAudioTrackSelect, refreshTrackState, trackState.audioTracks, videoRef]);
 
   const resolvedAudioTracks = trackState.audioTracks.map((track) => (
@@ -355,6 +420,7 @@ export {
   collectHlsSubtitleTracks,
   collectNativeAudioTracks,
   collectNativeSubtitleTracks,
+  isCommentaryTrack,
   normalizeBackendAudioTracks,
   normalizeBackendSubtitleTracks,
   resolveTrackState,

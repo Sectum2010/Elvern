@@ -245,6 +245,7 @@ export function useBrowserPlaybackController({
     postMobileRuntimeHeartbeat,
     maybeAcknowledgeHlsAttachment,
     recoverMobilePlaybackAfterResume,
+    softResumeMobilePlaybackAfterBackground,
     startMobileOptimizedPlayback,
     retargetMobileOptimizedPlayback,
     prepareBrowserPlaybackSubtitleTrack,
@@ -422,7 +423,7 @@ export function useBrowserPlaybackController({
         setPlaybackStatus("Optimized stream");
         return;
       }
-      setPlaybackStatus("Playing while Elvern transcodes ahead");
+      setPlaybackStatus("Optimized stream");
       return;
     }
     if (payload.transcode_status === "busy") {
@@ -1525,19 +1526,19 @@ export function useBrowserPlaybackController({
         return;
       }
       if (iosMobile && mobileSessionRef.current && mobileWasBackgroundedRef.current) {
-        recoverMobilePlaybackAfterResume("visibilitychange");
+        softResumeMobilePlaybackAfterBackground("visibilitychange");
       }
     }
 
     function handlePageShow() {
       if (iosMobile && mobileSessionRef.current && mobileWasBackgroundedRef.current) {
-        recoverMobilePlaybackAfterResume("pageshow");
+        softResumeMobilePlaybackAfterBackground("pageshow");
       }
     }
 
     function handleWindowFocus() {
       if (iosMobile && mobileSessionRef.current && mobileWasBackgroundedRef.current) {
-        recoverMobilePlaybackAfterResume("focus");
+        softResumeMobilePlaybackAfterBackground("focus");
       }
     }
 
@@ -1968,7 +1969,7 @@ export function useBrowserPlaybackController({
             : playbackStateRef.current?.mode === "hls"
                 && !playbackStateRef.current?.manifest_complete
                 && playbackStateRef.current?.transcode_status !== "completed"
-              ? "Playing while Elvern transcodes ahead"
+              ? "Optimized stream"
               : "Optimized stream",
         );
       }
@@ -2052,7 +2053,7 @@ export function useBrowserPlaybackController({
           : playbackStateRef.current?.mode === "hls"
               && !playbackStateRef.current?.manifest_complete
               && playbackStateRef.current?.transcode_status !== "completed"
-            ? "Playing while Elvern transcodes ahead"
+            ? "Optimized stream"
             : "Optimized stream",
       );
     }

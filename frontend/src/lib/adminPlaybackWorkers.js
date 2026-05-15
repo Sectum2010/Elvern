@@ -195,6 +195,32 @@ export function canTerminatePlaybackWorker(workerState) {
   return normalizedState === "running" || normalizedState === "queued";
 }
 
+const NON_DISMISSIBLE_PLAYBACK_STATES = new Set(["running", "queued", "waiting", "stopping"]);
+
+export function canDismissPlaybackStatus(worker) {
+  const displayStatus = buildWorkerDisplayStatus(worker);
+  const normalizedStatus = String(displayStatus.status || worker?.state || "").trim().toLowerCase();
+  return Boolean(normalizedStatus) && !NON_DISMISSIBLE_PLAYBACK_STATES.has(normalizedStatus);
+}
+
+export function buildPlaybackStatusDismissKey(worker) {
+  const displayStatus = buildWorkerDisplayStatus(worker);
+  return [
+    worker?.playback_kind || "route2",
+    worker?.session_id || "session",
+    worker?.worker_id || "worker",
+    worker?.epoch_id || "epoch",
+    displayStatus.status || worker?.state || "unknown",
+  ].map((part) => String(part || "unknown")).join(":");
+}
+
+export function buildPlaybackStatusDismissPrompt(title) {
+  const normalizedTitle = typeof title === "string" && title.trim()
+    ? title.trim()
+    : "this playback status";
+  return `Dismiss ${normalizedTitle} from this admin view?`;
+}
+
 const STATUS_TONE_CLASSES = new Set(["success", "info", "warning", "danger", "neutral"]);
 
 const RAW_WORKER_STATE_DISPLAY = {

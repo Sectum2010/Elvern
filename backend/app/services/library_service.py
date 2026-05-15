@@ -48,8 +48,8 @@ from ..config import Settings
 from ..db import get_connection
 
 
-TEXT_SUBTITLE_CODECS = {"ass", "ssa", "subrip", "text", "webvtt", "mov_text"}
-IMAGE_SUBTITLE_CODECS = {"dvd_subtitle", "hdmv_pgs_subtitle", "xsub"}
+TEXT_SUBTITLE_CODECS = {"ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", "mov_text"}
+IMAGE_SUBTITLE_CODECS = {"dvd_subtitle", "dvdsub", "hdmv_pgs_subtitle", "pgs", "xsub"}
 
 
 def _utc_iso_to_epoch_seconds(value: object) -> int:
@@ -133,6 +133,7 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
                     "title": title,
                     "channels": channels,
                     "disposition_default": bool(disposition.get("default", 0)),
+                    "disposition_commentary": bool(disposition.get("comment", 0) or disposition.get("commentary", 0)),
                     "label": _stream_track_label(
                         fallback=f"Audio {audio_ordinal}",
                         language=language,
@@ -157,9 +158,10 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
                 "channels": None,
                 "disposition_default": bool(disposition.get("default", 0)),
                 "disposition_forced": bool(disposition.get("forced", 0)),
+                "disposition_commentary": bool(disposition.get("comment", 0) or disposition.get("commentary", 0)),
                 "text_based": text_based,
                 "image_based": image_based,
-                "browser_supported": codec_name == "webvtt",
+                "browser_supported": text_based,
                 "label": _stream_track_label(
                     fallback=f"Subtitle {subtitle_ordinal}",
                     language=language,
@@ -529,9 +531,10 @@ def get_media_item_detail(
                 "channels": None,
                 "disposition_default": bool(subtitle.get("disposition_default")),
                 "disposition_forced": False,
+                "disposition_commentary": False,
                 "text_based": str(subtitle.get("codec") or "").lower() in TEXT_SUBTITLE_CODECS,
                 "image_based": str(subtitle.get("codec") or "").lower() in IMAGE_SUBTITLE_CODECS,
-                "browser_supported": str(subtitle.get("codec") or "").lower() == "webvtt",
+                "browser_supported": str(subtitle.get("codec") or "").lower() in TEXT_SUBTITLE_CODECS,
                 "label": _stream_track_label(
                     fallback=f"Subtitle {index + 1}",
                     language=subtitle.get("language"),
@@ -550,6 +553,7 @@ def get_media_item_detail(
                 "title": "Default audio",
                 "channels": None,
                 "disposition_default": True,
+                "disposition_commentary": False,
                 "label": _stream_track_label(
                     fallback="Default audio",
                     language=None,

@@ -155,6 +155,7 @@ class MediaPlaybackTrackResponse(BaseModel):
     channels: int | None = None
     disposition_default: bool = False
     disposition_forced: bool = False
+    disposition_commentary: bool = False
     text_based: bool | None = None
     image_based: bool | None = None
     browser_supported: bool = False

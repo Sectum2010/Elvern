@@ -6,10 +6,13 @@ import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
   buildPlaybackWorkerSummaryBubbles,
+  buildPlaybackStatusDismissKey,
+  buildPlaybackStatusDismissPrompt,
   buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
   buildWorkerPlaybackMetadataLabel,
   buildWorkerDisplayStatus,
+  canDismissPlaybackStatus,
   canTerminatePlaybackWorker,
   formatCpuCoresUsage,
   formatMemoryGaugeValue,
@@ -383,6 +386,8 @@ export function AdminPage() {
   const [playbackWorkersFeedback, setPlaybackWorkersFeedback] = useState(null);
   const [terminateWorkerPending, setTerminateWorkerPending] = useState("");
   const [terminateWorkerModal, setTerminateWorkerModal] = useState(null);
+  const [dismissedPlaybackStatusKeys, setDismissedPlaybackStatusKeys] = useState({});
+  const [dismissPlaybackStatusModal, setDismissPlaybackStatusModal] = useState(null);
   const [collapsedWorkerUserIds, setCollapsedWorkerUserIds] = useState({});
   const [diagnosticIdModal, setDiagnosticIdModal] = useState(null);
   const [selfDeleteState, setSelfDeleteState] = useState({
@@ -1014,6 +1019,28 @@ export function AdminPage() {
       sessionId: worker.session_id,
       title: worker.title || "this playback worker",
     });
+  }
+
+  function openDismissPlaybackStatusModal(worker) {
+    setDismissPlaybackStatusModal({
+      dismissKey: buildPlaybackStatusDismissKey(worker),
+      title: worker.title || "this playback status",
+    });
+  }
+
+  function closeDismissPlaybackStatusModal() {
+    setDismissPlaybackStatusModal(null);
+  }
+
+  function handleDismissPlaybackStatusConfirm() {
+    if (!dismissPlaybackStatusModal?.dismissKey) {
+      return;
+    }
+    setDismissedPlaybackStatusKeys((current) => ({
+      ...current,
+      [dismissPlaybackStatusModal.dismissKey]: true,
+    }));
+    setDismissPlaybackStatusModal(null);
   }
 
   function closeTerminateWorkerModal() {
@@ -1774,7 +1801,7 @@ export function AdminPage() {
   }, [selectedUserActionsEntry, userActionsModalUserId]);
 
   useEffect(() => {
-    if ((!selectedUserActionsEntry && !terminateWorkerModal && !diagnosticIdModal) || typeof document === "undefined") {
+    if ((!selectedUserActionsEntry && !terminateWorkerModal && !dismissPlaybackStatusModal && !diagnosticIdModal) || typeof document === "undefined") {
       return undefined;
     }
     const previousOverflow = document.body.style.overflow;
@@ -1788,6 +1815,10 @@ export function AdminPage() {
           closeTerminateWorkerModal();
           return;
         }
+        if (dismissPlaybackStatusModal) {
+          closeDismissPlaybackStatusModal();
+          return;
+        }
         closeUserActionsModal();
       }
     }
@@ -1797,7 +1828,7 @@ export function AdminPage() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [selectedUserActionsEntry, terminateWorkerModal, terminateWorkerPending, diagnosticIdModal]);
+  }, [selectedUserActionsEntry, terminateWorkerModal, terminateWorkerPending, dismissPlaybackStatusModal, diagnosticIdModal]);
 
   if (loading && !statusPayload) {
     return <LoadingView label="Loading admin tools..." />;
@@ -1967,7 +1998,9 @@ export function AdminPage() {
                       </p>
                     ) : (
                       <div className="admin-user-workers__list">
-                        {workerGroup.items.map((worker) => {
+                        {workerGroup.items
+                          .filter((worker) => !dismissedPlaybackStatusKeys[buildPlaybackStatusDismissKey(worker)])
+                          .map((worker) => {
                           const preparedRanges = formatPreparedRanges(worker.prepared_ranges);
                           const sessionDiagnosticId = shortenDiagnosticId(worker.session_id);
                           const workerDiagnosticId = shortenDiagnosticId(worker.worker_id);
@@ -1975,6 +2008,7 @@ export function AdminPage() {
                           const hasTargetPosition = Number.isFinite(worker.target_position_seconds);
                           const displayStatus = buildWorkerDisplayStatus(worker);
                           const canTerminateWorker = canTerminatePlaybackWorker(worker.state);
+                          const canDismissWorkerStatus = canDismissPlaybackStatus(worker);
                           return (
                             <div className="admin-worker-card" key={worker.worker_id}>
                               <div className="admin-worker-card__header">
@@ -2003,6 +2037,15 @@ export function AdminPage() {
                                       type="button"
                                     >
                                       Terminate
+                                    </button>
+                                  ) : null}
+                                  {canDismissWorkerStatus ? (
+                                    <button
+                                      className="ghost-button admin-worker-card__terminate"
+                                      onClick={() => openDismissPlaybackStatusModal(worker)}
+                                      type="button"
+                                    >
+                                      Dismiss
                                     </button>
                                   ) : null}
                                 </div>
@@ -2063,13 +2106,16 @@ export function AdminPage() {
                             </div>
                           );
                         })}
-                        {workerGroup.nativeItems.map((nativePlayback) => {
+                        {workerGroup.nativeItems
+                          .filter((nativePlayback) => !dismissedPlaybackStatusKeys[buildPlaybackStatusDismissKey(nativePlayback)])
+                          .map((nativePlayback) => {
                           const displayStatus = buildWorkerDisplayStatus(nativePlayback);
                           const sessionDiagnosticId = shortenDiagnosticId(nativePlayback.session_id);
                           const positionSeconds = Number(nativePlayback.last_position_seconds);
                           const durationSeconds = Number(nativePlayback.last_duration_seconds);
                           const hasPosition = Number.isFinite(positionSeconds) && positionSeconds >= 0;
                           const hasDuration = Number.isFinite(durationSeconds) && durationSeconds >= 0;
+                          const canDismissNativeStatus = canDismissPlaybackStatus(nativePlayback);
                           return (
                             <div className="admin-worker-card admin-native-playback-card" key={`native-${nativePlayback.session_id}`}>
                               <div className="admin-worker-card__header">
@@ -2090,6 +2136,15 @@ export function AdminPage() {
                                   >
                                     {displayStatus.label}
                                   </span>
+                                  {canDismissNativeStatus ? (
+                                    <button
+                                      className="ghost-button admin-worker-card__terminate"
+                                      onClick={() => openDismissPlaybackStatusModal(nativePlayback)}
+                                      type="button"
+                                    >
+                                      Dismiss
+                                    </button>
+                                  ) : null}
                                 </div>
                               </div>
 
@@ -2744,6 +2799,46 @@ export function AdminPage() {
             type="button"
           >
             Yes
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const dismissPlaybackStatusConfirmationModal = dismissPlaybackStatusModal ? (
+    <div
+      aria-labelledby="admin-dismiss-playback-status-modal-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="browser-resume-modal__backdrop"
+        onClick={closeDismissPlaybackStatusModal}
+      />
+      <div className="browser-resume-modal__card detail-info-modal__card admin-playback-worker-modal">
+        <div className="detail-info-modal__copy">
+          <p className="eyebrow detail-info-modal__eyebrow">PLAYBACK STATUS</p>
+          <p id="admin-dismiss-playback-status-modal-title" className="detail-info-modal__title admin-playback-worker-modal__prompt">
+            {buildPlaybackStatusDismissPrompt(dismissPlaybackStatusModal.title)}
+          </p>
+          <p className="page-subnote">This only hides the non-running card in this admin page session.</p>
+        </div>
+        <div className="browser-resume-modal__actions admin-playback-worker-modal__actions">
+          <button
+            className="primary-button admin-playback-worker-modal__cancel"
+            onClick={closeDismissPlaybackStatusModal}
+            type="button"
+          >
+            Cancel
+          </button>
+          <button
+            className="ghost-button admin-playback-worker-modal__confirm"
+            onClick={handleDismissPlaybackStatusConfirm}
+            type="button"
+          >
+            Dismiss
           </button>
         </div>
       </div>
@@ -3565,6 +3660,7 @@ export function AdminPage() {
       ) : null}
       {userActionsModal}
       {terminateWorkerConfirmationModal}
+      {dismissPlaybackStatusConfirmationModal}
       {diagnosticIdPopup}
       {backupCreateModal.open ? (
         <div className="browser-resume-modal" role="presentation">

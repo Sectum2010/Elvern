@@ -44,6 +44,54 @@ import {
 const SESSION_MANIFEST_REFRESH_RUNWAY_SECONDS = 12;
 const BACKGROUND_PREPARATION_PARK_MS = 5 * 60 * 1000;
 
+function stripManifestCacheBusters(url) {
+  if (typeof url !== "string" || !url.trim()) {
+    return "";
+  }
+  try {
+    const parsed = new URL(url, "https://elvern.local");
+    parsed.searchParams.delete("attach_revision");
+    parsed.searchParams.delete("manifest_revision");
+    return `${parsed.pathname}?${parsed.searchParams.toString()}`.replace(/\?$/, "");
+  } catch {
+    return url.split("#")[0].split("?")[0];
+  }
+}
+
+export function softResumeRequiresHardReattach({
+  payload,
+  attachedManifestUrl = "",
+  attachedIdentity = null,
+  streamSourceUrl = "",
+} = {}) {
+  if (!payload) {
+    return false;
+  }
+  const nextIdentity = payload.active_epoch_id || payload.epoch || null;
+  if (attachedIdentity && nextIdentity && attachedIdentity !== nextIdentity) {
+    return true;
+  }
+  const activeManifestUrl = payload.active_manifest_url || payload.manifest_url || "";
+  if (!activeManifestUrl) {
+    return false;
+  }
+  const activeManifest = stripManifestCacheBusters(activeManifestUrl);
+  const attachedManifest = stripManifestCacheBusters(attachedManifestUrl);
+  const streamManifest = stripManifestCacheBusters(streamSourceUrl);
+  if (!attachedManifest && !streamManifest) {
+    return true;
+  }
+  if (!attachedManifest && streamManifest) {
+    return activeManifest !== streamManifest;
+  }
+  return Boolean(
+    activeManifest
+    && attachedManifest
+    && activeManifest !== attachedManifest
+    && (!streamManifest || activeManifest !== streamManifest)
+  );
+}
+
 function buildSessionManifestUrl(url, manifestRevision) {
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}manifest_revision=${encodeURIComponent(manifestRevision)}`;
@@ -831,6 +879,117 @@ export function useOptimizedPlaybackSession({
 
   function route2AttachmentNeedsReattach(payload = mobileSessionRef.current) {
     return hlsAttachmentNeedsReattach(payload);
+  }
+
+  async function softResumeMobilePlaybackAfterBackground(trigger) {
+    void trigger;
+    const activeSession = mobileSessionRef.current;
+    if (!activeSession?.session_id || mobileRecoveryInFlightRef.current) {
+      return;
+    }
+    const hiddenAt = mobileBackgroundHiddenAtRef.current || 0;
+    const backgroundDurationMs = hiddenAt > 0 ? Math.max(Date.now() - hiddenAt, 0) : 0;
+    const video = videoRef.current;
+    const shouldResume =
+      mobileWasPlayingBeforeSuspendRef.current || (!video?.paused && mobilePlayerCanPlayRef.current);
+    mobileRecoveryInFlightRef.current = true;
+    applyMobileLifecycleStatus("resuming");
+    try {
+      let payload = null;
+      try {
+        payload = await fetchOptimizedPlaybackSessionStatus({
+          statusUrl: activeSession.status_url,
+          browserPlaybackSessionRoot,
+          sessionId: activeSession.session_id,
+        });
+        const acceptedStatus = acceptBrowserPlaybackSessionPayload(payload, SESSION_SOURCE_STATUS);
+        if (!acceptedStatus.accepted) {
+          return;
+        }
+      } catch (requestError) {
+        if (requestError?.status === 404) {
+          handleMissingBrowserPlaybackSession(activeSession.session_id);
+          return;
+        }
+        setSeekNotice("Rechecking playback session...");
+        scheduleMobilePlaybackPoll(
+          activeSession.session_id,
+          Math.max(1000, Math.round((activeSession.status_poll_seconds || 1) * 1000)),
+        );
+        return;
+      }
+      if (payload.state === "failed" || payload.state === "expired" || payload.state === "stopped") {
+        setPlaybackError(`This ${browserPlaybackLabel} session is no longer active.`);
+        return;
+      }
+      const heartbeatLifecycle = backgroundDurationMs > BACKGROUND_PREPARATION_PARK_MS ? "resuming" : "attached";
+      await postMobileRuntimeHeartbeat({
+        lifecycleState: heartbeatLifecycle,
+        stalled: false,
+        playing: shouldResume,
+        force: backgroundDurationMs > BACKGROUND_PREPARATION_PARK_MS,
+      }).catch(() => {
+        // Foreground return should keep the current element/source even if this diagnostic misses.
+      });
+      const hardReattachRequired = softResumeRequiresHardReattach({
+        payload,
+        attachedManifestUrl: attachedOptimizedManifestUrlRef.current,
+        attachedIdentity: mobileAttachedEpochRef.current,
+        streamSourceUrl: streamSource?.mode === "hls" ? streamSource.url : "",
+      });
+      if (hardReattachRequired) {
+        const recoveryTarget = resolveLivePlaybackRecoveryTarget(payload);
+        preservePlaybackRecoveryTarget(recoveryTarget);
+        setOptimizedPlaybackPending(true);
+        setSeekNotice(`Reattaching the current ${browserPlaybackLabel} session.`);
+        if (isHlsAttachReady(payload)) {
+          armMobileManifestAttachment(payload, {
+            autoplay: shouldResume,
+            targetPosition: recoveryTarget,
+            forceReattach: true,
+            preserveAuthority: true,
+            resetSeekPreparation: true,
+          });
+        } else {
+          scheduleMobilePlaybackPoll(
+            payload.session_id,
+            Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
+          );
+        }
+        return;
+      }
+      syncMobilePlaybackState(payload);
+      if (isRoute2SessionPayload(payload)) {
+        mobileAttachedManifestEndRef.current = resolveAttachedManifestEndSeconds(payload);
+        mobileAttachedManifestRevisionRef.current = String(payload.attach_revision || 0);
+        mobileAttachedEpochRef.current = resolveSessionAttachmentIdentity(payload);
+        scheduleMobilePlaybackPoll(
+          payload.session_id,
+          Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
+        );
+      }
+      applyMobileLifecycleStatus("attached");
+      clearOptimizedPlaybackPending();
+      setPlaybackError("");
+      setSeekNotice("");
+      if (shouldResume && video?.paused && mobilePlayerCanPlayRef.current) {
+        try {
+          await video.play();
+        } catch {
+          setSeekNotice("Tap play to resume.");
+        }
+      }
+    } catch (requestError) {
+      setSeekNotice("Rechecking playback session...");
+      scheduleMobilePlaybackPoll(
+        activeSession.session_id,
+        Math.max(1000, Math.round((activeSession.status_poll_seconds || 1) * 1000)),
+      );
+    } finally {
+      mobileWasBackgroundedRef.current = false;
+      mobileBackgroundHiddenAtRef.current = 0;
+      mobileRecoveryInFlightRef.current = false;
+    }
   }
 
   function maybeAttachHlsAuthority(payload, { autoplay = false } = {}) {
@@ -1939,6 +2098,7 @@ export function useOptimizedPlaybackSession({
     maybeAcknowledgeHlsAttachment,
     maybeAcknowledgeRoute2Attachment,
     recoverMobilePlaybackAfterResume,
+    softResumeMobilePlaybackAfterBackground,
     startMobileOptimizedPlayback,
     retargetMobileOptimizedPlayback,
     selectBrowserPlaybackAudioTrack,

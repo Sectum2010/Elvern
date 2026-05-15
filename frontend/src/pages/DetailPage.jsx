@@ -2595,16 +2595,16 @@ export function DetailPage() {
               : mobileSession.target_position_seconds,
           )}.`
         : fullDuration > 0
-          ? `Prepared through ${clientPreparedThruLabel} of ${formatDuration(fullDuration)} while Elvern transcodes ahead.`
-          : `Prepared through ${clientPreparedThruLabel} while Elvern transcodes ahead.`
+          ? `Prepared through ${clientPreparedThruLabel} of ${formatDuration(fullDuration)}.`
+          : `Prepared through ${clientPreparedThruLabel}.`
       : playback?.mode === "hls"
       ? playback.manifest_complete
         ? "Full movie is ready for optimized playback."
         : availableDuration <= 0
           ? "Elvern is preparing optimized playback."
         : fullDuration > 0
-          ? `Prepared through ${preparedDurationLabel} of ${formatDuration(fullDuration)} while Elvern transcodes ahead.`
-          : `Prepared through ${preparedDurationLabel} while Elvern transcodes ahead.`
+          ? `Prepared through ${preparedDurationLabel} of ${formatDuration(fullDuration)}.`
+          : `Prepared through ${preparedDurationLabel}.`
       : "Full movie is available for direct playback.";
 
   function normalizeDesktopSeekValue(value) {

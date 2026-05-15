@@ -165,6 +165,7 @@ function TrackMenuItem({
   checked = false,
   kind,
   onSelect,
+  pending = false,
   track,
 }) {
   const unsupported = isBackendUnsupportedTrack(track);
@@ -172,18 +173,21 @@ function TrackMenuItem({
     return (
       <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
         {kind === "subtitle" ? <span className="elvern-overlay__track-menu-warning" aria-hidden="true">!</span> : null}
-        <span className="elvern-overlay__track-menu-label">{track.label}</span>
-      </div>
-    );
-  }
+      <span className="elvern-overlay__track-menu-label">{track.label}</span>
+    </div>
+  );
+}
   return (
     <button
       aria-checked={checked}
-      className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
+      aria-busy={pending ? "true" : undefined}
+      className={`elvern-overlay__menu-item elvern-overlay__track-menu-item${pending ? " elvern-overlay__track-menu-item--pending" : ""}`}
+      disabled={pending}
       onClick={() => onSelect(track.id)}
       role="menuitemradio"
       type="button"
     >
+      {pending ? <span className="elvern-overlay__track-menu-spinner" aria-hidden="true" /> : null}
       <span className="elvern-overlay__track-menu-label">{track.label}</span>
     </button>
   );
@@ -296,6 +300,10 @@ export default function ElvernPlayerOverlay({
   const [isDraggingTimeline, setIsDraggingTimeline] = useState(false);
   const [activeBackendSubtitle, setActiveBackendSubtitle] = useState(null);
   const [activeSubtitleCueTexts, setActiveSubtitleCueTexts] = useState([]);
+  const [pendingSubtitleTrackId, setPendingSubtitleTrackId] = useState("");
+  const [subtitleTrackError, setSubtitleTrackError] = useState("");
+  const [pendingAudioTrackId, setPendingAudioTrackId] = useState("");
+  const [audioTrackError, setAudioTrackError] = useState("");
 
   const controlsVisibleRef = useRef(true);
   const controlsManuallyHiddenRef = useRef(false);
@@ -634,8 +642,16 @@ export default function ElvernPlayerOverlay({
     refreshControlsTimer();
   }, [closeAllMenus, refreshControlsTimer, videoRef]);
 
-  const handleTextTrackSelect = useCallback((trackId) => {
-    Promise.resolve(selectSubtitleTrack(trackId)).then((result) => {
+  const handleTextTrackSelect = useCallback(async (trackId) => {
+    const selectedTrack = textTracks.find((track) => track.id === trackId);
+    if (!selectedTrack || isBackendUnsupportedTrack(selectedTrack)) {
+      return;
+    }
+    setPendingSubtitleTrackId(trackId);
+    setSubtitleTrackError("");
+    refreshControlsTimer();
+    try {
+      const result = await selectSubtitleTrack(trackId);
       const prepared = result?.preparedSubtitle;
       if (prepared?.vtt_url) {
         setActiveBackendSubtitle({
@@ -644,15 +660,22 @@ export default function ElvernPlayerOverlay({
           src: prepared.vtt_url,
         });
       }
-    });
-    closeAllMenus();
-    refreshControlsTimer();
-  }, [closeAllMenus, refreshControlsTimer, selectSubtitleTrack]);
+      setPendingSubtitleTrackId("");
+      closeAllMenus();
+      refreshControlsTimer();
+    } catch (trackError) {
+      setPendingSubtitleTrackId("");
+      setSubtitleTrackError("Could not prepare subtitle.");
+      refreshControlsTimer();
+    }
+  }, [closeAllMenus, refreshControlsTimer, selectSubtitleTrack, textTracks]);
 
   const handleTextTrackOff = useCallback(() => {
     subtitlesOff();
     setActiveBackendSubtitle(null);
     setActiveSubtitleCueTexts([]);
+    setPendingSubtitleTrackId("");
+    setSubtitleTrackError("");
     closeAllMenus();
     refreshControlsTimer();
   }, [closeAllMenus, refreshControlsTimer, subtitlesOff]);
@@ -706,11 +729,25 @@ export default function ElvernPlayerOverlay({
     };
   }, [activeBackendSubtitle, videoElementKey, videoRef]);
 
-  const handleAudioTrackSelect = useCallback((trackId) => {
-    selectAudioTrack(trackId);
-    closeAllMenus();
+  const handleAudioTrackSelect = useCallback(async (trackId) => {
+    const selectedTrack = audioTracks.find((track) => track.id === trackId);
+    if (!selectedTrack || isBackendUnsupportedTrack(selectedTrack)) {
+      return;
+    }
+    setPendingAudioTrackId(trackId);
+    setAudioTrackError("");
     refreshControlsTimer();
-  }, [closeAllMenus, refreshControlsTimer, selectAudioTrack]);
+    try {
+      await selectAudioTrack(trackId);
+      setPendingAudioTrackId("");
+      closeAllMenus();
+      refreshControlsTimer();
+    } catch (trackError) {
+      setPendingAudioTrackId("");
+      setAudioTrackError("Could not switch audio track.");
+      refreshControlsTimer();
+    }
+  }, [audioTracks, closeAllMenus, refreshControlsTimer, selectAudioTrack]);
 
   const togglePip = useCallback(async () => {
     const video = videoRef?.current;
@@ -1232,9 +1269,13 @@ export default function ElvernPlayerOverlay({
                         key={track.id}
                         kind="subtitle"
                         onSelect={handleTextTrackSelect}
+                        pending={pendingSubtitleTrackId === track.id}
                         track={track}
                       />
                     ))}
+                    {subtitleTrackError ? (
+                      <div className="elvern-overlay__track-menu-feedback" role="alert">{subtitleTrackError}</div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1265,9 +1306,13 @@ export default function ElvernPlayerOverlay({
                         key={track.id}
                         kind="audio"
                         onSelect={handleAudioTrackSelect}
+                        pending={pendingAudioTrackId === track.id}
                         track={track}
                       />
                     ))}
+                    {audioTrackError ? (
+                      <div className="elvern-overlay__track-menu-feedback" role="alert">{audioTrackError}</div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1357,6 +1402,7 @@ export default function ElvernPlayerOverlay({
                           key={track.id}
                           kind="subtitle"
                           onSelect={handleTextTrackSelect}
+                          pending={pendingSubtitleTrackId === track.id}
                           track={track}
                         />
                       ))
@@ -1365,6 +1411,9 @@ export default function ElvernPlayerOverlay({
                         No subtitle tracks found
                       </div>
                     )}
+                    {subtitleTrackError ? (
+                      <div className="elvern-overlay__track-menu-feedback" role="alert">{subtitleTrackError}</div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1396,6 +1445,7 @@ export default function ElvernPlayerOverlay({
                           key={track.id}
                           kind="audio"
                           onSelect={handleAudioTrackSelect}
+                          pending={pendingAudioTrackId === track.id}
                           track={track}
                         />
                       ))
@@ -1404,6 +1454,14 @@ export default function ElvernPlayerOverlay({
                         No alternate audio tracks found
                       </div>
                     )}
+                    {pendingAudioTrackId ? (
+                      <div className="elvern-overlay__track-menu-feedback" role="status">
+                        Preparing {audioTracks.find((track) => track.id === pendingAudioTrackId)?.label || "audio"}...
+                      </div>
+                    ) : null}
+                    {audioTrackError ? (
+                      <div className="elvern-overlay__track-menu-feedback" role="alert">{audioTrackError}</div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1495,9 +1553,13 @@ export default function ElvernPlayerOverlay({
                             key={track.id}
                             kind="subtitle"
                             onSelect={handleTextTrackSelect}
+                            pending={pendingSubtitleTrackId === track.id}
                             track={track}
                           />
                         ))}
+                        {subtitleTrackError ? (
+                          <div className="elvern-overlay__track-menu-feedback" role="alert">{subtitleTrackError}</div>
+                        ) : null}
                       </div>
                     ) : null}
                     {moreMenuItems.includes("audio") ? (
@@ -1509,9 +1571,18 @@ export default function ElvernPlayerOverlay({
                             key={track.id}
                             kind="audio"
                             onSelect={handleAudioTrackSelect}
+                            pending={pendingAudioTrackId === track.id}
                             track={track}
                           />
                         ))}
+                        {pendingAudioTrackId ? (
+                          <div className="elvern-overlay__track-menu-feedback" role="status">
+                            Preparing {audioTracks.find((track) => track.id === pendingAudioTrackId)?.label || "audio"}...
+                          </div>
+                        ) : null}
+                        {audioTrackError ? (
+                          <div className="elvern-overlay__track-menu-feedback" role="alert">{audioTrackError}</div>
+                        ) : null}
                       </div>
                     ) : null}
                     {moreMenuItems.includes("pip") ? (

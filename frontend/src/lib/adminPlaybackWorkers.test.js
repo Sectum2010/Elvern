@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 
 import {
   buildPlaybackWorkerSummaryBubbles,
+  buildPlaybackStatusDismissKey,
+  buildPlaybackStatusDismissPrompt,
   buildPlaybackWorkerTerminatePrompt,
   buildPlaybackWorkersByUserId,
   buildWorkerPlaybackMetadataLabel,
   buildWorkerDisplayStatus,
+  canDismissPlaybackStatus,
   canTerminatePlaybackWorker,
   clampGaugePercent,
   formatCpuCoresUsage,
@@ -247,6 +250,34 @@ test("terminate helper includes the movie title", () => {
   assert.equal(canTerminatePlaybackWorker("running"), true);
   assert.equal(canTerminatePlaybackWorker("queued"), true);
   assert.equal(canTerminatePlaybackWorker("completed"), false);
+});
+
+test("non-running playback statuses can be dismissed from the admin view", () => {
+  assert.equal(canDismissPlaybackStatus({ state: "completed" }), true);
+  assert.equal(canDismissPlaybackStatus({ state: "failed" }), true);
+  assert.equal(canDismissPlaybackStatus({ display_status: "expired", display_status_label: "Expired" }), true);
+  assert.equal(canDismissPlaybackStatus({ state: "running" }), false);
+  assert.equal(canDismissPlaybackStatus({ state: "queued" }), false);
+  assert.equal(canDismissPlaybackStatus({ state: "stopping" }), false);
+});
+
+test("playback status dismiss key is stable for a session worker epoch and state", () => {
+  const worker = {
+    playback_kind: "route2",
+    session_id: "session-a",
+    worker_id: "worker-a",
+    epoch_id: "epoch-a",
+    state: "completed",
+  };
+
+  assert.equal(
+    buildPlaybackStatusDismissKey(worker),
+    "route2:session-a:worker-a:epoch-a:complete",
+  );
+  assert.equal(
+    buildPlaybackStatusDismissPrompt("Movie"),
+    "Dismiss Movie from this admin view?",
+  );
 });
 
 

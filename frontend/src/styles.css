@@ -5353,6 +5353,10 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   text-align: center;
 }
 
+.elvern-overlay--idle .elvern-overlay__subtitle-layer {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 2rem);
+}
+
 .elvern-overlay__subtitle-cue {
   max-width: min(92%, 54rem);
   padding: 0.16rem 0.5rem;
@@ -5977,8 +5981,11 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   width: min(18rem, calc(100vw - 1.2rem));
   min-width: min(18rem, calc(100vw - 1.2rem));
   max-width: calc(100vw - 1.2rem);
-  max-height: min(58dvh, 22rem);
+  max-height: min(72dvh, 28rem);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   padding: 0.6rem;
   gap: 0.25rem;
   border-radius: 0.85rem;
@@ -6014,6 +6021,29 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   color: #f87171;
   font-weight: 900;
   line-height: 1;
+}
+
+.elvern-overlay__track-menu-spinner {
+  flex: 0 0 auto;
+  width: 0.78rem;
+  height: 0.78rem;
+  border-radius: 999px;
+  border: 2px solid rgba(248, 250, 252, 0.28);
+  border-top-color: rgba(248, 250, 252, 0.92);
+  animation: elvern-spin 720ms linear infinite;
+}
+
+.elvern-overlay__track-menu-feedback {
+  padding: 0.4rem 0.65rem 0.2rem;
+  color: rgba(248, 250, 252, 0.72);
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+@keyframes elvern-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .elvern-overlay--tablet .elvern-overlay__icon-button {

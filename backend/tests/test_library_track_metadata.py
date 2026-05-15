@@ -26,8 +26,8 @@ def test_extracts_audio_and_subtitle_tracks_from_probe_summary() -> None:
                 "codec_type": "audio",
                 "codec_name": "ac3",
                 "channels": 2,
-                "tags": {"language": "jpn"},
-                "disposition": {"default": 0},
+                "tags": {"language": "jpn", "title": "Director Commentary"},
+                "disposition": {"default": 0, "comment": 1},
             },
             {
                 "index": 3,
@@ -40,7 +40,7 @@ def test_extracts_audio_and_subtitle_tracks_from_probe_summary() -> None:
                 "index": 4,
                 "codec_type": "subtitle",
                 "codec_name": "hdmv_pgs_subtitle",
-                "tags": {"language": "eng"},
+                "tags": {"language": "eng", "title": "PGS"},
             },
         ],
     }
@@ -50,7 +50,10 @@ def test_extracts_audio_and_subtitle_tracks_from_probe_summary() -> None:
     assert [track["index"] for track in audio_tracks] == [1, 2]
     assert audio_tracks[0]["label"] == "English 5.1 (eng / aac / 6ch)"
     assert audio_tracks[0]["disposition_default"] is True
+    assert audio_tracks[1]["disposition_commentary"] is True
     assert [track["index"] for track in subtitle_tracks] == [3, 4]
     assert subtitle_tracks[0]["text_based"] is True
+    assert subtitle_tracks[0]["browser_supported"] is True
     assert subtitle_tracks[0]["disposition_forced"] is True
     assert subtitle_tracks[1]["image_based"] is True
+    assert subtitle_tracks[1]["browser_supported"] is False
