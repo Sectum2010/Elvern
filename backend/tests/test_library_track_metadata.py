@@ -57,3 +57,43 @@ def test_extracts_audio_and_subtitle_tracks_from_probe_summary() -> None:
     assert subtitle_tracks[0]["disposition_forced"] is True
     assert subtitle_tracks[1]["image_based"] is True
     assert subtitle_tracks[1]["browser_supported"] is False
+
+
+def test_extracts_multiple_audio_tracks_with_global_stream_indexes() -> None:
+    payload = {
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "h264"},
+            {
+                "index": 2,
+                "codec_type": "audio",
+                "codec_name": "eac3",
+                "channels": 8,
+                "tags": {"language": "eng", "title": "Atmos"},
+                "disposition": {"default": 1},
+            },
+            {
+                "index": 5,
+                "codec_type": "audio",
+                "codec_name": "ac3",
+                "channels": 6,
+                "tags": {"language": "eng"},
+                "disposition": {"default": 0},
+            },
+            {
+                "index": 7,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+                "tags": {"language": "eng", "title": "Commentary"},
+                "disposition": {"commentary": 1},
+            },
+        ],
+    }
+
+    audio_tracks, _subtitle_tracks = _extract_playback_tracks_from_probe_summary(json.dumps(payload))
+
+    assert [track["index"] for track in audio_tracks] == [2, 5, 7]
+    assert audio_tracks[0]["codec"] == "eac3"
+    assert audio_tracks[0]["channels"] == 8
+    assert audio_tracks[1]["codec"] == "ac3"
+    assert audio_tracks[2]["disposition_commentary"] is True

@@ -48,6 +48,11 @@ function consumeKeyboardEvent(event) {
   event?.nativeEvent?.stopImmediatePropagation?.();
 }
 
+function stopTrackMenuSurfaceEvent(event) {
+  event?.stopPropagation?.();
+  event?.nativeEvent?.stopImmediatePropagation?.();
+}
+
 function PlayIcon({ className }) {
   return (
     <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
@@ -340,6 +345,7 @@ export default function ElvernPlayerOverlay({
     hlsRef,
     onBackendAudioTrackSelect,
     onBackendSubtitleTrackSelect,
+    sessionPayload,
     trackRefreshKey,
     videoElementKey,
     videoRef,
@@ -1253,7 +1259,15 @@ export default function ElvernPlayerOverlay({
                   <CaptionsIcon className="elvern-overlay__icon" />
                 </button>
                 {showCaptionsMenu ? (
-                  <div className="elvern-overlay__menu elvern-overlay__track-menu" role="menu">
+                  <div
+                    className="elvern-overlay__menu elvern-overlay__track-menu"
+                    onClick={stopTrackMenuSurfaceEvent}
+                    onPointerDown={stopTrackMenuSurfaceEvent}
+                    onPointerMove={stopTrackMenuSurfaceEvent}
+                    onTouchMove={stopTrackMenuSurfaceEvent}
+                    onTouchStart={stopTrackMenuSurfaceEvent}
+                    role="menu"
+                  >
                     <button
                       className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
                       onClick={handleTextTrackOff}
@@ -1269,7 +1283,7 @@ export default function ElvernPlayerOverlay({
                         key={track.id}
                         kind="subtitle"
                         onSelect={handleTextTrackSelect}
-                        pending={pendingSubtitleTrackId === track.id}
+                        pending={pendingSubtitleTrackId === track.id || track.pending}
                         track={track}
                       />
                     ))}
@@ -1299,14 +1313,22 @@ export default function ElvernPlayerOverlay({
                   <AudioTrackIcon className="elvern-overlay__icon" />
                 </button>
                 {showAudioMenu ? (
-                  <div className="elvern-overlay__menu" role="menu">
+                  <div
+                    className="elvern-overlay__menu elvern-overlay__track-menu"
+                    onClick={stopTrackMenuSurfaceEvent}
+                    onPointerDown={stopTrackMenuSurfaceEvent}
+                    onPointerMove={stopTrackMenuSurfaceEvent}
+                    onTouchMove={stopTrackMenuSurfaceEvent}
+                    onTouchStart={stopTrackMenuSurfaceEvent}
+                    role="menu"
+                  >
                     {audioTracks.map((track) => (
                       <TrackMenuItem
                         checked={track.selected || track.enabled}
                         key={track.id}
                         kind="audio"
                         onSelect={handleAudioTrackSelect}
-                        pending={pendingAudioTrackId === track.id}
+                        pending={pendingAudioTrackId === track.id || track.pending}
                         track={track}
                       />
                     ))}
@@ -1385,7 +1407,15 @@ export default function ElvernPlayerOverlay({
                   <CaptionsIcon className="elvern-overlay__icon" />
                 </button>
                 {showCaptionsMenu ? (
-                  <div className="elvern-overlay__menu elvern-overlay__track-menu" role="menu">
+                  <div
+                    className="elvern-overlay__menu elvern-overlay__track-menu"
+                    onClick={stopTrackMenuSurfaceEvent}
+                    onPointerDown={stopTrackMenuSurfaceEvent}
+                    onPointerMove={stopTrackMenuSurfaceEvent}
+                    onTouchMove={stopTrackMenuSurfaceEvent}
+                    onTouchStart={stopTrackMenuSurfaceEvent}
+                    role="menu"
+                  >
                     <button
                       aria-checked={captionActiveCount === 0}
                       className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
@@ -1402,7 +1432,7 @@ export default function ElvernPlayerOverlay({
                           key={track.id}
                           kind="subtitle"
                           onSelect={handleTextTrackSelect}
-                          pending={pendingSubtitleTrackId === track.id}
+                          pending={pendingSubtitleTrackId === track.id || track.pending}
                           track={track}
                         />
                       ))
@@ -1437,7 +1467,15 @@ export default function ElvernPlayerOverlay({
                   <AudioTrackIcon className="elvern-overlay__icon" />
                 </button>
                 {showAudioMenu ? (
-                  <div className="elvern-overlay__menu elvern-overlay__track-menu" role="menu">
+                  <div
+                    className="elvern-overlay__menu elvern-overlay__track-menu"
+                    onClick={stopTrackMenuSurfaceEvent}
+                    onPointerDown={stopTrackMenuSurfaceEvent}
+                    onPointerMove={stopTrackMenuSurfaceEvent}
+                    onTouchMove={stopTrackMenuSurfaceEvent}
+                    onTouchStart={stopTrackMenuSurfaceEvent}
+                    role="menu"
+                  >
                     {audioTracks.length > 0 ? (
                       audioTracks.map((track) => (
                         <TrackMenuItem
@@ -1445,7 +1483,7 @@ export default function ElvernPlayerOverlay({
                           key={track.id}
                           kind="audio"
                           onSelect={handleAudioTrackSelect}
-                          pending={pendingAudioTrackId === track.id}
+                          pending={pendingAudioTrackId === track.id || track.pending}
                           track={track}
                         />
                       ))
@@ -1553,7 +1591,7 @@ export default function ElvernPlayerOverlay({
                             key={track.id}
                             kind="subtitle"
                             onSelect={handleTextTrackSelect}
-                            pending={pendingSubtitleTrackId === track.id}
+                            pending={pendingSubtitleTrackId === track.id || track.pending}
                             track={track}
                           />
                         ))}
@@ -1571,7 +1609,7 @@ export default function ElvernPlayerOverlay({
                             key={track.id}
                             kind="audio"
                             onSelect={handleAudioTrackSelect}
-                            pending={pendingAudioTrackId === track.id}
+                            pending={pendingAudioTrackId === track.id || track.pending}
                             track={track}
                           />
                         ))}

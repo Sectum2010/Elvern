@@ -2452,7 +2452,15 @@ export function DetailPage() {
   }
 
   const subtitleTracks = Array.isArray(item.subtitles) ? item.subtitles : [];
-  const playbackAudioTracks = Array.isArray(item.audio_tracks) ? item.audio_tracks : [];
+  const rawPlaybackAudioTracks = Array.isArray(item.audio_tracks) ? item.audio_tracks : [];
+  const trackScanStatus = String(item.track_scan_status || "").trim();
+  const playbackAudioTracks = (
+    trackScanStatus && trackScanStatus !== "probed"
+    && rawPlaybackAudioTracks.length === 1
+    && /^default audio$/i.test(String(rawPlaybackAudioTracks[0]?.title || rawPlaybackAudioTracks[0]?.label || ""))
+  )
+    ? []
+    : rawPlaybackAudioTracks;
   const playbackSubtitleTracks = Array.isArray(item.subtitle_tracks) ? item.subtitle_tracks : subtitleTracks;
   const detailSourceLabel = item.source_label || (item.source_kind === "cloud" ? "Cloud" : "DGX");
   const sourceDescription = item.source_kind === "cloud"

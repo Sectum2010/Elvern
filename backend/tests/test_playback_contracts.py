@@ -1084,6 +1084,74 @@ def test_route2_background_park_retains_segments_and_resume_unparks(initialized_
     assert segment_path.exists()
 
 
+def test_route2_background_park_is_session_scoped_and_requests_safe_stop(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5041, relative_name="route2/background/session-scoped.mp4"),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="background-device-session")
+    epoch = _make_route2_epoch()
+    epoch.session_id = session.session_id
+    epoch.epoch_dir = manager._route2_root / "background-session-scoped-epoch"
+    epoch.staging_dir = epoch.epoch_dir / "staging"
+    epoch.published_dir = epoch.epoch_dir / "published"
+    epoch.staging_manifest_path = epoch.staging_dir / "ffmpeg.m3u8"
+    epoch.metadata_path = epoch.epoch_dir / "epoch.json"
+    epoch.frontier_path = epoch.published_dir / "frontier.json"
+    epoch.published_init_path = epoch.published_dir / "init.mp4"
+    epoch.published_dir.mkdir(parents=True, exist_ok=True)
+    segment_path = epoch.published_dir / "segment_000000.m4s"
+    segment_path.write_bytes(b"segment")
+    worker = Route2WorkerRecord(
+        worker_id="background-worker",
+        session_id=session.session_id,
+        epoch_id=epoch.epoch_id,
+        user_id=session.user_id,
+        username=session.username,
+        auth_session_id=session.auth_session_id,
+        media_item_id=session.media_item_id,
+        title=session.media_title,
+        playback_mode=session.browser_playback.playback_mode,
+        profile=session.profile,
+        source_kind=session.source_kind,
+        target_position_seconds=session.target_position_seconds,
+        state="running",
+        assigned_threads=4,
+    )
+    epoch.active_worker_id = worker.worker_id
+    session.browser_playback.epochs[epoch.epoch_id] = epoch
+    session.browser_playback.active_epoch_id = epoch.epoch_id
+    session.lifecycle_state = "background-suspended"
+    session.backgrounded_at_ts = time.time() - 301.0
+
+    with manager._lock:
+        manager._route2_workers[worker.worker_id] = worker
+        manager._maybe_park_backgrounded_route2_session_locked(session, now_ts=time.time())
+
+    assert session.lifecycle_state == "background-parked"
+    assert session.preparation_parked is True
+    assert worker.stop_requested is True
+    assert worker.state == "stopping"
+    assert epoch.stop_requested is True
+    assert segment_path.exists()
+
+    with manager._lock:
+        manager._dispatch_waiting_route2_workers_locked()
+
+    assert session.preparation_parked is True
+    assert worker.state == "stopping"
+    assert segment_path.exists()
+
+    manager.update_runtime(session.session_id, user_id=session.user_id, lifecycle_state="resuming")
+
+    assert session.preparation_parked is False
+    assert session.preparation_resumed_at_ts > 0
+    assert worker.stop_requested is False
+    assert epoch.stop_requested is False
+    assert segment_path.exists()
+
+
 def test_ios_external_launch_url_contract_for_infuse_and_vlc() -> None:
     stream_url = "https://media.example/api/native-playback/session/demo/stream?token=secret"
     success_url = "https://app.example/library/42?ios_app=infuse&ios_result=success"

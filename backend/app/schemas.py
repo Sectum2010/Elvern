@@ -493,6 +493,8 @@ class MediaItemDetail(LibraryItemSummary):
     subtitles: list[SubtitleTrackResponse] = Field(default_factory=list)
     subtitle_tracks: list[MediaPlaybackTrackResponse] = Field(default_factory=list)
     audio_tracks: list[MediaPlaybackTrackResponse] = Field(default_factory=list)
+    track_scan_status: str = "not_scanned"
+    track_scan_error: str = ""
 
 
 class GoogleDriveConnectionResponse(BaseModel):

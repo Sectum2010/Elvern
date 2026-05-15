@@ -180,12 +180,14 @@ describe("Elvern player mobile CSS guards", () => {
     const styles = readStyles();
     const menuBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-menu");
     const rowBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-menu-item");
+    const shortcutBlock = cssBlock(styles, ".elvern-overlay--phone .elvern-overlay__track-shortcut");
 
     expect(menuBlock).toContain("width: min(18rem");
     expect(menuBlock).toContain("max-height: min(72dvh");
     expect(menuBlock).toContain("overflow-y: auto");
     expect(menuBlock).toContain("-webkit-overflow-scrolling: touch");
     expect(menuBlock).toContain("touch-action: pan-y");
+    expect(shortcutBlock).toContain("touch-action: pan-y");
     expect(rowBlock).toContain("min-height: 2.55rem");
     expect(rowBlock).toContain("align-items: center");
     expect(rowBlock).toContain("gap: 0.55rem");

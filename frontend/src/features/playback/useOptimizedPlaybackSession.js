@@ -1040,6 +1040,24 @@ export function useOptimizedPlaybackSession({
     }
     setActualMediaElementTime(nextCommittedPosition);
     setPlaybackPosition(nextCommittedPosition);
+    if (iosMobile && mobileRetargetTransitionRef.current) {
+      pendingSeekPhaseRef.current = "target_attached_waiting_client_buffer";
+      setPendingSeekPhase("target_attached_waiting_client_buffer");
+      mobileSeekPendingRef.current = false;
+      mobilePendingTargetRef.current = nextCommittedPosition;
+      requestedTargetSecondsRef.current = nextCommittedPosition;
+      mobilePlayerCanPlayRef.current = false;
+      setMobilePlayerCanPlay(false);
+      setPlaybackError("");
+      setSeekNotice(`Preparing ${formatDuration(nextCommittedPosition)}...`);
+      setPlaybackStatus("Preparing target playback");
+      setMobileLifecycleStateValue("attached");
+      maybeAcknowledgeHlsAttachment({
+        playing: false,
+        force: true,
+      });
+      return;
+    }
     clearOptimizedPlaybackPending();
     setMobileFrozenFrameUrl("");
     mobileRetargetTransitionRef.current = false;

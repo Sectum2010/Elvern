@@ -2295,8 +2295,16 @@ class MobilePlaybackManager:
             if session.preparation_parked:
                 session.preparation_resumed_at_ts = now_ts
                 for record in self._route2_workers.values():
-                    if record.session_id == session.session_id and record.state == "paused":
+                    if record.session_id != session.session_id:
+                        continue
+                    if record.state == "paused":
                         record.state = "queued"
+                    elif record.state == "stopping":
+                        record.state = "running" if record.started_at and not record.finished_at else "queued"
+                    record.stop_requested = False
+                    epoch = session.browser_playback.epochs.get(record.epoch_id)
+                    if epoch is not None:
+                        epoch.stop_requested = False
             session.preparation_parked = False
             session.backgrounded_at_ts = 0.0
 
@@ -13734,11 +13742,23 @@ class MobilePlaybackManager:
         session.preparation_parked = True
         session.preparation_parked_at_ts = now_ts
         session.lifecycle_state = "background-parked"
+        running_worker_stop_requested = False
         session.worker_state = "idle"
         session.queue_started_ts = None
         for record in self._route2_workers.values():
-            if record.session_id == session.session_id and record.state == "queued":
+            if record.session_id != session.session_id:
+                continue
+            if record.state == "queued":
                 record.state = "paused"
+            elif record.state == "running":
+                record.stop_requested = True
+                record.state = "stopping"
+                running_worker_stop_requested = True
+            epoch = session.browser_playback.epochs.get(record.epoch_id)
+            if epoch is not None:
+                epoch.stop_requested = True
+        if running_worker_stop_requested:
+            session.worker_state = "stopping"
         self._log_route2_event(
             "background_preparation_parked",
             session=session,

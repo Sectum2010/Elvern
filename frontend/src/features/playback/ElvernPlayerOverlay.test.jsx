@@ -922,6 +922,40 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     }));
   });
 
+  test("backend track labels preserve useful duplicate distinctions", () => {
+    const { getByRole, getByText, queryByText } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, codec: "ac3", channels: 6, language: "eng", disposition_default: true },
+        { index: 2, codec: "aac", channels: 2, language: "eng" },
+        { index: 3, codec: "aac", channels: 2, language: "eng", title: "Audio Commentary" },
+      ],
+      backendSubtitleTracks: [
+        { index: 4, codec: "subrip", language: "chi", label: "Chinese (Simplified / subrip)", text_based: true },
+        { index: 5, codec: "ass", language: "chi", label: "Chinese", text_based: true },
+        { index: 6, codec: "hdmv_pgs_subtitle", language: "chi", label: "Chinese", image_based: true },
+        { index: 7, codec: "subrip", language: "eng", title: "Director Commentary", text_based: true },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onToggleFullscreen: vi.fn(),
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    expect(getByText("Chinese Simplified")).toBeTruthy();
+    expect(getByText("Chinese · ASS")).toBeTruthy();
+    expect(getByText("Chinese · PGS")).toBeTruthy();
+    expect(queryByText("Director Commentary")).toBeNull();
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    expect(getByText("English · AC3 · 5.1")).toBeTruthy();
+    expect(getByText("English · AAC · 2ch")).toBeTruthy();
+    expect(queryByText("Audio Commentary")).toBeNull();
+  });
+
   test("text backend subtitles are clickable while image subtitles are marked unsupported", async () => {
     let resolvePrepare;
     const delayedSubtitlePrepare = vi.fn(() => new Promise((resolve) => {
@@ -988,7 +1022,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(container.querySelector(".elvern-overlay__track-menu")).toBeTruthy();
     expect(container.querySelectorAll(".elvern-overlay__track-menu-item").length).toBeGreaterThanOrEqual(31);
     expect(getByText("Subtitle 1")).toBeTruthy();
-    expect(getByText("Subtitle 30")).toBeTruthy();
+    expect(getByText("Subtitle 30 · PGS")).toBeTruthy();
   });
 
   test("phone cinema places subtitle and audio icons before More when tracks exist", () => {

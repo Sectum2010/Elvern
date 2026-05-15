@@ -33,6 +33,10 @@ import {
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "../../lib/browserPlaybackTimeline";
+import {
+  RETARGET_CLIENT_BUFFER_RELEASE_SECONDS,
+  shouldReleaseRetargetFrozenFrame,
+} from "../../lib/browserPlaybackRetargetReadiness";
 import { resolveBrowserPlaybackResumePosition } from "../../lib/browserPlaybackResume";
 import { formatDuration } from "../../lib/format";
 import {
@@ -1235,6 +1239,32 @@ export function useBrowserPlaybackController({
       return readClientBufferedAheadSeconds(video);
     }
 
+    function shouldHoldRetargetFrozenFrameForClientBuffer(targetAbsoluteSeconds) {
+      if (!iosMobile || !mobileRetargetTransitionRef.current) {
+        return false;
+      }
+      const currentSession = mobileSessionRef.current;
+      if (!currentSession) {
+        return false;
+      }
+      const target = Number(targetAbsoluteSeconds);
+      if (!Number.isFinite(target) || target < 0) {
+        return true;
+      }
+      if (!shouldReleaseRetargetFrozenFrame({
+        requiredClientBufferSeconds: RETARGET_CLIENT_BUFFER_RELEASE_SECONDS,
+        sessionPayload: currentSession,
+        targetAbsoluteSeconds: target,
+        videoElement: video,
+      })) {
+        pendingSeekPhaseRef.current = "target_attached_waiting_client_buffer";
+        setPendingSeekPhase("target_attached_waiting_client_buffer");
+        setSeekNotice(`Preparing ${formatDuration(target)}...`);
+        return true;
+      }
+      return false;
+    }
+
     function clearFirstFrameStallMonitor() {
       window.clearTimeout(firstFrameStallTimerRef.current);
       firstFrameStallTimerRef.current = null;
@@ -1712,6 +1742,19 @@ export function useBrowserPlaybackController({
       if (backendRunway < IOS_STABLE_READY_BACKEND_RUNWAY_SECONDS) {
         return;
       }
+      if (isRetargetTransition) {
+        const targetAbsoluteSeconds =
+          mobilePendingTargetRef.current != null
+            ? mobilePendingTargetRef.current
+            : requestedTargetSecondsRef.current != null
+              ? requestedTargetSecondsRef.current
+              : currentSession.pending_target_seconds != null
+                ? currentSession.pending_target_seconds
+                : currentSession.target_position_seconds || 0;
+        if (shouldHoldRetargetFrozenFrameForClientBuffer(targetAbsoluteSeconds)) {
+          return;
+        }
+      }
       if (shouldAutoplay && !isRetargetTransition) {
         if (!mobileWarmupProbeActiveRef.current) {
           mobileWarmupProbeActiveRef.current = true;
@@ -1867,6 +1910,10 @@ export function useBrowserPlaybackController({
         && requestedTargetSecondsRef.current != null
         && Math.abs(absoluteCurrentTime - requestedTargetSecondsRef.current) <= 0.75
       ) {
+        if (shouldHoldRetargetFrozenFrameForClientBuffer(requestedTargetSecondsRef.current)) {
+          maybeFinalizeMobilePlayerReadiness();
+          return;
+        }
         finalizeRetargetVisibility(video, {
           resumePlayback: mobileResumeAfterReadyRef.current,
           committedPosition: requestedTargetSecondsRef.current,
@@ -1874,6 +1921,10 @@ export function useBrowserPlaybackController({
         return;
       }
       if (mobileRetargetTransitionRef.current && !mobileSeekPendingRef.current) {
+        if (shouldHoldRetargetFrozenFrameForClientBuffer(absoluteCurrentTime)) {
+          maybeFinalizeMobilePlayerReadiness();
+          return;
+        }
         finalizeRetargetVisibility(video, {
           resumePlayback: mobileResumeAfterReadyRef.current,
           committedPosition: absoluteCurrentTime,

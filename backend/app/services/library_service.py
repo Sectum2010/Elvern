@@ -470,9 +470,9 @@ def get_media_item_detail(
         ).fetchall()
         technical_row = connection.execute(
             """
-            SELECT raw_probe_summary_json
+            SELECT probe_status, probe_error, metadata_source, raw_probe_summary_json
             FROM media_item_technical_metadata
-            WHERE media_item_id = ? AND probe_status = 'probed'
+            WHERE media_item_id = ?
             LIMIT 1
             """,
             (item_id,),
@@ -509,7 +509,9 @@ def get_media_item_detail(
     if hidden_globally and not allow_globally_hidden:
         return None
     audio_tracks, subtitle_stream_tracks = _extract_playback_tracks_from_probe_summary(
-        technical_row["raw_probe_summary_json"] if technical_row else None
+        technical_row["raw_probe_summary_json"]
+        if technical_row and technical_row["probe_status"] == "probed"
+        else None
     )
     subtitle_payload = [
         {
@@ -574,6 +576,8 @@ def get_media_item_detail(
             "subtitles": subtitle_payload,
             "subtitle_tracks": subtitle_stream_tracks,
             "audio_tracks": audio_tracks,
+            "track_scan_status": str(technical_row["probe_status"] if technical_row else "not_scanned"),
+            "track_scan_error": str(technical_row["probe_error"] or "") if technical_row else "",
         }
     )
     return payload

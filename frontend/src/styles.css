@@ -5643,6 +5643,14 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   position: relative;
 }
 
+.elvern-overlay--phone .elvern-overlay__track-shortcut {
+  touch-action: pan-y;
+}
+
+.elvern-overlay--phone .elvern-overlay__track-shortcut .elvern-overlay__menu-host {
+  touch-action: pan-y;
+}
+
 .elvern-overlay__menu {
   position: absolute;
   bottom: calc(100% + 0.35rem);
@@ -5991,12 +5999,17 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   border-radius: 0.85rem;
 }
 
+.elvern-overlay--phone .elvern-overlay__track-menu * {
+  touch-action: pan-y;
+}
+
 .elvern-overlay--phone .elvern-overlay__track-menu-item {
   min-height: 2.55rem;
   display: flex;
   align-items: center;
   gap: 0.55rem;
   line-height: 1.25;
+  touch-action: pan-y;
   white-space: normal;
   overflow-wrap: anywhere;
   padding: 0.55rem 0.7rem;
