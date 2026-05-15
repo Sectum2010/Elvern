@@ -48,7 +48,7 @@ def test_extracts_audio_and_subtitle_tracks_from_probe_summary() -> None:
     audio_tracks, subtitle_tracks = _extract_playback_tracks_from_probe_summary(json.dumps(payload))
 
     assert [track["index"] for track in audio_tracks] == [1, 2]
-    assert audio_tracks[0]["label"] == "English 5.1 (eng / aac)"
+    assert audio_tracks[0]["label"] == "English 5.1 (eng / aac / 6ch)"
     assert audio_tracks[0]["disposition_default"] is True
     assert [track["index"] for track in subtitle_tracks] == [3, 4]
     assert subtitle_tracks[0]["text_based"] is True

@@ -14,6 +14,7 @@ from ..schemas import (
     MobilePlaybackSessionCreateRequest,
     MobilePlaybackSessionResponse,
     MobilePlaybackStopResponse,
+    MobilePlaybackSubtitlePrepareResponse,
 )
 from ..services.library_service import get_media_item_record
 from ..services.mobile_playback_service import (
@@ -210,6 +211,53 @@ def select_browser_playback_audio_track(
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
     return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+
+
+@router.post(
+    "/api/browser-playback/sessions/{session_id}/subtitles/{stream_index}/prepare",
+    response_model=MobilePlaybackSubtitlePrepareResponse,
+)
+def prepare_browser_playback_subtitle_track(
+    session_id: str,
+    stream_index: int,
+    request: Request,
+    user=CurrentUser,
+) -> MobilePlaybackSubtitlePrepareResponse:
+    try:
+        response = _get_browser_manager(request).prepare_subtitle_track(
+            session_id,
+            stream_index=stream_index,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _coerce_session_error(exc) from exc
+    return MobilePlaybackSubtitlePrepareResponse(**response)
+
+
+@router.get("/api/browser-playback/sessions/{session_id}/subtitles/{stream_index}.vtt")
+def browser_playback_subtitle_track(
+    session_id: str,
+    stream_index: int,
+    request: Request,
+    user=CurrentUser,
+):
+    try:
+        subtitle_path = _get_browser_manager(request).get_subtitle_vtt_path(
+            session_id,
+            stream_index=stream_index,
+            user_id=int(user.id),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _coerce_session_error(exc) from exc
+    return FileResponse(
+        subtitle_path,
+        media_type="text/vtt",
+        headers={"Cache-Control": "private, max-age=600"},
+    )
 
 
 @router.post("/api/browser-playback/sessions/{session_id}/heartbeat", response_model=MobilePlaybackSessionResponse)

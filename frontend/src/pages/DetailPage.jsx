@@ -700,6 +700,7 @@ export function DetailPage() {
     playExistingBrowserSource,
     seekBrowserPlaybackTo,
     selectBrowserPlaybackAudioTrack,
+    prepareBrowserPlaybackSubtitleTrack,
     stopCurrentBrowserPlaybackSession,
   } = useBrowserPlaybackController({
     itemId,
@@ -3364,6 +3365,7 @@ export function DetailPage() {
                   backendSubtitleTracks={playbackSubtitleTracks}
                   onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}
                   onBackendAudioTrackSelect={selectBrowserPlaybackAudioTrack}
+                  onBackendSubtitleTrackSelect={prepareBrowserPlaybackSubtitleTrack}
                   onClientPreparedThruChange={setClientPreparedThruSeconds}
                   onToggleFullscreen={toggleElvernPlayerFullscreen}
                   onVideoFitModeChange={setElvernVideoFitMode}

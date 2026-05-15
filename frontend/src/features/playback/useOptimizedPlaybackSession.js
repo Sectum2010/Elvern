@@ -36,11 +36,13 @@ import {
   fetchActiveOptimizedPlaybackSession,
   fetchOptimizedPlaybackSessionStatus,
   postOptimizedPlaybackHeartbeat,
+  prepareOptimizedPlaybackSubtitleTrack,
   selectOptimizedPlaybackAudioTrack,
   seekOptimizedPlaybackSession,
 } from "./browserSessionClient";
 
 const SESSION_MANIFEST_REFRESH_RUNWAY_SECONDS = 12;
+const BACKGROUND_PREPARATION_PARK_MS = 5 * 60 * 1000;
 
 function buildSessionManifestUrl(url, manifestRevision) {
   const separator = url.includes("?") ? "&" : "?";
@@ -144,6 +146,7 @@ export function useOptimizedPlaybackSession({
   const mobileLastHeartbeatAtRef = useRef(0);
   const mobileHeartbeatInFlightRef = useRef(false);
   const mobileWasBackgroundedRef = useRef(false);
+  const mobileBackgroundHiddenAtRef = useRef(0);
   const mobileWasPlayingBeforeSuspendRef = useRef(false);
   const mobileStallTimerRef = useRef(null);
   const mobileStallStartedAtRef = useRef(0);
@@ -411,6 +414,7 @@ export function useOptimizedPlaybackSession({
     mobileLastHeartbeatAtRef.current = 0;
     mobileHeartbeatInFlightRef.current = false;
     mobileWasBackgroundedRef.current = false;
+    mobileBackgroundHiddenAtRef.current = 0;
     mobileWasPlayingBeforeSuspendRef.current = false;
     window.clearTimeout(mobileStallTimerRef.current);
     mobileStallTimerRef.current = null;
@@ -1256,11 +1260,21 @@ export function useOptimizedPlaybackSession({
     if ((!iosMobile && !explicitRoute2Session) || !activeSession?.session_id || mobileRecoveryInFlightRef.current) {
       return;
     }
+    const backgroundResumeTrigger = Boolean(
+      mobileWasBackgroundedRef.current
+      && (trigger === "visibilitychange" || trigger === "pageshow" || trigger === "focus"),
+    );
+    const hiddenAt = mobileBackgroundHiddenAtRef.current || 0;
+    const backgroundDurationMs = backgroundResumeTrigger && hiddenAt > 0
+      ? Math.max(Date.now() - hiddenAt, 0)
+      : 0;
     const capturedRecoveryTarget = resolveLivePlaybackRecoveryTarget(activeSession);
     mobileRecoveryInFlightRef.current = true;
     applyMobileLifecycleStatus("resuming");
-    setOptimizedPlaybackPending(true);
-    setSeekNotice(`Reconnecting the current ${browserPlaybackLabel} session.`);
+    if (!backgroundResumeTrigger) {
+      setOptimizedPlaybackPending(true);
+      setSeekNotice(`Reconnecting the current ${browserPlaybackLabel} session.`);
+    }
     const video = videoRef.current;
     const shouldResume =
       mobileWasPlayingBeforeSuspendRef.current || (!video?.paused && mobilePlayerCanPlayRef.current);
@@ -1343,6 +1357,45 @@ export function useOptimizedPlaybackSession({
           return;
         }
       }
+      if (backgroundResumeTrigger) {
+        const hardReattachRequired = Boolean(
+          isHlsAttachReady(payload)
+          && hlsAttachmentNeedsReattach(payload)
+        );
+        await postMobileRuntimeHeartbeat({
+          lifecycleState: "resuming",
+          stalled: false,
+          playing: shouldResume,
+          force: backgroundDurationMs > BACKGROUND_PREPARATION_PARK_MS,
+        }).catch(() => {
+          // A missed foreground heartbeat must not turn a soft resume into a destructive reattach.
+        });
+        if (!hardReattachRequired) {
+          syncMobilePlaybackState(payload);
+          if (isRoute2SessionPayload(payload)) {
+            mobileAttachedManifestEndRef.current = resolveAttachedManifestEndSeconds(payload);
+            mobileAttachedManifestRevisionRef.current = String(payload.attach_revision || 0);
+            mobileAttachedEpochRef.current = resolveSessionAttachmentIdentity(payload);
+            scheduleMobilePlaybackPoll(
+              payload.session_id,
+              Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
+            );
+          }
+          applyMobileLifecycleStatus("attached");
+          clearOptimizedPlaybackPending();
+          setPlaybackError("");
+          setSeekNotice("");
+          if (shouldResume && video?.paused && mobilePlayerCanPlayRef.current) {
+            try {
+              await video.play();
+            } catch {
+              setSeekNotice("Tap play to resume.");
+            }
+          }
+          return;
+        }
+        setOptimizedPlaybackPending(true);
+      }
       const recoveryTarget = resolvePlaybackRecoveryTargetSeconds({
         currentAbsolutePositionSeconds: capturedRecoveryTarget,
         committedPlayheadSeconds: committedPlayheadSecondsRef.current,
@@ -1404,6 +1457,7 @@ export function useOptimizedPlaybackSession({
       setPlaybackError(requestError.message || `Failed to recover ${browserPlaybackLabelTitle}`);
     } finally {
       mobileWasBackgroundedRef.current = false;
+      mobileBackgroundHiddenAtRef.current = 0;
       mobileRecoveryInFlightRef.current = false;
     }
   }
@@ -1705,6 +1759,22 @@ export function useOptimizedPlaybackSession({
     );
   }
 
+  async function prepareBrowserPlaybackSubtitleTrack(track) {
+    const activeSession = mobileSessionRef.current;
+    const streamIndex = Number(track?.index);
+    if (!activeSession?.session_id || !Number.isInteger(streamIndex) || streamIndex < 0) {
+      return null;
+    }
+    setSeekNotice(`Preparing subtitle track: ${track.label || `Subtitle ${streamIndex}`}`);
+    const payload = await prepareOptimizedPlaybackSubtitleTrack({
+      browserPlaybackSessionRoot,
+      sessionId: activeSession.session_id,
+      streamIndex,
+    });
+    setSeekNotice("");
+    return payload;
+  }
+
   async function restoreActiveBrowserPlaybackSession() {
     // Route 2's reusable preparation cache lives on the backend session/epoch
     // workspace. Browser buffers are transient and should not be treated as
@@ -1834,6 +1904,7 @@ export function useOptimizedPlaybackSession({
     mobileLastHeartbeatAtRef,
     mobileHeartbeatInFlightRef,
     mobileWasBackgroundedRef,
+    mobileBackgroundHiddenAtRef,
     mobileWasPlayingBeforeSuspendRef,
     mobileStallTimerRef,
     mobileStallStartedAtRef,
@@ -1871,6 +1942,7 @@ export function useOptimizedPlaybackSession({
     startMobileOptimizedPlayback,
     retargetMobileOptimizedPlayback,
     selectBrowserPlaybackAudioTrack,
+    prepareBrowserPlaybackSubtitleTrack,
     restoreActiveBrowserPlaybackSession,
     finalizeRetargetVisibility,
   };

@@ -37,6 +37,8 @@ class BrowserPlaybackRouteManagerStub:
         self.create_calls = 0
         self.create_kwargs: list[dict[str, object]] = []
         self.manifest_content = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n"
+        self.subtitle_prepare_calls: list[dict[str, object]] = []
+        self.subtitle_vtt_path: Path | None = None
 
     def start(self) -> None:
         return None
@@ -83,6 +85,27 @@ class BrowserPlaybackRouteManagerStub:
 
     def get_route2_epoch_manifest_content(self, epoch_id: str, *, user_id: int) -> str:
         return self.manifest_content
+
+    def prepare_subtitle_track(self, session_id: str, *, stream_index: int, user_id: int, **kwargs) -> dict[str, object]:
+        self.subtitle_prepare_calls.append({
+            "session_id": session_id,
+            "stream_index": stream_index,
+            "user_id": user_id,
+            **kwargs,
+        })
+        return {
+            "stream_index": stream_index,
+            "label": "English SRT",
+            "codec": "subrip",
+            "vtt_url": f"/api/browser-playback/sessions/{session_id}/subtitles/{stream_index}.vtt",
+            "prepared": True,
+        }
+
+    def get_subtitle_vtt_path(self, session_id: str, *, stream_index: int, user_id: int) -> Path:
+        del session_id, stream_index, user_id
+        if self.subtitle_vtt_path is None:
+            raise FileNotFoundError("Prepared subtitle track not found")
+        return self.subtitle_vtt_path
 
 
 class AdminPlaybackWorkerManagerStub:
@@ -1008,6 +1031,39 @@ def test_dynamic_route2_manifest_responses_disable_cache(
 
     assert response.status_code == 200
     _assert_dynamic_hls_playlist_headers(response)
+
+
+def test_browser_playback_subtitle_prepare_and_vtt_routes_are_session_owned(
+    initialized_settings,
+    client,
+    admin_credentials,
+    tmp_path,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/subtitle-prepare-route.mp4",
+    )
+    payload = _make_browser_playback_route2_payload(item_id=int(item["id"]))
+    stub = BrowserPlaybackRouteManagerStub(payload)
+    vtt_path = tmp_path / "english.vtt"
+    vtt_path.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n", encoding="utf-8")
+    stub.subtitle_vtt_path = vtt_path
+    client.app.state.mobile_playback_manager = stub
+
+    prepare_response = client.post(f"/api/browser-playback/sessions/{payload['session_id']}/subtitles/3/prepare")
+
+    assert prepare_response.status_code == 200
+    assert prepare_response.json()["vtt_url"] == (
+        f"/api/browser-playback/sessions/{payload['session_id']}/subtitles/3.vtt"
+    )
+    assert stub.subtitle_prepare_calls[-1]["stream_index"] == 3
+
+    vtt_response = client.get(f"/api/browser-playback/sessions/{payload['session_id']}/subtitles/3.vtt")
+
+    assert vtt_response.status_code == 200
+    assert "text/vtt" in vtt_response.headers["content-type"]
+    assert vtt_response.text.startswith("WEBVTT")
 
 
 def test_legacy_hls_manifest_response_disables_cache(

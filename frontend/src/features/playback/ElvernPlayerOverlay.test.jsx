@@ -872,7 +872,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
   test("backend-discovered tracks appear and selectable audio prepares through backend", () => {
     const onBackendAudioTrackSelect = vi.fn();
-    const { getByRole, getByText } = renderOverlay({
+    const { getByRole, getByText, queryByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, label: "English (aac)", codec: "aac", disposition_default: true },
         { index: 2, label: "Commentary (aac)", codec: "aac" },
@@ -884,6 +884,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       deviceClass: "phone",
       onBackendAudioTrackSelect,
       onToggleFullscreen: vi.fn(),
+      setupVideo: (video) => {
+        Object.defineProperty(video, "audioTracks", {
+          configurable: true,
+          value: [{ label: "Audio 1", language: "", enabled: true }],
+        });
+      },
     });
 
     act(() => {
@@ -895,6 +901,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(getByRole("button", { name: "Audio track" }));
     });
     expect(getByText("Commentary (aac)")).toBeTruthy();
+    expect(queryByText("Audio 1")).toBeNull();
 
     act(() => {
       fireEvent.click(getByRole("menuitemradio", { name: "Commentary (aac)" }));
@@ -906,9 +913,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     }));
   });
 
-  test("text backend subtitles are clickable while image subtitles are marked unsupported", () => {
-    const onBackendSubtitleTrackSelect = vi.fn();
-    const { getByRole, getByText } = renderOverlay({
+  test("text backend subtitles are clickable while image subtitles are marked unsupported", async () => {
+    const onBackendSubtitleTrackSelect = vi.fn(() => ({
+      label: "English SRT",
+      vtt_url: "/api/browser-playback/sessions/demo/subtitles/3.vtt",
+    }));
+    const { getByRole, getByText, queryByText } = renderOverlay({
       backendSubtitleTracks: [
         { index: 3, label: "English SRT", codec: "subrip", language: "en", text_based: true },
         { index: 4, label: "PGS English", codec: "hdmv_pgs_subtitle", image_based: true },
@@ -924,10 +934,12 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     });
 
     expect(getByText("PGS English")).toBeTruthy();
-    expect(getByText(/Image subtitles need future burn-in support/i)).toBeTruthy();
+    expect(getByText("!")).toBeTruthy();
+    expect(queryByText(/Image subtitles need future burn-in support/i)).toBeNull();
 
-    act(() => {
+    await act(async () => {
       fireEvent.click(getByRole("menuitemradio", { name: "English SRT" }));
+      await Promise.resolve();
     });
     expect(onBackendSubtitleTrackSelect).toHaveBeenCalledWith(expect.objectContaining({
       index: 3,

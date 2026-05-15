@@ -914,6 +914,176 @@ def _upsert_trusted_local_technical_metadata(
     )
 
 
+def _register_route2_test_session(
+    manager: MobilePlaybackManager,
+    settings,
+    item: dict[str, object],
+    *,
+    session_id: str = "route2-session",
+    user_id: int = 1,
+) -> MobilePlaybackSession:
+    session = _make_route2_session()
+    session.session_id = session_id
+    session.user_id = user_id
+    session.media_item_id = int(item["id"])
+    session.media_title = str(item.get("title") or "Route2 Test Movie")
+    session.source_kind = str(item.get("source_kind") or "local")
+    session.source_locator = str(item["file_path"])
+    session.source_input_kind = "path"
+    session.source_fingerprint = (
+        build_local_source_fingerprint_from_path(item["file_path"])
+        or f"test-fingerprint-{item['id']}"
+    )
+    session.cache_key = f"route2-cache-{item['id']}"
+    session.duration_seconds = float(item.get("duration_seconds") or 120.0)
+    with manager._lock:
+        manager._sessions[session.session_id] = session
+        manager._register_route2_session_locked(session)
+    return session
+
+
+def test_browser_playback_text_subtitle_prepare_converts_to_webvtt(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    manager, settings = _make_route2_manager(initialized_settings, ffmpeg_path="/fake/ffmpeg")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=501, relative_name="route2/subtitles/text-subtitle.mkv"),
+    )
+    _upsert_trusted_local_technical_metadata(
+        settings,
+        item,
+        raw_probe_summary_json=json.dumps(
+            {
+                "streams": [
+                    {"index": 0, "codec_type": "video", "codec_name": "h264"},
+                    {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                    {
+                        "index": 3,
+                        "codec_type": "subtitle",
+                        "codec_name": "subrip",
+                        "tags": {"language": "eng", "title": "English SRT"},
+                    },
+                ],
+            }
+        ),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="subtitle-session")
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "/fake/ffmpeg"
+        assert command[command.index("-map") + 1] == "0:3"
+        Path(command[-1]).write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    response = manager.prepare_subtitle_track(session.session_id, stream_index=3, user_id=session.user_id)
+
+    assert response["stream_index"] == 3
+    assert response["codec"] == "subrip"
+    assert response["vtt_url"] == "/api/browser-playback/sessions/subtitle-session/subtitles/3.vtt"
+    subtitle_path = manager.get_subtitle_vtt_path(session.session_id, stream_index=3, user_id=session.user_id)
+    assert subtitle_path.read_text(encoding="utf-8").startswith("WEBVTT")
+
+
+def test_browser_playback_image_subtitle_prepare_stays_unsupported(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings, ffmpeg_path="/fake/ffmpeg")
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=502, relative_name="route2/subtitles/image-subtitle.mkv"),
+    )
+    _upsert_trusted_local_technical_metadata(
+        settings,
+        item,
+        raw_probe_summary_json=json.dumps(
+            {
+                "streams": [
+                    {"index": 0, "codec_type": "video", "codec_name": "h264"},
+                    {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                    {
+                        "index": 4,
+                        "codec_type": "subtitle",
+                        "codec_name": "hdmv_pgs_subtitle",
+                        "tags": {"language": "eng", "title": "English PGS"},
+                    },
+                ],
+            }
+        ),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="image-subtitle-session")
+
+    with pytest.raises(ValueError, match="burn-in"):
+        manager.prepare_subtitle_track(session.session_id, stream_index=4, user_id=session.user_id)
+
+
+def test_background_suspended_zero_heartbeat_does_not_reset_route2_playhead(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=503, relative_name="route2/background/stale-zero.mp4"),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="background-zero-session")
+    session.committed_playhead_seconds = 55.0
+    session.actual_media_element_time_seconds = 55.0
+    session.client_current_time_seconds = 55.0
+    session.last_stable_position_seconds = 55.0
+
+    manager.update_runtime(
+        session.session_id,
+        user_id=session.user_id,
+        committed_playhead_seconds=0.0,
+        actual_media_element_time_seconds=0.0,
+        client_current_time_seconds=0.0,
+        lifecycle_state="background-suspended",
+        playing=False,
+    )
+
+    assert session.committed_playhead_seconds == 55.0
+    assert session.actual_media_element_time_seconds == 55.0
+    assert session.client_current_time_seconds == 55.0
+    assert session.last_stable_position_seconds == 55.0
+
+
+def test_route2_background_park_retains_segments_and_resume_unparks(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=504, relative_name="route2/background/park.mp4"),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="background-park-session")
+    epoch = _make_route2_epoch()
+    epoch.session_id = session.session_id
+    epoch.epoch_dir = manager._route2_root / "background-park-epoch"
+    epoch.staging_dir = epoch.epoch_dir / "staging"
+    epoch.published_dir = epoch.epoch_dir / "published"
+    epoch.staging_manifest_path = epoch.staging_dir / "ffmpeg.m3u8"
+    epoch.metadata_path = epoch.epoch_dir / "epoch.json"
+    epoch.frontier_path = epoch.published_dir / "frontier.json"
+    epoch.published_init_path = epoch.published_dir / "init.mp4"
+    epoch.published_dir.mkdir(parents=True, exist_ok=True)
+    segment_path = epoch.published_dir / "segment_000000.m4s"
+    segment_path.write_bytes(b"segment")
+    session.browser_playback.epochs[epoch.epoch_id] = epoch
+    session.browser_playback.active_epoch_id = epoch.epoch_id
+    session.lifecycle_state = "background-suspended"
+    session.backgrounded_at_ts = time.time() - 301.0
+
+    with manager._lock:
+        manager._maybe_park_backgrounded_route2_session_locked(session, now_ts=time.time())
+
+    assert session.lifecycle_state == "background-parked"
+    assert session.preparation_parked is True
+    assert segment_path.exists()
+
+    manager.update_runtime(session.session_id, user_id=session.user_id, lifecycle_state="resuming")
+
+    assert session.preparation_parked is False
+    assert session.backgrounded_at_ts == 0.0
+    assert segment_path.exists()
+
+
 def test_ios_external_launch_url_contract_for_infuse_and_vlc() -> None:
     stream_url = "https://media.example/api/native-playback/session/demo/stream?token=secret"
     success_url = "https://app.example/library/42?ios_app=infuse&ios_result=success"

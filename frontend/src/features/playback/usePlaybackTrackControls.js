@@ -20,8 +20,11 @@ function buildTrackLabel(track, fallback) {
   const title = track?.label || track?.title || track?.name;
   const language = track?.lang || track?.language;
   const codec = track?.codec;
+  const channels = Number.isFinite(Number(track?.channels)) && Number(track.channels) > 0
+    ? `${Number(track.channels)}ch`
+    : "";
   const main = title || language || fallback;
-  const details = [language && title && language !== title ? language : "", codec].filter(Boolean).join(" · ");
+  const details = [language && title && language !== title ? language : "", codec, channels].filter(Boolean).join(" · ");
   return details ? `${main} (${details})` : main;
 }
 
@@ -105,22 +108,30 @@ function normalizeBackendSubtitleTracks(tracks) {
   if (!Array.isArray(tracks)) {
     return [];
   }
-  return tracks.map((track, index) => ({
-    id: `backend-subtitle-${track.index ?? track.id ?? index}`,
-    index: Number.isInteger(track.index) ? track.index : index,
-    label: buildTrackLabel(track, `Subtitle ${index + 1}`),
-    language: track.language || "",
-    mode: "disabled",
-    selected: false,
-    source: "backend",
-    codec: track.codec || "",
-    browserSupported: Boolean(track.browser_supported || track.text_based),
-    unsupportedReason: track.image_based
-      ? "Image subtitles need future burn-in support for browser playback."
-      : "This subtitle track needs WebVTT preparation before the browser can display it.",
-    textBased: Boolean(track.text_based),
-    imageBased: Boolean(track.image_based),
-  }));
+  return tracks
+    .map((track, index) => ({
+      id: `backend-subtitle-${track.index ?? track.id ?? index}`,
+      index: Number.isInteger(track.index) ? track.index : index,
+      label: buildTrackLabel(track, `Subtitle ${index + 1}`),
+      language: track.language || "",
+      mode: "disabled",
+      selected: false,
+      source: "backend",
+      codec: track.codec || "",
+      browserSupported: Boolean(track.browser_supported || track.text_based),
+      unsupportedReason: track.image_based ? "Burn-in required" : "Needs WebVTT preparation",
+      textBased: Boolean(track.text_based),
+      imageBased: Boolean(track.image_based),
+    }))
+    .sort((left, right) => {
+      if (left.browserSupported !== right.browserSupported) {
+        return left.browserSupported ? -1 : 1;
+      }
+      if (left.imageBased !== right.imageBased) {
+        return left.imageBased ? 1 : -1;
+      }
+      return left.index - right.index;
+    });
 }
 
 function normalizeBackendAudioTracks(tracks) {
@@ -151,21 +162,25 @@ function resolveTrackState({
   const hlsAudioTracks = collectHlsAudioTracks(hls);
   const nativeSubtitleTracks = collectNativeSubtitleTracks(video);
   const nativeAudioTracks = collectNativeAudioTracks(video);
+  const backendSubtitleList = normalizeBackendSubtitleTracks(backendSubtitleTracks);
+  const backendAudioList = normalizeBackendAudioTracks(backendAudioTracks);
   const subtitleTracks = hlsSubtitleTracks.length > 0
     ? hlsSubtitleTracks
     : nativeSubtitleTracks.length > 0
       ? nativeSubtitleTracks
-      : normalizeBackendSubtitleTracks(backendSubtitleTracks);
-  const audioTracks = hlsAudioTracks.length > 0
+      : backendSubtitleList;
+  const audioTracks = backendAudioList.length > 1
+    ? backendAudioList
+    : hlsAudioTracks.length > 0
     ? hlsAudioTracks
     : nativeAudioTracks.length > 0
       ? nativeAudioTracks
-      : normalizeBackendAudioTracks(backendAudioTracks);
+      : backendAudioList;
   const source = hlsSubtitleTracks.length > 0 || hlsAudioTracks.length > 0
     ? "hls_js"
     : nativeSubtitleTracks.length > 0 || nativeAudioTracks.length > 0
       ? "native"
-      : subtitleTracks.length > 0 || audioTracks.length > 0
+      : backendSubtitleList.length > 0 || backendAudioList.length > 0
         ? "backend"
         : "none";
 
@@ -259,7 +274,7 @@ export function usePlaybackTrackControls({
     refreshTrackState();
   }, [hlsRef, refreshTrackState, videoRef]);
 
-  const selectSubtitleTrack = useCallback((trackId) => {
+  const selectSubtitleTrack = useCallback(async (trackId) => {
     const selected = trackState.subtitleTracks.find((track) => track.id === trackId);
     if (!selected) {
       return;
@@ -279,9 +294,12 @@ export function usePlaybackTrackControls({
       }
     } else if (selected.source === "backend" && selected.browserSupported) {
       setSelectedBackendSubtitleTrackId(selected.id);
-      onBackendSubtitleTrackSelect?.(selected);
+      const prepared = await onBackendSubtitleTrackSelect?.(selected);
+      refreshTrackState();
+      return { ...selected, preparedSubtitle: prepared || null };
     }
     refreshTrackState();
+    return selected;
   }, [hlsRef, onBackendSubtitleTrackSelect, refreshTrackState, trackState.subtitleTracks, videoRef]);
 
   const selectAudioTrack = useCallback((trackId) => {

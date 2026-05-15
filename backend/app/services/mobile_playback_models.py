@@ -560,6 +560,10 @@ class MobilePlaybackSession:
     client_playback_stall_reason: str | None = None
     hls_js_config: dict[str, object] | None = None
     lifecycle_state: str = "attached"
+    backgrounded_at_ts: float = 0.0
+    preparation_parked: bool = False
+    preparation_parked_at_ts: float = 0.0
+    preparation_resumed_at_ts: float = 0.0
     stalled_recovery_requested: bool = False
     last_refill_start_seconds: float | None = None
     last_refill_end_seconds: float | None = None

@@ -168,14 +168,11 @@ function TrackMenuItem({
   track,
 }) {
   const unsupported = isBackendUnsupportedTrack(track);
-  const note = track?.unsupportedReason || (kind === "audio"
-    ? "Detected in the source file; this browser stream has not exposed alternate audio yet."
-    : "Detected in the source file; this browser stream has not exposed selectable subtitles yet.");
   if (unsupported) {
     return (
       <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
+        {kind === "subtitle" ? <span className="elvern-overlay__track-menu-warning" aria-hidden="true">!</span> : null}
         <span className="elvern-overlay__track-menu-label">{track.label}</span>
-        <span className="elvern-overlay__track-menu-note">{note}</span>
       </div>
     );
   }
@@ -297,6 +294,8 @@ export default function ElvernPlayerOverlay({
   const [controlsManuallyHidden, setControlsManuallyHidden] = useState(false);
   const [controlsFocused, setControlsFocused] = useState(false);
   const [isDraggingTimeline, setIsDraggingTimeline] = useState(false);
+  const [activeBackendSubtitle, setActiveBackendSubtitle] = useState(null);
+  const [activeSubtitleCueTexts, setActiveSubtitleCueTexts] = useState([]);
 
   const controlsVisibleRef = useRef(true);
   const controlsManuallyHiddenRef = useRef(false);
@@ -636,16 +635,76 @@ export default function ElvernPlayerOverlay({
   }, [closeAllMenus, refreshControlsTimer, videoRef]);
 
   const handleTextTrackSelect = useCallback((trackId) => {
-    selectSubtitleTrack(trackId);
+    Promise.resolve(selectSubtitleTrack(trackId)).then((result) => {
+      const prepared = result?.preparedSubtitle;
+      if (prepared?.vtt_url) {
+        setActiveBackendSubtitle({
+          id: result.id,
+          label: prepared.label || result.label,
+          src: prepared.vtt_url,
+        });
+      }
+    });
     closeAllMenus();
     refreshControlsTimer();
   }, [closeAllMenus, refreshControlsTimer, selectSubtitleTrack]);
 
   const handleTextTrackOff = useCallback(() => {
     subtitlesOff();
+    setActiveBackendSubtitle(null);
+    setActiveSubtitleCueTexts([]);
     closeAllMenus();
     refreshControlsTimer();
   }, [closeAllMenus, refreshControlsTimer, subtitlesOff]);
+
+  useEffect(() => {
+    const video = videoRef?.current || null;
+    if (!video || !activeBackendSubtitle?.src || !SUPPORTS_DOCUMENT) {
+      setActiveSubtitleCueTexts([]);
+      return undefined;
+    }
+    const trackElement = document.createElement("track");
+    trackElement.kind = "subtitles";
+    trackElement.label = activeBackendSubtitle.label || "Subtitle";
+    trackElement.srclang = "und";
+    trackElement.src = activeBackendSubtitle.src;
+    trackElement.default = true;
+    let textTrack = null;
+    let disposed = false;
+    const updateCueTexts = () => {
+      if (disposed || !textTrack?.activeCues) {
+        setActiveSubtitleCueTexts([]);
+        return;
+      }
+      const nextTexts = Array.from(textTrack.activeCues)
+        .map((cue) => String(cue?.text || "").trim())
+        .filter(Boolean);
+      setActiveSubtitleCueTexts(nextTexts);
+    };
+    const attachCueListener = () => {
+      textTrack = trackElement.track;
+      if (!textTrack) {
+        return;
+      }
+      textTrack.mode = "hidden";
+      textTrack.addEventListener?.("cuechange", updateCueTexts);
+      updateCueTexts();
+    };
+    trackElement.addEventListener("load", attachCueListener);
+    video.appendChild(trackElement);
+    attachCueListener();
+    return () => {
+      disposed = true;
+      textTrack?.removeEventListener?.("cuechange", updateCueTexts);
+      trackElement.removeEventListener("load", attachCueListener);
+      try {
+        video.removeChild(trackElement);
+      } catch {
+        // The video may have been remounted by a real attachment change.
+      }
+      setActiveSubtitleCueTexts([]);
+    };
+  }, [activeBackendSubtitle, videoElementKey, videoRef]);
 
   const handleAudioTrackSelect = useCallback((trackId) => {
     selectAudioTrack(trackId);
@@ -1066,6 +1125,16 @@ export default function ElvernPlayerOverlay({
         >
           <InlineExpandIcon className="elvern-overlay__inline-maximize-icon" />
         </button>
+      ) : null}
+
+      {activeSubtitleCueTexts.length > 0 ? (
+        <div className="elvern-overlay__subtitle-layer" aria-live="polite">
+          {activeSubtitleCueTexts.map((cueText, index) => (
+            <span className="elvern-overlay__subtitle-cue" key={`${cueText}-${index}`}>
+              {cueText}
+            </span>
+          ))}
+        </div>
       ) : null}
 
       {!phoneInlineMinimal && (title || errorMessage) ? (

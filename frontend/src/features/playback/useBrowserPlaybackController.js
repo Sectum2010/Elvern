@@ -212,6 +212,7 @@ export function useBrowserPlaybackController({
     mobileLastHeartbeatAtRef,
     mobileHeartbeatInFlightRef,
     mobileWasBackgroundedRef,
+    mobileBackgroundHiddenAtRef,
     mobileWasPlayingBeforeSuspendRef,
     mobileStallTimerRef,
     mobileStallStartedAtRef,
@@ -246,6 +247,7 @@ export function useBrowserPlaybackController({
     recoverMobilePlaybackAfterResume,
     startMobileOptimizedPlayback,
     retargetMobileOptimizedPlayback,
+    prepareBrowserPlaybackSubtitleTrack,
     restoreActiveBrowserPlaybackSession: restoreOptimizedPlaybackSession,
     finalizeRetargetVisibility,
   } = useOptimizedPlaybackSession({
@@ -1420,6 +1422,7 @@ export function useBrowserPlaybackController({
         return;
       }
       mobileWasBackgroundedRef.current = true;
+      mobileBackgroundHiddenAtRef.current = Date.now();
       mobileWasPlayingBeforeSuspendRef.current = Boolean(!video.paused && !video.ended);
       applyMobileLifecycleStatus("background-suspended");
       postMobileRuntimeHeartbeat({
@@ -1509,6 +1512,7 @@ export function useBrowserPlaybackController({
         beaconProgress(false);
         if (iosMobile && mobileSessionRef.current) {
           mobileWasBackgroundedRef.current = true;
+          mobileBackgroundHiddenAtRef.current = Date.now();
           mobileWasPlayingBeforeSuspendRef.current = Boolean(!video.paused && !video.ended);
           applyMobileLifecycleStatus("background-suspended");
           postMobileRuntimeHeartbeat({
@@ -2197,6 +2201,7 @@ export function useBrowserPlaybackController({
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
     seekBrowserPlaybackTo,
+    prepareBrowserPlaybackSubtitleTrack,
     stopCurrentBrowserPlaybackSession,
   };
 }

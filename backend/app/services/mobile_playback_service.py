@@ -19,6 +19,12 @@ from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..media_stream import ensure_media_path_within_root
 from .cloud_library_service import ensure_cloud_media_item_provider_access
+from .library_service import (
+    IMAGE_SUBTITLE_CODECS,
+    TEXT_SUBTITLE_CODECS,
+    _extract_playback_tracks_from_probe_summary,
+    get_media_item_record,
+)
 from .mobile_playback_models import (
     BACKGROUND_EXPANSION_FORWARD_SECONDS,
     FRONTIER_WAIT_SECONDS,
@@ -218,6 +224,17 @@ def _ffmpeg_audio_map(audio_stream_index: int | None) -> str:
     return f"0:{int(audio_stream_index)}?"
 
 
+def _normalize_subtitle_codec(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _coerce_subtitle_stream_index(value: int | None) -> int:
+    coerced = int(value)
+    if coerced < 0:
+        raise ValueError("subtitle stream index must be non-negative")
+    return coerced
+
+
 ROUTE2_TELEMETRY_PROCESS_ATTACH_GRACE_SECONDS = 5.0
 ROUTE2_RESOURCE_TELEMETRY_INTERVAL_SECONDS = 1.0
 ROUTE2_RESOURCE_SNAPSHOT_STALE_SECONDS = 5.0
@@ -245,6 +262,7 @@ ROUTE2_ADAPTIVE_RECLAIM_PENDING_TTL_SECONDS = 120.0
 ROUTE2_ADAPTIVE_RESUPPLY_RETRY_BACKOFF_SECONDS = 30.0
 ROUTE2_ADAPTIVE_RESUPPLY_MAX_ATTEMPTS_PER_DONOR = 3
 ROUTE2_ADAPTIVE_RESUPPLY_STABILIZATION_DEFAULT_SECONDS = 120
+BACKGROUND_PREPARATION_PARK_SECONDS = 300.0
 ROUTE2_RECLAIM_ACTIVE_STATES = {
     "consumer_waiting_for_reclaim",
     "donor_selected",
@@ -1346,11 +1364,13 @@ class MobilePlaybackManager:
         self._session_root = self.settings.transcode_dir / "mobile_sessions"
         self._cache_root = self.settings.transcode_dir / "mobile_cache"
         self._route2_root = self.settings.transcode_dir / "browser_playback_route2"
+        self._subtitle_cache_root = self.settings.transcode_dir / "browser_playback_subtitles"
 
     def start(self) -> None:
         self._session_root.mkdir(parents=True, exist_ok=True)
         self._cache_root.mkdir(parents=True, exist_ok=True)
         self._route2_root.mkdir(parents=True, exist_ok=True)
+        self._subtitle_cache_root.mkdir(parents=True, exist_ok=True)
         (self._route2_root / "preflight").mkdir(parents=True, exist_ok=True)
         self._recover_stale_route2_worker_metadata()
         self._cleanup_orphaned_cache_dirs()
@@ -1886,6 +1906,235 @@ class MobilePlaybackManager:
             self._refresh_route2_session_authority_locked(session)
             return self._route2_snapshot_locked(session)
 
+    def _playback_tracks_for_media_item(self, media_item_id: int) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        with get_connection(self.settings) as connection:
+            technical_row = connection.execute(
+                """
+                SELECT raw_probe_summary_json
+                FROM media_item_technical_metadata
+                WHERE media_item_id = ? AND probe_status = 'probed'
+                LIMIT 1
+                """,
+                (media_item_id,),
+            ).fetchone()
+            audio_tracks, subtitle_tracks = _extract_playback_tracks_from_probe_summary(
+                technical_row["raw_probe_summary_json"] if technical_row else None
+            )
+            if subtitle_tracks:
+                return audio_tracks, subtitle_tracks
+            rows = connection.execute(
+                """
+                SELECT id, language, title, codec, disposition_default
+                FROM subtitle_tracks
+                WHERE media_item_id = ?
+                ORDER BY id ASC
+                """,
+                (media_item_id,),
+            ).fetchall()
+        fallback_subtitles: list[dict[str, object]] = []
+        for index, row in enumerate(rows):
+            codec = _normalize_subtitle_codec(row["codec"])
+            fallback_subtitles.append(
+                {
+                    "index": index,
+                    "codec": row["codec"],
+                    "language": row["language"],
+                    "title": row["title"],
+                    "disposition_default": bool(row["disposition_default"]),
+                    "disposition_forced": False,
+                    "text_based": codec in TEXT_SUBTITLE_CODECS,
+                    "image_based": codec in IMAGE_SUBTITLE_CODECS,
+                    "browser_supported": codec == "webvtt",
+                    "label": str(row["title"] or row["language"] or f"Subtitle {index + 1}"),
+                }
+            )
+        return audio_tracks, fallback_subtitles
+
+    def _resolve_text_subtitle_track(self, media_item_id: int, stream_index: int) -> dict[str, object]:
+        _audio_tracks, subtitle_tracks = self._playback_tracks_for_media_item(media_item_id)
+        for track in subtitle_tracks:
+            if int(track.get("index") or 0) != stream_index:
+                continue
+            codec = _normalize_subtitle_codec(track.get("codec"))
+            if bool(track.get("image_based")) or codec in IMAGE_SUBTITLE_CODECS:
+                raise ValueError("Image subtitles require future burn-in support for Browser Playback")
+            if not bool(track.get("text_based")) and codec not in TEXT_SUBTITLE_CODECS:
+                raise ValueError("Only text subtitle streams can be prepared for Browser Playback")
+            return track
+        raise ValueError("Subtitle track was not found for this media item")
+
+    def _subtitle_vtt_cache_path(
+        self,
+        *,
+        source_fingerprint: str,
+        stream_index: int,
+        codec: str | None,
+    ) -> Path:
+        digest = hashlib.sha256(
+            f"{source_fingerprint}:{stream_index}:{_normalize_subtitle_codec(codec)}".encode("utf-8")
+        ).hexdigest()[:32]
+        return self._subtitle_cache_root / digest / f"stream-{stream_index}.vtt"
+
+    def prepare_subtitle_track(
+        self,
+        session_id: str,
+        *,
+        stream_index: int,
+        user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+    ) -> dict[str, object]:
+        stream_index = _coerce_subtitle_stream_index(stream_index)
+        with self._lock:
+            session = self._get_owned_session_locked(session_id, user_id)
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
+            media_item_id = int(session.media_item_id)
+            source_fingerprint = str(session.source_fingerprint)
+            source_locator = str(session.source_locator)
+            source_input_kind = str(session.source_input_kind)
+            source_kind = str(session.source_kind)
+            profile = str(session.profile)
+            duration_seconds = float(session.duration_seconds)
+            cache_key = str(session.cache_key)
+        item = get_media_item_record(self.settings, item_id=media_item_id)
+        if item is None:
+            raise ValueError("Media item not found for subtitle preparation")
+        track = self._resolve_text_subtitle_track(media_item_id, stream_index)
+        codec = str(track.get("codec") or "")
+        output_path = self._subtitle_vtt_cache_path(
+            source_fingerprint=source_fingerprint,
+            stream_index=stream_index,
+            codec=codec,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            if not self.settings.ffmpeg_path:
+                raise ValueError("ffmpeg was not found on the server")
+            transient_session = MobilePlaybackSession(
+                session_id=session_id,
+                user_id=user_id,
+                auth_session_id=auth_session_id,
+                username=(username or "").strip() or None,
+                media_item_id=media_item_id,
+                media_title=str(item.get("title") or f"Media Item {media_item_id}"),
+                profile=profile,
+                source_kind=source_kind,
+                duration_seconds=duration_seconds,
+                cache_key=cache_key,
+                source_locator=source_locator,
+                source_input_kind=source_input_kind,
+                source_fingerprint=source_fingerprint,
+                created_at=utcnow_iso(),
+                last_client_seen_at=utcnow_iso(),
+                last_media_access_at=utcnow_iso(),
+                target_position_seconds=0.0,
+                last_stable_position_seconds=0.0,
+                committed_playhead_seconds=0.0,
+                actual_media_element_time_seconds=0.0,
+                expires_at_ts=time.time() + 60.0,
+                browser_playback=self._build_browser_playback_session(
+                    engine_mode="route2",
+                    playback_mode="lite",
+                ),
+            )
+            source_input, source_input_kind = _resolve_worker_source_input_impl(
+                self.settings,
+                transient_session,
+            )
+            tmp_path = output_path.with_suffix(".vtt.tmp")
+            command = [
+                str(self.settings.ffmpeg_path),
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-nostdin",
+                "-y",
+            ]
+            if source_input_kind == "url":
+                command.extend(
+                    [
+                        "-reconnect",
+                        "1",
+                        "-reconnect_streamed",
+                        "1",
+                        "-reconnect_on_network_error",
+                        "1",
+                        "-rw_timeout",
+                        "15000000",
+                    ]
+                )
+            command.extend(
+                [
+                    "-i",
+                    source_input,
+                    "-map",
+                    f"0:{stream_index}",
+                    "-vn",
+                    "-an",
+                    "-dn",
+                    "-c:s",
+                    "webvtt",
+                    str(tmp_path),
+                ]
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise ValueError("Subtitle conversion timed out") from exc
+            if completed.returncode != 0 or not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                detail = (completed.stderr or "").strip().splitlines()[-1:] or ["subtitle conversion failed"]
+                raise ValueError(f"Subtitle conversion failed: {detail[0]}")
+            tmp_path.replace(output_path)
+        label = str(track.get("label") or track.get("title") or track.get("language") or f"Subtitle {stream_index}")
+        return {
+            "stream_index": stream_index,
+            "label": label,
+            "codec": codec or None,
+            "vtt_url": f"/api/browser-playback/sessions/{session_id}/subtitles/{stream_index}.vtt",
+            "prepared": True,
+        }
+
+    def get_subtitle_vtt_path(
+        self,
+        session_id: str,
+        *,
+        stream_index: int,
+        user_id: int,
+    ) -> Path:
+        stream_index = _coerce_subtitle_stream_index(stream_index)
+        with self._lock:
+            session = self._get_owned_session_locked(session_id, user_id)
+            media_item_id = int(session.media_item_id)
+            source_fingerprint = str(session.source_fingerprint)
+        track = self._resolve_text_subtitle_track(media_item_id, stream_index)
+        path = self._subtitle_vtt_cache_path(
+            source_fingerprint=source_fingerprint,
+            stream_index=stream_index,
+            codec=str(track.get("codec") or ""),
+        )
+        if not path.exists() or path.stat().st_size <= 0:
+            raise FileNotFoundError("Prepared subtitle track not found")
+        return path
+
     def update_runtime(
         self,
         session_id: str,
@@ -1921,6 +2170,35 @@ class MobilePlaybackManager:
                 auth_session_id=auth_session_id,
                 username=username,
             )
+            normalized_lifecycle = str(lifecycle_state or "").strip()
+            suspended_heartbeat = normalized_lifecycle in {"background-suspended", "background-parked"}
+            strongest_stable_position = max(
+                session.committed_playhead_seconds,
+                session.actual_media_element_time_seconds,
+                session.last_stable_position_seconds,
+                session.target_position_seconds,
+            )
+            if (
+                suspended_heartbeat
+                and strongest_stable_position > 1.0
+                and committed_playhead_seconds is not None
+                and float(committed_playhead_seconds or 0.0) <= 0.001
+            ):
+                committed_playhead_seconds = None
+            if (
+                suspended_heartbeat
+                and strongest_stable_position > 1.0
+                and actual_media_element_time_seconds is not None
+                and float(actual_media_element_time_seconds or 0.0) <= 0.001
+            ):
+                actual_media_element_time_seconds = None
+            if (
+                suspended_heartbeat
+                and strongest_stable_position > 1.0
+                and client_current_time_seconds is not None
+                and float(client_current_time_seconds or 0.0) <= 0.001
+            ):
+                client_current_time_seconds = None
             self._record_client_playback_telemetry_locked(
                 session,
                 selected_hls_engine=selected_hls_engine,
@@ -1949,6 +2227,7 @@ class MobilePlaybackManager:
                     )
                 if lifecycle_state:
                     session.lifecycle_state = lifecycle_state
+                    self._apply_background_lifecycle_locked(session, lifecycle_state)
                 if playing is not None:
                     session.client_is_playing = bool(playing)
                 browser_session = session.browser_playback
@@ -1985,6 +2264,7 @@ class MobilePlaybackManager:
                 )
             if lifecycle_state:
                 session.lifecycle_state = lifecycle_state
+                self._apply_background_lifecycle_locked(session, lifecycle_state)
             if playing is not None:
                 session.client_is_playing = bool(playing)
             if stalled is True:
@@ -1997,6 +2277,28 @@ class MobilePlaybackManager:
             self._transition_session_state_locked(session)
         self._ensure_worker_for_session(session_id)
         return self.get_session(session_id, user_id=user_id)
+
+    def _apply_background_lifecycle_locked(self, session: MobilePlaybackSession, lifecycle_state: str) -> None:
+        normalized = str(lifecycle_state or "").strip()
+        now_ts = time.time()
+        if normalized == "background-suspended":
+            if session.backgrounded_at_ts <= 0:
+                session.backgrounded_at_ts = now_ts
+            return
+        if normalized == "background-parked":
+            if session.backgrounded_at_ts <= 0:
+                session.backgrounded_at_ts = now_ts
+            session.preparation_parked = True
+            session.preparation_parked_at_ts = now_ts
+            return
+        if normalized in {"resuming", "attached"}:
+            if session.preparation_parked:
+                session.preparation_resumed_at_ts = now_ts
+                for record in self._route2_workers.values():
+                    if record.session_id == session.session_id and record.state == "paused":
+                        record.state = "queued"
+            session.preparation_parked = False
+            session.backgrounded_at_ts = 0.0
 
     def _record_client_playback_telemetry_locked(
         self,
@@ -11496,6 +11798,18 @@ class MobilePlaybackManager:
         return True
 
     def _ensure_route2_epoch_workers_locked(self, session: MobilePlaybackSession) -> None:
+        if session.preparation_parked:
+            has_running = False
+            for epoch_id in (session.browser_playback.active_epoch_id, session.browser_playback.replacement_epoch_id):
+                if not epoch_id:
+                    continue
+                epoch = session.browser_playback.epochs.get(epoch_id)
+                if epoch is not None and epoch.process and epoch.process.poll() is None:
+                    has_running = True
+                    break
+            session.worker_state = "running" if has_running else "idle"
+            session.queue_started_ts = None
+            return
         browser_session = session.browser_playback
         waiting_epoch_exists = False
         running_epoch_exists = False
@@ -12364,8 +12678,15 @@ class MobilePlaybackManager:
             else:
                 return
         # Compute the desired window from current session telemetry.
+        strongest_anchor_position = max(
+            session.client_current_time_seconds or 0.0,
+            session.committed_playhead_seconds,
+            session.actual_media_element_time_seconds,
+            session.last_stable_position_seconds,
+            session.target_position_seconds,
+        )
         anchor = resolve_window_anchor_seconds(
-            current_position_seconds=session.client_current_time_seconds,
+            current_position_seconds=strongest_anchor_position,
             target_position_seconds=session.target_position_seconds,
             attach_position_seconds=active_epoch.attach_position_seconds,
         )
@@ -13393,6 +13714,37 @@ class MobilePlaybackManager:
             for record in self._route2_workers.values()
         )
 
+    def _maybe_park_backgrounded_route2_session_locked(
+        self,
+        session: MobilePlaybackSession,
+        *,
+        now_ts: float,
+    ) -> None:
+        if session.browser_playback.engine_mode != "route2":
+            return
+        if session.lifecycle_state != "background-suspended":
+            return
+        if session.backgrounded_at_ts <= 0:
+            session.backgrounded_at_ts = now_ts
+            return
+        if now_ts - session.backgrounded_at_ts < BACKGROUND_PREPARATION_PARK_SECONDS:
+            return
+        if session.preparation_parked:
+            return
+        session.preparation_parked = True
+        session.preparation_parked_at_ts = now_ts
+        session.lifecycle_state = "background-parked"
+        session.worker_state = "idle"
+        session.queue_started_ts = None
+        for record in self._route2_workers.values():
+            if record.session_id == session.session_id and record.state == "queued":
+                record.state = "paused"
+        self._log_route2_event(
+            "background_preparation_parked",
+            session=session,
+            backgrounded_seconds=round(now_ts - session.backgrounded_at_ts, 2),
+        )
+
     def _reconcile_managed_session_auth_state(self) -> None:
         with self._lock:
             managed_sessions = [
@@ -13486,6 +13838,8 @@ class MobilePlaybackManager:
                 record = queue.pop(0)
                 session = self._sessions.get(record.session_id)
                 if session is None or session.browser_playback.engine_mode != "route2":
+                    continue
+                if session.preparation_parked:
                     continue
                 epoch = session.browser_playback.epochs.get(record.epoch_id)
                 if epoch is None:
@@ -13669,6 +14023,7 @@ class MobilePlaybackManager:
             for session_id, session in list(self._sessions.items()):
                 if session.browser_playback.engine_mode == "route2":
                     self._cleanup_route2_draining_epochs_locked(session, now_ts=now_ts)
+                    self._maybe_park_backgrounded_route2_session_locked(session, now_ts=now_ts)
                     if self._route2_has_background_activity_locked(session):
                         session.expires_at_ts = max(
                             session.expires_at_ts,

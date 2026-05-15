@@ -636,7 +636,14 @@ BrowserPlaybackModeState = Literal["estimating", "preparing", "ready"]
 BrowserPlaybackEstimateSource = str
 MobilePlaybackState = Literal["queued", "preparing", "ready", "retargeting", "failed", "stopped", "expired"]
 MobilePlaybackWorkerState = Literal["idle", "queued", "running"]
-MobilePlaybackLifecycleState = Literal["attached", "background-suspended", "resuming", "recovering", "fatal"]
+MobilePlaybackLifecycleState = Literal[
+    "attached",
+    "background-suspended",
+    "background-parked",
+    "resuming",
+    "recovering",
+    "fatal",
+]
 
 
 class MobilePlaybackSessionCreateRequest(BaseModel):
@@ -659,6 +666,14 @@ class MobilePlaybackAudioTrackRequest(BaseModel):
     selected_audio_stream_index: int = Field(ge=0)
     current_position_seconds: float | None = Field(default=None, ge=0)
     playing_before_switch: bool | None = None
+
+
+class MobilePlaybackSubtitlePrepareResponse(BaseModel):
+    stream_index: int = Field(ge=0)
+    label: str
+    codec: str | None = None
+    vtt_url: str
+    prepared: bool = True
 
 
 class MobilePlaybackHeartbeatRequest(BaseModel):

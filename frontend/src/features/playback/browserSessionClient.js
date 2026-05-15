@@ -139,6 +139,16 @@ export function selectOptimizedPlaybackAudioTrack({
   });
 }
 
+export function prepareOptimizedPlaybackSubtitleTrack({
+  browserPlaybackSessionRoot,
+  sessionId,
+  streamIndex,
+}) {
+  return apiRequest(`${browserPlaybackSessionRoot}/sessions/${sessionId}/subtitles/${streamIndex}/prepare`, {
+    method: "POST",
+  });
+}
+
 export function fetchActiveOptimizedPlaybackSession({
   browserPlaybackSessionRoot,
   itemId,

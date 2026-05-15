@@ -82,9 +82,17 @@ def _stream_track_label(
     language: object,
     title: object,
     codec: object,
+    channels: object = None,
 ) -> str:
+    channel_label = None
+    try:
+        channel_count = int(channels) if channels is not None else 0
+    except (TypeError, ValueError):
+        channel_count = 0
+    if channel_count > 0:
+        channel_label = f"{channel_count}ch"
     main = str(title or language or fallback)
-    details = [str(value) for value in (language if title else None, codec) if value]
+    details = [str(value) for value in (language if title else None, codec, channel_label) if value]
     return f"{main} ({' / '.join(details)})" if details else main
 
 
@@ -116,19 +124,21 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
         stream_index = int(stream.get("index") or 0)
         if codec_type == "audio":
             audio_ordinal += 1
+            channels = int(stream["channels"]) if stream.get("channels") else None
             audio_tracks.append(
                 {
                     "index": stream_index,
                     "codec": codec,
                     "language": language,
                     "title": title,
-                    "channels": int(stream["channels"]) if stream.get("channels") else None,
+                    "channels": channels,
                     "disposition_default": bool(disposition.get("default", 0)),
                     "label": _stream_track_label(
                         fallback=f"Audio {audio_ordinal}",
                         language=language,
                         title=title,
                         codec=codec,
+                        channels=channels,
                     ),
                     "browser_supported": False,
                 }
