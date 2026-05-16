@@ -192,10 +192,53 @@ function resolveAudioTrackUnavailableMessage(scanStatus, scanError) {
   return "No alternate audio tracks found";
 }
 
-function resolveAudioSwitchError(payload) {
-  const rawError = String(payload?.audio_switch_error || payload?.audio_switch_last_error || "").trim();
+function coerceAudioSwitchErrorDetail(value) {
+  if (!value) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => coerceAudioSwitchErrorDetail(entry))
+      .filter(Boolean)
+      .join("; ");
+  }
+  if (typeof value === "object") {
+    const primaryMessages = [
+      value.audio_switch_error,
+      value.audio_switch_replacement_last_error,
+      value.payload,
+      value.response,
+      value.detail,
+    ]
+      .map((entry) => coerceAudioSwitchErrorDetail(entry))
+      .filter(Boolean)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (primaryMessages.length > 0) {
+      return Array.from(new Set(primaryMessages)).join("; ");
+    }
+    const fallbackMessages = [
+      value.message,
+      value.error,
+      value.reason,
+      value.title,
+    ]
+      .map((entry) => coerceAudioSwitchErrorDetail(entry))
+      .filter(Boolean)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    return Array.from(new Set(fallbackMessages)).join("; ");
+  }
+  return "";
+}
+
+function resolveAudioSwitchErrorFromPayloadOrError(payloadOrError, fallback = "Could not switch audio track.") {
+  const rawError = coerceAudioSwitchErrorDetail(payloadOrError).trim();
   if (!rawError) {
-    return "Could not switch audio track.";
+    return fallback;
   }
   const singleLine = rawError.replace(/\s+/g, " ");
   return singleLine.length > 180 ? `${singleLine.slice(0, 177).trim()}...` : singleLine;
@@ -203,6 +246,7 @@ function resolveAudioSwitchError(payload) {
 
 function TrackMenuItem({
   checked = false,
+  disabled = false,
   error = false,
   kind,
   onSelect,
@@ -224,10 +268,15 @@ function TrackMenuItem({
     <button
       aria-checked={checked}
       aria-busy={pending ? "true" : undefined}
+      aria-disabled={disabled || pending ? "true" : undefined}
       aria-invalid={error ? "true" : undefined}
-      className={`elvern-overlay__menu-item elvern-overlay__track-menu-item${pending ? " elvern-overlay__track-menu-item--pending" : ""}${error ? " elvern-overlay__track-menu-item--error" : ""}`}
-      disabled={pending}
-      onClick={() => onSelect(track.id)}
+      className={`elvern-overlay__menu-item elvern-overlay__track-menu-item${pending ? " elvern-overlay__track-menu-item--pending" : ""}${error ? " elvern-overlay__track-menu-item--error" : ""}${disabled && !pending && !error ? " elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item--locked" : ""}`}
+      disabled={pending || disabled}
+      onClick={() => {
+        if (!disabled && !pending) {
+          onSelect(track.id);
+        }
+      }}
       role="menuitemradio"
       type="button"
     >
@@ -393,6 +442,26 @@ export default function ElvernPlayerOverlay({
     videoElementKey,
     videoRef,
   });
+  const sessionAudioSwitchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
+  const sessionPendingAudioStreamIndex = Number.isInteger(sessionPayload?.pending_audio_stream_index)
+    ? sessionPayload.pending_audio_stream_index
+    : null;
+  const sessionAttachRevision = Number(sessionPayload?.attach_revision || 0);
+  const sessionClientAttachRevision = Number(sessionPayload?.client_attach_revision || 0);
+  const visualPendingAudioTrackId = audioSwitchVisual?.trackId || "";
+  const backendAudioPending = audioTracks.some((track) => track.pending);
+  const backendAudioPreparing = sessionAudioSwitchState === "preparing"
+    && sessionPendingAudioStreamIndex != null;
+  const backendAudioAttaching = sessionAudioSwitchState === "active"
+    && sessionAttachRevision > 0
+    && sessionAttachRevision > sessionClientAttachRevision
+    && audioSwitchVisual?.phase === "attaching";
+  const audioSwitchInProgress = Boolean(
+    audioSwitchVisual
+    || backendAudioPending
+    || backendAudioPreparing
+    || backendAudioAttaching,
+  );
   const closeAllMenus = useCallback(() => {
     setShowSpeedMenu(false);
     setShowCaptionsMenu(false);
@@ -783,6 +852,9 @@ export default function ElvernPlayerOverlay({
     if (!selectedTrack || isBackendUnsupportedTrack(selectedTrack)) {
       return;
     }
+    if (audioSwitchInProgress) {
+      return;
+    }
     const selectedStreamIndex = Number.isInteger(selectedTrack.index) ? selectedTrack.index : null;
     if ((selectedTrack.selected || selectedTrack.enabled) && !selectedTrack.pending) {
       setAudioSwitchVisual(null);
@@ -810,7 +882,8 @@ export default function ElvernPlayerOverlay({
       const sessionPayloadResponse = hasSessionPayloadWrapper ? payload.sessionPayload : payload;
       if (selectedTrack.source === "backend" && !sessionPayloadResponse) {
         setAudioSwitchVisual(null);
-        setAudioTrackError("Could not switch audio track.");
+        setAudioTrackError(resolveAudioSwitchErrorFromPayloadOrError(payload));
+        setAudioTrackErrorTrackId(trackId);
         refreshControlsTimer();
         return;
       }
@@ -830,7 +903,7 @@ export default function ElvernPlayerOverlay({
       const hasSwitchError = Boolean(String(sessionPayloadResponse?.audio_switch_error || "").trim());
       if (switchState === "failed" || hasSwitchError) {
         setAudioSwitchVisual(null);
-        setAudioTrackError(resolveAudioSwitchError(sessionPayloadResponse));
+        setAudioTrackError(resolveAudioSwitchErrorFromPayloadOrError(sessionPayloadResponse));
         setAudioTrackErrorTrackId(trackId);
       } else if (
         switchState === "preparing"
@@ -888,12 +961,11 @@ export default function ElvernPlayerOverlay({
       refreshControlsTimer();
     } catch (trackError) {
       setAudioSwitchVisual(null);
-      const message = String(trackError?.message || "").trim();
-      setAudioTrackError(message || "Could not switch audio track.");
+      setAudioTrackError(resolveAudioSwitchErrorFromPayloadOrError(trackError));
       setAudioTrackErrorTrackId(trackId);
       refreshControlsTimer();
     }
-  }, [audioTracks, refreshControlsTimer, selectAudioTrack]);
+  }, [audioSwitchInProgress, audioTracks, refreshControlsTimer, selectAudioTrack]);
 
   useEffect(() => {
     const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
@@ -956,7 +1028,7 @@ export default function ElvernPlayerOverlay({
         )
       ) {
         setAudioSwitchVisual(null);
-        setAudioTrackError(resolveAudioSwitchError(sessionPayload));
+        setAudioTrackError(resolveAudioSwitchErrorFromPayloadOrError(sessionPayload));
         setAudioTrackErrorTrackId(audioSwitchVisual.trackId);
       }
       return;
@@ -1302,7 +1374,6 @@ export default function ElvernPlayerOverlay({
   const audioMenuAvailable = audioTracks.length > 1;
   const captionsMenuAvailable = textTracks.length > 0;
   const phoneTrackShortcutButtons = phoneFullscreenCinema;
-  const visualPendingAudioTrackId = audioSwitchVisual?.trackId || "";
   const previousAudioTrackIdDuringClientAttach = audioSwitchVisual?.phase === "attaching"
     ? audioSwitchVisual.previousTrackId || ""
     : "";
@@ -1440,6 +1511,7 @@ export default function ElvernPlayerOverlay({
         audioTracks.map((track) => (
           <TrackMenuItem
             checked={isAudioTrackChecked(track)}
+            disabled={audioSwitchInProgress}
             error={audioTrackErrorTrackId === track.id}
             key={track.id}
             kind="audio"

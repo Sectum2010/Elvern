@@ -5733,6 +5733,10 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   background: rgba(220, 38, 38, 0.3);
 }
 
+.elvern-overlay__track-menu-item--locked {
+  opacity: 0.58;
+}
+
 .elvern-overlay__menu-item--disabled,
 .elvern-overlay__menu-item--disabled:hover,
 .elvern-overlay__menu-item--disabled:focus-visible {

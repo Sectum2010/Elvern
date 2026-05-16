@@ -2157,7 +2157,6 @@ export function useOptimizedPlaybackSession({
       actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
       targetPositionSeconds: resolveMobileAuthorityPosition(activeSession),
     });
-    setSeekNotice(`Preparing audio track: ${track.label || `Audio ${streamIndex}`}`);
     const payload = await selectOptimizedPlaybackAudioTrack({
       browserPlaybackSessionRoot,
       sessionId: activeSession.session_id,

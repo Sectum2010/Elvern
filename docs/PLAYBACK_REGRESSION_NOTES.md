@@ -452,3 +452,37 @@ Keep route tests that verify mobile audio switching accepts a global stream inde
 - Do not leave iPhone/PWA routed to a missing mobile audio endpoint.
 - Do not stop old playback while the selected audio replacement prepares.
 - Do not change Lite startup thresholds or normal native-HLS window-slide behavior while fixing audio switching.
+
+## Audio Switch In-Progress Lock And Real Failure Surfacing
+
+### Status
+Fixed.
+
+### Affected Platforms
+iPhone/PWA Browser Playback using Route2 backend audio tracks.
+
+### Symptoms
+On item `1424`, `The.Super.Mario.Galaxy.Movie.2026.1080p.Webrip.Multi.Line.Audio.x264-SyncUP`, the audio menu could show a generic "Could not switch audio track" after tapping `LMHD`, and the target row could lose its visible pending spinner. The UI also allowed more audio rows to be tapped while a switch was already requesting, preparing, or attaching.
+
+### Real Root Cause
+The item-specific mobile API check showed the backend was not failing for `LMHD`: stream `3` returned `audio_switch_state = preparing`, replacement map `0:3?`, and promoted to `active_audio_stream_index = 3`. Streams `2` and `4` behaved the same way. The live failure category was frontend state handling: the audio menu did not lock competing rows during an in-flight switch, and frontend error resolution could fall back to the generic message instead of preserving the most specific backend/API detail.
+
+### Correct Fix
+Treat audio switch state as exclusive while requesting, preparing, or attaching. The pending target row keeps the spinner and pending highlight, the old active row remains selected, and all other audio rows are disabled until the switch becomes active or failed. When a failure is real, resolve the shortest useful message from `audio_switch_error`, replacement last error, HTTP detail, or thrown API detail before using the generic fallback. Keep audio switch feedback inside the audio menu instead of showing page-level preparation text.
+
+### Regression Guards
+Keep tests that verify:
+
+- Clicking an unselected backend audio row immediately shows row-level pending.
+- Backend `preparing` state locks other audio rows and shows no generic error.
+- Backend `active` with client attach still behind keeps the target pending.
+- Failed rows and the audio button remain red while the old active row stays selected.
+- Thrown API/backend detail is shown instead of the generic fallback.
+- The Phase A rectangular `.elvern-overlay__menu.elvern-overlay__track-menu` remains in place.
+
+### Do Not Regress
+- Do not allow repeated audio switches while one is requesting, preparing, or attaching.
+- Do not clear the pending spinner before matched backend active or failed state.
+- Do not show generic audio errors when backend/API detail exists.
+- Do not move audio-switch feedback into the page-level preparing note.
+- Do not change Phase A menu structure, subtitles/burn-in, cloud probing, recovery, native-HLS normal window slides, Lite thresholds, or adaptive policy while fixing audio switching.
