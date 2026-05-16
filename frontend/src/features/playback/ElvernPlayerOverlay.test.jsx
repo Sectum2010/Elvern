@@ -1063,6 +1063,10 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       resolveSwitch();
       await Promise.resolve();
     });
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
+
     rerenderOverlay({
       sessionPayload: {
         active_audio_stream_index: 1,

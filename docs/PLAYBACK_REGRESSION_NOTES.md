@@ -51,6 +51,16 @@ Only `raw_probe_summary_json` tracks from `probe_status = probed` are switchable
 - Never claim cloud multi-track solved without provider-aware probe tests.
 - Keep Phase A phone menu UI/scroll behavior intact.
 
+### Phase B.1 Addendum: Audio Switch Pending State
+
+Bug: after real audio tracks were discovered correctly, clicking an unselected backend audio row could look like nothing happened.
+
+Root cause: the `/audio` response was not explicitly synced into the frontend mobile session state at the selection call site, and local row-level pending UI could be cleared before the backend active/pending snapshot was visible.
+
+Correct fix: sync the accepted `/audio` payload immediately, keep the old active row selected while the new row is pending, and move the selected highlight only when backend `active_audio_stream_index` changes. Current audio/video keeps playing while the replacement audio epoch prepares.
+
+Do not regress: do not add fake local selected state for backend audio, do not clear pending before backend active/pending state is reflected, and do not stop current playback while audio replacement prepares.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status

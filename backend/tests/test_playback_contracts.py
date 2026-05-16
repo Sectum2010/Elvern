@@ -1051,6 +1051,7 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
         _make_local_item(settings, item_id=5022, relative_name="route2/audio/select.mkv"),
     )
     session = _register_route2_test_session(manager, settings, item, session_id="audio-select-session")
+    original_active_epoch_id = session.browser_playback.active_epoch_id
 
     response = manager.select_audio_track(
         session.session_id,
@@ -1064,8 +1065,13 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     assert response["pending_audio_stream_index"] == 5
     assert response["active_audio_stream_index"] is None
     assert response["audio_switch_state"] == "preparing"
+    assert session.browser_playback.active_epoch_id == original_active_epoch_id
     replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
     assert replacement.audio_stream_index == 5
+    assert replacement.replacement_reason == "audio_track_switch"
+    if original_active_epoch_id is not None:
+        assert replacement.epoch_id != original_active_epoch_id
+        assert session.browser_playback.epochs[original_active_epoch_id].state != "draining"
 
     manager._promote_route2_replacement_epoch_locked(session, replacement)
     promoted = manager._route2_snapshot_locked(session)

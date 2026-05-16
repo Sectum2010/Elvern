@@ -775,7 +775,6 @@ export default function ElvernPlayerOverlay({
     refreshControlsTimer();
     try {
       await selectAudioTrack(trackId);
-      setPendingAudioTrackId("");
       refreshControlsTimer();
     } catch (trackError) {
       setPendingAudioTrackId("");
@@ -783,6 +782,16 @@ export default function ElvernPlayerOverlay({
       refreshControlsTimer();
     }
   }, [audioTracks, closeAllMenus, refreshControlsTimer, selectAudioTrack]);
+
+  useEffect(() => {
+    if (!pendingAudioTrackId) {
+      return;
+    }
+    const pendingTrack = audioTracks.find((track) => track.id === pendingAudioTrackId);
+    if (!pendingTrack || pendingTrack.selected || pendingTrack.enabled) {
+      setPendingAudioTrackId("");
+    }
+  }, [audioTracks, pendingAudioTrackId]);
 
   const togglePip = useCallback(async () => {
     const video = videoRef?.current;

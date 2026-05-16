@@ -1930,6 +1930,7 @@ export function useOptimizedPlaybackSession({
     if (!acceptedPayload.accepted) {
       return;
     }
+    syncMobilePlaybackState(payload);
     scheduleMobilePlaybackPoll(
       payload.session_id,
       Math.max(1000, Math.round((payload.status_poll_seconds || 1) * 1000)),
