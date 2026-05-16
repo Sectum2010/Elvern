@@ -81,6 +81,16 @@ Correct fix: audio pending is split into request-local state and backend snapsho
 
 Do not regress: an old audio failure must never erase a newly clicked backend audio row spinner.
 
+### Phase B.2.1 Addendum: Audio Pending Spinner / Highlight Visibility
+
+Bug: after Phase B.2, clicking an unselected backend audio row could lose the visible pending spinner/color, making the click look like a no-op even though audio discovery was correct.
+
+Root cause: frontend pending state could still be cleared by stale backend session payload or by a missing/unaccepted `/audio` response, and the pending row styling was too weak to be a reliable visible state.
+
+Correct fix: use request-local visual pending state keyed to the clicked track/stream, let only matching response/backend pending/active/failed state clear it, and give `.elvern-overlay__track-menu-item--pending` a visible tinted background plus spinner styling.
+
+Do not regress: a clicked backend audio row must immediately show spinner plus pending highlight until the matching backend preparing/active/failed response resolves it.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status

@@ -810,7 +810,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   test("native audio tracks can be selected", async () => {
     const english = { label: "English", language: "en", enabled: true };
     const french = { label: "French", language: "fr", enabled: false };
-    const { getByRole, getByText } = renderOverlay({
+    const { getByRole, queryByText } = renderOverlay({
       cinemaModeActive: true,
       setupVideo(video) {
         Object.defineProperty(video, "audioTracks", {
@@ -1056,6 +1056,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
     expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({ index: 2 }));
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
 
@@ -1064,6 +1065,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       await Promise.resolve();
     });
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
 
@@ -1076,6 +1078,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       },
     });
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
 
     rerenderOverlay({
@@ -1087,6 +1090,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       },
     });
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveClass("elvern-overlay__track-menu-item--pending");
   });
 
   test("stale backend audio failure does not clear a new click spinner", () => {
@@ -1118,9 +1123,48 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
     expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({ index: 2 }));
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
     expect(queryByText("Could not switch audio track.")).toBeNull();
+  });
+
+  test("missing backend audio response clears pending with visible error", async () => {
+    const onBackendAudioTrackSelect = vi.fn(() => Promise.resolve(undefined));
+    const { getByRole, getByText } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendAudioTrackSelect,
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 1,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+    });
+
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveClass("elvern-overlay__track-menu-item--pending");
+    expect(getByText("Could not switch audio track.")).toBeTruthy();
   });
 
   test("backend audio failure clears pending and keeps old active row selected", async () => {
@@ -1167,10 +1211,11 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
     expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByText("Could not switch audio track.")).toBeTruthy();
   });
 
-  test("backend audio pending clears when backend clears pending without activating clicked row", async () => {
+  test("backend audio response without matching active or pending state shows error", async () => {
     let resolveSwitch;
     const onBackendAudioTrackSelect = vi.fn(() => new Promise((resolve) => {
       resolveSwitch = () => resolve({
@@ -1180,7 +1225,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
         audio_switch_state: "active",
       });
     }));
-    const { getByRole, queryByText } = renderOverlay({
+    const { getByRole, getByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
         { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
@@ -1212,7 +1257,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
-    expect(queryByText("Could not switch audio track.")).toBeNull();
+    expect(getByText("Could not switch audio track.")).toBeTruthy();
   });
 
   test("text backend subtitles are clickable while image subtitles are marked unsupported", async () => {
