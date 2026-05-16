@@ -942,6 +942,36 @@ def _register_route2_test_session(
     return session
 
 
+def _install_route2_active_epoch(
+    session: MobilePlaybackSession,
+    *,
+    epoch_id: str = "route2-active-epoch",
+    audio_stream_index: int | None = None,
+) -> PlaybackEpoch:
+    epoch = _make_route2_epoch()
+    epoch.epoch_id = epoch_id
+    epoch.session_id = session.session_id
+    epoch.state = "active"
+    epoch_root = Path("/tmp") / f"elvern-route2-contract-{session.session_id}-{epoch_id}"
+    epoch.epoch_dir = epoch_root
+    epoch.staging_dir = epoch_root / "staging"
+    epoch.published_dir = epoch_root / "published"
+    epoch.staging_manifest_path = epoch.staging_dir / "ffmpeg.m3u8"
+    epoch.metadata_path = epoch_root / "epoch.json"
+    epoch.frontier_path = epoch.published_dir / "frontier.json"
+    epoch.published_init_path = epoch.published_dir / "init.mp4"
+    epoch.staging_dir.mkdir(parents=True, exist_ok=True)
+    epoch.published_dir.mkdir(parents=True, exist_ok=True)
+    session.browser_playback.epochs[epoch.epoch_id] = epoch
+    session.browser_playback.active_epoch_id = epoch.epoch_id
+    session.browser_playback.active_audio_stream_index = audio_stream_index
+    session.browser_playback.selected_audio_stream_index = audio_stream_index
+    session.browser_playback.pending_audio_stream_index = None
+    session.browser_playback.audio_switch_state = "active"
+    session.browser_playback.audio_switch_error = None
+    return epoch
+
+
 def test_browser_playback_text_subtitle_prepare_converts_to_webvtt(
     initialized_settings,
     monkeypatch,
@@ -1080,6 +1110,81 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     assert promoted["active_audio_stream_index"] == 5
     assert promoted["pending_audio_stream_index"] is None
     assert promoted["audio_switch_state"] == "active"
+    assert promoted["audio_switch_error"] is None
+
+
+def test_route2_audio_replacement_failure_clears_pending_and_keeps_active_epoch(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5023, relative_name="route2/audio/failure.mkv"),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-failure-session")
+    active_epoch = _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+
+    response = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+
+    assert response["active_audio_stream_index"] == 1
+    assert response["pending_audio_stream_index"] == 5
+    assert response["audio_switch_state"] == "preparing"
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    replacement.state = "failed"
+    replacement.last_error = "audio map failed"
+
+    manager._refresh_route2_session_authority_locked(session)
+    snapshot = manager._route2_snapshot_locked(session)
+
+    assert snapshot["active_audio_stream_index"] == 1
+    assert snapshot["selected_audio_stream_index"] == 1
+    assert snapshot["pending_audio_stream_index"] is None
+    assert snapshot["audio_switch_state"] == "failed"
+    assert snapshot["audio_switch_error"] == "audio map failed"
+    assert session.browser_playback.active_epoch_id == active_epoch.epoch_id
+    assert session.browser_playback.epochs[active_epoch.epoch_id].state not in {"draining", "failed", "ended"}
+    assert session.browser_playback.replacement_epoch_id is None
+    assert replacement.epoch_id not in session.browser_playback.epochs
+
+
+def test_route2_audio_replacement_superseded_does_not_leave_stale_pending(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5024, relative_name="route2/audio/superseded.mkv"),
+    )
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-superseded-session")
+    active_epoch = _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+
+    manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+    stale_replacement_id = session.browser_playback.replacement_epoch_id
+
+    recovery_replacement = manager._create_route2_replacement_epoch_locked(
+        session,
+        target_position_seconds=48.0,
+        reason="active_epoch_failure",
+    )
+
+    snapshot = manager._route2_snapshot_locked(session)
+    assert recovery_replacement is not None
+    assert recovery_replacement.replacement_reason == "active_epoch_failure"
+    assert snapshot["active_audio_stream_index"] == 1
+    assert snapshot["selected_audio_stream_index"] == 1
+    assert snapshot["pending_audio_stream_index"] is None
+    assert snapshot["audio_switch_state"] == "failed"
+    assert "superseded" in str(snapshot["audio_switch_error"]).lower()
+    assert session.browser_playback.active_epoch_id == active_epoch.epoch_id
+    assert stale_replacement_id not in session.browser_playback.epochs
 
 
 def test_background_suspended_zero_heartbeat_does_not_reset_route2_playhead(initialized_settings) -> None:

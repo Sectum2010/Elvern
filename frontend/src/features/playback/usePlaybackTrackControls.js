@@ -460,7 +460,7 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
   const selectedIndex = Number.isInteger(sessionPayload?.selected_audio_stream_index)
     ? sessionPayload.selected_audio_stream_index
     : null;
-  const pendingSwitchInProgress = pendingIndex != null && switchState !== "active";
+  const pendingSwitchInProgress = pendingIndex != null && switchState === "preparing";
   const activeIndex = Number.isInteger(sessionPayload?.active_audio_stream_index)
     ? sessionPayload.active_audio_stream_index
     : !pendingSwitchInProgress && selectedIndex != null
@@ -493,7 +493,7 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
       language: track.language || "",
       enabled: selected,
       selected,
-      pending: pendingIndex === streamIndex && switchState !== "active",
+      pending: pendingIndex === streamIndex && switchState === "preparing",
       source: "backend",
       codec: track.codec || "",
       codecLongName: track.codec_long_name || "",

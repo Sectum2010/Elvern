@@ -816,6 +816,7 @@ class MobilePlaybackSessionResponse(BaseModel):
     active_audio_stream_index: int | None = Field(default=None, ge=0)
     pending_audio_stream_index: int | None = Field(default=None, ge=0)
     audio_switch_state: str | None = None
+    audio_switch_error: str | None = None
 
 
 class MobilePlaybackStopResponse(BaseModel):

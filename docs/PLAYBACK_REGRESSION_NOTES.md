@@ -61,6 +61,16 @@ Correct fix: sync the accepted `/audio` payload immediately, keep the old active
 
 Do not regress: do not add fake local selected state for backend audio, do not clear pending before backend active/pending state is reflected, and do not stop current playback while audio replacement prepares.
 
+### Phase B.2 Addendum: Audio Switch Completion / Failure Convergence
+
+Bug: audio track switching could remain stuck in a pending spinner forever after the replacement epoch failed, ended before attach-ready, or was superseded by another recovery.
+
+Root cause: audio replacement failure/discard paths did not reliably clear `pending_audio_stream_index` or mark the switch failed, and the frontend could keep a local pending spinner after backend state had stopped supporting that pending row.
+
+Correct fix: audio switching is a finite state machine: `preparing` must resolve to either `active` or `failed`. Failed or superseded audio replacements clear pending, keep the old active stream selected, and expose a short switch error while current playback continues.
+
+Do not regress: never leave `pending_audio_stream_index` pointing to a failed/discarded replacement, never keep a local pending spinner after backend failed or cleared pending, and never stop current playback while the audio replacement prepares.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status
