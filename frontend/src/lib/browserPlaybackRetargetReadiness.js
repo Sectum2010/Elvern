@@ -1,6 +1,5 @@
 import {
-  getContiguousBufferedEndFromPosition,
-  readBufferedAbsoluteRanges,
+  getContiguousClientBufferedAheadSeconds,
 } from "./playbackTimelineRanges.js";
 import { toBrowserPlaybackMediaElementSeconds } from "./browserPlaybackTimeline.js";
 
@@ -11,9 +10,7 @@ export function readClientBufferedAheadFromAbsoluteTarget(videoElement, sessionP
   if (!videoElement || !sessionPayload || !Number.isFinite(target) || target < 0) {
     return 0;
   }
-  const bufferedRanges = readBufferedAbsoluteRanges(videoElement, sessionPayload);
-  const contiguousEnd = getContiguousBufferedEndFromPosition(target, bufferedRanges);
-  return contiguousEnd > target ? contiguousEnd - target : 0;
+  return getContiguousClientBufferedAheadSeconds(videoElement, target, sessionPayload);
 }
 
 export function shouldReleaseRetargetFrozenFrame({

@@ -2325,6 +2325,7 @@ export function useOptimizedPlaybackSession({
     mobileWasPlayingBeforeSuspendRef,
     mobileStallTimerRef,
     mobileStallStartedAtRef,
+    audioSwitchAttachRef,
     committedPlayheadSecondsRef,
     actualMediaElementTimeRef,
     mobileSession,

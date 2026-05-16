@@ -8,6 +8,7 @@ import {
   classifySeekTarget,
   clampRangesToDuration,
   computePlayedNotCachedRanges,
+  getContiguousClientBufferedAheadSeconds,
   getContiguousBufferedEndFromPosition,
   isAbsolutePositionInRanges,
   mapAbsoluteToMediaElementSeconds,
@@ -161,6 +162,21 @@ describe("rangesToAbsolute", () => {
     );
     assert.deepEqual(result, [[100, 130], [140, 160]]);
   });
+
+  test("shifts native HLS window ranges by active_window_start_seconds", () => {
+    const result = rangesToAbsolute(
+      {
+        engine_mode: "route2",
+        selected_hls_engine: "native_hls",
+        ready_start_seconds: 0,
+        ready_end_seconds: 900,
+        active_window_start_seconds: 180,
+        active_window_end_seconds: 240,
+      },
+      [[0, 30]],
+    );
+    assert.deepEqual(result, [[180, 210]]);
+  });
 });
 
 describe("readBufferedAbsoluteRanges + readPlayedAbsoluteRanges", () => {
@@ -193,6 +209,45 @@ describe("getContiguousBufferedEndFromPosition", () => {
 
   test("does not use disjoint future ranges as prepared-through", () => {
     assert.equal(getContiguousBufferedEndFromPosition(12, [[60, 90]]), 0);
+  });
+
+  test("treats tiny leading media offsets as containing the target", () => {
+    assert.equal(getContiguousBufferedEndFromPosition(0, [[0.083, 46.007]]), 46.007);
+  });
+});
+
+describe("getContiguousClientBufferedAheadSeconds", () => {
+  test("computes contiguous client runway from an absolute Route2 target", () => {
+    const video = { buffered: makeTimeRanges([[20, 35]]) };
+    const session = { engine_mode: "route2", ready_start_seconds: 100 };
+
+    assert.equal(getContiguousClientBufferedAheadSeconds(video, 120, session), 15);
+  });
+
+  test("returns 0 when the target is outside the client buffered range", () => {
+    const video = { buffered: makeTimeRanges([[0, 4], [20, 40]]) };
+    const session = { engine_mode: "route2", ready_start_seconds: 100 };
+
+    assert.equal(getContiguousClientBufferedAheadSeconds(video, 112, session), 0);
+  });
+
+  test("counts client runway when the first media range starts slightly after zero", () => {
+    const video = { buffered: makeTimeRanges([[0.083, 46.007]]) };
+    const session = { engine_mode: "route2", ready_start_seconds: 0 };
+
+    assert.equal(getContiguousClientBufferedAheadSeconds(video, 0, session), 46.007);
+  });
+
+  test("can map a media element target into absolute movie time", () => {
+    const video = { buffered: makeTimeRanges([[5, 25]]) };
+    const session = { engine_mode: "route2", ready_start_seconds: 100 };
+
+    assert.equal(getContiguousClientBufferedAheadSeconds(
+      video,
+      5,
+      session,
+      { targetIsMediaElementTime: true },
+    ), 20);
   });
 });
 

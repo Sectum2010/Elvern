@@ -37,4 +37,18 @@ describe("DetailPage hook-order guards", () => {
     expect(handlerSource.indexOf("target?.closest?.(\".elvern-overlay__track-menu\")"))
       .toBeLessThan(handlerSource.indexOf("event.preventDefault()"));
   });
+
+  test("normal player progress wording keeps Prepared through label", () => {
+    const source = readDetailPage();
+    const noteStart = source.indexOf("const optimizedProgressNote =");
+    expect(noteStart).toBeGreaterThan(0);
+    const noteEnd = source.indexOf("function normalizeDesktopSeekValue", noteStart);
+    expect(noteEnd).toBeGreaterThan(noteStart);
+    const noteSource = source.slice(noteStart, noteEnd);
+
+    expect(noteSource).toContain("Prepared through");
+    expect(noteSource).not.toContain("Device buffered");
+    expect(noteSource).not.toContain("Server ready");
+    expect(noteSource).not.toContain("Client buffer");
+  });
 });

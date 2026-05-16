@@ -1,4 +1,5 @@
 import {
+  getBrowserPlaybackAttachedManifestStartSeconds,
   getBrowserPlaybackTimelineStartSeconds,
   getBrowserPlaybackTimelineEndSeconds,
   isBrowserPlaybackAbsolutePositionReady,
@@ -8,6 +9,7 @@ import {
 
 const RANGE_MERGE_EPSILON_SECONDS = 0.05;
 const PLAYED_ACCUMULATE_MAX_GAP_SECONDS = 1.5;
+const BUFFER_POSITION_TOLERANCE_SECONDS = 0.25;
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -174,7 +176,7 @@ export function appendPlayedSample(existingRanges, previousAbsoluteSeconds, curr
 }
 
 export function rangesToAbsolute(sessionPayload, mediaElementRanges) {
-  const offset = getBrowserPlaybackTimelineStartSeconds(sessionPayload);
+  const offset = getBrowserPlaybackAttachedManifestStartSeconds(sessionPayload);
   if (!offset) {
     return mergeRanges(mediaElementRanges);
   }
@@ -199,11 +201,31 @@ export function getContiguousBufferedEndFromPosition(absoluteSeconds, bufferedRa
     return 0;
   }
   for (const [start, end] of mergeRanges(bufferedRanges || [])) {
-    if (position >= start && position <= end) {
+    if (position + BUFFER_POSITION_TOLERANCE_SECONDS >= start && position <= end) {
       return end;
     }
   }
   return 0;
+}
+
+export function getContiguousClientBufferedAheadSeconds(
+  videoElement,
+  targetMediaTimeOrAbsoluteTime,
+  sessionPayload = null,
+  { targetIsMediaElementTime = false } = {},
+) {
+  const target = isFiniteNumber(targetMediaTimeOrAbsoluteTime)
+    ? targetMediaTimeOrAbsoluteTime
+    : Number(targetMediaTimeOrAbsoluteTime);
+  if (!videoElement || !Number.isFinite(target) || target < 0) {
+    return 0;
+  }
+  const absoluteTarget = targetIsMediaElementTime
+    ? mapMediaElementSecondsToAbsolute(sessionPayload, target)
+    : target;
+  const bufferedRanges = readBufferedAbsoluteRanges(videoElement, sessionPayload);
+  const contiguousEnd = getContiguousBufferedEndFromPosition(absoluteTarget, bufferedRanges);
+  return contiguousEnd > absoluteTarget ? contiguousEnd - absoluteTarget : 0;
 }
 
 export function readPlayedAbsoluteRanges(videoElement, sessionPayload) {

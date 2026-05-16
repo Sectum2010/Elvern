@@ -3,6 +3,7 @@ export const LITE_UNCERTAIN_FORWARD_BUFFER_SECONDS = 45;
 export const LITE_UNDERSUPPLY_FORWARD_BUFFER_SECONDS = 180;
 export const FULL_HEALTHY_FORWARD_BUFFER_SECONDS = 120;
 export const FULL_BAD_CONDITION_FORWARD_BUFFER_SECONDS = 900;
+export const AUDIO_SWITCH_FORWARD_BUFFER_SECONDS = 15;
 export const CLIENT_BACK_BUFFER_SECONDS = 120;
 export const PHONE_MAX_BUFFER_SIZE_BYTES = 250 * 1024 * 1024;
 export const TABLET_MAX_BUFFER_SIZE_BYTES = 300 * 1024 * 1024;
@@ -80,6 +81,49 @@ export function deriveBufferTargetsFromSession(session = {}, deviceClass = "unkn
     memoryCeilingSource: `${normalizedDeviceClass}_fixed_byte_ceiling`,
     limitedByMemory: Boolean(session?.client_buffer_limited_by_memory),
     policySource: session?.client_buffer_policy_source || `frontend_${bufferTier}`,
+  };
+}
+
+export function resolveClientPlaybackReleaseBufferSeconds(
+  session = {},
+  deviceClass = "unknown",
+  { audioSwitch = false } = {},
+) {
+  if (audioSwitch) {
+    return AUDIO_SWITCH_FORWARD_BUFFER_SECONDS;
+  }
+  return deriveBufferTargetsFromSession(session, deviceClass).forwardBufferSeconds;
+}
+
+export function evaluateClientPlaybackReleaseGate({
+  session = {},
+  clientBufferedAheadSeconds = 0,
+  backendPreparedAheadSeconds = 0,
+  remainingPlayableSeconds = null,
+  deviceClass = "unknown",
+  audioSwitch = false,
+} = {}) {
+  const configuredClientBufferSeconds = resolveClientPlaybackReleaseBufferSeconds(
+    session,
+    deviceClass,
+    { audioSwitch },
+  );
+  const remainingSeconds = finitePositiveNumber(remainingPlayableSeconds);
+  const requiredClientBufferSeconds = remainingSeconds != null
+    ? Math.min(configuredClientBufferSeconds, remainingSeconds)
+    : configuredClientBufferSeconds;
+  const clientAhead = Math.max(0, Number(clientBufferedAheadSeconds) || 0);
+  const backendAhead = Math.max(0, Number(backendPreparedAheadSeconds) || 0);
+  const clientReady = clientAhead + 0.001 >= requiredClientBufferSeconds;
+  const serverReady = backendAhead + 0.001 >= requiredClientBufferSeconds;
+  return {
+    ready: Boolean(clientReady && serverReady),
+    clientReady,
+    serverReady,
+    requiredClientBufferSeconds,
+    configuredClientBufferSeconds,
+    clientBufferedAheadSeconds: clientAhead,
+    backendPreparedAheadSeconds: backendAhead,
   };
 }
 

@@ -58,6 +58,17 @@ export function getBrowserPlaybackTimelineStartSeconds(payload) {
   );
 }
 
+export function getBrowserPlaybackAttachedManifestStartSeconds(payload) {
+  if (!isHlsSessionPayload(payload)) {
+    return 0;
+  }
+  const activeWindow = getBrowserPlaybackActiveWindowSeconds(payload);
+  if (isNativeHlsWindowPayload(payload) && activeWindow) {
+    return activeWindow.startSeconds;
+  }
+  return getBrowserPlaybackTimelineStartSeconds(payload);
+}
+
 export function getBrowserPlaybackTimelineEndSeconds(payload) {
   if (!isHlsSessionPayload(payload)) {
     return 0;

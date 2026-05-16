@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   getBrowserPlaybackActiveWindowSeconds,
   getBrowserPlaybackAttachedManifestEndSeconds,
+  getBrowserPlaybackAttachedManifestStartSeconds,
   getBrowserPlaybackFullDurationSeconds,
   getBrowserPlaybackTimelineEndSeconds,
   getBrowserPlaybackTimelineStartSeconds,
@@ -79,6 +80,17 @@ test("native HLS attached manifest end uses active window end instead of server 
     ready_end_seconds: 300,
   });
   assert.equal(getBrowserPlaybackAttachedManifestEndSeconds(payload), 20);
+});
+
+test("native HLS attached manifest start uses active window start for client buffer mapping", () => {
+  const payload = buildRoute2Payload({
+    selected_hls_engine: "native_hls",
+    active_window_start_seconds: 180,
+    active_window_end_seconds: 240,
+    ready_start_seconds: 0,
+    ready_end_seconds: 900,
+  });
+  assert.equal(getBrowserPlaybackAttachedManifestStartSeconds(payload), 180);
 });
 
 test("native HLS window refresh does not force frontend reattach", () => {

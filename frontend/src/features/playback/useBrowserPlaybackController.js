@@ -15,6 +15,7 @@ import {
   classifyPlaybackStall,
   compactHlsBufferConfig,
   deriveBufferTargetsFromSession,
+  evaluateClientPlaybackReleaseGate,
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
   retuneHlsInstance,
@@ -33,6 +34,7 @@ import {
   toBrowserPlaybackAbsoluteSeconds,
   toBrowserPlaybackMediaElementSeconds,
 } from "../../lib/browserPlaybackTimeline";
+import { getContiguousClientBufferedAheadSeconds } from "../../lib/playbackTimelineRanges";
 import {
   RETARGET_CLIENT_BUFFER_RELEASE_SECONDS,
   shouldReleaseRetargetFrozenFrame,
@@ -220,6 +222,7 @@ export function useBrowserPlaybackController({
     mobileWasPlayingBeforeSuspendRef,
     mobileStallTimerRef,
     mobileStallStartedAtRef,
+    audioSwitchAttachRef,
     committedPlayheadSecondsRef,
     actualMediaElementTimeRef,
     mobileSession,
@@ -359,6 +362,89 @@ export function useBrowserPlaybackController({
     return session
       ? toBrowserPlaybackMediaElementSeconds(session, absoluteSeconds)
       : Math.max(absoluteSeconds || 0, 0);
+  }
+
+  function resolveMobileReleaseTargetPosition(session, video = videoRef.current) {
+    if (mobilePendingTargetRef.current != null) {
+      return mobilePendingTargetRef.current;
+    }
+    if (session?.pending_target_seconds != null) {
+      return Math.max(0, Number(session.pending_target_seconds) || 0);
+    }
+    if (session?.target_position_seconds != null) {
+      return Math.max(0, Number(session.target_position_seconds) || 0);
+    }
+    const seekOrRetargetActive =
+      mobileSeekPendingRef.current
+      || mobileRetargetTransitionRef.current
+      || pendingSeekPhaseRef.current !== "idle";
+    if (seekOrRetargetActive) {
+      if (requestedTargetSecondsRef.current != null) {
+        return requestedTargetSecondsRef.current;
+      }
+    }
+    if (requestedTargetSecondsRef.current != null) {
+      return requestedTargetSecondsRef.current;
+    }
+    return resolveCurrentVideoAbsolutePosition(session, video);
+  }
+
+  function isAudioSwitchAttachWaitingForClientRelease() {
+    const pending = audioSwitchAttachRef.current;
+    return Boolean(
+      pending
+      && pending.phase !== "acked"
+      && pending.phase !== "failed"
+    );
+  }
+
+  function evaluateMobileClientReleaseGate(session, video = videoRef.current) {
+    if (!session || !video) {
+      return {
+        ready: false,
+        clientReady: false,
+        serverReady: false,
+        requiredClientBufferSeconds: 0,
+        clientBufferedAheadSeconds: 0,
+        backendPreparedAheadSeconds: 0,
+      };
+    }
+    const targetAbsoluteSeconds = resolveMobileReleaseTargetPosition(session, video);
+    const clientBufferedAheadSeconds = getContiguousClientBufferedAheadSeconds(
+      video,
+      targetAbsoluteSeconds,
+      session,
+    );
+    const manifestEndSeconds = isHlsSessionPayload(session)
+      ? getBrowserPlaybackAttachedManifestEndSeconds(session)
+      : Number(session.ready_end_seconds || 0);
+    const backendPreparedAheadSeconds = Math.max(
+      0,
+      Number(manifestEndSeconds || 0) - targetAbsoluteSeconds,
+    );
+    const durationSeconds = [
+      Number(session.duration_seconds || 0) || 0,
+      Number(session.media_duration_seconds || 0) || 0,
+      Number(session.full_duration_seconds || 0) || 0,
+      Number(fullDuration || 0) || 0,
+      Number.isFinite(video.duration) ? Number(video.duration) : 0,
+    ].find((candidate) => candidate > 0) || 0;
+    const remainingPlayableSeconds = durationSeconds > 0
+      ? Math.max(0, durationSeconds - targetAbsoluteSeconds)
+      : null;
+    const gate = evaluateClientPlaybackReleaseGate({
+      session,
+      clientBufferedAheadSeconds,
+      backendPreparedAheadSeconds,
+      remainingPlayableSeconds,
+      deviceClass: browserPlaybackDeviceClass,
+      audioSwitch: isAudioSwitchAttachWaitingForClientRelease(),
+    });
+    return {
+      ...gate,
+      targetAbsoluteSeconds,
+      remainingPlayableSeconds,
+    };
   }
 
   function prepareControllerForLoad(nextItemId = itemId) {
@@ -632,7 +718,7 @@ export function useBrowserPlaybackController({
     }
     try {
       await startMobileOptimizedPlayback({
-        autoplay: playbackModeIntentRef.current !== "full",
+        autoplay: true,
         playbackMode: playbackModeIntentRef.current,
       });
     } catch (requestError) {
@@ -922,6 +1008,12 @@ export function useBrowserPlaybackController({
       if (!browserPlayRequestedRef.current) {
         return;
       }
+      if (
+        mobileSessionRef.current
+        && !evaluateMobileClientReleaseGate(mobileSessionRef.current, video).ready
+      ) {
+        return;
+      }
       browserPlayRequestedRef.current = false;
       video.play().catch((requestError) => {
         const message = requestError?.message || "";
@@ -1050,7 +1142,9 @@ export function useBrowserPlaybackController({
       bufferPolicySource: initialHlsConfig.policySource,
       ...hlsSupportDiagnostics,
     });
-    hls.on(Hls.Events.MANIFEST_PARSED, maybeAutoplay);
+    if (!useManualMobileAutoplay) {
+      hls.on(Hls.Events.MANIFEST_PARSED, maybeAutoplay);
+    }
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (data.fatal) {
         if (isHlsSessionPayload(mobileSessionRef.current)) {
@@ -1070,6 +1164,9 @@ export function useBrowserPlaybackController({
 
     return () => {
       video.removeEventListener("error", handlePlaybackFailure);
+      if (!useManualMobileAutoplay) {
+        hls.off(Hls.Events.MANIFEST_PARSED, maybeAutoplay);
+      }
       hls.destroy();
       if (hlsRef.current === hls) {
         hlsRef.current = null;
@@ -1668,6 +1765,9 @@ export function useBrowserPlaybackController({
         ) > 0.5;
       }
       applyResumePosition();
+      maybeProbeMobileFirstFrame();
+      maybeFinalizeMobilePlayerReadiness();
+      finalizeNonIosClientReadiness();
     }
 
     function maybeProbeMobileFirstFrame() {
@@ -1713,12 +1813,24 @@ export function useBrowserPlaybackController({
       }, 120);
     }
 
+    function refreshMobileReadinessFlagsFromReadyState() {
+      if (video.readyState >= 2) {
+        mobileLoadedDataSeenRef.current = true;
+      }
+      if (video.readyState >= 3) {
+        mobileCanPlaySeenRef.current = true;
+      }
+    }
+
     function maybeFinalizeMobilePlayerReadiness() {
       if (!iosMobile || !mobileSessionRef.current || !streamSource) {
         return;
       }
       const currentSession = mobileSessionRef.current;
-      const shouldAutoplay = mobileAutoplayPendingRef.current || mobileResumeAfterReadyRef.current;
+      const shouldAutoplay =
+        mobileAutoplayPendingRef.current
+        || mobileResumeAfterReadyRef.current
+        || browserPlayRequestedRef.current;
       const isRetargetTransition = mobileRetargetTransitionRef.current;
       if (!mobileCanPlaySeenRef.current || !mobileLoadedDataSeenRef.current) {
         return;
@@ -1735,14 +1847,14 @@ export function useBrowserPlaybackController({
       if (video.readyState < 3) {
         return;
       }
-      const backendRunway = Math.max(
-        0,
-        (currentSession.ready_end_seconds || 0) - (currentSession.target_position_seconds || 0),
-      );
-      if (backendRunway < IOS_STABLE_READY_BACKEND_RUNWAY_SECONDS) {
-        return;
-      }
       if (isRetargetTransition) {
+        const backendRunway = Math.max(
+          0,
+          (currentSession.ready_end_seconds || 0) - (currentSession.target_position_seconds || 0),
+        );
+        if (backendRunway < IOS_STABLE_READY_BACKEND_RUNWAY_SECONDS) {
+          return;
+        }
         const targetAbsoluteSeconds =
           mobilePendingTargetRef.current != null
             ? mobilePendingTargetRef.current
@@ -1752,6 +1864,11 @@ export function useBrowserPlaybackController({
                 ? currentSession.pending_target_seconds
                 : currentSession.target_position_seconds || 0;
         if (shouldHoldRetargetFrozenFrameForClientBuffer(targetAbsoluteSeconds)) {
+          return;
+        }
+      } else {
+        const clientReleaseGate = evaluateMobileClientReleaseGate(currentSession, video);
+        if (!clientReleaseGate.ready) {
           return;
         }
       }
@@ -1787,6 +1904,19 @@ export function useBrowserPlaybackController({
               mobileWarmupProbeActiveRef.current = false;
               const normalized = (requestError?.message || "").toLowerCase();
               if (
+                normalized.includes("abort")
+                || normalized.includes("interrupted")
+                || normalized.includes("fetching process")
+              ) {
+                window.setTimeout(() => {
+                  if (readinessGeneration !== mobileReadinessGenerationRef.current) {
+                    return;
+                  }
+                  maybeFinalizeMobilePlayerReadiness();
+                }, 500);
+                return;
+              }
+              if (
                 normalized.includes("gesture")
                 || normalized.includes("notallowed")
                 || normalized.includes("denied")
@@ -1794,6 +1924,7 @@ export function useBrowserPlaybackController({
               ) {
                 mobileAutoplayPendingRef.current = false;
                 mobileResumeAfterReadyRef.current = false;
+                browserPlayRequestedRef.current = false;
                 mobilePlayerCanPlayRef.current = true;
                 setMobilePlayerCanPlay(true);
                 setMobileLifecycleStateValue("attached");
@@ -1834,10 +1965,14 @@ export function useBrowserPlaybackController({
         pendingSeekPhaseRef.current = "idle";
         setPendingSeekPhase("idle");
       }
-      if (mobileAutoplayPendingRef.current || mobileResumeAfterReadyRef.current) {
-        const shouldResume = mobileAutoplayPendingRef.current || mobileResumeAfterReadyRef.current;
+      if (mobileAutoplayPendingRef.current || mobileResumeAfterReadyRef.current || browserPlayRequestedRef.current) {
+        const shouldResume =
+          mobileAutoplayPendingRef.current
+          || mobileResumeAfterReadyRef.current
+          || browserPlayRequestedRef.current;
         mobileAutoplayPendingRef.current = false;
         mobileResumeAfterReadyRef.current = false;
+        browserPlayRequestedRef.current = false;
         if (shouldResume && video.paused) {
           video.play().catch((requestError) => {
             const normalized = (requestError?.message || "").toLowerCase();
@@ -1858,13 +1993,115 @@ export function useBrowserPlaybackController({
       }
     }
 
+    function finalizeNonIosClientReadiness() {
+      const activeSession = mobileSessionRef.current;
+      if (!activeSession || iosMobile || mobilePlayerCanPlayRef.current) {
+        return false;
+      }
+      if (!evaluateMobileClientReleaseGate(activeSession, video).ready) {
+        return false;
+      }
+      maybeAcknowledgeHlsAttachment({ playing: !video.paused, loadedEventName: "canplay" });
+      mobilePlayerCanPlayRef.current = true;
+      setMobilePlayerCanPlay(true);
+      clearOptimizedPlaybackPending();
+      setPlaybackError("");
+      setPlaybackStatus(browserReadyLabelTitle);
+      const shouldResume =
+        browserPlayRequestedRef.current
+        || mobileAutoplayPendingRef.current
+        || mobileResumeAfterReadyRef.current;
+      browserPlayRequestedRef.current = false;
+      mobileAutoplayPendingRef.current = false;
+      mobileResumeAfterReadyRef.current = false;
+      if (shouldResume && video.paused) {
+        video.play().catch((requestError) => {
+          const normalized = (requestError?.message || "").toLowerCase();
+          if (
+            normalized.includes("gesture")
+            || normalized.includes("notallowed")
+            || normalized.includes("denied")
+            || normalized.includes("not allowed")
+          ) {
+            setPlaybackError("");
+            setSeekNotice(`Tap play in the video controls to continue ${browserPlaybackLabel}.`);
+            return;
+          }
+          setPlaybackError(requestError.message || `Failed to continue ${browserPlaybackLabel}`);
+        });
+      }
+      return true;
+    }
+
+    function maybeReleaseClientReadyPlayback() {
+      const activeSession = mobileSessionRef.current;
+      const hasPlayableSource = Boolean(
+        streamSource
+        || video.currentSrc
+        || video.getAttribute("src")
+      );
+      if (
+        !activeSession
+        || mobilePlayerCanPlayRef.current
+        || !hasPlayableSource
+        || video.readyState < 3
+        || !video.paused
+      ) {
+        return false;
+      }
+      const clientReleaseGate = evaluateMobileClientReleaseGate(activeSession, video);
+      if (!clientReleaseGate.ready) {
+        return false;
+      }
+      const shouldResume =
+        browserPlayRequestedRef.current
+        || mobileAutoplayPendingRef.current
+        || mobileResumeAfterReadyRef.current
+        || activeSession.playback_mode === "full";
+      if (!shouldResume) {
+        return false;
+      }
+      browserPlayRequestedRef.current = false;
+      mobileAutoplayPendingRef.current = false;
+      mobileResumeAfterReadyRef.current = false;
+      mobilePlayerCanPlayRef.current = true;
+      setMobilePlayerCanPlay(true);
+      setMobileLifecycleStateValue("attached");
+      clearOptimizedPlaybackPending();
+      setPlaybackError("");
+      setSeekNotice("");
+      setPlaybackStatus(browserReadyLabelTitle);
+      video.play().then(() => {
+        setPlaybackStatus(browserReadyLabelTitle);
+      }).catch((requestError) => {
+        const normalized = (requestError?.message || "").toLowerCase();
+        if (
+          normalized.includes("gesture")
+          || normalized.includes("notallowed")
+          || normalized.includes("denied")
+          || normalized.includes("not allowed")
+        ) {
+          setPlaybackError("");
+          setSeekNotice(`Tap play in the video controls to continue ${browserPlaybackLabel}.`);
+          setPlaybackStatus(browserReadyLabelTitle);
+          return;
+        }
+        setPlaybackError(requestError.message || `Failed to continue ${browserPlaybackLabel}`);
+      });
+      return true;
+    }
+
     function handleLoadedData() {
       updatePlayerMetrics();
       mobileLoadedDataSeenRef.current = true;
       sampleNativeClientPlayback();
       maybeAcknowledgeHlsAttachment({ playing: !video.paused, loadedEventName: "loadeddata" });
+      if (maybeReleaseClientReadyPlayback()) {
+        return;
+      }
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();
+      finalizeNonIosClientReadiness();
       armFirstFrameStallMonitor();
     }
 
@@ -1872,8 +2109,12 @@ export function useBrowserPlaybackController({
       updatePlayerMetrics();
       sampleNativeClientPlayback();
       clearMobileStallRecoveryTimer();
+      if (maybeReleaseClientReadyPlayback()) {
+        return;
+      }
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();
+      finalizeNonIosClientReadiness();
       armFirstFrameStallMonitor();
     }
 
@@ -1882,17 +2123,15 @@ export function useBrowserPlaybackController({
         return;
       }
       if (!iosMobile) {
-        maybeAcknowledgeHlsAttachment({ playing: !video.paused, loadedEventName: "canplay" });
-        mobilePlayerCanPlayRef.current = true;
-        setMobilePlayerCanPlay(true);
-        clearOptimizedPlaybackPending();
-        setPlaybackError("");
-        setPlaybackStatus(browserReadyLabelTitle);
+        finalizeNonIosClientReadiness();
         return;
       }
       mobileCanPlaySeenRef.current = true;
       maybeAcknowledgeHlsAttachment({ playing: !video.paused, loadedEventName: "canplay" });
       sampleNativeClientPlayback();
+      if (maybeReleaseClientReadyPlayback()) {
+        return;
+      }
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();
       armFirstFrameStallMonitor();
@@ -1965,6 +2204,12 @@ export function useBrowserPlaybackController({
     function handleDurationChange() {
       updatePlayerMetrics();
       applyResumePosition();
+      if (maybeReleaseClientReadyPlayback()) {
+        return;
+      }
+      maybeProbeMobileFirstFrame();
+      maybeFinalizeMobilePlayerReadiness();
+      finalizeNonIosClientReadiness();
     }
 
     function handlePlaying() {
@@ -2134,12 +2379,33 @@ export function useBrowserPlaybackController({
     if (video.readyState >= 1) {
       updatePlayerMetrics();
       applyResumePosition();
+      refreshMobileReadinessFlagsFromReadyState();
+      maybeProbeMobileFirstFrame();
+      maybeFinalizeMobilePlayerReadiness();
     }
+
+    const mobileReadinessPollTimer = window.setInterval(() => {
+      if (!mobileSessionRef.current || mobilePlayerCanPlayRef.current) {
+        return;
+      }
+      refreshMobileReadinessFlagsFromReadyState();
+      sampleNativeClientPlayback();
+      if (maybeReleaseClientReadyPlayback()) {
+        return;
+      }
+      if (iosMobile) {
+        maybeProbeMobileFirstFrame();
+        maybeFinalizeMobilePlayerReadiness();
+      } else {
+        finalizeNonIosClientReadiness();
+      }
+    }, 750);
 
     return () => {
       stopProgressTimer();
       clearMobileStallRecoveryTimer();
       clearFirstFrameStallMonitor();
+      window.clearInterval(mobileReadinessPollTimer);
       window.removeEventListener("pagehide", handlePageHide);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pageshow", handlePageShow);

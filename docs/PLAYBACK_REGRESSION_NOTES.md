@@ -486,3 +486,36 @@ Keep tests that verify:
 - Do not show generic audio errors when backend/API detail exists.
 - Do not move audio-switch feedback into the page-level preparing note.
 - Do not change Phase A menu structure, subtitles/burn-in, cloud probing, recovery, native-HLS normal window slides, Lite thresholds, or adaptive policy while fixing audio switching.
+
+## Client Buffer Gate Regression
+
+### Status
+Fixed.
+
+### Affected Platforms
+Route2 Lite and Full Browser Playback, especially iPhone/PWA native-HLS sessions where server-side Route2 cache can be ahead while Safari has only a few seconds in `video.buffered`.
+
+### Symptoms
+Browser Playback could appear ready, or attempt to start playback, when the server had prepared enough HLS segments but the device itself had only a small contiguous client buffer, such as 4 seconds. The visible "Prepared through X of Y." line could therefore be interpreted as satisfying the Lite 15-second gate even though the client-side media element did not actually have 15 seconds buffered.
+
+### Root Cause
+Server prepared/cache readiness and client `video.buffered` readiness were mixed in the final playback release path. The mobile readiness finalizer checked backend runway and media readyState, then could call `video.play()` as an iOS warmup probe before verifying that the device had the required contiguous client buffer from the target playhead.
+
+### Correct Fix
+Keep the normal visible wording as "Prepared through X of Y.", but base playback release on the stricter internal gate: server runway must exist and contiguous client buffer ahead from the current target must meet the selected mode threshold. Lite fast requires 15 seconds of client buffer, Lite uncertain requires 45 seconds, Lite undersupply requires 180 seconds, Full normal requires 120 seconds, and Full bad-condition reserve requires 900 seconds, capped only by remaining title duration when the remaining media is shorter than the configured threshold. Audio-switch attach release uses the audio-specific 15-second client buffer gate. The client-buffer check tolerates tiny leading media offsets, such as an fMP4 range beginning at 0.083s for a 0s target, and the warmup path re-checks readiness while `video.buffered` grows.
+
+### Regression Guards
+Keep tests that verify:
+
+- The visible normal player note still contains "Prepared through".
+- Normal player UI does not introduce "Device buffered", "Server ready", or "Client buffer" labels.
+- Server prepared runway alone does not release playback when client buffer is below the required threshold.
+- Lite 15/45/180 and Full 120/900 thresholds are enforced as client release thresholds.
+- Audio-switch release remains gated by client buffer, not just replacement server readiness.
+
+### Do Not Regress
+- Do not lower Lite 15/45/180 or Full 120/900.
+- Do not treat server `ready_end_seconds`, cache ranges, or Route2 prepared frontier as sufficient to release playback.
+- Do not label normal user-facing client buffer separately; keep "Prepared through X of Y." in the player note.
+- Do not call `video.play()`, set `mobilePlayerCanPlay = true`, or clear the waiting state at 4 seconds of client buffer when the selected threshold is 15 seconds or higher.
+- Do not change Phase A menu structure, subtitles/burn-in, cloud probing, recovery/background/native-HLS normal window slide behavior, or adaptive policy while enforcing the client buffer gate.

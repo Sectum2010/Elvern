@@ -2658,7 +2658,9 @@ export function DetailPage() {
       ? "status-pill"
       : "status-pill status-pill--live";
   const preparedDurationLabel = availableDuration > 0 ? formatDuration(availableDuration) : "0:00";
-  const clientPreparedThruLabel = formatDuration(Math.max(0, clientPreparedThruSeconds || 0));
+  const clientPreparedThruValue = Math.max(0, Number(clientPreparedThruSeconds) || 0);
+  const clientPreparedThruLabel =
+    clientPreparedThruValue > 0 ? formatDuration(clientPreparedThruValue) : "0:00";
   const effectiveBrowserResumePromptPosition = browserResumePromptPosition > 0
     ? browserResumePromptPosition
     : resumableStartPosition;

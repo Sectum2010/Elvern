@@ -6,8 +6,10 @@ import {
   classifyManifestWindowState,
   classifyPlaybackStall,
   deriveBufferTargetsFromSession,
+  evaluateClientPlaybackReleaseGate,
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
+  resolveClientPlaybackReleaseBufferSeconds,
   resolvePlaybackRecoveryTargetSeconds,
   retuneHlsInstance,
   shouldRecoverNativeHlsStalePlaylist,
@@ -66,6 +68,118 @@ describe("deriveBufferTargetsFromSession", () => {
       lite_required_runway_seconds: 45,
     }, "phone");
     assert.equal(targets.forwardBufferSeconds, 45);
+  });
+});
+
+describe("client playback release gates", () => {
+  test("locked thresholds are client-buffer release thresholds", () => {
+    assert.equal(resolveClientPlaybackReleaseBufferSeconds({
+      playback_mode: "lite",
+      buffer_tier: "lite_fast",
+    }, "phone"), 15);
+    assert.equal(resolveClientPlaybackReleaseBufferSeconds({
+      playback_mode: "lite",
+      buffer_tier: "lite_uncertain",
+    }, "phone"), 45);
+    assert.equal(resolveClientPlaybackReleaseBufferSeconds({
+      playback_mode: "lite",
+      buffer_tier: "lite_undersupply",
+    }, "phone"), 180);
+    assert.equal(resolveClientPlaybackReleaseBufferSeconds({
+      playback_mode: "full",
+      buffer_tier: "full_healthy",
+    }, "phone"), 120);
+    assert.equal(resolveClientPlaybackReleaseBufferSeconds({
+      playback_mode: "full",
+      buffer_tier: "full_bad_condition",
+    }, "phone"), 900);
+  });
+
+  test("server prepared runway alone does not release Lite fast playback", () => {
+    const gate = evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_fast" },
+      backendPreparedAheadSeconds: 20,
+      clientBufferedAheadSeconds: 4,
+      deviceClass: "phone",
+    });
+
+    assert.equal(gate.requiredClientBufferSeconds, 15);
+    assert.equal(gate.serverReady, true);
+    assert.equal(gate.clientReady, false);
+    assert.equal(gate.ready, false);
+  });
+
+  test("Lite releases only when client contiguous buffer reaches the required tier", () => {
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_fast" },
+      backendPreparedAheadSeconds: 20,
+      clientBufferedAheadSeconds: 15,
+      deviceClass: "phone",
+    }).ready, true);
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_uncertain" },
+      backendPreparedAheadSeconds: 60,
+      clientBufferedAheadSeconds: 15,
+      deviceClass: "phone",
+    }).ready, false);
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_undersupply" },
+      backendPreparedAheadSeconds: 220,
+      clientBufferedAheadSeconds: 45,
+      deviceClass: "phone",
+    }).ready, false);
+  });
+
+  test("Full releases only when client contiguous buffer reaches normal or reserve tier", () => {
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_healthy" },
+      backendPreparedAheadSeconds: 140,
+      clientBufferedAheadSeconds: 119,
+      deviceClass: "phone",
+    }).ready, false);
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_healthy" },
+      backendPreparedAheadSeconds: 140,
+      clientBufferedAheadSeconds: 120,
+      deviceClass: "phone",
+    }).ready, true);
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
+      backendPreparedAheadSeconds: 950,
+      clientBufferedAheadSeconds: 899,
+      deviceClass: "phone",
+    }).ready, false);
+  });
+
+  test("caps the effective release gate to the remaining title duration", () => {
+    const gate = evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_healthy" },
+      backendPreparedAheadSeconds: 60,
+      clientBufferedAheadSeconds: 60,
+      remainingPlayableSeconds: 60,
+      deviceClass: "phone",
+    });
+
+    assert.equal(gate.configuredClientBufferSeconds, 120);
+    assert.equal(gate.requiredClientBufferSeconds, 60);
+    assert.equal(gate.ready, true);
+  });
+
+  test("audio switch release uses the audio-specific client buffer gate", () => {
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
+      backendPreparedAheadSeconds: 20,
+      clientBufferedAheadSeconds: 14,
+      audioSwitch: true,
+      deviceClass: "phone",
+    }).ready, false);
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
+      backendPreparedAheadSeconds: 20,
+      clientBufferedAheadSeconds: 15,
+      audioSwitch: true,
+      deviceClass: "phone",
+    }).ready, true);
   });
 });
 
