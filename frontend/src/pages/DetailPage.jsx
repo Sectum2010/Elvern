@@ -469,6 +469,7 @@ export function DetailPage() {
   const useNativeControlsFallback = false;
   const playerShellRef = useRef(null);
   const playerFitPinchRef = useRef(null);
+  const trackScanRequestKeyRef = useRef("");
   const desktopSeekCommitPendingRef = useRef(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
@@ -1279,6 +1280,46 @@ export function DetailPage() {
       resetMobilePlaybackState();
     };
   }, [desktopPlatform, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
+
+  useEffect(() => {
+    if (!item?.id) {
+      return undefined;
+    }
+    const audioDiagnostics = item.audio_track_diagnostics && typeof item.audio_track_diagnostics === "object"
+      ? item.audio_track_diagnostics
+      : {};
+    const trustedAudioCount = Number(audioDiagnostics.trusted_count || 0);
+    const scanStatus = String(audioDiagnostics.track_scan_status || item.track_scan_status || "not_scanned").trim();
+    const normalizedStatus = scanStatus.toLowerCase();
+    const canRequestScan = ["", "never", "not_scanned", "stale"].includes(normalizedStatus);
+    if (trustedAudioCount > 0 || !canRequestScan) {
+      return undefined;
+    }
+    const requestKey = `${item.id}:${normalizedStatus || "not_scanned"}`;
+    if (trackScanRequestKeyRef.current === requestKey) {
+      return undefined;
+    }
+    trackScanRequestKeyRef.current = requestKey;
+    let cancelled = false;
+    async function requestTrackScan() {
+      try {
+        await apiRequest(`/api/library/item/${item.id}/track-scan`, { method: "POST" });
+        if (cancelled) {
+          return;
+        }
+        const refreshedItem = await apiRequest(`/api/library/item/${item.id}`);
+        if (!cancelled) {
+          setItem(refreshedItem);
+        }
+      } catch {
+        // Detail metadata already carries the honest scan state; avoid retry loops.
+      }
+    }
+    requestTrackScan();
+    return () => {
+      cancelled = true;
+    };
+  }, [item]);
 
   useEffect(() => {
     if (!infoModalOpen || typeof window === "undefined") {
@@ -2462,13 +2503,17 @@ export function DetailPage() {
   const subtitleTracks = Array.isArray(item.subtitles) ? item.subtitles : [];
   const rawPlaybackAudioTracks = Array.isArray(item.audio_tracks) ? item.audio_tracks : [];
   const trackScanStatus = String(item.track_scan_status || "").trim();
-  const playbackAudioTracks = (
-    trackScanStatus && trackScanStatus !== "probed"
-    && rawPlaybackAudioTracks.length === 1
-    && /^default audio$/i.test(String(rawPlaybackAudioTracks[0]?.title || rawPlaybackAudioTracks[0]?.label || ""))
+  const playbackAudioTracks = rawPlaybackAudioTracks.filter((track) => (
+    (track?.track_source || track?.source || "") === "raw_probe_summary_json"
+  ));
+  const audioTrackDiagnostics = (
+    item.audio_track_diagnostics
+    && typeof item.audio_track_diagnostics === "object"
   )
-    ? []
-    : rawPlaybackAudioTracks;
+    ? item.audio_track_diagnostics
+    : null;
+  const audioTrackScanStatus = String(audioTrackDiagnostics?.track_scan_status || trackScanStatus || "").trim();
+  const audioTrackScanError = String(audioTrackDiagnostics?.track_scan_error || item.track_scan_error || "").trim();
   const playbackSubtitleTracks = Array.isArray(item.subtitle_tracks) ? item.subtitle_tracks : subtitleTracks;
   const subtitleTrackDiagnostics = (
     item.subtitle_track_diagnostics
@@ -3397,6 +3442,8 @@ export function DetailPage() {
                   hlsRef={hlsRef}
                   backendAudioTracks={playbackAudioTracks}
                   backendSubtitleTracks={playbackSubtitleTracks}
+                  audioTrackScanError={audioTrackScanError}
+                  audioTrackScanStatus={audioTrackScanStatus}
                   onSeekCommit={(targetSeconds) => seekBrowserPlaybackTo(targetSeconds)}
                   onBackendAudioTrackSelect={selectBrowserPlaybackAudioTrack}
                   onBackendSubtitleTrackSelect={prepareBrowserPlaybackSubtitleTrack}

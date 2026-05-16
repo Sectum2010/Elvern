@@ -92,6 +92,21 @@ def build_local_source_fingerprint_from_path(file_path: str | Path) -> str:
     )
 
 
+def build_cloud_source_fingerprint(item: dict[str, object]) -> str:
+    payload = "|".join(
+        str(value or "")
+        for value in (
+            item.get("source_kind") or "cloud",
+            item.get("library_source_id"),
+            item.get("external_media_id"),
+            item.get("cloud_resource_key"),
+            item.get("file_size"),
+            item.get("file_mtime"),
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _normalize_text(value: object) -> str | None:
     if value in {None, ""}:
         return None
@@ -858,6 +873,273 @@ def probe_local_item_technical_metadata(
         "media_item_id": media_item_id,
         "technical_metadata": row,
     }
+
+
+def _cloud_probe_error_code(exc: Exception) -> str:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        code = str(detail.get("code") or "").strip()
+        reason = str(detail.get("provider_reason") or detail.get("reason") or "").strip()
+        if code == "provider_auth_required":
+            return "provider_reconnect_required" if reason else "provider_auth_required"
+        if code:
+            return code
+    message = str(exc).strip()
+    if "provider_auth_required" in message or "reconnect" in message.lower():
+        return "provider_reconnect_required"
+    return "cloud_source_unavailable"
+
+
+def _ffprobe_url_command(settings: Settings, stream_url: str) -> list[str]:
+    return [
+        str(settings.ffprobe_path),
+        "-v",
+        "error",
+        "-rw_timeout",
+        "15000000",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_on_network_error",
+        "1",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        stream_url,
+    ]
+
+
+def probe_cloud_item_technical_metadata(
+    settings: Settings,
+    item: dict[str, object],
+    *,
+    user_id: int,
+    timeout_seconds: int = 30,
+) -> dict[str, object]:
+    media_item_id = int(item["id"])
+    if str(item.get("source_kind") or "local") != "cloud":
+        return {
+            "status": "skipped",
+            "reason": "not_cloud_source",
+            "media_item_id": media_item_id,
+        }
+
+    source_fingerprint = build_cloud_source_fingerprint(item)
+    if not settings.ffprobe_path:
+        return _probe_failure_result(
+            settings,
+            media_item_id=media_item_id,
+            source_fingerprint=source_fingerprint,
+            metadata_source="cloud_ffprobe",
+            error_code="ffprobe_unavailable",
+        )
+
+    session_payload: dict[str, object] | None = None
+    try:
+        from .mobile_playback_source_service import _rewrite_stream_url_for_server_localhost
+        from .native_playback_service import close_native_playback_session, create_native_playback_session
+
+        session_payload = create_native_playback_session(
+            settings,
+            user_id=int(user_id),
+            item=item,
+            auth_session_id=None,
+            user_agent="Elvern Browser Playback Track Probe",
+            source_ip=None,
+            client_name="Browser Playback Track Probe",
+        )
+        stream_url = _rewrite_stream_url_for_server_localhost(
+            settings,
+            stream_url=str(session_payload["stream_url"]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _probe_failure_result(
+            settings,
+            media_item_id=media_item_id,
+            source_fingerprint=source_fingerprint,
+            metadata_source="cloud_ffprobe",
+            error_code=_cloud_probe_error_code(exc),
+        )
+
+    try:
+        completed = subprocess.run(
+            _ffprobe_url_command(settings, stream_url),
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_seconds)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _probe_failure_result(
+            settings,
+            media_item_id=media_item_id,
+            source_fingerprint=source_fingerprint,
+            metadata_source="cloud_ffprobe",
+            error_code="timeout",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _probe_failure_result(
+            settings,
+            media_item_id=media_item_id,
+            source_fingerprint=source_fingerprint,
+            metadata_source="cloud_ffprobe",
+            error_code="ffprobe_exec_error",
+        )
+    finally:
+        if session_payload is not None:
+            try:
+                close_native_playback_session(
+                    settings,
+                    session_id=str(session_payload["session_id"]),
+                    access_token=str(session_payload["access_token"]),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    if completed.returncode != 0:
+        return _probe_failure_result(
+            settings,
+            media_item_id=media_item_id,
+            source_fingerprint=source_fingerprint,
+            metadata_source="cloud_ffprobe",
+            error_code=f"ffprobe_exit_{completed.returncode}",
+        )
+
+    try:
+        ffprobe_json = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return _probe_failure_result(
+            settings,
+            media_item_id=media_item_id,
+            source_fingerprint=source_fingerprint,
+            metadata_source="cloud_ffprobe",
+            error_code="invalid_json",
+        )
+
+    parsed = parse_ffprobe_technical_metadata(ffprobe_json)
+    row = upsert_technical_metadata(
+        settings,
+        media_item_id=media_item_id,
+        values={
+            **parsed,
+            "metadata_version": MEDIA_TECHNICAL_METADATA_VERSION,
+            "metadata_source": "cloud_ffprobe",
+            "probe_status": "probed",
+            "probe_error": None,
+            "probed_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+            "source_fingerprint": source_fingerprint,
+        },
+    )
+    return {
+        "status": "probed",
+        "reason": "probe_succeeded",
+        "media_item_id": media_item_id,
+        "technical_metadata": row,
+    }
+
+
+def _source_fingerprint_for_item(item: dict[str, object]) -> str | None:
+    if str(item.get("source_kind") or "local") == "cloud":
+        return build_cloud_source_fingerprint(item)
+    return _current_local_source_fingerprint(item)
+
+
+def should_probe_media_item_technical_metadata(
+    settings: Settings,
+    item: dict[str, object],
+    *,
+    retry_failed: bool = False,
+    failed_retry_after_seconds: int = LOCAL_TECHNICAL_METADATA_FAILED_RETRY_AFTER_SECONDS,
+    now_epoch: float | None = None,
+) -> tuple[bool, str]:
+    if str(item.get("source_kind") or "local") == "local":
+        return should_probe_local_item(
+            settings,
+            item,
+            retry_failed=retry_failed,
+            failed_retry_after_seconds=failed_retry_after_seconds,
+            now_epoch=now_epoch,
+        )
+    media_item_id = int(item["id"])
+    existing = get_technical_metadata(settings, media_item_id)
+    current_fingerprint = _source_fingerprint_for_item(item)
+    if existing is None:
+        return True, "no_metadata_row"
+    if int(existing.get("metadata_version") or 0) != MEDIA_TECHNICAL_METADATA_VERSION:
+        return True, "metadata_version_changed"
+    probe_status = str(existing.get("probe_status") or "never").strip() or "never"
+    if probe_status in {"never", "stale"}:
+        return True, probe_status
+    if probe_status == "probed":
+        if str(existing.get("source_fingerprint") or "") != str(current_fingerprint or ""):
+            return True, "source_fingerprint_changed"
+        return False, "fingerprint_unchanged"
+    if probe_status == "failed":
+        if retry_failed:
+            return True, "retry_requested"
+        failed_at_epoch = _parse_iso_to_epoch_seconds(existing.get("probed_at"))
+        if failed_at_epoch is None:
+            return False, "failed_backoff_active"
+        effective_now_epoch = time.time() if now_epoch is None else now_epoch
+        if (effective_now_epoch - failed_at_epoch) >= max(0, failed_retry_after_seconds):
+            return True, "failed_backoff_elapsed"
+        return False, "failed_backoff_active"
+    return True, "unknown_probe_status"
+
+
+def run_one_media_item_technical_metadata_enrichment(
+    settings: Settings,
+    *,
+    media_item_id: int,
+    user_id: int | None = None,
+    retry_failed: bool = False,
+    timeout_seconds: int = 30,
+) -> dict[str, object]:
+    item = get_media_item_record(settings, item_id=int(media_item_id))
+    if item is None:
+        return {
+            "status": "missing",
+            "reason": "media_item_not_found",
+            "media_item_id": int(media_item_id),
+        }
+    eligible, reason = should_probe_media_item_technical_metadata(
+        settings,
+        item,
+        retry_failed=retry_failed,
+    )
+    if not eligible:
+        return {
+            "status": "skipped",
+            "reason": reason,
+            "media_item_id": int(media_item_id),
+        }
+    if reason == "source_fingerprint_changed":
+        mark_technical_metadata_stale(
+            settings,
+            media_item_id=int(item["id"]),
+            source_fingerprint=_source_fingerprint_for_item(item),
+        )
+    if str(item.get("source_kind") or "local") == "cloud":
+        if user_id is None:
+            return {
+                "status": "failed",
+                "reason": "cloud_probe_requires_user_context",
+                "media_item_id": int(media_item_id),
+            }
+        return probe_cloud_item_technical_metadata(
+            settings,
+            item,
+            user_id=int(user_id),
+            timeout_seconds=timeout_seconds,
+        )
+    return probe_local_item_technical_metadata(
+        settings,
+        item,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def run_one_local_technical_metadata_enrichment(

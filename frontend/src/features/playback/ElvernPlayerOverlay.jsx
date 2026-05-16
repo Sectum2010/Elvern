@@ -172,6 +172,26 @@ function shouldShowSubtitleWarning(track) {
     && Boolean(track?.imageBased);
 }
 
+function resolveAudioTrackUnavailableMessage(scanStatus, scanError) {
+  const status = String(scanStatus || "").trim().toLowerCase();
+  const error = String(scanError || "").trim().toLowerCase();
+  if (status === "scanning" || status === "stale" || status === "never" || status === "not_scanned") {
+    return "Scanning audio tracks...";
+  }
+  if (
+    status === "provider_auth_required"
+    || status === "provider_reconnect_required"
+    || error === "provider_auth_required"
+    || error === "provider_reconnect_required"
+  ) {
+    return "Reconnect cloud source to scan tracks";
+  }
+  if (status === "failed" || error) {
+    return "Track scan unavailable";
+  }
+  return "No alternate audio tracks found";
+}
+
 function TrackMenuItem({
   checked = false,
   kind,
@@ -291,6 +311,8 @@ export default function ElvernPlayerOverlay({
   trackRefreshKey = "",
   backendAudioTracks = [],
   backendSubtitleTracks = [],
+  audioTrackScanStatus = "",
+  audioTrackScanError = "",
 }) {
   const layoutCapabilities = useMemo(() => resolveOverlayLayoutCapabilities(deviceClass), [deviceClass]);
 
@@ -1205,7 +1227,7 @@ export default function ElvernPlayerOverlay({
         ))
       ) : (
         <div className="elvern-overlay__menu-item elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item" role="menuitem">
-          No alternate audio tracks found
+          {resolveAudioTrackUnavailableMessage(audioTrackScanStatus, audioTrackScanError)}
         </div>
       )}
       {pendingAudioTrackId ? (

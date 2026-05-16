@@ -14,6 +14,7 @@ from ..services.library_service import (
     list_library,
     search_library,
 )
+from ..services.media_technical_metadata_service import run_one_media_item_technical_metadata_enrichment
 from ..services.account_access_service import is_item_download_allowed
 from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
 from ..services.user_settings_service import get_poster_card_display_max_width
@@ -97,6 +98,25 @@ def get_item(item_id: int, request: Request, user=CurrentUser) -> MediaItemDetai
         item_id=item_id,
     )
     return MediaItemDetail(**item)
+
+
+@router.post("/item/{item_id}/track-scan", status_code=status.HTTP_202_ACCEPTED)
+def request_item_track_scan(item_id: int, request: Request, user=CurrentUser) -> dict[str, object]:
+    item = get_media_item_detail(
+        request.app.state.settings,
+        user_id=user.id,
+        item_id=item_id,
+        allow_globally_hidden=user.role == "admin",
+    )
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    result = run_one_media_item_technical_metadata_enrichment(
+        request.app.state.settings,
+        media_item_id=item_id,
+        user_id=user.id,
+        timeout_seconds=30,
+    )
+    return result
 
 
 @router.get("/item/{item_id}/poster")

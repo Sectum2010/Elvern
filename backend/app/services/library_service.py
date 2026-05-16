@@ -143,7 +143,7 @@ def _extract_playback_tracks_from_probe_summary(raw_probe_summary_json: object) 
                         codec=codec,
                         channels=channels,
                     ),
-                    "browser_supported": False,
+                    "browser_supported": True,
                     "track_source": "raw_probe_summary_json",
                 }
             )
@@ -554,8 +554,9 @@ def get_media_item_detail(
             }
             for index, subtitle in enumerate(subtitle_payload)
         ]
+    fallback_audio_tracks: list[dict[str, object]] = []
     if not audio_tracks and row["audio_codec"]:
-        audio_tracks = [
+        fallback_audio_tracks = [
             {
                 "index": 0,
                 "codec": row["audio_codec"],
@@ -575,6 +576,13 @@ def get_media_item_detail(
                 "track_source": "media_row_fallback",
             }
         ]
+    audio_diagnostic_tracks = [*audio_tracks, *fallback_audio_tracks]
+    audio_counts = {
+        "total_count": len(audio_diagnostic_tracks),
+        "trusted_count": sum(1 for track in audio_diagnostic_tracks if track.get("track_source") == "raw_probe_summary_json"),
+        "fallback_count": sum(1 for track in audio_diagnostic_tracks if track.get("track_source") == "media_row_fallback"),
+        "commentary_count": sum(1 for track in audio_diagnostic_tracks if track.get("disposition_commentary")),
+    }
     subtitle_counts = {
         "text_count": sum(1 for track in subtitle_stream_tracks if track.get("text_based")),
         "image_count": sum(1 for track in subtitle_stream_tracks if track.get("image_based")),
@@ -608,6 +616,29 @@ def get_media_item_detail(
             "track_scan_status": track_scan_status,
             "track_scan_error": str(technical_row["probe_error"] or "") if technical_row else "",
             "track_scan_source": track_scan_source,
+            "audio_track_diagnostics": {
+                **audio_counts,
+                "track_scan_status": track_scan_status,
+                "track_scan_source": "raw_probe_summary_json"
+                if trusted_probe
+                else ("failed" if track_scan_status == "failed" else "not_scanned"),
+                "track_scan_error": str(technical_row["probe_error"] or "") if technical_row else "",
+                "tracks": [
+                    {
+                        "index": track.get("index"),
+                        "codec": track.get("codec"),
+                        "codec_long_name": track.get("codec_long_name"),
+                        "language": track.get("language"),
+                        "title": track.get("title"),
+                        "channels": track.get("channels"),
+                        "disposition_default": bool(track.get("disposition_default")),
+                        "disposition_commentary": bool(track.get("disposition_commentary")),
+                        "browser_supported": bool(track.get("browser_supported")),
+                        "track_source": track.get("track_source"),
+                    }
+                    for track in audio_diagnostic_tracks
+                ],
+            },
             "subtitle_track_diagnostics": {
                 **subtitle_counts,
                 "track_scan_status": track_scan_status,

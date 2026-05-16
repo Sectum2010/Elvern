@@ -7,6 +7,8 @@ import { ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS } from "../../lib/elvernOverlayLayout
 function renderOverlay({
   backendAudioTracks = [],
   backendSubtitleTracks = [],
+  audioTrackScanError = "",
+  audioTrackScanStatus = "",
   cinemaModeActive = false,
   deviceClass = "desktop",
   hlsRef = null,
@@ -79,6 +81,8 @@ function renderOverlay({
 
   const renderProps = (overrides = {}) => ({
     cinemaModeActive,
+    audioTrackScanError,
+    audioTrackScanStatus,
     backendAudioTracks,
     backendSubtitleTracks,
     durationSeconds: 600,
@@ -878,9 +882,9 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const onBackendAudioTrackSelect = vi.fn();
     const { getByRole, getByText, queryByText } = renderOverlay({
       backendAudioTracks: [
-        { index: 1, title: "English", codec: "aac", disposition_default: true },
-        { index: 2, title: "French", codec: "ac3" },
-        { index: 2, label: "Commentary (aac)", codec: "aac" },
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+        { index: 2, label: "Commentary (aac)", codec: "aac", track_source: "raw_probe_summary_json" },
       ],
       backendSubtitleTracks: [
         { index: 3, label: "English subtitles (subrip)", codec: "subrip", language: "en" },
@@ -922,12 +926,48 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     }));
   });
 
+  test("Route2 does not expose media-row fallback or native Audio 1 as switchable audio", () => {
+    const { getByRole, queryByText } = renderOverlay({
+      backendAudioTracks: [
+        {
+          index: 0,
+          title: "Default audio",
+          label: "Default audio (aac)",
+          codec: "aac",
+          track_source: "media_row_fallback",
+        },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      audioTrackScanStatus: "not_scanned",
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        engine_mode: "route2",
+      },
+      setupVideo: (video) => {
+        Object.defineProperty(video, "audioTracks", {
+          configurable: true,
+          value: [{ label: "Audio 1", language: "", enabled: true }],
+        });
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+
+    expect(queryByText("Default audio")).toBeNull();
+    expect(queryByText("Default audio (aac)")).toBeNull();
+    expect(queryByText("Audio 1")).toBeNull();
+    expect(queryByText("Scanning audio tracks...")).toBeTruthy();
+  });
+
   test("backend track labels preserve useful duplicate distinctions", () => {
     const { getByRole, getByText, queryByText } = renderOverlay({
       backendAudioTracks: [
-        { index: 1, codec: "ac3", channels: 6, language: "eng", disposition_default: true },
-        { index: 2, codec: "aac", channels: 2, language: "eng" },
-        { index: 3, codec: "aac", channels: 2, language: "eng", title: "Audio Commentary" },
+        { index: 1, codec: "ac3", channels: 6, language: "eng", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 2, codec: "aac", channels: 2, language: "eng", track_source: "raw_probe_summary_json" },
+        { index: 3, codec: "aac", channels: 2, language: "eng", title: "Audio Commentary", track_source: "raw_probe_summary_json" },
       ],
       backendSubtitleTracks: [
         { index: 4, codec: "subrip", language: "chi", label: "Chinese (Simplified / subrip)", text_based: true },
@@ -959,9 +999,9 @@ describe("ElvernPlayerOverlay controls visibility", () => {
   test("backend audio snapshot state keeps exactly one selected row", () => {
     const { container, getByRole, getByText } = renderOverlay({
       backendAudioTracks: [
-        { index: 1, title: "English", codec: "aac", disposition_default: true },
-        { index: 2, title: "French", codec: "ac3", disposition_default: true },
-        { index: 3, title: "Japanese", codec: "aac" },
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 2, title: "French", codec: "ac3", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 3, title: "Japanese", codec: "aac", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
@@ -993,8 +1033,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     }));
     const { getByRole, rerenderOverlay } = renderOverlay({
       backendAudioTracks: [
-        { index: 1, title: "English", codec: "aac", disposition_default: true },
-        { index: 2, title: "French", codec: "ac3" },
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",

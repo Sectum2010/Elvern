@@ -498,6 +498,7 @@ class MediaItemDetail(LibraryItemSummary):
     track_scan_status: str = "not_scanned"
     track_scan_error: str = ""
     track_scan_source: str = ""
+    audio_track_diagnostics: dict[str, object] = Field(default_factory=dict)
     subtitle_track_diagnostics: dict[str, object] = Field(default_factory=dict)
 
 

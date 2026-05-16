@@ -74,6 +74,18 @@ def _local_frontend_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
+def _spa_base_url(settings: Any, base_url: str) -> str:
+    from backend.app.url_prefix_service import load_state
+
+    prefix = settings.url_prefix
+    if not prefix:
+        state = load_state(settings)
+        prefix = state.prefix if state else ""
+    if not prefix:
+        return base_url.rstrip("/")
+    return f"{base_url.rstrip('/')}/{str(prefix).strip('/')}"
+
+
 def _api_request(
     base_url: str,
     cookie_name: str,
@@ -354,6 +366,7 @@ def _trace_summary(trace: list[dict[str, Any]]) -> dict[str, Any]:
 def _run_mode_check(
     *,
     base_url: str,
+    app_base_url: str,
     cookie_name: str,
     token: str,
     geckodriver: str,
@@ -367,7 +380,7 @@ def _run_mode_check(
         driver.wd("POST", "/url", {"url": base_url})
         time.sleep(0.5)
         driver.wd("POST", "/cookie", {"cookie": {"name": cookie_name, "value": token, "path": "/", "sameSite": "Lax"}})
-        driver.wd("POST", "/url", {"url": f"{base_url.rstrip()}/library/{item['id']}"})
+        driver.wd("POST", "/url", {"url": f"{app_base_url.rstrip()}/library/{item['id']}"})
         time.sleep(3)
         driver.script(PROBE_SCRIPT)
         initial = driver.script("return window.__elvernSnapshot();")
@@ -466,18 +479,21 @@ def main() -> int:
 
     settings, _, token = _settings_and_auth()
     base_url = (args.base_url or _local_frontend_url()).rstrip("/")
+    app_base_url = _spa_base_url(settings, base_url)
     _stop_active_mobile_session(base_url, settings.session_cookie_name, token)
     lite_item = _choose_visible_item(settings, base_url, settings.session_cookie_name, token, args.lite_item_id or args.item_id)
     full_item = _choose_visible_item(settings, base_url, settings.session_cookie_name, token, args.full_item_id or args.item_id)
 
     result = {
         "base_url": base_url,
+        "app_base_url": app_base_url,
         "detail_render": {
             "checked_via": "browser detail page before each playback mode",
             "required_actions": ["Lite Playback", "Full Playback", "Open in VLC", "Open in Infuse"],
         },
         "lite": _run_mode_check(
             base_url=base_url,
+            app_base_url=app_base_url,
             cookie_name=settings.session_cookie_name,
             token=token,
             geckodriver=geckodriver,
@@ -487,6 +503,7 @@ def main() -> int:
         ),
         "full": _run_mode_check(
             base_url=base_url,
+            app_base_url=app_base_url,
             cookie_name=settings.session_cookie_name,
             token=token,
             geckodriver=geckodriver,

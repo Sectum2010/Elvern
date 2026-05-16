@@ -16,6 +16,41 @@ Each entry should preserve:
 - Regression guards.
 - Do not regress.
 
+## Fake Audio 1 / Fallback Track Discovery Regression
+
+### Status
+Fixed for local trusted probe metadata and guarded for cloud/provider failures. Cloud multi-track discovery is provider-aware through the same local Elvern stream URL path used by playback probes; keep mocked provider probe tests before claiming broader provider behavior.
+
+### Affected Platforms
+iPhone/PWA Browser Playback, cloud Browser Playback, local Route2 Browser Playback.
+
+### Symptoms
+- The audio menu could show only fake Audio 1 / Default audio.
+- Real multi-track files could collapse to one fallback track.
+- Cloud files could lack trusted probe metadata and still look like they had a switchable default audio stream.
+
+### Wrong Or Incomplete Hypotheses
+- Native browser `audioTracks` are enough for Browser Playback track authority.
+- `media_items.audio_codec` is a real switchable audio track.
+- Local-only ffprobe coverage solves cloud track discovery.
+
+### Real Root Cause
+Fallback metadata from the media row was allowed to masquerade as Browser Playback audio authority. Browser/native/HLS single-track exposure could also replace the backend ffprobe track list, producing fake Audio 1 behavior. Cloud probing did not have an explicit provider-aware trusted probe path with honest failure diagnostics.
+
+### Correct Fix
+Only `raw_probe_summary_json` tracks from `probe_status = probed` are switchable Browser Playback audio tracks. `media_row_fallback` remains diagnostic/coarse metadata only. Cloud track probing uses the provider-authenticated Elvern stream URL path with ffprobe network options, and provider/auth failures are surfaced as scan unavailable/reconnect-required states instead of fake audio tracks.
+
+### Regression Guards
+- Backend diagnostics tests prove fallback audio is diagnostic, trusted raw-probe audio keeps global ffprobe stream indexes, cloud provider URL probing stores raw tracks, and provider auth failure does not create fake Audio 1.
+- Frontend tests prove Route2 uses trusted backend audio over native Audio 1, filters `media_row_fallback`, hides commentary, preserves distinct codec/channel names, and keeps the Phase A rectangular phone menu path.
+- Cloud mocked provider probe tests are required before claiming cloud multi-track discovery solved.
+
+### Do Not Regress
+- Never show `media_row_fallback` as switchable audio.
+- Never let native browser/HLS `Audio 1` replace trusted backend tracks for Route2 Browser Playback.
+- Never claim cloud multi-track solved without provider-aware probe tests.
+- Keep Phase A phone menu UI/scroll behavior intact.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status

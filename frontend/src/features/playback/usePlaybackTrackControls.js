@@ -450,6 +450,9 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
   if (!Array.isArray(tracks)) {
     return [];
   }
+  const trustedTracks = tracks.filter((track) => (
+    (track?.track_source || track?.source || "") === "raw_probe_summary_json"
+  ));
   const pendingIndex = Number.isInteger(sessionPayload?.pending_audio_stream_index)
     ? sessionPayload.pending_audio_stream_index
     : null;
@@ -463,7 +466,7 @@ function normalizeBackendAudioTracks(tracks, sessionPayload = null) {
     : !pendingSwitchInProgress && selectedIndex != null
       ? selectedIndex
       : null;
-  const filteredTracks = tracks.filter((track) => !isCommentaryTrack(track));
+  const filteredTracks = trustedTracks.filter((track) => !isCommentaryTrack(track));
   let fallbackSelectedStreamIndex = null;
   if (activeIndex == null && filteredTracks.length > 0) {
     const defaultTrack = filteredTracks.find((track) => Boolean(track?.disposition_default));
@@ -525,7 +528,8 @@ function resolveTrackState({
   const backendSubtitleList = normalizeBackendSubtitleTracks(backendSubtitleTracks);
   const backendAudioList = normalizeBackendAudioTracks(backendAudioTracks, sessionPayload);
   const backendSubtitlesAuthoritative = Array.isArray(backendSubtitleTracks) && backendSubtitleTracks.length > 0;
-  const backendAudioAuthoritative = Array.isArray(backendAudioTracks) && backendAudioTracks.length > 0;
+  const route2BrowserPlayback = sessionPayload?.engine_mode === "route2";
+  const backendAudioAuthoritative = route2BrowserPlayback || backendAudioList.length > 0;
   const subtitleTracks = backendSubtitlesAuthoritative
     ? backendSubtitleList
     : hlsSubtitleTracks.length > 0
