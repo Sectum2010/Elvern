@@ -24,6 +24,7 @@ import {
   shouldStartClientBufferPrewarm,
   shouldRecoverNativeHlsStalePlaylist,
   shouldDisarmFirstFrameStallMonitor,
+  shouldStartVisibleHlsSupplyRecovery,
 } from "../../lib/browserPlaybackBufferPolicy";
 import {
   getActivePlaybackWorkerConflict,
@@ -1704,18 +1705,41 @@ export function useBrowserPlaybackController({
         return;
       }
       const currentSession = mobileSessionRef.current;
-      const { stall } = sampleNativeClientPlayback();
+      const { sample, stall } = sampleNativeClientPlayback();
       const bufferedAhead = bufferedRunwaySeconds();
       const backendAhead = currentSession?.ahead_runway_seconds || 0;
       const refillInProgress = Boolean(currentSession?.refill_in_progress);
-      const hardStarvation =
+      const staleNativePlaylistStall = shouldRecoverNativeHlsStalePlaylist({
+        hlsJsAttached: Boolean(hlsRef.current),
+        backendPreparedAheadSeconds: backendAhead,
+        stallReason: stall.stallReason,
+      });
+      const recoveryCandidate =
         currentSession?.stalled_recovery_needed
         || currentSession?.starvation_risk
         || stall.stallReason === "client_buffer_starved"
         || stall.firstFrameStall
         || stall.midPlaybackStall
+        || staleNativePlaylistStall
         || (backendAhead <= 3 && bufferedAhead <= 0.75 && !refillInProgress);
-      if (!hardStarvation) {
+      const recoveryDecision = shouldStartVisibleHlsSupplyRecovery({
+        session: {
+          ...currentSession,
+          stalled_recovery_needed: Boolean(recoveryCandidate),
+        },
+        livenessSample: {
+          ...sample,
+          stallReason: stall.stallReason,
+        },
+        seekPending: mobileSeekPendingRef.current,
+        recoveryInFlight: mobileRecoveryInFlightRef.current,
+        lifecycleState: mobileLifecycleStateRef.current,
+        mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
+        videoPaused: video.paused,
+        hlsJsAttached: Boolean(hlsRef.current),
+        stalePlaylistStall,
+      });
+      if (!recoveryDecision.start) {
         clearMobileStallRecoveryTimer();
         return;
       }
@@ -1734,13 +1758,41 @@ export function useBrowserPlaybackController({
           return;
         }
         const latestSession = mobileSessionRef.current;
+        const { sample: latestSample, stall: latestStall } = sampleNativeClientPlayback();
         const latestBackendAhead = latestSession?.ahead_runway_seconds || 0;
+        const latestBufferedAhead = bufferedRunwaySeconds();
+        const latestRefillInProgress = Boolean(latestSession?.refill_in_progress);
         const staleNativePlaylistStall = shouldRecoverNativeHlsStalePlaylist({
           hlsJsAttached: Boolean(hlsRef.current),
           backendPreparedAheadSeconds: latestBackendAhead,
-          stallReason: stall.stallReason,
+          stallReason: latestStall.stallReason,
         });
-        if (latestBackendAhead > 6 && !latestSession?.stalled_recovery_needed && !staleNativePlaylistStall) {
+        const latestRecoveryCandidate =
+          latestSession?.stalled_recovery_needed
+          || latestSession?.starvation_risk
+          || latestStall.stallReason === "client_buffer_starved"
+          || latestStall.firstFrameStall
+          || latestStall.midPlaybackStall
+          || staleNativePlaylistStall
+          || (latestBackendAhead <= 3 && latestBufferedAhead <= 0.75 && !latestRefillInProgress);
+        const latestRecoveryDecision = shouldStartVisibleHlsSupplyRecovery({
+          session: {
+            ...latestSession,
+            stalled_recovery_needed: Boolean(latestRecoveryCandidate),
+          },
+          livenessSample: {
+            ...latestSample,
+            stallReason: latestStall.stallReason,
+          },
+          seekPending: mobileSeekPendingRef.current,
+          recoveryInFlight: mobileRecoveryInFlightRef.current,
+          lifecycleState: mobileLifecycleStateRef.current,
+          mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
+          videoPaused: video.paused,
+          hlsJsAttached: Boolean(hlsRef.current),
+          stalePlaylistStall,
+        });
+        if (!latestRecoveryDecision.start) {
           return;
         }
         setOptimizedPlaybackPending(true);
@@ -1753,7 +1805,7 @@ export function useBrowserPlaybackController({
               ...current,
               nativeHlsStallRecoveryReason: staleNativePlaylistStall
                 ? "native_hls_playlist_stale"
-                : (stall.stallReason || "client_stalled"),
+                : (latestStall.stallReason || latestRecoveryDecision.reason || "client_stalled"),
               nativeHlsStallRecoveryPreservedPositionSeconds: resolveCurrentVideoAbsolutePosition(latestSession, video),
             }
             : current
@@ -1765,7 +1817,7 @@ export function useBrowserPlaybackController({
           force: true,
           clientPlaybackStallReason: staleNativePlaylistStall
             ? "native_hls_playlist_stale"
-            : (stall.stallReason || "client_stalled"),
+            : (latestStall.stallReason || latestRecoveryDecision.reason || "client_stalled"),
         }).catch(() => {
           // Recovery will still try to reattach locally.
         });

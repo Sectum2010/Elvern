@@ -13,6 +13,7 @@ import {
   deriveBufferTargetsFromSession,
   readClientPlaybackLiveness,
   resolvePlaybackRecoveryTargetSeconds,
+  shouldStartVisibleHlsSupplyRecovery,
 } from "../../lib/browserPlaybackBufferPolicy";
 import {
   getBrowserPlaybackAttachedManifestEndSeconds,
@@ -1645,6 +1646,21 @@ export function useOptimizedPlaybackSession({
       || !mobilePlayerCanPlayRef.current
       || video.paused
     ) {
+      return false;
+    }
+    const livenessSample = readClientPlaybackLiveness(video, clientPlaybackLivenessSampleRef.current);
+    clientPlaybackLivenessSampleRef.current = livenessSample;
+    const recoveryDecision = shouldStartVisibleHlsSupplyRecovery({
+      session: payload,
+      livenessSample,
+      seekPending: mobileSeekPendingRef.current,
+      recoveryInFlight: mobileRecoveryInFlightRef.current,
+      lifecycleState: mobileLifecycleStateRef.current,
+      mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
+      videoPaused: video.paused,
+      hlsJsAttached: Boolean(hlsRef?.current),
+    });
+    if (!recoveryDecision.start) {
       return false;
     }
     setOptimizedPlaybackPending(true);

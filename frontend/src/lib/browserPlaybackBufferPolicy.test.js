@@ -17,6 +17,7 @@ import {
   shouldStartClientBufferPrewarm,
   shouldRecoverNativeHlsStalePlaylist,
   shouldDisarmFirstFrameStallMonitor,
+  shouldStartVisibleHlsSupplyRecovery,
 } from "./browserPlaybackBufferPolicy.js";
 
 const MB = 1024 * 1024;
@@ -245,6 +246,65 @@ describe("client playback release gates", () => {
     restoreVideoAfterClientPrewarm(video, saved);
     assert.equal(video.muted, true);
     assert.equal(video.volume, 0.4);
+  });
+});
+
+describe("visible HLS supply recovery gate", () => {
+  test("backend low-water does not visibly recover while client buffer is playable and time advances", () => {
+    const decision = shouldStartVisibleHlsSupplyRecovery({
+      session: { stalled_recovery_needed: true },
+      livenessSample: {
+        bufferedAheadSeconds: 20,
+        elapsedMs: 3000,
+        currentTimeDeltaSeconds: 2.8,
+        timeAdvancing: true,
+        readyState: 4,
+        networkState: 2,
+      },
+      lifecycleState: "attached",
+      mobilePlayerCanPlay: true,
+      videoPaused: false,
+    });
+
+    assert.equal(decision.start, false);
+    assert.equal(decision.reason, "client_buffer_playable");
+  });
+
+  test("backend low-water visibly recovers only when client buffer is empty and time is stopped", () => {
+    const decision = shouldStartVisibleHlsSupplyRecovery({
+      session: { stalled_recovery_needed: true },
+      livenessSample: {
+        bufferedAheadSeconds: 0,
+        elapsedMs: 3200,
+        currentTimeDeltaSeconds: 0,
+        timeAdvancing: false,
+        readyState: 2,
+        networkState: 2,
+      },
+      lifecycleState: "attached",
+      mobilePlayerCanPlay: true,
+      videoPaused: false,
+    });
+
+    assert.equal(decision.start, true);
+  });
+
+  test("low-water recovery waits for a confirmed stopped-time sample before reattaching", () => {
+    const decision = shouldStartVisibleHlsSupplyRecovery({
+      session: { stalled_recovery_needed: true },
+      livenessSample: {
+        bufferedAheadSeconds: 0,
+        elapsedMs: 500,
+        currentTimeDeltaSeconds: 0,
+        timeAdvancing: false,
+      },
+      lifecycleState: "attached",
+      mobilePlayerCanPlay: true,
+      videoPaused: false,
+    });
+
+    assert.equal(decision.start, false);
+    assert.equal(decision.reason, "client_time_not_confirmed_stopped");
   });
 });
 

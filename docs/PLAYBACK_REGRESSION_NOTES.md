@@ -609,3 +609,37 @@ Keep route tests that prove Route2 playback API responses preserve `active_windo
 - Do not let response-model filtering hide `active_window_*` fields again.
 - Do not confuse server `ready_end_seconds` with the currently attached native-HLS manifest edge.
 - Do not change Phase A menu structure, audio switching, subtitles/burn-in, cloud probing, Lite 15/45/180, Full 120/900, background recovery, or adaptive policy while fixing native-HLS stall telemetry.
+
+## iPhone/PWA Long-Play Cache Growth Regression
+
+### Status
+Partially fixed for the concrete frontend recovery bug found in this pass; still requires real iPhone/PWA confirmation because the item-specific iPhone-UA long-play run did not reproduce the user's live Safari/PWA cache stop.
+
+### Affected Platforms
+iPhone/PWA Route2 Lite Browser Playback, especially native-HLS playback after several minutes of continuous viewing.
+
+### Item 1424 Timeline Evidence
+The item-specific iPhone-UA long-play diagnostic for `1424` (`The Super Mario Galaxy Movie`) ran for `520s`, beyond the reported three-minute stall point. In that run Route2 server preparation did not stop: `ready_end_seconds` grew from `0` to `2868`, `active_window_end_seconds` grew from `0` to `556.87`, the worker stayed `running`, `preparation_parked` stayed false, no backend `stalled_recovery_needed` samples appeared, no recovery heartbeat was sent, and no source resets or current-time jumps were observed. That ruled out a general backend cache-growth stop in the hls.js/iPhone-UA harness.
+
+### Root Cause Category
+Failure category fixed in this pass: `A` low-water visible recovery bug. The frontend still allowed backend low-water / `stalled_recovery_needed` to enter the visible recovery and reattach path without proving the client buffer was actually empty and playback time was stopped. On real native-HLS Safari this could turn a recoverable supply warning into user-visible rebuffering, a source reattach, or a current-time jump.
+
+### Correct Fix
+Backend low-water is now treated as a resupply signal while the client is still playable. Visible recovery/reattach may start only when the client has effectively no contiguous buffer ahead, playback time is confirmed not advancing over a real sample window, the session is still attached and released, and no seek/recovery is already in progress. The normal native-HLS window slide remains non-destructive.
+
+### Regression Guards
+Keep tests that prove:
+
+- `stalled_recovery_needed=true` with 20 seconds of client buffer and advancing time does not start visible recovery.
+- `stalled_recovery_needed=true` with empty client buffer and confirmed stopped time can start controlled recovery.
+- Low-water recovery waits for a confirmed stopped-time sample before reattaching.
+- A backend low-water heartbeat does not set the player into visible rebuffering while the client buffer is playable.
+
+### Do Not Regress
+- Backend low-water cannot trigger visible recovery while client buffer is playable.
+- Active/prewarm/visible sessions must keep preparing.
+- Adaptive cannot starve active playback.
+- Native-HLS active windows must advance without destructive normal reattach.
+- Visible user-facing wording remains `Prepared through X of Y.`
+- Lite 15/45/180 and Full 120/900 threshold values remain unchanged.
+- Do not change Phase A menu structure, audio switching, subtitles/burn-in, cloud probing, or adaptive policy while tightening recovery.

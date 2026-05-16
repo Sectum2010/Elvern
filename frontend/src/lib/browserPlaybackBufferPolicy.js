@@ -390,6 +390,58 @@ export function shouldRecoverNativeHlsStalePlaylist({
   );
 }
 
+export function shouldStartVisibleHlsSupplyRecovery({
+  session = {},
+  livenessSample = {},
+  seekPending = false,
+  recoveryInFlight = false,
+  lifecycleState = "attached",
+  mobilePlayerCanPlay = false,
+  videoPaused = false,
+  hlsJsAttached = false,
+  stalePlaylistStall = false,
+} = {}) {
+  if (
+    seekPending
+    || recoveryInFlight
+    || lifecycleState !== "attached"
+    || !mobilePlayerCanPlay
+    || videoPaused
+  ) {
+    return { start: false, reason: "client_not_recoverable" };
+  }
+  const backendWantsRecovery = Boolean(
+    session?.stalled_recovery_needed
+    || stalePlaylistStall
+  );
+  if (!backendWantsRecovery) {
+    return { start: false, reason: "backend_not_recovering" };
+  }
+  const bufferedAhead = Math.max(0, Number(livenessSample?.bufferedAheadSeconds || 0));
+  const elapsedMs = Math.max(0, Number(livenessSample?.elapsedMs || 0));
+  const currentTimeDeltaSeconds = Math.max(0, Number(livenessSample?.currentTimeDeltaSeconds || 0));
+  const timeAdvancing = livenessSample?.timeAdvancing;
+  const stallReason = String(livenessSample?.stallReason || "");
+  const clientBufferEmpty = bufferedAhead <= 0.5;
+  const timeConfirmedStopped = Boolean(
+    elapsedMs >= 2000
+    && timeAdvancing === false
+    && currentTimeDeltaSeconds < 0.1
+  );
+  if (!clientBufferEmpty) {
+    return { start: false, reason: "client_buffer_playable" };
+  }
+  if (!timeConfirmedStopped) {
+    return { start: false, reason: "client_time_not_confirmed_stopped" };
+  }
+  return {
+    start: true,
+    reason: stalePlaylistStall && !hlsJsAttached
+      ? "native_hls_playlist_starved"
+      : (stallReason || "client_buffer_empty"),
+  };
+}
+
 export function classifyManifestWindowState({
   absolutePositionSeconds = 0,
   manifestEndSeconds = 0,
