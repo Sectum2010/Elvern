@@ -641,6 +641,14 @@ export function DetailPage() {
       return undefined;
     }
     const preventViewportPan = (event) => {
+      const target = event.target;
+      if (
+        target?.closest?.(".elvern-overlay__track-menu")
+        || target?.closest?.(".elvern-overlay__menu-host")
+        || target?.closest?.(".elvern-overlay__track-menu-item")
+      ) {
+        return;
+      }
       if (event.cancelable) {
         event.preventDefault();
       }
