@@ -10516,6 +10516,7 @@ def test_route2_pending_reclaim_reserves_donor_and_suppresses_autonomous_mainten
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     pending = manager._route2_create_pending_reclaim_request_locked(
         incoming_user_id=2,
@@ -10650,6 +10651,7 @@ def test_route2_adaptive_reclaim_measures_capacity_after_switch_before_admission
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     with pytest.raises(PlaybackAdmissionError):
         manager._raise_if_route2_admission_denied_locked(
@@ -10720,6 +10722,7 @@ def test_route2_adaptive_reclaim_measured_insufficient_capacity_does_not_claim_s
         observation_seconds=24.0,
         runway_seconds=320.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     with pytest.raises(PlaybackAdmissionError):
         manager._raise_if_route2_admission_denied_locked(
@@ -10765,6 +10768,7 @@ def test_route2_adaptive_reclaim_abort_preserves_old_epoch_and_records_abort(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._create_route2_downshift_replacement_epoch_locked(
         session,
@@ -10933,6 +10937,7 @@ def test_route2_reclaim_retry_cooldown_blocks_before_replacement_cap(
         observation_seconds=24.0,
         runway_seconds=260.0,
         cpu_cores_used=1.0,
+        client_is_playing=False,
     )
     replacement = manager._create_route2_downshift_replacement_epoch_locked(
         session,
