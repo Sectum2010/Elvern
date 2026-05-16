@@ -401,3 +401,30 @@ Keep tests that verify:
 - Do not let Space activate fullscreen/minimize while the custom overlay owns playback.
 - Do not let touch/pen pointer leave hide phone/tablet controls.
 - Do not reintroduce `100vh` overrides that defeat phone `100dvh` fullscreen/cinema sizing.
+
+## Phase B.4 / Real Audio Switch Fix
+
+### Status
+Fixed for the reproduced iPhone/PWA route failure.
+
+### Affected Platforms
+iPhone/PWA Browser Playback using Route2 audio switching.
+
+### Symptoms
+Real audio tracks were discovered and displayed, but clicking another audio track showed a generic "Could not switch audio track" error and never created a backend audio replacement.
+
+### Real Root Cause
+The frontend correctly uses `/api/mobile-playback` for iOS/PWA sessions, but the mobile playback router did not expose `/api/mobile-playback/sessions/{session_id}/audio`. The same audio-switch route existed only under `/api/browser-playback`, so iPhone/PWA audio clicks hit a real HTTP 404 before the Route2 replacement path could run.
+
+### Correct Fix
+Add the mobile audio-selection endpoint and forward the selected global ffprobe stream index to the existing `select_audio_track()` backend path. Preserve the old active epoch while the audio replacement prepares. Expose the replacement audio stream index/map and short replacement error in session snapshots so live failures report the actual backend state instead of collapsing to a generic UI-only failure.
+
+### Regression Guards
+Keep route tests that verify mobile audio switching accepts a global stream index and returns `preparing` state with a pending audio stream. Keep backend contract tests that verify Route2 audio replacements report the selected stream and ffmpeg map string.
+
+### Do Not Regress
+- Discovery is not enough; clicking a trusted backend audio row must reach the backend audio replacement path.
+- UI pending is not enough; the backend must either promote the new stream or report an exact failure reason.
+- Do not leave iPhone/PWA routed to a missing mobile audio endpoint.
+- Do not stop old playback while the selected audio replacement prepares.
+- Do not change Lite startup thresholds or normal native-HLS window-slide behavior while fixing audio switching.

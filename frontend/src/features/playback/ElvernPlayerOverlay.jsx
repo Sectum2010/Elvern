@@ -830,7 +830,8 @@ export default function ElvernPlayerOverlay({
       refreshControlsTimer();
     } catch (trackError) {
       setAudioSwitchVisual(null);
-      setAudioTrackError("Could not switch audio track.");
+      const message = String(trackError?.message || "").trim();
+      setAudioTrackError(message || "Could not switch audio track.");
       refreshControlsTimer();
     }
   }, [audioTracks, closeAllMenus, refreshControlsTimer, selectAudioTrack]);

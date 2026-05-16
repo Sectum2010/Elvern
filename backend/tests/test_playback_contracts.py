@@ -1125,6 +1125,9 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     assert response["audio_switch_state"] == "preparing"
     assert response["audio_switch_replacement_epoch_id"] == session.browser_playback.replacement_epoch_id
     assert response["audio_switch_replacement_reason"] == "audio_track_switch"
+    assert response["audio_switch_replacement_audio_stream_index"] == 5
+    assert response["audio_switch_replacement_audio_map"] == "0:5?"
+    assert response["audio_switch_replacement_last_error"] is None
     assert session.browser_playback.active_epoch_id == original_active_epoch_id
     replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
     assert replacement.audio_stream_index == 5

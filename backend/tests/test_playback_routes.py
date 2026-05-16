@@ -39,6 +39,7 @@ class BrowserPlaybackRouteManagerStub:
         self.manifest_content = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n"
         self.subtitle_prepare_calls: list[dict[str, object]] = []
         self.subtitle_vtt_path: Path | None = None
+        self.audio_track_calls: list[dict[str, object]] = []
 
     def start(self) -> None:
         return None
@@ -78,6 +79,29 @@ class BrowserPlaybackRouteManagerStub:
     def update_runtime(self, session_id: str, *, user_id: int, **kwargs) -> dict[str, object]:
         payload = dict(self.payload)
         payload["session_id"] = session_id
+        return payload
+
+    def select_audio_track(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        selected_audio_stream_index: int,
+        **kwargs,
+    ) -> dict[str, object]:
+        self.audio_track_calls.append({
+            "session_id": session_id,
+            "user_id": user_id,
+            "selected_audio_stream_index": selected_audio_stream_index,
+            **kwargs,
+        })
+        payload = dict(self.payload)
+        payload["session_id"] = session_id
+        payload["selected_audio_stream_index"] = selected_audio_stream_index
+        payload["pending_audio_stream_index"] = selected_audio_stream_index
+        payload["active_audio_stream_index"] = 1
+        payload["audio_switch_state"] = "preparing"
+        payload["audio_switch_error"] = None
         return payload
 
     def get_manifest_content(self, session_id: str, *, user_id: int) -> str:
@@ -1330,6 +1354,71 @@ def test_mobile_playback_create_route_passes_standard_user_role(
 
     assert create_response.status_code == 200
     assert stub.create_kwargs[-1]["user_role"] == "standard_user"
+
+
+def test_mobile_playback_create_route_passes_selected_audio_stream_index(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="mobile/route-selected-audio-create.mp4",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/mobile-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_1080p",
+            "playback_mode": "lite",
+            "start_position_seconds": 12.0,
+            "selected_audio_stream_index": 5,
+        },
+    )
+
+    assert create_response.status_code == 200
+    assert stub.create_kwargs[-1]["selected_audio_stream_index"] == 5
+
+
+def test_mobile_playback_audio_route_selects_track_with_global_stream_index(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="mobile/route-audio-switch.mp4",
+    )
+    payload = _make_browser_playback_route2_payload(item_id=int(item["id"]))
+    stub = BrowserPlaybackRouteManagerStub(payload)
+    client.app.state.mobile_playback_manager = stub
+
+    response = client.post(
+        f"/api/mobile-playback/sessions/{payload['session_id']}/audio",
+        json={
+            "selected_audio_stream_index": 5,
+            "current_position_seconds": 42.5,
+            "playing_before_switch": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selected_audio_stream_index"] == 5
+    assert body["pending_audio_stream_index"] == 5
+    assert body["active_audio_stream_index"] == 1
+    assert body["audio_switch_state"] == "preparing"
+    assert body["audio_switch_error"] is None
+    assert stub.audio_track_calls[-1]["session_id"] == payload["session_id"]
+    assert stub.audio_track_calls[-1]["selected_audio_stream_index"] == 5
+    assert stub.audio_track_calls[-1]["current_position_seconds"] == 42.5
+    assert stub.audio_track_calls[-1]["playing_before_switch"] is True
+    assert stub.audio_track_calls[-1]["auth_session_id"] is not None
 
 
 def test_mobile_playback_create_route_returns_structured_server_max_capacity(

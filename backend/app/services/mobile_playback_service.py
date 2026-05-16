@@ -13287,6 +13287,16 @@ class MobilePlaybackManager:
             if audio_switch_replacement_epoch is not None
             else None
         )
+        audio_switch_replacement_audio_stream_index = (
+            audio_switch_replacement_epoch.audio_stream_index
+            if audio_switch_replacement_epoch is not None
+            else None
+        )
+        audio_switch_replacement_audio_map = (
+            f"0:{int(audio_switch_replacement_audio_stream_index)}?"
+            if audio_switch_replacement_audio_stream_index is not None
+            else None
+        )
         return {
             "session_id": session.session_id,
             "media_item_id": session.media_item_id,
@@ -13390,6 +13400,11 @@ class MobilePlaybackManager:
             ),
             "audio_switch_replacement_reason": (
                 audio_switch_replacement_epoch.replacement_reason if audio_switch_replacement_epoch is not None else None
+            ),
+            "audio_switch_replacement_audio_stream_index": audio_switch_replacement_audio_stream_index,
+            "audio_switch_replacement_audio_map": audio_switch_replacement_audio_map,
+            "audio_switch_replacement_last_error": (
+                audio_switch_replacement_epoch.last_error if audio_switch_replacement_epoch is not None else None
             ),
             "audio_switch_replacement_ready_end_seconds": (
                 round(float(audio_switch_replacement_ready_end_seconds), 2)
