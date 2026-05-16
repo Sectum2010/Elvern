@@ -784,6 +784,16 @@ class MobilePlaybackSessionResponse(BaseModel):
     client_time_advancing: bool | None = None
     client_playback_stall_reason: str | None = None
     hls_js_config: dict[str, object] | None = None
+    active_window_start_seconds: float | None = Field(default=None, ge=0)
+    active_window_end_seconds: float | None = Field(default=None, ge=0)
+    active_window_back_seconds: float | None = Field(default=None, ge=0)
+    active_window_forward_seconds: float | None = Field(default=None, ge=0)
+    active_window_anchor_seconds: float | None = Field(default=None, ge=0)
+    active_window_revision: int | str | None = None
+    active_window_reason: str | None = None
+    native_hls_window_policy: str | None = None
+    client_back_buffer_prune_supported: bool = False
+    full_duration_seconds: float | None = Field(default=None, ge=0)
     full_bad_condition_detected: bool = False
     full_bad_condition_reason: str | None = None
     full_bad_condition_reasons: list[str] = Field(default_factory=list)

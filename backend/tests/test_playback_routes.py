@@ -376,6 +376,17 @@ def _make_browser_playback_route2_payload(
         "effective_goodput_ratio": 2.847,
         "supply_rate_x": 2.847,
         "supply_observation_seconds": 16.92,
+        "selected_hls_engine": "native_hls",
+        "active_window_start_seconds": 720.0,
+        "active_window_end_seconds": 957.01,
+        "active_window_back_seconds": 120.0,
+        "active_window_forward_seconds": 120.0,
+        "active_window_anchor_seconds": 837.01,
+        "active_window_revision": 7,
+        "active_window_reason": "approaching_window_end",
+        "native_hls_window_policy": "native_hls_sliding_window_v1",
+        "client_back_buffer_prune_supported": False,
+        "full_duration_seconds": 14125.17,
     }
 
 
@@ -996,6 +1007,10 @@ def test_browser_playback_routes_accept_full_fast_start_estimate_source(
     assert create_response.status_code == 200
     assert create_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
     assert create_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+    assert create_response.json()["active_window_start_seconds"] == 720.0
+    assert create_response.json()["active_window_end_seconds"] == 957.01
+    assert create_response.json()["active_window_revision"] == 7
+    assert create_response.json()["native_hls_window_policy"] == "native_hls_sliding_window_v1"
     assert client.app.state.mobile_playback_manager.create_kwargs[-1]["user_role"] == "admin"
 
     session_response = client.get(f"/api/browser-playback/sessions/{payload['session_id']}")

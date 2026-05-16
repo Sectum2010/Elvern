@@ -519,3 +519,31 @@ Keep tests that verify:
 - Do not label normal user-facing client buffer separately; keep "Prepared through X of Y." in the player note.
 - Do not call `video.play()`, set `mobilePlayerCanPlay = true`, or clear the waiting state at 4 seconds of client buffer when the selected threshold is 15 seconds or higher.
 - Do not change Phase A menu structure, subtitles/burn-in, cloud probing, recovery/background/native-HLS normal window slide behavior, or adaptive policy while enforcing the client buffer gate.
+
+## iPhone/PWA Continuous Preparation / Stall Regression
+
+### Status
+Fixed for the identified native-HLS window telemetry gap; still requires a real iPhone/PWA long-play ear/device verification.
+
+### Affected Platforms
+iPhone/PWA Route2 Lite Browser Playback using Safari/WebKit native HLS.
+
+### Symptoms
+Item `1424` (`The Super Mario Galaxy Movie`) could start Lite Playback on iPhone/PWA but later stall after several minutes. Local iPhone-UA/hls.js long-play diagnostics showed server preparation continuing and client buffer holding steady, which narrowed the live issue to the native-HLS sliding-window path.
+
+### Real Root Cause
+Failure category: `G` native-HLS sliding-window state was not reaching the client. The backend was actually sliding the native-HLS playlist window: the item-specific native-HLS API diagnostic showed `#EXT-X-MEDIA-SEQUENCE` moving from `0` to `9` to `21` while Route2 `ready_end_seconds` continued far ahead. However `MobilePlaybackSessionResponse` did not declare the `active_window_*`, `native_hls_window_policy`, `client_back_buffer_prune_supported`, or `full_duration_seconds` fields, so FastAPI/Pydantic filtered them out of `/api/browser-playback` and `/api/mobile-playback` responses. The frontend therefore fell back to server `ready_end_seconds` as the attached manifest edge and could not map native-HLS `video.buffered` or window exhaustion against the real sliding playlist window.
+
+### Correct Fix
+Expose the native-HLS active-window fields in the public playback session response schema. The existing backend sliding-window implementation can continue advancing the dynamic manifest without destructive normal reattach, while the frontend now receives the real active window edge and policy fields needed for client-buffer mapping, window-edge detection, and stale native playlist recovery.
+
+### Regression Guards
+Keep route tests that prove Route2 playback API responses preserve `active_window_start_seconds`, `active_window_end_seconds`, `active_window_revision`, and `native_hls_window_policy` instead of filtering them out.
+
+### Do Not Regress
+- Visible user-facing wording remains `Prepared through X of Y.`
+- Server prepared/cache remains necessary but not sufficient for playback release.
+- Native-HLS window slides must continue without normal attach-revision churn.
+- Do not let response-model filtering hide `active_window_*` fields again.
+- Do not confuse server `ready_end_seconds` with the currently attached native-HLS manifest edge.
+- Do not change Phase A menu structure, audio switching, subtitles/burn-in, cloud probing, Lite 15/45/180, Full 120/900, background recovery, or adaptive policy while fixing native-HLS stall telemetry.
