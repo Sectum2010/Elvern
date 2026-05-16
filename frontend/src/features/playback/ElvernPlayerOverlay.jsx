@@ -338,7 +338,7 @@ export default function ElvernPlayerOverlay({
   const [pendingSubtitleTrackId, setPendingSubtitleTrackId] = useState("");
   const [subtitleTrackError, setSubtitleTrackError] = useState("");
   const [pendingAudioTrackId, setPendingAudioTrackId] = useState("");
-  const [pendingAudioTrackRequestId, setPendingAudioTrackRequestId] = useState("");
+  const [audioSwitchRequest, setAudioSwitchRequest] = useState(null);
   const [audioTrackError, setAudioTrackError] = useState("");
 
   const controlsVisibleRef = useRef(true);
@@ -771,15 +771,15 @@ export default function ElvernPlayerOverlay({
     if (!selectedTrack || isBackendUnsupportedTrack(selectedTrack)) {
       return;
     }
+    const selectedStreamIndex = Number.isInteger(selectedTrack.index) ? selectedTrack.index : null;
     setPendingAudioTrackId(trackId);
-    setPendingAudioTrackRequestId(trackId);
+    setAudioSwitchRequest({ trackId, streamIndex: selectedStreamIndex, status: "requesting" });
     setAudioTrackError("");
     refreshControlsTimer();
     try {
       const payload = await selectAudioTrack(trackId);
       const sessionPayloadResponse = payload?.sessionPayload || payload;
       const switchState = String(sessionPayloadResponse?.audio_switch_state || "").trim().toLowerCase();
-      const selectedStreamIndex = Number.isInteger(selectedTrack.index) ? selectedTrack.index : null;
       const pendingStreamIndex = Number.isInteger(sessionPayloadResponse?.pending_audio_stream_index)
         ? sessionPayloadResponse.pending_audio_stream_index
         : null;
@@ -788,16 +788,26 @@ export default function ElvernPlayerOverlay({
         : null;
       if (switchState === "failed") {
         setPendingAudioTrackId("");
-        setPendingAudioTrackRequestId("");
+        setAudioSwitchRequest(null);
         setAudioTrackError("Could not switch audio track.");
       } else if (
         switchState === "preparing"
         && selectedStreamIndex != null
         && pendingStreamIndex === selectedStreamIndex
       ) {
+        setAudioSwitchRequest({ trackId, streamIndex: selectedStreamIndex, status: "pending" });
+        setPendingAudioTrackId(trackId);
+        setAudioTrackError("");
+      } else if (
+        switchState === "active"
+        && selectedStreamIndex != null
+        && activeStreamIndex === selectedStreamIndex
+      ) {
+        setPendingAudioTrackId("");
+        setAudioSwitchRequest(null);
         setAudioTrackError("");
       } else {
-        setPendingAudioTrackRequestId("");
+        setAudioSwitchRequest(null);
         if (
           selectedStreamIndex == null
           || pendingStreamIndex == null
@@ -809,7 +819,7 @@ export default function ElvernPlayerOverlay({
       refreshControlsTimer();
     } catch (trackError) {
       setPendingAudioTrackId("");
-      setPendingAudioTrackRequestId("");
+      setAudioSwitchRequest(null);
       setAudioTrackError("Could not switch audio track.");
       refreshControlsTimer();
     }
@@ -817,46 +827,88 @@ export default function ElvernPlayerOverlay({
 
   useEffect(() => {
     const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
-    if (switchState === "failed") {
-      setPendingAudioTrackId("");
-      setPendingAudioTrackRequestId("");
-      setAudioTrackError("Could not switch audio track.");
-      return;
-    }
+    const pendingStreamIndex = Number.isInteger(sessionPayload?.pending_audio_stream_index)
+      ? sessionPayload.pending_audio_stream_index
+      : null;
+    const activeStreamIndex = Number.isInteger(sessionPayload?.active_audio_stream_index)
+      ? sessionPayload.active_audio_stream_index
+      : null;
+    const selectedStreamIndex = Number.isInteger(sessionPayload?.selected_audio_stream_index)
+      ? sessionPayload.selected_audio_stream_index
+      : null;
     const backendPendingTrack = audioTracks.find((track) => (
       Number.isInteger(track.index)
-      && Number.isInteger(sessionPayload?.pending_audio_stream_index)
-      && track.index === sessionPayload.pending_audio_stream_index
+      && pendingStreamIndex != null
+      && track.index === pendingStreamIndex
     ));
     const backendActiveTrack = audioTracks.find((track) => (
       Number.isInteger(track.index)
-      && Number.isInteger(sessionPayload?.active_audio_stream_index)
-      && track.index === sessionPayload.active_audio_stream_index
+      && activeStreamIndex != null
+      && track.index === activeStreamIndex
     ));
+    if (audioSwitchRequest) {
+      const requestStreamIndex = audioSwitchRequest.streamIndex;
+      if (
+        switchState === "preparing"
+        && requestStreamIndex != null
+        && pendingStreamIndex === requestStreamIndex
+      ) {
+        if (audioSwitchRequest.status !== "pending") {
+          setAudioSwitchRequest({ ...audioSwitchRequest, status: "pending" });
+        }
+        setPendingAudioTrackId(audioSwitchRequest.trackId);
+        setAudioTrackError("");
+      } else if (
+        switchState === "active"
+        && requestStreamIndex != null
+        && activeStreamIndex === requestStreamIndex
+      ) {
+        setAudioSwitchRequest(null);
+        setPendingAudioTrackId("");
+        setAudioTrackError("");
+      } else if (
+        switchState === "failed"
+        && (
+          audioSwitchRequest.status === "pending"
+          || (
+            requestStreamIndex != null
+            && (pendingStreamIndex === requestStreamIndex || selectedStreamIndex === requestStreamIndex)
+          )
+        )
+      ) {
+        setAudioSwitchRequest(null);
+        setPendingAudioTrackId("");
+        setAudioTrackError("Could not switch audio track.");
+      }
+      return;
+    }
+    if (switchState === "failed") {
+      setPendingAudioTrackId("");
+      setAudioTrackError("Could not switch audio track.");
+      return;
+    }
+    if (switchState === "preparing" && backendPendingTrack) {
+      setPendingAudioTrackId(backendPendingTrack.id);
+      setAudioTrackError("");
+      return;
+    }
     if (switchState === "active") {
       if (
         (pendingAudioTrackId && backendActiveTrack?.id === pendingAudioTrackId)
-        || (pendingAudioTrackRequestId && backendActiveTrack?.id === pendingAudioTrackRequestId)
       ) {
+        setPendingAudioTrackId("");
         setAudioTrackError("");
       }
-      if (!pendingAudioTrackRequestId || backendActiveTrack?.id === pendingAudioTrackRequestId) {
-        setPendingAudioTrackRequestId("");
-      }
-    } else if (
-      pendingAudioTrackRequestId
-      && backendPendingTrack?.id === pendingAudioTrackRequestId
-    ) {
-      setPendingAudioTrackRequestId("");
     }
   }, [
+    audioSwitchRequest,
     audioTracks,
     pendingAudioTrackId,
-    pendingAudioTrackRequestId,
     sessionPayload?.audio_switch_error,
     sessionPayload?.audio_switch_state,
     sessionPayload?.active_audio_stream_index,
     sessionPayload?.pending_audio_stream_index,
+    sessionPayload?.selected_audio_stream_index,
   ]);
 
   useEffect(() => {
@@ -864,7 +916,7 @@ export default function ElvernPlayerOverlay({
       return;
     }
     const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
-    if (pendingAudioTrackRequestId === pendingAudioTrackId) {
+    if (audioSwitchRequest?.trackId === pendingAudioTrackId) {
       return;
     }
     const pendingTrack = audioTracks.find((track) => track.id === pendingAudioTrackId);
@@ -877,7 +929,7 @@ export default function ElvernPlayerOverlay({
     if (switchState === "failed") {
       setAudioTrackError("Could not switch audio track.");
     }
-  }, [audioTracks, pendingAudioTrackId, pendingAudioTrackRequestId, sessionPayload?.audio_switch_state]);
+  }, [audioSwitchRequest, audioTracks, pendingAudioTrackId, sessionPayload?.audio_switch_state]);
 
   const togglePip = useCallback(async () => {
     const video = videoRef?.current;

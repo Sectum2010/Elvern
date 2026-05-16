@@ -71,6 +71,16 @@ Correct fix: audio switching is a finite state machine: `preparing` must resolve
 
 Do not regress: never leave `pending_audio_stream_index` pointing to a failed/discarded replacement, never keep a local pending spinner after backend failed or cleared pending, and never stop current playback while the audio replacement prepares.
 
+### Phase B.2 Addendum: Stale Failure Must Not Clear A New Audio Request
+
+Bug: the Phase B.2 failure cleanup could erase the row-level spinner for a new audio click when the existing session snapshot still carried an older `audio_switch_state = "failed"`.
+
+Root cause: the frontend treated stale global audio switch failure as the current request failure. That collapsed request-local pending before the `/audio` response or matching backend pending/active/failed state arrived.
+
+Correct fix: audio pending is split into request-local state and backend snapshot state. A stale failed snapshot cannot clear a new request spinner; only the matched `/audio` response or matching backend pending/active/failed stream can take over or clear it.
+
+Do not regress: an old audio failure must never erase a newly clicked backend audio row spinner.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status
