@@ -883,7 +883,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const { getByRole, getByText, queryByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
-        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
         { index: 2, label: "Commentary (aac)", codec: "aac", track_source: "raw_probe_summary_json" },
       ],
       backendSubtitleTracks: [
@@ -920,7 +920,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       await Promise.resolve();
     });
     expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({
-      index: 2,
+      index: 5,
       source: "backend",
       switchRequiresPreparation: true,
     }));
@@ -1000,16 +1000,16 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const { container, getByRole, getByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
-        { index: 2, title: "French", codec: "ac3", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", disposition_default: true, track_source: "raw_probe_summary_json" },
         { index: 3, title: "Japanese", codec: "aac", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
       onToggleFullscreen: vi.fn(),
       sessionPayload: {
-        active_audio_stream_index: 2,
+        active_audio_stream_index: 5,
         audio_switch_state: "active",
-        selected_audio_stream_index: 2,
+        selected_audio_stream_index: 5,
       },
     });
 
@@ -1027,14 +1027,14 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const onBackendAudioTrackSelect = vi.fn(() => new Promise((resolve) => {
       resolveSwitch = () => resolve({
         active_audio_stream_index: 1,
-        pending_audio_stream_index: 2,
+        pending_audio_stream_index: 5,
         audio_switch_state: "preparing",
       });
     }));
     const { getByRole, rerenderOverlay } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
-        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
@@ -1054,7 +1054,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(getByRole("menuitemradio", { name: "French" }));
     });
 
-    expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({ index: 2 }));
+    expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({ index: 5 }));
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
@@ -1072,9 +1072,9 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     rerenderOverlay({
       sessionPayload: {
         active_audio_stream_index: 1,
-        pending_audio_stream_index: 2,
+        pending_audio_stream_index: 5,
         audio_switch_state: "preparing",
-        selected_audio_stream_index: 2,
+        selected_audio_stream_index: 5,
       },
     });
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
@@ -1083,10 +1083,10 @@ describe("ElvernPlayerOverlay controls visibility", () => {
 
     rerenderOverlay({
       sessionPayload: {
-        active_audio_stream_index: 2,
+        active_audio_stream_index: 5,
         pending_audio_stream_index: null,
         audio_switch_state: "active",
-        selected_audio_stream_index: 2,
+        selected_audio_stream_index: 5,
       },
     });
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "true");
@@ -1099,7 +1099,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const { getByRole, queryByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
-        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
@@ -1121,7 +1121,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       fireEvent.click(getByRole("menuitemradio", { name: "French" }));
     });
 
-    expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({ index: 2 }));
+    expect(onBackendAudioTrackSelect).toHaveBeenCalledWith(expect.objectContaining({ index: 5 }));
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
@@ -1134,7 +1134,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const { getByRole, getByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
-        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
@@ -1181,7 +1181,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const { getByRole, getByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
-        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",
@@ -1212,7 +1212,96 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
     expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
     expect(getByRole("menuitemradio", { name: "French" })).not.toHaveClass("elvern-overlay__track-menu-item--pending");
+    expect(getByRole("menuitemradio", { name: /French/ })).toHaveClass("elvern-overlay__track-menu-item--error");
+    expect(getByRole("button", { name: "Audio track" })).toHaveClass("elvern-overlay__icon-button--error");
     expect(getByText("audio map failed")).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    expect(getByRole("button", { name: "Audio track" })).toHaveClass("elvern-overlay__icon-button--error");
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "English" }));
+    });
+    expect(getByRole("button", { name: "Audio track" })).not.toHaveClass("elvern-overlay__icon-button--error");
+  });
+
+  test("backend active audio waits for client attach ack before final selected state", async () => {
+    let resolveSwitch;
+    const onBackendAudioTrackSelect = vi.fn(() => new Promise((resolve) => {
+      resolveSwitch = () => resolve({
+        active_audio_stream_index: 5,
+        pending_audio_stream_index: null,
+        selected_audio_stream_index: 5,
+        audio_switch_state: "active",
+        attach_revision: 4,
+        client_attach_revision: 3,
+      });
+    }));
+    const { getByRole, rerenderOverlay } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendAudioTrackSelect,
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 1,
+        attach_revision: 3,
+        client_attach_revision: 3,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+    });
+
+    await act(async () => {
+      resolveSwitch();
+      await Promise.resolve();
+    });
+
+    expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+
+    rerenderOverlay({
+      sessionPayload: {
+        active_audio_stream_index: 5,
+        pending_audio_stream_index: null,
+        selected_audio_stream_index: 5,
+        audio_switch_state: "active",
+        attach_revision: 4,
+        client_attach_revision: 3,
+      },
+    });
+    expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+
+    rerenderOverlay({
+      sessionPayload: {
+        active_audio_stream_index: 5,
+        pending_audio_stream_index: null,
+        selected_audio_stream_index: 5,
+        audio_switch_state: "active",
+        attach_revision: 4,
+        client_attach_revision: 4,
+      },
+    });
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
   });
 
   test("accepted ambiguous backend audio response keeps pending without fake failure", async () => {
@@ -1228,7 +1317,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     const { getByRole, queryByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
-        { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
       ],
       cinemaModeActive: true,
       deviceClass: "phone",

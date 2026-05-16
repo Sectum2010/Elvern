@@ -5581,6 +5581,16 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   background: rgba(225, 29, 72, 0.32);
 }
 
+.elvern-overlay__icon-button--error {
+  color: #ffffff;
+  background: rgba(220, 38, 38, 0.28);
+  border-color: rgba(248, 113, 113, 0.55);
+}
+
+.elvern-overlay__icon-button--error:hover {
+  background: rgba(220, 38, 38, 0.38);
+}
+
 .elvern-overlay__icon {
   width: 1.35rem;
   height: 1.35rem;
@@ -5710,6 +5720,17 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-overlay__track-menu-item--pending .elvern-overlay__track-menu-spinner {
   opacity: 1;
   border-top-color: #ffffff;
+}
+
+.elvern-overlay__track-menu-item--error {
+  background: rgba(220, 38, 38, 0.2);
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.42);
+}
+
+.elvern-overlay__track-menu-item--error:hover,
+.elvern-overlay__track-menu-item--error:focus-visible {
+  background: rgba(220, 38, 38, 0.3);
 }
 
 .elvern-overlay__menu-item--disabled,
@@ -6068,6 +6089,13 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-overlay__track-menu-warning {
   flex: 0 0 auto;
   color: #f87171;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.elvern-overlay__track-menu-error-mark {
+  flex: 0 0 auto;
+  color: #fecaca;
   font-weight: 900;
   line-height: 1;
 }

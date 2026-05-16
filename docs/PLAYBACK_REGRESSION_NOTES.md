@@ -101,6 +101,18 @@ Correct fix: accepted ambiguous `/audio` responses keep the clicked row pending 
 
 Do not regress: do not show fake generic failure without backend failed/error state, do not create replacements for invalid or fallback stream indexes, do not change global Lite startup thresholds, and do not stop the old active playback while selected audio prepares.
 
+### Phase B.5 Addendum: Galaxy Item Audio Switch Attach And Error State
+
+Bug: on the user-tested `The Super Mario Galaxy Movie` item (`media_item_id=1424`), audio discovery showed the real tracks, but live UI could still look failed or inconclusive after clicking a track.
+
+Evidence: item-specific Route2 mobile audio-switch tests found trusted raw-probe audio streams at ffprobe global indexes `1`, `2`, `3`, and `4`. Switching through `/api/mobile-playback/sessions/{session_id}/audio` prepared and promoted target streams `2`, `3`, and `4`; the replacement snapshots carried maps `0:2?`, `0:3?`, and `0:4?`, and `active_audio_stream_index` changed after the audio-specific runway. The API-only run had no browser client to acknowledge the new `attach_revision`, so `client_attach_revision` stayed behind even after backend promotion.
+
+Real root cause category: backend replacement/promotion was working for this item. The remaining regression was client/UI convergence: backend active stream change alone was treated as final success, failed/unusable options only showed generic text, and the audio button/row did not preserve a clear red failed-option state.
+
+Correct fix: keep the old active row selected while an audio-switch promotion waits for client attach acknowledgement, keep the clicked row pending until `client_attach_revision` catches up to `attach_revision`, and mark explicit backend failures with a red row plus red audio button until the user chooses a usable/current track.
+
+Do not regress: backend active stream change is not enough proof of client switch; the client attach must be acknowledged. Failed options must be visibly red and not selected. Stream indexes must remain ffprobe global indexes, the mobile audio route must stay covered, and old playback must continue while the selected audio replacement prepares.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status

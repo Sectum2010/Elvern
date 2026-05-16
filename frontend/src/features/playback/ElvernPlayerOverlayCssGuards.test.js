@@ -192,6 +192,8 @@ describe("Elvern player mobile CSS guards", () => {
     const pendingBlock = cssBlock(styles, ".elvern-overlay__track-menu-item--pending");
     const pendingDisabledBlock = cssBlock(styles, ".elvern-overlay__track-menu-item--pending:disabled");
     const pendingSpinnerBlock = cssBlock(styles, ".elvern-overlay__track-menu-item--pending .elvern-overlay__track-menu-spinner");
+    const errorBlock = cssBlock(styles, ".elvern-overlay__track-menu-item--error");
+    const errorButtonBlock = cssBlock(styles, ".elvern-overlay__icon-button--error");
 
     expect(styles).not.toContain(".elvern-overlay__track-sheet");
     expect(shellOpenBlock).toContain("touch-action: pan-y");
@@ -213,6 +215,9 @@ describe("Elvern player mobile CSS guards", () => {
     expect(pendingDisabledBlock).toContain("cursor: progress");
     expect(pendingDisabledBlock).toContain("opacity: 1");
     expect(pendingSpinnerBlock).toContain("opacity: 1");
+    expect(errorBlock).toContain("background: rgba(220, 38, 38");
+    expect(errorBlock).toContain("color: #ffffff");
+    expect(errorButtonBlock).toContain("background: rgba(220, 38, 38");
   });
 
   test("timeline has no standalone playhead knob styling", () => {
