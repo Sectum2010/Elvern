@@ -1655,7 +1655,7 @@ export function useBrowserPlaybackController({
 
     function handleLoadedMetadata() {
       updatePlayerMetrics();
-      maybeAcknowledgeHlsAttachment({ playing: !video.paused, force: true });
+      maybeAcknowledgeHlsAttachment({ playing: !video.paused, force: true, loadedEventName: "loadedmetadata" });
       if (mobilePendingTargetRef.current != null && mobileSessionRef.current) {
         const pendingTarget = mobilePendingTargetRef.current;
         video.currentTime = resolveMediaElementPositionForAbsolute(mobileSessionRef.current, pendingTarget);
@@ -1862,7 +1862,7 @@ export function useBrowserPlaybackController({
       updatePlayerMetrics();
       mobileLoadedDataSeenRef.current = true;
       sampleNativeClientPlayback();
-      maybeAcknowledgeHlsAttachment({ playing: !video.paused });
+      maybeAcknowledgeHlsAttachment({ playing: !video.paused, loadedEventName: "loadeddata" });
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();
       armFirstFrameStallMonitor();
@@ -1881,8 +1881,8 @@ export function useBrowserPlaybackController({
       if (!mobileSessionRef.current) {
         return;
       }
-      maybeAcknowledgeHlsAttachment({ playing: !video.paused });
       if (!iosMobile) {
+        maybeAcknowledgeHlsAttachment({ playing: !video.paused, loadedEventName: "canplay" });
         mobilePlayerCanPlayRef.current = true;
         setMobilePlayerCanPlay(true);
         clearOptimizedPlaybackPending();
@@ -1891,6 +1891,7 @@ export function useBrowserPlaybackController({
         return;
       }
       mobileCanPlaySeenRef.current = true;
+      maybeAcknowledgeHlsAttachment({ playing: !video.paused, loadedEventName: "canplay" });
       sampleNativeClientPlayback();
       maybeProbeMobileFirstFrame();
       maybeFinalizeMobilePlayerReadiness();

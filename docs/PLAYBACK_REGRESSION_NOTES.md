@@ -113,6 +113,18 @@ Correct fix: keep the old active row selected while an audio-switch promotion wa
 
 Do not regress: backend active stream change is not enough proof of client switch; the client attach must be acknowledged. Failed options must be visibly red and not selected. Stream indexes must remain ffprobe global indexes, the mobile audio route must stay covered, and old playback must continue while the selected audio replacement prepares.
 
+### Plan B Addendum: Verified Audio Switch Attach
+
+Bug: real iPhone/PWA testing showed that backend `active_audio_stream_index` changing was not enough proof that Safari's native-HLS media pipeline had actually loaded the new audio-switch manifest.
+
+Evidence: on item `1424`, backend audio switching promoted stream `2` and changed `active_epoch_id`/`attach_revision`, but a browser-side trace showed a gap where backend was active on the new stream while the video element still held the old blob/source. A generic heartbeat could carry the pending `client_attach_revision` without proving it came after the new audio-switch source loaded.
+
+Real root cause: Route2 attach acknowledgement was revision-based rather than audio-switch-source-based. The client could acknowledge a new attach revision from generic heartbeat/video paths before the expected replacement epoch manifest had produced a fresh `loadedmetadata`/`loadeddata`/`canplay` event.
+
+Correct fix: audio-switch promotion now creates an explicit expected attach record: target stream, expected attach revision, expected active epoch, and expected manifest URL. Normal heartbeats cannot acknowledge that revision. The hook force-attaches the replacement manifest, waits for the expected source/epoch/revision to be set, waits for a load/canplay event from that attach, and only then sends `client_attach_revision`.
+
+Do not regress: never treat backend active audio as final client success, never send audio-switch attach ack before the expected source loads, never mark the new row selected before `client_attach_revision >= attach_revision`, and do not route ordinary native-HLS window slides through this special audio-switch reattach path.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status
