@@ -19,6 +19,7 @@ import {
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
   retuneHlsInstance,
+  shouldStartClientBufferPrewarm,
   shouldRecoverNativeHlsStalePlaylist,
   shouldDisarmFirstFrameStallMonitor,
 } from "../../lib/browserPlaybackBufferPolicy";
@@ -1822,6 +1823,115 @@ export function useBrowserPlaybackController({
       }
     }
 
+    function hasAttachedSourceForClientPrewarm(currentSession) {
+      if (!currentSession || !streamSource) {
+        return false;
+      }
+      const attachedEpoch = mobileAttachedEpochRef.current;
+      const expectedEpoch = resolveSessionAttachmentIdentity(currentSession);
+      if (attachedEpoch && expectedEpoch && attachedEpoch !== expectedEpoch) {
+        return false;
+      }
+      return Boolean(video.currentSrc || video.getAttribute("src") || streamSource.url);
+    }
+
+    function handleIosPrewarmPlayFailure(requestError, readinessGeneration, { allowReadyFallback = false } = {}) {
+      mobileWarmupProbeActiveRef.current = false;
+      const normalized = (requestError?.message || "").toLowerCase();
+      if (
+        normalized.includes("abort")
+        || normalized.includes("interrupted")
+        || normalized.includes("fetching process")
+      ) {
+        window.setTimeout(() => {
+          if (readinessGeneration !== mobileReadinessGenerationRef.current) {
+            return;
+          }
+          maybeFinalizeMobilePlayerReadiness();
+        }, 500);
+        return;
+      }
+      if (
+        normalized.includes("gesture")
+        || normalized.includes("notallowed")
+        || normalized.includes("denied")
+        || normalized.includes("not allowed")
+      ) {
+        mobileAutoplayPendingRef.current = false;
+        mobileResumeAfterReadyRef.current = false;
+        browserPlayRequestedRef.current = false;
+        if (allowReadyFallback) {
+          mobilePlayerCanPlayRef.current = true;
+          setMobilePlayerCanPlay(true);
+          setMobileLifecycleStateValue("attached");
+          clearOptimizedPlaybackPending();
+          setPlaybackStatus(browserReadyLabelTitle);
+          if (mobilePendingTargetRef.current != null) {
+            mobilePendingTargetRef.current = null;
+            mobileSeekPendingRef.current = false;
+            pendingSeekPhaseRef.current = "idle";
+            setPendingSeekPhase("idle");
+          }
+        } else {
+          setPlaybackStatus(`Preparing ${browserPlaybackLabel}`);
+        }
+        setPlaybackError("");
+        setSeekNotice(`Tap play in the video controls to continue ${browserPlaybackLabel}.`);
+        return;
+      }
+      setPlaybackError(requestError.message || `Failed to warm up ${browserPlaybackLabel}`);
+    }
+
+    function startIosClientBufferPrewarm(currentSession, { fromUserGesture = false } = {}) {
+      const releaseGate = evaluateMobileClientReleaseGate(currentSession, video);
+      const playbackIntentActive =
+        fromUserGesture
+        || mobileAutoplayPendingRef.current
+        || mobileResumeAfterReadyRef.current
+        || browserPlayRequestedRef.current;
+      if (!shouldStartClientBufferPrewarm({
+        iosMobile,
+        hasMobileSession: Boolean(currentSession),
+        hasAttachedSource: hasAttachedSourceForClientPrewarm(currentSession),
+        mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
+        playbackIntentActive,
+        releaseGateReady: releaseGate.ready,
+        seekPending: Boolean(mobileSeekPendingRef.current),
+        retargetTransition: Boolean(mobileRetargetTransitionRef.current),
+        awaitingTargetSeek: Boolean(mobileAwaitingTargetSeekRef.current),
+      })) {
+        return false;
+      }
+      const warmupAlreadyActive = mobileWarmupProbeActiveRef.current;
+      if (!warmupAlreadyActive) {
+        mobileWarmupProbeActiveRef.current = true;
+        mobileWarmupPlaybackObservedRef.current = false;
+        mobileWarmupStartPositionRef.current =
+          mobilePendingTargetRef.current != null
+            ? resolveMediaElementPositionForAbsolute(mobileSessionRef.current, mobilePendingTargetRef.current)
+            : (video.currentTime || 0);
+      }
+      setPlaybackStatus(`Preparing ${browserPlaybackLabel}`);
+      setSeekNotice(`Elvern is still preparing enough video for stable ${browserPlaybackLabel}.`);
+      if (iosMobile && getPlaybackMode(currentSession?.playback_mode || playbackModeIntentRef.current) === "lite") {
+        video.controls = true;
+      }
+      if (fromUserGesture && !video.paused) {
+        return true;
+      }
+      if (warmupAlreadyActive && !video.paused) {
+        return true;
+      }
+      const readinessGeneration = mobileReadinessGenerationRef.current;
+      video.play().catch((requestError) => {
+        if (readinessGeneration !== mobileReadinessGenerationRef.current) {
+          return;
+        }
+        handleIosPrewarmPlayFailure(requestError, readinessGeneration);
+      });
+      return true;
+    }
+
     function maybeFinalizeMobilePlayerReadiness() {
       if (!iosMobile || !mobileSessionRef.current || !streamSource) {
         return;
@@ -1832,6 +1942,16 @@ export function useBrowserPlaybackController({
         || mobileResumeAfterReadyRef.current
         || browserPlayRequestedRef.current;
       const isRetargetTransition = mobileRetargetTransitionRef.current;
+      const clientReleaseGate = isRetargetTransition
+        ? null
+        : evaluateMobileClientReleaseGate(currentSession, video);
+      if (
+        clientReleaseGate
+        && !clientReleaseGate.ready
+        && shouldAutoplay
+      ) {
+        startIosClientBufferPrewarm(currentSession);
+      }
       if (!mobileCanPlaySeenRef.current || !mobileLoadedDataSeenRef.current) {
         return;
       }
@@ -1867,7 +1987,6 @@ export function useBrowserPlaybackController({
           return;
         }
       } else {
-        const clientReleaseGate = evaluateMobileClientReleaseGate(currentSession, video);
         if (!clientReleaseGate.ready) {
           return;
         }
@@ -1901,47 +2020,7 @@ export function useBrowserPlaybackController({
               }, 250);
             })
             .catch((requestError) => {
-              mobileWarmupProbeActiveRef.current = false;
-              const normalized = (requestError?.message || "").toLowerCase();
-              if (
-                normalized.includes("abort")
-                || normalized.includes("interrupted")
-                || normalized.includes("fetching process")
-              ) {
-                window.setTimeout(() => {
-                  if (readinessGeneration !== mobileReadinessGenerationRef.current) {
-                    return;
-                  }
-                  maybeFinalizeMobilePlayerReadiness();
-                }, 500);
-                return;
-              }
-              if (
-                normalized.includes("gesture")
-                || normalized.includes("notallowed")
-                || normalized.includes("denied")
-                || normalized.includes("not allowed")
-              ) {
-                mobileAutoplayPendingRef.current = false;
-                mobileResumeAfterReadyRef.current = false;
-                browserPlayRequestedRef.current = false;
-                mobilePlayerCanPlayRef.current = true;
-                setMobilePlayerCanPlay(true);
-                setMobileLifecycleStateValue("attached");
-                clearOptimizedPlaybackPending();
-                setPlaybackError("");
-                setPlaybackStatus(browserReadyLabelTitle);
-                setSeekNotice(`Tap play in the video controls to continue ${browserPlaybackLabel}.`);
-                if (mobilePendingTargetRef.current != null) {
-                  mobilePendingTargetRef.current = null;
-                  mobileSeekPendingRef.current = false;
-                  pendingSeekPhaseRef.current = "idle";
-                  setPendingSeekPhase("idle");
-                }
-                return;
-              }
-              clearOptimizedPlaybackPending();
-              setPlaybackError(requestError.message || `Failed to continue ${browserPlaybackLabel}`);
+              handleIosPrewarmPlayFailure(requestError, readinessGeneration, { allowReadyFallback: true });
             });
         }
         if (!mobileWarmupPlaybackObservedRef.current) {
@@ -1954,6 +2033,7 @@ export function useBrowserPlaybackController({
       setMobileFrozenFrameUrl("");
       clearOptimizedPlaybackPending();
       setPlaybackError("");
+      setSeekNotice("");
       setPlaybackStatus(browserReadyLabelTitle);
       mobileWarmupProbeActiveRef.current = false;
       mobileWarmupPlaybackObservedRef.current = false;
@@ -2311,8 +2391,8 @@ export function useBrowserPlaybackController({
     function handlePlayStarted() {
       if (iosMobile && mobileSessionRef.current && !mobilePlayerCanPlayRef.current) {
         if (!mobileWarmupProbeActiveRef.current) {
-          video.pause();
           mobileAutoplayPendingRef.current = true;
+          startIosClientBufferPrewarm(mobileSessionRef.current, { fromUserGesture: true });
           setPlaybackStatus(`Preparing ${browserPlaybackLabel}`);
           setSeekNotice(`Elvern is still preparing enough video for stable ${browserPlaybackLabel}.`);
         }

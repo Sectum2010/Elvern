@@ -12,6 +12,7 @@ import {
   resolveClientPlaybackReleaseBufferSeconds,
   resolvePlaybackRecoveryTargetSeconds,
   retuneHlsInstance,
+  shouldStartClientBufferPrewarm,
   shouldRecoverNativeHlsStalePlaylist,
   shouldDisarmFirstFrameStallMonitor,
 } from "./browserPlaybackBufferPolicy.js";
@@ -180,6 +181,44 @@ describe("client playback release gates", () => {
       audioSwitch: true,
       deviceClass: "phone",
     }).ready, true);
+  });
+
+  test("iPhone prewarm can start with an attached source before client buffer reaches release threshold", () => {
+    const gate = evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_fast" },
+      backendPreparedAheadSeconds: 20,
+      clientBufferedAheadSeconds: 0,
+      deviceClass: "phone",
+    });
+
+    assert.equal(gate.ready, false);
+    assert.equal(shouldStartClientBufferPrewarm({
+      iosMobile: true,
+      hasMobileSession: true,
+      hasAttachedSource: true,
+      mobilePlayerCanPlay: false,
+      playbackIntentActive: true,
+      releaseGateReady: gate.ready,
+    }), true);
+  });
+
+  test("client prewarm does not replace the formal release gate", () => {
+    assert.equal(shouldStartClientBufferPrewarm({
+      iosMobile: true,
+      hasMobileSession: true,
+      hasAttachedSource: true,
+      mobilePlayerCanPlay: false,
+      playbackIntentActive: true,
+      releaseGateReady: true,
+    }), false);
+    assert.equal(shouldStartClientBufferPrewarm({
+      iosMobile: true,
+      hasMobileSession: true,
+      hasAttachedSource: false,
+      mobilePlayerCanPlay: false,
+      playbackIntentActive: true,
+      releaseGateReady: false,
+    }), false);
   });
 });
 

@@ -520,6 +520,36 @@ Keep tests that verify:
 - Do not call `video.play()`, set `mobilePlayerCanPlay = true`, or clear the waiting state at 4 seconds of client buffer when the selected threshold is 15 seconds or higher.
 - Do not change Phase A menu structure, subtitles/burn-in, cloud probing, recovery/background/native-HLS normal window slide behavior, or adaptive policy while enforcing the client buffer gate.
 
+## Prewarm vs Release Gate Regression
+
+### Status
+Fixed for the startup deadlock introduced by enforcing client-buffer release before starting the iOS media pipeline; still requires real iPhone/PWA confirmation because Firefox/iPhone-UA with hls.js can buffer while paused and does not reproduce the WebKit deadlock.
+
+### Affected Platforms
+iPhone/PWA Route2 Lite and Full Browser Playback after the client-buffer release gate.
+
+### Symptoms
+After tapping Lite Playback, the player could remain on the warmup shell with the normal "Prepared through 0:00 of 1:38:01." line and "Elvern is still preparing enough video for stable lite playback." The source was not allowed to make useful progress toward `video.buffered`, so the client-buffer release gate waited forever.
+
+### Root Cause
+The startup path treated the client-buffer threshold as the first media-pipeline gate. On iPhone/PWA, Safari may need a source attach plus a user-gesture-backed warmup `play()` before it will build client `video.buffered`. Because the code waited for the client-buffer gate before starting that warmup, it could deadlock: no client buffer, no release, and no warmup path to create client buffer.
+
+### Correct Fix
+Keep the visible "Prepared through X of Y." wording and keep Lite 15/45/180 plus Full 120/900 as release thresholds, but split the stages internally. Server attach readiness allows the frontend to attach and prewarm the HLS source. The formal release path still waits for contiguous client `video.buffered` to satisfy the selected threshold before setting `mobilePlayerCanPlay`, clearing the waiting state, or treating playback as ready.
+
+### Regression Guards
+Keep tests that prove:
+
+- An attached iPhone source can enter prewarm while the client-buffer release gate is still false.
+- Prewarm does not replace the release gate and does not run before a source is attached.
+- The normal player UI keeps the "Prepared through" wording and does not expose separate "Device buffered", "Server ready", or "Client buffer" labels.
+
+### Do Not Regress
+- Do not lower or bypass the client-buffer release thresholds.
+- Do not block source attach/prewarm on the final client-buffer release gate.
+- Do not mark playback ready, set `mobilePlayerCanPlay`, or clear waiting/preparing until the client-buffer release gate passes.
+- Do not change Phase A menu structure, subtitles/burn-in, cloud probing, adaptive policy, recovery/background behavior, or normal native-HLS window-slide handling while maintaining this split.
+
 ## iPhone/PWA Continuous Preparation / Stall Regression
 
 ### Status

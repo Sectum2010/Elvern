@@ -127,6 +127,30 @@ export function evaluateClientPlaybackReleaseGate({
   };
 }
 
+export function shouldStartClientBufferPrewarm({
+  iosMobile = false,
+  hasMobileSession = false,
+  hasAttachedSource = false,
+  mobilePlayerCanPlay = false,
+  playbackIntentActive = false,
+  releaseGateReady = false,
+  seekPending = false,
+  retargetTransition = false,
+  awaitingTargetSeek = false,
+} = {}) {
+  return Boolean(
+    iosMobile
+    && hasMobileSession
+    && hasAttachedSource
+    && !mobilePlayerCanPlay
+    && playbackIntentActive
+    && !releaseGateReady
+    && !seekPending
+    && !retargetTransition
+    && !awaitingTargetSeek
+  );
+}
+
 export function buildHlsConfig({ session = {}, deviceClass = "unknown" } = {}) {
   const targets = deriveBufferTargetsFromSession(session, deviceClass);
   return {
