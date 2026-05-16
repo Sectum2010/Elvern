@@ -817,6 +817,11 @@ class MobilePlaybackSessionResponse(BaseModel):
     pending_audio_stream_index: int | None = Field(default=None, ge=0)
     audio_switch_state: str | None = None
     audio_switch_error: str | None = None
+    audio_switch_replacement_epoch_id: str | None = None
+    audio_switch_replacement_state: str | None = None
+    audio_switch_replacement_reason: str | None = None
+    audio_switch_replacement_ready_end_seconds: float | None = Field(default=None, ge=0)
+    audio_switch_replacement_attach_position_seconds: float | None = Field(default=None, ge=0)
 
 
 class MobilePlaybackStopResponse(BaseModel):

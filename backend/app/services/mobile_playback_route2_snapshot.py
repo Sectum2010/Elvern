@@ -252,6 +252,16 @@ def _route2_snapshot_locked(
             active_window_fields["active_window_forward_seconds"] = round(
                 browser_session.last_emitted_window_forward_seconds, 2,
             )
+    audio_switch_replacement_epoch = (
+        replacement_epoch
+        if replacement_epoch is not None and replacement_epoch.replacement_reason == "audio_track_switch"
+        else None
+    )
+    audio_switch_replacement_ready_end_seconds = (
+        route2_epoch_ready_end_seconds(session, audio_switch_replacement_epoch)
+        if audio_switch_replacement_epoch is not None
+        else None
+    )
     return {
         "session_id": session.session_id,
         "media_item_id": session.media_item_id,
@@ -368,5 +378,24 @@ def _route2_snapshot_locked(
         "pending_audio_stream_index": browser_session.pending_audio_stream_index,
         "audio_switch_state": browser_session.audio_switch_state,
         "audio_switch_error": browser_session.audio_switch_error,
+        "audio_switch_replacement_epoch_id": (
+            audio_switch_replacement_epoch.epoch_id if audio_switch_replacement_epoch is not None else None
+        ),
+        "audio_switch_replacement_state": (
+            audio_switch_replacement_epoch.state if audio_switch_replacement_epoch is not None else None
+        ),
+        "audio_switch_replacement_reason": (
+            audio_switch_replacement_epoch.replacement_reason if audio_switch_replacement_epoch is not None else None
+        ),
+        "audio_switch_replacement_ready_end_seconds": (
+            round(float(audio_switch_replacement_ready_end_seconds), 2)
+            if audio_switch_replacement_ready_end_seconds is not None
+            else None
+        ),
+        "audio_switch_replacement_attach_position_seconds": (
+            round(float(audio_switch_replacement_epoch.attach_position_seconds), 2)
+            if audio_switch_replacement_epoch is not None
+            else None
+        ),
         **full_bad_condition_fields,
     }

@@ -33,6 +33,7 @@ from .mobile_playback_models import (
     MOBILE_PROFILES,
     PLAYBACK_COMMIT_RUNWAY_SECONDS,
     READY_AFTER_TARGET_SECONDS,
+    ROUTE2_AUDIO_SWITCH_READY_RUNWAY_SECONDS,
     ROUTE2_ATTACH_ACK_WARN_SECONDS,
     ROUTE2_ATTACH_READY_SECONDS,
     ROUTE2_DRAIN_IDLE_GRACE_SECONDS,
@@ -578,6 +579,13 @@ def _read_text_tail(path: Path, *, max_lines: int = 100) -> str | None:
     if not lines:
         return None
     return "\n".join(lines[-max_lines:])
+
+
+def _compact_error_text(value: object, *, max_chars: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3].rstrip()}..."
 
 
 def _parse_ffmpeg_progress_time_seconds(value: str | None) -> float | None:
@@ -1865,6 +1873,18 @@ class MobilePlaybackManager:
             if selected_audio_stream_index is None:
                 raise ValueError("selected_audio_stream_index is required")
             browser_session = session.browser_playback
+            selected_audio_track, audio_validation_error = self._resolve_trusted_audio_track_for_switch(
+                int(session.media_item_id),
+                selected_audio_stream_index,
+            )
+            if selected_audio_track is None:
+                self._set_route2_audio_switch_failed_locked(
+                    session,
+                    reason=audio_validation_error
+                    or f"Selected audio stream {selected_audio_stream_index} was not found in trusted probe metadata.",
+                )
+                self._refresh_route2_session_authority_locked(session)
+                return self._route2_snapshot_locked(session)
             if (
                 browser_session.active_audio_stream_index == selected_audio_stream_index
                 and browser_session.pending_audio_stream_index is None
@@ -1926,11 +1946,7 @@ class MobilePlaybackManager:
         if replacement_epoch.replacement_reason != "audio_track_switch":
             return
         error = (reason or replacement_epoch.last_error or "Could not switch audio track").strip()
-        browser_session.pending_audio_stream_index = None
-        browser_session.audio_switch_state = "failed"
-        browser_session.audio_switch_error = error
-        if browser_session.active_audio_stream_index is not None:
-            browser_session.selected_audio_stream_index = browser_session.active_audio_stream_index
+        self._set_route2_audio_switch_failed_locked(session, reason=error)
         self._log_route2_event(
             "audio_switch_failed",
             session=session,
@@ -1938,6 +1954,39 @@ class MobilePlaybackManager:
             level=logging.WARNING,
             error=error,
         )
+
+    def _set_route2_audio_switch_failed_locked(
+        self,
+        session: MobilePlaybackSession,
+        *,
+        reason: str,
+    ) -> None:
+        browser_session = session.browser_playback
+        browser_session.pending_audio_stream_index = None
+        browser_session.audio_switch_state = "failed"
+        browser_session.audio_switch_error = (reason or "Could not switch audio track").strip()
+        if browser_session.active_audio_stream_index is not None:
+            browser_session.selected_audio_stream_index = browser_session.active_audio_stream_index
+
+    def _resolve_trusted_audio_track_for_switch(
+        self,
+        media_item_id: int,
+        selected_audio_stream_index: int,
+    ) -> tuple[dict[str, object] | None, str | None]:
+        audio_tracks, _subtitle_tracks = self._playback_tracks_for_media_item(media_item_id)
+        if not audio_tracks:
+            return None, "Trusted audio stream metadata is required before Browser Playback audio switching."
+        for track in audio_tracks:
+            try:
+                stream_index = int(track.get("index"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if stream_index != int(selected_audio_stream_index):
+                continue
+            if str(track.get("track_source") or "") != "raw_probe_summary_json":
+                return None, f"Selected audio stream {selected_audio_stream_index} is not trusted probe metadata."
+            return track, None
+        return None, f"Selected audio stream {selected_audio_stream_index} was not found in trusted probe metadata."
 
     def _playback_tracks_for_media_item(self, media_item_id: int) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         with get_connection(self.settings) as connection:
@@ -11167,6 +11216,40 @@ class MobilePlaybackManager:
             ),
         )
 
+    def _route2_audio_switch_replacement_ready_locked(
+        self,
+        session: MobilePlaybackSession,
+        replacement_epoch: PlaybackEpoch,
+    ) -> bool:
+        if replacement_epoch.replacement_reason != "audio_track_switch":
+            return False
+        if replacement_epoch.state in {"failed", "ended", "draining"}:
+            return False
+        if replacement_epoch.last_error:
+            return False
+        if not replacement_epoch.init_published:
+            return False
+        if replacement_epoch.contiguous_published_through_segment is None:
+            return False
+        active_epoch = (
+            session.browser_playback.epochs.get(session.browser_playback.active_epoch_id)
+            if session.browser_playback.active_epoch_id
+            else None
+        )
+        if active_epoch is None or active_epoch.state in {"failed", "ended"}:
+            return False
+        ready_end_seconds = self._route2_epoch_ready_end_seconds(session, replacement_epoch)
+        remaining_presentation_seconds = max(
+            0.0,
+            float(session.duration_seconds or 0.0) - float(replacement_epoch.attach_position_seconds or 0.0),
+        )
+        required_runway = min(ROUTE2_AUDIO_SWITCH_READY_RUNWAY_SECONDS, remaining_presentation_seconds)
+        if required_runway <= 0.0:
+            return True
+        return (
+            ready_end_seconds - float(replacement_epoch.attach_position_seconds or 0.0)
+        ) + 0.001 >= required_runway
+
     def _route2_downshift_abort_reason_locked(
         self,
         session: MobilePlaybackSession,
@@ -12203,7 +12286,13 @@ class MobilePlaybackManager:
                 )
             except Exception as exc:  # noqa: BLE001
                 epoch.state = "failed"
-                epoch.last_error = str(exc) or "Browser Playback Route 2 could not prepare the source"
+                if epoch.replacement_reason == "audio_track_switch":
+                    epoch.last_error = (
+                        "FFmpeg command could not be built while preparing selected audio stream "
+                        f"{epoch.audio_stream_index}: {_compact_error_text(exc)}"
+                    )
+                else:
+                    epoch.last_error = str(exc) or "Browser Playback Route 2 could not prepare the source"
                 self._finalize_route2_worker_record_locked(
                     session,
                     epoch,
@@ -12340,14 +12429,27 @@ class MobilePlaybackManager:
                 return
             if return_code != 0:
                 epoch.state = "failed"
-                epoch.last_error = (
-                    str(source_input_error).strip()
-                    if source_input_error
-                    else (
-                        "Browser Playback Route 2 epoch transcoder failed "
-                        f"(ffmpeg exited with code {return_code})"
+                if epoch.replacement_reason == "audio_track_switch":
+                    if source_input_error:
+                        epoch.last_error = (
+                            "Cloud/source input failed while preparing selected audio stream "
+                            f"{epoch.audio_stream_index}: {_compact_error_text(source_input_error)}"
+                        )
+                    else:
+                        stderr_hint = _compact_error_text(stderr_tail)
+                        suffix = f": {stderr_hint}" if stderr_hint else f" (ffmpeg exited with code {return_code})"
+                        epoch.last_error = (
+                            f"FFmpeg failed while preparing selected audio stream {epoch.audio_stream_index}{suffix}"
+                        )
+                else:
+                    epoch.last_error = (
+                        str(source_input_error).strip()
+                        if source_input_error
+                        else (
+                            "Browser Playback Route 2 epoch transcoder failed "
+                            f"(ffmpeg exited with code {return_code})"
+                        )
                     )
-                )
                 self._finalize_route2_worker_record_locked(
                     session,
                     epoch,
@@ -12601,13 +12703,19 @@ class MobilePlaybackManager:
                 self._discard_route2_epoch_locked(session, replacement_epoch.epoch_id)
                 replacement_epoch = None
             if replacement_epoch is not None:
-                replacement_attach_ready = self._route2_epoch_startup_attach_ready_locked(session, replacement_epoch)
-                replacement_attach_ready = self._guard_route2_full_attach_boundary_locked(
-                    session,
-                    replacement_epoch,
-                    attach_eligible=replacement_attach_ready,
-                    guard_path="replacement_promotion_check",
-                )
+                if replacement_epoch.replacement_reason == "audio_track_switch":
+                    replacement_attach_ready = self._route2_audio_switch_replacement_ready_locked(
+                        session,
+                        replacement_epoch,
+                    )
+                else:
+                    replacement_attach_ready = self._route2_epoch_startup_attach_ready_locked(session, replacement_epoch)
+                    replacement_attach_ready = self._guard_route2_full_attach_boundary_locked(
+                        session,
+                        replacement_epoch,
+                        attach_eligible=replacement_attach_ready,
+                        guard_path="replacement_promotion_check",
+                    )
                 if replacement_attach_ready:
                     self._promote_route2_replacement_epoch_locked(session, replacement_epoch)
                     active_epoch = replacement_epoch
@@ -12620,7 +12728,8 @@ class MobilePlaybackManager:
                         replacement_epoch.state = "starting"
                     self._write_route2_epoch_metadata_locked(replacement_epoch)
                     browser_session.state = "recovering" if active_epoch.state == "draining" else "switching"
-                    session.state = "retargeting" if session.pending_target_seconds is not None else "preparing"
+                    if replacement_epoch.replacement_reason != "audio_track_switch":
+                        session.state = "retargeting" if session.pending_target_seconds is not None else "preparing"
         elif active_epoch.state == "draining":
             browser_session.state = "recovering"
 
@@ -13163,6 +13272,21 @@ class MobilePlaybackManager:
             lite_required_runway_seconds=ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
             lite_required_runway_source="legacy_slow_path_45",
         )
+        replacement_epoch = (
+            browser_session.epochs.get(browser_session.replacement_epoch_id)
+            if browser_session.replacement_epoch_id
+            else None
+        )
+        audio_switch_replacement_epoch = (
+            replacement_epoch
+            if replacement_epoch is not None and replacement_epoch.replacement_reason == "audio_track_switch"
+            else None
+        )
+        audio_switch_replacement_ready_end_seconds = (
+            self._route2_epoch_ready_end_seconds(session, audio_switch_replacement_epoch)
+            if audio_switch_replacement_epoch is not None
+            else None
+        )
         return {
             "session_id": session.session_id,
             "media_item_id": session.media_item_id,
@@ -13258,6 +13382,25 @@ class MobilePlaybackManager:
             "pending_audio_stream_index": browser_session.pending_audio_stream_index,
             "audio_switch_state": browser_session.audio_switch_state,
             "audio_switch_error": browser_session.audio_switch_error,
+            "audio_switch_replacement_epoch_id": (
+                audio_switch_replacement_epoch.epoch_id if audio_switch_replacement_epoch is not None else None
+            ),
+            "audio_switch_replacement_state": (
+                audio_switch_replacement_epoch.state if audio_switch_replacement_epoch is not None else None
+            ),
+            "audio_switch_replacement_reason": (
+                audio_switch_replacement_epoch.replacement_reason if audio_switch_replacement_epoch is not None else None
+            ),
+            "audio_switch_replacement_ready_end_seconds": (
+                round(float(audio_switch_replacement_ready_end_seconds), 2)
+                if audio_switch_replacement_ready_end_seconds is not None
+                else None
+            ),
+            "audio_switch_replacement_attach_position_seconds": (
+                round(float(audio_switch_replacement_epoch.attach_position_seconds), 2)
+                if audio_switch_replacement_epoch is not None
+                else None
+            ),
         }
 
     def _target_is_ready(self, session: MobilePlaybackSession) -> bool:

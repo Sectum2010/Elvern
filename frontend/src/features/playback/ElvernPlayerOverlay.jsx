@@ -192,6 +192,15 @@ function resolveAudioTrackUnavailableMessage(scanStatus, scanError) {
   return "No alternate audio tracks found";
 }
 
+function resolveAudioSwitchError(payload) {
+  const rawError = String(payload?.audio_switch_error || payload?.audio_switch_last_error || "").trim();
+  if (!rawError) {
+    return "Could not switch audio track.";
+  }
+  const singleLine = rawError.replace(/\s+/g, " ");
+  return singleLine.length > 180 ? `${singleLine.slice(0, 177).trim()}...` : singleLine;
+}
+
 function TrackMenuItem({
   checked = false,
   kind,
@@ -793,9 +802,10 @@ export default function ElvernPlayerOverlay({
       const activeStreamIndex = Number.isInteger(sessionPayloadResponse?.active_audio_stream_index)
         ? sessionPayloadResponse.active_audio_stream_index
         : null;
-      if (switchState === "failed") {
+      const hasSwitchError = Boolean(String(sessionPayloadResponse?.audio_switch_error || "").trim());
+      if (switchState === "failed" || hasSwitchError) {
         setAudioSwitchVisual(null);
-        setAudioTrackError("Could not switch audio track.");
+        setAudioTrackError(resolveAudioSwitchError(sessionPayloadResponse));
       } else if (
         switchState === "preparing"
         && selectedStreamIndex != null
@@ -811,8 +821,8 @@ export default function ElvernPlayerOverlay({
         setAudioSwitchVisual(null);
         setAudioTrackError("");
       } else if (selectedTrack.source === "backend") {
-        setAudioSwitchVisual(null);
-        setAudioTrackError("Could not switch audio track.");
+        setAudioSwitchVisual({ trackId, streamIndex: selectedStreamIndex, phase: "requesting" });
+        setAudioTrackError("");
       } else {
         setAudioSwitchVisual(null);
         setAudioTrackError("");
@@ -865,7 +875,7 @@ export default function ElvernPlayerOverlay({
         setAudioSwitchVisual(null);
         setAudioTrackError("");
       } else if (
-        switchState === "failed"
+        (switchState === "failed" || String(sessionPayload?.audio_switch_error || "").trim())
         && (
           audioSwitchVisual.phase === "preparing"
           || (
@@ -875,7 +885,7 @@ export default function ElvernPlayerOverlay({
         )
       ) {
         setAudioSwitchVisual(null);
-        setAudioTrackError("Could not switch audio track.");
+        setAudioTrackError(resolveAudioSwitchError(sessionPayload));
       }
       return;
     }

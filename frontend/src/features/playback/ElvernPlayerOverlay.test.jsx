@@ -1212,10 +1212,10 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
     expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
     expect(getByRole("menuitemradio", { name: "French" })).not.toHaveClass("elvern-overlay__track-menu-item--pending");
-    expect(getByText("Could not switch audio track.")).toBeTruthy();
+    expect(getByText("audio map failed")).toBeTruthy();
   });
 
-  test("backend audio response without matching active or pending state shows error", async () => {
+  test("accepted ambiguous backend audio response keeps pending without fake failure", async () => {
     let resolveSwitch;
     const onBackendAudioTrackSelect = vi.fn(() => new Promise((resolve) => {
       resolveSwitch = () => resolve({
@@ -1225,7 +1225,7 @@ describe("ElvernPlayerOverlay controls visibility", () => {
         audio_switch_state: "active",
       });
     }));
-    const { getByRole, getByText } = renderOverlay({
+    const { getByRole, queryByText } = renderOverlay({
       backendAudioTracks: [
         { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
         { index: 2, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
@@ -1256,8 +1256,9 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     });
 
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
-    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
-    expect(getByText("Could not switch audio track.")).toBeTruthy();
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
+    expect(queryByText("Could not switch audio track.")).toBeNull();
   });
 
   test("text backend subtitles are clickable while image subtitles are marked unsupported", async () => {

@@ -972,6 +972,33 @@ def _install_route2_active_epoch(
     return epoch
 
 
+def _upsert_route2_audio_probe_metadata(
+    settings,
+    item: dict[str, object],
+    *,
+    stream_indices: tuple[int, ...] = (1, 5),
+) -> None:
+    streams: list[dict[str, object]] = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+    ]
+    for stream_index in stream_indices:
+        streams.append(
+            {
+                "index": stream_index,
+                "codec_type": "audio",
+                "codec_name": "aac" if stream_index == 1 else "ac3",
+                "channels": 2 if stream_index == 1 else 6,
+                "tags": {"language": "eng" if stream_index == 1 else "fre"},
+                "disposition": {"default": 1 if stream_index == 1 else 0},
+            }
+        )
+    _upsert_trusted_local_technical_metadata(
+        settings,
+        item,
+        raw_probe_summary_json=json.dumps({"streams": streams}),
+    )
+
+
 def test_browser_playback_text_subtitle_prepare_converts_to_webvtt(
     initialized_settings,
     monkeypatch,
@@ -1080,6 +1107,7 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
         settings,
         _make_local_item(settings, item_id=5022, relative_name="route2/audio/select.mkv"),
     )
+    _upsert_route2_audio_probe_metadata(settings, item)
     session = _register_route2_test_session(manager, settings, item, session_id="audio-select-session")
     original_active_epoch_id = session.browser_playback.active_epoch_id
 
@@ -1095,6 +1123,8 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     assert response["pending_audio_stream_index"] == 5
     assert response["active_audio_stream_index"] is None
     assert response["audio_switch_state"] == "preparing"
+    assert response["audio_switch_replacement_epoch_id"] == session.browser_playback.replacement_epoch_id
+    assert response["audio_switch_replacement_reason"] == "audio_track_switch"
     assert session.browser_playback.active_epoch_id == original_active_epoch_id
     replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
     assert replacement.audio_stream_index == 5
@@ -1113,12 +1143,41 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     assert promoted["audio_switch_error"] is None
 
 
+def test_route2_audio_selection_rejects_untrusted_stream_before_replacement(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5025, relative_name="route2/audio/invalid-stream.mkv"),
+    )
+    _upsert_route2_audio_probe_metadata(settings, item, stream_indices=(1,))
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-invalid-stream-session")
+    active_epoch = _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+
+    response = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+
+    assert response["active_audio_stream_index"] == 1
+    assert response["selected_audio_stream_index"] == 1
+    assert response["pending_audio_stream_index"] is None
+    assert response["audio_switch_state"] == "failed"
+    assert "Selected audio stream 5" in str(response["audio_switch_error"])
+    assert "trusted probe metadata" in str(response["audio_switch_error"])
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.browser_playback.active_epoch_id == active_epoch.epoch_id
+
+
 def test_route2_audio_replacement_failure_clears_pending_and_keeps_active_epoch(initialized_settings) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
     item = _insert_media_item_record(
         settings,
         _make_local_item(settings, item_id=5023, relative_name="route2/audio/failure.mkv"),
     )
+    _upsert_route2_audio_probe_metadata(settings, item)
     session = _register_route2_test_session(manager, settings, item, session_id="audio-failure-session")
     active_epoch = _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
 
@@ -1151,12 +1210,83 @@ def test_route2_audio_replacement_failure_clears_pending_and_keeps_active_epoch(
     assert replacement.epoch_id not in session.browser_playback.epochs
 
 
+def test_route2_audio_replacement_promotes_after_audio_specific_runway(initialized_settings, monkeypatch) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5026, relative_name="route2/audio/ready-runway.mkv"),
+    )
+    _upsert_route2_audio_probe_metadata(settings, item)
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-ready-runway-session")
+    active_epoch = _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+
+    response = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    assert response["audio_switch_state"] == "preparing"
+    assert replacement.attach_position_seconds == 42.0
+    replacement.init_published = True
+    replacement.epoch_start_seconds = 0.0
+    replacement.contiguous_published_through_segment = 28  # 58s ready end, 16s after the 42s attach point.
+    monkeypatch.setattr(manager, "_rebuild_route2_published_frontier_locked", lambda _epoch: None)
+
+    manager._refresh_route2_session_authority_locked(session)
+    snapshot = manager._route2_snapshot_locked(session)
+
+    assert snapshot["active_audio_stream_index"] == 5
+    assert snapshot["selected_audio_stream_index"] == 5
+    assert snapshot["pending_audio_stream_index"] is None
+    assert snapshot["audio_switch_state"] == "active"
+    assert snapshot["audio_switch_error"] is None
+    assert session.browser_playback.active_epoch_id == replacement.epoch_id
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.browser_playback.epochs[active_epoch.epoch_id].state in {"draining", "ended"}
+
+
+def test_route2_audio_replacement_ffmpeg_failure_surfaces_selected_stream_reason(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=5027, relative_name="route2/audio/ffmpeg-failure.mkv"),
+    )
+    _upsert_route2_audio_probe_metadata(settings, item)
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-ffmpeg-failure-session")
+    active_epoch = _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+
+    manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    replacement.state = "failed"
+    replacement.last_error = "FFmpeg failed while preparing selected audio stream 5: Stream map '0:5' matches no streams"
+
+    manager._refresh_route2_session_authority_locked(session)
+    snapshot = manager._route2_snapshot_locked(session)
+
+    assert snapshot["active_audio_stream_index"] == 1
+    assert snapshot["pending_audio_stream_index"] is None
+    assert snapshot["audio_switch_state"] == "failed"
+    assert "selected audio stream 5" in str(snapshot["audio_switch_error"]).lower()
+    assert "stream map" in str(snapshot["audio_switch_error"]).lower()
+    assert session.browser_playback.active_epoch_id == active_epoch.epoch_id
+
+
 def test_route2_audio_replacement_superseded_does_not_leave_stale_pending(initialized_settings) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
     item = _insert_media_item_record(
         settings,
         _make_local_item(settings, item_id=5024, relative_name="route2/audio/superseded.mkv"),
     )
+    _upsert_route2_audio_probe_metadata(settings, item)
     session = _register_route2_test_session(manager, settings, item, session_id="audio-superseded-session")
     active_epoch = _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
 

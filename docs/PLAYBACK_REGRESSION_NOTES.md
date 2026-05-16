@@ -91,6 +91,16 @@ Correct fix: use request-local visual pending state keyed to the clicked track/s
 
 Do not regress: a clicked backend audio row must immediately show spinner plus pending highlight until the matching backend preparing/active/failed response resolves it.
 
+### Phase B.3 Addendum: Real Audio Switch Convergence
+
+Bug: audio rows were discovered and pending feedback appeared, but the actual replacement audio switch could still fail or stall behind a generic `Could not switch audio track` message.
+
+Root causes: the frontend treated accepted-but-incomplete `/audio` responses as failures; the backend accepted selected stream indexes before proving they were trusted raw-probe audio streams; replacement readiness used the heavier generic attach gate; and ffmpeg/source failures were collapsed into generic audio errors.
+
+Correct fix: accepted ambiguous `/audio` responses keep the clicked row pending until polling resolves them; selected streams are validated against trusted `raw_probe_summary_json`; audio-track replacements can promote after a 15s audio-specific ready runway; and `audio_switch_error` carries the short backend/ffmpeg/source reason while the old active playback stays alive.
+
+Do not regress: do not show fake generic failure without backend failed/error state, do not create replacements for invalid or fallback stream indexes, do not change global Lite startup thresholds, and do not stop the old active playback while selected audio prepares.
+
 ## macOS / Windows Browser HLS Scrubber Regression
 
 ### Status
