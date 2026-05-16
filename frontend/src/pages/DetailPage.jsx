@@ -28,6 +28,11 @@ import {
 } from "../lib/libraryNavigation";
 import { resolveBrowserPlaybackPlayerViewState } from "../lib/browserPlaybackPlayerState";
 import { resolveAuthoritativeBrowserPlaybackResumePosition } from "../lib/browserPlaybackResume";
+import { toBrowserPlaybackAbsoluteSeconds } from "../lib/browserPlaybackTimeline";
+import {
+  getContiguousBufferedEndFromPosition,
+  readBufferedAbsoluteRanges,
+} from "../lib/playbackTimelineRanges";
 import {
   deriveVideoFitModeGestureChange,
   measureTouchDistance,
@@ -359,6 +364,44 @@ function resolvePrepareEstimateTone(seconds) {
     return "yellow";
   }
   return "green";
+}
+
+function PrewarmPreparedThruObserver({
+  active,
+  mobileSession,
+  onChange,
+  videoElementKey,
+  videoRef,
+}) {
+  useEffect(() => {
+    if (!active || !mobileSession || !videoRef?.current || typeof onChange !== "function") {
+      return undefined;
+    }
+    const video = videoRef.current;
+    const updateClientPreparedThru = () => {
+      const bufferedRanges = readBufferedAbsoluteRanges(video, mobileSession);
+      const localTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      const absolutePlayhead = toBrowserPlaybackAbsoluteSeconds(mobileSession, localTime);
+      onChange(getContiguousBufferedEndFromPosition(absolutePlayhead, bufferedRanges));
+    };
+    updateClientPreparedThru();
+    video.addEventListener("progress", updateClientPreparedThru);
+    video.addEventListener("loadedmetadata", updateClientPreparedThru);
+    video.addEventListener("loadeddata", updateClientPreparedThru);
+    video.addEventListener("canplay", updateClientPreparedThru);
+    video.addEventListener("timeupdate", updateClientPreparedThru);
+    const timer = window.setInterval(updateClientPreparedThru, 750);
+    return () => {
+      window.clearInterval(timer);
+      video.removeEventListener("progress", updateClientPreparedThru);
+      video.removeEventListener("loadedmetadata", updateClientPreparedThru);
+      video.removeEventListener("loadeddata", updateClientPreparedThru);
+      video.removeEventListener("canplay", updateClientPreparedThru);
+      video.removeEventListener("timeupdate", updateClientPreparedThru);
+    };
+  }, [active, mobileSession, onChange, videoElementKey, videoRef]);
+
+  return null;
 }
 
 function saveIosExternalAppLaunchState({ itemId, app, launchUrl, playbackUrl }) {
@@ -2557,6 +2600,7 @@ export function DetailPage() {
     browserPlaybackPreparing,
     playerClassName,
     showMobilePreparingPlaceholder,
+    showMobilePrewarmCard,
     showPlayerShell,
     videoControlsEnabled,
   } = resolveBrowserPlaybackPlayerViewState({
@@ -2611,6 +2655,7 @@ export function DetailPage() {
     useElvernCustomShell ? "player-shell--elvern-custom" : "",
     useElvernCustomShell ? `player-shell--elvern-${clientDeviceClass}` : "",
     useElvernCustomShell ? `player-shell--video-fit-${elvernShellVideoFitMode}` : "",
+    showMobilePrewarmCard ? "player-shell--prewarm-card" : "",
     showMacAppFullscreenControl ? "player-shell--app-fullscreen" : "",
     macAppFullscreenActive ? "player-shell--app-fullscreen-active" : "",
     elvernCinemaTakeoverActive ? "player-shell--cinema-takeover" : "",
@@ -3435,7 +3480,23 @@ export function DetailPage() {
                 preload="metadata"
                 ref={videoRef}
               />
-              {useElvernCustomShell ? (
+              <PrewarmPreparedThruObserver
+                active={showMobilePrewarmCard}
+                mobileSession={mobileSession}
+                onChange={setClientPreparedThruSeconds}
+                videoElementKey={videoElementKey}
+                videoRef={videoRef}
+              />
+              {showMobilePrewarmCard ? (
+                <div className="player-prewarm-card" role="status" aria-live="polite">
+                  <span className="spinner player-prewarm-card__spinner" aria-hidden="true" />
+                  <div className="player-prewarm-card__copy">
+                    <p className="player-prewarm-card__title">Preparing {browserPlaybackLabel}</p>
+                    <p className="player-prewarm-card__text">Elvern is preparing stable {browserPlaybackLabel}.</p>
+                  </div>
+                </div>
+              ) : null}
+              {useElvernCustomShell && !showMobilePrewarmCard ? (
                 <ElvernPlayerOverlay
                   cinemaModeActive={elvernCinemaTakeoverActive}
                   deviceClass={clientDeviceClass}

@@ -43,10 +43,11 @@ test("iPhone route2 source keeps the warmup shell until mobile can-play is confi
   });
 
   assert.equal(state.showInlinePlayer, false);
+  assert.equal(state.showMobilePrewarmCard, true);
   assert.equal(state.showMobileWarmupShell, true);
   assert.equal(state.showPlayerShell, true);
   assert.equal(state.playerClassName, "player player--warmup");
-  assert.equal(state.videoControlsEnabled, true);
+  assert.equal(state.videoControlsEnabled, false);
 });
 
 test("route2 session without a ready source keeps the preparing placeholder visible", () => {
@@ -63,4 +64,20 @@ test("route2 session without a ready source keeps the preparing placeholder visi
   assert.equal(state.showPlayerShell, false);
   assert.equal(state.showMobilePreparingPlaceholder, true);
   assert.equal(state.browserPlaybackPreparing, true);
+});
+
+test("iPhone frozen retarget warmup keeps the shell without the generic prewarm card", () => {
+  const state = resolveBrowserPlaybackPlayerViewState({
+    activePlaybackMode: "lite",
+    iosMobile: true,
+    mobileFrozenFrameUrl: "blob:frozen-frame",
+    mobilePlayerCanPlay: false,
+    mobileSession: buildRoute2Session(),
+    optimizedPlaybackPending: false,
+    streamSource: { mode: "hls", url: "blob:test" },
+  });
+
+  assert.equal(state.showMobileWarmupShell, true);
+  assert.equal(state.showMobilePrewarmCard, false);
+  assert.equal(state.showPlayerShell, true);
 });

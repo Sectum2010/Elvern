@@ -7,8 +7,10 @@ import {
   classifyPlaybackStall,
   deriveBufferTargetsFromSession,
   evaluateClientPlaybackReleaseGate,
+  muteVideoForClientPrewarm,
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
+  restoreVideoAfterClientPrewarm,
   resolveClientPlaybackReleaseBufferSeconds,
   resolvePlaybackRecoveryTargetSeconds,
   retuneHlsInstance,
@@ -219,6 +221,30 @@ describe("client playback release gates", () => {
       playbackIntentActive: true,
       releaseGateReady: false,
     }), false);
+  });
+
+  test("client prewarm mutes the media element and restores the previous audio state on release", () => {
+    const video = { muted: false, volume: 0.72 };
+
+    const saved = muteVideoForClientPrewarm(video);
+    assert.equal(video.muted, true);
+    assert.deepEqual(saved, { muted: false, volume: 0.72 });
+
+    const nextState = restoreVideoAfterClientPrewarm(video, saved);
+    assert.equal(nextState, null);
+    assert.equal(video.muted, false);
+    assert.equal(video.volume, 0.72);
+  });
+
+  test("client prewarm preserves an already-muted media element after release", () => {
+    const video = { muted: true, volume: 0.4 };
+
+    const saved = muteVideoForClientPrewarm(video);
+    assert.equal(video.muted, true);
+
+    restoreVideoAfterClientPrewarm(video, saved);
+    assert.equal(video.muted, true);
+    assert.equal(video.volume, 0.4);
   });
 });
 

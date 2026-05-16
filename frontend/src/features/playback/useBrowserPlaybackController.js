@@ -16,8 +16,10 @@ import {
   compactHlsBufferConfig,
   deriveBufferTargetsFromSession,
   evaluateClientPlaybackReleaseGate,
+  muteVideoForClientPrewarm,
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
+  restoreVideoAfterClientPrewarm,
   retuneHlsInstance,
   shouldStartClientBufferPrewarm,
   shouldRecoverNativeHlsStalePlaylist,
@@ -123,6 +125,7 @@ export function useBrowserPlaybackController({
   const playbackPollGenerationRef = useRef(0);
   const browserStartPositionRef = useRef(0);
   const playbackModeIntentRef = useRef("lite");
+  const mobilePrewarmAudioStateRef = useRef(null);
 
   const [playback, setPlayback] = useState(null);
   const [streamSource, setStreamSource] = useState(null);
@@ -172,6 +175,24 @@ export function useBrowserPlaybackController({
     setPlaybackError("");
   }
 
+  function muteVideoForInternalPrewarm(video = videoRef.current) {
+    if (!video) {
+      return;
+    }
+    mobilePrewarmAudioStateRef.current = muteVideoForClientPrewarm(
+      video,
+      mobilePrewarmAudioStateRef.current,
+    );
+  }
+
+  function restoreVideoAudioAfterPrewarm(video = videoRef.current) {
+    const previous = mobilePrewarmAudioStateRef.current;
+    if (!previous) {
+      return;
+    }
+    mobilePrewarmAudioStateRef.current = restoreVideoAfterClientPrewarm(video, previous);
+  }
+
   function stopPlaybackPolling() {
     playbackPollGenerationRef.current += 1;
     window.clearInterval(playbackPollRef.current);
@@ -190,6 +211,7 @@ export function useBrowserPlaybackController({
     playbackOpenedReportedRef.current = false;
     stopPlaybackPolling();
     clearPlayerBinding();
+    restoreVideoAudioAfterPrewarm();
     attachedOptimizedManifestUrlRef.current = "";
   }
 
@@ -1798,6 +1820,9 @@ export function useBrowserPlaybackController({
         if (video.readyState < 2) {
           return;
         }
+        if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+          return;
+        }
         mobileFrameReadyRef.current = true;
         maybeFinalizeMobilePlayerReadiness();
       };
@@ -1857,6 +1882,7 @@ export function useBrowserPlaybackController({
         || normalized.includes("denied")
         || normalized.includes("not allowed")
       ) {
+        restoreVideoAudioAfterPrewarm(video);
         mobileAutoplayPendingRef.current = false;
         mobileResumeAfterReadyRef.current = false;
         browserPlayRequestedRef.current = false;
@@ -1879,6 +1905,7 @@ export function useBrowserPlaybackController({
         setSeekNotice(`Tap play in the video controls to continue ${browserPlaybackLabel}.`);
         return;
       }
+      restoreVideoAudioAfterPrewarm(video);
       setPlaybackError(requestError.message || `Failed to warm up ${browserPlaybackLabel}`);
     }
 
@@ -1914,8 +1941,9 @@ export function useBrowserPlaybackController({
       setPlaybackStatus(`Preparing ${browserPlaybackLabel}`);
       setSeekNotice(`Elvern is still preparing enough video for stable ${browserPlaybackLabel}.`);
       if (iosMobile && getPlaybackMode(currentSession?.playback_mode || playbackModeIntentRef.current) === "lite") {
-        video.controls = true;
+        video.controls = false;
       }
+      muteVideoForInternalPrewarm(video);
       if (fromUserGesture && !video.paused) {
         return true;
       }
@@ -1967,6 +1995,9 @@ export function useBrowserPlaybackController({
       if (video.readyState < 3) {
         return;
       }
+      if (!mobileFrameReadyRef.current || video.videoWidth <= 0 || video.videoHeight <= 0) {
+        return;
+      }
       if (isRetargetTransition) {
         const backendRunway = Math.max(
           0,
@@ -2001,7 +2032,7 @@ export function useBrowserPlaybackController({
               : (video.currentTime || 0);
           const readinessGeneration = mobileReadinessGenerationRef.current;
           if (iosMobile && getPlaybackMode(currentSession?.playback_mode || playbackModeIntentRef.current) === "lite") {
-            video.controls = true;
+            video.controls = false;
           }
           video
             .play()
@@ -2035,6 +2066,7 @@ export function useBrowserPlaybackController({
       setPlaybackError("");
       setSeekNotice("");
       setPlaybackStatus(browserReadyLabelTitle);
+      restoreVideoAudioAfterPrewarm(video);
       mobileWarmupProbeActiveRef.current = false;
       mobileWarmupPlaybackObservedRef.current = false;
       mobileWarmupStartPositionRef.current = 0;
@@ -2391,6 +2423,7 @@ export function useBrowserPlaybackController({
     function handlePlayStarted() {
       if (iosMobile && mobileSessionRef.current && !mobilePlayerCanPlayRef.current) {
         if (!mobileWarmupProbeActiveRef.current) {
+          muteVideoForInternalPrewarm(video);
           mobileAutoplayPendingRef.current = true;
           startIosClientBufferPrewarm(mobileSessionRef.current, { fromUserGesture: true });
           setPlaybackStatus(`Preparing ${browserPlaybackLabel}`);

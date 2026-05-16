@@ -97,6 +97,20 @@ describe("Elvern player mobile CSS guards", () => {
     expect(styles).not.toContain(".elvern-overlay--phone-inline-minimal .elvern-timeline");
   });
 
+  test("iPhone prewarm card covers the hidden media element before release", () => {
+    const styles = readStyles();
+    const card = cssBlock(styles, ".player-prewarm-card");
+    const warmupVideo = cssBlock(styles, ".player--warmup");
+
+    expect(warmupVideo).toContain("opacity: 0");
+    expect(card).toContain("position: absolute");
+    expect(card).toContain("inset: 0");
+    expect(card).toContain("z-index: 8");
+    expect(card).toContain("display: flex");
+    expect(card).toContain("background:");
+    expect(card).toContain("pointer-events: auto");
+  });
+
   test("phone inline maximize is card-corner anchored above the tap surface", () => {
     const styles = readStyles();
     const block = cssBlock(styles, ".elvern-overlay__inline-maximize");

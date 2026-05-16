@@ -550,6 +550,38 @@ Keep tests that prove:
 - Do not mark playback ready, set `mobilePlayerCanPlay`, or clear waiting/preparing until the client-buffer release gate passes.
 - Do not change Phase A menu structure, subtitles/burn-in, cloud probing, adaptive policy, recovery/background behavior, or normal native-HLS window-slide handling while maintaining this split.
 
+## Prewarm Visibility / Black Screen Regression
+
+### Status
+Fixed.
+
+### Affected Platforms
+iPhone/PWA Route2 Lite and Full Browser Playback during the internal prewarm phase.
+
+### Symptoms
+After the prewarm split, Lite Playback could start the media pipeline before release, but the user could see a black player shell and hear audio while the client-buffer gate was still closed. The normal "Prepared through X of Y." line remained correct, but the visual/audio boundary made internal prewarm look like failed playback.
+
+### Root Cause
+Internal prewarm was treated too much like user-visible playback. The hidden warmup video could run unmuted, the player shell was exposed while `mobilePlayerCanPlay` was still false, and release did not explicitly require the first decoded frame boundary before showing the real player.
+
+### Correct Fix
+Keep internal prewarm attached and loading, but cover it with a preparing card until user playback is actually released. Warmup `play()` mutes the media element first and restores the previous muted/volume state only after release. The release path still requires the client-buffer threshold and now also requires a first-frame-ready signal with nonzero video dimensions before the real player shell is exposed.
+
+### Regression Guards
+Keep tests that prove:
+
+- iPhone prewarm with an attached source shows the prewarm card, not exposed controls.
+- Warmup mutes before playback and restores the previous audio state at release.
+- Client buffer release is still separate from source prewarm.
+- The normal player UI keeps "Prepared through" wording and does not introduce "Device buffered", "Server ready", or "Client buffer" labels.
+
+### Do Not Regress
+- Do not show a black video shell during prewarm.
+- Do not leak audible audio during prewarm.
+- Do not mark playback ready before client buffer and first-frame readiness pass.
+- Do not lower Lite 15/45/180 or Full 120/900.
+- Do not change Phase A menu structure, subtitles/burn-in, cloud probing, adaptive policy, or normal native-HLS window-slide handling while maintaining this boundary.
+
 ## iPhone/PWA Continuous Preparation / Stall Regression
 
 ### Status

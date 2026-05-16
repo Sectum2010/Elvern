@@ -24,7 +24,7 @@ AT_REST_KEY_INFO: Final[bytes] = b"elvern-at-rest-v1"
 PLAINTEXT_PREFIX: Final[str] = ""
 CIPHERTEXT_PREFIX: Final[str] = "fernet1$"
 
-_fernet_cache: dict[int, Fernet] = {}
+_fernet_cache: dict[bytes, Fernet] = {}
 
 
 def _derive_fernet_key(settings: Settings) -> bytes:
@@ -34,9 +34,9 @@ def _derive_fernet_key(settings: Settings) -> bytes:
 
 
 def _get_fernet(settings: Settings) -> Fernet:
-    cache_key = id(settings)
+    cache_key = _derive_fernet_key(settings)
     if cache_key not in _fernet_cache:
-        _fernet_cache[cache_key] = Fernet(_derive_fernet_key(settings))
+        _fernet_cache[cache_key] = Fernet(cache_key)
     return _fernet_cache[cache_key]
 
 

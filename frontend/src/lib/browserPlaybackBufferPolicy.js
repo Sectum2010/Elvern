@@ -151,6 +151,33 @@ export function shouldStartClientBufferPrewarm({
   );
 }
 
+export function muteVideoForClientPrewarm(video, previousAudioState = null) {
+  if (!video) {
+    return previousAudioState;
+  }
+  const audioState = previousAudioState || {
+    muted: Boolean(video.muted),
+    volume: Number.isFinite(video.volume) ? video.volume : 1,
+  };
+  video.muted = true;
+  return audioState;
+}
+
+export function restoreVideoAfterClientPrewarm(video, previousAudioState = null) {
+  if (!video || !previousAudioState) {
+    return null;
+  }
+  video.muted = Boolean(previousAudioState.muted);
+  try {
+    video.volume = Number.isFinite(previousAudioState.volume)
+      ? previousAudioState.volume
+      : 1;
+  } catch {
+    // Some WebKit contexts reject volume writes; restoring muted state is enough.
+  }
+  return null;
+}
+
 export function buildHlsConfig({ session = {}, deviceClass = "unknown" } = {}) {
   const targets = deriveBufferTargetsFromSession(session, deviceClass);
   return {

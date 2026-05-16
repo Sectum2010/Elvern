@@ -20,6 +20,7 @@ export function resolveBrowserPlaybackPlayerViewState({
     requiresIosWarmupGate
     && (hasStreamSource || Boolean(mobileFrozenFrameUrl))
     && !mobilePlayerCanPlay;
+  const showMobilePrewarmCard = showMobileWarmupShell && !mobileFrozenFrameUrl;
   const showPlayerShell = showInlinePlayer || showMobileWarmupShell;
 
   const browserPlaybackPreparing = hasMobileSession
@@ -38,12 +39,12 @@ export function resolveBrowserPlaybackPlayerViewState({
         : "player",
     showInlinePlayer,
     showMobilePreparingPlaceholder,
+    showMobilePrewarmCard,
     showMobileWarmupShell,
     showPlayerShell,
     videoControlsEnabled:
       !hasMobileSession
       || !requiresIosWarmupGate
-      || mobilePlayerCanPlay
-      || (activePlaybackMode === "lite" && hasStreamSource),
+      || mobilePlayerCanPlay,
   };
 }

@@ -4211,6 +4211,49 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   pointer-events: none;
 }
 
+.player-prewarm-card {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  padding: clamp(1rem, 4vw, 1.8rem);
+  border-radius: inherit;
+  background: linear-gradient(145deg, rgba(8, 10, 16, 0.98), rgba(2, 4, 9, 0.98));
+  color: #f8fafc;
+  line-height: 1.35;
+  text-align: left;
+  pointer-events: auto;
+}
+
+.player-prewarm-card__spinner {
+  width: 1.45rem;
+  height: 1.45rem;
+  flex: 0 0 auto;
+}
+
+.player-prewarm-card__copy {
+  display: grid;
+  gap: 0.18rem;
+  max-width: min(22rem, 78%);
+}
+
+.player-prewarm-card__title {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.player-prewarm-card__text {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.78);
+  font-size: 0.82rem;
+  letter-spacing: 0;
+}
+
 .player-frozen-frame {
   position: absolute;
   inset: 0;
