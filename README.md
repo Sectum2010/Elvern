@@ -22,7 +22,7 @@
 <br/>
 
 <a href="#"><img alt="Version" src="https://img.shields.io/badge/version-0.8.0-5b42e0?style=for-the-badge&labelColor=1b1f3a"/></a>
-<a href="#"><img alt="Status" src="https://img.shields.io/badge/status-actively%20developed-2dd4bf?style=for-the-badge&labelColor=1b1f3a"/></a>
+<a href="#"><img alt="Status" src="https://img.shields.io/badge/status-slowly%20iterating-2dd4bf?style=for-the-badge&labelColor=1b1f3a"/></a>
 <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-8fb6da?style=for-the-badge&labelColor=1b1f3a"/></a>
 
 <a href="#"><img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=flat-square&logo=python&logoColor=white&labelColor=1b1f3a"/></a>
