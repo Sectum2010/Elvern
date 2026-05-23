@@ -44,6 +44,7 @@ test("iPhone route2 source keeps the warmup shell until mobile can-play is confi
 
   assert.equal(state.showInlinePlayer, false);
   assert.equal(state.showMobilePrewarmCard, true);
+  assert.equal(state.showMobilePreparingPlaceholder, false);
   assert.equal(state.showMobileWarmupShell, true);
   assert.equal(state.showPlayerShell, true);
   assert.equal(state.playerClassName, "player player--warmup");

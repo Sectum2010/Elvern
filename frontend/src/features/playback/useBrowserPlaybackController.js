@@ -16,6 +16,7 @@ import {
   compactHlsBufferConfig,
   deriveBufferTargetsFromSession,
   evaluateClientPlaybackReleaseGate,
+  hasVideoFirstFrameForPlaybackRelease,
   muteVideoForClientPrewarm,
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
@@ -127,6 +128,7 @@ export function useBrowserPlaybackController({
   const browserStartPositionRef = useRef(0);
   const playbackModeIntentRef = useRef("lite");
   const mobilePrewarmAudioStateRef = useRef(null);
+  const mobilePrewarmStuckDiagnosticLastAtRef = useRef(0);
 
   const [playback, setPlayback] = useState(null);
   const [streamSource, setStreamSource] = useState(null);
@@ -1991,7 +1993,7 @@ export function useBrowserPlaybackController({
             : (video.currentTime || 0);
       }
       setPlaybackStatus(`Preparing ${browserPlaybackLabel}`);
-      setSeekNotice(`Elvern is still preparing enough video for stable ${browserPlaybackLabel}.`);
+      setSeekNotice("");
       if (iosMobile && getPlaybackMode(currentSession?.playback_mode || playbackModeIntentRef.current) === "lite") {
         video.controls = false;
       }
@@ -2010,6 +2012,53 @@ export function useBrowserPlaybackController({
         handleIosPrewarmPlayFailure(requestError, readinessGeneration);
       });
       return true;
+    }
+
+    function debugPrewarmReleaseBlock(reason, clientReleaseGate = null) {
+      if (!iosMobile || !mobileSessionRef.current || mobilePlayerCanPlayRef.current) {
+        return;
+      }
+      if (!mobileWarmupProbeActiveRef.current && !browserPlayRequestedRef.current && !mobileAutoplayPendingRef.current) {
+        return;
+      }
+      const now = Date.now();
+      if (now - mobilePrewarmStuckDiagnosticLastAtRef.current < 10000) {
+        return;
+      }
+      mobilePrewarmStuckDiagnosticLastAtRef.current = now;
+      const session = mobileSessionRef.current;
+      const gate = clientReleaseGate || evaluateMobileClientReleaseGate(session, video);
+      const firstFrameReady = hasVideoFirstFrameForPlaybackRelease(video, {
+        loadedDataSeen: mobileLoadedDataSeenRef.current,
+        canPlaySeen: mobileCanPlaySeenRef.current,
+        frameReady: mobileFrameReadyRef.current,
+      });
+      console.debug("elvern:prewarm_release_waiting", {
+        reason,
+        sourceAttached: hasAttachedSourceForClientPrewarm(session),
+        streamSourceUrl: streamSource?.url || "",
+        currentSrc: video.currentSrc || video.getAttribute("src") || "",
+        readyState: video.readyState,
+        networkState: video.networkState,
+        videoWidth: video.videoWidth || 0,
+        videoHeight: video.videoHeight || 0,
+        loadedDataSeen: mobileLoadedDataSeenRef.current,
+        canPlaySeen: mobileCanPlaySeenRef.current,
+        frameReady: mobileFrameReadyRef.current,
+        firstFrameReady,
+        clientBufferedAheadSeconds: gate.clientBufferedAheadSeconds,
+        requiredClientBufferSeconds: gate.requiredClientBufferSeconds,
+        backendPreparedAheadSeconds: gate.backendPreparedAheadSeconds,
+        releaseGateReady: gate.ready,
+        mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
+        optimizedPlaybackPending,
+        mobileWarmupProbeActive: mobileWarmupProbeActiveRef.current,
+        pendingSeekPhase: pendingSeekPhaseRef.current,
+        pendingTarget: mobilePendingTargetRef.current,
+        activeEpochId: session.active_epoch_id || session.epoch || null,
+        attachRevision: session.attach_revision ?? null,
+        clientAttachRevision: session.client_attach_revision ?? null,
+      });
     }
 
     function maybeFinalizeMobilePlayerReadiness() {
@@ -2032,22 +2081,25 @@ export function useBrowserPlaybackController({
       ) {
         startIosClientBufferPrewarm(currentSession);
       }
-      if (!mobileCanPlaySeenRef.current || !mobileLoadedDataSeenRef.current) {
+      const firstFrameReady = hasVideoFirstFrameForPlaybackRelease(video, {
+        loadedDataSeen: mobileLoadedDataSeenRef.current,
+        canPlaySeen: mobileCanPlaySeenRef.current,
+        frameReady: mobileFrameReadyRef.current,
+      });
+      if (!firstFrameReady) {
+        debugPrewarmReleaseBlock("first_frame_not_ready", clientReleaseGate);
         return;
       }
       if (mobileAwaitingTargetSeekRef.current) {
+        debugPrewarmReleaseBlock("awaiting_target_seek", clientReleaseGate);
         return;
       }
       if (mobileSeekPendingRef.current) {
+        debugPrewarmReleaseBlock("seek_pending", clientReleaseGate);
         return;
       }
       if (mobileAttachedEpochRef.current !== resolveSessionAttachmentIdentity(currentSession)) {
-        return;
-      }
-      if (video.readyState < 3) {
-        return;
-      }
-      if (!mobileFrameReadyRef.current || video.videoWidth <= 0 || video.videoHeight <= 0) {
+        debugPrewarmReleaseBlock("attached_epoch_mismatch", clientReleaseGate);
         return;
       }
       if (isRetargetTransition) {
@@ -2056,6 +2108,7 @@ export function useBrowserPlaybackController({
           (currentSession.ready_end_seconds || 0) - (currentSession.target_position_seconds || 0),
         );
         if (backendRunway < IOS_STABLE_READY_BACKEND_RUNWAY_SECONDS) {
+          debugPrewarmReleaseBlock("retarget_backend_runway", clientReleaseGate);
           return;
         }
         const targetAbsoluteSeconds =
@@ -2067,46 +2120,12 @@ export function useBrowserPlaybackController({
                 ? currentSession.pending_target_seconds
                 : currentSession.target_position_seconds || 0;
         if (shouldHoldRetargetFrozenFrameForClientBuffer(targetAbsoluteSeconds)) {
+          debugPrewarmReleaseBlock("retarget_client_buffer", clientReleaseGate);
           return;
         }
       } else {
         if (!clientReleaseGate.ready) {
-          return;
-        }
-      }
-      if (shouldAutoplay && !isRetargetTransition) {
-        if (!mobileWarmupProbeActiveRef.current) {
-          mobileWarmupProbeActiveRef.current = true;
-          mobileWarmupPlaybackObservedRef.current = false;
-          mobileWarmupStartPositionRef.current =
-            mobilePendingTargetRef.current != null
-              ? resolveMediaElementPositionForAbsolute(mobileSessionRef.current, mobilePendingTargetRef.current)
-              : (video.currentTime || 0);
-          const readinessGeneration = mobileReadinessGenerationRef.current;
-          if (iosMobile && getPlaybackMode(currentSession?.playback_mode || playbackModeIntentRef.current) === "lite") {
-            video.controls = false;
-          }
-          video
-            .play()
-            .then(() => {
-              window.setTimeout(() => {
-                if (readinessGeneration !== mobileReadinessGenerationRef.current) {
-                  return;
-                }
-                if (!mobileWarmupProbeActiveRef.current || mobilePlayerCanPlayRef.current) {
-                  return;
-                }
-                if (!video.paused && video.readyState >= 3) {
-                  mobileWarmupPlaybackObservedRef.current = true;
-                  maybeFinalizeMobilePlayerReadiness();
-                }
-              }, 250);
-            })
-            .catch((requestError) => {
-              handleIosPrewarmPlayFailure(requestError, readinessGeneration, { allowReadyFallback: true });
-            });
-        }
-        if (!mobileWarmupPlaybackObservedRef.current) {
+          debugPrewarmReleaseBlock("client_release_gate", clientReleaseGate);
           return;
         }
       }
@@ -2204,11 +2223,16 @@ export function useBrowserPlaybackController({
         || video.currentSrc
         || video.getAttribute("src")
       );
+      const firstFrameReady = hasVideoFirstFrameForPlaybackRelease(video, {
+        loadedDataSeen: mobileLoadedDataSeenRef.current,
+        canPlaySeen: mobileCanPlaySeenRef.current,
+        frameReady: mobileFrameReadyRef.current,
+      });
       if (
         !activeSession
         || mobilePlayerCanPlayRef.current
         || !hasPlayableSource
-        || video.readyState < 3
+        || !firstFrameReady
         || !video.paused
       ) {
         return false;
@@ -2479,7 +2503,7 @@ export function useBrowserPlaybackController({
           mobileAutoplayPendingRef.current = true;
           startIosClientBufferPrewarm(mobileSessionRef.current, { fromUserGesture: true });
           setPlaybackStatus(`Preparing ${browserPlaybackLabel}`);
-          setSeekNotice(`Elvern is still preparing enough video for stable ${browserPlaybackLabel}.`);
+          setSeekNotice("");
         }
         return;
       }

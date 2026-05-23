@@ -51,4 +51,13 @@ describe("DetailPage hook-order guards", () => {
     expect(noteSource).not.toContain("Server ready");
     expect(noteSource).not.toContain("Client buffer");
   });
+
+  test("browser prewarm uses the video-card prepare UI instead of a duplicate external EST box", () => {
+    const source = readDetailPage();
+
+    expect(source).toContain("showMobilePreparingPlaceholder && !showMobilePrewarmCard");
+    expect(source).toContain("player-prewarm-card__estimate");
+    expect(source).not.toContain("Elvern is preparing stable");
+    expect(source).toContain("Prepared through");
+  });
 });

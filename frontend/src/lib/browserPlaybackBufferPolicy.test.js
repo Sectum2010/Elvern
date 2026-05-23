@@ -7,6 +7,7 @@ import {
   classifyPlaybackStall,
   deriveBufferTargetsFromSession,
   evaluateClientPlaybackReleaseGate,
+  hasVideoFirstFrameForPlaybackRelease,
   muteVideoForClientPrewarm,
   readClientBufferedAheadSeconds,
   readClientPlaybackLiveness,
@@ -246,6 +247,26 @@ describe("client playback release gates", () => {
     restoreVideoAfterClientPrewarm(video, saved);
     assert.equal(video.muted, true);
     assert.equal(video.volume, 0.4);
+  });
+
+  test("first-frame release accepts loaded current data with video dimensions", () => {
+    assert.equal(hasVideoFirstFrameForPlaybackRelease({
+      readyState: 2,
+      videoWidth: 1920,
+      videoHeight: 1080,
+    }, { loadedDataSeen: true }), true);
+
+    assert.equal(hasVideoFirstFrameForPlaybackRelease({
+      readyState: 2,
+      videoWidth: 0,
+      videoHeight: 1080,
+    }, { loadedDataSeen: true }), false);
+
+    assert.equal(hasVideoFirstFrameForPlaybackRelease({
+      readyState: 1,
+      videoWidth: 1920,
+      videoHeight: 1080,
+    }, { canPlaySeen: true }), false);
   });
 });
 

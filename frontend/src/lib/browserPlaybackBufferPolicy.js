@@ -151,6 +151,31 @@ export function shouldStartClientBufferPrewarm({
   );
 }
 
+export function hasVideoFirstFrameForPlaybackRelease(
+  video,
+  {
+    loadedDataSeen = false,
+    canPlaySeen = false,
+    frameReady = false,
+  } = {},
+) {
+  if (!video) {
+    return false;
+  }
+  const readyState = Number(video.readyState || 0);
+  const width = Number(video.videoWidth || 0);
+  const height = Number(video.videoHeight || 0);
+  if (readyState < 2 || width <= 0 || height <= 0) {
+    return false;
+  }
+  return Boolean(
+    loadedDataSeen
+    || canPlaySeen
+    || frameReady
+    || readyState >= 2
+  );
+}
+
 export function muteVideoForClientPrewarm(video, previousAudioState = null) {
   if (!video) {
     return previousAudioState;

@@ -107,8 +107,10 @@ describe("Elvern player mobile CSS guards", () => {
     expect(card).toContain("inset: 0");
     expect(card).toContain("z-index: 8");
     expect(card).toContain("display: flex");
+    expect(card).toContain("align-items: flex-start");
     expect(card).toContain("background:");
     expect(card).toContain("pointer-events: auto");
+    expect(cssBlock(styles, ".player-prewarm-card__estimate")).toContain("font-variant-numeric: tabular-nums");
   });
 
   test("phone inline maximize is card-corner anchored above the tap surface", () => {

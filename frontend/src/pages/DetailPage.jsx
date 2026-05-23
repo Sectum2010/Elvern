@@ -2671,8 +2671,9 @@ export function DetailPage() {
   const desktopSeekProgressPercent = fullDuration > 0
     ? Math.min(100, Math.max(0, (desktopSeekPosition / fullDuration) * 100))
     : 0;
+  const showMobilePreparingEstimate = showMobilePreparingPlaceholder || showMobilePrewarmCard;
   const prepareEstimateDisplay = (() => {
-    if (!showMobilePreparingPlaceholder || !isRoute2SessionPayload(mobileSession)) {
+    if (!showMobilePreparingEstimate || !isRoute2SessionPayload(mobileSession)) {
       return {
         value: "EST --:--",
         tone: "estimating",
@@ -3316,7 +3317,7 @@ export function DetailPage() {
               </>
             ) : null}
           </div>
-          {showMobilePreparingPlaceholder ? (
+          {showMobilePreparingPlaceholder && !showMobilePrewarmCard ? (
             <div className="playback-pending-indicator" role="status">
               <span className="spinner spinner--inline" aria-hidden="true" />
               <div>
@@ -3492,7 +3493,9 @@ export function DetailPage() {
                   <span className="spinner player-prewarm-card__spinner" aria-hidden="true" />
                   <div className="player-prewarm-card__copy">
                     <p className="player-prewarm-card__title">Preparing {browserPlaybackLabel}</p>
-                    <p className="player-prewarm-card__text">Elvern is preparing stable {browserPlaybackLabel}.</p>
+                    <strong className={`player-prewarm-card__estimate playback-pending-est__value--${prepareEstimateDisplay.tone}`}>
+                      {prepareEstimateDisplay.value}
+                    </strong>
                   </div>
                 </div>
               ) : null}

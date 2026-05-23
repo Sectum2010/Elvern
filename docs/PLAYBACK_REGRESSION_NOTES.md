@@ -643,3 +643,37 @@ Keep tests that prove:
 - Visible user-facing wording remains `Prepared through X of Y.`
 - Lite 15/45/180 and Full 120/900 threshold values remain unchanged.
 - Do not change Phase A menu structure, audio switching, subtitles/burn-in, cloud probing, or adaptive policy while tightening recovery.
+
+## Prewarm UI / Release Boundary Regression
+
+### Status
+Fixed for the duplicate prepare UI and overly strict iOS release boundary; still needs real iPhone/PWA confirmation on item `1424`.
+
+### Affected Platforms
+iPhone/PWA Route2 Lite and Full Browser Playback during startup prewarm.
+
+### Symptoms
+The prewarm phase could show two prepare surfaces at once: the external EST prepare box and the video-area preparing card. The card also carried an extra explanatory sentence while the normal `Prepared through X of Y.` line remained below the player. In the same path, playback could remain stuck on the preparing card even after the source had loaded enough first-frame data.
+
+### Root Cause
+The startup UI had two visible prepare sources: `showMobilePreparingPlaceholder` rendered the external EST box while the video-area `player-prewarm-card` rendered the real prewarm state. The iOS release boundary was also stricter than the intended first-frame gate: it still required `readyState >= 3`, a canplay-style signal, and observed warmup playback advancement before setting `mobilePlayerCanPlay`. On Safari/PWA that can keep internal prewarm hidden behind the card even when the client-buffer gate and first decoded frame boundary are already sufficient.
+
+### Correct Fix
+Use the video-area preparing card as the single startup/prewarm surface. The external EST box is suppressed whenever the prewarm card is active, the colored `EST` value is rendered inside the card below `Preparing lite playback` / `Preparing full playback`, and the extra explanatory sentence is removed. Release still requires the client-buffer threshold, but first-frame readiness now accepts loaded current data with nonzero video dimensions instead of waiting for the heavier canplay/playback-advance path. Prewarm remains muted and internal until release, then the normal shell appears and audio state is restored.
+
+### Regression Guards
+Keep tests that prove:
+
+- The iPhone prewarm card is active without the duplicate external EST box.
+- The card contains the title plus an EST value and does not contain the removed explanatory sentence.
+- `Prepared through X of Y.` remains the normal progress wording.
+- Release can occur when the client-buffer gate passes and first-frame data has `readyState >= 2` with nonzero video dimensions.
+- The warmup video remains covered before release.
+
+### Do Not Regress
+- Do not show duplicate prepare surfaces.
+- Do not show a black video shell, central play button, or controls during prewarm.
+- Do not leak audible audio during prewarm.
+- Do not stay preparing after the client-buffer threshold and first-frame boundary pass.
+- Do not lower Lite 15/45/180 or Full 120/900.
+- Do not change Phase A menu structure, audio switching, subtitles/burn-in, cloud probing, adaptive policy, or normal native-HLS window-slide handling while maintaining this boundary.

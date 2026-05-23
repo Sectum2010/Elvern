@@ -4216,10 +4216,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   inset: 0;
   z-index: 8;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   gap: 0.9rem;
-  padding: clamp(1rem, 4vw, 1.8rem);
+  padding: clamp(2rem, 9vw, 4.2rem) clamp(1rem, 4vw, 1.8rem) clamp(1rem, 4vw, 1.8rem);
   border-radius: inherit;
   background: linear-gradient(145deg, rgba(8, 10, 16, 0.98), rgba(2, 4, 9, 0.98));
   color: #f8fafc;
@@ -4232,11 +4232,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   width: 1.45rem;
   height: 1.45rem;
   flex: 0 0 auto;
+  margin-top: 0.12rem;
 }
 
 .player-prewarm-card__copy {
   display: grid;
-  gap: 0.18rem;
+  gap: 0.35rem;
   max-width: min(22rem, 78%);
 }
 
@@ -4247,11 +4248,13 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   letter-spacing: 0;
 }
 
-.player-prewarm-card__text {
+.player-prewarm-card__estimate {
   margin: 0;
-  color: rgba(226, 232, 240, 0.78);
-  font-size: 0.82rem;
+  font-size: clamp(1.55rem, 6vw, 2.35rem);
+  font-weight: 800;
+  line-height: 1;
   letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .player-frozen-frame {
