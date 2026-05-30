@@ -2487,30 +2487,48 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .password-help-refresh-button--sweep::after {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: -1px;
   z-index: 1;
   border-radius: inherit;
-  padding: 1px;
-  background:
-    conic-gradient(
-      from 0deg,
-      transparent 0deg 250deg,
-      rgba(102, 219, 255, 0.15) 272deg,
-      rgba(102, 219, 255, 0.95) 300deg,
-      rgba(181, 220, 249, 0.95) 326deg,
-      transparent 352deg
-    );
-  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  mask-composite: exclude;
-  -webkit-mask-composite: xor;
+  border: 2px solid rgba(74, 222, 255, 0.98);
+  box-shadow:
+    0 0 8px rgba(74, 222, 255, 0.7),
+    0 0 16px rgba(74, 222, 255, 0.32);
+  clip-path: polygon(50% 0, 50% 0, 50% 0, 50% 0, 50% 0, 50% 0, 50% 0);
   animation: password-help-refresh-border-sweep 1100ms linear forwards;
   pointer-events: none;
 }
 
 @keyframes password-help-refresh-border-sweep {
+  0% {
+    clip-path: polygon(50% 0, 50% 0, 50% 0, 50% 0, 50% 0, 50% 0, 50% 0);
+    opacity: 1;
+  }
+
+  18% {
+    clip-path: polygon(50% 0, 100% 0, 100% 0, 100% 0, 100% 0, 50% 0, 50% 0);
+  }
+
+  36% {
+    clip-path: polygon(50% 0, 100% 0, 100% 100%, 100% 100%, 100% 100%, 50% 0, 50% 0);
+  }
+
+  54% {
+    clip-path: polygon(50% 0, 100% 0, 100% 100%, 0 100%, 0 100%, 50% 0, 50% 0);
+  }
+
+  72% {
+    clip-path: polygon(50% 0, 100% 0, 100% 100%, 0 100%, 0 0, 0 0, 50% 0);
+  }
+
+  88% {
+    clip-path: polygon(50% 0, 100% 0, 100% 100%, 0 100%, 0 0, 50% 0, 50% 0);
+    opacity: 1;
+  }
+
   to {
-    transform: rotate(1turn);
+    clip-path: polygon(50% 0, 100% 0, 100% 100%, 0 100%, 0 0, 50% 0, 50% 0);
+    opacity: 0;
   }
 }
 

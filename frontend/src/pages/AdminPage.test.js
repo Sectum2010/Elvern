@@ -95,6 +95,13 @@ describe("AdminPage password help request guards", () => {
     expect(styles).toContain(".password-help-refresh-button--sweep::after");
     expect(styles).toContain("@keyframes password-help-refresh-border-sweep");
     expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
+    const refreshSweepStart = styles.indexOf(".password-help-refresh-button--sweep::after");
+    const refreshSweepEnd = styles.indexOf("@media (prefers-reduced-motion: reduce)", refreshSweepStart);
+    const refreshSweepStyles = styles.slice(refreshSweepStart, refreshSweepEnd);
+    expect(refreshSweepStyles).toContain("border: 2px solid rgba(74, 222, 255, 0.98)");
+    expect(refreshSweepStyles).toContain("clip-path: polygon");
+    expect(refreshSweepStyles).not.toContain("conic-gradient");
+    expect(refreshSweepStyles).not.toContain("rotate(");
   });
 
   test("password help section does not use native browser popups", () => {
