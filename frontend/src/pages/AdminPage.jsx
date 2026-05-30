@@ -1702,13 +1702,6 @@ export function AdminPage() {
     setInviteCodesExpanded((current) => !current);
   }
 
-  function handleInviteHeaderKeyDown(event) {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      toggleInviteCodesExpanded();
-    }
-  }
-
   async function loadDownloadAccessForUser(entry) {
     if (!entry) {
       return;
@@ -3705,51 +3698,32 @@ export function AdminPage() {
 	                  </Link>
 	                </div>
 	              </section>
-              <section className="settings-card">
-                <div className="settings-inline-header admin-invite-code-header">
-                  <div
-                    aria-controls="admin-invite-code-list"
-                    aria-expanded={inviteCodesExpanded}
-                    className="admin-invite-code-header__summary"
-                    onClick={toggleInviteCodesExpanded}
-                    onKeyDown={handleInviteHeaderKeyDown}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div>
-                      <h2>Generate invite code</h2>
-                      <p className="page-subnote">
-                        Codes expire after 30 minutes and can be used once. Invite codes are shown only when generated.
-                        Copy them now; they cannot be revealed again after this page is closed.
-                      </p>
-                    </div>
-                    <span className="admin-invite-code-header__meta">
-                      <span className="admin-invite-code-header__label">
-                        {inviteCodesExpanded ? "Hide codes" : "Show codes"}
-                      </span>
-                      <span
-                        aria-hidden="true"
-                        className={[
-                          "admin-invite-code-header__chevron",
-                          inviteCodesExpanded ? "admin-invite-code-header__chevron--open" : "",
-                        ].filter(Boolean).join(" ")}
-                      >
-                        ^
-                      </span>
-                    </span>
-                  </div>
-                  <button
-                    className="primary-button"
-                    disabled={invitePending}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      handleGenerateInviteCode();
-                    }}
-                    type="button"
-                  >
-                    {invitePending ? "Generating..." : "Generate invite code"}
-                  </button>
-                </div>
+	              <section className="settings-card">
+	                <div className="settings-inline-header admin-invite-code-header">
+	                  <button
+	                    aria-controls="admin-invite-code-list"
+	                    aria-expanded={inviteCodesExpanded}
+	                    className="admin-invite-code-header__summary"
+	                    onClick={toggleInviteCodesExpanded}
+	                    type="button"
+	                  >
+	                    <div>
+	                      <h2>Generate invite code</h2>
+	                      <p className="page-subnote">
+	                        Codes expire after 30 minutes and can be used once. Invite codes are shown only when generated.
+	                        Copy them now; they cannot be revealed again after this page is closed.
+	                      </p>
+	                    </div>
+	                  </button>
+	                  <button
+	                    className="primary-button"
+	                    disabled={invitePending}
+	                    onClick={handleGenerateInviteCode}
+	                    type="button"
+	                  >
+	                    {invitePending ? "Generating..." : "Generate invite code"}
+	                  </button>
+	                </div>
                 {inviteCodesExpanded ? (
                   <div className="admin-list admin-list--dense admin-invite-code-list" id="admin-invite-code-list">
                     {inviteCodes.length > 0 ? (

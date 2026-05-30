@@ -34,7 +34,12 @@ describe("AdminPage invite code guards", () => {
     expect(source).toContain("setInviteCodesExpanded(true)");
     expect(source).toContain("aria-expanded={inviteCodesExpanded}");
     expect(source).toContain("inviteCodesExpanded ? (");
-    expect(source).toContain("event.stopPropagation();\n                      handleGenerateInviteCode();");
+    expect(source).toContain("className=\"admin-invite-code-header__summary\"");
+    expect(source).toContain("onClick={toggleInviteCodesExpanded}");
+    expect(source).toContain("onClick={handleGenerateInviteCode}");
+    expect(source).not.toContain("Show codes");
+    expect(source).not.toContain("Hide codes");
+    expect(source).not.toContain("admin-invite-code-header__chevron");
   });
 
   test("invite list spacing is outside the generated code card internals", () => {
@@ -42,6 +47,15 @@ describe("AdminPage invite code guards", () => {
 
     expect(styles).toContain(".admin-list--dense.admin-invite-code-list");
     expect(styles).toMatch(/\.admin-list--dense\.admin-invite-code-list\s*\{[^}]*margin-top:\s*1rem;/s);
+    expect(styles).toMatch(/\.admin-list--dense\.admin-invite-code-list\s*\{[^}]*width:\s*min\(100%,\s*37rem\);/s);
     expect(styles).not.toMatch(/\.admin-invite-code-row\s*\{[^}]*margin-top:/s);
+  });
+
+  test("invite delete modal actions use the compact modal row layout", () => {
+    const styles = readStyles();
+
+    expect(styles).toMatch(/\.browser-resume-modal__actions\.admin-confirm-modal__actions\s*\{[^}]*display:\s*flex;/s);
+    expect(styles).toMatch(/\.browser-resume-modal__actions\.admin-confirm-modal__actions\s*\{[^}]*justify-content:\s*flex-end;/s);
+    expect(styles).toMatch(/\.browser-resume-modal__actions\.admin-confirm-modal__actions > button\s*\{[^}]*flex:\s*0 0 auto;/s);
   });
 });

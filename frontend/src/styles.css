@@ -2740,17 +2740,36 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .browser-resume-modal__card.detail-info-modal__card.admin-confirm-modal {
   width: min(100%, 28rem);
+  gap: 1rem;
+  padding: 1.25rem;
 }
 
-.admin-confirm-modal__actions {
+.admin-confirm-modal .detail-info-modal__copy {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.admin-confirm-modal .detail-info-modal__title {
+  margin: 0;
+}
+
+.admin-confirm-modal .page-subnote {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.browser-resume-modal__actions.admin-confirm-modal__actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 0.75rem;
+  margin-top: 0.15rem;
 }
 
-.admin-confirm-modal__actions > button {
-  min-width: 7.5rem;
+.browser-resume-modal__actions.admin-confirm-modal__actions > button {
+  flex: 0 0 auto;
+  min-width: 7.25rem;
 }
 
 @media (max-width: 519px) {
@@ -2779,19 +2798,21 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .admin-invite-code-header {
-  align-items: center;
+  display: block;
 }
 
 .admin-invite-code-header__summary {
-  display: flex;
-  flex: 1 1 22rem;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  min-width: min(100%, 22rem);
-  padding: 0.25rem 0;
+  display: grid;
+  justify-items: start;
+  gap: 0.85rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
   border-radius: 0.85rem;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
+  text-align: left;
 }
 
 .admin-invite-code-header__summary:focus-visible {
@@ -2799,30 +2820,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   outline-offset: 4px;
 }
 
-.admin-invite-code-header__meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.admin-invite-code-header__chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform 140ms ease;
-}
-
-.admin-invite-code-header__chevron--open {
-  transform: rotate(180deg);
-}
-
 .admin-list--dense.admin-invite-code-list {
   grid-template-columns: minmax(0, 1fr);
   margin-top: 1rem;
+  width: min(100%, 37rem);
 }
 
 .admin-invite-code-row__line {
