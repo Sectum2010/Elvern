@@ -20,6 +20,17 @@ describe("RefreshSweepButton", () => {
 
   test("draws a single rounded rectangle sweep for the fixed refresh duration", () => {
     const onClick = vi.fn();
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      bottom: 44,
+      height: 44,
+      left: 0,
+      right: 180,
+      top: 0,
+      width: 180,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
     render(
       <RefreshSweepButton className="ghost-button" onClick={onClick}>
         Refresh status
@@ -36,15 +47,17 @@ describe("RefreshSweepButton", () => {
     expect(button).toHaveClass("refresh-status-sweep-button--active");
 
     const sweep = button.querySelector(".refresh-status-sweep-button__sweep");
-    const rect = sweep?.querySelector("rect");
-    expect(rect).not.toBeNull();
-    expect(rect?.getAttribute("pathLength")).toBe("100");
-    expect(rect?.getAttribute("rx")).toBe("17.6");
+    const path = sweep?.querySelector("path");
+    expect(sweep?.getAttribute("viewBox")).toBe("0 0 180 44");
+    expect(path).not.toBeNull();
+    expect(path?.getAttribute("d")).toContain("A ");
+    expect(path?.style.getPropertyValue("--refresh-sweep-length")).not.toBe("100");
 
     act(() => {
       vi.advanceTimersByTime(REFRESH_SWEEP_MS);
     });
 
     expect(button).not.toHaveClass("refresh-status-sweep-button--active");
+    rectSpy.mockRestore();
   });
 });

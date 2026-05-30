@@ -101,9 +101,10 @@ describe("AdminPage password help request guards", () => {
     const styles = readStyles();
 
     expect(componentSource).toContain("export const REFRESH_SWEEP_MS = 1100");
-    expect(componentSource).toContain("<rect");
-    expect(componentSource).toContain("pathLength=\"100\"");
-    expect(componentSource).toContain("rx=\"17.6\"");
+    expect(componentSource).toContain("buildSweepGeometry");
+    expect(componentSource).toContain("getBoundingClientRect");
+    expect(componentSource).toContain("--refresh-sweep-length");
+    expect(componentSource).not.toContain("pathLength=\"100\"");
     expect(source).toContain("handlePasswordHelpRefresh");
     expect(source).toContain("await loadPasswordHelpRequests();");
     expect(source).toContain("handleUrlPrefixRefreshStatus");
@@ -112,15 +113,15 @@ describe("AdminPage password help request guards", () => {
     expect(librarySource).toContain("RefreshSweepButton");
     expect(librarySource).toContain("Rescan library");
     expect(componentSource).toContain("refresh-status-sweep-button__sweep");
-    expect(styles).toContain(".refresh-status-sweep-button__sweep rect");
+    expect(styles).toContain(".refresh-status-sweep-button__sweep path");
     expect(styles).toContain("@keyframes refresh-status-border-sweep");
     expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
-    const refreshSweepStart = styles.indexOf(".refresh-status-sweep-button__sweep rect");
+    const refreshSweepStart = styles.indexOf(".refresh-status-sweep-button__sweep path");
     const refreshSweepEnd = styles.indexOf("@media (prefers-reduced-motion: reduce)", refreshSweepStart);
     const refreshSweepStyles = styles.slice(refreshSweepStart, refreshSweepEnd);
     expect(refreshSweepStyles).toContain("stroke-width: 4.2");
-    expect(refreshSweepStyles).toContain("stroke-dasharray: 100");
-    expect(refreshSweepStyles).toContain("stroke-dashoffset: 100");
+    expect(refreshSweepStyles).toContain("stroke-dasharray: var(--refresh-sweep-length)");
+    expect(refreshSweepStyles).toContain("stroke-dashoffset: var(--refresh-sweep-length)");
     expect(refreshSweepStyles).toContain("stroke-dashoffset: 0");
     expect(refreshSweepStyles).not.toContain("conic-gradient");
     expect(refreshSweepStyles).not.toContain("rotate(");
