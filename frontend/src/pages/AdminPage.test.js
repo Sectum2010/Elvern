@@ -84,23 +84,27 @@ describe("AdminPage password help request guards", () => {
     expect(source).toContain("detectPasswordHelpBrowser");
   });
 
-  test("password help refresh keeps the same handler path with a transient border sweep", () => {
+  test("refresh controls share the same one-way rounded border sweep", () => {
     const source = readAdminPage();
     const styles = readStyles();
 
     expect(source).toContain("handlePasswordHelpRefresh");
     expect(source).toContain("await loadPasswordHelpRequests();");
-    expect(source).toContain("passwordHelpRefreshSweepActive");
-    expect(source).toContain("PASSWORD_HELP_REFRESH_SWEEP_MS");
-    expect(source).toContain("password-help-refresh-button__sweep");
+    expect(source).toContain("handleUrlPrefixRefreshStatus");
+    expect(source).toContain("handleRecoveryRefresh");
+    expect(source).toContain("startRefreshStatusSweep(\"admin-status\")");
+    expect(source).toContain("refreshSweepActiveKeys");
+    expect(source).toContain("REFRESH_STATUS_SWEEP_MS");
+    expect(source).toContain("refresh-status-sweep-button");
+    expect(source).toContain("refresh-status-sweep-button__sweep");
     expect(source).toContain("pathLength=\"100\"");
-    expect(styles).toContain(".password-help-refresh-button__sweep path");
+    expect(styles).toContain(".refresh-status-sweep-button__sweep path");
     expect(styles).toContain("@keyframes password-help-refresh-border-sweep");
     expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
-    const refreshSweepStart = styles.indexOf(".password-help-refresh-button__sweep path");
+    const refreshSweepStart = styles.indexOf(".refresh-status-sweep-button__sweep path");
     const refreshSweepEnd = styles.indexOf("@media (prefers-reduced-motion: reduce)", refreshSweepStart);
     const refreshSweepStyles = styles.slice(refreshSweepStart, refreshSweepEnd);
-    expect(refreshSweepStyles).toContain("stroke-width: 3.4");
+    expect(refreshSweepStyles).toContain("stroke-width: 4.2");
     expect(refreshSweepStyles).toContain("stroke-dasharray: 0 100");
     expect(refreshSweepStyles).toContain("stroke-dasharray: 100 100");
     expect(refreshSweepStyles).not.toContain("conic-gradient");
