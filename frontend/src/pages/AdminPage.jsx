@@ -210,6 +210,56 @@ function InviteCodeEyeIcon({ struck = false }) {
   );
 }
 
+function AdminConfirmModal({
+  confirmLabel = "Confirm",
+  danger = false,
+  error = "",
+  onCancel,
+  onConfirm,
+  open,
+  pending = false,
+  title,
+  body,
+}) {
+  if (!open) {
+    return null;
+  }
+  return (
+    <div
+      aria-labelledby="admin-confirm-modal-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="browser-resume-modal__backdrop"
+        onClick={pending ? undefined : onCancel}
+      />
+      <div className="browser-resume-modal__card detail-info-modal__card admin-confirm-modal">
+        <div className="detail-info-modal__copy">
+          <h2 id="admin-confirm-modal-title" className="detail-info-modal__title">{title}</h2>
+          <p className="page-subnote">{body}</p>
+          {error ? <p className="form-error">{error}</p> : null}
+        </div>
+        <div className="browser-resume-modal__actions admin-confirm-modal__actions">
+          <button className="ghost-button" disabled={pending} onClick={onCancel} type="button">
+            Cancel
+          </button>
+          <button
+            className={danger ? "ghost-button ghost-button--danger" : "primary-button"}
+            disabled={pending}
+            onClick={onConfirm}
+            type="button"
+          >
+            {pending ? `${confirmLabel}...` : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function getUserAvatarInitials(username) {
   if (typeof username !== "string") {
@@ -349,8 +399,15 @@ export function AdminPage() {
   const [inviteCodes, setInviteCodes] = useState([]);
   const [invitePending, setInvitePending] = useState(false);
   const [revealedInviteIds, setRevealedInviteIds] = useState({});
+  const [inviteCodesExpanded, setInviteCodesExpanded] = useState(true);
   const [passwordHelpRequests, setPasswordHelpRequests] = useState([]);
   const [passwordHelpPendingId, setPasswordHelpPendingId] = useState(null);
+  const [adminConfirmModal, setAdminConfirmModal] = useState({
+    type: null,
+    payload: null,
+    pending: false,
+    error: "",
+  });
   const [urlPrefixStatus, setUrlPrefixStatus] = useState(null);
   const [urlPrefixPending, setUrlPrefixPending] = useState(false);
   const [urlPrefixReminderDismissed, setUrlPrefixReminderDismissed] = useState(false);
@@ -1534,6 +1591,7 @@ export function AdminPage() {
         ...current.filter((inviteCode) => inviteCode.id !== payload.id),
       ]);
       setRevealedInviteIds((current) => ({ ...current, [payload.id]: false }));
+      setInviteCodesExpanded(true);
       setBanner({ tone: "success", text: "Invite code generated." });
     } catch (requestError) {
       setBanner({
@@ -1545,28 +1603,62 @@ export function AdminPage() {
     }
   }
 
-  async function handleHideInviteCode(inviteCode) {
-    const confirmed = window.confirm("Hide this invite code from the admin list? The code itself will remain usable until it expires or is used.");
-    if (!confirmed) {
+  function openInviteCodeDeleteModal(inviteCode) {
+    setAdminConfirmModal({
+      type: "invite-delete",
+      payload: inviteCode,
+      pending: false,
+      error: "",
+    });
+  }
+
+  function openPasswordHelpDismissModal(requestEntry) {
+    setAdminConfirmModal({
+      type: "password-help-dismiss",
+      payload: requestEntry,
+      pending: false,
+      error: "",
+    });
+  }
+
+  function closeAdminConfirmModal() {
+    if (adminConfirmModal.pending) {
       return;
     }
+    setAdminConfirmModal({
+      type: null,
+      payload: null,
+      pending: false,
+      error: "",
+    });
+  }
+
+  async function confirmInviteCodeDelete(inviteCode) {
     try {
-      await apiRequest(`/api/admin/invite-codes/${inviteCode.id}/display`, { method: "DELETE" });
-      await loadInviteCodes();
-      setBanner({ tone: "success", text: "Invite code hidden." });
-    } catch (requestError) {
-      setBanner({
-        tone: "error",
-        text: requestError.message || "Failed to hide invite code",
+      await apiRequest(`/api/admin/invite-codes/${inviteCode.id}/revoke`, { method: "POST" });
+      setInviteCodes((current) => current.filter((entry) => entry.id !== inviteCode.id));
+      setRevealedInviteIds((current) => {
+        const next = { ...current };
+        delete next[inviteCode.id];
+        return next;
       });
+      setAdminConfirmModal({
+        type: null,
+        payload: null,
+        pending: false,
+        error: "",
+      });
+      setBanner({ tone: "success", text: "Invite code deleted and revoked." });
+    } catch (requestError) {
+      setAdminConfirmModal((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || "Failed to delete invite code",
+      }));
     }
   }
 
-  async function handleDismissPasswordHelpRequest(requestEntry) {
-    const confirmed = window.confirm(`Dismiss the password help request for ${requestEntry.username_snapshot}?`);
-    if (!confirmed) {
-      return;
-    }
+  async function confirmPasswordHelpDismiss(requestEntry) {
     setPasswordHelpPendingId(requestEntry.id);
     try {
       await apiRequest(`/api/admin/password-help-requests/${requestEntry.id}/dismiss`, {
@@ -1574,14 +1666,46 @@ export function AdminPage() {
         data: { confirm: true },
       });
       await loadPasswordHelpRequests();
+      setAdminConfirmModal({
+        type: null,
+        payload: null,
+        pending: false,
+        error: "",
+      });
       setBanner({ tone: "success", text: "Password help request dismissed." });
     } catch (requestError) {
-      setBanner({
-        tone: "error",
-        text: requestError.message || "Failed to dismiss password help request",
-      });
+      setAdminConfirmModal((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || "Failed to dismiss password help request",
+      }));
     } finally {
       setPasswordHelpPendingId(null);
+    }
+  }
+
+  async function handleConfirmAdminModal() {
+    if (!adminConfirmModal.type || !adminConfirmModal.payload) {
+      return;
+    }
+    setAdminConfirmModal((current) => ({ ...current, pending: true, error: "" }));
+    if (adminConfirmModal.type === "invite-delete") {
+      await confirmInviteCodeDelete(adminConfirmModal.payload);
+      return;
+    }
+    if (adminConfirmModal.type === "password-help-dismiss") {
+      await confirmPasswordHelpDismiss(adminConfirmModal.payload);
+    }
+  }
+
+  function toggleInviteCodesExpanded() {
+    setInviteCodesExpanded((current) => !current);
+  }
+
+  function handleInviteHeaderKeyDown(event) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleInviteCodesExpanded();
     }
   }
 
@@ -3046,7 +3170,7 @@ export function AdminPage() {
             Refresh
           </button>
         </div>
-		                <div className="admin-list admin-list--dense admin-invite-code-list">
+        <div className="admin-list admin-list--dense">
           {passwordHelpRequests.length > 0 ? (
             passwordHelpRequests.map((requestEntry) => (
               <div className="admin-list__row admin-list__row--card" key={requestEntry.id}>
@@ -3059,7 +3183,7 @@ export function AdminPage() {
                 <button
                   className="ghost-button ghost-button--danger"
                   disabled={passwordHelpPendingId === requestEntry.id}
-                  onClick={() => handleDismissPasswordHelpRequest(requestEntry)}
+                  onClick={() => openPasswordHelpDismissModal(requestEntry)}
                   type="button"
                 >
                   {passwordHelpPendingId === requestEntry.id ? "Dismissing..." : "Dismiss"}
@@ -3498,6 +3622,20 @@ export function AdminPage() {
     </div>
   );
 
+  const adminConfirmModalConfig = adminConfirmModal.type === "invite-delete"
+    ? {
+        title: "Delete invite code?",
+        body: "This invite code will be revoked immediately and can no longer be used.",
+        confirmLabel: "Delete",
+        danger: true,
+      }
+    : {
+        title: "Dismiss password help request?",
+        body: "This request will be removed from the admin list. The user can submit another request later.",
+        confirmLabel: "Dismiss",
+        danger: true,
+      };
+
   return (
     <section className="page-section">
       <div className="admin-nav-card" aria-label="Admin sections">
@@ -3567,93 +3705,136 @@ export function AdminPage() {
 	                  </Link>
 	                </div>
 	              </section>
-	              <section className="settings-card">
-	                <div className="settings-inline-header">
-		                  <div>
-		                    <h2>Generate invite code</h2>
-		                    <p className="page-subnote">
-                          Codes expire after 30 minutes and can be used once. Invite codes are shown only when generated.
-                          Copy them now; they cannot be revealed again after this page is closed.
-                        </p>
-	                  </div>
-	                  <button className="primary-button" disabled={invitePending} onClick={handleGenerateInviteCode} type="button">
-	                    {invitePending ? "Generating..." : "Generate invite code"}
-	                  </button>
-	                </div>
-	                <div className="admin-list admin-list--dense">
-		                  {inviteCodes.length > 0 ? (
-		                    inviteCodes.map((inviteCode) => {
-		                      const isRevealed = revealedInviteIds[inviteCode.id] === true;
-		                      const expiresAtMs = Date.parse(inviteCode.expires_at);
-		                      const statusKey = inviteCode.used_at
-		                        ? "used"
-		                        : (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now() ? "expired" : "valid");
-		                      const statusLabel = statusKey === "used"
-		                        ? "Used"
-		                        : (statusKey === "expired" ? "Expired" : "Valid");
-		                      return (
-		                        <div className="admin-list__row admin-list__row--card admin-invite-code-row" key={inviteCode.id}>
-		                          <div className="admin-invite-code-row__body">
-		                            <div className="admin-invite-code-row__line">
-		                              <div className="admin-invite-code-field">
-		                                <input
-		                                  aria-label="Invite code"
-                                      autoComplete="one-time-code"
-                                      data-1p-ignore="true"
-                                      data-bwignore="true"
-                                      data-lpignore="true"
-                                      id={`elvern-invite-code-${inviteCode.id}`}
-                                      name={`elvern-invite-code-${inviteCode.id}`}
-		                                  readOnly
-		                                  type={inviteCode.code && !isRevealed ? "password" : "text"}
-			                                  value={inviteCode.code || "Code is only shown when generated"}
-		                                />
-		                                <button
-		                                  aria-label={isRevealed ? "Hide invite code" : "Reveal invite code"}
-		                                  aria-pressed={isRevealed}
-		                                  className="admin-invite-code-field__toggle"
-		                                  disabled={!inviteCode.code}
-		                                  onClick={() => setRevealedInviteIds((current) => ({ ...current, [inviteCode.id]: !current[inviteCode.id] }))}
-		                                  type="button"
-		                                >
-		                                  <InviteCodeEyeIcon struck={!isRevealed} />
-		                                </button>
-		                              </div>
-		                              <span className={`admin-invite-status admin-invite-status--${statusKey}`}>
-		                                {statusLabel}
-		                              </span>
-		                            </div>
-		                            <p className="page-subnote">
-		                              Expires {formatDate(inviteCode.expires_at)}
-		                              {inviteCode.used_at ? ` · used ${formatDate(inviteCode.used_at)}` : ""}
-		                            </p>
-		                          </div>
-		                          <div className="admin-list__actions">
-		                            <button
-		                              className="ghost-button ghost-button--inline"
-	                              disabled={!inviteCode.code}
-	                              onClick={() => navigator.clipboard?.writeText(inviteCode.code)}
-	                              type="button"
-	                            >
-	                              Copy
-	                            </button>
-	                            <button
-	                              aria-label="Hide invite code"
-	                              className="ghost-button ghost-button--danger"
-	                              onClick={() => handleHideInviteCode(inviteCode)}
-	                              type="button"
-	                            >
-	                              X
-	                            </button>
-	                          </div>
-	                        </div>
-	                      );
-	                    })
-		                  ) : (
-		                    <p className="page-subnote">No visible invite codes.</p>
-		                  )}
-	                </div>
-	              </section>
+              <section className="settings-card">
+                <div className="settings-inline-header admin-invite-code-header">
+                  <div
+                    aria-controls="admin-invite-code-list"
+                    aria-expanded={inviteCodesExpanded}
+                    className="admin-invite-code-header__summary"
+                    onClick={toggleInviteCodesExpanded}
+                    onKeyDown={handleInviteHeaderKeyDown}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <div>
+                      <h2>Generate invite code</h2>
+                      <p className="page-subnote">
+                        Codes expire after 30 minutes and can be used once. Invite codes are shown only when generated.
+                        Copy them now; they cannot be revealed again after this page is closed.
+                      </p>
+                    </div>
+                    <span className="admin-invite-code-header__meta">
+                      <span className="admin-invite-code-header__label">
+                        {inviteCodesExpanded ? "Hide codes" : "Show codes"}
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        className={[
+                          "admin-invite-code-header__chevron",
+                          inviteCodesExpanded ? "admin-invite-code-header__chevron--open" : "",
+                        ].filter(Boolean).join(" ")}
+                      >
+                        ^
+                      </span>
+                    </span>
+                  </div>
+                  <button
+                    className="primary-button"
+                    disabled={invitePending}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleGenerateInviteCode();
+                    }}
+                    type="button"
+                  >
+                    {invitePending ? "Generating..." : "Generate invite code"}
+                  </button>
+                </div>
+                {inviteCodesExpanded ? (
+                  <div className="admin-list admin-list--dense admin-invite-code-list" id="admin-invite-code-list">
+                    {inviteCodes.length > 0 ? (
+                      inviteCodes.map((inviteCode) => {
+                        const isRevealed = revealedInviteIds[inviteCode.id] === true;
+                        const expiresAtMs = Date.parse(inviteCode.expires_at);
+                        const statusKey = inviteCode.used_at
+                          ? "used"
+                          : (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now() ? "expired" : "valid");
+                        const statusLabel = statusKey === "used"
+                          ? "Used"
+                          : (statusKey === "expired" ? "Expired" : "Valid");
+                        return (
+                          <div className="admin-list__row admin-list__row--card admin-invite-code-row" key={inviteCode.id}>
+                            <div className="admin-invite-code-row__body">
+                              <div className="admin-invite-code-row__line">
+                                <div className="admin-invite-code-field">
+                                  <input
+                                    aria-label="Invite code"
+                                    autoComplete="one-time-code"
+                                    data-1p-ignore="true"
+                                    data-bwignore="true"
+                                    data-lpignore="true"
+                                    id={`elvern-invite-code-${inviteCode.id}`}
+                                    name={`elvern-invite-code-${inviteCode.id}`}
+                                    readOnly
+                                    type={inviteCode.code && !isRevealed ? "password" : "text"}
+                                    value={inviteCode.code || "Code is only shown when generated"}
+                                  />
+                                  <button
+                                    aria-label={isRevealed ? "Hide invite code" : "Reveal invite code"}
+                                    aria-pressed={isRevealed}
+                                    className="admin-invite-code-field__toggle"
+                                    disabled={!inviteCode.code}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setRevealedInviteIds((current) => ({ ...current, [inviteCode.id]: !current[inviteCode.id] }));
+                                    }}
+                                    type="button"
+                                  >
+                                    <InviteCodeEyeIcon struck={!isRevealed} />
+                                  </button>
+                                </div>
+                                <span className={`admin-invite-status admin-invite-status--${statusKey}`}>
+                                  {statusLabel}
+                                </span>
+                              </div>
+                              <p className="page-subnote">
+                                Expires {formatDate(inviteCode.expires_at)}
+                                {inviteCode.used_at ? ` · used ${formatDate(inviteCode.used_at)}` : ""}
+                              </p>
+                            </div>
+                            <div className="admin-list__actions">
+                              <button
+                                className="ghost-button ghost-button--inline"
+                                disabled={!inviteCode.code}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  navigator.clipboard?.writeText(inviteCode.code);
+                                }}
+                                type="button"
+                              >
+                                Copy
+                              </button>
+                              <button
+                                aria-label="Delete invite code"
+                                className="ghost-button ghost-button--danger"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openInviteCodeDeleteModal(inviteCode);
+                                }}
+                                type="button"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <p className="page-subnote">No visible invite codes.</p>
+                    )}
+                  </div>
+                ) : null}
+              </section>
 	            </>
 	          ) : null}
         </div>
@@ -3662,6 +3843,17 @@ export function AdminPage() {
       {terminateWorkerConfirmationModal}
       {dismissPlaybackStatusConfirmationModal}
       {diagnosticIdPopup}
+      <AdminConfirmModal
+        body={adminConfirmModalConfig.body}
+        confirmLabel={adminConfirmModalConfig.confirmLabel}
+        danger={adminConfirmModalConfig.danger}
+        error={adminConfirmModal.error}
+        onCancel={closeAdminConfirmModal}
+        onConfirm={handleConfirmAdminModal}
+        open={Boolean(adminConfirmModal.type)}
+        pending={adminConfirmModal.pending}
+        title={adminConfirmModalConfig.title}
+      />
       {backupCreateModal.open ? (
         <div className="browser-resume-modal" role="presentation">
           <button

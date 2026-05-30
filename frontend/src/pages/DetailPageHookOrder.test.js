@@ -60,4 +60,20 @@ describe("DetailPage hook-order guards", () => {
     expect(source).not.toContain("Elvern is preparing stable");
     expect(source).toContain("Prepared through");
   });
+
+  test("movie info opens from a top-right player icon instead of the bottom action row", () => {
+    const source = readDetailPage();
+    const playerCardIndex = source.indexOf("<div className=\"player-card\">");
+    const secondaryActionsIndex = source.indexOf("<div className=\"detail-secondary-actions\">", playerCardIndex);
+    expect(playerCardIndex).toBeGreaterThan(0);
+    expect(secondaryActionsIndex).toBeGreaterThan(playerCardIndex);
+
+    const playerCardHeader = source.slice(playerCardIndex, secondaryActionsIndex);
+    const bottomActions = source.slice(secondaryActionsIndex, source.indexOf("detail-download-action", secondaryActionsIndex));
+
+    expect(playerCardHeader).toContain("detail-player-info-button");
+    expect(playerCardHeader).toContain("aria-label=\"Movie info\"");
+    expect(playerCardHeader).toContain("detail-player-info-button__glyph");
+    expect(bottomActions).not.toContain(">Info<");
+  });
 });

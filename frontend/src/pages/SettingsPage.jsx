@@ -1183,13 +1183,6 @@ export function SettingsPage() {
         setMessage(buildCloudRefreshWarning(successMessage, refreshError));
       }
     } catch (requestError) {
-      if (
-        typeof window !== "undefined"
-        && requestError?.status === 409
-        && /already been added by your admin/i.test(requestError.message || "")
-      ) {
-        window.alert(requestError.message);
-      }
       setError(requestError.message || "Failed to add Google Drive library");
     } finally {
       setCloudBusyKey("");

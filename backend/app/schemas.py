@@ -1474,6 +1474,7 @@ class AdminInviteCodeResponse(BaseModel):
     used_at: str | None = None
     used_by_user_id: int | None = None
     hidden_at: str | None = None
+    revoked_at: str | None = None
 
 
 class AdminInviteCodeListResponse(BaseModel):

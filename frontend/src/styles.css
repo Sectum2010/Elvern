@@ -1236,6 +1236,47 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   min-width: 0;
 }
 
+.page-section--detail .player-card {
+  position: relative;
+}
+
+.detail-player-info-button {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.55rem;
+  background: transparent;
+  color: rgba(237, 248, 255, 0.86);
+  cursor: pointer;
+}
+
+.detail-player-info-button:hover,
+.detail-player-info-button:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.detail-player-info-button:focus-visible {
+  outline: 2px solid rgba(181, 220, 249, 0.85);
+  outline-offset: 3px;
+}
+
+.detail-player-info-button__glyph {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.55rem;
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .page-section--detail .detail-list span {
   max-width: 100%;
   white-space: normal;
@@ -2697,6 +2738,21 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   min-width: 9rem;
 }
 
+.browser-resume-modal__card.detail-info-modal__card.admin-confirm-modal {
+  width: min(100%, 28rem);
+}
+
+.admin-confirm-modal__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.admin-confirm-modal__actions > button {
+  min-width: 7.5rem;
+}
+
 @media (max-width: 519px) {
   .browser-resume-modal__card.detail-info-modal__card.download-confirm-modal {
     width: calc(100vw - 32px);
@@ -2722,8 +2778,51 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   min-width: 0;
 }
 
+.admin-invite-code-header {
+  align-items: center;
+}
+
+.admin-invite-code-header__summary {
+  display: flex;
+  flex: 1 1 22rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-width: min(100%, 22rem);
+  padding: 0.25rem 0;
+  border-radius: 0.85rem;
+  cursor: pointer;
+}
+
+.admin-invite-code-header__summary:focus-visible {
+  outline: 2px solid rgba(181, 220, 249, 0.85);
+  outline-offset: 4px;
+}
+
+.admin-invite-code-header__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.admin-invite-code-header__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 140ms ease;
+}
+
+.admin-invite-code-header__chevron--open {
+  transform: rotate(180deg);
+}
+
 .admin-list--dense.admin-invite-code-list {
   grid-template-columns: minmax(0, 1fr);
+  margin-top: 1rem;
 }
 
 .admin-invite-code-row__line {

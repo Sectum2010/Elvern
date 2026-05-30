@@ -19,6 +19,7 @@ from backend.app.security import hash_session_token
 from backend.app.services.account_access_service import (
     create_user_with_invite,
     generate_invite_code,
+    revoke_invite_code,
     create_download_session,
     get_download_access_for_user,
     is_item_download_allowed,
@@ -1751,6 +1752,111 @@ def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> No
             user_agent="pytest",
         )
     assert invalid_exc.value.status_code == 400
+
+
+def test_revoked_invite_code_cannot_create_user(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    invite_payload = generate_invite_code(
+        initialized_settings,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    revoke_invite_code(
+        initialized_settings,
+        invite_id=int(invite_payload["id"]),
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT revoked_at, hidden_at FROM invite_codes WHERE id = ?",
+            (invite_payload["id"],),
+        ).fetchone()
+
+    assert row is not None
+    assert row["revoked_at"] is not None
+    assert row["hidden_at"] is not None
+
+    with pytest.raises(HTTPException) as revoked_exc:
+        create_user_with_invite(
+            initialized_settings,
+            username="revoked-invite-user",
+            password="family-password",
+            confirm_password="family-password",
+            invite_code=str(invite_payload["code"]),
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+    assert revoked_exc.value.status_code == 400
+
+
+def test_admin_invite_revoke_route_returns_clear_statuses(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    login_response = client.post("/api/auth/login", json=admin_credentials)
+    assert login_response.status_code == 200
+    admin_user = _admin_user(initialized_settings)
+
+    invite_payload = generate_invite_code(
+        initialized_settings,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    revoke_response = client.post(f"/api/admin/invite-codes/{invite_payload['id']}/revoke")
+    assert revoke_response.status_code == 200
+    assert revoke_response.json()["message"] == "Invite code revoked"
+
+    repeat_response = client.post(f"/api/admin/invite-codes/{invite_payload['id']}/revoke")
+    assert repeat_response.status_code == 409
+    assert "already revoked" in repeat_response.json()["detail"]
+
+    missing_response = client.post("/api/admin/invite-codes/999999/revoke")
+    assert missing_response.status_code == 404
+    assert missing_response.json()["detail"] == "Invite code not found"
+
+    expired_payload = generate_invite_code(
+        initialized_settings,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE invite_codes SET expires_at = ? WHERE id = ?",
+            ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), expired_payload["id"]),
+        )
+        connection.commit()
+
+    expired_response = client.post(f"/api/admin/invite-codes/{expired_payload['id']}/revoke")
+    assert expired_response.status_code == 409
+    assert "expired" in expired_response.json()["detail"]
+
+    used_payload = generate_invite_code(
+        initialized_settings,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    create_user_with_invite(
+        initialized_settings,
+        username="used-invite-user",
+        password="family-password",
+        confirm_password="family-password",
+        invite_code=str(used_payload["code"]),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    used_response = client.post(f"/api/admin/invite-codes/{used_payload['id']}/revoke")
+    assert used_response.status_code == 409
+    assert "already used" in used_response.json()["detail"]
 
 
 def test_download_access_selected_movie_gate_and_revoke(initialized_settings) -> None:

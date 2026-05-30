@@ -70,6 +70,7 @@ def _serialize_invite_code(row, *, code: str | None = None) -> dict[str, object]
         "used_at": row["used_at"],
         "used_by_user_id": row["used_by_user_id"],
         "hidden_at": row["hidden_at"],
+        "revoked_at": row["revoked_at"],
     }
 
 
@@ -100,7 +101,7 @@ def generate_invite_code(
         invite_id = int(cursor.lastrowid)
         row = connection.execute(
             """
-            SELECT id, created_by_user_id, created_at, expires_at, used_at, used_by_user_id, hidden_at
+            SELECT id, created_by_user_id, created_at, expires_at, used_at, used_by_user_id, hidden_at, revoked_at
             FROM invite_codes
             WHERE id = ?
             """,
@@ -127,7 +128,7 @@ def list_visible_invite_codes(settings: Settings) -> list[dict[str, object]]:
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
-            SELECT id, created_by_user_id, created_at, expires_at, used_at, used_by_user_id, hidden_at
+            SELECT id, created_by_user_id, created_at, expires_at, used_at, used_by_user_id, hidden_at, revoked_at
             FROM invite_codes
             WHERE hidden_at IS NULL
               AND revoked_at IS NULL
@@ -166,6 +167,56 @@ def hide_invite_code_display(
     log_audit_event(
         settings,
         action="admin.invite_code.hide",
+        outcome="success",
+        user_id=actor.id,
+        username=actor.username,
+        role=actor.role,
+        target_type="invite_code",
+        target_id=invite_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+
+def revoke_invite_code(
+    settings: Settings,
+    *,
+    invite_id: int,
+    actor: AuthenticatedUser,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> None:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id, expires_at, used_at, revoked_at
+            FROM invite_codes
+            WHERE id = ?
+            """,
+            (invite_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invite code not found")
+        if row["revoked_at"] is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Invite code is already revoked")
+        if row["used_at"] is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Invite code was already used")
+        if str(row["expires_at"]) <= now:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Invite code has already expired")
+        connection.execute(
+            """
+            UPDATE invite_codes
+            SET revoked_at = ?,
+                hidden_at = COALESCE(hidden_at, ?)
+            WHERE id = ?
+            """,
+            (now, now, invite_id),
+        )
+        connection.commit()
+    log_audit_event(
+        settings,
+        action="admin.invite_code.revoke",
         outcome="success",
         user_id=actor.id,
         username=actor.username,

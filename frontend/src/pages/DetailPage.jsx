@@ -3234,6 +3234,14 @@ export function DetailPage() {
       </div>
 
       <div className="player-card">
+        <button
+          aria-label="Movie info"
+          className="detail-player-info-button"
+          onClick={() => setInfoModalOpen(true)}
+          type="button"
+        >
+          <span aria-hidden="true" className="detail-player-info-button__glyph">i</span>
+        </button>
         <div className="player-status">
           <div className="status-stack">
             {showPrimaryStatusPill ? (
@@ -3581,13 +3589,6 @@ export function DetailPage() {
         ) : null}
 
         <div className="detail-secondary-actions">
-          <button
-            className="ghost-button"
-            onClick={() => setInfoModalOpen(true)}
-            type="button"
-          >
-            Info
-          </button>
           {isAdmin ? (
             <button
               className="ghost-button ghost-button--danger"

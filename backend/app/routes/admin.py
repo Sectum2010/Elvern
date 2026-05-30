@@ -79,6 +79,7 @@ from ..services.account_access_service import (
     hide_invite_code_display,
     list_password_help_requests,
     list_visible_invite_codes,
+    revoke_invite_code,
     update_download_access_for_user,
 )
 from ..services.app_settings_service import (
@@ -441,6 +442,22 @@ def admin_hide_invite_code_display(
         user_agent=request.headers.get("user-agent"),
     )
     return MessageResponse(message="Invite code hidden from admin display")
+
+
+@router.post("/invite-codes/{invite_id}/revoke", response_model=MessageResponse)
+def admin_revoke_invite_code(
+    invite_id: int,
+    request: Request,
+    user=CurrentAdmin,
+) -> MessageResponse:
+    revoke_invite_code(
+        request.app.state.settings,
+        invite_id=invite_id,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return MessageResponse(message="Invite code revoked")
 
 
 @router.get("/password-help-requests", response_model=PasswordHelpRequestListResponse)
