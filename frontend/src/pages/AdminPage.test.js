@@ -6,10 +6,20 @@ import { describe, expect, test } from "vitest";
 
 const pagesDir = path.dirname(fileURLToPath(import.meta.url));
 const adminPagePath = path.resolve(pagesDir, "AdminPage.jsx");
+const libraryPagePath = path.resolve(pagesDir, "LibraryPage.jsx");
+const refreshSweepButtonPath = path.resolve(pagesDir, "../components/RefreshSweepButton.jsx");
 const stylesPath = path.resolve(pagesDir, "../styles.css");
 
 function readAdminPage() {
   return fs.readFileSync(adminPagePath, "utf8");
+}
+
+function readLibraryPage() {
+  return fs.readFileSync(libraryPagePath, "utf8");
+}
+
+function readRefreshSweepButton() {
+  return fs.readFileSync(refreshSweepButtonPath, "utf8");
 }
 
 function readStyles() {
@@ -86,27 +96,32 @@ describe("AdminPage password help request guards", () => {
 
   test("refresh controls share the same one-way rounded border sweep", () => {
     const source = readAdminPage();
+    const librarySource = readLibraryPage();
+    const componentSource = readRefreshSweepButton();
     const styles = readStyles();
 
+    expect(componentSource).toContain("export const REFRESH_SWEEP_MS = 1100");
+    expect(componentSource).toContain("<rect");
+    expect(componentSource).toContain("pathLength=\"100\"");
+    expect(componentSource).toContain("rx=\"17.6\"");
     expect(source).toContain("handlePasswordHelpRefresh");
     expect(source).toContain("await loadPasswordHelpRequests();");
     expect(source).toContain("handleUrlPrefixRefreshStatus");
     expect(source).toContain("handleRecoveryRefresh");
-    expect(source).toContain("startRefreshStatusSweep(\"admin-status\")");
-    expect(source).toContain("refreshSweepActiveKeys");
-    expect(source).toContain("REFRESH_STATUS_SWEEP_MS");
-    expect(source).toContain("refresh-status-sweep-button");
-    expect(source).toContain("refresh-status-sweep-button__sweep");
-    expect(source).toContain("pathLength=\"100\"");
-    expect(styles).toContain(".refresh-status-sweep-button__sweep path");
-    expect(styles).toContain("@keyframes password-help-refresh-border-sweep");
+    expect(source).toContain("RefreshSweepButton");
+    expect(librarySource).toContain("RefreshSweepButton");
+    expect(librarySource).toContain("Rescan library");
+    expect(componentSource).toContain("refresh-status-sweep-button__sweep");
+    expect(styles).toContain(".refresh-status-sweep-button__sweep rect");
+    expect(styles).toContain("@keyframes refresh-status-border-sweep");
     expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
-    const refreshSweepStart = styles.indexOf(".refresh-status-sweep-button__sweep path");
+    const refreshSweepStart = styles.indexOf(".refresh-status-sweep-button__sweep rect");
     const refreshSweepEnd = styles.indexOf("@media (prefers-reduced-motion: reduce)", refreshSweepStart);
     const refreshSweepStyles = styles.slice(refreshSweepStart, refreshSweepEnd);
     expect(refreshSweepStyles).toContain("stroke-width: 4.2");
-    expect(refreshSweepStyles).toContain("stroke-dasharray: 0 100");
-    expect(refreshSweepStyles).toContain("stroke-dasharray: 100 100");
+    expect(refreshSweepStyles).toContain("stroke-dasharray: 100");
+    expect(refreshSweepStyles).toContain("stroke-dashoffset: 100");
+    expect(refreshSweepStyles).toContain("stroke-dashoffset: 0");
     expect(refreshSweepStyles).not.toContain("conic-gradient");
     expect(refreshSweepStyles).not.toContain("rotate(");
     expect(refreshSweepStyles).not.toContain("clip-path");

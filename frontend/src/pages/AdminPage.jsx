@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LoadingView } from "../components/LoadingView";
 import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
+import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
@@ -55,9 +56,6 @@ const ADMIN_SECTIONS = [
   { key: "recovery", label: "Recovery", icon: "recovery" },
   { key: "assistant", label: "Assistant (Beta)", icon: "assistant" },
 ];
-const REFRESH_STATUS_SWEEP_MS = 1100;
-
-
 function unknownIfEmpty(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized || "Unknown";
@@ -118,27 +116,6 @@ function StatusRow({ label, value }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
-  );
-}
-
-
-function RefreshButtonSweep({ active }) {
-  if (!active) {
-    return null;
-  }
-  return (
-    <svg
-      aria-hidden="true"
-      className="refresh-status-sweep-button__sweep"
-      focusable="false"
-      preserveAspectRatio="none"
-      viewBox="0 0 100 40"
-    >
-      <path
-        d="M 50 2.4 H 80 A 17.6 17.6 0 0 1 97.6 20 A 17.6 17.6 0 0 1 80 37.6 H 20 A 17.6 17.6 0 0 1 2.4 20 A 17.6 17.6 0 0 1 20 2.4 H 50"
-        pathLength="100"
-      />
-    </svg>
   );
 }
 
@@ -479,7 +456,6 @@ export function AdminPage() {
   const [passwordHelpRequests, setPasswordHelpRequests] = useState([]);
   const [passwordHelpPendingId, setPasswordHelpPendingId] = useState(null);
   const [expandedPasswordHelpRequestId, setExpandedPasswordHelpRequestId] = useState(null);
-  const [refreshSweepActiveKeys, setRefreshSweepActiveKeys] = useState({});
   const [adminConfirmModal, setAdminConfirmModal] = useState({
     type: null,
     payload: null,
@@ -557,7 +533,6 @@ export function AdminPage() {
   const realtimeRefreshInFlightRef = useRef(false);
   const realtimeRefreshQueuedRef = useRef(false);
   const sectionCollapseTimerRef = useRef(0);
-  const refreshSweepTimerRefs = useRef({});
   const [activeSection, setActiveSection] = useState("panel");
   const [expandedSection, setExpandedSection] = useState(null);
 
@@ -671,42 +646,15 @@ export function AdminPage() {
     }
   }
 
-  function setRefreshSweepActive(key, active) {
-    setRefreshSweepActiveKeys((current) => {
-      if (Boolean(current[key]) === active) {
-        return current;
-      }
-      return { ...current, [key]: active };
-    });
-  }
-
-  function startRefreshStatusSweep(key) {
-    if (refreshSweepTimerRefs.current[key]) {
-      window.clearTimeout(refreshSweepTimerRefs.current[key]);
-      refreshSweepTimerRefs.current[key] = 0;
-    }
-    setRefreshSweepActive(key, false);
-    window.requestAnimationFrame(() => {
-      setRefreshSweepActive(key, true);
-      refreshSweepTimerRefs.current[key] = window.setTimeout(() => {
-        setRefreshSweepActive(key, false);
-        refreshSweepTimerRefs.current[key] = 0;
-      }, REFRESH_STATUS_SWEEP_MS);
-    });
-  }
-
   async function handlePasswordHelpRefresh() {
-    startRefreshStatusSweep("password-help");
     await loadPasswordHelpRequests();
   }
 
   async function handleUrlPrefixRefreshStatus() {
-    startRefreshStatusSweep("url-prefix");
     await loadUrlPrefixStatus();
   }
 
   async function handleRecoveryRefresh() {
-    startRefreshStatusSweep("recovery");
     await loadRecoveryData();
   }
 
@@ -952,15 +900,6 @@ export function AdminPage() {
 
   useEffect(() => {
     loadAdminData();
-  }, []);
-
-  useEffect(() => () => {
-    Object.values(refreshSweepTimerRefs.current).forEach((timerId) => {
-      if (timerId) {
-        window.clearTimeout(timerId);
-      }
-    });
-    refreshSweepTimerRefs.current = {};
   }, []);
 
   useEffect(() => {
@@ -1286,7 +1225,6 @@ export function AdminPage() {
     if (statusRefreshPending) {
       return;
     }
-    startRefreshStatusSweep("admin-status");
     setStatusRefreshPending(true);
     setBanner(null);
     try {
@@ -3208,19 +3146,14 @@ export function AdminPage() {
           >
             Rotate prefix...
           </button>
-          <button
-            className={[
-              "ghost-button",
-              "refresh-status-sweep-button",
-              refreshSweepActiveKeys["url-prefix"] ? "refresh-status-sweep-button--active" : "",
-            ].filter(Boolean).join(" ")}
+          <RefreshSweepButton
+            className="ghost-button"
             disabled={urlPrefixPending}
             onClick={handleUrlPrefixRefreshStatus}
             type="button"
           >
             {urlPrefixPending ? "Refreshing..." : "Refresh status"}
-            <RefreshButtonSweep active={Boolean(refreshSweepActiveKeys["url-prefix"])} />
-          </button>
+          </RefreshSweepButton>
         </div>
       </section>
 
@@ -3296,19 +3229,13 @@ export function AdminPage() {
             <h2>Password help requests</h2>
             <p className="page-subnote">Pending requests stay visible for 30 days unless dismissed.</p>
           </div>
-          <button
-            className={[
-              "ghost-button",
-              "ghost-button--inline",
-              "refresh-status-sweep-button",
-              refreshSweepActiveKeys["password-help"] ? "refresh-status-sweep-button--active" : "",
-            ].filter(Boolean).join(" ")}
+          <RefreshSweepButton
+            className="ghost-button ghost-button--inline"
             onClick={handlePasswordHelpRefresh}
             type="button"
           >
             Refresh
-            <RefreshButtonSweep active={Boolean(refreshSweepActiveKeys["password-help"])} />
-          </button>
+          </RefreshSweepButton>
         </div>
         <div className="admin-list admin-list--dense password-help-request-list">
           {passwordHelpRequests.length > 0 ? (
@@ -3491,19 +3418,14 @@ export function AdminPage() {
           >
             {createBackupPending ? "Creating backup..." : "Create encrypted backup"}
           </button>
-          <button
-            className={[
-              "ghost-button",
-              "refresh-status-sweep-button",
-              refreshSweepActiveKeys.recovery ? "refresh-status-sweep-button--active" : "",
-            ].filter(Boolean).join(" ")}
+          <RefreshSweepButton
+            className="ghost-button"
             disabled={recoveryLoading}
             onClick={handleRecoveryRefresh}
             type="button"
           >
             {recoveryLoading ? "Refreshing..." : "Refresh"}
-            <RefreshButtonSweep active={Boolean(refreshSweepActiveKeys.recovery)} />
-          </button>
+          </RefreshSweepButton>
         </div>
         <FeedbackBanner banner={recoveryFeedback} />
       </section>
@@ -3848,21 +3770,14 @@ export function AdminPage() {
           })}
         </div>
         {activeSection === "panel" ? (
-          <button
-            className={[
-              "ghost-button",
-              "ghost-button--inline",
-              "admin-nav-card__rescan",
-              "refresh-status-sweep-button",
-              refreshSweepActiveKeys["admin-status"] ? "refresh-status-sweep-button--active" : "",
-            ].filter(Boolean).join(" ")}
+          <RefreshSweepButton
+            className="ghost-button ghost-button--inline admin-nav-card__rescan"
             disabled={statusRefreshPending}
             onClick={handleRefreshStatus}
             type="button"
           >
             {statusRefreshPending ? "Refreshing..." : "Refresh status"}
-            <RefreshButtonSweep active={Boolean(refreshSweepActiveKeys["admin-status"])} />
-          </button>
+          </RefreshSweepButton>
         ) : null}
       </div>
 

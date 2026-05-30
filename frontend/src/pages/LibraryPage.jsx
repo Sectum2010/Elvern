@@ -6,6 +6,7 @@ import { EmptyState } from "../components/EmptyState";
 import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
 import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
+import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { SeriesRail } from "../components/SeriesRail";
 import { apiRequest } from "../lib/api";
 import {
@@ -959,14 +960,14 @@ export function LibraryPage() {
               value={query}
             />
           </label>
-          <button
+          <RefreshSweepButton
             className="ghost-button"
             disabled={rescanPending}
             onClick={handleRescan}
             type="button"
           >
             {rescanPending ? "Starting scan..." : "Rescan library"}
-          </button>
+          </RefreshSweepButton>
         </div>
       </div>
 
