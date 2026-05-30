@@ -59,3 +59,53 @@ describe("AdminPage invite code guards", () => {
     expect(styles).toMatch(/\.browser-resume-modal__actions\.admin-confirm-modal__actions > button\s*\{[^}]*flex:\s*0 0 auto;/s);
   });
 });
+
+describe("AdminPage password help request guards", () => {
+  test("password help cards have list spacing without changing card padding", () => {
+    const styles = readStyles();
+
+    expect(styles).toMatch(/\.password-help-request-list\s*\{[^}]*margin-top:\s*1rem;/s);
+    expect(styles).not.toMatch(/\.password-help-request-card\s*\{[^}]*padding:/s);
+  });
+
+  test("password help request cards expose inline request details from stored metadata", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("expandedPasswordHelpRequestId");
+    expect(source).toContain("aria-label=\"Password request details\"");
+    expect(source).toContain("password-help-request-card__info-glyph");
+    expect(source).toContain("requestEntry.requester_ip_address");
+    expect(source).toContain("requestEntry.requester_user_agent");
+    expect(source).toContain("IP address");
+    expect(source).toContain("Detected device");
+    expect(source).toContain("Browser");
+    expect(source).toContain("unknownIfEmpty");
+    expect(source).toContain("detectPasswordHelpDevice");
+    expect(source).toContain("detectPasswordHelpBrowser");
+  });
+
+  test("password help refresh keeps the same handler path with a transient border sweep", () => {
+    const source = readAdminPage();
+    const styles = readStyles();
+
+    expect(source).toContain("handlePasswordHelpRefresh");
+    expect(source).toContain("await loadPasswordHelpRequests();");
+    expect(source).toContain("passwordHelpRefreshSweepActive");
+    expect(source).toContain("PASSWORD_HELP_REFRESH_SWEEP_MS");
+    expect(styles).toContain(".password-help-refresh-button--sweep::after");
+    expect(styles).toContain("@keyframes password-help-refresh-border-sweep");
+    expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
+  });
+
+  test("password help section does not use native browser popups", () => {
+    const source = readAdminPage();
+    const start = source.indexOf("<h2>Password help requests</h2>");
+    const end = source.indexOf("const logsSection =", start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const sectionSource = source.slice(start, end);
+
+    expect(sectionSource).not.toMatch(/window\.(?:alert|confirm|prompt)\b/);
+    expect(sectionSource).not.toMatch(/\b(?:alert|confirm|prompt)\s*\(/);
+  });
+});

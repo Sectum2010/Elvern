@@ -1859,6 +1859,73 @@ def test_admin_invite_revoke_route_returns_clear_statuses(
     assert "already used" in used_response.json()["detail"]
 
 
+def test_password_help_request_admin_details_include_request_metadata(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _create_standard_user(initialized_settings, username="password-help-user")
+    user_agent = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    )
+
+    help_response = client.post(
+        "/api/auth/password-help",
+        json={"username": "password-help-user"},
+        headers={"x-forwarded-for": "198.51.100.22", "user-agent": user_agent},
+    )
+    assert help_response.status_code == 200
+
+    login_response = client.post("/api/auth/login", json=admin_credentials)
+    assert login_response.status_code == 200
+
+    list_response = client.get("/api/admin/password-help-requests")
+    assert list_response.status_code == 200
+    requests = list_response.json()["requests"]
+    entry = next(row for row in requests if row["username_snapshot"] == "password-help-user")
+
+    assert entry["requester_ip_address"] == "198.51.100.22"
+    assert entry["requester_user_agent"] == user_agent
+
+
+def test_legacy_password_help_request_admin_details_allow_unknown_metadata(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="legacy-help-user")
+    now = utcnow_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO password_help_requests (
+                username_snapshot,
+                user_id,
+                requester_bucket_hash,
+                status,
+                created_at,
+                updated_at,
+                expires_at
+            ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            ("legacy-help-user", created["id"], "legacy-bucket", now, now, expires_at),
+        )
+        connection.commit()
+
+    login_response = client.post("/api/auth/login", json=admin_credentials)
+    assert login_response.status_code == 200
+
+    list_response = client.get("/api/admin/password-help-requests")
+    assert list_response.status_code == 200
+    requests = list_response.json()["requests"]
+    entry = next(row for row in requests if row["username_snapshot"] == "legacy-help-user")
+
+    assert entry["requester_ip_address"] is None
+    assert entry["requester_user_agent"] is None
+
+
 def test_download_access_selected_movie_gate_and_revoke(initialized_settings) -> None:
     created = _create_standard_user(initialized_settings, username="download-user")
     media_item = _create_media_item(initialized_settings, relative_name="download-movie.mp4")

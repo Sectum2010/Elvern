@@ -2408,6 +2408,123 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   word-break: break-word;
 }
 
+.password-help-request-list {
+  margin-top: 1rem;
+}
+
+.password-help-request-card {
+  position: relative;
+}
+
+.password-help-request-card__info-button {
+  position: absolute;
+  top: 0.62rem;
+  right: 0.68rem;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.45rem;
+  min-height: 2.45rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: rgba(237, 248, 255, 0.78);
+  cursor: pointer;
+}
+
+.password-help-request-card__info-button:hover,
+.password-help-request-card__info-button:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.password-help-request-card__info-button:focus-visible {
+  outline: 2px solid rgba(181, 220, 249, 0.85);
+  outline-offset: 3px;
+}
+
+.password-help-request-card__info-glyph {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.35rem;
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.password-help-request-card__details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  padding: 0.72rem 0.8rem;
+  border: 1px solid rgba(143, 182, 218, 0.16);
+  border-radius: 0.85rem;
+  background: rgba(3, 7, 12, 0.32);
+}
+
+.password-help-request-card__details div {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.password-help-request-card__details span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.password-help-request-card__details strong {
+  font-size: 0.88rem;
+}
+
+.password-help-refresh-button {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.password-help-refresh-button--sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  padding: 1px;
+  background:
+    conic-gradient(
+      from 0deg,
+      transparent 0deg 250deg,
+      rgba(102, 219, 255, 0.15) 272deg,
+      rgba(102, 219, 255, 0.95) 300deg,
+      rgba(181, 220, 249, 0.95) 326deg,
+      transparent 352deg
+    );
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  -webkit-mask-composite: xor;
+  animation: password-help-refresh-border-sweep 1100ms linear forwards;
+  pointer-events: none;
+}
+
+@keyframes password-help-refresh-border-sweep {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .password-help-refresh-button--sweep {
+    border-color: rgba(102, 219, 255, 0.78);
+    box-shadow: 0 0 0 1px rgba(102, 219, 255, 0.28);
+  }
+
+  .password-help-refresh-button--sweep::after {
+    animation: none;
+  }
+}
+
 .admin-list__actions {
   display: flex;
   flex-wrap: wrap;
@@ -2911,6 +3028,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 @media (max-width: 519px) {
+  .password-help-request-card__details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .admin-invite-code-row__line {
     grid-template-columns: minmax(0, 1fr);
   }

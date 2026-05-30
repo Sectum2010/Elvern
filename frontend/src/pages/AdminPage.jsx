@@ -55,6 +55,61 @@ const ADMIN_SECTIONS = [
   { key: "recovery", label: "Recovery", icon: "recovery" },
   { key: "assistant", label: "Assistant (Beta)", icon: "assistant" },
 ];
+const PASSWORD_HELP_REFRESH_SWEEP_MS = 1100;
+
+
+function unknownIfEmpty(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized || "Unknown";
+}
+
+
+function detectPasswordHelpDevice(userAgent) {
+  const normalized = String(userAgent || "").toLowerCase();
+  if (!normalized) {
+    return "Unknown";
+  }
+  if (normalized.includes("iphone") || normalized.includes("ipod")) {
+    return "iPhone";
+  }
+  if (normalized.includes("ipad")) {
+    return "iPad";
+  }
+  if (normalized.includes("android")) {
+    return normalized.includes("mobile") ? "Android phone" : "Android tablet";
+  }
+  if (normalized.includes("windows nt")) {
+    return "Windows PC";
+  }
+  if (normalized.includes("macintosh")) {
+    return "Mac";
+  }
+  if (normalized.includes("linux")) {
+    return "Linux desktop";
+  }
+  return "Unknown";
+}
+
+
+function detectPasswordHelpBrowser(userAgent) {
+  const normalized = String(userAgent || "").toLowerCase();
+  if (!normalized) {
+    return "Unknown";
+  }
+  if (normalized.includes("edg/") || normalized.includes("edgios") || normalized.includes("edga/")) {
+    return "Edge";
+  }
+  if (normalized.includes("crios") || normalized.includes("chrome/") || normalized.includes("chromium/")) {
+    return "Chrome";
+  }
+  if (normalized.includes("fxios") || normalized.includes("firefox/")) {
+    return "Firefox";
+  }
+  if (normalized.includes("safari/")) {
+    return "Safari";
+  }
+  return "Unknown";
+}
 
 
 function StatusRow({ label, value }) {
@@ -402,6 +457,8 @@ export function AdminPage() {
   const [inviteCodesExpanded, setInviteCodesExpanded] = useState(true);
   const [passwordHelpRequests, setPasswordHelpRequests] = useState([]);
   const [passwordHelpPendingId, setPasswordHelpPendingId] = useState(null);
+  const [expandedPasswordHelpRequestId, setExpandedPasswordHelpRequestId] = useState(null);
+  const [passwordHelpRefreshSweepActive, setPasswordHelpRefreshSweepActive] = useState(false);
   const [adminConfirmModal, setAdminConfirmModal] = useState({
     type: null,
     payload: null,
@@ -479,6 +536,7 @@ export function AdminPage() {
   const realtimeRefreshInFlightRef = useRef(false);
   const realtimeRefreshQueuedRef = useRef(false);
   const sectionCollapseTimerRef = useRef(0);
+  const passwordHelpRefreshSweepTimerRef = useRef(0);
   const [activeSection, setActiveSection] = useState("panel");
   const [expandedSection, setExpandedSection] = useState(null);
 
@@ -590,6 +648,26 @@ export function AdminPage() {
         text: requestError.message || "Failed to load password help requests",
       });
     }
+  }
+
+  function startPasswordHelpRefreshSweep() {
+    if (passwordHelpRefreshSweepTimerRef.current) {
+      window.clearTimeout(passwordHelpRefreshSweepTimerRef.current);
+      passwordHelpRefreshSweepTimerRef.current = 0;
+    }
+    setPasswordHelpRefreshSweepActive(false);
+    window.requestAnimationFrame(() => {
+      setPasswordHelpRefreshSweepActive(true);
+      passwordHelpRefreshSweepTimerRef.current = window.setTimeout(() => {
+        setPasswordHelpRefreshSweepActive(false);
+        passwordHelpRefreshSweepTimerRef.current = 0;
+      }, PASSWORD_HELP_REFRESH_SWEEP_MS);
+    });
+  }
+
+  async function handlePasswordHelpRefresh() {
+    startPasswordHelpRefreshSweep();
+    await loadPasswordHelpRequests();
   }
 
   async function loadUrlPrefixStatus() {
@@ -834,6 +912,12 @@ export function AdminPage() {
 
   useEffect(() => {
     loadAdminData();
+  }, []);
+
+  useEffect(() => () => {
+    if (passwordHelpRefreshSweepTimerRef.current) {
+      window.clearTimeout(passwordHelpRefreshSweepTimerRef.current);
+    }
   }, []);
 
   useEffect(() => {
@@ -1619,6 +1703,10 @@ export function AdminPage() {
       pending: false,
       error: "",
     });
+  }
+
+  function togglePasswordHelpDetails(requestId) {
+    setExpandedPasswordHelpRequestId((current) => (current === requestId ? null : requestId));
   }
 
   function closeAdminConfirmModal() {
@@ -3159,30 +3247,78 @@ export function AdminPage() {
             <h2>Password help requests</h2>
             <p className="page-subnote">Pending requests stay visible for 30 days unless dismissed.</p>
           </div>
-          <button className="ghost-button ghost-button--inline" onClick={loadPasswordHelpRequests} type="button">
+          <button
+            className={[
+              "ghost-button",
+              "ghost-button--inline",
+              "password-help-refresh-button",
+              passwordHelpRefreshSweepActive ? "password-help-refresh-button--sweep" : "",
+            ].filter(Boolean).join(" ")}
+            onClick={handlePasswordHelpRefresh}
+            type="button"
+          >
             Refresh
           </button>
         </div>
-        <div className="admin-list admin-list--dense">
+        <div className="admin-list admin-list--dense password-help-request-list">
           {passwordHelpRequests.length > 0 ? (
-            passwordHelpRequests.map((requestEntry) => (
-              <div className="admin-list__row admin-list__row--card" key={requestEntry.id}>
-                <div>
-                  <strong>{requestEntry.username_snapshot}</strong>
-                  <p className="page-subnote">
-                    Requested {formatDate(requestEntry.created_at)} · expires {formatDate(requestEntry.expires_at)}
-                  </p>
-                </div>
-                <button
-                  className="ghost-button ghost-button--danger"
-                  disabled={passwordHelpPendingId === requestEntry.id}
-                  onClick={() => openPasswordHelpDismissModal(requestEntry)}
-                  type="button"
+            passwordHelpRequests.map((requestEntry) => {
+              const detailsOpen = expandedPasswordHelpRequestId === requestEntry.id;
+              const requesterIpAddress = unknownIfEmpty(requestEntry.requester_ip_address);
+              const requesterDevice = detectPasswordHelpDevice(requestEntry.requester_user_agent);
+              const requesterBrowser = detectPasswordHelpBrowser(requestEntry.requester_user_agent);
+              return (
+                <div
+                  className={[
+                    "admin-list__row",
+                    "admin-list__row--card",
+                    "password-help-request-card",
+                    detailsOpen ? "password-help-request-card--details-open" : "",
+                  ].filter(Boolean).join(" ")}
+                  key={requestEntry.id}
                 >
-                  {passwordHelpPendingId === requestEntry.id ? "Dismissing..." : "Dismiss"}
-                </button>
-              </div>
-            ))
+                  <button
+                    aria-expanded={detailsOpen}
+                    aria-label="Password request details"
+                    className="password-help-request-card__info-button"
+                    onClick={() => togglePasswordHelpDetails(requestEntry.id)}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="password-help-request-card__info-glyph">i</span>
+                  </button>
+                  <div>
+                    <strong>{requestEntry.username_snapshot}</strong>
+                    <p className="page-subnote">
+                      Requested {formatDate(requestEntry.created_at)} · expires {formatDate(requestEntry.expires_at)}
+                    </p>
+                  </div>
+                  {detailsOpen ? (
+                    <div className="password-help-request-card__details">
+                      <div>
+                        <span>IP address</span>
+                        <strong>{requesterIpAddress}</strong>
+                      </div>
+                      <div>
+                        <span>Detected device</span>
+                        <strong>{requesterDevice}</strong>
+                      </div>
+                      <div>
+                        <span>Browser</span>
+                        <strong>{requesterBrowser}</strong>
+                      </div>
+                    </div>
+                  ) : null}
+                  <button
+                    className="ghost-button ghost-button--danger"
+                    disabled={passwordHelpPendingId === requestEntry.id}
+                    onClick={() => openPasswordHelpDismissModal(requestEntry)}
+                    type="button"
+                  >
+                    {passwordHelpPendingId === requestEntry.id ? "Dismissing..." : "Dismiss"}
+                  </button>
+                </div>
+              );
+            })
           ) : (
             <p className="page-subnote">No pending password help requests.</p>
           )}

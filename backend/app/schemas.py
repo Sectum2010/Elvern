@@ -1485,6 +1485,8 @@ class PasswordHelpRequestResponse(BaseModel):
     id: int
     username_snapshot: str
     user_id: int
+    requester_ip_address: str | None = None
+    requester_user_agent: str | None = None
     created_at: str
     expires_at: str
     status: Literal["pending", "dismissed"] = "pending"

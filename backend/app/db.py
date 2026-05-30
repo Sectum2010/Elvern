@@ -254,6 +254,8 @@ TABLE_STATEMENTS = (
         username_snapshot TEXT NOT NULL,
         user_id INTEGER,
         requester_bucket_hash TEXT,
+        requester_ip_address TEXT,
+        requester_user_agent TEXT,
         status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -888,6 +890,8 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "client_devices", "helper_vlc_detection_checked_at", "TEXT")
     _ensure_column(connection, "library_sources", "local_path", "TEXT")
     _ensure_column(connection, "assistant_change_records", "request_id", "INTEGER")
+    _ensure_column(connection, "password_help_requests", "requester_ip_address", "TEXT")
+    _ensure_column(connection, "password_help_requests", "requester_user_agent", "TEXT")
 
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)

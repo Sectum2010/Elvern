@@ -367,13 +367,15 @@ def create_password_help_request(
                     username_snapshot,
                     user_id,
                     requester_bucket_hash,
+                    requester_ip_address,
+                    requester_user_agent,
                     status,
                     created_at,
                     updated_at,
                     expires_at
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                 """,
-                (normalized_username, user_row["id"], bucket_hash, now, now, expires_at),
+                (normalized_username, user_row["id"], bucket_hash, ip_address, user_agent, now, now, expires_at),
             )
             connection.commit()
         else:
@@ -386,7 +388,15 @@ def list_password_help_requests(settings: Settings) -> list[dict[str, object]]:
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
-            SELECT id, username_snapshot, user_id, created_at, expires_at, status
+            SELECT
+                id,
+                username_snapshot,
+                user_id,
+                requester_ip_address,
+                requester_user_agent,
+                created_at,
+                expires_at,
+                status
             FROM password_help_requests
             WHERE status = 'pending'
               AND expires_at > ?
@@ -400,6 +410,8 @@ def list_password_help_requests(settings: Settings) -> list[dict[str, object]]:
             "id": int(row["id"]),
             "username_snapshot": row["username_snapshot"],
             "user_id": int(row["user_id"]),
+            "requester_ip_address": row["requester_ip_address"],
+            "requester_user_agent": row["requester_user_agent"],
             "created_at": row["created_at"],
             "expires_at": row["expires_at"],
             "status": row["status"],
