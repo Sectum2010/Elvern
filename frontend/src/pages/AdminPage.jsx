@@ -3258,6 +3258,20 @@ export function AdminPage() {
             type="button"
           >
             Refresh
+            {passwordHelpRefreshSweepActive ? (
+              <svg
+                aria-hidden="true"
+                className="password-help-refresh-button__sweep"
+                focusable="false"
+                preserveAspectRatio="none"
+                viewBox="0 0 100 40"
+              >
+                <path
+                  d="M 50 1.8 H 80 A 18.2 18.2 0 0 1 98.2 20 A 18.2 18.2 0 0 1 80 38.2 H 20 A 18.2 18.2 0 0 1 1.8 20 A 18.2 18.2 0 0 1 20 1.8 H 50"
+                  pathLength="100"
+                />
+              </svg>
+            ) : null}
           </button>
         </div>
         <div className="admin-list admin-list--dense password-help-request-list">

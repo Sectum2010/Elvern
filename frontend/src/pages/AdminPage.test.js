@@ -92,16 +92,20 @@ describe("AdminPage password help request guards", () => {
     expect(source).toContain("await loadPasswordHelpRequests();");
     expect(source).toContain("passwordHelpRefreshSweepActive");
     expect(source).toContain("PASSWORD_HELP_REFRESH_SWEEP_MS");
-    expect(styles).toContain(".password-help-refresh-button--sweep::after");
+    expect(source).toContain("password-help-refresh-button__sweep");
+    expect(source).toContain("pathLength=\"100\"");
+    expect(styles).toContain(".password-help-refresh-button__sweep path");
     expect(styles).toContain("@keyframes password-help-refresh-border-sweep");
     expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
-    const refreshSweepStart = styles.indexOf(".password-help-refresh-button--sweep::after");
+    const refreshSweepStart = styles.indexOf(".password-help-refresh-button__sweep path");
     const refreshSweepEnd = styles.indexOf("@media (prefers-reduced-motion: reduce)", refreshSweepStart);
     const refreshSweepStyles = styles.slice(refreshSweepStart, refreshSweepEnd);
-    expect(refreshSweepStyles).toContain("border: 2px solid rgba(74, 222, 255, 0.98)");
-    expect(refreshSweepStyles).toContain("clip-path: polygon");
+    expect(refreshSweepStyles).toContain("stroke-width: 3.4");
+    expect(refreshSweepStyles).toContain("stroke-dasharray: 0 100");
+    expect(refreshSweepStyles).toContain("stroke-dasharray: 100 100");
     expect(refreshSweepStyles).not.toContain("conic-gradient");
     expect(refreshSweepStyles).not.toContain("rotate(");
+    expect(refreshSweepStyles).not.toContain("clip-path");
   });
 
   test("password help section does not use native browser popups", () => {
