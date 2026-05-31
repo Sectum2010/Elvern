@@ -14,6 +14,7 @@ import {
   normalizeUserBackgroundSettings,
   resetUserBackgroundTheme,
 } from "../lib/userBackground";
+import { detectClientDeviceClass } from "../lib/platformDetection";
 import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
@@ -64,6 +65,8 @@ export function ShellLayout({ children }) {
   const isLibraryRootPage = location.pathname === "/library";
   const isLibrarySourcePage = location.pathname === "/library/local" || location.pathname === "/library/cloud";
   const hideFloatingIsland = location.pathname === "/setup/totp";
+  const clientDeviceClass = detectClientDeviceClass();
+  const floatingNavDragEnabled = clientDeviceClass !== "phone" && clientDeviceClass !== "tablet";
   const floatingActiveIndex = Math.max(0, navigation.findIndex((item) => (
     item.to === "/library"
       ? location.pathname.startsWith("/library")
@@ -241,6 +244,9 @@ export function ShellLayout({ children }) {
   }
 
   function handleFloatingActivePointerDown(event) {
+    if (!floatingNavDragEnabled) {
+      return;
+    }
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
     const navRect = floatingNavRef.current?.getBoundingClientRect?.();
@@ -543,24 +549,25 @@ export function ShellLayout({ children }) {
             {navigation.map((item, index) => {
               const isCurrent = index === floatingActiveIndex;
               const isVisuallyActive = index === floatingVisualIndex;
+              const canDragCurrentItem = isCurrent && floatingNavDragEnabled;
               return (
               <NavLink
                 key={item.to}
                 className={[
                   "floating-island__link",
                   isVisuallyActive ? "floating-island__link--active" : "",
-                  isCurrent ? "floating-island__link--current" : "",
-                  isCurrent && floatingNavDragging ? "floating-island__link--dragging" : "",
+                  canDragCurrentItem ? "floating-island__link--current" : "",
+                  canDragCurrentItem && floatingNavDragging ? "floating-island__link--dragging" : "",
                 ].filter(Boolean).join(" ")}
                 onClick={(event) => {
                   handleNavigationClick(event, item).catch(() => {
                     // Fall back to the default route if validation fails unexpectedly.
                   });
                 }}
-                onPointerCancel={isCurrent ? handleFloatingActivePointerCancel : undefined}
-                onPointerDown={isCurrent ? handleFloatingActivePointerDown : undefined}
-                onPointerMove={isCurrent ? handleFloatingActivePointerMove : undefined}
-                onPointerUp={isCurrent ? handleFloatingActivePointerEnd : undefined}
+                onPointerCancel={canDragCurrentItem ? handleFloatingActivePointerCancel : undefined}
+                onPointerDown={canDragCurrentItem ? handleFloatingActivePointerDown : undefined}
+                onPointerMove={canDragCurrentItem ? handleFloatingActivePointerMove : undefined}
+                onPointerUp={canDragCurrentItem ? handleFloatingActivePointerEnd : undefined}
                 ref={(node) => {
                   floatingLinkRefs.current[index] = node;
                 }}

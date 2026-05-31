@@ -304,7 +304,10 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
 
   return (
     <div
-      className="settings-segmented-control"
+      className={[
+        "settings-segmented-control",
+        dragging ? "settings-segmented-control--dragging" : "",
+      ].filter(Boolean).join(" ")}
       role="radiogroup"
       aria-label={ariaLabel}
       ref={controlRef}

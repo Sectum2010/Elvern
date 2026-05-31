@@ -4028,6 +4028,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   color: #eef8ff;
 }
 
+.settings-segmented-control--dragging .settings-segmented-control__button:not(.settings-segmented-control__button--active) {
+  color: var(--text-muted);
+}
+
 .settings-segmented-control__button--active {
   color: #f5fbff;
 }
