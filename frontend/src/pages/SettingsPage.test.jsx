@@ -116,9 +116,21 @@ describe("SettingsPage Display background controls", () => {
 
     expect(source).toContain("settings-card settings-display-card");
     expect(source).toContain("settings-card settings-background-card");
+    expect(source).toContain("settings-card settings-display-interface-card");
+    expect(source).toContain("settings-card settings-display-library-card");
     expect(source).not.toContain("settings-card settings-card--wide settings-display-card");
+    expect(source).not.toContain("Customize your Elvern background for this account.");
     expect(styles).toMatch(/\.settings-grid--display\s*\{[^}]*align-items:\s*start;/s);
+    expect(styles).toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
+    expect(styles).toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
     expect(styles).toMatch(/\.detail-grid,\s*\.settings-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
+  });
+
+  test("interface search toggle uses the dynamic search button label", async () => {
+    await renderDisplaySettings();
+
+    expect(screen.getByText("Dynamic search button")).toBeInTheDocument();
+    expect(screen.queryByText("Floating library search")).not.toBeInTheDocument();
   });
 
   test("poster appearance controls still save through the existing settings endpoint", async () => {

@@ -713,7 +713,7 @@ export function SettingsPage() {
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
       }
-      setMessage(nextValue ? "Floating library search is enabled." : "Floating library search is disabled.");
+      setMessage(nextValue ? "Dynamic search button is enabled." : "Dynamic search button is disabled.");
     } catch (requestError) {
       setError(requestError.message || "Failed to update floating search setting");
     } finally {
@@ -1543,7 +1543,6 @@ export function SettingsPage() {
           <div className="settings-inline-header">
             <div>
               <h2>Background</h2>
-              <p className="page-subnote">Customize your Elvern background for this account.</p>
             </div>
           </div>
           {loading ? (
@@ -1739,7 +1738,7 @@ export function SettingsPage() {
           )}
         </section>
 
-        <section className="settings-card">
+        <section className="settings-card settings-display-interface-card">
           <h2>Interface</h2>
           {loading ? (
             <p className="page-subnote">Loading interface preferences...</p>
@@ -1762,7 +1761,7 @@ export function SettingsPage() {
               </label>
               <label className="settings-toggle">
                 <span>
-                  <strong>Floating library search</strong>
+                  <strong>Dynamic search button</strong>
                   <small>Show the compact search button on Library pages.</small>
                 </span>
                 <input
@@ -1776,7 +1775,7 @@ export function SettingsPage() {
           )}
         </section>
 
-        <section className="settings-card">
+        <section className="settings-card settings-display-library-card">
           <h2>Library</h2>
           {loading ? (
             <p className="page-subnote">Loading your library preferences...</p>

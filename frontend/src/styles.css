@@ -3728,10 +3728,6 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   align-items: start;
 }
 
-.settings-background-card {
-  min-block-size: 100%;
-}
-
 .settings-background-preview {
   position: relative;
   min-block-size: 7rem;
@@ -5136,6 +5132,30 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   .detail-grid,
   .settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-grid--display {
+    grid-template-rows: auto auto auto;
+  }
+
+  .settings-display-card {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .settings-background-card {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  .settings-display-interface-card {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .settings-display-library-card {
+    grid-column: 2;
+    grid-row: 3;
   }
 
   .admin-list__row {
