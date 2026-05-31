@@ -242,6 +242,13 @@ class UserSettingsResponse(BaseModel):
         "2200",
         "original",
     ] = "1400"
+    background_mode: Literal["preset", "gradient", "solid", "photo"] = "preset"
+    background_preset: Literal["neon", "basic", "midnight", "aurora", "rose", "ocean"] = "neon"
+    background_gradient_start: str = "#74114f"
+    background_gradient_end: str = "#1b41b5"
+    background_gradient_accent: str = "#5c1867"
+    background_solid_color: str = "#151a21"
+    background_photo_url: str | None = None
     media_library_reference_private_value: str | None = None
     media_library_reference_shared_default_value: str = ""
     media_library_reference_effective_value: str = ""
@@ -254,6 +261,12 @@ class UserSettingsUpdateRequest(BaseModel):
     floating_library_search_enabled: bool | None = None
     poster_card_appearance: str | None = None
     poster_card_display_max_width: str | int | None = None
+    background_mode: str | None = None
+    background_preset: str | None = None
+    background_gradient_start: str | None = None
+    background_gradient_end: str | None = None
+    background_gradient_accent: str | None = None
+    background_solid_color: str | None = None
     media_library_reference_private_value: str | None = None
 
 

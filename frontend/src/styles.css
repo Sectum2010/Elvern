@@ -27,6 +27,65 @@
   --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
 }
 
+:root[data-elvern-background-mode="preset"][data-elvern-background-preset="neon"],
+:root:not([data-elvern-background-mode]) {
+  --app-page-background:
+    radial-gradient(circle at 12% 14%, rgba(214, 72, 176, 0.28), transparent 24%),
+    radial-gradient(circle at 34% 38%, rgba(160, 52, 196, 0.2), transparent 28%),
+    radial-gradient(circle at 66% 58%, rgba(91, 66, 224, 0.18), transparent 32%),
+    radial-gradient(circle at 90% 14%, rgba(52, 104, 255, 0.24), transparent 26%),
+    linear-gradient(135deg, #74114f 0%, #6a145b 16%, #5c1867 30%, #4f1d76 44%, #432486 58%, #342d97 74%, #2438aa 88%, #1b41b5 100%);
+}
+
+:root[data-elvern-background-mode="preset"][data-elvern-background-preset="basic"] {
+  --app-page-background: #151a21;
+}
+
+:root[data-elvern-background-mode="preset"][data-elvern-background-preset="midnight"] {
+  --app-page-background:
+    radial-gradient(circle at 84% 18%, rgba(78, 116, 156, 0.18), transparent 26%),
+    linear-gradient(135deg, #06111f 0%, #13283d 48%, #08111d 100%);
+}
+
+:root[data-elvern-background-mode="preset"][data-elvern-background-preset="aurora"] {
+  --app-page-background:
+    radial-gradient(circle at 20% 16%, rgba(88, 210, 167, 0.18), transparent 28%),
+    radial-gradient(circle at 82% 28%, rgba(115, 135, 242, 0.2), transparent 30%),
+    linear-gradient(135deg, #10463d 0%, #255b76 48%, #3a2a78 100%);
+}
+
+:root[data-elvern-background-mode="preset"][data-elvern-background-preset="rose"] {
+  --app-page-background:
+    radial-gradient(circle at 20% 16%, rgba(241, 105, 157, 0.2), transparent 28%),
+    linear-gradient(135deg, #5a1732 0%, #843a5c 46%, #272355 100%);
+}
+
+:root[data-elvern-background-mode="preset"][data-elvern-background-preset="ocean"] {
+  --app-page-background:
+    radial-gradient(circle at 20% 16%, rgba(68, 196, 228, 0.18), transparent 28%),
+    linear-gradient(135deg, #05324a 0%, #146078 46%, #172c66 100%);
+}
+
+:root[data-elvern-background-mode="gradient"] {
+  --app-page-background:
+    linear-gradient(
+      135deg,
+      var(--app-background-gradient-start, #74114f) 0%,
+      var(--app-background-gradient-accent, #5c1867) 45%,
+      var(--app-background-gradient-end, #1b41b5) 100%
+    );
+}
+
+:root[data-elvern-background-mode="solid"] {
+  --app-page-background: var(--app-background-solid-color, #151a21);
+}
+
+:root[data-elvern-background-mode="photo"] {
+  --app-page-background:
+    linear-gradient(135deg, rgba(5, 9, 14, 0.48), rgba(7, 10, 18, 0.66)),
+    var(--app-background-photo, linear-gradient(135deg, #74114f, #1b41b5));
+}
+
 @supports (height: 100dvh) {
   :root {
     --app-viewport-height: 100dvh;
@@ -115,6 +174,19 @@ body.elvern-player-fullscreen-active .app-viewport-backdrop::after {
     radial-gradient(circle at 88% 10%, rgba(77, 124, 255, 0.26), transparent 32%),
     radial-gradient(circle at 68% 100%, rgba(118, 63, 238, 0.14), transparent 40%);
   filter: blur(52px);
+}
+
+:root[data-elvern-background-mode="preset"][data-elvern-background-preset="basic"] .app-viewport-backdrop::after,
+:root[data-elvern-background-mode="solid"] .app-viewport-backdrop::after,
+:root[data-elvern-background-mode="gradient"] .app-viewport-backdrop::after,
+:root[data-elvern-background-mode="photo"] .app-viewport-backdrop::after {
+  display: none;
+}
+
+:root[data-elvern-background-mode="photo"] body,
+:root[data-elvern-background-mode="photo"] .app-viewport-backdrop {
+  background-position: center;
+  background-size: cover;
 }
 
 a {
@@ -3653,7 +3725,131 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .settings-grid--display {
-  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+.settings-background-card {
+  min-block-size: 100%;
+}
+
+.settings-background-preview {
+  position: relative;
+  min-block-size: 7rem;
+  overflow: hidden;
+  border: 1px solid rgba(152, 176, 201, 0.18);
+  border-radius: 1rem;
+  background: linear-gradient(135deg, #74114f 0%, #5c1867 45%, #1b41b5 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.settings-background-preview__shine {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 38%),
+    radial-gradient(circle at 18% 20%, rgba(255, 255, 255, 0.22), transparent 30%);
+}
+
+.settings-background-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.settings-background-preset {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 3rem;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid rgba(152, 176, 201, 0.16);
+  border-radius: 0.95rem;
+  background: rgba(7, 11, 23, 0.5);
+  color: #dbe8f5;
+  font-weight: 750;
+  text-align: start;
+  transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
+}
+
+.settings-background-preset:hover,
+.settings-background-preset:focus-visible {
+  border-color: rgba(154, 214, 235, 0.48);
+  background: rgba(17, 27, 41, 0.72);
+}
+
+.settings-background-preset--active {
+  border-color: rgba(154, 214, 235, 0.7);
+  background: rgba(69, 104, 132, 0.36);
+}
+
+.settings-background-preset__swatch {
+  display: block;
+  inline-size: 2.25rem;
+  block-size: 1.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.55rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.settings-background-custom-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  align-items: end;
+}
+
+.settings-background-custom-grid--solid {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.settings-color-field {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.settings-color-field input {
+  inline-size: 100%;
+  min-block-size: 2.75rem;
+  padding: 0.22rem;
+  border: 1px solid rgba(152, 176, 201, 0.18);
+  border-radius: 0.85rem;
+  background: rgba(7, 11, 23, 0.62);
+}
+
+.settings-background-save {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.settings-background-photo-actions {
+  display: flex;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.settings-background-upload {
+  cursor: pointer;
+}
+
+.settings-background-error {
+  margin: 0;
+}
+
+@media (max-width: 520px) {
+  .settings-background-preset-grid,
+  .settings-background-custom-grid,
+  .settings-background-custom-grid--solid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-background-save {
+    inline-size: 100%;
+  }
 }
 
 .settings-segmented-control {

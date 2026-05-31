@@ -7,6 +7,13 @@ import {
   formatGoogleDriveSetupLabel,
 } from "../lib/cloudSyncStatus";
 import { startGoogleDriveReconnect } from "../lib/providerAuth";
+import {
+  BACKGROUND_PRESETS,
+  DEFAULT_BACKGROUND_SETTINGS,
+  buildBackgroundPreviewStyle,
+  deriveGradientEndFromSingleColor,
+  normalizeUserBackgroundSettings,
+} from "../lib/userBackground";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
@@ -34,6 +41,8 @@ const POSTER_DISPLAY_WIDTH_OPTIONS = [
   { value: "2200", label: "2200 px" },
   { value: "original", label: "Original / No upperbound" },
 ];
+
+const BACKGROUND_PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 
 function normalizePosterCardAppearance(value) {
@@ -331,10 +340,14 @@ export function SettingsPage() {
     floating_library_search_enabled: true,
     poster_card_appearance: "classic",
     poster_card_display_max_width: "1400",
+    ...DEFAULT_BACKGROUND_SETTINGS,
     media_library_reference_private_value: null,
     media_library_reference_shared_default_value: "",
     media_library_reference_effective_value: "",
   });
+  const [backgroundDraft, setBackgroundDraft] = useState(DEFAULT_BACKGROUND_SETTINGS);
+  const [backgroundSaving, setBackgroundSaving] = useState(false);
+  const [backgroundError, setBackgroundError] = useState("");
   const [activeSettingsSection, setActiveSettingsSection] = useState("preferences");
   const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
@@ -492,6 +505,7 @@ export function SettingsPage() {
         ]);
         if (active) {
           setSettings(settingsPayload);
+          setBackgroundDraft(normalizeUserBackgroundSettings(settingsPayload));
           setHiddenItems(hiddenPayload.items || []);
           setGlobalHiddenItems(globalHiddenPayload.items || []);
           setCloudLibraries(cloudPayload);
@@ -758,6 +772,147 @@ export function SettingsPage() {
       setError(requestError.message || "Failed to update poster display quality");
     } finally {
       setSaving(false);
+    }
+  }
+
+  function applyBackgroundPayload(payload, successMessage) {
+    const normalizedBackground = normalizeUserBackgroundSettings(payload);
+    setSettings(payload);
+    setBackgroundDraft(normalizedBackground);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+    }
+    setBackgroundError("");
+    if (successMessage) {
+      setMessage(successMessage);
+    }
+  }
+
+  async function patchBackgroundSettings(data, successMessage) {
+    setBackgroundSaving(true);
+    setBackgroundError("");
+    setError("");
+    setMessage("");
+    try {
+      const payload = await apiRequest("/api/user-settings", {
+        method: "PATCH",
+        data,
+      });
+      applyBackgroundPayload(payload, successMessage);
+    } catch (requestError) {
+      setBackgroundError(requestError.message || "Failed to update background");
+    } finally {
+      setBackgroundSaving(false);
+    }
+  }
+
+  function handleBackgroundModeChange(nextMode) {
+    const mode = ["preset", "gradient", "solid", "photo"].includes(nextMode) ? nextMode : "preset";
+    if (mode === "photo" && !settings.background_photo_url) {
+      setBackgroundError("Upload a JPEG, PNG, or WebP background photo first.");
+      return;
+    }
+    setBackgroundDraft((current) => ({
+      ...current,
+      background_mode: mode,
+    }));
+    patchBackgroundSettings({ background_mode: mode }, "Background saved.");
+  }
+
+  function handleBackgroundPresetSelect(nextPreset) {
+    const preset = BACKGROUND_PRESETS.some((entry) => entry.value === nextPreset) ? nextPreset : "neon";
+    setBackgroundDraft((current) => ({
+      ...current,
+      background_mode: "preset",
+      background_preset: preset,
+    }));
+    patchBackgroundSettings(
+      {
+        background_mode: "preset",
+        background_preset: preset,
+      },
+      preset === "basic" ? "Basic background saved." : "Background preset saved.",
+    );
+  }
+
+  function handleBackgroundDraftColorChange(key, value) {
+    setBackgroundDraft((current) => ({
+      ...current,
+      [key]: value,
+    }));
+    setBackgroundError("");
+  }
+
+  async function handleBackgroundCustomSave() {
+    const draft = normalizeUserBackgroundSettings(backgroundDraft);
+    if (draft.background_mode === "solid") {
+      await patchBackgroundSettings(
+        {
+          background_mode: "solid",
+          background_solid_color: draft.background_solid_color,
+        },
+        "Solid background saved.",
+      );
+      return;
+    }
+    const gradientEnd =
+      draft.background_gradient_end === draft.background_gradient_start
+        ? deriveGradientEndFromSingleColor(draft.background_gradient_start)
+        : draft.background_gradient_end;
+    await patchBackgroundSettings(
+      {
+        background_mode: "gradient",
+        background_gradient_start: draft.background_gradient_start,
+        background_gradient_end: gradientEnd,
+        background_gradient_accent: draft.background_gradient_accent,
+      },
+      "Gradient background saved.",
+    );
+  }
+
+  async function handleBackgroundPhotoUpload(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    if (!BACKGROUND_PHOTO_TYPES.has(file.type)) {
+      setBackgroundError("Choose a JPEG, PNG, or WebP image.");
+      return;
+    }
+    setBackgroundSaving(true);
+    setBackgroundError("");
+    setError("");
+    setMessage("");
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const payload = await apiRequest("/api/user-settings/background-photo", {
+        method: "POST",
+        data: formData,
+      });
+      applyBackgroundPayload(payload, "Background photo saved.");
+    } catch (requestError) {
+      setBackgroundError(requestError.message || "Failed to upload background photo");
+    } finally {
+      setBackgroundSaving(false);
+    }
+  }
+
+  async function handleBackgroundReset() {
+    setBackgroundSaving(true);
+    setBackgroundError("");
+    setError("");
+    setMessage("");
+    try {
+      const payload = await apiRequest("/api/user-settings/background-photo", {
+        method: "DELETE",
+      });
+      applyBackgroundPayload(payload, "Background reset to Neon.");
+    } catch (requestError) {
+      setBackgroundError(requestError.message || "Failed to reset background");
+    } finally {
+      setBackgroundSaving(false);
     }
   }
 
@@ -1332,7 +1487,7 @@ export function SettingsPage() {
 
       {activeSettingsSection === "display" ? (
       <div className="settings-grid settings-grid--display">
-        <section className="settings-card settings-card--wide settings-display-card">
+        <section className="settings-card settings-display-card">
           <div className="settings-inline-header">
             <div>
               <h2>Poster appearance</h2>
@@ -1380,6 +1535,206 @@ export function SettingsPage() {
                   ))}
                 </select>
               </label>
+            </div>
+          )}
+        </section>
+
+        <section className="settings-card settings-background-card">
+          <div className="settings-inline-header">
+            <div>
+              <h2>Background</h2>
+              <p className="page-subnote">Customize your Elvern background for this account.</p>
+            </div>
+          </div>
+          {loading ? (
+            <p className="page-subnote">Loading background preferences...</p>
+          ) : (
+            <div className="settings-card-stack">
+              <div
+                aria-label="Background preview"
+                className="settings-background-preview"
+                style={buildBackgroundPreviewStyle(backgroundDraft)}
+              >
+                <span className="settings-background-preview__shine" aria-hidden="true" />
+              </div>
+
+              <div className="settings-segmented-control" role="radiogroup" aria-label="Background mode">
+                {[
+                  { value: "preset", label: "Presets" },
+                  { value: "gradient", label: "Gradient" },
+                  { value: "solid", label: "Solid" },
+                  { value: "photo", label: "Photo" },
+                ].map((option) => {
+                  const isSelected = backgroundDraft.background_mode === option.value;
+                  return (
+                    <button
+                      aria-checked={isSelected}
+                      className={[
+                        "settings-segmented-control__button",
+                        isSelected ? "settings-segmented-control__button--active" : "",
+                      ].filter(Boolean).join(" ")}
+                      disabled={backgroundSaving}
+                      key={option.value}
+                      onClick={() => handleBackgroundModeChange(option.value)}
+                      role="radio"
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {backgroundDraft.background_mode === "preset" ? (
+                <div className="settings-background-preset-grid" role="radiogroup" aria-label="Background presets">
+                  {BACKGROUND_PRESETS.map((preset) => {
+                    const isSelected = backgroundDraft.background_preset === preset.value;
+                    return (
+                      <button
+                        aria-checked={isSelected}
+                        className={[
+                          "settings-background-preset",
+                          isSelected ? "settings-background-preset--active" : "",
+                        ].filter(Boolean).join(" ")}
+                        disabled={backgroundSaving}
+                        key={preset.value}
+                        onClick={() => handleBackgroundPresetSelect(preset.value)}
+                        role="radio"
+                        type="button"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="settings-background-preset__swatch"
+                          style={{ background: preset.swatch }}
+                        />
+                        <span>{preset.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {backgroundDraft.background_mode === "gradient" ? (
+                <div className="settings-background-custom-grid">
+                  <label className="settings-color-field">
+                    <span>Start</span>
+                    <input
+                      aria-label="Gradient start color"
+                      disabled={backgroundSaving}
+                      onChange={(event) =>
+                        handleBackgroundDraftColorChange("background_gradient_start", event.target.value)
+                      }
+                      type="color"
+                      value={backgroundDraft.background_gradient_start}
+                    />
+                  </label>
+                  <label className="settings-color-field">
+                    <span>Accent</span>
+                    <input
+                      aria-label="Gradient accent color"
+                      disabled={backgroundSaving}
+                      onChange={(event) =>
+                        handleBackgroundDraftColorChange("background_gradient_accent", event.target.value)
+                      }
+                      type="color"
+                      value={backgroundDraft.background_gradient_accent}
+                    />
+                  </label>
+                  <label className="settings-color-field">
+                    <span>End</span>
+                    <input
+                      aria-label="Gradient end color"
+                      disabled={backgroundSaving}
+                      onChange={(event) =>
+                        handleBackgroundDraftColorChange("background_gradient_end", event.target.value)
+                      }
+                      type="color"
+                      value={backgroundDraft.background_gradient_end}
+                    />
+                  </label>
+                  <button
+                    className="ghost-button ghost-button--inline settings-background-save"
+                    disabled={backgroundSaving}
+                    onClick={handleBackgroundCustomSave}
+                    type="button"
+                  >
+                    Save gradient
+                  </button>
+                </div>
+              ) : null}
+
+              {backgroundDraft.background_mode === "solid" ? (
+                <div className="settings-background-custom-grid settings-background-custom-grid--solid">
+                  <label className="settings-color-field">
+                    <span>Color</span>
+                    <input
+                      aria-label="Solid background color"
+                      disabled={backgroundSaving}
+                      onChange={(event) =>
+                        handleBackgroundDraftColorChange("background_solid_color", event.target.value)
+                      }
+                      type="color"
+                      value={backgroundDraft.background_solid_color}
+                    />
+                  </label>
+                  <button
+                    className="ghost-button ghost-button--inline settings-background-save"
+                    disabled={backgroundSaving}
+                    onClick={handleBackgroundCustomSave}
+                    type="button"
+                  >
+                    Save solid
+                  </button>
+                </div>
+              ) : null}
+
+              {backgroundDraft.background_mode === "photo" ? (
+                <div className="settings-background-photo-actions">
+                  <label className="ghost-button ghost-button--inline settings-background-upload">
+                    <span>{settings.background_photo_url ? "Replace photo" : "Upload photo"}</span>
+                    <input
+                      accept="image/jpeg,image/png,image/webp"
+                      className="sr-only"
+                      disabled={backgroundSaving}
+                      onChange={handleBackgroundPhotoUpload}
+                      type="file"
+                    />
+                  </label>
+                  {settings.background_photo_url ? (
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      disabled={backgroundSaving}
+                      onClick={handleBackgroundReset}
+                      type="button"
+                    >
+                      Remove photo
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="settings-background-photo-actions">
+                  <label className="ghost-button ghost-button--inline settings-background-upload">
+                    <span>Upload photo</span>
+                    <input
+                      accept="image/jpeg,image/png,image/webp"
+                      className="sr-only"
+                      disabled={backgroundSaving}
+                      onChange={handleBackgroundPhotoUpload}
+                      type="file"
+                    />
+                  </label>
+                  <button
+                    className="ghost-button ghost-button--inline"
+                    disabled={backgroundSaving}
+                    onClick={handleBackgroundReset}
+                    type="button"
+                  >
+                    Reset
+                  </button>
+                </div>
+              )}
+
+              {backgroundError ? <p className="form-error settings-background-error">{backgroundError}</p> : null}
             </div>
           )}
         </section>

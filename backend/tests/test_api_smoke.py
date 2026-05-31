@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import importlib
+from io import BytesIO
 import json
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import backend.app.main as main_module
 from backend.app.auth import ensure_admin_user
@@ -2225,6 +2227,176 @@ def test_user_settings_poster_card_appearance_defaults_and_persists(client, admi
     )
     assert invalid_update.status_code == 200
     assert invalid_update.json()["poster_card_appearance"] == "classic"
+
+
+def test_user_settings_background_defaults_persist_and_reject_unsafe_css(client, admin_credentials) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    initial = client.get("/api/user-settings")
+    assert initial.status_code == 200
+    assert initial.json()["background_mode"] == "preset"
+    assert initial.json()["background_preset"] == "neon"
+
+    basic_update = client.patch(
+        "/api/user-settings",
+        json={"background_mode": "preset", "background_preset": "basic"},
+    )
+    assert basic_update.status_code == 200
+    assert basic_update.json()["background_mode"] == "preset"
+    assert basic_update.json()["background_preset"] == "basic"
+
+    gradient_update = client.patch(
+        "/api/user-settings",
+        json={
+            "background_mode": "gradient",
+            "background_gradient_start": "#123456",
+            "background_gradient_end": "#abcdef",
+            "background_gradient_accent": "#456789",
+        },
+    )
+    assert gradient_update.status_code == 200
+    assert gradient_update.json()["background_mode"] == "gradient"
+    assert gradient_update.json()["background_gradient_start"] == "#123456"
+    assert gradient_update.json()["background_gradient_end"] == "#abcdef"
+
+    rejected = client.patch(
+        "/api/user-settings",
+        json={"background_solid_color": "url(javascript:alert(1))"},
+    )
+    assert rejected.status_code == 400
+    assert "hex color" in rejected.json()["detail"]
+
+
+def test_user_settings_background_stays_per_user(client, admin_credentials) -> None:
+    alice_password = "alice-background-password"
+    bob_password = "bob-background-password"
+
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    _create_standard_user_via_admin(client, username="alice-background", password=alice_password)
+    _create_standard_user_via_admin(client, username="bob-background", password=bob_password)
+    _logout(client)
+
+    _login(client, username="alice-background", password=alice_password)
+    response = client.patch(
+        "/api/user-settings",
+        json={"background_mode": "solid", "background_solid_color": "#223344"},
+    )
+    assert response.status_code == 200
+    assert response.json()["background_mode"] == "solid"
+    assert response.json()["background_solid_color"] == "#223344"
+    _logout(client)
+
+    _login(client, username="bob-background", password=bob_password)
+    bob_settings = client.get("/api/user-settings")
+    assert bob_settings.status_code == 200
+    assert bob_settings.json()["background_mode"] == "preset"
+    assert bob_settings.json()["background_preset"] == "neon"
+    _logout(client)
+
+    _login(client, username="alice-background", password=alice_password)
+    alice_repeat = client.get("/api/user-settings")
+    assert alice_repeat.status_code == 200
+    assert alice_repeat.json()["background_mode"] == "solid"
+    assert alice_repeat.json()["background_solid_color"] == "#223344"
+
+
+def _background_image_bytes(*, image_format: str = "PNG", size: tuple[int, int] = (320, 180)) -> bytes:
+    image = Image.new("RGB", size, "#336699")
+    output = BytesIO()
+    image.save(output, format=image_format)
+    return output.getvalue()
+
+
+def test_user_settings_background_photo_upload_sanitizes_and_can_be_removed(client, admin_credentials) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    large_png = _background_image_bytes(size=(3000, 1200))
+    response = client.post(
+        "/api/user-settings/background-photo",
+        files={"file": ("background.png", large_png, "image/png")},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["background_mode"] == "photo"
+    assert payload["background_photo_url"].startswith("/api/user-settings/background-photo?v=")
+
+    photo_response = client.get("/api/user-settings/background-photo")
+    assert photo_response.status_code == 200
+    assert photo_response.headers["content-type"].startswith("image/jpeg")
+    with Image.open(BytesIO(photo_response.content)) as sanitized:
+        assert sanitized.format == "JPEG"
+        assert max(sanitized.size) <= 2560
+
+    remove_response = client.delete("/api/user-settings/background-photo")
+    assert remove_response.status_code == 200
+    assert remove_response.json()["background_mode"] == "preset"
+    assert remove_response.json()["background_preset"] == "neon"
+    assert remove_response.json()["background_photo_url"] is None
+    assert client.get("/api/user-settings/background-photo").status_code == 404
+
+
+def test_user_settings_background_photo_rejects_svg_and_oversized_uploads(client, admin_credentials) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    svg_response = client.post(
+        "/api/user-settings/background-photo",
+        files={"file": ("background.svg", b"<svg xmlns='http://www.w3.org/2000/svg' />", "image/svg+xml")},
+    )
+    assert svg_response.status_code == 400
+    assert "SVG" in svg_response.json()["detail"]
+
+    oversized_response = client.post(
+        "/api/user-settings/background-photo",
+        files={"file": ("background.jpg", b"x" * (5 * 1024 * 1024 + 1), "image/jpeg")},
+    )
+    assert oversized_response.status_code == 400
+    assert "5 MB" in oversized_response.json()["detail"]
+
+
+def test_user_settings_background_photo_is_private_to_current_user(client, admin_credentials) -> None:
+    alice_password = "alice-photo-password"
+    bob_password = "bob-photo-password"
+
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    _create_standard_user_via_admin(client, username="alice-photo", password=alice_password)
+    _create_standard_user_via_admin(client, username="bob-photo", password=bob_password)
+    _logout(client)
+
+    _login(client, username="alice-photo", password=alice_password)
+    upload_response = client.post(
+        "/api/user-settings/background-photo",
+        files={"file": ("background.png", _background_image_bytes(image_format="PNG"), "image/png")},
+    )
+    assert upload_response.status_code == 200
+    assert client.get("/api/user-settings/background-photo").status_code == 200
+    _logout(client)
+
+    _login(client, username="bob-photo", password=bob_password)
+    bob_settings = client.get("/api/user-settings")
+    assert bob_settings.status_code == 200
+    assert bob_settings.json()["background_mode"] == "preset"
+    assert bob_settings.json()["background_photo_url"] is None
+    assert client.get("/api/user-settings/background-photo").status_code == 404
 
 
 def test_standard_user_private_media_library_reference_uses_shared_default_and_stays_private(

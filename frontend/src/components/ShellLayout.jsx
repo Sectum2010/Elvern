@@ -8,6 +8,12 @@ import {
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
 import { buildLogoutPlaybackWorkerPrompt } from "../lib/playbackWorkerOwnership";
+import {
+  DEFAULT_BACKGROUND_SETTINGS,
+  applyUserBackgroundTheme,
+  normalizeUserBackgroundSettings,
+  resetUserBackgroundTheme,
+} from "../lib/userBackground";
 import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
@@ -22,6 +28,7 @@ export function ShellLayout({ children }) {
   const navigate = useNavigate();
   const [floatingControlsPosition, setFloatingControlsPosition] = useState("bottom");
   const [posterCardAppearance, setPosterCardAppearance] = useState("classic");
+  const [backgroundSettings, setBackgroundSettings] = useState(DEFAULT_BACKGROUND_SETTINGS);
   const [accountExpanded, setAccountExpanded] = useState(false);
   const [logoutWorkerModal, setLogoutWorkerModal] = useState(null);
   const [logoutWorkerPending, setLogoutWorkerPending] = useState("");
@@ -210,11 +217,13 @@ export function ShellLayout({ children }) {
         if (active) {
           setFloatingControlsPosition(payload.floating_controls_position === "top" ? "top" : "bottom");
           setPosterCardAppearance(normalizePosterCardAppearance(payload.poster_card_appearance));
+          setBackgroundSettings(normalizeUserBackgroundSettings(payload));
         }
       } catch {
         if (active) {
           setFloatingControlsPosition("bottom");
           setPosterCardAppearance("classic");
+          setBackgroundSettings(DEFAULT_BACKGROUND_SETTINGS);
         }
       }
     }
@@ -228,6 +237,17 @@ export function ShellLayout({ children }) {
       if (nextPosterCardAppearance !== undefined) {
         setPosterCardAppearance(normalizePosterCardAppearance(nextPosterCardAppearance));
       }
+      if (
+        event?.detail?.background_mode !== undefined
+        || event?.detail?.background_preset !== undefined
+        || event?.detail?.background_gradient_start !== undefined
+        || event?.detail?.background_gradient_end !== undefined
+        || event?.detail?.background_gradient_accent !== undefined
+        || event?.detail?.background_solid_color !== undefined
+        || event?.detail?.background_photo_url !== undefined
+      ) {
+        setBackgroundSettings(normalizeUserBackgroundSettings(event.detail));
+      }
     }
 
     loadUserSettings();
@@ -237,6 +257,13 @@ export function ShellLayout({ children }) {
       window.removeEventListener(USER_SETTINGS_CHANGED_EVENT, handleSettingsChanged);
     };
   }, []);
+
+  useEffect(() => {
+    applyUserBackgroundTheme(backgroundSettings);
+    return () => {
+      resetUserBackgroundTheme();
+    };
+  }, [backgroundSettings]);
 
   useEffect(() => () => {
     if (typeof window !== "undefined" && collapseTimerRef.current) {
@@ -273,6 +300,10 @@ export function ShellLayout({ children }) {
         "app-shell",
         `app-shell--floating-island-${floatingControlsPosition}`,
         `app-shell--poster-card-${posterCardAppearance}`,
+        `app-shell--background-${backgroundSettings.background_mode}`,
+        backgroundSettings.background_mode === "preset"
+          ? `app-shell--background-preset-${backgroundSettings.background_preset}`
+          : "",
         isLibraryRootPage ? "app-shell--library-root" : "",
         isLibrarySourcePage ? "app-shell--library-source" : "",
       ].filter(Boolean).join(" ")}
