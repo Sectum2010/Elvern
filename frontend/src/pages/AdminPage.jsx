@@ -3440,299 +3440,303 @@ export function AdminPage() {
         <FeedbackBanner banner={recoveryFeedback} />
       </section>
 
-      <div className="admin-activity-grid admin-recovery-grid">
-        <section className="settings-card admin-activity-card admin-recovery-card">
-          <div className="settings-inline-header">
-            <div>
-              <h2>Recent checkpoints</h2>
-              <p className="page-subnote">
-                Select a checkpoint, then inspect it or preview recovery. Automatic checkpoints are best-effort and stay server-local in this stage.
-              </p>
+      <div className="admin-activity-grid admin-recovery-grid admin-recovery-grid--compact settings-grid--compact-columns">
+        <div className="settings-grid__column admin-recovery-grid__column">
+          <section className="settings-card admin-activity-card admin-recovery-card">
+            <div className="settings-inline-header">
+              <div>
+                <h2>Recent checkpoints</h2>
+                <p className="page-subnote">
+                  Select a checkpoint, then inspect it or preview recovery. Automatic checkpoints are best-effort and stay server-local in this stage.
+                </p>
+              </div>
             </div>
-          </div>
-          {backupsPayload.length > 0 ? (
-            <div className="admin-recovery__toolbar">
-              <p className="page-subnote">{recoveryCheckpointSummary}</p>
-              {backupsPayload.length > RECOVERY_CHECKPOINT_LIMIT ? (
-                <button
-                  className="ghost-button ghost-button--inline"
-                  onClick={() => setShowAllRecoveryCheckpoints((current) => !current)}
-                  type="button"
-                >
-                  {showAllRecoveryCheckpoints ? "Show less" : "Show all"}
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          <div className="admin-list admin-list--dense">
             {backupsPayload.length > 0 ? (
-              visibleRecoveryCheckpoints.map((checkpoint) => {
-                const selected = checkpoint.checkpoint_id === selectedCheckpointId;
-                return (
-                  <div
-                    className={selected
-                      ? "admin-list__row admin-list__row--card admin-recovery__checkpoint-card admin-recovery__checkpoint-card--selected"
-                      : "admin-list__row admin-list__row--card admin-recovery__checkpoint-card"}
-                    key={checkpoint.checkpoint_id}
+              <div className="admin-recovery__toolbar">
+                <p className="page-subnote">{recoveryCheckpointSummary}</p>
+                {backupsPayload.length > RECOVERY_CHECKPOINT_LIMIT ? (
+                  <button
+                    className="ghost-button ghost-button--inline"
+                    onClick={() => setShowAllRecoveryCheckpoints((current) => !current)}
+                    type="button"
                   >
-                    <div>
-                      <strong>{formatRecoveryTriggerLabel(checkpoint.backup_trigger)}</strong>
-                      <p className="page-subnote">
-                        {formatRecoveryCheckpointTime(checkpoint.created_at_utc)} · {checkpoint.auto_checkpoint ? "Automatic checkpoint" : "Manual checkpoint"}
-                      </p>
-                      <p className="page-subnote admin-recovery__mono" title={checkpoint.checkpoint_id}>
-                        ID {formatRecoveryCheckpointId(checkpoint.checkpoint_id)}
-                      </p>
-                      <p className="page-subnote">
-                        {formatBackupProtectionLabel(checkpoint)} · {checkpoint.contains_secrets ? "Contains secrets" : "No secrets flagged"} · DB integrity {checkpoint.db_integrity_check_result || "unknown"} · {formatBytes(checkpoint.total_size_bytes)} · {checkpoint.file_count} files
-                      </p>
-                      <p className="page-subnote">
-                        Inspect {checkpoint.inspect_valid ? "valid" : "invalid"}{checkpoint.inspect_error ? ` · ${checkpoint.inspect_error}` : ""}
-                      </p>
+                    {showAllRecoveryCheckpoints ? "Show less" : "Show all"}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="admin-list admin-list--dense">
+              {backupsPayload.length > 0 ? (
+                visibleRecoveryCheckpoints.map((checkpoint) => {
+                  const selected = checkpoint.checkpoint_id === selectedCheckpointId;
+                  return (
+                    <div
+                      className={selected
+                        ? "admin-list__row admin-list__row--card admin-recovery__checkpoint-card admin-recovery__checkpoint-card--selected"
+                        : "admin-list__row admin-list__row--card admin-recovery__checkpoint-card"}
+                      key={checkpoint.checkpoint_id}
+                    >
+                      <div>
+                        <strong>{formatRecoveryTriggerLabel(checkpoint.backup_trigger)}</strong>
+                        <p className="page-subnote">
+                          {formatRecoveryCheckpointTime(checkpoint.created_at_utc)} · {checkpoint.auto_checkpoint ? "Automatic checkpoint" : "Manual checkpoint"}
+                        </p>
+                        <p className="page-subnote admin-recovery__mono" title={checkpoint.checkpoint_id}>
+                          ID {formatRecoveryCheckpointId(checkpoint.checkpoint_id)}
+                        </p>
+                        <p className="page-subnote">
+                          {formatBackupProtectionLabel(checkpoint)} · {checkpoint.contains_secrets ? "Contains secrets" : "No secrets flagged"} · DB integrity {checkpoint.db_integrity_check_result || "unknown"} · {formatBytes(checkpoint.total_size_bytes)} · {checkpoint.file_count} files
+                        </p>
+                        <p className="page-subnote">
+                          Inspect {checkpoint.inspect_valid ? "valid" : "invalid"}{checkpoint.inspect_error ? ` · ${checkpoint.inspect_error}` : ""}
+                        </p>
+                      </div>
+                      <div className="admin-list__actions">
+                        <button
+                          className={selected ? "primary-button" : "ghost-button"}
+                          onClick={() => handleCheckpointSelection(checkpoint.checkpoint_id)}
+                          type="button"
+                        >
+                          {selected ? "Selected" : "Select"}
+                        </button>
+                      </div>
                     </div>
-                    <div className="admin-list__actions">
-                      <button
-                        className={selected ? "primary-button" : "ghost-button"}
-                        onClick={() => handleCheckpointSelection(checkpoint.checkpoint_id)}
-                        type="button"
-                      >
-                        {selected ? "Selected" : "Select"}
-                      </button>
-                    </div>
+                  );
+                })
+              ) : (
+                <p className="page-subnote">
+                  {recoveryLoading ? "Loading checkpoints..." : "No checkpoints found yet."}
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section className="settings-card admin-activity-card admin-recovery-card admin-recovery-card--result">
+            <div className="settings-inline-header">
+              <div>
+                <h2>Recovery preview</h2>
+                <p className="page-subnote">
+                  This only checks what this checkpoint could recover. It does not restore or change anything.
+                </p>
+              </div>
+              <button
+                className="ghost-button ghost-button--inline"
+                disabled={!selectedCheckpointId || restorePlanPending}
+                onClick={handleProtectedRestorePlanClick}
+                type="button"
+              >
+                {restorePlanPending ? "Previewing..." : "Preview recovery"}
+              </button>
+            </div>
+            {selectedCheckpoint ? (
+              <div className="admin-recovery__selection-note">
+                <p className="page-subnote">
+                  Selected checkpoint: {formatRecoveryTriggerLabel(selectedCheckpoint.backup_trigger)} · {formatRecoveryCheckpointTime(selectedCheckpoint.created_at_utc)}
+                </p>
+                <p className="page-subnote admin-recovery__mono" title={selectedCheckpoint.checkpoint_id}>
+                  ID {selectedCheckpoint.checkpoint_id}
+                </p>
+              </div>
+            ) : (
+              <p className="page-subnote">Select a checkpoint first.</p>
+            )}
+            {restorePlanPayload ? (
+              <div className="admin-list">
+                <div className="admin-list__row admin-list__row--card admin-recovery__result-card">
+                  <div>
+                    <strong>{restorePlanPayload.checkpoint_valid ? "Recovery preview ready" : "Recovery preview has blocking errors"}</strong>
+                    <p className="page-subnote">
+                      {formatRecoveryTriggerLabel(restorePlanPayload.backup_trigger)} · {restorePlanPayload.contains_secrets ? "Contains secrets" : "No secrets flagged"}
+                    </p>
+                    {restorePlanPayload.blocking_errors?.length > 0 ? (
+                      <>
+                        <p className="form-error">Blocking errors:</p>
+                        <ul className="page-subnote">
+                          {restorePlanPayload.blocking_errors.map((entry) => (
+                            <li key={entry}>{entry}</li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                    {restorePlanWarnings.length > 0 ? (
+                      <>
+                        <div className="admin-recovery__list-header">
+                          <p className="page-subnote">Warnings:</p>
+                          {restorePlanWarnings.length > RECOVERY_WARNING_LIMIT ? (
+                            <button
+                              className="ghost-button ghost-button--inline"
+                              onClick={() => setShowAllRecoveryWarnings((current) => !current)}
+                              type="button"
+                            >
+                              {showAllRecoveryWarnings ? "Show fewer warnings" : "Show all warnings"}
+                            </button>
+                          ) : null}
+                        </div>
+                        <ul className="page-subnote">
+                          {visibleRestorePlanWarnings.map((entry) => (
+                            <li key={entry}>{entry}</li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                    <p className="page-subnote">
+                      Scope: DB snapshot {restorePlanPayload.restore_scope?.db_snapshot_available ? "available" : "missing"} · env {restorePlanPayload.restore_scope?.env_snapshot_available ? "available" : "missing"} · helper releases {restorePlanPayload.restore_scope?.helper_releases_available ? "available" : "missing"} · assistant uploads {restorePlanPayload.restore_scope?.assistant_uploads_available ? "available" : "missing"}
+                    </p>
+                    <p className="page-subnote">
+                      Current vs backup: project root {restorePlanPayload.comparison?.same_project_root ? "same" : "different"} · DB path {restorePlanPayload.comparison?.same_db_path ? "same" : "different"} · public origin {restorePlanPayload.comparison?.same_public_app_origin ? "same" : "different"} · backend origin {restorePlanPayload.comparison?.same_backend_origin ? "same" : "different"} · media root {restorePlanPayload.comparison?.same_media_root_path ? "same" : "different"}
+                    </p>
+                    {restorePlanPayload.not_included?.length > 0 ? (
+                      <>
+                        <p className="page-subnote">Not included:</p>
+                        <ul className="page-subnote">
+                          {restorePlanPayload.not_included.map((entry) => (
+                            <li key={entry}>{entry}</li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                    {restorePlanPayload.required_pre_restore_steps?.length > 0 ? (
+                      <>
+                        <p className="page-subnote">Required pre-restore steps:</p>
+                        <ul className="page-subnote">
+                          {restorePlanPayload.required_pre_restore_steps.map((entry) => (
+                            <li key={entry}>{entry}</li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                    {restorePlanPayload.manual_restore_outline?.length > 0 ? (
+                      <>
+                        <p className="page-subnote">Manual restore outline:</p>
+                        <ol className="page-subnote">
+                          {restorePlanPayload.manual_restore_outline.map((entry) => (
+                            <li key={entry}>{entry}</li>
+                          ))}
+                        </ol>
+                      </>
+                    ) : null}
                   </div>
-                );
-              })
+                </div>
+              </div>
             ) : (
               <p className="page-subnote">
-                {recoveryLoading ? "Loading checkpoints..." : "No checkpoints found yet."}
+                Preview recovery to compare the checkpoint against the current live environment.
               </p>
             )}
-          </div>
-        </section>
+          </section>
+        </div>
 
-        <section className="settings-card admin-activity-card admin-recovery-card admin-recovery-card--result">
-          <div className="settings-inline-header">
-            <div>
-              <h2>Inspect checkpoint</h2>
-              <p className="page-subnote">
-                Compact checkpoint validation only. No manifest secrets or raw database contents are shown here.
-              </p>
+        <div className="settings-grid__column admin-recovery-grid__column">
+          <section className="settings-card admin-activity-card admin-recovery-card admin-recovery-card--result">
+            <div className="settings-inline-header">
+              <div>
+                <h2>Inspect checkpoint</h2>
+                <p className="page-subnote">
+                  Compact checkpoint validation only. No manifest secrets or raw database contents are shown here.
+                </p>
+              </div>
+              <button
+                className="ghost-button ghost-button--inline"
+                disabled={!selectedCheckpointId || inspectPending}
+                onClick={handleProtectedInspectClick}
+                type="button"
+              >
+                {inspectPending ? "Inspecting..." : "Inspect"}
+              </button>
             </div>
-            <button
-              className="ghost-button ghost-button--inline"
-              disabled={!selectedCheckpointId || inspectPending}
-              onClick={handleProtectedInspectClick}
-              type="button"
-            >
-              {inspectPending ? "Inspecting..." : "Inspect"}
-            </button>
-          </div>
-          {selectedCheckpoint ? (
-            <div className="admin-recovery__selection-note">
-              <p className="page-subnote">
-                Selected checkpoint: {formatRecoveryTriggerLabel(selectedCheckpoint.backup_trigger)} · {formatRecoveryCheckpointTime(selectedCheckpoint.created_at_utc)}
-              </p>
-              <p className="page-subnote admin-recovery__mono" title={selectedCheckpoint.checkpoint_id}>
-                ID {selectedCheckpoint.checkpoint_id}
-              </p>
-            </div>
-          ) : (
-            <p className="page-subnote">Select a checkpoint first.</p>
-          )}
-          {inspectPayload ? (
-            <div className="admin-list">
-              <div className="admin-list__row admin-list__row--card admin-recovery__result-card">
-                <div>
-                  <strong>{inspectPayload.valid ? "Checkpoint valid" : "Checkpoint invalid"}</strong>
-                  <p className="page-subnote">
-                    DB integrity {inspectPayload.db_integrity_check_result || "unknown"} · {formatBytes(inspectPayload.total_size_bytes)} · {inspectPayload.file_count} files · {inspectPayload.files_verified} verified
-                  </p>
-                  {inspectPayload.warning ? <p className="page-subnote">{inspectPayload.warning}</p> : null}
-                  {inspectPayload.errors?.length > 0 ? (
-                    <ul className="page-subnote">
-                      {inspectPayload.errors.map((error) => (
-                        <li key={error}>{error}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {inspectPayload.missing_files?.length > 0 ? (
-                    <>
-                      <p className="page-subnote">Missing files:</p>
+            {selectedCheckpoint ? (
+              <div className="admin-recovery__selection-note">
+                <p className="page-subnote">
+                  Selected checkpoint: {formatRecoveryTriggerLabel(selectedCheckpoint.backup_trigger)} · {formatRecoveryCheckpointTime(selectedCheckpoint.created_at_utc)}
+                </p>
+                <p className="page-subnote admin-recovery__mono" title={selectedCheckpoint.checkpoint_id}>
+                  ID {selectedCheckpoint.checkpoint_id}
+                </p>
+              </div>
+            ) : (
+              <p className="page-subnote">Select a checkpoint first.</p>
+            )}
+            {inspectPayload ? (
+              <div className="admin-list">
+                <div className="admin-list__row admin-list__row--card admin-recovery__result-card">
+                  <div>
+                    <strong>{inspectPayload.valid ? "Checkpoint valid" : "Checkpoint invalid"}</strong>
+                    <p className="page-subnote">
+                      DB integrity {inspectPayload.db_integrity_check_result || "unknown"} · {formatBytes(inspectPayload.total_size_bytes)} · {inspectPayload.file_count} files · {inspectPayload.files_verified} verified
+                    </p>
+                    {inspectPayload.warning ? <p className="page-subnote">{inspectPayload.warning}</p> : null}
+                    {inspectPayload.errors?.length > 0 ? (
                       <ul className="page-subnote">
-                        {inspectPayload.missing_files.map((entry) => (
-                          <li key={entry}>{entry}</li>
+                        {inspectPayload.errors.map((error) => (
+                          <li key={error}>{error}</li>
                         ))}
                       </ul>
-                    </>
-                  ) : null}
-                  {inspectPayload.hash_mismatches?.length > 0 ? (
-                    <>
-                      <p className="page-subnote">Hash mismatches:</p>
-                      <ul className="page-subnote">
-                        {inspectPayload.hash_mismatches.map((entry) => (
-                          <li key={entry.relative_path}>{entry.relative_path}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
+                    ) : null}
+                    {inspectPayload.missing_files?.length > 0 ? (
+                      <>
+                        <p className="page-subnote">Missing files:</p>
+                        <ul className="page-subnote">
+                          {inspectPayload.missing_files.map((entry) => (
+                            <li key={entry}>{entry}</li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                    {inspectPayload.hash_mismatches?.length > 0 ? (
+                      <>
+                        <p className="page-subnote">Hash mismatches:</p>
+                        <ul className="page-subnote">
+                          {inspectPayload.hash_mismatches.map((entry) => (
+                            <li key={entry.relative_path}>{entry.relative_path}</li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                  </div>
                 </div>
               </div>
-            </div>
-          ) : null}
-        </section>
-      </div>
-
-      <div className="admin-activity-grid admin-recovery-grid">
-        <section className="settings-card admin-activity-card admin-recovery-card admin-recovery-card--result">
-          <div className="settings-inline-header">
-            <div>
-              <h2>Recovery preview</h2>
-              <p className="page-subnote">
-                This only checks what this checkpoint could recover. It does not restore or change anything.
-              </p>
-            </div>
-            <button
-              className="ghost-button ghost-button--inline"
-              disabled={!selectedCheckpointId || restorePlanPending}
-              onClick={handleProtectedRestorePlanClick}
-              type="button"
-            >
-              {restorePlanPending ? "Previewing..." : "Preview recovery"}
-            </button>
-          </div>
-          {selectedCheckpoint ? (
-            <div className="admin-recovery__selection-note">
-              <p className="page-subnote">
-                Selected checkpoint: {formatRecoveryTriggerLabel(selectedCheckpoint.backup_trigger)} · {formatRecoveryCheckpointTime(selectedCheckpoint.created_at_utc)}
-              </p>
-              <p className="page-subnote admin-recovery__mono" title={selectedCheckpoint.checkpoint_id}>
-                ID {selectedCheckpoint.checkpoint_id}
-              </p>
-            </div>
-          ) : (
-            <p className="page-subnote">Select a checkpoint first.</p>
-          )}
-          {restorePlanPayload ? (
-            <div className="admin-list">
-              <div className="admin-list__row admin-list__row--card admin-recovery__result-card">
-                <div>
-                  <strong>{restorePlanPayload.checkpoint_valid ? "Recovery preview ready" : "Recovery preview has blocking errors"}</strong>
-                  <p className="page-subnote">
-                    {formatRecoveryTriggerLabel(restorePlanPayload.backup_trigger)} · {restorePlanPayload.contains_secrets ? "Contains secrets" : "No secrets flagged"}
-                  </p>
-                  {restorePlanPayload.blocking_errors?.length > 0 ? (
-                    <>
-                      <p className="form-error">Blocking errors:</p>
-                      <ul className="page-subnote">
-                        {restorePlanPayload.blocking_errors.map((entry) => (
-                          <li key={entry}>{entry}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                  {restorePlanWarnings.length > 0 ? (
-                    <>
-                      <div className="admin-recovery__list-header">
-                        <p className="page-subnote">Warnings:</p>
-                        {restorePlanWarnings.length > RECOVERY_WARNING_LIMIT ? (
-                          <button
-                            className="ghost-button ghost-button--inline"
-                            onClick={() => setShowAllRecoveryWarnings((current) => !current)}
-                            type="button"
-                          >
-                            {showAllRecoveryWarnings ? "Show fewer warnings" : "Show all warnings"}
-                          </button>
-                        ) : null}
-                      </div>
-                      <ul className="page-subnote">
-                        {visibleRestorePlanWarnings.map((entry) => (
-                          <li key={entry}>{entry}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                  <p className="page-subnote">
-                    Scope: DB snapshot {restorePlanPayload.restore_scope?.db_snapshot_available ? "available" : "missing"} · env {restorePlanPayload.restore_scope?.env_snapshot_available ? "available" : "missing"} · helper releases {restorePlanPayload.restore_scope?.helper_releases_available ? "available" : "missing"} · assistant uploads {restorePlanPayload.restore_scope?.assistant_uploads_available ? "available" : "missing"}
-                  </p>
-                  <p className="page-subnote">
-                    Current vs backup: project root {restorePlanPayload.comparison?.same_project_root ? "same" : "different"} · DB path {restorePlanPayload.comparison?.same_db_path ? "same" : "different"} · public origin {restorePlanPayload.comparison?.same_public_app_origin ? "same" : "different"} · backend origin {restorePlanPayload.comparison?.same_backend_origin ? "same" : "different"} · media root {restorePlanPayload.comparison?.same_media_root_path ? "same" : "different"}
-                  </p>
-                  {restorePlanPayload.not_included?.length > 0 ? (
-                    <>
-                      <p className="page-subnote">Not included:</p>
-                      <ul className="page-subnote">
-                        {restorePlanPayload.not_included.map((entry) => (
-                          <li key={entry}>{entry}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                  {restorePlanPayload.required_pre_restore_steps?.length > 0 ? (
-                    <>
-                      <p className="page-subnote">Required pre-restore steps:</p>
-                      <ul className="page-subnote">
-                        {restorePlanPayload.required_pre_restore_steps.map((entry) => (
-                          <li key={entry}>{entry}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                  {restorePlanPayload.manual_restore_outline?.length > 0 ? (
-                    <>
-                      <p className="page-subnote">Manual restore outline:</p>
-                      <ol className="page-subnote">
-                        {restorePlanPayload.manual_restore_outline.map((entry) => (
-                          <li key={entry}>{entry}</li>
-                        ))}
-                      </ol>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <p className="page-subnote">Preview recovery to compare the checkpoint against the current live environment.</p>
-          )}
-        </section>
-
-        <div className="admin-recovery-side-stack">
-          <section className="settings-card admin-activity-card admin-recovery-card">
-            <h2>Off-host protection</h2>
-            <p className="page-subnote">
-              Server-local checkpoints protect against bad scans, bad settings changes, and app mistakes. They do not protect against drive failure.
-            </p>
-            <p className="page-subnote">
-              Copy checkpoint folders from <strong>{backupsDirectory || "backend/data/backups/"}</strong> to an external drive, NAS, or secure storage for off-host protection.
-            </p>
-            {selectedCheckpoint?.path ? (
-              <p className="page-subnote">
-                Selected checkpoint path: <strong>{selectedCheckpoint.path}</strong>
-              </p>
             ) : null}
           </section>
 
-          <section className="settings-card admin-activity-card admin-recovery-card">
-            <h2>Recent backup warnings</h2>
-            {recentBackupWarnings.length > 0 ? (
-              <div className="admin-list">
-                {recentBackupWarnings.map((event) => (
-                  <div className="admin-list__row admin-list__row--card admin-recovery__warning-card" key={event.id}>
-                    <div>
-                      <strong>{event.action}</strong>
-                      <p className="page-subnote">
-                        {formatDate(event.created_at)} · {event.username || "unknown user"}
-                      </p>
-                      <p className="page-subnote">
-                        {event.details?.auto_backup_error || "Backup warning recorded in the audit log."}
-                      </p>
+          <div className="admin-recovery-side-stack">
+            <section className="settings-card admin-activity-card admin-recovery-card">
+              <h2>Off-host protection</h2>
+              <p className="page-subnote">
+                Server-local checkpoints protect against bad scans, bad settings changes, and app mistakes. They do not protect against drive failure.
+              </p>
+              <p className="page-subnote">
+                Copy checkpoint folders from <strong>{backupsDirectory || "backend/data/backups/"}</strong> to an external drive, NAS, or secure storage for off-host protection.
+              </p>
+              {selectedCheckpoint?.path ? (
+                <p className="page-subnote">
+                  Selected checkpoint path: <strong>{selectedCheckpoint.path}</strong>
+                </p>
+              ) : null}
+            </section>
+
+            <section className="settings-card admin-activity-card admin-recovery-card">
+              <h2>Recent backup warnings</h2>
+              {recentBackupWarnings.length > 0 ? (
+                <div className="admin-list">
+                  {recentBackupWarnings.map((event) => (
+                    <div className="admin-list__row admin-list__row--card admin-recovery__warning-card" key={event.id}>
+                      <div>
+                        <strong>{event.action}</strong>
+                        <p className="page-subnote">
+                          {formatDate(event.created_at)} · {event.username || "unknown user"}
+                        </p>
+                        <p className="page-subnote">
+                          {event.details?.auto_backup_error || "Backup warning recorded in the audit log."}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="page-subnote">No recent backup warnings are visible in the loaded audit log.</p>
-            )}
-          </section>
+                  ))}
+                </div>
+              ) : (
+                <p className="page-subnote">No recent backup warnings are visible in the loaded audit log.</p>
+              )}
+            </section>
+          </div>
         </div>
       </div>
     </div>
