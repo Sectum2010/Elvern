@@ -17,6 +17,23 @@ from backend.app.services.media_age_access_service import (
     resolve_media_age_requirement,
     set_media_age_requirement,
 )
+from backend.app.services.library_movie_identity_service import _dedupe_group_key
+
+
+def _age_group_key(
+    title: str,
+    *,
+    year: int | None,
+    original_filename: str | None = None,
+    item_id: int = 1,
+) -> str:
+    return resolve_age_restriction_movie_group({
+        "id": item_id,
+        "title": title,
+        "year": year,
+        "original_filename": original_filename or f"{title}.mkv",
+        "source_kind": "local",
+    }).age_group_key
 
 
 def _admin_user(settings):
@@ -118,6 +135,155 @@ def test_age_group_uses_conservative_title_year_without_aliasing() -> None:
     assert sorcerer.age_group_key != philosopher.age_group_key
     assert no_year.age_group_key == "age:item:5"
     assert no_year.source == "item_fallback"
+
+
+def test_age_group_ignores_safe_quality_and_release_noise() -> None:
+    baseline = _age_group_key(
+        "The Super Mario Galaxy Movie",
+        year=2026,
+        original_filename="The.Super.Mario.Galaxy.Movie.2026.1080p.WEB-DL.mkv",
+    )
+    noisy = _age_group_key(
+        "The Super Mario Galaxy Movie",
+        year=2026,
+        original_filename="The.Super.Mario.Galaxy.Movie.2026.2160p.UHD.BluRay.HDR10.Atmos-GALAXY.mkv",
+        item_id=2,
+    )
+
+    assert baseline == noisy
+
+
+def test_age_group_ignores_safe_movie_editions_for_same_title_year() -> None:
+    baseline = _age_group_key("Blade Runner", year=1982)
+    cases = [
+        "Blade Runner Theatrical Cut",
+        "Blade Runner Extended Edition",
+        "Blade Runner Director Cut",
+        "Blade Runner Final Cut",
+        "Blade Runner Unrated",
+    ]
+
+    for index, title in enumerate(cases, start=2):
+        assert _age_group_key(title, year=1982, item_id=index) == baseline
+
+
+def test_age_group_normalizes_safe_modifier_examples() -> None:
+    examples = [
+        (
+            "Mad Max: Fury Road (2015) Black & Chrome Edition",
+            "Mad.Max.Fury.Road.2015.Theatrical.1080p.WEBRip.x264-WITNESS",
+            2015,
+        ),
+        (
+            "The Godfather (1972) Coppola Restoration",
+            "Godfather.1972.REMASTERED.4K.UHD.BluRay.TrueHD-GFATHER",
+            1972,
+        ),
+        (
+            "Jurassic Park (1993) 25th Anniversary Edition",
+            "Jurassic.Park.1993.3D.1080p.BluRay.x264-DINO",
+            1993,
+        ),
+        (
+            "Avengers: Endgame (2019) Bonus Edition",
+            "Avengers.Endgame.2019.2160p.UHD.BluRay.HDR10-MARVEL",
+            2019,
+        ),
+        (
+            "Star Wars: Episode IV - A New Hope (1977) Despecialized Edition",
+            "Star.Wars.Episode.4.A.New.Hope.1977.1997.Special.Edition.1080p.BluRay",
+            1977,
+        ),
+    ]
+
+    for index, (left, right, year) in enumerate(examples, start=10):
+        assert _age_group_key(left, year=year, item_id=index) == _age_group_key(
+            right,
+            year=year,
+            item_id=index + 100,
+        )
+
+
+def test_age_group_normalizes_safe_numbered_contexts() -> None:
+    assert _age_group_key("Star Wars Episode IV A New Hope", year=1977) == _age_group_key(
+        "Star Wars Episode 4 A New Hope",
+        year=1977,
+        item_id=2,
+    )
+    assert _age_group_key("Dune: Part Two", year=2024, item_id=3) == _age_group_key(
+        "Dune.Part.2.2024.2160p.UHD.BluRay.x265-ARRAKIS",
+        year=2024,
+        item_id=4,
+    )
+    assert _age_group_key("Guardians of the Galaxy Vol. 2", year=2017, item_id=5) == _age_group_key(
+        "Guardians.Of.The.Galaxy.Volume.Two.2017.1080p.BluRay.DTS-MIXTAPE",
+        year=2017,
+        item_id=6,
+    )
+
+
+def test_age_group_keeps_out_of_scope_aliases_separate() -> None:
+    assert _age_group_key("LOTR Return Of The King", year=2003) != _age_group_key(
+        "The Lord of the Rings: The Return of the King",
+        year=2003,
+        item_id=2,
+    )
+    assert _age_group_key("Harry Potter and the Sorcerer's Stone", year=2001, item_id=3) != _age_group_key(
+        "Harry Potter and the Philosopher's Stone",
+        year=2001,
+        item_id=4,
+    )
+    assert _age_group_key("Raiders of the Lost Ark", year=1981, item_id=5) != _age_group_key(
+        "Indiana Jones: Raiders of the Lost Ark",
+        year=1981,
+        item_id=6,
+    )
+    assert _age_group_key("Fast.and.Furious.3.Tokyo.Drift.2006.720p.BluRay", year=2006, item_id=7) != _age_group_key(
+        "The Fast and the Furious: Tokyo Drift",
+        year=2006,
+        item_id=8,
+    )
+
+
+def test_age_group_uses_item_fallback_for_missing_year_or_unsafe_parse() -> None:
+    missing_year = resolve_age_restriction_movie_group({
+        "id": 11,
+        "title": "Camera Dump",
+        "year": None,
+        "original_filename": "MVI_0123.mkv",
+    })
+    suspicious = resolve_age_restriction_movie_group({
+        "id": 12,
+        "title": "2026",
+        "year": None,
+        "original_filename": "2026.mkv",
+    })
+
+    assert missing_year.age_group_key == "age:item:11"
+    assert suspicious.age_group_key == "age:item:12"
+
+
+def test_age_group_ignores_edition_identity_without_changing_local_dedupe() -> None:
+    standard_row = {
+        "title": "The Super Mario Galaxy Movie",
+        "year": 2026,
+        "original_filename": "The.Super.Mario.Galaxy.Movie.2026.1080p.mkv",
+        "source_kind": "local",
+    }
+    extended_row = {
+        "title": "The Super Mario Galaxy Movie Extended Cut",
+        "year": 2026,
+        "original_filename": "The.Super.Mario.Galaxy.Movie.2026.Extended.Cut.1080p.mkv",
+        "source_kind": "local",
+    }
+
+    assert _age_group_key(standard_row["title"], year=2026, original_filename=standard_row["original_filename"]) == _age_group_key(
+        extended_row["title"],
+        year=2026,
+        original_filename=extended_row["original_filename"],
+        item_id=2,
+    )
+    assert _dedupe_group_key(standard_row) != _dedupe_group_key(extended_row)
 
 
 def test_age_requirement_denies_standard_user_and_admin_bypasses(initialized_settings) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -26,6 +27,117 @@ class AgeGroupResolution:
     display_title: str
     year: int | None
     source: str
+
+
+_AGE_GROUP_ROMAN_TO_NUMBER = {
+    "i": "1",
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "x": "10",
+}
+_AGE_GROUP_WORD_TO_NUMBER = {
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+}
+_AGE_GROUP_NUMBER_CONTEXTS = {"episode", "ep", "part", "chapter", "volume", "vol"}
+
+_AGE_GROUP_NOISE_PATTERNS = [
+    r"\bthe richard donner cut\b",
+    r"\bspecial edition james cameron cut\b",
+    r"\bjames cameron cut\b",
+    r"\bblack and chrome(?: edition)?\b",
+    r"\bcoppola restoration\b",
+    r"\bdespecialized(?: edition)?\b",
+    r"\bskynet(?: edition)?\b",
+    r"\bredux(?: \d{4})? cut\b",
+    r"\bimax 70mm presentation\b",
+    r"\bimax open matte\b",
+    r"\bimax enhanced\b",
+    r"\bimax edition\b",
+    r"\bimax remaster\b",
+    r"\bopen matte\b",
+    r"\b\d+(?:st|nd|rd|th)(?: anniversary)?(?: edition)?\b",
+    r"\banniversary(?: edition)?\b",
+    r"\b(?:director(?:s)? cut|theatrical cut|extended cut|extended edition|final cut)\b",
+    r"\b(?:special edition|bonus edition|collector(?:s)? edition|collectors edition)\b",
+    r"\b(?:unrated|assembly cut|roadshow|ultimate edition|ultimate cut)\b",
+    r"\b(?:4k|uhd|hdr|hdr10|remastered|remaster|restored|restoration|3d)\b",
+    r"\b(?:collector|collectors|special|theatrical|extended)\b\s*$",
+]
+
+
+def _age_group_number_value(token: str) -> str | None:
+    normalized = token.strip().lower().rstrip(".")
+    if normalized.isdigit():
+        return normalized
+    if normalized in _AGE_GROUP_ROMAN_TO_NUMBER:
+        return _AGE_GROUP_ROMAN_TO_NUMBER[normalized]
+    return _AGE_GROUP_WORD_TO_NUMBER.get(normalized)
+
+
+def _normalize_age_group_number_tokens(normalized_key: str) -> str:
+    tokens = normalized_key.split()
+    for index, token in enumerate(tokens):
+        previous = tokens[index - 1] if index > 0 else ""
+        value = _age_group_number_value(token)
+        if value is None:
+            continue
+        if previous in _AGE_GROUP_NUMBER_CONTEXTS:
+            tokens[index] = value
+            if previous == "ep":
+                tokens[index - 1] = "episode"
+            elif previous == "vol":
+                tokens[index - 1] = "volume"
+            continue
+        if token.lower() in _AGE_GROUP_ROMAN_TO_NUMBER and index == len(tokens) - 1:
+            tokens[index] = value
+    return " ".join(tokens)
+
+
+def _strip_age_group_noise(normalized_key: str, *, year: int | None = None) -> str:
+    stripped = f" {normalized_key} "
+    if year is not None:
+        stripped = re.sub(
+            rf"\b{int(year)}\s+(?:special edition james cameron cut|special edition|theatrical cut|extended cut)\b",
+            " ",
+            stripped,
+        )
+    for pattern in _AGE_GROUP_NOISE_PATTERNS:
+        stripped = re.sub(pattern, " ", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    return stripped
+
+
+def _drop_trailing_age_group_article(normalized_key: str) -> str:
+    tokens = normalized_key.split()
+    if len(tokens) > 1 and tokens[-1] in {"the", "a", "an"}:
+        return " ".join(tokens[:-1])
+    return normalized_key
+
+
+def normalize_age_group_identity_title(identity_title: str, *, year: int | None = None) -> str:
+    """Normalize same-title edition noise for age restriction grouping only."""
+
+    normalized = normalize_title_key(identity_title)
+    normalized = _normalize_age_group_number_tokens(normalized)
+    normalized = _strip_age_group_noise(normalized, year=year)
+    normalized = _normalize_age_group_number_tokens(normalized)
+    normalized = _drop_trailing_age_group_article(normalized)
+    return normalized
 
 
 def _row_value(row: Any, key: str, default: Any = None) -> Any:
@@ -105,7 +217,7 @@ def resolve_age_restriction_movie_group(row_or_item: Any) -> AgeGroupResolution:
         or metadata.get("base_title")
         or ""
     ).strip()
-    normalized_title = normalize_title_key(identity_title)
+    normalized_title = normalize_age_group_identity_title(identity_title, year=year)
     if not normalized_title:
         return _fallback_age_group(row_or_item)
     return AgeGroupResolution(
