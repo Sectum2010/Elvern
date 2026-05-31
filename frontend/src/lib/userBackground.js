@@ -45,6 +45,8 @@ export const DEFAULT_BACKGROUND_SETTINGS = {
 const PRESET_VALUES = new Set(BACKGROUND_PRESETS.map((preset) => preset.value));
 const BACKGROUND_MODES = new Set(["preset", "gradient", "solid", "photo"]);
 const SAFE_HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const COLOR_PICKER_NEUTRAL_WIDTH = 0.1;
+const COLOR_PICKER_MAX_HUE = 0.92;
 
 function clampColorChannel(value) {
   return Math.max(0, Math.min(255, Math.round(value)));
@@ -184,12 +186,12 @@ export function getBackgroundPickerPositionFromColor(color) {
   const hsl = rgbToHsl(hexToRgb(normalized));
   if (hsl.s < 0.12) {
     return {
-      x: 0.04,
+      x: 0.02,
       y: clampUnit((0.92 - hsl.l) / 0.82),
     };
   }
   return {
-    x: clampUnit(0.12 + hsl.h * 0.82),
+    x: clampUnit(COLOR_PICKER_NEUTRAL_WIDTH + (hsl.h / COLOR_PICKER_MAX_HUE) * (1 - COLOR_PICKER_NEUTRAL_WIDTH)),
     y: clampUnit((0.92 - hsl.l) / 0.82),
   };
 }
@@ -197,10 +199,11 @@ export function getBackgroundPickerPositionFromColor(color) {
 export function getBackgroundPickerColorAtPosition(x, y) {
   const horizontal = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
   const vertical = Math.max(0, Math.min(1, Number.isFinite(y) ? y : 0.5));
-  const neutralBlend = clampUnit((0.14 - horizontal) / 0.14);
-  const hue = clampUnit((horizontal - 0.12) / 0.82);
+  const neutralBlend = clampUnit((COLOR_PICKER_NEUTRAL_WIDTH - horizontal) / COLOR_PICKER_NEUTRAL_WIDTH);
+  const hue = clampUnit((horizontal - COLOR_PICKER_NEUTRAL_WIDTH) / (1 - COLOR_PICKER_NEUTRAL_WIDTH))
+    * COLOR_PICKER_MAX_HUE;
   const lightness = clampUnit(0.92 - vertical * 0.82);
-  const saturation = clampUnit((0.96 - vertical * 0.08) * (1 - neutralBlend));
+  const saturation = clampUnit((0.98 - vertical * 0.06) * (1 - neutralBlend));
   return hslToHex({ h: hue, s: saturation, l: lightness });
 }
 
