@@ -58,13 +58,61 @@ function getBackgroundColorPickerValue(backgroundDraft) {
 
 function BackgroundColorPicker({ color, disabled, mode, onPick }) {
   const pickerRef = useRef(null);
+  const canvasRef = useRef(null);
+  const lastPickedColorRef = useRef("");
   const [dragging, setDragging] = useState(false);
-  const position = getBackgroundPickerPositionFromColor(color);
+  const [pickerPosition, setPickerPosition] = useState(() => getBackgroundPickerPositionFromColor(color));
+  const position = pickerPosition;
   const pickerStyle = {
     "--settings-background-picker-x": `${position.x * 100}%`,
     "--settings-background-picker-y": `${position.y * 100}%`,
     "--settings-background-picker-color": color,
   };
+
+  useEffect(() => {
+    if (color === lastPickedColorRef.current) {
+      return;
+    }
+    setPickerPosition(getBackgroundPickerPositionFromColor(color));
+  }, [color]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    if (typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent || "")) {
+      return;
+    }
+    let context;
+    try {
+      context = canvas.getContext?.("2d", { alpha: false });
+    } catch {
+      return;
+    }
+    if (!context) {
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(360, Math.round(rect.width || 560));
+    const height = Math.max(220, Math.round(rect.height || 288));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const imageData = context.createImageData(width, height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const colorHex = getBackgroundPickerColorAtPosition(x / (width - 1 || 1), y / (height - 1 || 1));
+        const offset = (y * width + x) * 4;
+        imageData.data[offset] = parseInt(colorHex.slice(1, 3), 16);
+        imageData.data[offset + 1] = parseInt(colorHex.slice(3, 5), 16);
+        imageData.data[offset + 2] = parseInt(colorHex.slice(5, 7), 16);
+        imageData.data[offset + 3] = 255;
+      }
+    }
+    context.putImageData(imageData, 0, 0);
+  }, []);
 
   function pickFromPoint(clientX, clientY) {
     if (disabled) {
@@ -76,9 +124,14 @@ function BackgroundColorPicker({ color, disabled, mode, onPick }) {
     }
     const width = rect.width || 1;
     const height = rect.height || 1;
-    const x = Math.max(0, Math.min(1, (clientX - rect.left) / width));
-    const y = Math.max(0, Math.min(1, (clientY - rect.top) / height));
-    onPick(getBackgroundPickerColorAtPosition(x, y));
+    const nextPosition = {
+      x: Math.max(0, Math.min(1, (clientX - rect.left) / width)),
+      y: Math.max(0, Math.min(1, (clientY - rect.top) / height)),
+    };
+    const nextColor = getBackgroundPickerColorAtPosition(nextPosition.x, nextPosition.y);
+    lastPickedColorRef.current = nextColor;
+    setPickerPosition(nextPosition);
+    onPick(nextColor);
   }
 
   function handlePointerDown(event) {
@@ -119,7 +172,14 @@ function BackgroundColorPicker({ color, disabled, mode, onPick }) {
       return;
     }
     event.preventDefault();
-    onPick(getBackgroundPickerColorAtPosition(nextX, nextY));
+    const nextPosition = {
+      x: Math.max(0, Math.min(1, nextX)),
+      y: Math.max(0, Math.min(1, nextY)),
+    };
+    const nextColor = getBackgroundPickerColorAtPosition(nextPosition.x, nextPosition.y);
+    lastPickedColorRef.current = nextColor;
+    setPickerPosition(nextPosition);
+    onPick(nextColor);
   }
 
   return (
@@ -133,6 +193,11 @@ function BackgroundColorPicker({ color, disabled, mode, onPick }) {
       style={pickerStyle}
       tabIndex={disabled ? -1 : 0}
     >
+      <canvas
+        aria-hidden="true"
+        className="settings-background-color-picker__canvas"
+        ref={canvasRef}
+      />
       <span
         className={[
           "settings-background-color-picker__cursor",
