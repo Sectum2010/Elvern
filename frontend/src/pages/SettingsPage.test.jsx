@@ -155,6 +155,8 @@ describe("SettingsPage Display background controls", () => {
     expect(settingsSource).toContain("onPointerDown={isSelected ? handleActivePointerDown : undefined}");
     expect(shellSource).toContain("import { detectClientDeviceClass } from \"../lib/platformDetection\";");
     expect(shellSource).toContain("const floatingNavDragEnabled = clientDeviceClass !== \"phone\" && clientDeviceClass !== \"tablet\";");
+    expect(shellSource).toContain("left: activeLinkRect.left - navRect.left + (navNode?.scrollLeft || 0),");
+    expect(shellSource).toContain("navNode?.addEventListener(\"scroll\", updateFloatingNavIndicator, { passive: true });");
     expect(shellSource).toContain("const canDragCurrentItem = isCurrent && floatingNavDragEnabled;");
     expect(shellSource).toContain("onPointerDown={canDragCurrentItem ? handleFloatingActivePointerDown : undefined}");
   });

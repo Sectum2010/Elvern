@@ -390,14 +390,15 @@ export function ShellLayout({ children }) {
   useEffect(() => {
     floatingLinkRefs.current.length = navigation.length;
     function updateFloatingNavIndicator() {
-      const navRect = floatingNavRef.current?.getBoundingClientRect?.();
+      const navNode = floatingNavRef.current;
+      const navRect = navNode?.getBoundingClientRect?.();
       const activeLinkRect = floatingLinkRefs.current[floatingActiveIndex]?.getBoundingClientRect?.();
       if (!navRect || !activeLinkRect) {
         setFloatingNavIndicatorFrame({ left: 0, width: 0 });
         return;
       }
       setFloatingNavIndicatorFrame({
-        left: activeLinkRect.left - navRect.left,
+        left: activeLinkRect.left - navRect.left + (navNode?.scrollLeft || 0),
         width: activeLinkRect.width,
       });
     }
@@ -406,9 +407,14 @@ export function ShellLayout({ children }) {
     if (typeof window === "undefined") {
       return undefined;
     }
+    const navNode = floatingNavRef.current;
+    const frameId = window.requestAnimationFrame(updateFloatingNavIndicator);
     window.addEventListener("resize", updateFloatingNavIndicator);
+    navNode?.addEventListener("scroll", updateFloatingNavIndicator, { passive: true });
     return () => {
+      window.cancelAnimationFrame(frameId);
       window.removeEventListener("resize", updateFloatingNavIndicator);
+      navNode?.removeEventListener("scroll", updateFloatingNavIndicator);
     };
   }, [floatingActiveIndex, floatingControlsPosition, navigation.length]);
 

@@ -142,6 +142,15 @@ describe("AdminPage password help request guards", () => {
     expect(refreshSweepStyles).not.toContain("clip-path");
   });
 
+  test("recovery cards wrap long backup paths and fill the phone column", () => {
+    const styles = readStyles();
+
+    expect(styles).toMatch(/\.admin-recovery-card \.page-subnote,\s*\.admin-recovery-card strong\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
+    expect(styles).toMatch(/\.admin-recovery-card \.page-subnote,\s*\.admin-recovery-card strong\s*\{[^}]*word-break:\s*break-word;/s);
+    expect(styles).toMatch(/html\[data-device-shell="iphone"\] \.admin-recovery-grid,[\s\S]*html\[data-device-shell="iphone"\] \.admin-recovery-card\s*\{[^}]*inline-size:\s*100%;/s);
+    expect(styles).toMatch(/html\[data-device-shell="iphone"\] \.admin-recovery-grid,[\s\S]*html\[data-device-shell="iphone"\] \.admin-recovery-card\s*\{[^}]*max-inline-size:\s*100%;/s);
+  });
+
   test("password help section does not use native browser popups", () => {
     const source = readAdminPage();
     const start = source.indexOf("<h2>Password help requests</h2>");

@@ -2440,6 +2440,13 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   align-self: start;
 }
 
+.admin-recovery-card .page-subnote,
+.admin-recovery-card strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .admin-recovery-side-stack {
   display: grid;
   gap: 1rem;
@@ -5727,6 +5734,14 @@ html[data-device-shell="iphone"] .admin-user-workers__gauges {
 
 html[data-device-shell="iphone"] .admin-recovery-section {
   padding-bottom: calc(2rem + env(safe-area-inset-bottom, 0px));
+}
+
+html[data-device-shell="iphone"] .admin-recovery-grid,
+html[data-device-shell="iphone"] .admin-recovery-grid__column,
+html[data-device-shell="iphone"] .admin-recovery-side-stack,
+html[data-device-shell="iphone"] .admin-recovery-card {
+  inline-size: 100%;
+  max-inline-size: 100%;
 }
 
 @media (orientation: landscape) {
