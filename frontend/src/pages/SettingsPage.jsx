@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
@@ -57,6 +57,8 @@ function getBackgroundColorPickerValue(backgroundDraft) {
 
 
 function BackgroundColorPicker({ color, disabled, mode, onPick }) {
+  const pickerRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
   const position = getBackgroundPickerPositionFromColor(color);
   const pickerStyle = {
     "--settings-background-picker-x": `${position.x * 100}%`,
@@ -64,29 +66,38 @@ function BackgroundColorPicker({ color, disabled, mode, onPick }) {
     "--settings-background-picker-color": color,
   };
 
-  function pickFromPointer(event) {
+  function pickFromPoint(clientX, clientY) {
     if (disabled) {
       return;
     }
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = pickerRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return;
+    }
     const width = rect.width || 1;
     const height = rect.height || 1;
-    const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / width));
-    const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / height));
+    const x = Math.max(0, Math.min(1, (clientX - rect.left) / width));
+    const y = Math.max(0, Math.min(1, (clientY - rect.top) / height));
     onPick(getBackgroundPickerColorAtPosition(x, y));
   }
 
   function handlePointerDown(event) {
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    pickFromPointer(event);
+    setDragging(true);
+    pickFromPoint(event.clientX, event.clientY);
   }
 
   function handlePointerMove(event) {
     if (event.buttons !== 1) {
       return;
     }
-    pickFromPointer(event);
+    pickFromPoint(event.clientX, event.clientY);
+  }
+
+  function handlePointerEnd(event) {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    setDragging(false);
   }
 
   function handleKeyDown(event) {
@@ -117,13 +128,106 @@ function BackgroundColorPicker({ color, disabled, mode, onPick }) {
       aria-valuetext={color}
       className="settings-background-color-picker"
       onKeyDown={handleKeyDown}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
+      ref={pickerRef}
       role="slider"
       style={pickerStyle}
       tabIndex={disabled ? -1 : 0}
     >
-      <span className="settings-background-color-picker__cursor" aria-hidden="true" />
+      <span
+        className={[
+          "settings-background-color-picker__cursor",
+          dragging ? "settings-background-color-picker__cursor--dragging" : "",
+        ].filter(Boolean).join(" ")}
+        aria-hidden="true"
+        onPointerCancel={handlePointerEnd}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+      />
+    </div>
+  );
+}
+
+
+function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, value }) {
+  const controlRef = useRef(null);
+  const draggingRef = useRef(false);
+  const ignoreNextClickRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
+
+  function getValueFromPoint(clientX) {
+    const rect = controlRef.current?.getBoundingClientRect();
+    if (!rect || !options.length) {
+      return value;
+    }
+    const ratio = Math.max(0, Math.min(0.999, (clientX - rect.left) / (rect.width || 1)));
+    const index = Math.max(0, Math.min(options.length - 1, Math.floor(ratio * options.length)));
+    return options[index]?.value || value;
+  }
+
+  function handleActivePointerDown(event) {
+    if (disabled) {
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    draggingRef.current = true;
+    ignoreNextClickRef.current = true;
+    setDragging(true);
+  }
+
+  function handleActivePointerUp(event) {
+    if (!draggingRef.current) {
+      return;
+    }
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    draggingRef.current = false;
+    setDragging(false);
+    onChange(getValueFromPoint(event.clientX));
+    window.setTimeout(() => {
+      ignoreNextClickRef.current = false;
+    }, 120);
+  }
+
+  function handleActivePointerCancel(event) {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    draggingRef.current = false;
+    ignoreNextClickRef.current = false;
+    setDragging(false);
+  }
+
+  return (
+    <div className="settings-segmented-control" role="radiogroup" aria-label={ariaLabel} ref={controlRef}>
+      {options.map((option) => {
+        const isSelected = value === option.value;
+        return (
+          <button
+            aria-checked={isSelected}
+            className={[
+              "settings-segmented-control__button",
+              isSelected ? "settings-segmented-control__button--active" : "",
+              isSelected && dragging ? "settings-segmented-control__button--dragging" : "",
+            ].filter(Boolean).join(" ")}
+            disabled={disabled}
+            key={option.value}
+            onClick={(event) => {
+              if (ignoreNextClickRef.current) {
+                event.preventDefault();
+                ignoreNextClickRef.current = false;
+                return;
+              }
+              onChange(option.value);
+            }}
+            onPointerCancel={isSelected ? handleActivePointerCancel : undefined}
+            onPointerDown={isSelected ? handleActivePointerDown : undefined}
+            onPointerUp={isSelected ? handleActivePointerUp : undefined}
+            role="radio"
+            type="button"
+          >
+            {option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1647,27 +1751,13 @@ export function SettingsPage() {
             <p className="page-subnote">Loading display preferences...</p>
           ) : (
             <div className="settings-card-stack">
-              <div className="settings-segmented-control" role="radiogroup" aria-label="Poster appearance">
-                {POSTER_CARD_APPEARANCE_OPTIONS.map((option) => {
-                  const isSelected = normalizePosterCardAppearance(settings.poster_card_appearance) === option.value;
-                  return (
-                    <button
-                      aria-checked={isSelected}
-                      className={[
-                        "settings-segmented-control__button",
-                        isSelected ? "settings-segmented-control__button--active" : "",
-                      ].filter(Boolean).join(" ")}
-                      disabled={saving}
-                      key={option.value}
-                      onClick={() => handlePosterCardAppearanceChange(option.value)}
-                      role="radio"
-                      type="button"
-                    >
-                      {option.label}
-                    </button>
-                  );
-                })}
-              </div>
+              <SettingsSegmentedControl
+                ariaLabel="Poster appearance"
+                disabled={saving}
+                onChange={handlePosterCardAppearanceChange}
+                options={POSTER_CARD_APPEARANCE_OPTIONS}
+                value={normalizePosterCardAppearance(settings.poster_card_appearance)}
+              />
               <label className="settings-field">
                 <span>
                   <strong>Poster display quality</strong>
@@ -1697,33 +1787,19 @@ export function SettingsPage() {
           {loading ? (
             <p className="page-subnote">Loading background preferences...</p>
           ) : (
-            <div className="settings-card-stack">
-              <div className="settings-segmented-control" role="radiogroup" aria-label="Background mode">
-                {[
+            <div className="settings-card-stack settings-background-stack">
+              <SettingsSegmentedControl
+                ariaLabel="Background mode"
+                disabled={backgroundSaving}
+                onChange={handleBackgroundModeChange}
+                options={[
                   { value: "preset", label: "Presets" },
                   { value: "gradient", label: "Gradient" },
                   { value: "solid", label: "Solid" },
                   { value: "photo", label: "Photo" },
-                ].map((option) => {
-                  const isSelected = backgroundDraft.background_mode === option.value;
-                  return (
-                    <button
-                      aria-checked={isSelected}
-                      className={[
-                        "settings-segmented-control__button",
-                        isSelected ? "settings-segmented-control__button--active" : "",
-                      ].filter(Boolean).join(" ")}
-                      disabled={backgroundSaving}
-                      key={option.value}
-                      onClick={() => handleBackgroundModeChange(option.value)}
-                      role="radio"
-                      type="button"
-                    >
-                      {option.label}
-                    </button>
-                  );
-                })}
-              </div>
+                ]}
+                value={backgroundDraft.background_mode}
+              />
 
               {backgroundDraft.background_mode === "preset" ? (
                 <div className="settings-background-preset-grid" role="radiogroup" aria-label="Background presets">

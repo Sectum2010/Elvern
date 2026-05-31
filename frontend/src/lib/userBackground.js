@@ -149,19 +149,32 @@ function mixHexColors(left, right, ratio) {
   });
 }
 
+function clampUnit(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
 export function deriveGradientEndFromSingleColor(color) {
   const normalized = normalizeHexColor(color, DEFAULT_BACKGROUND_SETTINGS.background_gradient_start);
-  const darker = mixHexColors(normalized, "#06111f", 0.42);
-  const brighter = mixHexColors(normalized, "#9ad6eb", 0.22);
-  return normalized === darker ? brighter : darker;
+  const hsl = rgbToHsl(hexToRgb(normalized));
+  return hslToHex({
+    h: (hsl.h + 0.18) % 1,
+    s: clampUnit(Math.max(0.58, hsl.s + 0.08)),
+    l: clampUnit(Math.min(0.48, Math.max(0.22, hsl.l - 0.14))),
+  });
 }
 
 export function deriveGradientColorsFromSingleColor(color) {
   const normalized = normalizeHexColor(color, DEFAULT_BACKGROUND_SETTINGS.background_gradient_start);
+  const hsl = rgbToHsl(hexToRgb(normalized));
+  const accent = hslToHex({
+    h: (hsl.h + 0.08) % 1,
+    s: clampUnit(Math.max(0.66, hsl.s + 0.1)),
+    l: clampUnit(Math.min(0.58, Math.max(0.3, hsl.l + 0.02))),
+  });
   const end = deriveGradientEndFromSingleColor(normalized);
   return {
     background_gradient_start: normalized,
-    background_gradient_accent: mixHexColors(normalized, end, 0.36),
+    background_gradient_accent: accent,
     background_gradient_end: end,
   };
 }
@@ -171,7 +184,7 @@ export function getBackgroundPickerPositionFromColor(color) {
   const hsl = rgbToHsl(hexToRgb(normalized));
   return {
     x: Math.max(0, Math.min(1, hsl.h)),
-    y: Math.max(0, Math.min(1, 1 - hsl.l)),
+    y: Math.max(0, Math.min(1, (0.82 - hsl.l) / 0.58)),
   };
 }
 

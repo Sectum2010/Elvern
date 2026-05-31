@@ -68,10 +68,13 @@
 
 :root[data-elvern-background-mode="gradient"] {
   --app-page-background:
+    radial-gradient(circle at 14% 14%, var(--app-background-gradient-start, #74114f) 0%, transparent 28%),
+    radial-gradient(circle at 84% 18%, var(--app-background-gradient-accent, #5c1867) 0%, transparent 30%),
+    radial-gradient(circle at 76% 82%, var(--app-background-gradient-end, #1b41b5) 0%, transparent 34%),
     linear-gradient(
       135deg,
       var(--app-background-gradient-start, #74114f) 0%,
-      var(--app-background-gradient-accent, #5c1867) 45%,
+      var(--app-background-gradient-accent, #5c1867) 48%,
       var(--app-background-gradient-end, #1b41b5) 100%
     );
 }
@@ -3728,6 +3731,11 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   align-items: start;
 }
 
+.settings-background-stack {
+  margin-top: 0.55rem;
+  gap: 1.1rem;
+}
+
 .settings-background-preview {
   position: relative;
   min-block-size: 7rem;
@@ -3798,7 +3806,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .settings-background-color-picker {
   position: relative;
   inline-size: 100%;
-  min-block-size: 9.5rem;
+  min-block-size: 14rem;
   overflow: hidden;
   border: 1px solid rgba(202, 226, 245, 0.3);
   border-radius: 1rem;
@@ -3808,7 +3816,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     inset 0 -24px 44px rgba(3, 7, 12, 0.18);
-  cursor: crosshair;
+  cursor: default;
   touch-action: none;
 }
 
@@ -3830,7 +3838,13 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
     0 0 0 1px rgba(0, 0, 0, 0.46),
     0 8px 22px rgba(0, 0, 0, 0.32);
   transform: translate(-50%, -50%);
-  pointer-events: none;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.settings-background-color-picker__cursor--dragging {
+  cursor: grabbing;
 }
 
 .settings-background-actions {
@@ -3880,6 +3894,19 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   font-weight: 750;
   letter-spacing: 0.01em;
   transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+.settings-segmented-control__button--active {
+  cursor: grab;
+  touch-action: none;
+}
+
+.settings-segmented-control__button--active:active {
+  cursor: grabbing;
+}
+
+.settings-segmented-control__button--dragging {
+  cursor: grabbing;
 }
 
 .settings-segmented-control__button:hover,
