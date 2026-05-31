@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
+from ..models import AuthenticatedUser
 from ..progress import save_progress
 from ..security import generate_session_token, hash_session_token
 from .desktop_helper_service import (
@@ -19,6 +20,7 @@ from .desktop_playback_protocol_service import (
     build_vlc_helper_started_url,
     infer_target_kind,
 )
+from .media_age_access_service import assert_user_can_access_media_by_age
 
 
 logger = logging.getLogger(__name__)
@@ -280,6 +282,9 @@ def _require_desktop_vlc_handoff(
                 h.user_id,
                 m.title,
                 m.duration_seconds,
+                u.username,
+                u.role,
+                COALESCE(u.age_credential, 18) AS age_credential,
                 u.enabled
             FROM desktop_vlc_handoffs h
             JOIN media_items m ON m.id = h.media_item_id
@@ -298,6 +303,18 @@ def _require_desktop_vlc_handoff(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Desktop VLC handoff is invalid or has expired",
         )
+    assert_user_can_access_media_by_age(
+        settings,
+        user=AuthenticatedUser(
+            id=int(row["user_id"]),
+            username=str(row["username"] or ""),
+            role=str(row["role"] or "standard_user"),
+            enabled=True,
+            age_credential=int(row["age_credential"] or 18),
+        ),
+        item_id=int(row["media_item_id"]),
+        purpose="desktop_playback",
+    )
     return dict(row)
 
 

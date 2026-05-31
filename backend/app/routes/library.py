@@ -3,9 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import FileResponse
 
-from ..auth import CurrentUser, resolve_client_ip
+from ..auth import CurrentAdmin, CurrentUser, resolve_client_ip
 from ..progress import refresh_recent_tracking
-from ..schemas import LibraryListResponse, MediaItemDetail, ScanResponse
+from ..schemas import LibraryListResponse, MediaAgeRequirementUpdateRequest, MediaItemDetail, ScanResponse
 from ..services.backup_service import create_backup_checkpoint, prune_backup_checkpoints
 from ..services.cloud_library_service import sync_all_google_drive_sources
 from ..services.library_service import (
@@ -16,6 +16,11 @@ from ..services.library_service import (
 )
 from ..services.media_technical_metadata_service import run_one_media_item_technical_metadata_enrichment
 from ..services.account_access_service import is_item_download_allowed
+from ..services.media_age_access_service import (
+    assert_user_can_access_media_by_age,
+    revoke_persistent_sessions_for_age_group,
+    set_media_age_requirement,
+)
 from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
 from ..services.user_settings_service import get_poster_card_display_max_width
 from ..services.audit_service import log_audit_event
@@ -89,6 +94,56 @@ def get_item(item_id: int, request: Request, user=CurrentUser) -> MediaItemDetai
         user_id=user.id,
         item_id=item_id,
         allow_globally_hidden=user.role == "admin",
+    )
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    try:
+        assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="download")
+        age_allows_download = True
+    except HTTPException:
+        age_allows_download = False
+    item["download_access_allowed"] = age_allows_download and is_item_download_allowed(
+        request.app.state.settings,
+        user_id=user.id,
+        item_id=item_id,
+    )
+    return MediaItemDetail(**item)
+
+
+@router.patch("/item/{item_id}/age-requirement", response_model=MediaItemDetail)
+def update_item_age_requirement(
+    item_id: int,
+    payload: MediaAgeRequirementUpdateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> MediaItemDetail:
+    updated_requirement = set_media_age_requirement(
+        request.app.state.settings,
+        item_id=item_id,
+        age_requirement=payload.age_requirement,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    revoke_summary = revoke_persistent_sessions_for_age_group(
+        request.app.state.settings,
+        age_group_key=str(updated_requirement["age_group_key"]),
+        age_requirement=updated_requirement["age_requirement"],
+        reason="age_requirement_changed",
+    )
+    manager = getattr(request.app.state, "mobile_playback_manager", None)
+    invalidate = getattr(manager, "invalidate_sessions_for_media_items_and_users", None)
+    if callable(invalidate):
+        invalidate(
+            media_item_ids=[int(item_id) for item_id in revoke_summary.get("media_item_ids") or []],
+            user_ids=[int(user_id) for user_id in revoke_summary.get("user_ids") or []],
+            reason="age_requirement_changed",
+        )
+    item = get_media_item_detail(
+        request.app.state.settings,
+        user_id=user.id,
+        item_id=item_id,
+        allow_globally_hidden=True,
     )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")

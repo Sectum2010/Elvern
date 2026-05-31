@@ -10,6 +10,7 @@ class AuthenticatedUser:
     role: str = "standard_user"
     enabled: bool = True
     assistant_beta_enabled: bool = False
+    age_credential: int = 18
     session_id: int | None = None
 
 

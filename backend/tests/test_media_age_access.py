@@ -1,0 +1,343 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+
+from backend.app.auth import authenticate_user
+from backend.app.db import get_connection, utcnow_iso
+from backend.app.services.admin_service import create_user
+from backend.app.services.media_age_access_service import (
+    AGE_ACCESS_DENIED_18,
+    assert_user_can_access_media_by_age,
+    revoke_persistent_sessions_for_age_group,
+    revoke_persistent_sessions_for_user_age_change,
+    resolve_age_restriction_movie_group,
+    resolve_media_age_requirement,
+    set_media_age_requirement,
+)
+
+
+def _admin_user(settings):
+    user, failure_reason = authenticate_user(
+        settings,
+        settings.admin_username,
+        settings.admin_bootstrap_password or "",
+    )
+    assert failure_reason is None
+    assert user is not None
+    return user
+
+
+def _create_media_item(
+    settings,
+    *,
+    title: str,
+    original_filename: str,
+    year: int | None,
+) -> int:
+    media_file = Path(settings.media_root) / original_filename
+    media_file.parent.mkdir(parents=True, exist_ok=True)
+    media_file.write_bytes(b"not a real media file")
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                title,
+                media_file.name,
+                str(media_file),
+                media_file.stat().st_size,
+                media_file.stat().st_mtime,
+                120.0,
+                "h264",
+                "aac",
+                "mp4",
+                year,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+
+
+def test_age_group_uses_conservative_title_year_without_aliasing() -> None:
+    standard = resolve_age_restriction_movie_group({
+        "id": 1,
+        "title": "The Super Mario Galaxy Movie",
+        "year": 2026,
+        "original_filename": "The.Super.Mario.Galaxy.Movie.2026.1080p.mkv",
+    })
+    director_cut = resolve_age_restriction_movie_group({
+        "id": 2,
+        "title": "The Super Mario Galaxy Movie - Director's Cut",
+        "year": 2026,
+        "original_filename": "The.Super.Mario.Galaxy.Movie.2026.Directors.Cut.2160p.mkv",
+    })
+    sorcerer = resolve_age_restriction_movie_group({
+        "id": 3,
+        "title": "Harry Potter and the Sorcerer's Stone",
+        "year": 2001,
+        "original_filename": "Harry.Potter.and.the.Sorcerers.Stone.2001.mkv",
+    })
+    philosopher = resolve_age_restriction_movie_group({
+        "id": 4,
+        "title": "Harry Potter and the Philosopher's Stone",
+        "year": 2001,
+        "original_filename": "Harry.Potter.and.the.Philosophers.Stone.2001.mkv",
+    })
+    no_year = resolve_age_restriction_movie_group({
+        "id": 5,
+        "title": "Camera Dump",
+        "year": None,
+        "original_filename": "MVI_0123.mkv",
+    })
+
+    assert standard.age_group_key == director_cut.age_group_key
+    assert standard.source == "title_year"
+    assert sorcerer.age_group_key != philosopher.age_group_key
+    assert no_year.age_group_key == "age:item:5"
+    assert no_year.source == "item_fallback"
+
+
+def test_age_requirement_denies_standard_user_and_admin_bypasses(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    item_id = _create_media_item(
+        initialized_settings,
+        title="Age Gate Movie",
+        original_filename="Age.Gate.Movie.2026.mkv",
+        year=2026,
+    )
+    create_user(
+        initialized_settings,
+        username="age-gated-user",
+        password="family-password",
+        role="standard_user",
+        enabled=True,
+        age_credential=12,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    standard_user, failure_reason = authenticate_user(
+        initialized_settings,
+        "age-gated-user",
+        "family-password",
+    )
+    assert failure_reason is None
+    assert standard_user is not None
+
+    updated = set_media_age_requirement(
+        initialized_settings,
+        item_id=item_id,
+        age_requirement=18,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert updated["age_requirement"] == 18
+    assert updated["age_requirement_display"] == "18+"
+    assert resolve_media_age_requirement(initialized_settings, item_id)["age_requirement"] == 18
+
+    with pytest.raises(HTTPException) as exc:
+        assert_user_can_access_media_by_age(
+            initialized_settings,
+            user=standard_user,
+            item_id=item_id,
+            purpose="playback",
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.detail == AGE_ACCESS_DENIED_18
+
+    assert_user_can_access_media_by_age(
+        initialized_settings,
+        user=admin_user,
+        item_id=item_id,
+        purpose="playback",
+    )
+
+
+def test_users_default_to_adult_age_credential(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    created = create_user(
+        initialized_settings,
+        username="default-age-user",
+        password="family-password",
+        role="standard_user",
+        enabled=True,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    assert admin_user.age_credential == 18
+    assert created["age_credential"] == 18
+    assert created["age_credential_display"] == "18+"
+
+
+def test_age_requirement_change_revokes_disallowed_persistent_sessions(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    user_payload = create_user(
+        initialized_settings,
+        username="age-revoke-user",
+        password="family-password",
+        role="standard_user",
+        enabled=True,
+        age_credential=12,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    item_id = _create_media_item(
+        initialized_settings,
+        title="Revoked Age Movie",
+        original_filename="Revoked.Age.Movie.2026.mkv",
+        year=2026,
+    )
+    updated = set_media_age_requirement(
+        initialized_settings,
+        item_id=item_id,
+        age_requirement=16,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO native_playback_sessions (
+                session_id, access_token_hash, user_id, media_item_id,
+                created_at, expires_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("native-age-session", "native-hash", user_payload["id"], item_id, now, "2999-01-01T00:00:00+00:00", now),
+        )
+        connection.execute(
+            """
+            INSERT INTO download_sessions (
+                session_token_hash, user_id, media_item_id, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("download-age-hash", user_payload["id"], item_id, now, "2999-01-01T00:00:00+00:00"),
+        )
+        connection.execute(
+            """
+            INSERT INTO desktop_vlc_handoffs (
+                handoff_id, access_token_hash, user_id, media_item_id,
+                platform, strategy, resolved_target, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "desktop-age-handoff",
+                "desktop-hash",
+                user_payload["id"],
+                item_id,
+                "linux",
+                "stream_url",
+                "http://example.invalid/movie",
+                now,
+                "2999-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.commit()
+
+    summary = revoke_persistent_sessions_for_age_group(
+        initialized_settings,
+        age_group_key=str(updated["age_group_key"]),
+        age_requirement=16,
+        reason="age_requirement_changed",
+    )
+
+    assert summary["media_item_ids"] == [item_id]
+    assert summary["user_ids"] == [user_payload["id"]]
+    assert summary["revoked_native"] == 1
+    assert summary["revoked_downloads"] == 1
+    assert summary["revoked_desktop"] == 1
+    with get_connection(initialized_settings) as connection:
+        native_row = connection.execute("SELECT revoked_at, last_error FROM native_playback_sessions").fetchone()
+        download_row = connection.execute("SELECT revoked_at, last_error FROM download_sessions").fetchone()
+        desktop_row = connection.execute("SELECT revoked_at FROM desktop_vlc_handoffs").fetchone()
+    assert native_row["revoked_at"] is not None
+    assert native_row["last_error"] == "age_requirement_changed"
+    assert download_row["revoked_at"] is not None
+    assert download_row["last_error"] == "age_requirement_changed"
+    assert desktop_row["revoked_at"] is not None
+
+
+def test_user_age_credential_change_revokes_newly_disallowed_sessions(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    user_payload = create_user(
+        initialized_settings,
+        username="age-credential-revoke-user",
+        password="family-password",
+        role="standard_user",
+        enabled=True,
+        age_credential=18,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    item_id = _create_media_item(
+        initialized_settings,
+        title="Credential Revoke Movie",
+        original_filename="Credential.Revoke.Movie.2026.mkv",
+        year=2026,
+    )
+    set_media_age_requirement(
+        initialized_settings,
+        item_id=item_id,
+        age_requirement=18,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE users SET age_credential = 12 WHERE id = ?",
+            (user_payload["id"],),
+        )
+        connection.execute(
+            """
+            INSERT INTO download_sessions (
+                session_token_hash, user_id, media_item_id, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("download-age-change-hash", user_payload["id"], item_id, now, "2999-01-01T00:00:00+00:00"),
+        )
+        connection.commit()
+
+    summary = revoke_persistent_sessions_for_user_age_change(
+        initialized_settings,
+        user_id=int(user_payload["id"]),
+        reason="user_age_credential_changed",
+    )
+
+    assert summary["media_item_ids"] == [item_id]
+    assert summary["user_ids"] == [user_payload["id"]]
+    assert summary["revoked_downloads"] == 1
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute("SELECT revoked_at, last_error FROM download_sessions").fetchone()
+    assert row["revoked_at"] is not None
+    assert row["last_error"] == "user_age_credential_changed"

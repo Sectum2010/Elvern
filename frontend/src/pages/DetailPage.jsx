@@ -142,6 +142,19 @@ const INITIAL_DOWNLOAD_STATE = {
   blocked: false,
 };
 
+const AGE_REQUIREMENT_OPTIONS = [null, ...Array.from({ length: 18 }, (_, index) => index + 1)];
+
+function formatAgeRequirement(value) {
+  if (value == null || value === "") {
+    return "None";
+  }
+  const age = Number(value);
+  if (!Number.isFinite(age)) {
+    return "None";
+  }
+  return age >= 18 ? "18+" : String(age);
+}
+
 
 function isLocalDevelopmentLoopback(platform) {
   if (typeof window === "undefined" || platform !== "linux") {
@@ -515,6 +528,12 @@ export function DetailPage() {
   const trackScanRequestKeyRef = useRef("");
   const desktopSeekCommitPendingRef = useRef(false);
   const [infoModalOpen, setInfoModalOpen] = useState(false);
+  const [ageRequirementEditor, setAgeRequirementEditor] = useState({
+    editing: false,
+    value: "",
+    pending: false,
+    error: "",
+  });
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [hiddenActionPending, setHiddenActionPending] = useState(false);
@@ -1974,6 +1993,55 @@ export function DetailPage() {
     }
   }
 
+  function startAgeRequirementEdit() {
+    if (!item || !isAdmin) {
+      return;
+    }
+    setAgeRequirementEditor({
+      editing: true,
+      value: item.age_requirement == null ? "" : String(item.age_requirement),
+      pending: false,
+      error: "",
+    });
+  }
+
+  function cancelAgeRequirementEdit() {
+    setAgeRequirementEditor({
+      editing: false,
+      value: "",
+      pending: false,
+      error: "",
+    });
+  }
+
+  async function saveAgeRequirement() {
+    if (!item || !isAdmin || ageRequirementEditor.pending) {
+      return;
+    }
+    setAgeRequirementEditor((current) => ({ ...current, pending: true, error: "" }));
+    try {
+      const payload = await apiRequest(`/api/library/item/${item.id}/age-requirement`, {
+        method: "PATCH",
+        data: {
+          age_requirement: ageRequirementEditor.value === "" ? null : Number(ageRequirementEditor.value),
+        },
+      });
+      setItem(payload);
+      setAgeRequirementEditor({
+        editing: false,
+        value: "",
+        pending: false,
+        error: "",
+      });
+    } catch (requestError) {
+      setAgeRequirementEditor((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || "Failed to update age requirement",
+      }));
+    }
+  }
+
   function clearDownloadRuntimeTimers() {
     window.clearInterval(downloadStallTimerRef.current);
     downloadStallTimerRef.current = 0;
@@ -3124,6 +3192,67 @@ export function DetailPage() {
                     {resumePosition > 0 ? <span>Resume at {formatDuration(resumePosition)}</span> : null}
                     {playback?.mode === "hls" ? <span>Automatic HLS fallback</span> : null}
                   </div>
+                </div>
+
+                <div className="detail-block">
+                  <h2>Age Requirement</h2>
+                  {isAdmin && ageRequirementEditor.editing ? (
+                    <div className="detail-reference-group">
+                      <label>
+                        Requirement
+                        <select
+                          className="admin-select"
+                          disabled={ageRequirementEditor.pending}
+                          onChange={(event) =>
+                            setAgeRequirementEditor((current) => ({ ...current, value: event.target.value }))
+                          }
+                          value={ageRequirementEditor.value}
+                        >
+                          {AGE_REQUIREMENT_OPTIONS.map((age) => (
+                            <option key={age == null ? "none" : age} value={age == null ? "" : age}>
+                              {formatAgeRequirement(age)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <p className="page-subnote">This applies to matching copies of this movie.</p>
+                      {ageRequirementEditor.error ? <p className="form-error">{ageRequirementEditor.error}</p> : null}
+                      <div className="admin-list__actions">
+                        <button
+                          className="primary-button"
+                          disabled={ageRequirementEditor.pending}
+                          onClick={saveAgeRequirement}
+                          type="button"
+                        >
+                          {ageRequirementEditor.pending ? "Saving..." : "Save"}
+                        </button>
+                        <button
+                          className="ghost-button"
+                          disabled={ageRequirementEditor.pending}
+                          onClick={cancelAgeRequirementEdit}
+                          type="button"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="detail-reference-group">
+                      <div className="detail-list">
+                        <span>{item.age_requirement_display || formatAgeRequirement(item.age_requirement)}</span>
+                      </div>
+                      {isAdmin ? (
+                        <>
+                          <p className="page-subnote">This applies to matching copies of this movie.</p>
+                          <div className="admin-list__actions">
+                            <button className="ghost-button" onClick={startAgeRequirementEdit} type="button">
+                              Edit age requirement
+                            </button>
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
 
                 <div className="detail-block">

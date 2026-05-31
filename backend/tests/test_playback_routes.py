@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from backend.app.auth import authenticate_user, destroy_session
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.admin_service import create_user, update_user
+from backend.app.services.media_age_access_service import set_media_age_requirement
 from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
     PlaybackAdmissionError,
@@ -1369,6 +1370,137 @@ def test_mobile_playback_create_route_passes_standard_user_role(
 
     assert create_response.status_code == 200
     assert stub.create_kwargs[-1]["user_role"] == "standard_user"
+
+
+def test_mobile_playback_create_route_rejects_user_below_movie_age_requirement(
+    initialized_settings,
+    client,
+) -> None:
+    admin_user = _admin_user(initialized_settings)
+    created_user = _create_standard_user(initialized_settings, username="mobile-route-underage-user")
+    update_user(
+        initialized_settings,
+        user_id=int(created_user["id"]),
+        enabled=None,
+        role=None,
+        age_credential=12,
+        current_admin_password=None,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _login(client, username=created_user["username"], password="family-password")
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="mobile/route-age-gated.mp4",
+    )
+    set_media_age_requirement(
+        initialized_settings,
+        item_id=int(item["id"]),
+        age_requirement=18,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    stub = BrowserPlaybackRouteManagerStub(_make_browser_playback_route2_payload(item_id=int(item["id"])))
+    client.app.state.mobile_playback_manager = stub
+
+    create_response = client.post(
+        "/api/mobile-playback/sessions",
+        json={
+            "item_id": int(item["id"]),
+            "profile": "mobile_1080p",
+            "playback_mode": "lite",
+            "start_position_seconds": 12.0,
+        },
+    )
+
+    assert create_response.status_code == 403
+    assert create_response.json()["detail"] == (
+        "You must be 18+ years old to view this film. "
+        "Please contact an admin if your age credentials are incorrect."
+    )
+    assert stub.create_calls == 0
+
+
+def test_native_playback_create_route_rejects_user_below_movie_age_requirement(
+    initialized_settings,
+    client,
+) -> None:
+    admin_user = _admin_user(initialized_settings)
+    created_user = _create_standard_user(initialized_settings, username="native-route-underage-user")
+    update_user(
+        initialized_settings,
+        user_id=int(created_user["id"]),
+        enabled=None,
+        role=None,
+        age_credential=12,
+        current_admin_password=None,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _login(client, username=created_user["username"], password="family-password")
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="native/route-age-gated.mp4",
+    )
+    set_media_age_requirement(
+        initialized_settings,
+        item_id=int(item["id"]),
+        age_requirement=16,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    response = client.post(f"/api/native-playback/{item['id']}/session")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You must be 16 years old to view this film. "
+        "Please contact an admin if your age credentials are incorrect."
+    )
+
+
+def test_direct_stream_route_rejects_user_below_movie_age_requirement(
+    initialized_settings,
+    client,
+) -> None:
+    admin_user = _admin_user(initialized_settings)
+    created_user = _create_standard_user(initialized_settings, username="stream-route-underage-user")
+    update_user(
+        initialized_settings,
+        user_id=int(created_user["id"]),
+        enabled=None,
+        role=None,
+        age_credential=12,
+        current_admin_password=None,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _login(client, username=created_user["username"], password="family-password")
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="stream/route-age-gated.mp4",
+    )
+    set_media_age_requirement(
+        initialized_settings,
+        item_id=int(item["id"]),
+        age_requirement=16,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    response = client.get(f"/api/stream/{item['id']}")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You must be 16 years old to view this film. "
+        "Please contact an admin if your age credentials are incorrect."
+    )
 
 
 def test_mobile_playback_create_route_passes_selected_audio_stream_index(

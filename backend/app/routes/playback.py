@@ -11,6 +11,7 @@ from ..schemas import (
     PlaybackStartRequest,
 )
 from ..services.library_service import get_media_item_detail
+from ..services.media_age_access_service import assert_user_can_access_media_by_age
 from ..services.playback_service import build_playback_decision, start_playback, stop_playback
 
 
@@ -42,6 +43,7 @@ def playback_decision(
     user=CurrentUser,
 ) -> PlaybackDecisionResponse:
     item = _get_item_or_404(request, item_id, user_id=int(user.id))
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="playback")
     payload = build_playback_decision(
         request.app.state.settings,
         item,
@@ -60,6 +62,7 @@ def playback_start(
     user=CurrentUser,
 ) -> PlaybackDecisionResponse:
     item = _get_item_or_404(request, item_id, user_id=int(user.id))
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="playback")
     request_payload = payload or PlaybackStartRequest()
     decision = start_playback(
         request.app.state.settings,
@@ -89,6 +92,7 @@ def playback_stop(item_id: int, request: Request, user=CurrentUser):
 @router.get("/api/hls/{item_id}/index.m3u8")
 def hls_manifest(item_id: int, request: Request, user=CurrentUser):
     item = _get_item_or_404(request, item_id, user_id=int(user.id))
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="hls")
     manifest_content = request.app.state.transcode_manager.get_manifest_content(item)
     if manifest_content is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HLS manifest is not ready yet")
@@ -102,6 +106,7 @@ def hls_manifest(item_id: int, request: Request, user=CurrentUser):
 @router.get("/api/hls/{item_id}/{segment_name}")
 def hls_segment(item_id: int, segment_name: str, request: Request, user=CurrentUser):
     item = _get_item_or_404(request, item_id, user_id=int(user.id))
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="hls")
     segment_path = request.app.state.transcode_manager.get_segment_path(item, segment_name)
     if segment_path is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HLS segment not found")

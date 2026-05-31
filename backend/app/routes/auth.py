@@ -70,6 +70,7 @@ def _auth_envelope(user: AuthenticatedUser, *, totp_setup_required: bool = False
             "role": user.role,
             "enabled": user.enabled,
             "assistant_beta_enabled": user.assistant_beta_enabled,
+            "age_credential": user.age_credential,
             "session_id": user.session_id,
         },
     )

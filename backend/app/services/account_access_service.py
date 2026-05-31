@@ -14,6 +14,11 @@ from ..models import AuthenticatedUser
 from ..security import generate_session_token, hash_password
 from .audit_service import log_audit_event
 from .library_service import get_media_item_detail
+from .media_age_access_service import (
+    assert_user_can_access_media_by_age,
+    format_age_for_display,
+    validate_age_credential,
+)
 
 
 INVITE_CODE_LENGTH = 32
@@ -69,6 +74,8 @@ def _serialize_invite_code(row, *, code: str | None = None) -> dict[str, object]
         "expires_at": row["expires_at"],
         "used_at": row["used_at"],
         "used_by_user_id": row["used_by_user_id"],
+        "assigned_age": int(row["assigned_age"] or 18),
+        "assigned_age_display": format_age_for_display(int(row["assigned_age"] or 18)),
         "hidden_at": row["hidden_at"],
         "revoked_at": row["revoked_at"],
     }
@@ -80,7 +87,9 @@ def generate_invite_code(
     actor: AuthenticatedUser,
     ip_address: str | None,
     user_agent: str | None,
+    assigned_age: int = 18,
 ) -> dict[str, object]:
+    normalized_assigned_age = validate_age_credential(assigned_age)
     code = _generate_invite_code()
     code_hash = _secret_hash(settings, "invite-code", code)
     now_dt = datetime.now(timezone.utc)
@@ -93,15 +102,16 @@ def generate_invite_code(
                 code_hash,
                 created_by_user_id,
                 created_at,
-                expires_at
-            ) VALUES (?, ?, ?, ?)
+                expires_at,
+                assigned_age
+            ) VALUES (?, ?, ?, ?, ?)
             """,
-            (code_hash, actor.id, now, expires_at),
+            (code_hash, actor.id, now, expires_at, normalized_assigned_age),
         )
         invite_id = int(cursor.lastrowid)
         row = connection.execute(
             """
-            SELECT id, created_by_user_id, created_at, expires_at, used_at, used_by_user_id, hidden_at, revoked_at
+            SELECT id, created_by_user_id, created_at, expires_at, assigned_age, used_at, used_by_user_id, hidden_at, revoked_at
             FROM invite_codes
             WHERE id = ?
             """,
@@ -119,7 +129,7 @@ def generate_invite_code(
         target_id=invite_id,
         ip_address=ip_address,
         user_agent=user_agent,
-        details={"expires_at": expires_at},
+        details={"expires_at": expires_at, "assigned_age": normalized_assigned_age},
     )
     return _serialize_invite_code(row, code=code)
 
@@ -128,7 +138,7 @@ def list_visible_invite_codes(settings: Settings) -> list[dict[str, object]]:
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
-            SELECT id, created_by_user_id, created_at, expires_at, used_at, used_by_user_id, hidden_at, revoked_at
+            SELECT id, created_by_user_id, created_at, expires_at, assigned_age, used_at, used_by_user_id, hidden_at, revoked_at
             FROM invite_codes
             WHERE hidden_at IS NULL
               AND revoked_at IS NULL
@@ -190,7 +200,7 @@ def revoke_invite_code(
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT id, expires_at, used_at, revoked_at
+            SELECT id, expires_at, assigned_age, used_at, revoked_at
             FROM invite_codes
             WHERE id = ?
             """,
@@ -250,7 +260,7 @@ def create_user_with_invite(
     with get_connection(settings) as connection:
         invite_row = connection.execute(
             """
-            SELECT id, expires_at, used_at, revoked_at
+            SELECT id, expires_at, assigned_age, used_at, revoked_at
             FROM invite_codes
             WHERE code_hash = ?
             LIMIT 1
@@ -274,10 +284,16 @@ def create_user_with_invite(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Unable to create account with these details")
         cursor = connection.execute(
             """
-            INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at)
-            VALUES (?, ?, 'standard_user', 1, ?, ?)
+            INSERT INTO users (username, password_hash, role, enabled, age_credential, created_at, updated_at)
+            VALUES (?, ?, 'standard_user', 1, ?, ?, ?)
             """,
-            (normalized_username, hash_password(password, settings), now, now),
+            (
+                normalized_username,
+                hash_password(password, settings),
+                validate_age_credential(invite_row["assigned_age"] or 18),
+                now,
+                now,
+            ),
         )
         user_id = int(cursor.lastrowid)
         connection.execute(
@@ -295,6 +311,7 @@ def create_user_with_invite(
         role="standard_user",
         enabled=True,
         assistant_beta_enabled=False,
+        age_credential=validate_age_credential(invite_row["assigned_age"] or 18),
     )
     log_audit_event(
         settings,
@@ -633,11 +650,12 @@ def is_item_download_allowed(settings: Settings, *, user_id: int, item_id: int) 
         return selected is not None
 
 
-def _get_download_item_detail(settings: Settings, *, user_id: int, item_id: int) -> dict[str, Any]:
-    detail = get_media_item_detail(settings, user_id=user_id, item_id=item_id, allow_globally_hidden=False)
+def _get_download_item_detail(settings: Settings, *, user: AuthenticatedUser, item_id: int) -> dict[str, Any]:
+    detail = get_media_item_detail(settings, user_id=user.id, item_id=item_id, allow_globally_hidden=False)
     if detail is None or bool(detail.get("hidden_for_user")) or bool(detail.get("hidden_globally")):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found")
-    if not is_item_download_allowed(settings, user_id=user_id, item_id=item_id):
+    assert_user_can_access_media_by_age(settings, user=user, item_id=item_id, purpose="download")
+    if not is_item_download_allowed(settings, user_id=user.id, item_id=item_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download access is not enabled for this movie")
     return detail
 
@@ -650,7 +668,7 @@ def create_download_session(
     ip_address: str | None,
     user_agent: str | None,
 ) -> dict[str, object]:
-    detail = _get_download_item_detail(settings, user_id=user.id, item_id=item_id)
+    detail = _get_download_item_detail(settings, user=user, item_id=item_id)
     token = generate_session_token()
     token_hash = _secret_hash(settings, "download-session", token)
     now_dt = datetime.now(timezone.utc)
@@ -704,7 +722,9 @@ def create_download_session(
 
 
 def get_download_filename_for_item(settings: Settings, *, user_id: int, item_id: int) -> str:
-    detail = _get_download_item_detail(settings, user_id=user_id, item_id=item_id)
+    detail = get_media_item_detail(settings, user_id=user_id, item_id=item_id, allow_globally_hidden=False)
+    if detail is None or bool(detail.get("hidden_for_user")) or bool(detail.get("hidden_globally")):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found")
     return safe_download_filename(str(detail.get("original_filename") or detail.get("title") or "movie"))
 
 
@@ -776,6 +796,18 @@ def validate_download_session(
             audit_action="download.revoked",
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download access is no longer available")
+    try:
+        assert_user_can_access_media_by_age(settings, user=user, item_id=int(row["media_item_id"]), purpose="download")
+    except HTTPException:
+        mark_download_session_failed(
+            settings,
+            token=token,
+            user=user,
+            session_id=session_id,
+            message="age_requirement_changed",
+            audit_action="download.revoked",
+        )
+        raise
     return int(row["media_item_id"])
 
 

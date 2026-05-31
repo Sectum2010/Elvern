@@ -215,6 +215,7 @@ def authenticate_user(
                 u.password_hash,
                 u.role,
                 u.enabled,
+                COALESCE(u.age_credential, 18) AS age_credential,
                 COALESCE(a.assistant_beta_enabled, 0) AS assistant_beta_enabled
             FROM users u
             LEFT JOIN assistant_user_access a ON a.user_id = u.id
@@ -252,6 +253,7 @@ def authenticate_user(
                 role=row["role"] or "standard_user",
                 enabled=bool(row["enabled"]),
                 assistant_beta_enabled=bool(row["assistant_beta_enabled"]),
+                age_credential=int(row["age_credential"] or 18),
             ),
             None,
         )
@@ -329,6 +331,7 @@ def get_user_by_session_token(
                 u.username,
                 u.role,
                 u.enabled,
+                COALESCE(u.age_credential, 18) AS age_credential,
                 COALESCE(a.assistant_beta_enabled, 0) AS assistant_beta_enabled,
                 s.id AS session_id,
                 s.created_at,
@@ -431,6 +434,7 @@ def get_user_by_session_token(
         role=row["role"] or "standard_user",
         enabled=bool(row["enabled"]),
         assistant_beta_enabled=bool(row["assistant_beta_enabled"]),
+        age_credential=int(row["age_credential"] or 18),
         session_id=row["session_id"],
     )
 

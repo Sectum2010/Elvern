@@ -28,6 +28,7 @@ from backend.app.services.account_access_service import (
 )
 from backend.app.services.admin_service import create_user, delete_user, update_user
 from backend.app.services.log_redaction import redact_download_session_urls
+from backend.app.services.media_age_access_service import set_media_age_requirement
 from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
     create_native_playback_session,
@@ -1710,6 +1711,7 @@ def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> No
         actor=admin_user,
         ip_address="127.0.0.1",
         user_agent="pytest",
+        assigned_age=13,
     )
     invite_code = str(invite_payload["code"])
 
@@ -1728,6 +1730,7 @@ def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> No
         user_agent="pytest",
     )
     assert created_user.username == "invited-user"
+    assert created_user.age_credential == 13
 
     with pytest.raises(HTTPException) as reused_exc:
         create_user_with_invite(
@@ -1752,6 +1755,18 @@ def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> No
             user_agent="pytest",
         )
     assert invalid_exc.value.status_code == 400
+
+
+def test_invite_code_defaults_assigned_age_to_adult(initialized_settings) -> None:
+    invite_payload = generate_invite_code(
+        initialized_settings,
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    assert invite_payload["assigned_age"] == 18
+    assert invite_payload["assigned_age_display"] == "18+"
 
 
 def test_revoked_invite_code_cannot_create_user(initialized_settings) -> None:
@@ -2073,6 +2088,110 @@ def test_download_session_endpoint_authorizes_range_requests(initialized_setting
     assert range_response.headers["accept-ranges"] == "bytes"
     assert range_response.headers["content-disposition"] == "attachment; filename*=UTF-8''family%20movie%3F.mp4"
     assert range_response.content == b"not "
+
+
+def test_download_session_rejects_user_below_movie_age_requirement(initialized_settings, client) -> None:
+    admin_user = _admin_user(initialized_settings)
+    created = _create_standard_user(initialized_settings, username="underage-download-user")
+    update_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        enabled=None,
+        role=None,
+        age_credential=12,
+        current_admin_password=None,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    media_item = _create_media_item(initialized_settings, relative_name="age-gated-download.mp4")
+    _grant_download_for_item(
+        initialized_settings,
+        user_id=int(created["id"]),
+        media_item_id=int(media_item["id"]),
+    )
+    set_media_age_requirement(
+        initialized_settings,
+        item_id=int(media_item["id"]),
+        age_requirement=16,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _session_user, token = _issue_user_session(
+        initialized_settings,
+        username="underage-download-user",
+        password="family-password",
+    )
+    client.cookies.set(initialized_settings.session_cookie_name, token)
+
+    response = client.post(f"/api/download/item/{media_item['id']}/session")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You must be 16 years old to view this film. "
+        "Please contact an admin if your age credentials are incorrect."
+    )
+
+
+def test_download_session_validation_rechecks_age_after_requirement_change(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    created = _create_standard_user(initialized_settings, username="download-age-recheck-user")
+    media_item = _create_media_item(initialized_settings, relative_name="age-recheck-download.mp4")
+    _grant_download_for_item(
+        initialized_settings,
+        user_id=int(created["id"]),
+        media_item_id=int(media_item["id"]),
+    )
+    session_user, auth_token = _issue_user_session(
+        initialized_settings,
+        username="download-age-recheck-user",
+        password="family-password",
+    )
+    session_payload = create_download_session(
+        initialized_settings,
+        user=session_user,
+        item_id=int(media_item["id"]),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    update_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        enabled=None,
+        role=None,
+        age_credential=12,
+        current_admin_password=None,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    set_media_age_requirement(
+        initialized_settings,
+        item_id=int(media_item["id"]),
+        age_requirement=16,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    refreshed_session_user = get_user_by_session_token(initialized_settings, auth_token)
+    assert refreshed_session_user is not None
+
+    with pytest.raises(HTTPException) as exc:
+        validate_download_session(
+            initialized_settings,
+            token=str(session_payload["session_token"]),
+            user=refreshed_session_user,
+        )
+
+    assert exc.value.status_code == 403
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT revoked_at, failed_at, last_error FROM download_sessions WHERE session_token_hash IS NOT NULL",
+        ).fetchone()
+    assert row["failed_at"] is not None
+    assert row["last_error"] == "age_requirement_changed"
 
 
 def test_download_session_rejects_captured_token_for_other_user_and_revoked_auth(initialized_settings, client) -> None:

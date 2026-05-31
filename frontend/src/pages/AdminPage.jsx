@@ -62,6 +62,16 @@ const ADMIN_SECTIONS = [
 ];
 const ADMIN_SECTION_KEYS = ADMIN_SECTIONS.map((section) => section.key);
 const ADMIN_ACTIVE_SECTION_STORAGE_KEY = "elvern:admin-active-section";
+const AGE_CREDENTIAL_OPTIONS = Array.from({ length: 18 }, (_, index) => index + 1);
+
+function formatAgeCredential(value) {
+  const age = Number(value);
+  if (!Number.isFinite(age)) {
+    return "18+";
+  }
+  return age >= 18 ? "18+" : String(age);
+}
+
 function unknownIfEmpty(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized || "Unknown";
@@ -459,6 +469,8 @@ export function AdminPage() {
   const [invitePending, setInvitePending] = useState(false);
   const [revealedInviteIds, setRevealedInviteIds] = useState({});
   const [inviteCodesExpanded, setInviteCodesExpanded] = useState(true);
+  const [inviteAgeModalOpen, setInviteAgeModalOpen] = useState(false);
+  const [inviteAssignedAge, setInviteAssignedAge] = useState(18);
   const [passwordHelpRequests, setPasswordHelpRequests] = useState([]);
   const [passwordHelpPendingId, setPasswordHelpPendingId] = useState(null);
   const [expandedPasswordHelpRequestId, setExpandedPasswordHelpRequestId] = useState(null);
@@ -530,6 +542,11 @@ export function AdminPage() {
     username: "",
     password: "",
     role: "standard_user",
+    ageCredential: 18,
+  });
+  const [ageCredentialEditor, setAgeCredentialEditor] = useState({
+    userId: null,
+    ageCredential: 18,
   });
   const cloudSyncWarningRef = useRef("");
   const scanRunningRef = useRef(false);
@@ -1123,10 +1140,20 @@ export function AdminPage() {
           error: "",
         }
       : current));
+    setAgeCredentialEditor((current) => (current.userId === userId
+      ? {
+          userId: null,
+          ageCredential: 18,
+        }
+      : current));
   }
 
   function openUserActionsModal(entry) {
     clearUserEditors(userActionsModalUserId);
+    setAgeCredentialEditor({
+      userId: entry.id,
+      ageCredential: Number(entry.age_credential || 18),
+    });
     setUserActionsModalUserId(entry.id);
   }
 
@@ -1458,7 +1485,7 @@ export function AdminPage() {
   }
 
   function closeCreateUserForm() {
-    setCreateUserForm({ username: "", password: "", role: "standard_user" });
+    setCreateUserForm({ username: "", password: "", role: "standard_user", ageCredential: 18 });
     setCreateUserExpanded(false);
   }
 
@@ -1482,6 +1509,7 @@ export function AdminPage() {
           password: createUserForm.password,
           role: createUserForm.role,
           enabled: true,
+          age_credential: Number(createUserForm.ageCredential || 18),
         },
       });
       closeCreateUserForm();
@@ -1656,17 +1684,22 @@ export function AdminPage() {
     }
   }
 
-  async function handleGenerateInviteCode() {
+  async function handleGenerateInviteCode(event) {
+    event?.preventDefault?.();
     setInvitePending(true);
     setBanner(null);
     try {
-      const payload = await apiRequest("/api/admin/invite-codes", { method: "POST" });
+      const payload = await apiRequest("/api/admin/invite-codes", {
+        method: "POST",
+        data: { assigned_age: Number(inviteAssignedAge || 18) },
+      });
       setInviteCodes((current) => [
         payload,
         ...current.filter((inviteCode) => inviteCode.id !== payload.id),
       ]);
       setRevealedInviteIds((current) => ({ ...current, [payload.id]: false }));
       setInviteCodesExpanded(true);
+      setInviteAgeModalOpen(false);
       setBanner({ tone: "success", text: "Invite code generated." });
     } catch (requestError) {
       setBanner({
@@ -1676,6 +1709,14 @@ export function AdminPage() {
     } finally {
       setInvitePending(false);
     }
+  }
+
+  async function handleSaveUserAgeCredential(entry) {
+    await handleUpdateUser(
+      entry,
+      { age_credential: Number(ageCredentialEditor.ageCredential || 18) },
+      `${entry.username} age credential is ${formatAgeCredential(ageCredentialEditor.ageCredential)}.`,
+    );
   }
 
   function openInviteCodeDeleteModal(inviteCode) {
@@ -2120,6 +2161,7 @@ export function AdminPage() {
                 <p className="page-subnote">
                   {entry.active_sessions} live session{entry.active_sessions === 1 ? "" : "s"} · last login {formatDate(entry.last_login_at)}
                 </p>
+                <p className="page-subnote">Age credential {entry.age_credential_display || formatAgeCredential(entry.age_credential)}</p>
                 {entry.last_seen_at ? <p className="page-subnote">Last heartbeat {formatDate(entry.last_seen_at)}{entry.last_activity_at ? ` · last activity ${formatDate(entry.last_activity_at)}` : ""}</p> : null}
                 {isSelf ? (
                   <p className="page-subnote">Your own admin account cannot be disabled. Use Delete account inside Account actions if needed.</p>
@@ -2433,6 +2475,18 @@ export function AdminPage() {
                     <option value="admin">Admin</option>
                   </select>
                 </label>
+                <label>
+                  Age credential
+                  <select
+                    className="admin-select"
+                    onChange={(event) => setCreateUserForm((current) => ({ ...current, ageCredential: Number(event.target.value) }))}
+                    value={createUserForm.ageCredential}
+                  >
+                    {AGE_CREDENTIAL_OPTIONS.map((age) => (
+                      <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                    ))}
+                  </select>
+                </label>
                 <div className="admin-form__actions">
                   <button className="primary-button" disabled={createPending} type="submit">
                     {createPending ? "Creating..." : "Create user"}
@@ -2640,6 +2694,44 @@ export function AdminPage() {
                 </div>
               </div>
             ) : null}
+
+            <div className="admin-inline-form admin-age-credential-editor">
+              <label>
+                Age credential
+                <select
+                  className="admin-select"
+                  disabled={userActionPending === selectedUserActionsEntry.id}
+                  onChange={(event) =>
+                    setAgeCredentialEditor({
+                      userId: selectedUserActionsEntry.id,
+                      ageCredential: Number(event.target.value),
+                    })
+                  }
+                  value={
+                    ageCredentialEditor.userId === selectedUserActionsEntry.id
+                      ? ageCredentialEditor.ageCredential
+                      : Number(selectedUserActionsEntry.age_credential || 18)
+                  }
+                >
+                  {AGE_CREDENTIAL_OPTIONS.map((age) => (
+                    <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="admin-list__actions">
+                <button
+                  className="primary-button"
+                  disabled={
+                    userActionPending === selectedUserActionsEntry.id
+                    || Number(ageCredentialEditor.ageCredential || 18) === Number(selectedUserActionsEntry.age_credential || 18)
+                  }
+                  onClick={() => handleSaveUserAgeCredential(selectedUserActionsEntry)}
+                  type="button"
+                >
+                  Save age credential
+                </button>
+              </div>
+            </div>
 
             {selectedUserActionsEntry.id === user?.id ? (
               <p className="page-subnote">
@@ -3845,7 +3937,10 @@ export function AdminPage() {
 	                  <button
 	                    className="primary-button"
 	                    disabled={invitePending}
-	                    onClick={handleGenerateInviteCode}
+	                    onClick={() => {
+                        setInviteAssignedAge(18);
+                        setInviteAgeModalOpen(true);
+                      }}
 	                    type="button"
 	                  >
 	                    {invitePending ? "Generating..." : "Generate invite code"}
@@ -3900,6 +3995,8 @@ export function AdminPage() {
                               </div>
                               <p className="page-subnote">
                                 Expires {formatDate(inviteCode.expires_at)}
+                                {" · "}
+                                Age credential {inviteCode.assigned_age_display || formatAgeCredential(inviteCode.assigned_age)}
                                 {inviteCode.used_at ? ` · used ${formatDate(inviteCode.used_at)}` : ""}
                               </p>
                             </div>
@@ -3938,6 +4035,60 @@ export function AdminPage() {
               </section>
 	            </>
 	          ) : null}
+        </div>
+      ) : null}
+      {inviteAgeModalOpen ? (
+        <div
+          aria-labelledby="admin-invite-age-modal-title"
+          aria-modal="true"
+          className="browser-resume-modal"
+          role="dialog"
+        >
+          <div
+            aria-hidden="true"
+            className="browser-resume-modal__backdrop"
+            onClick={() => {
+              if (!invitePending) {
+                setInviteAgeModalOpen(false);
+              }
+            }}
+          />
+          <form
+            className="browser-resume-modal__card detail-info-modal__card admin-invite-age-modal"
+            onSubmit={handleGenerateInviteCode}
+          >
+            <div className="detail-info-modal__copy">
+              <p className="eyebrow detail-info-modal__eyebrow">Invite code</p>
+              <h2 className="detail-info-modal__title" id="admin-invite-age-modal-title">Assign age credential</h2>
+              <p className="page-subnote">The new account created with this code receives this age credential.</p>
+            </div>
+            <label className="admin-inline-form">
+              Age credential
+              <select
+                className="admin-select"
+                disabled={invitePending}
+                onChange={(event) => setInviteAssignedAge(Number(event.target.value))}
+                value={inviteAssignedAge}
+              >
+                {AGE_CREDENTIAL_OPTIONS.map((age) => (
+                  <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                ))}
+              </select>
+            </label>
+            <div className="admin-list__actions">
+              <button className="primary-button" disabled={invitePending} type="submit">
+                {invitePending ? "Generating..." : "Generate invite code"}
+              </button>
+              <button
+                className="ghost-button"
+                disabled={invitePending}
+                onClick={() => setInviteAgeModalOpen(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
         </div>
       ) : null}
       {userActionsModal}

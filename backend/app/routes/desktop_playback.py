@@ -25,6 +25,7 @@ from ..services.desktop_playback_service import (
     resolve_desktop_vlc_handoff,
 )
 from ..services.library_service import get_media_item_detail
+from ..services.media_age_access_service import assert_user_can_access_media_by_age
 
 
 router = APIRouter(prefix="/api/desktop-playback", tags=["desktop-playback"])
@@ -42,6 +43,7 @@ def desktop_playback_resolve(
     item = get_media_item_detail(settings, user_id=user.id, item_id=item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(settings, user=user, item_id=item_id, purpose="desktop_playback")
     resolved_platform = infer_desktop_platform(request.headers.get("user-agent"), platform)
     client_ip = resolve_client_ip(request)
     same_host_context = resolve_same_host_request(
@@ -72,6 +74,7 @@ def desktop_playback_open(
     item = get_media_item_detail(settings, user_id=user.id, item_id=item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(settings, user=user, item_id=item_id, purpose="desktop_playback")
     resolved_platform = infer_desktop_platform(
         request.headers.get("user-agent"),
         payload.platform if payload else None,
@@ -131,6 +134,7 @@ def desktop_playback_handoff_create(
     item = get_media_item_detail(request.app.state.settings, user_id=user.id, item_id=item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="desktop_playback")
     resolved_platform = infer_desktop_platform(
         request.headers.get("user-agent"),
         payload.platform if payload else None,
@@ -178,6 +182,7 @@ def desktop_playback_handoff_launch(
     item = get_media_item_detail(request.app.state.settings, user_id=user.id, item_id=item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="desktop_playback")
     resolved_platform = infer_desktop_platform(request.headers.get("user-agent"), platform)
     handoff = create_desktop_vlc_handoff(
         request.app.state.settings,
@@ -270,6 +275,7 @@ def desktop_playback_playlist(
     item = get_media_item_detail(request.app.state.settings, user_id=user.id, item_id=item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="desktop_playback")
     resolved_platform = infer_desktop_platform(request.headers.get("user-agent"), platform)
     resolution = build_desktop_playback_resolution(
         request.app.state.settings,

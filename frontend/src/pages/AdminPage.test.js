@@ -46,10 +46,24 @@ describe("AdminPage invite code guards", () => {
     expect(source).toContain("inviteCodesExpanded ? (");
     expect(source).toContain("className=\"admin-invite-code-header__summary\"");
     expect(source).toContain("onClick={toggleInviteCodesExpanded}");
-    expect(source).toContain("onClick={handleGenerateInviteCode}");
+    expect(source).toContain("setInviteAssignedAge(18);");
+    expect(source).toContain("setInviteAgeModalOpen(true);");
+    expect(source).toContain("onSubmit={handleGenerateInviteCode}");
     expect(source).not.toContain("Show codes");
     expect(source).not.toContain("Hide codes");
     expect(source).not.toContain("admin-invite-code-header__chevron");
+  });
+
+  test("invite and user age credential controls post explicit age values", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("const AGE_CREDENTIAL_OPTIONS = Array.from({ length: 18 }");
+    expect(source).toContain("const [inviteAssignedAge, setInviteAssignedAge] = useState(18)");
+    expect(source).toContain("data: { assigned_age: Number(inviteAssignedAge || 18) }");
+    expect(source).toContain("Age credential {inviteCode.assigned_age_display || formatAgeCredential(inviteCode.assigned_age)}");
+    expect(source).toContain("age_credential: Number(createUserForm.ageCredential || 18)");
+    expect(source).toContain("{ age_credential: Number(ageCredentialEditor.ageCredential || 18) }");
+    expect(source).toContain("Assign age credential");
   });
 
   test("invite list spacing is outside the generated code card internals", () => {

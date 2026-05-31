@@ -51,7 +51,7 @@ clients/desktop-vlc-opener/**/obj/
 dev/artifacts/
 
 # Insider-only archives / unpublished analysis exports
-tmp/elvern_5_8_2026.zip
+tmp/
 
 # Local/private security review notes
 docs/security-audit-2026-05-08.md

@@ -10292,6 +10292,25 @@ class MobilePlaybackManager:
         self._invalidate_sessions(sessions)
         return len(sessions)
 
+    def invalidate_sessions_for_media_items_and_users(
+        self,
+        *,
+        media_item_ids: list[int],
+        user_ids: list[int],
+        reason: str,
+    ) -> int:
+        media_set = {int(item_id) for item_id in media_item_ids}
+        user_set = {int(user_id) for user_id in user_ids}
+        if not media_set or not user_set:
+            return 0
+        with self._lock:
+            sessions = self._collect_sessions_to_invalidate_locked(
+                lambda session: session.media_item_id in media_set and session.user_id in user_set,
+                reason=reason,
+            )
+        self._invalidate_sessions(sessions)
+        return len(sessions)
+
     def _collect_sessions_to_invalidate_locked(
         self,
         predicate,
@@ -10320,6 +10339,10 @@ class MobilePlaybackManager:
             return "This signed-in session was revoked. Browser playback preparation was stopped."
         if reason == "self_deleted":
             return "This account was deleted. Browser playback preparation was stopped."
+        if reason == "age_requirement_changed":
+            return "This movie's age requirement changed. Browser playback preparation was stopped."
+        if reason == "user_age_credential_changed":
+            return "This account's age credential changed. Browser playback preparation was stopped."
         return "Browser playback preparation was stopped by backend control."
 
     def _recover_stale_route2_worker_metadata(self) -> None:

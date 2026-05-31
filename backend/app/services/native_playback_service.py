@@ -15,10 +15,12 @@ from fastapi import HTTPException, status
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..media_stream import build_stream_response, ensure_media_path_within_root
+from ..models import AuthenticatedUser
 from ..progress import record_playback_event, save_progress
 from ..security import generate_session_token, hash_session_token
 from .cloud_library_service import build_cloud_stream_response, refresh_cloud_media_item_metadata
 from .library_service import get_media_item_record
+from .media_age_access_service import assert_user_can_access_media_by_age
 
 
 logger = logging.getLogger(__name__)
@@ -1085,7 +1087,10 @@ def _require_native_session(
                 m.duration_seconds,
                 m.container,
                 m.video_codec,
-                m.audio_codec
+                m.audio_codec,
+                u.username,
+                u.role,
+                COALESCE(u.age_credential, 18) AS age_credential
             FROM native_playback_sessions n
             JOIN media_items m ON m.id = n.media_item_id
             LEFT JOIN sessions s ON s.id = n.auth_session_id
@@ -1123,6 +1128,19 @@ def _require_native_session(
             )
             connection.commit()
 
+    assert_user_can_access_media_by_age(
+        settings,
+        user=AuthenticatedUser(
+            id=int(row["user_id"]),
+            username=str(row["username"] or ""),
+            role=str(row["role"] or "standard_user"),
+            enabled=True,
+            age_credential=int(row["age_credential"] or 18),
+            session_id=row["auth_session_id"],
+        ),
+        item_id=int(row["media_item_id"]),
+        purpose="native_playback_stream",
+    )
     payload = dict(row)
     payload["expires_at"] = current_expires
     payload["resume_seconds"] = float(row["last_position_seconds"] or 0)

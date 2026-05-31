@@ -21,6 +21,7 @@ from ..schemas import (
     AdminUserTotpDisableResponse,
     AdminUserTotpSetupPromptUpdateRequest,
     AdminInviteCodeListResponse,
+    AdminInviteCodeCreateRequest,
     AdminInviteCodeResponse,
     AdminPlaybackWorkersStatusResponse,
     AdminPasswordUpdateRequest,
@@ -226,6 +227,7 @@ def admin_create_user(
         password=payload.password,
         role=payload.role,
         enabled=payload.enabled,
+        age_credential=payload.age_credential,
         actor=user,
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -245,6 +247,7 @@ def admin_update_user(
         user_id=user_id,
         enabled=payload.enabled,
         role=payload.role,
+        age_credential=payload.age_credential,
         current_admin_password=payload.current_admin_password,
         actor=user,
         ip_address=resolve_client_ip(request),
@@ -256,6 +259,16 @@ def admin_update_user(
             user_id,
             reason="user_disabled",
         )
+    if payload.age_credential is not None:
+        revoke_summary = updated.get("_age_revoke_summary") if isinstance(updated, dict) else None
+        manager = getattr(request.app.state, "mobile_playback_manager", None)
+        invalidate = getattr(manager, "invalidate_sessions_for_media_items_and_users", None)
+        if callable(invalidate):
+            invalidate(
+                media_item_ids=[int(item_id) for item_id in (revoke_summary or {}).get("media_item_ids", [])],
+                user_ids=[user_id],
+                reason="user_age_credential_changed",
+            )
     return AdminUserResponse(**updated)
 
 
@@ -418,12 +431,17 @@ def admin_invite_codes(request: Request, user=CurrentAdmin) -> AdminInviteCodeLi
 
 
 @router.post("/invite-codes", response_model=AdminInviteCodeResponse)
-def admin_generate_invite_code(request: Request, user=CurrentAdmin) -> AdminInviteCodeResponse:
+def admin_generate_invite_code(
+    request: Request,
+    payload: AdminInviteCodeCreateRequest | None = None,
+    user=CurrentAdmin,
+) -> AdminInviteCodeResponse:
     invite_code = generate_invite_code(
         request.app.state.settings,
         actor=user,
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
+        assigned_age=(payload.assigned_age if payload is not None else 18),
     )
     return AdminInviteCodeResponse(**invite_code)
 

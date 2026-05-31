@@ -76,4 +76,17 @@ describe("DetailPage hook-order guards", () => {
     expect(playerCardHeader).toContain("detail-player-info-button__glyph");
     expect(bottomActions).not.toContain(">Info<");
   });
+
+  test("admin movie info exposes age requirement editing without changing playback controls", () => {
+    const source = readDetailPage();
+
+    expect(source).toContain("const AGE_REQUIREMENT_OPTIONS = [null, ...Array.from({ length: 18 }");
+    expect(source).toContain("function formatAgeRequirement(value)");
+    expect(source).toContain("/api/library/item/${item.id}/age-requirement");
+    expect(source).toContain("<h2>Age Requirement</h2>");
+    expect(source).toContain("This applies to matching copies of this movie.");
+    expect(source).toContain("Edit age requirement");
+    expect(source).toContain("onClick={saveAgeRequirement}");
+    expect(source).toContain("ageRequirementEditor.pending ? \"Saving...\" : \"Save\"");
+  });
 });

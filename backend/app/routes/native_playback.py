@@ -24,6 +24,7 @@ from ..schemas import (
 )
 from ..services.library_service import get_media_item_detail
 from ..services.audit_service import log_audit_event
+from ..services.media_age_access_service import assert_user_can_access_media_by_age
 from ..services.native_playback_service import (
     build_native_stream_response,
     close_native_playback_session,
@@ -301,6 +302,7 @@ def native_playback_session_create(
     )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="native_playback")
     transport_decision: TransportControllerDecisionResponse | None = None
     transport_request = build_ios_external_transport_request(
         request.app.state.settings,
@@ -459,6 +461,7 @@ def native_playback_external_launch(
     )
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="native_playback")
     session_payload = create_native_playback_session(
         request.app.state.settings,
         user_id=user.id,

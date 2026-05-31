@@ -20,6 +20,11 @@ from ..security import hash_password, verify_password
 from .admin_events_service import emit_admin_event
 from .assistant_service import build_assistant_access_map
 from .audit_service import list_recent_audit_events, log_audit_event
+from .media_age_access_service import (
+    format_age_for_display,
+    revoke_persistent_sessions_for_user_age_change,
+    validate_age_credential,
+)
 
 
 def list_users(settings: Settings) -> list[dict[str, object]]:
@@ -36,6 +41,7 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
                 username,
                 role,
                 enabled,
+                COALESCE(age_credential, 18) AS age_credential,
                 created_at,
                 updated_at,
                 last_login_at,
@@ -79,6 +85,8 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
             "role": row["role"] or "standard_user",
             "enabled": bool(row["enabled"]),
             "assistant_beta_enabled": bool(assistant_access_by_user[int(row["id"])]["assistant_beta_enabled"]),
+            "age_credential": int(row["age_credential"] or 18),
+            "age_credential_display": format_age_for_display(int(row["age_credential"] or 18)),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_login_at": row["last_login_at"],
@@ -102,6 +110,7 @@ def create_user(
     password: str,
     role: str,
     enabled: bool,
+    age_credential: int = 18,
     actor: AuthenticatedUser,
     ip_address: str | None,
     user_agent: str | None,
@@ -122,6 +131,7 @@ def create_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unsupported user role",
         )
+    normalized_age_credential = validate_age_credential(age_credential)
 
     now = utcnow_iso()
     with get_connection(settings) as connection:
@@ -129,15 +139,16 @@ def create_user(
             cursor = connection.execute(
                 """
                 INSERT INTO users (
-                    username, password_hash, role, enabled, totp_setup_prompt_enabled, created_at, updated_at
+                    username, password_hash, role, enabled, age_credential, totp_setup_prompt_enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_username,
                     hash_password(password, settings),
                     role,
                     int(enabled),
+                    normalized_age_credential,
                     1 if role == "admin" else 0,
                     now,
                     now,
@@ -164,7 +175,7 @@ def create_user(
         target_id=user_id,
         ip_address=ip_address,
         user_agent=user_agent,
-        details={"username": normalized_username, "role": role, "enabled": enabled},
+        details={"username": normalized_username, "role": role, "enabled": enabled, "age_credential": normalized_age_credential},
     )
     return payload
 
@@ -175,6 +186,7 @@ def update_user(
     user_id: int,
     enabled: bool | None,
     role: str | None,
+    age_credential: int | None = None,
     current_admin_password: str | None,
     actor: AuthenticatedUser,
     ip_address: str | None,
@@ -188,6 +200,7 @@ def update_user(
                 username,
                 role,
                 enabled,
+                COALESCE(age_credential, 18) AS age_credential,
                 created_at,
                 updated_at,
                 last_login_at,
@@ -205,8 +218,10 @@ def update_user(
 
         next_role = role or row["role"] or "standard_user"
         next_enabled = bool(row["enabled"]) if enabled is None else bool(enabled)
+        next_age_credential = int(row["age_credential"] or 18) if age_credential is None else validate_age_credential(age_credential)
         role_changed = next_role != (row["role"] or "standard_user")
         enabled_changed = next_enabled != bool(row["enabled"])
+        age_changed = next_age_credential != int(row["age_credential"] or 18)
         if next_role not in {"admin", "standard_user"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -245,7 +260,7 @@ def update_user(
                 )
 
         now = utcnow_iso()
-        if not role_changed and not enabled_changed:
+        if not role_changed and not enabled_changed and not age_changed:
             return _get_user_from_row(row)
         revoked_session_count = 0
         enable_totp_prompt = bool(role_changed and next_role == "admin" and not row["totp_secret"])
@@ -254,11 +269,12 @@ def update_user(
             UPDATE users
             SET role = ?,
                 enabled = ?,
+                age_credential = ?,
                 totp_setup_prompt_enabled = CASE WHEN ? THEN 1 ELSE totp_setup_prompt_enabled END,
                 updated_at = ?
             WHERE id = ?
             """,
-            (next_role, int(next_enabled), int(enable_totp_prompt), now, user_id),
+            (next_role, int(next_enabled), next_age_credential, int(enable_totp_prompt), now, user_id),
         )
         if not next_enabled:
             revoked_session_count = revoke_sessions_for_user_in_connection(
@@ -268,8 +284,20 @@ def update_user(
                 now=now,
             )
         connection.commit()
+    age_revoke_summary = None
+    if age_changed:
+        age_revoke_summary = revoke_persistent_sessions_for_user_age_change(
+            settings,
+            user_id=user_id,
+            reason="user_age_credential_changed",
+        )
+        revoked_session_count += int(age_revoke_summary.get("revoked_native") or 0)
+        revoked_session_count += int(age_revoke_summary.get("revoked_downloads") or 0)
+        revoked_session_count += int(age_revoke_summary.get("revoked_desktop") or 0)
 
     payload = _get_user(settings, user_id=user_id)
+    if age_revoke_summary is not None:
+        payload["_age_revoke_summary"] = age_revoke_summary
     if enabled_changed:
         emit_admin_event("user_enabled" if payload["enabled"] else "user_disabled", user_id=user_id)
     log_audit_event(
@@ -287,6 +315,7 @@ def update_user(
         details={
             "enabled": payload["enabled"],
             "role": payload["role"],
+            "age_credential": payload["age_credential"],
             "revoked_session_count": revoked_session_count,
         },
     )
@@ -602,7 +631,7 @@ def _get_user(settings: Settings, *, user_id: int) -> dict[str, object]:
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT id, username, role, enabled, created_at, updated_at, last_login_at
+            SELECT id, username, role, enabled, COALESCE(age_credential, 18) AS age_credential, created_at, updated_at, last_login_at
             FROM users
             WHERE id = ?
             LIMIT 1
@@ -620,6 +649,8 @@ def _get_user_from_row(row) -> dict[str, object]:
         "username": row["username"],
         "role": row["role"] or "standard_user",
         "enabled": bool(row["enabled"]),
+        "age_credential": int(row["age_credential"] or 18),
+        "age_credential_display": format_age_for_display(int(row["age_credential"] or 18)),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "last_login_at": row["last_login_at"],

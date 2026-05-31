@@ -17,6 +17,7 @@ from ..schemas import (
     MobilePlaybackSubtitlePrepareResponse,
 )
 from ..services.library_service import get_media_item_record
+from ..services.media_age_access_service import assert_user_can_access_media_by_age
 from ..services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
     PlaybackAdmissionError,
@@ -83,6 +84,7 @@ def create_browser_playback_session(
     item = get_media_item_record(request.app.state.settings, item_id=payload.item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=int(item["id"]), purpose="browser_playback")
     try:
         manager = _get_browser_manager(request)
         manager.raise_if_browser_playback_cooldown_active(

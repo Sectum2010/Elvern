@@ -27,6 +27,7 @@ class UserResponse(BaseModel):
     role: Literal["admin", "standard_user"]
     enabled: bool = True
     assistant_beta_enabled: bool = False
+    age_credential: int = Field(default=18, ge=1, le=18)
     session_id: int | None = None
 
 
@@ -513,6 +514,18 @@ class MediaItemDetail(LibraryItemSummary):
     track_scan_source: str = ""
     audio_track_diagnostics: dict[str, object] = Field(default_factory=dict)
     subtitle_track_diagnostics: dict[str, object] = Field(default_factory=dict)
+    age_group_key: str = ""
+    age_group_source: str = ""
+    age_group_display_title: str = ""
+    age_group_year: int | None = None
+    age_requirement: int | None = Field(default=None, ge=1, le=18)
+    age_requirement_display: str = "None"
+    age_requirement_updated_at: str | None = None
+    age_requirement_updated_by_user_id: int | None = None
+
+
+class MediaAgeRequirementUpdateRequest(BaseModel):
+    age_requirement: int | None = Field(default=None, ge=1, le=18)
 
 
 class GoogleDriveConnectionResponse(BaseModel):
@@ -1189,6 +1202,8 @@ class AdminUserResponse(BaseModel):
     role: Literal["admin", "standard_user"]
     enabled: bool = True
     assistant_beta_enabled: bool = False
+    age_credential: int = Field(default=18, ge=1, le=18)
+    age_credential_display: str = "18+"
     created_at: str
     updated_at: str
     last_login_at: str | None = None
@@ -1211,11 +1226,13 @@ class AdminUserCreateRequest(BaseModel):
     password: str
     role: Literal["admin", "standard_user"] = "standard_user"
     enabled: bool = True
+    age_credential: int = Field(default=18, ge=1, le=18)
 
 
 class AdminUserUpdateRequest(BaseModel):
     enabled: bool | None = None
     role: Literal["admin", "standard_user"] | None = None
+    age_credential: int | None = Field(default=None, ge=1, le=18)
     current_admin_password: str | None = None
 
 
@@ -1486,12 +1503,18 @@ class AdminInviteCodeResponse(BaseModel):
     expires_at: str
     used_at: str | None = None
     used_by_user_id: int | None = None
+    assigned_age: int = Field(default=18, ge=1, le=18)
+    assigned_age_display: str = "18+"
     hidden_at: str | None = None
     revoked_at: str | None = None
 
 
 class AdminInviteCodeListResponse(BaseModel):
     invite_codes: list[AdminInviteCodeResponse] = Field(default_factory=list)
+
+
+class AdminInviteCodeCreateRequest(BaseModel):
+    assigned_age: int = Field(default=18, ge=1, le=18)
 
 
 class PasswordHelpRequestResponse(BaseModel):

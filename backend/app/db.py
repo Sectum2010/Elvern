@@ -26,6 +26,7 @@ TABLE_STATEMENTS = (
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'standard_user',
         enabled INTEGER NOT NULL DEFAULT 1,
+        age_credential INTEGER NOT NULL DEFAULT 18 CHECK (age_credential BETWEEN 1 AND 18),
         last_login_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -240,12 +241,24 @@ TABLE_STATEMENTS = (
         created_by_user_id INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
+        assigned_age INTEGER NOT NULL DEFAULT 18 CHECK (assigned_age BETWEEN 1 AND 18),
         used_at TEXT,
         used_by_user_id INTEGER,
         hidden_at TEXT,
         revoked_at TEXT,
         FOREIGN KEY (created_by_user_id) REFERENCES users (id) ON DELETE CASCADE,
         FOREIGN KEY (used_by_user_id) REFERENCES users (id) ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS media_age_requirements (
+        age_group_key TEXT PRIMARY KEY,
+        display_title TEXT NOT NULL,
+        year INTEGER,
+        age_requirement INTEGER CHECK (age_requirement IS NULL OR (age_requirement BETWEEN 1 AND 18)),
+        updated_at TEXT NOT NULL,
+        updated_by_user_id INTEGER,
+        FOREIGN KEY (updated_by_user_id) REFERENCES users (id) ON DELETE SET NULL
     )
     """,
     """
@@ -750,6 +763,7 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings (user_id)",
     "CREATE INDEX IF NOT EXISTS idx_invite_codes_expires_at ON invite_codes (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by ON invite_codes (created_by_user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_media_age_requirements_updated_at ON media_age_requirements (updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_status ON password_help_requests (status, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_user ON password_help_requests (user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_bucket ON password_help_requests (requester_bucket_hash, created_at DESC)",
@@ -856,6 +870,7 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'standard_user'")
     _ensure_column(connection, "users", "enabled", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(connection, "users", "last_login_at", "TEXT")
+    _ensure_column(connection, "users", "age_credential", "INTEGER NOT NULL DEFAULT 18")
     _ensure_column(connection, "users", "totp_secret", "TEXT")
     _ensure_column(connection, "users", "totp_enabled_at", "TEXT")
     _ensure_column(connection, "users", "totp_last_used_window", "INTEGER")
@@ -892,6 +907,7 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "assistant_change_records", "request_id", "INTEGER")
     _ensure_column(connection, "password_help_requests", "requester_ip_address", "TEXT")
     _ensure_column(connection, "password_help_requests", "requester_user_agent", "TEXT")
+    _ensure_column(connection, "invite_codes", "assigned_age", "INTEGER NOT NULL DEFAULT 18")
 
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)

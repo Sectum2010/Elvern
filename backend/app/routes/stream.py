@@ -5,6 +5,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from ..auth import CurrentUser
 from ..media_stream import build_stream_response
 from ..services.cloud_library_service import build_cloud_stream_response
+from ..services.media_age_access_service import assert_user_can_access_media_by_age
 
 
 router = APIRouter(prefix="/api/stream", tags=["stream"])
@@ -17,6 +18,7 @@ def stream_item(
     range_header: str | None = Header(default=None, alias="Range"),
     user=CurrentUser,
 ):
+    assert_user_can_access_media_by_age(request.app.state.settings, user=user, item_id=item_id, purpose="stream")
     target = build_cloud_stream_response(
         request.app.state.settings,
         user_id=user.id,

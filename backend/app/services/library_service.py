@@ -38,6 +38,7 @@ from .library_presentation_service import (
     _row_value,
     _serialize_media_item,
 )
+from .media_age_access_service import resolve_media_age_requirement
 from .title_normalization import (
     build_search_index,
     match_search_query,
@@ -603,6 +604,7 @@ def get_media_item_detail(
     else:
         track_scan_source = "not_scanned"
     payload = _serialize_media_item(settings, row, poster_dir=poster_dir)
+    age_requirement_payload = resolve_media_age_requirement(settings, item_id)
     payload.update(
         {
             "hidden_for_user": hidden_for_user,
@@ -660,6 +662,7 @@ def get_media_item_detail(
                     for track in subtitle_stream_tracks
                 ],
             },
+            **age_requirement_payload,
         }
     )
     return payload
