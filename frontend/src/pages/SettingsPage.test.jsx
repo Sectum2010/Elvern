@@ -126,8 +126,9 @@ describe("SettingsPage Display background controls", () => {
     expect(styles).toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
     expect(styles).toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
     expect(styles).toMatch(/data-elvern-background-preset="basic"\]\s*\{[^}]*#202832/s);
-    expect(styles).toMatch(/\.settings-background-color-picker\s*\{[^}]*min-block-size:\s*16rem;/s);
+    expect(styles).toMatch(/\.settings-background-color-picker\s*\{[^}]*min-block-size:\s*18rem;/s);
     expect(styles).toContain("settings-segmented-control__indicator");
+    expect(styles).toContain("settings-segmented-control__button--current");
     expect(styles).toMatch(/\.detail-grid,\s*\.settings-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
   });
 

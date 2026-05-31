@@ -184,28 +184,23 @@ export function getBackgroundPickerPositionFromColor(color) {
   const hsl = rgbToHsl(hexToRgb(normalized));
   if (hsl.s < 0.12) {
     return {
-      x: Math.max(0, Math.min(1, (hsl.l - 0.04) / 0.72)),
-      y: 0.86,
+      x: 0.04,
+      y: clampUnit((0.92 - hsl.l) / 0.82),
     };
   }
   return {
-    x: Math.max(0, Math.min(1, hsl.h)),
-    y: Math.max(0, Math.min(0.72, ((0.78 - hsl.l) / 0.55) * 0.72)),
+    x: clampUnit(0.12 + hsl.h * 0.82),
+    y: clampUnit((0.92 - hsl.l) / 0.82),
   };
 }
 
 export function getBackgroundPickerColorAtPosition(x, y) {
-  const hue = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
+  const horizontal = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
   const vertical = Math.max(0, Math.min(1, Number.isFinite(y) ? y : 0.5));
-  if (vertical >= 0.72) {
-    const neutralDepth = (vertical - 0.72) / 0.28;
-    const baseLightness = 0.04 + hue * 0.72;
-    const lightness = Math.max(0.02, baseLightness * (1 - neutralDepth * 0.62));
-    return hslToHex({ h: 0, s: 0, l: lightness });
-  }
-  const colorY = vertical / 0.72;
-  const lightness = 0.78 - colorY * 0.55;
-  const saturation = 0.92 - colorY * 0.1;
+  const neutralBlend = clampUnit((0.14 - horizontal) / 0.14);
+  const hue = clampUnit((horizontal - 0.12) / 0.82);
+  const lightness = clampUnit(0.92 - vertical * 0.82);
+  const saturation = clampUnit((0.96 - vertical * 0.08) * (1 - neutralBlend));
   return hslToHex({ h: hue, s: saturation, l: lightness });
 }
 

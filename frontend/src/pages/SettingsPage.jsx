@@ -156,6 +156,7 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
   const dragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
   const [dragging, setDragging] = useState(false);
   const [dragOffset, setDragOffset] = useState(0);
+  const [dragPreviewValue, setDragPreviewValue] = useState(null);
 
   function getValueFromPoint(clientX) {
     const rect = controlRef.current?.getBoundingClientRect();
@@ -183,6 +184,7 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     draggingRef.current = true;
     ignoreNextClickRef.current = true;
     setDragOffset(0);
+    setDragPreviewValue(value);
     setDragging(true);
   }
 
@@ -193,6 +195,7 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     const bounds = dragBoundsRef.current;
     const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
     setDragOffset(nextOffset);
+    setDragPreviewValue(getValueFromPoint(event.clientX));
   }
 
   function handleActivePointerUp(event) {
@@ -203,7 +206,9 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     draggingRef.current = false;
     setDragging(false);
     setDragOffset(0);
-    onChange(getValueFromPoint(event.clientX));
+    const nextValue = getValueFromPoint(event.clientX);
+    setDragPreviewValue(null);
+    onChange(nextValue);
     window.setTimeout(() => {
       ignoreNextClickRef.current = false;
     }, 120);
@@ -215,6 +220,7 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     ignoreNextClickRef.current = false;
     setDragging(false);
     setDragOffset(0);
+    setDragPreviewValue(null);
   }
 
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
@@ -241,12 +247,15 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
       />
       {options.map((option) => {
         const isSelected = value === option.value;
+        const isPreviewSelected = dragging && dragPreviewValue === option.value;
+        const isVisuallySelected = dragging ? isPreviewSelected : isSelected;
         return (
           <button
             aria-checked={isSelected}
             className={[
               "settings-segmented-control__button",
-              isSelected ? "settings-segmented-control__button--active" : "",
+              isSelected ? "settings-segmented-control__button--current" : "",
+              isVisuallySelected ? "settings-segmented-control__button--active" : "",
               isSelected && dragging ? "settings-segmented-control__button--dragging" : "",
             ].filter(Boolean).join(" ")}
             disabled={disabled}
