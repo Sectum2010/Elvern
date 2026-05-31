@@ -217,8 +217,28 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     setDragOffset(0);
   }
 
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const controlStyle = {
+    "--settings-segmented-count": options.length,
+    "--settings-segmented-index": selectedIndex,
+    "--settings-segmented-drag-x": dragging ? `${dragOffset}px` : "0px",
+  };
+
   return (
-    <div className="settings-segmented-control" role="radiogroup" aria-label={ariaLabel} ref={controlRef}>
+    <div
+      className="settings-segmented-control"
+      role="radiogroup"
+      aria-label={ariaLabel}
+      ref={controlRef}
+      style={controlStyle}
+    >
+      <span
+        aria-hidden="true"
+        className={[
+          "settings-segmented-control__indicator",
+          dragging ? "settings-segmented-control__indicator--dragging" : "",
+        ].filter(Boolean).join(" ")}
+      />
       {options.map((option) => {
         const isSelected = value === option.value;
         return (
@@ -244,7 +264,6 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
             onPointerMove={isSelected ? handleActivePointerMove : undefined}
             onPointerUp={isSelected ? handleActivePointerUp : undefined}
             role="radio"
-            style={isSelected && dragging ? { "--settings-segmented-drag-x": `${dragOffset}px` } : undefined}
             type="button"
           >
             {option.label}

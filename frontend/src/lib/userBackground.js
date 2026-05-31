@@ -182,17 +182,30 @@ export function deriveGradientColorsFromSingleColor(color) {
 export function getBackgroundPickerPositionFromColor(color) {
   const normalized = normalizeHexColor(color, DEFAULT_BACKGROUND_SETTINGS.background_gradient_start);
   const hsl = rgbToHsl(hexToRgb(normalized));
+  if (hsl.s < 0.12) {
+    return {
+      x: Math.max(0, Math.min(1, (hsl.l - 0.04) / 0.72)),
+      y: 0.86,
+    };
+  }
   return {
     x: Math.max(0, Math.min(1, hsl.h)),
-    y: Math.max(0, Math.min(1, (0.82 - hsl.l) / 0.58)),
+    y: Math.max(0, Math.min(0.72, ((0.78 - hsl.l) / 0.55) * 0.72)),
   };
 }
 
 export function getBackgroundPickerColorAtPosition(x, y) {
   const hue = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
   const vertical = Math.max(0, Math.min(1, Number.isFinite(y) ? y : 0.5));
-  const lightness = 0.82 - vertical * 0.58;
-  const saturation = 0.78;
+  if (vertical >= 0.72) {
+    const neutralDepth = (vertical - 0.72) / 0.28;
+    const baseLightness = 0.04 + hue * 0.72;
+    const lightness = Math.max(0.02, baseLightness * (1 - neutralDepth * 0.62));
+    return hslToHex({ h: 0, s: 0, l: lightness });
+  }
+  const colorY = vertical / 0.72;
+  const lightness = 0.78 - colorY * 0.55;
+  const saturation = 0.92 - colorY * 0.1;
   return hslToHex({ h: hue, s: saturation, l: lightness });
 }
 

@@ -3806,18 +3806,41 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .settings-background-color-picker {
   position: relative;
   inline-size: 100%;
-  min-block-size: 14rem;
+  min-block-size: 16rem;
   overflow: hidden;
   border: 1px solid rgba(202, 226, 245, 0.3);
   border-radius: 1rem;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0) 42%, rgba(0, 0, 0, 0.72) 100%),
-    linear-gradient(90deg, #f43f5e 0%, #f59e0b 15%, #f6e05e 28%, #22c55e 42%, #22d3ee 57%, #2563eb 72%, #9333ea 86%, #ec4899 100%);
+  background: #05070c;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     inset 0 -24px 44px rgba(3, 7, 12, 0.18);
   cursor: default;
   touch-action: none;
+}
+
+.settings-background-color-picker::before,
+.settings-background-color-picker::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  pointer-events: none;
+}
+
+.settings-background-color-picker::before {
+  inset-block-start: 0;
+  block-size: 72%;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0) 26%, rgba(0, 0, 0, 0) 50%, rgba(0, 0, 0, 0.84) 100%),
+    linear-gradient(90deg, #f43f5e 0%, #f97316 11%, #facc15 22%, #84cc16 34%, #10b981 45%, #22d3ee 56%, #2563eb 68%, #7c3aed 80%, #ec4899 92%, #f43f5e 100%);
+}
+
+.settings-background-color-picker::after {
+  inset-block-end: 0;
+  block-size: 28%;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(0, 0, 0, 0.72)),
+    linear-gradient(90deg, #f8fafc 0%, #cbd5e1 18%, #94a3b8 34%, #64748b 50%, #334155 66%, #111827 82%, #030712 100%);
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
 }
 
 .settings-background-color-picker:focus-visible {
@@ -3841,6 +3864,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   cursor: grab;
   pointer-events: auto;
   touch-action: none;
+  z-index: 1;
 }
 
 .settings-background-color-picker__cursor--dragging {
@@ -3873,6 +3897,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .settings-segmented-control {
+  position: relative;
   display: inline-flex;
   width: fit-content;
   max-width: 100%;
@@ -3883,7 +3908,27 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
+.settings-segmented-control__indicator {
+  position: absolute;
+  inset-block: 0.22rem;
+  inset-inline-start: 0.22rem;
+  inline-size: calc((100% - 0.44rem) / var(--settings-segmented-count, 1));
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(94, 143, 177, 0.84), rgba(45, 76, 104, 0.92));
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
+  transform: translateX(calc((var(--settings-segmented-index, 0) * 100%) + var(--settings-segmented-drag-x, 0px)));
+  transition: transform 150ms ease;
+  pointer-events: none;
+}
+
+.settings-segmented-control__indicator--dragging {
+  transition: none;
+}
+
 .settings-segmented-control__button {
+  position: relative;
+  z-index: 1;
   min-width: 6rem;
   min-height: 2.35rem;
   padding: 0.45rem 1rem;
@@ -3907,9 +3952,6 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .settings-segmented-control__button--dragging {
   cursor: grabbing;
-  z-index: 1;
-  transform: translateX(var(--settings-segmented-drag-x, 0px));
-  transition: none;
 }
 
 .settings-segmented-control__button:hover,
@@ -3918,10 +3960,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .settings-segmented-control__button--active {
-  background:
-    linear-gradient(180deg, rgba(94, 143, 177, 0.84), rgba(45, 76, 104, 0.92));
   color: #f5fbff;
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
 }
 
 .settings-disclosure {
