@@ -153,7 +153,9 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
   const controlRef = useRef(null);
   const draggingRef = useRef(false);
   const ignoreNextClickRef = useRef(false);
+  const dragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
   const [dragging, setDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState(0);
 
   function getValueFromPoint(clientX) {
     const rect = controlRef.current?.getBoundingClientRect();
@@ -171,9 +173,26 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     }
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    const controlRect = controlRef.current?.getBoundingClientRect();
+    const buttonRect = event.currentTarget.getBoundingClientRect();
+    dragBoundsRef.current = {
+      clientX: event.clientX,
+      min: controlRect ? controlRect.left - buttonRect.left : 0,
+      max: controlRect ? controlRect.right - buttonRect.right : 0,
+    };
     draggingRef.current = true;
     ignoreNextClickRef.current = true;
+    setDragOffset(0);
     setDragging(true);
+  }
+
+  function handleActivePointerMove(event) {
+    if (!draggingRef.current) {
+      return;
+    }
+    const bounds = dragBoundsRef.current;
+    const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
+    setDragOffset(nextOffset);
   }
 
   function handleActivePointerUp(event) {
@@ -183,6 +202,7 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     draggingRef.current = false;
     setDragging(false);
+    setDragOffset(0);
     onChange(getValueFromPoint(event.clientX));
     window.setTimeout(() => {
       ignoreNextClickRef.current = false;
@@ -194,6 +214,7 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
     draggingRef.current = false;
     ignoreNextClickRef.current = false;
     setDragging(false);
+    setDragOffset(0);
   }
 
   return (
@@ -220,8 +241,10 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
             }}
             onPointerCancel={isSelected ? handleActivePointerCancel : undefined}
             onPointerDown={isSelected ? handleActivePointerDown : undefined}
+            onPointerMove={isSelected ? handleActivePointerMove : undefined}
             onPointerUp={isSelected ? handleActivePointerUp : undefined}
             role="radio"
+            style={isSelected && dragging ? { "--settings-segmented-drag-x": `${dragOffset}px` } : undefined}
             type="button"
           >
             {option.label}

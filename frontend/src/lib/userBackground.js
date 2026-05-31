@@ -8,7 +8,7 @@ export const BACKGROUND_PRESETS = [
   {
     value: "basic",
     label: "Basic",
-    swatch: "#3d4652",
+    swatch: "#202832",
   },
   {
     value: "midnight",

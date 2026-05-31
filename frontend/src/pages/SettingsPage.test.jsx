@@ -125,7 +125,7 @@ describe("SettingsPage Display background controls", () => {
     expect(styles).toMatch(/\.settings-grid--display\s*\{[^}]*align-items:\s*start;/s);
     expect(styles).toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
     expect(styles).toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
-    expect(styles).toMatch(/data-elvern-background-preset="basic"\]\s*\{[^}]*#3d4652/s);
+    expect(styles).toMatch(/data-elvern-background-preset="basic"\]\s*\{[^}]*#202832/s);
     expect(styles).toMatch(/\.settings-background-color-picker\s*\{[^}]*min-block-size:\s*14rem;/s);
     expect(styles).toMatch(/\.detail-grid,\s*\.settings-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
   });

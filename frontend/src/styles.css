@@ -38,7 +38,7 @@
 }
 
 :root[data-elvern-background-mode="preset"][data-elvern-background-preset="basic"] {
-  --app-page-background: #3d4652;
+  --app-page-background: #202832;
 }
 
 :root[data-elvern-background-mode="preset"][data-elvern-background-preset="midnight"] {
@@ -3893,7 +3893,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   color: var(--text-muted);
   font-weight: 750;
   letter-spacing: 0.01em;
-  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 120ms ease;
 }
 
 .settings-segmented-control__button--active {
@@ -3907,6 +3907,9 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .settings-segmented-control__button--dragging {
   cursor: grabbing;
+  z-index: 1;
+  transform: translateX(var(--settings-segmented-drag-x, 0px));
+  transition: none;
 }
 
 .settings-segmented-control__button:hover,
