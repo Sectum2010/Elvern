@@ -38,7 +38,7 @@
 }
 
 :root[data-elvern-background-mode="preset"][data-elvern-background-preset="basic"] {
-  --app-page-background: #151a21;
+  --app-page-background: #3d4652;
 }
 
 :root[data-elvern-background-mode="preset"][data-elvern-background-preset="midnight"] {
@@ -3789,40 +3789,51 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
-.settings-background-custom-grid {
+.settings-background-picker-panel,
+.settings-background-photo-panel {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.65rem;
-  align-items: end;
+  gap: 0.9rem;
 }
 
-.settings-background-custom-grid--solid {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.settings-color-field {
-  display: grid;
-  gap: 0.35rem;
-  color: var(--text-muted);
-  font-size: 0.88rem;
-  font-weight: 700;
-}
-
-.settings-color-field input {
+.settings-background-color-picker {
+  position: relative;
   inline-size: 100%;
-  min-block-size: 2.75rem;
-  padding: 0.22rem;
-  border: 1px solid rgba(152, 176, 201, 0.18);
-  border-radius: 0.85rem;
-  background: rgba(7, 11, 23, 0.62);
+  min-block-size: 9.5rem;
+  overflow: hidden;
+  border: 1px solid rgba(202, 226, 245, 0.3);
+  border-radius: 1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0) 42%, rgba(0, 0, 0, 0.72) 100%),
+    linear-gradient(90deg, #f43f5e 0%, #f59e0b 15%, #f6e05e 28%, #22c55e 42%, #22d3ee 57%, #2563eb 72%, #9333ea 86%, #ec4899 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -24px 44px rgba(3, 7, 12, 0.18);
+  cursor: crosshair;
+  touch-action: none;
 }
 
-.settings-background-save {
-  grid-column: 1 / -1;
-  justify-self: start;
+.settings-background-color-picker:focus-visible {
+  outline: 2px solid rgba(154, 214, 235, 0.75);
+  outline-offset: 3px;
 }
 
-.settings-background-photo-actions {
+.settings-background-color-picker__cursor {
+  position: absolute;
+  left: var(--settings-background-picker-x, 50%);
+  top: var(--settings-background-picker-y, 50%);
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: var(--settings-background-picker-color, #74114f);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.46),
+    0 8px 22px rgba(0, 0, 0, 0.32);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.settings-background-actions {
   display: flex;
   gap: 0.65rem;
   flex-wrap: wrap;
@@ -3837,13 +3848,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 @media (max-width: 520px) {
-  .settings-background-preset-grid,
-  .settings-background-custom-grid,
-  .settings-background-custom-grid--solid {
+  .settings-background-preset-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .settings-background-save {
+  .settings-background-actions > button,
+  .settings-background-actions > label {
     inline-size: 100%;
   }
 }

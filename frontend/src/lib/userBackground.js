@@ -8,7 +8,7 @@ export const BACKGROUND_PRESETS = [
   {
     value: "basic",
     label: "Basic",
-    swatch: "#151a21",
+    swatch: "#3d4652",
   },
   {
     value: "midnight",
@@ -80,6 +80,65 @@ function rgbToHex({ r, g, b }) {
     .join("")}`;
 }
 
+function rgbToHsl({ r, g, b }) {
+  const red = r / 255;
+  const green = g / 255;
+  const blue = b / 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const lightness = (max + min) / 2;
+
+  if (max === min) {
+    return { h: 0, s: 0, l: lightness };
+  }
+
+  const delta = max - min;
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue;
+  if (max === red) {
+    hue = (green - blue) / delta + (green < blue ? 6 : 0);
+  } else if (max === green) {
+    hue = (blue - red) / delta + 2;
+  } else {
+    hue = (red - green) / delta + 4;
+  }
+  return { h: hue / 6, s: saturation, l: lightness };
+}
+
+function hueToRgbChannel(p, q, t) {
+  let nextT = t;
+  if (nextT < 0) {
+    nextT += 1;
+  }
+  if (nextT > 1) {
+    nextT -= 1;
+  }
+  if (nextT < 1 / 6) {
+    return p + (q - p) * 6 * nextT;
+  }
+  if (nextT < 1 / 2) {
+    return q;
+  }
+  if (nextT < 2 / 3) {
+    return p + (q - p) * (2 / 3 - nextT) * 6;
+  }
+  return p;
+}
+
+function hslToHex({ h, s, l }) {
+  if (s === 0) {
+    const channel = l * 255;
+    return rgbToHex({ r: channel, g: channel, b: channel });
+  }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return rgbToHex({
+    r: hueToRgbChannel(p, q, h + 1 / 3) * 255,
+    g: hueToRgbChannel(p, q, h) * 255,
+    b: hueToRgbChannel(p, q, h - 1 / 3) * 255,
+  });
+}
+
 function mixHexColors(left, right, ratio) {
   const leftRgb = hexToRgb(left);
   const rightRgb = hexToRgb(right);
@@ -95,6 +154,33 @@ export function deriveGradientEndFromSingleColor(color) {
   const darker = mixHexColors(normalized, "#06111f", 0.42);
   const brighter = mixHexColors(normalized, "#9ad6eb", 0.22);
   return normalized === darker ? brighter : darker;
+}
+
+export function deriveGradientColorsFromSingleColor(color) {
+  const normalized = normalizeHexColor(color, DEFAULT_BACKGROUND_SETTINGS.background_gradient_start);
+  const end = deriveGradientEndFromSingleColor(normalized);
+  return {
+    background_gradient_start: normalized,
+    background_gradient_accent: mixHexColors(normalized, end, 0.36),
+    background_gradient_end: end,
+  };
+}
+
+export function getBackgroundPickerPositionFromColor(color) {
+  const normalized = normalizeHexColor(color, DEFAULT_BACKGROUND_SETTINGS.background_gradient_start);
+  const hsl = rgbToHsl(hexToRgb(normalized));
+  return {
+    x: Math.max(0, Math.min(1, hsl.h)),
+    y: Math.max(0, Math.min(1, 1 - hsl.l)),
+  };
+}
+
+export function getBackgroundPickerColorAtPosition(x, y) {
+  const hue = Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
+  const vertical = Math.max(0, Math.min(1, Number.isFinite(y) ? y : 0.5));
+  const lightness = 0.82 - vertical * 0.58;
+  const saturation = 0.78;
+  return hslToHex({ h: hue, s: saturation, l: lightness });
 }
 
 export function normalizeUserBackgroundSettings(payload = {}) {

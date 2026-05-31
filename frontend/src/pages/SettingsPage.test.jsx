@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -120,9 +120,13 @@ describe("SettingsPage Display background controls", () => {
     expect(source).toContain("settings-card settings-display-library-card");
     expect(source).not.toContain("settings-card settings-card--wide settings-display-card");
     expect(source).not.toContain("Customize your Elvern background for this account.");
+    expect(source).not.toContain("Gradient start color");
+    expect(source).not.toContain("Remove photo");
     expect(styles).toMatch(/\.settings-grid--display\s*\{[^}]*align-items:\s*start;/s);
     expect(styles).toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
     expect(styles).toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
+    expect(styles).toMatch(/data-elvern-background-preset="basic"\]\s*\{[^}]*#3d4652/s);
+    expect(styles).toMatch(/\.settings-background-color-picker\s*\{[^}]*min-block-size:\s*9\.5rem;/s);
     expect(styles).toMatch(/\.detail-grid,\s*\.settings-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
   });
 
@@ -150,6 +154,7 @@ describe("SettingsPage Display background controls", () => {
     await renderDisplaySettings();
 
     expect(screen.getByRole("radio", { name: "Neon" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByLabelText("Background preview")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("radio", { name: "Basic" }));
 
     await waitFor(() => {
@@ -163,8 +168,50 @@ describe("SettingsPage Display background controls", () => {
     });
   });
 
+  test("gradient and solid use one palette picker and save only through their save buttons", async () => {
+    await renderDisplaySettings();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Gradient" }));
+
+    expect(screen.getByRole("slider", { name: "Gradient background color picker" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Gradient start color")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start")).not.toBeInTheDocument();
+    expect(apiRequest).not.toHaveBeenCalledWith("/api/user-settings", {
+      method: "PATCH",
+      data: { background_mode: "gradient" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save gradient" }));
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/user-settings", {
+        method: "PATCH",
+        data: expect.objectContaining({ background_mode: "gradient" }),
+      });
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: "Solid" }));
+
+    expect(screen.getByRole("slider", { name: "Solid background color picker" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Solid background color")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save solid" })).toBeInTheDocument();
+  });
+
+  test("background photo tab opens before upload and reset uses an in-app confirmation", async () => {
+    await renderDisplaySettings();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Photo" }));
+
+    expect(screen.getByText("Upload photo")).toBeInTheDocument();
+    expect(apiRequest).not.toHaveBeenCalledWith("/api/user-settings", {
+      method: "PATCH",
+      data: { background_mode: "photo" },
+    });
+  });
+
   test("photo upload rejects unsupported types with styled page feedback", async () => {
     await renderDisplaySettings();
+    fireEvent.click(screen.getByRole("radio", { name: "Photo" }));
     const fileInput = document.querySelector("input[type='file']");
 
     fireEvent.change(fileInput, {
@@ -180,8 +227,9 @@ describe("SettingsPage Display background controls", () => {
     );
   });
 
-  test("photo upload and remove return the background state through the settings event path", async () => {
+  test("photo upload and reset return the background state through the settings event path", async () => {
     await renderDisplaySettings();
+    fireEvent.click(screen.getByRole("radio", { name: "Photo" }));
     const fileInput = document.querySelector("input[type='file']");
 
     fireEvent.change(fileInput, {
@@ -197,7 +245,10 @@ describe("SettingsPage Display background controls", () => {
       );
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Remove photo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reset" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Reset background?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reset" }));
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith("/api/user-settings/background-photo", {

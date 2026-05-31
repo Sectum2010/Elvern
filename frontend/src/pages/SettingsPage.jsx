@@ -11,7 +11,10 @@ import {
   BACKGROUND_PRESETS,
   DEFAULT_BACKGROUND_SETTINGS,
   buildBackgroundPreviewStyle,
+  deriveGradientColorsFromSingleColor,
   deriveGradientEndFromSingleColor,
+  getBackgroundPickerColorAtPosition,
+  getBackgroundPickerPositionFromColor,
   normalizeUserBackgroundSettings,
 } from "../lib/userBackground";
 
@@ -43,6 +46,87 @@ const POSTER_DISPLAY_WIDTH_OPTIONS = [
 ];
 
 const BACKGROUND_PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+
+function getBackgroundColorPickerValue(backgroundDraft) {
+  if (backgroundDraft.background_mode === "solid") {
+    return backgroundDraft.background_solid_color || DEFAULT_BACKGROUND_SETTINGS.background_solid_color;
+  }
+  return backgroundDraft.background_gradient_start || DEFAULT_BACKGROUND_SETTINGS.background_gradient_start;
+}
+
+
+function BackgroundColorPicker({ color, disabled, mode, onPick }) {
+  const position = getBackgroundPickerPositionFromColor(color);
+  const pickerStyle = {
+    "--settings-background-picker-x": `${position.x * 100}%`,
+    "--settings-background-picker-y": `${position.y * 100}%`,
+    "--settings-background-picker-color": color,
+  };
+
+  function pickFromPointer(event) {
+    if (disabled) {
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = rect.width || 1;
+    const height = rect.height || 1;
+    const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / width));
+    const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / height));
+    onPick(getBackgroundPickerColorAtPosition(x, y));
+  }
+
+  function handlePointerDown(event) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    pickFromPointer(event);
+  }
+
+  function handlePointerMove(event) {
+    if (event.buttons !== 1) {
+      return;
+    }
+    pickFromPointer(event);
+  }
+
+  function handleKeyDown(event) {
+    if (disabled) {
+      return;
+    }
+    const step = event.shiftKey ? 0.08 : 0.035;
+    let nextX = position.x;
+    let nextY = position.y;
+    if (event.key === "ArrowLeft") {
+      nextX -= step;
+    } else if (event.key === "ArrowRight") {
+      nextX += step;
+    } else if (event.key === "ArrowUp") {
+      nextY -= step;
+    } else if (event.key === "ArrowDown") {
+      nextY += step;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    onPick(getBackgroundPickerColorAtPosition(nextX, nextY));
+  }
+
+  return (
+    <div
+      aria-label={mode === "solid" ? "Solid background color picker" : "Gradient background color picker"}
+      aria-valuetext={color}
+      className="settings-background-color-picker"
+      onKeyDown={handleKeyDown}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      role="slider"
+      style={pickerStyle}
+      tabIndex={disabled ? -1 : 0}
+    >
+      <span className="settings-background-color-picker__cursor" aria-hidden="true" />
+    </div>
+  );
+}
 
 
 function normalizePosterCardAppearance(value) {
@@ -329,6 +413,51 @@ function DirectoryPickerModal({
 }
 
 
+function BackgroundResetConfirmModal({ open, pending, onCancel, onConfirm }) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-labelledby="settings-background-reset-modal-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="browser-resume-modal__backdrop"
+        onClick={pending ? undefined : onCancel}
+      />
+      <div className="browser-resume-modal__card detail-info-modal__card admin-confirm-modal settings-background-reset-modal">
+        <div className="detail-info-modal__copy">
+          <h2 id="settings-background-reset-modal-title" className="detail-info-modal__title">
+            Reset background?
+          </h2>
+          <p className="page-subnote">
+            This will restore the Neon background and remove any saved background photo.
+          </p>
+        </div>
+        <div className="browser-resume-modal__actions admin-confirm-modal__actions">
+          <button className="ghost-button" disabled={pending} onClick={onCancel} type="button">
+            Cancel
+          </button>
+          <button
+            className="ghost-button ghost-button--danger"
+            disabled={pending}
+            onClick={onConfirm}
+            type="button"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export function SettingsPage() {
   const { user } = useAuth();
   const location = useLocation();
@@ -348,6 +477,7 @@ export function SettingsPage() {
   const [backgroundDraft, setBackgroundDraft] = useState(DEFAULT_BACKGROUND_SETTINGS);
   const [backgroundSaving, setBackgroundSaving] = useState(false);
   const [backgroundError, setBackgroundError] = useState("");
+  const [backgroundResetConfirmOpen, setBackgroundResetConfirmOpen] = useState(false);
   const [activeSettingsSection, setActiveSettingsSection] = useState("preferences");
   const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
@@ -808,15 +938,14 @@ export function SettingsPage() {
 
   function handleBackgroundModeChange(nextMode) {
     const mode = ["preset", "gradient", "solid", "photo"].includes(nextMode) ? nextMode : "preset";
-    if (mode === "photo" && !settings.background_photo_url) {
-      setBackgroundError("Upload a JPEG, PNG, or WebP background photo first.");
-      return;
-    }
     setBackgroundDraft((current) => ({
       ...current,
       background_mode: mode,
     }));
-    patchBackgroundSettings({ background_mode: mode }, "Background saved.");
+    setBackgroundError("");
+    if (mode === "photo" && settings.background_photo_url) {
+      patchBackgroundSettings({ background_mode: mode }, "Background saved.");
+    }
   }
 
   function handleBackgroundPresetSelect(nextPreset) {
@@ -835,11 +964,19 @@ export function SettingsPage() {
     );
   }
 
-  function handleBackgroundDraftColorChange(key, value) {
-    setBackgroundDraft((current) => ({
-      ...current,
-      [key]: value,
-    }));
+  function handleBackgroundPalettePick(color) {
+    setBackgroundDraft((current) => {
+      if (current.background_mode === "solid") {
+        return {
+          ...current,
+          background_solid_color: color,
+        };
+      }
+      return {
+        ...current,
+        ...deriveGradientColorsFromSingleColor(color),
+      };
+    });
     setBackgroundError("");
   }
 
@@ -868,6 +1005,11 @@ export function SettingsPage() {
       },
       "Gradient background saved.",
     );
+  }
+
+  function requestBackgroundReset() {
+    setBackgroundError("");
+    setBackgroundResetConfirmOpen(true);
   }
 
   async function handleBackgroundPhotoUpload(event) {
@@ -909,6 +1051,7 @@ export function SettingsPage() {
         method: "DELETE",
       });
       applyBackgroundPayload(payload, "Background reset to Neon.");
+      setBackgroundResetConfirmOpen(false);
     } catch (requestError) {
       setBackgroundError(requestError.message || "Failed to reset background");
     } finally {
@@ -1438,6 +1581,12 @@ export function SettingsPage() {
         parentPath={directoryPicker.parent_path}
         title={directoryPicker.title}
       />
+      <BackgroundResetConfirmModal
+        onCancel={() => setBackgroundResetConfirmOpen(false)}
+        onConfirm={handleBackgroundReset}
+        open={backgroundResetConfirmOpen}
+        pending={backgroundSaving}
+      />
 
       <div className="admin-nav-card settings-section-nav-card" aria-label="Settings sections">
         <div className="admin-nav-card__actions settings-section-nav-card__actions" role="tablist">
@@ -1549,14 +1698,6 @@ export function SettingsPage() {
             <p className="page-subnote">Loading background preferences...</p>
           ) : (
             <div className="settings-card-stack">
-              <div
-                aria-label="Background preview"
-                className="settings-background-preview"
-                style={buildBackgroundPreviewStyle(backgroundDraft)}
-              >
-                <span className="settings-background-preview__shine" aria-hidden="true" />
-              </div>
-
               <div className="settings-segmented-control" role="radiogroup" aria-label="Background mode">
                 {[
                   { value: "preset", label: "Presets" },
@@ -1614,124 +1755,100 @@ export function SettingsPage() {
               ) : null}
 
               {backgroundDraft.background_mode === "gradient" ? (
-                <div className="settings-background-custom-grid">
-                  <label className="settings-color-field">
-                    <span>Start</span>
-                    <input
-                      aria-label="Gradient start color"
-                      disabled={backgroundSaving}
-                      onChange={(event) =>
-                        handleBackgroundDraftColorChange("background_gradient_start", event.target.value)
-                      }
-                      type="color"
-                      value={backgroundDraft.background_gradient_start}
-                    />
-                  </label>
-                  <label className="settings-color-field">
-                    <span>Accent</span>
-                    <input
-                      aria-label="Gradient accent color"
-                      disabled={backgroundSaving}
-                      onChange={(event) =>
-                        handleBackgroundDraftColorChange("background_gradient_accent", event.target.value)
-                      }
-                      type="color"
-                      value={backgroundDraft.background_gradient_accent}
-                    />
-                  </label>
-                  <label className="settings-color-field">
-                    <span>End</span>
-                    <input
-                      aria-label="Gradient end color"
-                      disabled={backgroundSaving}
-                      onChange={(event) =>
-                        handleBackgroundDraftColorChange("background_gradient_end", event.target.value)
-                      }
-                      type="color"
-                      value={backgroundDraft.background_gradient_end}
-                    />
-                  </label>
-                  <button
-                    className="ghost-button ghost-button--inline settings-background-save"
+                <div className="settings-background-picker-panel">
+                  <BackgroundColorPicker
+                    color={getBackgroundColorPickerValue(backgroundDraft)}
                     disabled={backgroundSaving}
-                    onClick={handleBackgroundCustomSave}
-                    type="button"
-                  >
-                    Save gradient
-                  </button>
+                    mode="gradient"
+                    onPick={handleBackgroundPalettePick}
+                  />
+                  <div className="settings-background-actions">
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      disabled={backgroundSaving}
+                      onClick={handleBackgroundCustomSave}
+                      type="button"
+                    >
+                      Save gradient
+                    </button>
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      disabled={backgroundSaving}
+                      onClick={requestBackgroundReset}
+                      type="button"
+                    >
+                      Reset
+                    </button>
+                  </div>
                 </div>
               ) : null}
 
               {backgroundDraft.background_mode === "solid" ? (
-                <div className="settings-background-custom-grid settings-background-custom-grid--solid">
-                  <label className="settings-color-field">
-                    <span>Color</span>
-                    <input
-                      aria-label="Solid background color"
-                      disabled={backgroundSaving}
-                      onChange={(event) =>
-                        handleBackgroundDraftColorChange("background_solid_color", event.target.value)
-                      }
-                      type="color"
-                      value={backgroundDraft.background_solid_color}
-                    />
-                  </label>
-                  <button
-                    className="ghost-button ghost-button--inline settings-background-save"
+                <div className="settings-background-picker-panel">
+                  <BackgroundColorPicker
+                    color={getBackgroundColorPickerValue(backgroundDraft)}
                     disabled={backgroundSaving}
-                    onClick={handleBackgroundCustomSave}
-                    type="button"
-                  >
-                    Save solid
-                  </button>
+                    mode="solid"
+                    onPick={handleBackgroundPalettePick}
+                  />
+                  <div className="settings-background-actions">
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      disabled={backgroundSaving}
+                      onClick={handleBackgroundCustomSave}
+                      type="button"
+                    >
+                      Save solid
+                    </button>
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      disabled={backgroundSaving}
+                      onClick={requestBackgroundReset}
+                      type="button"
+                    >
+                      Reset
+                    </button>
+                  </div>
                 </div>
               ) : null}
 
               {backgroundDraft.background_mode === "photo" ? (
-                <div className="settings-background-photo-actions">
-                  <label className="ghost-button ghost-button--inline settings-background-upload">
-                    <span>{settings.background_photo_url ? "Replace photo" : "Upload photo"}</span>
-                    <input
-                      accept="image/jpeg,image/png,image/webp"
-                      className="sr-only"
-                      disabled={backgroundSaving}
-                      onChange={handleBackgroundPhotoUpload}
-                      type="file"
-                    />
-                  </label>
+                <div className="settings-background-photo-panel">
                   {settings.background_photo_url ? (
+                    <div
+                      aria-label="Background photo preview"
+                      className="settings-background-preview"
+                      style={buildBackgroundPreviewStyle({
+                        ...backgroundDraft,
+                        background_mode: "photo",
+                        background_photo_url: settings.background_photo_url,
+                      })}
+                    >
+                      <span className="settings-background-preview__shine" aria-hidden="true" />
+                    </div>
+                  ) : null}
+                  <div className="settings-background-actions">
+                    <label className="ghost-button ghost-button--inline settings-background-upload">
+                      <span>{settings.background_photo_url ? "Replace photo" : "Upload photo"}</span>
+                      <input
+                        accept="image/jpeg,image/png,image/webp"
+                        className="sr-only"
+                        disabled={backgroundSaving}
+                        onChange={handleBackgroundPhotoUpload}
+                        type="file"
+                      />
+                    </label>
                     <button
                       className="ghost-button ghost-button--inline"
                       disabled={backgroundSaving}
-                      onClick={handleBackgroundReset}
+                      onClick={requestBackgroundReset}
                       type="button"
                     >
-                      Remove photo
+                      Reset
                     </button>
-                  ) : null}
+                  </div>
                 </div>
-              ) : (
-                <div className="settings-background-photo-actions">
-                  <label className="ghost-button ghost-button--inline settings-background-upload">
-                    <span>Upload photo</span>
-                    <input
-                      accept="image/jpeg,image/png,image/webp"
-                      className="sr-only"
-                      disabled={backgroundSaving}
-                      onChange={handleBackgroundPhotoUpload}
-                      type="file"
-                    />
-                  </label>
-                  <button
-                    className="ghost-button ghost-button--inline"
-                    disabled={backgroundSaving}
-                    onClick={handleBackgroundReset}
-                    type="button"
-                  >
-                    Reset
-                  </button>
-                </div>
-              )}
+              ) : null}
 
               {backgroundError ? <p className="form-error settings-background-error">{backgroundError}</p> : null}
             </div>
