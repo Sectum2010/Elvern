@@ -3949,6 +3949,22 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   }
 }
 
+@media (max-width: 640px) and (orientation: portrait) {
+  :root {
+    --app-shell-inline-gutter: clamp(1.15rem, 5.5vw, 1.55rem);
+  }
+
+  .settings-card .settings-segmented-control {
+    inline-size: 100%;
+  }
+
+  .settings-card .settings-segmented-control__button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: clamp(0.45rem, 2.2vw, 0.8rem);
+  }
+}
+
 .settings-segmented-control {
   position: relative;
   display: inline-flex;

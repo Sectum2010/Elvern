@@ -321,12 +321,13 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
         const isSelected = value === option.value;
         const isPreviewSelected = dragging && dragPreviewValue === option.value;
         const isVisuallySelected = dragging ? isPreviewSelected : isSelected;
+        const isCurrentLabel = dragging ? isPreviewSelected : isSelected;
         return (
           <button
             aria-checked={isSelected}
             className={[
               "settings-segmented-control__button",
-              isSelected ? "settings-segmented-control__button--current" : "",
+              isCurrentLabel ? "settings-segmented-control__button--current" : "",
               isVisuallySelected ? "settings-segmented-control__button--active" : "",
               isSelected && dragging ? "settings-segmented-control__button--dragging" : "",
             ].filter(Boolean).join(" ")}

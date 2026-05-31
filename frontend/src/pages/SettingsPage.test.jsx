@@ -134,9 +134,14 @@ describe("SettingsPage Display background controls", () => {
     expect(styles).toMatch(/\.settings-background-color-picker\s*\{[^}]*min-block-size:\s*18rem;/s);
     expect(styles).toContain("settings-segmented-control__indicator");
     expect(styles).toContain("settings-segmented-control__button--current");
+    expect(source).toContain("const isCurrentLabel = dragging ? isPreviewSelected : isSelected;");
+    expect(source).toContain("isCurrentLabel ? \"settings-segmented-control__button--current\" : \"\"");
     expect(styles).toContain("app-shell--poster-card-clean");
     expect(styles).toMatch(/\.app-shell--poster-card-clean[\s\S]*\.media-card__body[\s\S]*display:\s*none;/);
     expect(styles).toMatch(/\.detail-grid,\s*\.settings-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
+    expect(styles).toMatch(/@media \(max-width:\s*640px\) and \(orientation:\s*portrait\)[\s\S]*--app-shell-inline-gutter:\s*clamp\(1\.15rem,\s*5\.5vw,\s*1\.55rem\);/);
+    expect(styles).toMatch(/\.settings-card \.settings-segmented-control\s*\{[^}]*inline-size:\s*100%;/s);
+    expect(styles).toMatch(/\.settings-card \.settings-segmented-control__button\s*\{[^}]*min-width:\s*0;/s);
   });
 
   test("interface search toggle uses the dynamic search button label", async () => {
