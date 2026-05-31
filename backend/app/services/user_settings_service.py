@@ -24,7 +24,7 @@ BACKGROUND_GRADIENT_END_KEY = "background_gradient_end"
 BACKGROUND_GRADIENT_ACCENT_KEY = "background_gradient_accent"
 BACKGROUND_SOLID_COLOR_KEY = "background_solid_color"
 FLOATING_CONTROLS_POSITIONS = {"bottom", "top"}
-POSTER_CARD_APPEARANCES = {"classic", "modern"}
+POSTER_CARD_APPEARANCES = {"classic", "modern", "clean"}
 POSTER_CARD_DISPLAY_MAX_WIDTHS = {
     "800",
     "1000",

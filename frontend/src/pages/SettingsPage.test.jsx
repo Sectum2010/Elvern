@@ -107,6 +107,7 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
 
 beforeEach(() => {
   apiRequest.mockReset();
+  window.localStorage.clear();
 });
 
 describe("SettingsPage Display background controls", () => {
@@ -118,17 +119,23 @@ describe("SettingsPage Display background controls", () => {
     expect(source).toContain("settings-card settings-background-card");
     expect(source).toContain("settings-card settings-display-interface-card");
     expect(source).toContain("settings-card settings-display-library-card");
+    expect(source).toContain("settings-grid--compact-columns");
+    expect(source).toContain("settings-grid__column");
+    expect(source).toContain("{ value: \"clean\", label: \"Clean\" }");
     expect(source).not.toContain("settings-card settings-card--wide settings-display-card");
     expect(source).not.toContain("Customize your Elvern background for this account.");
     expect(source).not.toContain("Gradient start color");
     expect(source).not.toContain("Remove photo");
     expect(styles).toMatch(/\.settings-grid--display\s*\{[^}]*align-items:\s*start;/s);
-    expect(styles).toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
-    expect(styles).toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
+    expect(styles).toMatch(/\.settings-grid__column\s*\{[^}]*align-content:\s*start;/s);
+    expect(styles).not.toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
+    expect(styles).not.toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
     expect(styles).toMatch(/data-elvern-background-preset="basic"\]\s*\{[^}]*#202832/s);
     expect(styles).toMatch(/\.settings-background-color-picker\s*\{[^}]*min-block-size:\s*18rem;/s);
     expect(styles).toContain("settings-segmented-control__indicator");
     expect(styles).toContain("settings-segmented-control__button--current");
+    expect(styles).toContain("app-shell--poster-card-clean");
+    expect(styles).toMatch(/\.app-shell--poster-card-clean[\s\S]*\.media-card__body[\s\S]*display:\s*none;/);
     expect(styles).toMatch(/\.detail-grid,\s*\.settings-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
   });
 
@@ -148,6 +155,15 @@ describe("SettingsPage Display background controls", () => {
       expect(apiRequest).toHaveBeenCalledWith("/api/user-settings", {
         method: "PATCH",
         data: { poster_card_appearance: "modern" },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: "Clean" }));
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/user-settings", {
+        method: "PATCH",
+        data: { poster_card_appearance: "clean" },
       });
     });
   });

@@ -19,7 +19,10 @@ import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNot
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
 function normalizePosterCardAppearance(value) {
-  return value === "modern" ? "modern" : "classic";
+  if (value === "modern" || value === "clean") {
+    return value;
+  }
+  return "classic";
 }
 
 export function ShellLayout({ children }) {
@@ -34,6 +37,15 @@ export function ShellLayout({ children }) {
   const [logoutWorkerPending, setLogoutWorkerPending] = useState("");
   const [logoutWorkerError, setLogoutWorkerError] = useState("");
   const collapseTimerRef = useRef(0);
+  const floatingNavRef = useRef(null);
+  const floatingLinkRefs = useRef([]);
+  const floatingDragRef = useRef(false);
+  const floatingIgnoreNextClickRef = useRef(false);
+  const floatingDragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
+  const [floatingNavDragging, setFloatingNavDragging] = useState(false);
+  const [floatingNavDragOffset, setFloatingNavDragOffset] = useState(0);
+  const [floatingNavPreviewIndex, setFloatingNavPreviewIndex] = useState(null);
+  const [floatingNavIndicatorFrame, setFloatingNavIndicatorFrame] = useState({ left: 0, width: 0 });
   const navigation = [
     { to: "/library", label: "Library" },
     { to: "/install", label: "Install" },
@@ -52,6 +64,20 @@ export function ShellLayout({ children }) {
   const isLibraryRootPage = location.pathname === "/library";
   const isLibrarySourcePage = location.pathname === "/library/local" || location.pathname === "/library/cloud";
   const hideFloatingIsland = location.pathname === "/setup/totp";
+  const floatingActiveIndex = Math.max(0, navigation.findIndex((item) => (
+    item.to === "/library"
+      ? location.pathname.startsWith("/library")
+      : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
+  )));
+  const floatingVisualIndex =
+    floatingNavDragging && floatingNavPreviewIndex !== null
+      ? floatingNavPreviewIndex
+      : floatingActiveIndex;
+  const floatingIndicatorStyle = {
+    left: `${floatingNavIndicatorFrame.left}px`,
+    width: `${floatingNavIndicatorFrame.width}px`,
+    transform: floatingNavDragging ? `translateX(${floatingNavDragOffset}px)` : "translateX(0)",
+  };
 
   function clearLogoutInteractionState() {
     if (typeof window !== "undefined" && collapseTimerRef.current) {
@@ -170,6 +196,11 @@ export function ShellLayout({ children }) {
     && !isLibraryDetailPath(location.pathname);
 
   async function handleNavigationClick(event, item) {
+    if (floatingIgnoreNextClickRef.current) {
+      event.preventDefault();
+      floatingIgnoreNextClickRef.current = false;
+      return;
+    }
     if (item.to !== "/library" || location.pathname.startsWith("/library") || !isLibraryDetailPath(location.pathname)) {
       return;
     }
@@ -181,6 +212,91 @@ export function ShellLayout({ children }) {
     navigate(rememberedTarget?.listPath || "/library", {
       state: { restoreLibraryReturn: true },
     });
+  }
+
+  function getFloatingNavigationIndexFromPoint(clientX) {
+    const links = floatingLinkRefs.current;
+    if (!links.length) {
+      return floatingActiveIndex;
+    }
+    let closestIndex = floatingActiveIndex;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    links.forEach((linkNode, index) => {
+      const rect = linkNode?.getBoundingClientRect?.();
+      if (!rect) {
+        return;
+      }
+      if (clientX >= rect.left && clientX <= rect.right) {
+        closestIndex = index;
+        closestDistance = -1;
+        return;
+      }
+      const distance = Math.min(Math.abs(clientX - rect.left), Math.abs(clientX - rect.right));
+      if (distance < closestDistance) {
+        closestIndex = index;
+        closestDistance = distance;
+      }
+    });
+    return Math.max(0, Math.min(navigation.length - 1, closestIndex));
+  }
+
+  function handleFloatingActivePointerDown(event) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const navRect = floatingNavRef.current?.getBoundingClientRect?.();
+    const linkRect = event.currentTarget.getBoundingClientRect();
+    floatingDragBoundsRef.current = {
+      clientX: event.clientX,
+      min: navRect ? navRect.left - linkRect.left : 0,
+      max: navRect ? navRect.right - linkRect.right : 0,
+    };
+    floatingDragRef.current = true;
+    floatingIgnoreNextClickRef.current = true;
+    setFloatingNavDragOffset(0);
+    setFloatingNavPreviewIndex(floatingActiveIndex);
+    setFloatingNavDragging(true);
+  }
+
+  function handleFloatingActivePointerMove(event) {
+    if (!floatingDragRef.current) {
+      return;
+    }
+    const bounds = floatingDragBoundsRef.current;
+    const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
+    setFloatingNavDragOffset(nextOffset);
+    setFloatingNavPreviewIndex(getFloatingNavigationIndexFromPoint(event.clientX));
+  }
+
+  function handleFloatingActivePointerEnd(event) {
+    if (!floatingDragRef.current) {
+      return;
+    }
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    const nextIndex = getFloatingNavigationIndexFromPoint(event.clientX);
+    const nextItem = navigation[nextIndex];
+    floatingDragRef.current = false;
+    setFloatingNavDragging(false);
+    setFloatingNavDragOffset(0);
+    setFloatingNavPreviewIndex(null);
+    if (nextItem && nextIndex !== floatingActiveIndex) {
+      navigate(nextItem.to, { state: nextItem.state });
+    }
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        floatingIgnoreNextClickRef.current = false;
+      }, 120);
+    } else {
+      floatingIgnoreNextClickRef.current = false;
+    }
+  }
+
+  function handleFloatingActivePointerCancel(event) {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    floatingDragRef.current = false;
+    floatingIgnoreNextClickRef.current = false;
+    setFloatingNavDragging(false);
+    setFloatingNavDragOffset(0);
+    setFloatingNavPreviewIndex(null);
   }
 
   function scheduleAccountCollapse() {
@@ -264,6 +380,31 @@ export function ShellLayout({ children }) {
       resetUserBackgroundTheme();
     };
   }, [backgroundSettings]);
+
+  useEffect(() => {
+    floatingLinkRefs.current.length = navigation.length;
+    function updateFloatingNavIndicator() {
+      const navRect = floatingNavRef.current?.getBoundingClientRect?.();
+      const activeLinkRect = floatingLinkRefs.current[floatingActiveIndex]?.getBoundingClientRect?.();
+      if (!navRect || !activeLinkRect) {
+        setFloatingNavIndicatorFrame({ left: 0, width: 0 });
+        return;
+      }
+      setFloatingNavIndicatorFrame({
+        left: activeLinkRect.left - navRect.left,
+        width: activeLinkRect.width,
+      });
+    }
+
+    updateFloatingNavIndicator();
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    window.addEventListener("resize", updateFloatingNavIndicator);
+    return () => {
+      window.removeEventListener("resize", updateFloatingNavIndicator);
+    };
+  }, [floatingActiveIndex, floatingControlsPosition, navigation.length]);
 
   useEffect(() => () => {
     if (typeof window !== "undefined" && collapseTimerRef.current) {
@@ -390,24 +531,46 @@ export function ShellLayout({ children }) {
           className={`floating-island floating-island--${floatingControlsPosition}`}
           aria-label="Primary navigation and account controls"
         >
-          <nav className="floating-island__nav" aria-label="Primary">
-            {navigation.map((item) => (
+          <nav className="floating-island__nav" aria-label="Primary" ref={floatingNavRef}>
+            <span
+              aria-hidden="true"
+              className={[
+                "floating-island__nav-indicator",
+                floatingNavDragging ? "floating-island__nav-indicator--dragging" : "",
+              ].filter(Boolean).join(" ")}
+              style={floatingIndicatorStyle}
+            />
+            {navigation.map((item, index) => {
+              const isCurrent = index === floatingActiveIndex;
+              const isVisuallyActive = index === floatingVisualIndex;
+              return (
               <NavLink
                 key={item.to}
-                className={({ isActive }) =>
-                  isActive ? "floating-island__link floating-island__link--active" : "floating-island__link"
-                }
+                className={[
+                  "floating-island__link",
+                  isVisuallyActive ? "floating-island__link--active" : "",
+                  isCurrent ? "floating-island__link--current" : "",
+                  isCurrent && floatingNavDragging ? "floating-island__link--dragging" : "",
+                ].filter(Boolean).join(" ")}
                 onClick={(event) => {
                   handleNavigationClick(event, item).catch(() => {
                     // Fall back to the default route if validation fails unexpectedly.
                   });
+                }}
+                onPointerCancel={isCurrent ? handleFloatingActivePointerCancel : undefined}
+                onPointerDown={isCurrent ? handleFloatingActivePointerDown : undefined}
+                onPointerMove={isCurrent ? handleFloatingActivePointerMove : undefined}
+                onPointerUp={isCurrent ? handleFloatingActivePointerEnd : undefined}
+                ref={(node) => {
+                  floatingLinkRefs.current[index] = node;
                 }}
                 to={item.to}
                 state={item.state}
               >
                 {item.label}
               </NavLink>
-            ))}
+              );
+            })}
           </nav>
           <div className="floating-island__account">
             <button

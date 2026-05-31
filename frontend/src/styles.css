@@ -304,6 +304,7 @@ button {
 }
 
 .floating-island__nav {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.55rem;
@@ -316,7 +317,23 @@ button {
   display: none;
 }
 
+.floating-island__nav-indicator {
+  position: absolute;
+  inset-block: 0;
+  border-radius: 0.95rem;
+  background: rgba(255, 245, 214, 0.14);
+  transform: translateX(0);
+  transition: left 150ms ease, width 150ms ease, transform 150ms ease;
+  pointer-events: none;
+}
+
+.floating-island__nav-indicator--dragging {
+  transition: none;
+}
+
 .floating-island__link {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -328,11 +345,21 @@ button {
   flex: 0 0 auto;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+  transition: color 150ms ease;
 }
 
 .floating-island__link--active {
-  background: rgba(255, 245, 214, 0.14);
   color: #fff9e6;
+}
+
+.floating-island__link--current {
+  cursor: grab;
+  touch-action: none;
+}
+
+.floating-island__link--current:active,
+.floating-island__link--dragging {
+  cursor: grabbing;
 }
 
 .floating-island__account {
@@ -1038,6 +1065,49 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .app-shell--poster-card-modern.app-shell--library-root .media-card__title,
 .app-shell--poster-card-modern.app-shell--library-source .media-card__title {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
+}
+
+.app-shell--poster-card-clean.app-shell--library-root .media-card,
+.app-shell--poster-card-clean.app-shell--library-source .media-card,
+.app-shell--poster-card-clean.app-shell--library-root .series-rail__slide .media-card,
+.app-shell--poster-card-clean.app-shell--library-source .series-rail__slide .media-card {
+  grid-template-rows: auto;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.app-shell--poster-card-clean.app-shell--library-root .media-card:hover,
+.app-shell--poster-card-clean.app-shell--library-root .media-card:focus-within,
+.app-shell--poster-card-clean.app-shell--library-source .media-card:hover,
+.app-shell--poster-card-clean.app-shell--library-source .media-card:focus-within {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.app-shell--poster-card-clean.app-shell--library-root .media-card__poster,
+.app-shell--poster-card-clean.app-shell--library-source .media-card__poster,
+.app-shell--poster-card-clean.app-shell--library-root .series-rail__slide .media-card__poster,
+.app-shell--poster-card-clean.app-shell--library-source .series-rail__slide .media-card__poster {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.app-shell--poster-card-clean.app-shell--library-root .media-card__poster::after,
+.app-shell--poster-card-clean.app-shell--library-source .media-card__poster::after,
+.app-shell--poster-card-clean.app-shell--library-root .series-rail__slide .media-card__poster::after,
+.app-shell--poster-card-clean.app-shell--library-source .series-rail__slide .media-card__poster::after,
+.app-shell--poster-card-clean.app-shell--library-root .media-card__body,
+.app-shell--poster-card-clean.app-shell--library-source .media-card__body,
+.app-shell--poster-card-clean.app-shell--library-root .series-rail__slide .media-card__body,
+.app-shell--poster-card-clean.app-shell--library-source .series-rail__slide .media-card__body,
+.app-shell--poster-card-clean.app-shell--library-root .media-card__progress,
+.app-shell--poster-card-clean.app-shell--library-source .media-card__progress,
+.app-shell--poster-card-clean.app-shell--library-root .media-card__background-playback-indicator,
+.app-shell--poster-card-clean.app-shell--library-source .media-card__background-playback-indicator {
+  display: none;
 }
 
 .series-rail-pack-row {
@@ -5110,6 +5180,17 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   margin-top: 1rem;
 }
 
+.settings-grid--compact-columns {
+  align-items: start;
+}
+
+.settings-grid__column {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  min-width: 0;
+}
+
 .detail-block {
   display: grid;
   gap: 0.7rem;
@@ -5194,30 +5275,6 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   .detail-grid,
   .settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .settings-grid--display {
-    grid-template-rows: auto auto auto;
-  }
-
-  .settings-display-card {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .settings-background-card {
-    grid-column: 2;
-    grid-row: 1 / span 2;
-  }
-
-  .settings-display-interface-card {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .settings-display-library-card {
-    grid-column: 2;
-    grid-row: 3;
   }
 
   .admin-list__row {

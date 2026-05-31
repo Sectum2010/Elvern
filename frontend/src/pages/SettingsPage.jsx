@@ -17,6 +17,10 @@ import {
   getBackgroundPickerPositionFromColor,
   normalizeUserBackgroundSettings,
 } from "../lib/userBackground";
+import {
+  readPersistedPanelState,
+  writePersistedPanelState,
+} from "../lib/persistedPanelState";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
@@ -27,10 +31,13 @@ const SETTINGS_SECTIONS = [
   { key: "hidden", label: "Hidden", icon: "hidden" },
   { key: "advanced", label: "Advanced", icon: "advanced" },
 ];
+const SETTINGS_SECTION_KEYS = SETTINGS_SECTIONS.map((section) => section.key);
+const SETTINGS_ACTIVE_SECTION_STORAGE_KEY = "elvern:settings-active-section";
 
 const POSTER_CARD_APPEARANCE_OPTIONS = [
   { value: "classic", label: "Classic" },
   { value: "modern", label: "Modern" },
+  { value: "clean", label: "Clean" },
 ];
 
 const POSTER_DISPLAY_WIDTH_OPTIONS = [
@@ -350,7 +357,10 @@ function SettingsSegmentedControl({ ariaLabel, disabled, onChange, options, valu
 
 
 function normalizePosterCardAppearance(value) {
-  return value === "modern" ? "modern" : "classic";
+  if (value === "modern" || value === "clean") {
+    return value;
+  }
+  return "classic";
 }
 
 
@@ -698,7 +708,9 @@ export function SettingsPage() {
   const [backgroundSaving, setBackgroundSaving] = useState(false);
   const [backgroundError, setBackgroundError] = useState("");
   const [backgroundResetConfirmOpen, setBackgroundResetConfirmOpen] = useState(false);
-  const [activeSettingsSection, setActiveSettingsSection] = useState("preferences");
+  const [activeSettingsSection, setActiveSettingsSection] = useState(() => (
+    readPersistedPanelState(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, SETTINGS_SECTION_KEYS, "preferences")
+  ));
   const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
   const [globalHiddenItems, setGlobalHiddenItems] = useState([]);
@@ -1091,7 +1103,9 @@ export function SettingsPage() {
       setMessage(
         normalizedValue === "modern"
           ? "Poster appearance set to Modern."
-          : "Poster appearance set to Classic.",
+          : normalizedValue === "clean"
+            ? "Poster appearance set to Clean."
+            : "Poster appearance set to Classic.",
       );
     } catch (requestError) {
       setError(requestError.message || "Failed to update poster appearance");
@@ -1777,6 +1791,7 @@ export function SettingsPage() {
   }
 
   function handleSettingsPanelToggle(sectionKey) {
+    writePersistedPanelState(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, sectionKey, SETTINGS_SECTION_KEYS);
     setActiveSettingsSection((currentSection) => {
       if (currentSection === sectionKey) {
         setActiveSettingsButtonExpanded((currentExpanded) => !currentExpanded);
@@ -1855,254 +1870,258 @@ export function SettingsPage() {
       ) : null}
 
       {activeSettingsSection === "display" ? (
-      <div className="settings-grid settings-grid--display">
-        <section className="settings-card settings-display-card">
-          <div className="settings-inline-header">
-            <div>
-              <h2>Poster appearance</h2>
-              <p className="page-subnote">Choose how movie cards appear in your library.</p>
+      <div className="settings-grid settings-grid--display settings-grid--compact-columns">
+        <div className="settings-grid__column">
+          <section className="settings-card settings-display-card">
+            <div className="settings-inline-header">
+              <div>
+                <h2>Poster appearance</h2>
+                <p className="page-subnote">Choose how movie cards appear in your library.</p>
+              </div>
             </div>
-          </div>
-          {loading ? (
-            <p className="page-subnote">Loading display preferences...</p>
-          ) : (
-            <div className="settings-card-stack">
-              <SettingsSegmentedControl
-                ariaLabel="Poster appearance"
-                disabled={saving}
-                onChange={handlePosterCardAppearanceChange}
-                options={POSTER_CARD_APPEARANCE_OPTIONS}
-                value={normalizePosterCardAppearance(settings.poster_card_appearance)}
-              />
-              <label className="settings-field">
-                <span>
-                  <strong>Poster display quality</strong>
-                  <small>Maximum poster width used for library card images.</small>
-                </span>
-                <select
-                  className="admin-select"
+            {loading ? (
+              <p className="page-subnote">Loading display preferences...</p>
+            ) : (
+              <div className="settings-card-stack">
+                <SettingsSegmentedControl
+                  ariaLabel="Poster appearance"
                   disabled={saving}
-                  onChange={handlePosterDisplayWidthChange}
-                  value={normalizePosterDisplayWidth(settings.poster_card_display_max_width)}
-                >
-                  {POSTER_DISPLAY_WIDTH_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          )}
-        </section>
+                  onChange={handlePosterCardAppearanceChange}
+                  options={POSTER_CARD_APPEARANCE_OPTIONS}
+                  value={normalizePosterCardAppearance(settings.poster_card_appearance)}
+                />
+                <label className="settings-field">
+                  <span>
+                    <strong>Poster display quality</strong>
+                    <small>Maximum poster width used for library card images.</small>
+                  </span>
+                  <select
+                    className="admin-select"
+                    disabled={saving}
+                    onChange={handlePosterDisplayWidthChange}
+                    value={normalizePosterDisplayWidth(settings.poster_card_display_max_width)}
+                  >
+                    {POSTER_DISPLAY_WIDTH_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+          </section>
 
-        <section className="settings-card settings-background-card">
-          <div className="settings-inline-header">
-            <div>
-              <h2>Background</h2>
-            </div>
-          </div>
-          {loading ? (
-            <p className="page-subnote">Loading background preferences...</p>
-          ) : (
-            <div className="settings-card-stack settings-background-stack">
-              <SettingsSegmentedControl
-                ariaLabel="Background mode"
-                disabled={backgroundSaving}
-                onChange={handleBackgroundModeChange}
-                options={[
-                  { value: "preset", label: "Presets" },
-                  { value: "gradient", label: "Gradient" },
-                  { value: "solid", label: "Solid" },
-                  { value: "photo", label: "Photo" },
-                ]}
-                value={backgroundDraft.background_mode}
-              />
+          <section className="settings-card settings-display-interface-card">
+            <h2>Interface</h2>
+            {loading ? (
+              <p className="page-subnote">Loading interface preferences...</p>
+            ) : (
+              <div className="settings-card-stack">
+                <label className="settings-field">
+                  <span>
+                    <strong>Floating island position</strong>
+                    <small>Move the full floating navigation and account island away from the Dynamic Island area.</small>
+                  </span>
+                  <select
+                    className="admin-select"
+                    disabled={saving}
+                    onChange={handleFloatingControlsPositionChange}
+                    value={settings.floating_controls_position || "bottom"}
+                  >
+                    <option value="bottom">Bottom</option>
+                    <option value="top">Top</option>
+                  </select>
+                </label>
+                <label className="settings-toggle">
+                  <span>
+                    <strong>Dynamic search button</strong>
+                    <small>Show the compact search button on Library pages.</small>
+                  </span>
+                  <input
+                    checked={settings.floating_library_search_enabled !== false}
+                    disabled={saving}
+                    onChange={handleFloatingLibrarySearchToggle}
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+            )}
+          </section>
+        </div>
 
-              {backgroundDraft.background_mode === "preset" ? (
-                <div className="settings-background-preset-grid" role="radiogroup" aria-label="Background presets">
-                  {BACKGROUND_PRESETS.map((preset) => {
-                    const isSelected = backgroundDraft.background_preset === preset.value;
-                    return (
+        <div className="settings-grid__column">
+          <section className="settings-card settings-background-card">
+            <div className="settings-inline-header">
+              <div>
+                <h2>Background</h2>
+              </div>
+            </div>
+            {loading ? (
+              <p className="page-subnote">Loading background preferences...</p>
+            ) : (
+              <div className="settings-card-stack settings-background-stack">
+                <SettingsSegmentedControl
+                  ariaLabel="Background mode"
+                  disabled={backgroundSaving}
+                  onChange={handleBackgroundModeChange}
+                  options={[
+                    { value: "preset", label: "Presets" },
+                    { value: "gradient", label: "Gradient" },
+                    { value: "solid", label: "Solid" },
+                    { value: "photo", label: "Photo" },
+                  ]}
+                  value={backgroundDraft.background_mode}
+                />
+
+                {backgroundDraft.background_mode === "preset" ? (
+                  <div className="settings-background-preset-grid" role="radiogroup" aria-label="Background presets">
+                    {BACKGROUND_PRESETS.map((preset) => {
+                      const isSelected = backgroundDraft.background_preset === preset.value;
+                      return (
+                        <button
+                          aria-checked={isSelected}
+                          className={[
+                            "settings-background-preset",
+                            isSelected ? "settings-background-preset--active" : "",
+                          ].filter(Boolean).join(" ")}
+                          disabled={backgroundSaving}
+                          key={preset.value}
+                          onClick={() => handleBackgroundPresetSelect(preset.value)}
+                          role="radio"
+                          type="button"
+                        >
+                          <span
+                            aria-hidden="true"
+                            className="settings-background-preset__swatch"
+                            style={{ background: preset.swatch }}
+                          />
+                          <span>{preset.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+
+                {backgroundDraft.background_mode === "gradient" ? (
+                  <div className="settings-background-picker-panel">
+                    <BackgroundColorPicker
+                      color={getBackgroundColorPickerValue(backgroundDraft)}
+                      disabled={backgroundSaving}
+                      mode="gradient"
+                      onPick={handleBackgroundPalettePick}
+                    />
+                    <div className="settings-background-actions">
                       <button
-                        aria-checked={isSelected}
-                        className={[
-                          "settings-background-preset",
-                          isSelected ? "settings-background-preset--active" : "",
-                        ].filter(Boolean).join(" ")}
+                        className="ghost-button ghost-button--inline"
                         disabled={backgroundSaving}
-                        key={preset.value}
-                        onClick={() => handleBackgroundPresetSelect(preset.value)}
-                        role="radio"
+                        onClick={handleBackgroundCustomSave}
                         type="button"
                       >
-                        <span
-                          aria-hidden="true"
-                          className="settings-background-preset__swatch"
-                          style={{ background: preset.swatch }}
-                        />
-                        <span>{preset.label}</span>
+                        Save gradient
                       </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-
-              {backgroundDraft.background_mode === "gradient" ? (
-                <div className="settings-background-picker-panel">
-                  <BackgroundColorPicker
-                    color={getBackgroundColorPickerValue(backgroundDraft)}
-                    disabled={backgroundSaving}
-                    mode="gradient"
-                    onPick={handleBackgroundPalettePick}
-                  />
-                  <div className="settings-background-actions">
-                    <button
-                      className="ghost-button ghost-button--inline"
-                      disabled={backgroundSaving}
-                      onClick={handleBackgroundCustomSave}
-                      type="button"
-                    >
-                      Save gradient
-                    </button>
-                    <button
-                      className="ghost-button ghost-button--inline"
-                      disabled={backgroundSaving}
-                      onClick={requestBackgroundReset}
-                      type="button"
-                    >
-                      Reset
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {backgroundDraft.background_mode === "solid" ? (
-                <div className="settings-background-picker-panel">
-                  <BackgroundColorPicker
-                    color={getBackgroundColorPickerValue(backgroundDraft)}
-                    disabled={backgroundSaving}
-                    mode="solid"
-                    onPick={handleBackgroundPalettePick}
-                  />
-                  <div className="settings-background-actions">
-                    <button
-                      className="ghost-button ghost-button--inline"
-                      disabled={backgroundSaving}
-                      onClick={handleBackgroundCustomSave}
-                      type="button"
-                    >
-                      Save solid
-                    </button>
-                    <button
-                      className="ghost-button ghost-button--inline"
-                      disabled={backgroundSaving}
-                      onClick={requestBackgroundReset}
-                      type="button"
-                    >
-                      Reset
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {backgroundDraft.background_mode === "photo" ? (
-                <div className="settings-background-photo-panel">
-                  {settings.background_photo_url ? (
-                    <div
-                      aria-label="Background photo preview"
-                      className="settings-background-preview"
-                      style={buildBackgroundPreviewStyle({
-                        ...backgroundDraft,
-                        background_mode: "photo",
-                        background_photo_url: settings.background_photo_url,
-                      })}
-                    >
-                      <span className="settings-background-preview__shine" aria-hidden="true" />
-                    </div>
-                  ) : null}
-                  <div className="settings-background-actions">
-                    <label className="ghost-button ghost-button--inline settings-background-upload">
-                      <span>{settings.background_photo_url ? "Replace photo" : "Upload photo"}</span>
-                      <input
-                        accept="image/jpeg,image/png,image/webp"
-                        className="sr-only"
+                      <button
+                        className="ghost-button ghost-button--inline"
                         disabled={backgroundSaving}
-                        onChange={handleBackgroundPhotoUpload}
-                        type="file"
-                      />
-                    </label>
-                    <button
-                      className="ghost-button ghost-button--inline"
-                      disabled={backgroundSaving}
-                      onClick={requestBackgroundReset}
-                      type="button"
-                    >
-                      Reset
-                    </button>
+                        onClick={requestBackgroundReset}
+                        type="button"
+                      >
+                        Reset
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ) : null}
+                ) : null}
 
-              {backgroundError ? <p className="form-error settings-background-error">{backgroundError}</p> : null}
-            </div>
-          )}
-        </section>
+                {backgroundDraft.background_mode === "solid" ? (
+                  <div className="settings-background-picker-panel">
+                    <BackgroundColorPicker
+                      color={getBackgroundColorPickerValue(backgroundDraft)}
+                      disabled={backgroundSaving}
+                      mode="solid"
+                      onPick={handleBackgroundPalettePick}
+                    />
+                    <div className="settings-background-actions">
+                      <button
+                        className="ghost-button ghost-button--inline"
+                        disabled={backgroundSaving}
+                        onClick={handleBackgroundCustomSave}
+                        type="button"
+                      >
+                        Save solid
+                      </button>
+                      <button
+                        className="ghost-button ghost-button--inline"
+                        disabled={backgroundSaving}
+                        onClick={requestBackgroundReset}
+                        type="button"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
 
-        <section className="settings-card settings-display-interface-card">
-          <h2>Interface</h2>
-          {loading ? (
-            <p className="page-subnote">Loading interface preferences...</p>
-          ) : (
-            <div className="settings-card-stack">
-              <label className="settings-field">
-                <span>
-                  <strong>Floating island position</strong>
-                  <small>Move the full floating navigation and account island away from the Dynamic Island area.</small>
-                </span>
-                <select
-                  className="admin-select"
-                  disabled={saving}
-                  onChange={handleFloatingControlsPositionChange}
-                  value={settings.floating_controls_position || "bottom"}
-                >
-                  <option value="bottom">Bottom</option>
-                  <option value="top">Top</option>
-                </select>
-              </label>
+                {backgroundDraft.background_mode === "photo" ? (
+                  <div className="settings-background-photo-panel">
+                    {settings.background_photo_url ? (
+                      <div
+                        aria-label="Background photo preview"
+                        className="settings-background-preview"
+                        style={buildBackgroundPreviewStyle({
+                          ...backgroundDraft,
+                          background_mode: "photo",
+                          background_photo_url: settings.background_photo_url,
+                        })}
+                      >
+                        <span className="settings-background-preview__shine" aria-hidden="true" />
+                      </div>
+                    ) : null}
+                    <div className="settings-background-actions">
+                      <label className="ghost-button ghost-button--inline settings-background-upload">
+                        <span>{settings.background_photo_url ? "Replace photo" : "Upload photo"}</span>
+                        <input
+                          accept="image/jpeg,image/png,image/webp"
+                          className="sr-only"
+                          disabled={backgroundSaving}
+                          onChange={handleBackgroundPhotoUpload}
+                          type="file"
+                        />
+                      </label>
+                      <button
+                        className="ghost-button ghost-button--inline"
+                        disabled={backgroundSaving}
+                        onClick={requestBackgroundReset}
+                        type="button"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {backgroundError ? <p className="form-error settings-background-error">{backgroundError}</p> : null}
+              </div>
+            )}
+          </section>
+
+          <section className="settings-card settings-display-library-card">
+            <h2>Library</h2>
+            {loading ? (
+              <p className="page-subnote">Loading your library preferences...</p>
+            ) : (
               <label className="settings-toggle">
                 <span>
-                  <strong>Dynamic search button</strong>
-                  <small>Show the compact search button on Library pages.</small>
+                  <strong>Hide Recently added</strong>
+                  <small>Remove the Recently added section from your Library view.</small>
                 </span>
                 <input
-                  checked={settings.floating_library_search_enabled !== false}
+                  checked={settings.hide_recently_added}
                   disabled={saving}
-                  onChange={handleFloatingLibrarySearchToggle}
+                  onChange={handleRecentlyAddedToggle}
                   type="checkbox"
                 />
               </label>
-            </div>
-          )}
-        </section>
-
-        <section className="settings-card settings-display-library-card">
-          <h2>Library</h2>
-          {loading ? (
-            <p className="page-subnote">Loading your library preferences...</p>
-          ) : (
-            <label className="settings-toggle">
-              <span>
-                <strong>Hide Recently added</strong>
-                <small>Remove the Recently added section from your Library view.</small>
-              </span>
-              <input
-                checked={settings.hide_recently_added}
-                disabled={saving}
-                onChange={handleRecentlyAddedToggle}
-                type="checkbox"
-              />
-            </label>
-          )}
-        </section>
+            )}
+          </section>
+        </div>
       </div>
       ) : null}
 

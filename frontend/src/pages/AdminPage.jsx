@@ -25,6 +25,10 @@ import {
 } from "../lib/adminPlaybackWorkers";
 import { formatCompletedRescanWarning } from "../lib/cloudSyncStatus";
 import { formatDate } from "../lib/format";
+import {
+  readPersistedPanelState,
+  writePersistedPanelState,
+} from "../lib/persistedPanelState";
 
 
 const SELF_DELETE_CONFIRM_DETAIL = "Confirm deletion before removing your own account";
@@ -56,6 +60,8 @@ const ADMIN_SECTIONS = [
   { key: "recovery", label: "Recovery", icon: "recovery" },
   { key: "assistant", label: "Assistant (Beta)", icon: "assistant" },
 ];
+const ADMIN_SECTION_KEYS = ADMIN_SECTIONS.map((section) => section.key);
+const ADMIN_ACTIVE_SECTION_STORAGE_KEY = "elvern:admin-active-section";
 function unknownIfEmpty(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized || "Unknown";
@@ -533,7 +539,9 @@ export function AdminPage() {
   const realtimeRefreshInFlightRef = useRef(false);
   const realtimeRefreshQueuedRef = useRef(false);
   const sectionCollapseTimerRef = useRef(0);
-  const [activeSection, setActiveSection] = useState("panel");
+  const [activeSection, setActiveSection] = useState(() => (
+    readPersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, ADMIN_SECTION_KEYS, "panel")
+  ));
   const [expandedSection, setExpandedSection] = useState(null);
 
   useEffect(() => {
@@ -546,6 +554,7 @@ export function AdminPage() {
     if (!isKnownSection) {
       return;
     }
+    writePersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, requestedSection, ADMIN_SECTION_KEYS);
     setActiveSection(requestedSection);
     setExpandedSection(requestedSection);
   }, [location.search]);
@@ -2041,6 +2050,7 @@ export function AdminPage() {
   }
 
   function handleSectionClick(sectionKey) {
+    writePersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, sectionKey, ADMIN_SECTION_KEYS);
     setActiveSection(sectionKey);
     setExpandedSection((current) => {
       if (current === sectionKey) {

@@ -230,7 +230,7 @@ class UserSettingsResponse(BaseModel):
     hide_recently_added: bool = False
     floating_controls_position: Literal["bottom", "top"] = "bottom"
     floating_library_search_enabled: bool = True
-    poster_card_appearance: Literal["classic", "modern"] = "classic"
+    poster_card_appearance: Literal["classic", "modern", "clean"] = "classic"
     poster_card_display_max_width: Literal[
         "800",
         "1000",

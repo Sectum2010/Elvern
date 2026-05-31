@@ -2221,6 +2221,13 @@ def test_user_settings_poster_card_appearance_defaults_and_persists(client, admi
     assert repeat.status_code == 200
     assert repeat.json()["poster_card_appearance"] == "modern"
 
+    clean_update = client.patch(
+        "/api/user-settings",
+        json={"poster_card_appearance": "clean"},
+    )
+    assert clean_update.status_code == 200
+    assert clean_update.json()["poster_card_appearance"] == "clean"
+
     invalid_update = client.patch(
         "/api/user-settings",
         json={"poster_card_appearance": "neon"},
