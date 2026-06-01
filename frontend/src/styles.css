@@ -3192,8 +3192,11 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 @media (max-width: 519px) {
+  .settings-age-group-list,
   .settings-age-group-columns,
-  .settings-age-group-row,
+  .settings-age-group-row__top,
+  .settings-age-group-row__header,
+  .settings-age-group-row__movies,
   .settings-age-group-copy,
   .settings-age-group-search__result,
   .settings-age-group-modal__summary,
@@ -4222,10 +4225,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .settings-age-group-list {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.8rem;
 }
 
-.settings-age-group-row,
 .settings-age-group-copy,
 .settings-age-group-search__result,
 .settings-age-group-modal__summary,
@@ -4240,6 +4243,64 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   background: rgba(11, 17, 24, 0.72);
 }
 
+.settings-age-group-row {
+  display: grid;
+  gap: 0.8rem;
+  min-width: 0;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid rgba(152, 176, 201, 0.16);
+  border-radius: 0.9rem;
+  background: rgba(11, 17, 24, 0.72);
+}
+
+.settings-age-group-row__top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  min-width: 0;
+}
+
+.settings-age-group-row__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.75rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-age-group-row__header:focus-visible {
+  outline: 2px solid rgba(154, 214, 235, 0.72);
+  outline-offset: 0.35rem;
+  border-radius: 0.65rem;
+}
+
+.settings-age-group-row__chevron {
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.settings-age-group-row__details {
+  display: grid;
+  gap: 0.7rem;
+  min-width: 0;
+  padding-top: 0.05rem;
+}
+
+.settings-age-group-row__movies {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+  min-width: 0;
+}
+
 .settings-age-group-row__copy,
 .settings-age-group-copy-list,
 .settings-age-group-search,
@@ -4248,6 +4309,25 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   display: grid;
   gap: 0.35rem;
   min-width: 0;
+}
+
+.settings-age-group-row strong,
+.settings-age-group-copy strong,
+.settings-age-group-search__result strong,
+.settings-age-group-modal__summary strong,
+.detail-age-group-modal__summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.settings-age-group-row small,
+.settings-age-group-copy small,
+.settings-age-group-search__result small,
+.settings-age-group-modal__summary small,
+.detail-age-group-modal__summary small {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .settings-age-group-row small,

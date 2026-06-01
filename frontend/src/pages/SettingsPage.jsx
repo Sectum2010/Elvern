@@ -21,6 +21,7 @@ import {
   readPersistedPanelState,
   writePersistedPanelState,
 } from "../lib/persistedPanelState";
+import { RefreshSweepButton } from "../components/RefreshSweepButton";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
@@ -940,6 +941,8 @@ export function SettingsPage() {
   });
   const [cloudBusyKey, setCloudBusyKey] = useState("");
   const [ageGroups, setAgeGroups] = useState({ items: [], total: 0 });
+  const [expandedAgeGroupKeys, setExpandedAgeGroupKeys] = useState({});
+  const [ageGroupDetailsByKey, setAgeGroupDetailsByKey] = useState({});
   const [ageGroupManager, setAgeGroupManager] = useState({
     open: false,
     loading: false,
@@ -1823,8 +1826,12 @@ export function SettingsPage() {
     return payload;
   }
 
+  async function fetchAgeGroupDetail(ageGroupKey) {
+    return apiRequest(`/api/library/age-groups/${encodeURIComponent(ageGroupKey)}`);
+  }
+
   async function loadAgeGroupDetail(ageGroupKey) {
-    const payload = await apiRequest(`/api/library/age-groups/${encodeURIComponent(ageGroupKey)}`);
+    const payload = await fetchAgeGroupDetail(ageGroupKey);
     setAgeGroupManager((current) => ({
       ...current,
       loading: false,
@@ -1833,6 +1840,41 @@ export function SettingsPage() {
       ageRequirementValue: payload.age_requirement == null ? "" : String(payload.age_requirement),
     }));
     return payload;
+  }
+
+  async function handleToggleAgeGroupRow(group) {
+    const ageGroupKey = group?.age_group_key;
+    if (!ageGroupKey) {
+      return;
+    }
+    const willOpen = !expandedAgeGroupKeys[ageGroupKey];
+    setExpandedAgeGroupKeys((current) => ({
+      ...current,
+      [ageGroupKey]: willOpen,
+    }));
+    if (!willOpen || ageGroupDetailsByKey[ageGroupKey]?.group || ageGroupDetailsByKey[ageGroupKey]?.loading) {
+      return;
+    }
+    setAgeGroupDetailsByKey((current) => ({
+      ...current,
+      [ageGroupKey]: { loading: true, error: "", group: null },
+    }));
+    try {
+      const payload = await fetchAgeGroupDetail(ageGroupKey);
+      setAgeGroupDetailsByKey((current) => ({
+        ...current,
+        [ageGroupKey]: { loading: false, error: "", group: payload },
+      }));
+    } catch (requestError) {
+      setAgeGroupDetailsByKey((current) => ({
+        ...current,
+        [ageGroupKey]: {
+          loading: false,
+          error: requestError.message || "Failed to load age group",
+          group: null,
+        },
+      }));
+    }
   }
 
   async function handleOpenAgeGroupManager(group) {
@@ -2557,33 +2599,83 @@ export function SettingsPage() {
                 <h2>Age Groups</h2>
                 <p className="page-subnote">Review automatic movie age groups and explicit manual links.</p>
               </div>
-              <button className="ghost-button ghost-button--inline" onClick={refreshAgeGroups} type="button">
+              <RefreshSweepButton className="ghost-button ghost-button--inline" onClick={refreshAgeGroups} type="button">
                 Refresh
-              </button>
+              </RefreshSweepButton>
             </div>
             {loading ? (
               <p className="page-subnote">Loading age groups...</p>
             ) : (ageGroups.items || []).length > 0 ? (
               <div className="settings-age-group-list">
-                {(ageGroups.items || []).map((group) => (
-                  <article className="settings-age-group-row" key={group.age_group_key}>
-                    <div className="settings-age-group-row__copy">
-                      <strong>{group.display_title}</strong>
-                      <small>
-                        {group.year || "Year unknown"} · {group.copies_count} copies
-                        {group.manual_links_count ? ` · ${group.manual_links_count} manual` : ""}
-                      </small>
-                    </div>
-                    <span className="status-pill">{group.age_requirement_display || formatAgeRequirement(group.age_requirement)}</span>
-                    <button
-                      className="ghost-button ghost-button--inline"
-                      onClick={() => handleOpenAgeGroupManager(group)}
-                      type="button"
+                {(ageGroups.items || []).map((group) => {
+                  const expanded = Boolean(expandedAgeGroupKeys[group.age_group_key]);
+                  const detailState = ageGroupDetailsByKey[group.age_group_key] || {};
+                  const detailGroup = detailState.group;
+                  const expandedCopies = [
+                    ...((detailGroup?.auto_matched_copies || []).map((copy) => ({ ...copy, membership: "Auto" }))),
+                    ...((detailGroup?.manual_linked_copies || []).map((copy) => ({ ...copy, membership: "Manual" }))),
+                  ];
+                  return (
+                    <article
+                      className={[
+                        "settings-age-group-row",
+                        expanded ? "settings-age-group-row--expanded" : "",
+                      ].filter(Boolean).join(" ")}
+                      key={group.age_group_key}
                     >
-                      Manage
-                    </button>
-                  </article>
-                ))}
+                      <div className="settings-age-group-row__top">
+                        <button
+                          aria-expanded={expanded}
+                          className="settings-age-group-row__header"
+                          onClick={() => handleToggleAgeGroupRow(group)}
+                          type="button"
+                        >
+                          <div className="settings-age-group-row__copy">
+                            <strong>{group.display_title}</strong>
+                            <small>
+                              {group.year || "Year unknown"} · {group.copies_count} copies
+                              {group.manual_links_count ? ` · ${group.manual_links_count} manual` : ""}
+                            </small>
+                          </div>
+                          <span className="status-pill">{group.age_requirement_display || formatAgeRequirement(group.age_requirement)}</span>
+                          <span aria-hidden="true" className="settings-age-group-row__chevron">
+                            {expanded ? "▴" : "▾"}
+                          </span>
+                        </button>
+                        <button
+                          className="ghost-button ghost-button--inline"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleOpenAgeGroupManager(group);
+                          }}
+                          type="button"
+                        >
+                          Manage
+                        </button>
+                      </div>
+                      {expanded ? (
+                        <div className="settings-age-group-row__details">
+                          {detailState.loading ? <p className="page-subnote">Loading copies...</p> : null}
+                          {detailState.error ? <p className="form-error">{detailState.error}</p> : null}
+                          {!detailState.loading && !detailState.error ? (
+                            expandedCopies.length > 0 ? (
+                              <div className="settings-age-group-row__movies">
+                                {expandedCopies.map((copy) => (
+                                  <article className="settings-age-group-copy" key={`age-row-copy-${copy.membership}-${copy.id}`}>
+                                    <strong>{copy.title}</strong>
+                                    <small>{copy.membership} · {copy.year || "Year unknown"} · {copy.source_label}</small>
+                                  </article>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="page-subnote">No copies found.</p>
+                            )
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </article>
+                  );
+                })}
               </div>
             ) : (
               <p className="page-subnote">No age groups found yet.</p>
