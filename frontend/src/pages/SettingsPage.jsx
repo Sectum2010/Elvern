@@ -2638,9 +2638,6 @@ export function SettingsPage() {
                             </small>
                           </div>
                           <span className="status-pill">{group.age_requirement_display || formatAgeRequirement(group.age_requirement)}</span>
-                          <span aria-hidden="true" className="settings-age-group-row__chevron">
-                            {expanded ? "▴" : "▾"}
-                          </span>
                         </button>
                         <button
                           className="ghost-button ghost-button--inline"
