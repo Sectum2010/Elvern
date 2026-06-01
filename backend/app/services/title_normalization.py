@@ -134,6 +134,35 @@ def _ampersand_variants(value: str) -> list[str]:
     return variants
 
 
+def _safe_spacing_variants(value: str) -> list[str]:
+    variants: list[str] = []
+    normalized = collapse_spaces(value)
+    if not normalized:
+        return variants
+
+    def _append(candidate: str) -> None:
+        collapsed = collapse_spaces(candidate)
+        if collapsed and collapsed not in variants:
+            variants.append(collapsed)
+
+    _append(normalized)
+    _append(re.sub(r"(?i)\bnever\s+ending\b", "NeverEnding", normalized))
+    _append(re.sub(r"(?i)\bneverending\b", "Never Ending", normalized))
+    return variants
+
+
+def _article_variants(value: str) -> list[str]:
+    variants: list[str] = []
+    normalized = collapse_spaces(value)
+    if not normalized:
+        return variants
+    variants.append(normalized)
+    without_article = re.sub(r"(?i)^(?:the|a|an)\s+", "", normalized).strip()
+    if without_article and without_article not in variants:
+        variants.append(without_article)
+    return variants
+
+
 def poster_equivalent_title_variants(value: str) -> list[str]:
     variants: list[str] = []
 
@@ -147,6 +176,11 @@ def poster_equivalent_title_variants(value: str) -> list[str]:
 
     queue = list(variants)
     for variant in queue:
+        for spacing_variant in _safe_spacing_variants(variant):
+            _append(spacing_variant)
+
+    queue = list(variants)
+    for variant in queue:
         for ampersand_variant in _ampersand_variants(variant):
             _append(ampersand_variant)
 
@@ -154,6 +188,11 @@ def poster_equivalent_title_variants(value: str) -> list[str]:
     for variant in queue:
         for roman_variant in _roman_part_variants(variant):
             _append(roman_variant)
+
+    queue = list(variants)
+    for variant in queue:
+        for article_variant in _article_variants(variant):
+            _append(article_variant)
 
     return variants
 

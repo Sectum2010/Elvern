@@ -12,6 +12,7 @@ from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.library_movie_identity_service import _dedupe_group_key
 from backend.app.services.media_title_parser import TITLE_PARSER_VERSION, parse_media_title
 from backend.app.services.title_normalization import (
+    build_poster_candidate_family,
     clean_title_for_matching,
     resolve_poster_match_identity,
     resolve_title_metadata,
@@ -123,6 +124,13 @@ def test_trusted_clean_title_beats_dirty_filename_when_available() -> None:
             "The Menu",
             2022,
         ),
+        (
+            "The Never Ending Story ITA-ENG",
+            "The Never Ending Story (1984) ITA-ENG Ac3 5.1 BDRip 1080p H264 sub ita eng [ArMor].mkv",
+            1984,
+            "The Never Ending Story",
+            1984,
+        ),
     ],
 )
 def test_live_row_like_dirty_titles_do_not_beat_cleaner_raw_sources(
@@ -156,6 +164,117 @@ def test_live_row_like_dirty_titles_do_not_beat_cleaner_raw_sources(
     assert poster_identity["title"] == expected_title
     assert poster_identity["year"] == expected_year
     assert poster_identity["source"] == "original_filename"
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        (
+            "The Never Ending Story (1984) ITA-ENG Ac3 5.1 BDRip 1080p H264 sub ita eng [ArMor].mkv",
+            "The Never Ending Story",
+            1984,
+        ),
+        (
+            "Nightbitch (2024) [1080p Ita Eng Spa 5.1 HEVC10 SubS] byMe7alh [MIRCrew]",
+            "Nightbitch",
+            2024,
+        ),
+        (
+            "La.Sposa!2026.iTA-ENG.Bluray.1080p.x264-CYBER.mkv",
+            "La Sposa",
+            2026,
+        ),
+        (
+            "Le Cose Non Dette (2026) iTA-Bluray.1080p.x264-Dr4gon.mkv",
+            "Le Cose Non Dette",
+            2026,
+        ),
+        (
+            "L'Amore E Altre Seghe Mentali (2024) iTA-BluRay.1080p.x264-Dr4gon.mkv",
+            "L'Amore E Altre Seghe Mentali",
+            2024,
+        ),
+        (
+            "Safe.-.2012.-.Blu-ray.-.1080p.-.x264.-.DTS.ITA.AC3.ENG.-.Sub.ITA.-LV89",
+            "Safe",
+            2012,
+        ),
+        (
+            "Hot Tub Time Machine 2 (2015 ITA/ENG) [1080p x265] [Paso77]",
+            "Hot Tub Time Machine 2",
+            2015,
+        ),
+        (
+            "Before Sunset (2004 ITA/ENG) [1080p x265] [Paso77]",
+            "Before Sunset",
+            2004,
+        ),
+        (
+            "Titanic (1997 ITA/ENG) [1080p x265] [Paso77]",
+            "Titanic",
+            1997,
+        ),
+        (
+            "The Green Mile (1999 ITA/ENG) [1080p x265] [Paso77]",
+            "The Green Mile",
+            1999,
+        ),
+    ],
+)
+def test_diagnostic_metadata_suffix_leaks_are_scrubbed(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        ("Spider-Man.2002.1080p.BluRay.Remux.TrueHD.mkv", "Spider-Man", 2002),
+        ("Se7en.1995.1080p.BluRay.mkv", "Se7en", 1995),
+        ("3 Idiots 2009 1080p BluRay.mkv", "3 Idiots", 2009),
+        ("Project X 2012 1080p WEB-DL.mkv", "Project X", 2012),
+        ("Malcolm X 1992 1080p BluRay.mkv", "Malcolm X", 1992),
+        ("Movie Name [A True Story] 2020 1080p WEB-DL.mkv", "Movie Name [A True Story]", 2020),
+    ],
+)
+def test_suffix_scrubbing_preserves_meaningful_title_tokens(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+def test_never_ending_story_poster_candidates_include_safe_spacing_variants() -> None:
+    parsed = parse_media_title(
+        title=None,
+        original_filename="The Never Ending Story (1984) ITA-ENG Ac3 5.1 BDRip 1080p H264 sub ita eng [ArMor].mkv",
+        year=None,
+    )
+    family = build_poster_candidate_family(
+        title=None,
+        original_filename="The Never Ending Story (1984) ITA-ENG Ac3 5.1 BDRip 1080p H264 sub ita eng [ArMor].mkv",
+        year=None,
+    )
+
+    assert parsed["display_title"] == "The Never Ending Story"
+    assert {"The Never Ending Story", "The NeverEnding Story", "Never Ending Story", "NeverEnding Story"}.issubset(
+        set(family["titles"])
+    )
 
 
 def test_title_normalization_wrappers_use_backend_parser() -> None:
