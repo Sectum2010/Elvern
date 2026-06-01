@@ -259,6 +259,71 @@ def test_suffix_scrubbing_preserves_meaningful_title_tokens(
     assert parsed["suspicious_output"] is False
 
 
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        ("John.Wick.Chapter.2.2017.1080p.BluRay.x264.mkv", "John Wick Chapter 2", 2017),
+        ("Big.Hero.6.2014.1080p.BluRay.x264.mkv", "Big Hero 6", 2014),
+        ("Blade II (2002) (1080p BluRay x265 10bit EAC3 7.1 Celdra) [QxR]", "Blade II", 2002),
+        ("Inside.Out.2.2024.1080p.WEB-DL.x264.mkv", "Inside Out 2", 2024),
+        ("The.BFG.2016.1080p.BluRay.x264.mkv", "The BFG", 2016),
+        (
+            "The Never Ending Story (1984) ITA-ENG Ac3 5.1 BDRip 1080p H264 sub ita eng [ArMor].mkv",
+            "The Never Ending Story",
+            1984,
+        ),
+        ("Se7en.1995.1080p.BluRay.x264.mkv", "Se7en", 1995),
+        ("3.Idiots.2009.1080p.BluRay.x264.mkv", "3 Idiots", 2009),
+        ("Malcolm.X.1992.1080p.BluRay.x264.mkv", "Malcolm X", 1992),
+        ("Project.X.2012.1080p.BluRay.x264.mkv", "Project X", 2012),
+        (
+            "Nightbitch (2024) [1080p Ita Eng Spa 5.1 HEVC10 SubS] byMe7alh [MIRCrew]",
+            "Nightbitch",
+            2024,
+        ),
+        ("Before Sunset (2004 ITA/ENG) [1080p x265] [Paso77]", "Before Sunset", 2004),
+    ],
+)
+def test_phase_one_overtrim_regressions_preserve_title_tokens(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+def test_dirty_never_ending_story_stored_title_uses_safe_filename_parse() -> None:
+    parsed = parse_media_title(
+        title="The Never Ending Story ITA-ENG",
+        original_filename="The Never Ending Story (1984) ITA-ENG Ac3 5.1 BDRip 1080p H264 sub ita eng [ArMor].mkv",
+        year=1984,
+    )
+
+    assert parsed["display_title"] == "The Never Ending Story"
+    assert parsed["title_source"] == "original_filename"
+    assert parsed["parsed_year"] == 1984
+    assert parsed["suspicious_output"] is False
+
+
+def test_the_bfg_must_never_collapse_to_article_only() -> None:
+    parsed = parse_media_title(
+        title=None,
+        original_filename="The.BFG.2016.1080p.BluRay.x264.mkv",
+        year=None,
+    )
+
+    assert parsed["display_title"] == "The BFG"
+    assert parsed["display_title"] != "The"
+    assert "display_title_implausibly_short" not in parsed["warnings"]
+
+
 def test_never_ending_story_poster_candidates_include_safe_spacing_variants() -> None:
     parsed = parse_media_title(
         title=None,

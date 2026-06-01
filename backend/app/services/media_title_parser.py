@@ -444,6 +444,11 @@ def _parse_title_candidate(
             continue
         kept_segments.append(cleaned_segment)
     working = " - ".join(kept_segments)
+    if removed_metadata_bracket_suffix:
+        working, removed_trailing_group = _strip_trailing_bare_release_group_after_metadata(working)
+        if removed_trailing_group:
+            warnings.append("dash_release_group_suffix_removed")
+            signal_score += 1
 
     if filename_like:
         working, cut_suffix, suffix_hints = _cut_non_title_suffix(working)
@@ -965,6 +970,15 @@ def _backward_metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str
         canonical = _canonical_metadata_token(raw_token)
         if not canonical:
             continue
+        if (
+            metadata_seen
+            and index + 1 < len(tokens)
+            and _is_standalone_year(_canonical_metadata_token(tokens[index + 1]))
+            and _looks_like_release_year_boundary(tokens, index + 1)
+            and not _token_is_suffix_metadata(raw_token)
+            and not _looks_like_release_group_token(raw_token)
+        ):
+            break
         previous = _canonical_metadata_token(tokens[index - 1]) if index > 0 else ""
         if ROMAN_NUMERAL_PATTERN.fullmatch(canonical):
             break
@@ -1108,7 +1122,7 @@ def _suffix_token_kind(raw_token: str, *, metadata_seen: bool) -> str | None:
         return "metadata"
     if metadata_seen and (_looks_like_audio_channel_token(canonical) or canonical in {"0", "1", "2", "5", "6", "7", "8"}):
         return "metadata"
-    if _looks_like_bare_release_group_token(raw_token):
+    if metadata_seen and _looks_like_bare_release_group_token(raw_token):
         return "release_group"
     return None
 
@@ -1264,6 +1278,18 @@ def _looks_like_dash_suffix_junk_segment(value: str) -> bool:
         if word.isalpha() and word.islower():
             return True
     return all(word.isalpha() and word.islower() for word in words)
+
+
+def _strip_trailing_bare_release_group_after_metadata(value: str) -> tuple[str, bool]:
+    tokens = collapse_spaces(value).split()
+    if len(tokens) < 2 or not _looks_like_bare_release_group_token(tokens[-1]):
+        return value, False
+    if ROMAN_NUMERAL_PATTERN.fullmatch(_canonical_metadata_token(tokens[-1])):
+        return value, False
+    prefix = " ".join(tokens[:-1]).strip(" -")
+    if not prefix or prefix.lower() in {"the", "a", "an"}:
+        return value, False
+    return prefix, True
 
 
 def _looks_like_bracket_plus_release_group(value: str) -> bool:
