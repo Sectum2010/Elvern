@@ -3192,6 +3192,9 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 @media (max-width: 519px) {
+  .settings-age-bucket-list,
+  .settings-age-bucket-card,
+  .settings-age-bucket-groups,
   .settings-age-group-list,
   .settings-age-group-columns,
   .settings-age-group-row__top,
@@ -3816,6 +3819,10 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   flex-wrap: wrap;
 }
 
+.settings-age-groups-card__header {
+  cursor: pointer;
+}
+
 .settings-grid--display {
   align-items: start;
 }
@@ -4229,6 +4236,58 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.8rem;
 }
 
+.settings-age-bucket-list,
+.settings-age-bucket-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.settings-age-bucket-card,
+.settings-age-bucket-group {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.85rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.9rem;
+  border: 1px solid rgba(152, 176, 201, 0.16);
+  border-radius: 0.9rem;
+  background: rgba(11, 17, 24, 0.72);
+}
+
+.settings-age-bucket-card__age {
+  justify-self: start;
+  min-width: 3rem;
+  justify-content: center;
+  text-align: center;
+  font-weight: 800;
+}
+
+.settings-age-bucket-group {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.settings-age-bucket-group__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.settings-age-group-empty {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid rgba(152, 176, 201, 0.14);
+  border-radius: 0.9rem;
+  background: rgba(11, 17, 24, 0.64);
+}
+
+.settings-age-group-empty small {
+  color: var(--text-muted);
+}
+
 .settings-age-group-copy,
 .settings-age-group-search__result,
 .settings-age-group-modal__summary,
@@ -4312,8 +4371,8 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .settings-age-group-modal__summary strong,
 .detail-age-group-modal__summary strong {
   min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .settings-age-group-row small,
@@ -4322,7 +4381,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .settings-age-group-modal__summary small,
 .detail-age-group-modal__summary small {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .settings-age-group-row small,
@@ -5163,6 +5222,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.95rem;
   padding: 1rem 1.25rem 1.25rem;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.settings-directory-picker__body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .settings-directory-picker__actions {
@@ -5249,9 +5314,13 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .detail-info-modal__body {
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(143, 182, 218, 0.28) transparent;
+  scrollbar-width: none;
   padding: 1rem 1.25rem 1.25rem;
+}
+
+.detail-info-modal__body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .detail-grid--modal {

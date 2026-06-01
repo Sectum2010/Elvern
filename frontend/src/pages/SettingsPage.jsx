@@ -69,6 +69,37 @@ function formatAgeRequirement(value) {
 }
 
 
+function buildRestrictedAgeBuckets(items = []) {
+  const buckets = new Map();
+  for (const group of items || []) {
+    const age = Number(group?.age_requirement);
+    if (!Number.isInteger(age) || age < 1) {
+      continue;
+    }
+    const bucket = buckets.get(age) || {
+      age,
+      ageLabel: formatAgeRequirement(age),
+      copiesCount: 0,
+      groupCount: 0,
+      manualLinksCount: 0,
+      groups: [],
+    };
+    bucket.groupCount += 1;
+    bucket.copiesCount += Number(group?.copies_count) || 0;
+    bucket.manualLinksCount += Number(group?.manual_links_count) || 0;
+    bucket.groups.push(group);
+    buckets.set(age, bucket);
+  }
+  return Array.from(buckets.values()).sort((left, right) => left.age - right.age);
+}
+
+
+function formatCountLabel(count, singular, plural = `${singular}s`) {
+  const value = Number(count) || 0;
+  return `${value} ${value === 1 ? singular : plural}`;
+}
+
+
 function getBackgroundColorPickerValue(backgroundDraft) {
   if (backgroundDraft.background_mode === "solid") {
     return backgroundDraft.background_solid_color || DEFAULT_BACKGROUND_SETTINGS.background_solid_color;
@@ -661,6 +692,84 @@ function DirectoryPickerModal({
 }
 
 
+function AgeBucketManagerModal({
+  bucket,
+  error,
+  onClose,
+  onManageGroup,
+  onRemoveRequirement,
+  open,
+  savingKey,
+}) {
+  if (!open) {
+    return null;
+  }
+
+  const groups = bucket?.groups || [];
+  const title = bucket ? `Age ${bucket.ageLabel} groups` : "Age groups";
+
+  return (
+    <div
+      aria-labelledby="settings-age-bucket-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div aria-hidden="true" className="browser-resume-modal__backdrop" onClick={onClose} />
+      <div className="browser-resume-modal__card settings-age-group-modal">
+        <div className="detail-info-modal__header">
+          <div className="detail-info-modal__copy">
+            <p className="eyebrow detail-info-modal__eyebrow">Admin</p>
+            <h2 className="detail-info-modal__title" id="settings-age-bucket-title">{title}</h2>
+          </div>
+          <button className="ghost-button ghost-button--inline detail-info-modal__close" onClick={onClose} type="button">
+            Close
+          </button>
+        </div>
+
+        <div className="detail-info-modal__body settings-age-group-modal__body">
+          {error ? <p className="form-error">{error}</p> : null}
+          {groups.length > 0 ? (
+            <div className="settings-age-bucket-groups">
+              {groups.map((group) => (
+                <article className="settings-age-bucket-group" key={`age-bucket-${group.age_group_key}`}>
+                  <div className="settings-age-group-row__copy">
+                    <strong>{group.display_title}</strong>
+                    <small>
+                      {group.year || "Year unknown"} · {group.copies_count} copies
+                      {group.manual_links_count ? ` · ${group.manual_links_count} manual` : ""}
+                    </small>
+                  </div>
+                  <div className="settings-age-bucket-group__actions">
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      onClick={() => onManageGroup(group)}
+                      type="button"
+                    >
+                      Manage group
+                    </button>
+                    <button
+                      className="ghost-button ghost-button--inline ghost-button--danger"
+                      disabled={savingKey === group.age_group_key || !group.primary_media_item_id}
+                      onClick={() => onRemoveRequirement(group)}
+                      type="button"
+                    >
+                      {savingKey === group.age_group_key ? "Removing..." : "Remove age requirement"}
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="page-subnote">No groups remain in this age bucket.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function AgeGroupManagerModal({
   open,
   loading,
@@ -941,8 +1050,13 @@ export function SettingsPage() {
   });
   const [cloudBusyKey, setCloudBusyKey] = useState("");
   const [ageGroups, setAgeGroups] = useState({ items: [], total: 0 });
-  const [expandedAgeGroupKeys, setExpandedAgeGroupKeys] = useState({});
-  const [ageGroupDetailsByKey, setAgeGroupDetailsByKey] = useState({});
+  const [ageGroupsPanelOpen, setAgeGroupsPanelOpen] = useState(false);
+  const [ageBucketManager, setAgeBucketManager] = useState({
+    open: false,
+    age: null,
+    savingKey: "",
+    error: "",
+  });
   const [ageGroupManager, setAgeGroupManager] = useState({
     open: false,
     loading: false,
@@ -1032,6 +1146,10 @@ export function SettingsPage() {
         : visibleCloudSources.some((source) => source?.sync_status === "never_synced")
           ? "Never synced"
           : "Current";
+  const restrictedAgeBuckets = buildRestrictedAgeBuckets(ageGroups.items || []);
+  const activeAgeBucket = ageBucketManager.open
+    ? restrictedAgeBuckets.find((bucket) => bucket.age === ageBucketManager.age)
+    : null;
 
   useEffect(() => {
     let active = true;
@@ -1842,41 +1960,6 @@ export function SettingsPage() {
     return payload;
   }
 
-  async function handleToggleAgeGroupRow(group) {
-    const ageGroupKey = group?.age_group_key;
-    if (!ageGroupKey) {
-      return;
-    }
-    const willOpen = !expandedAgeGroupKeys[ageGroupKey];
-    setExpandedAgeGroupKeys((current) => ({
-      ...current,
-      [ageGroupKey]: willOpen,
-    }));
-    if (!willOpen || ageGroupDetailsByKey[ageGroupKey]?.group || ageGroupDetailsByKey[ageGroupKey]?.loading) {
-      return;
-    }
-    setAgeGroupDetailsByKey((current) => ({
-      ...current,
-      [ageGroupKey]: { loading: true, error: "", group: null },
-    }));
-    try {
-      const payload = await fetchAgeGroupDetail(ageGroupKey);
-      setAgeGroupDetailsByKey((current) => ({
-        ...current,
-        [ageGroupKey]: { loading: false, error: "", group: payload },
-      }));
-    } catch (requestError) {
-      setAgeGroupDetailsByKey((current) => ({
-        ...current,
-        [ageGroupKey]: {
-          loading: false,
-          error: requestError.message || "Failed to load age group",
-          group: null,
-        },
-      }));
-    }
-  }
-
   async function handleOpenAgeGroupManager(group) {
     if (!group?.age_group_key) {
       return;
@@ -1899,6 +1982,47 @@ export function SettingsPage() {
         ...current,
         loading: false,
         error: requestError.message || "Failed to load age group",
+      }));
+    }
+  }
+
+  function handleOpenAgeBucket(bucket) {
+    setAgeBucketManager({
+      open: true,
+      age: bucket.age,
+      savingKey: "",
+      error: "",
+    });
+  }
+
+  async function handleOpenAgeGroupFromBucket(group) {
+    setAgeBucketManager((current) => ({ ...current, open: false, error: "", savingKey: "" }));
+    await handleOpenAgeGroupManager(group);
+  }
+
+  async function handleRemoveAgeRequirementFromBucket(group) {
+    if (!group?.primary_media_item_id || ageBucketManager.savingKey) {
+      return;
+    }
+    setAgeBucketManager((current) => ({
+      ...current,
+      savingKey: group.age_group_key,
+      error: "",
+    }));
+    try {
+      await apiRequest(`/api/library/item/${group.primary_media_item_id}/age-requirement`, {
+        method: "PATCH",
+        data: { age_requirement: null },
+      });
+      await refreshAgeGroups();
+      setMessage("Age requirement removed.");
+      setError("");
+      setAgeBucketManager((current) => ({ ...current, savingKey: "", error: "" }));
+    } catch (requestError) {
+      setAgeBucketManager((current) => ({
+        ...current,
+        savingKey: "",
+        error: requestError.message || "Failed to remove age requirement",
       }));
     }
   }
@@ -2268,6 +2392,16 @@ export function SettingsPage() {
         searching={ageGroupManager.searching}
       />
 
+      <AgeBucketManagerModal
+        bucket={activeAgeBucket}
+        error={ageBucketManager.error}
+        onClose={() => setAgeBucketManager((current) => ({ ...current, open: false, savingKey: "", error: "" }))}
+        onManageGroup={handleOpenAgeGroupFromBucket}
+        onRemoveRequirement={handleRemoveAgeRequirementFromBucket}
+        open={ageBucketManager.open}
+        savingKey={ageBucketManager.savingKey}
+      />
+
       <div className="admin-nav-card settings-section-nav-card" aria-label="Settings sections">
         <div className="admin-nav-card__actions settings-section-nav-card__actions" role="tablist">
           {SETTINGS_SECTIONS.map((section) => {
@@ -2594,89 +2728,56 @@ export function SettingsPage() {
 
         {user?.role === "admin" ? (
           <section className="settings-card settings-card--wide settings-age-groups-card">
-            <div className="settings-inline-header">
+            <div
+              aria-expanded={ageGroupsPanelOpen}
+              className="settings-inline-header settings-age-groups-card__header"
+              onClick={() => setAgeGroupsPanelOpen((current) => !current)}
+            >
               <div>
                 <h2>Age Groups</h2>
                 <p className="page-subnote">Review automatic movie age groups and explicit manual links.</p>
               </div>
-              <RefreshSweepButton className="ghost-button ghost-button--inline" onClick={refreshAgeGroups} type="button">
+              <RefreshSweepButton
+                className="ghost-button ghost-button--inline"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  refreshAgeGroups();
+                }}
+                type="button"
+              >
                 Refresh
               </RefreshSweepButton>
             </div>
-            {loading ? (
+            {ageGroupsPanelOpen && loading ? (
               <p className="page-subnote">Loading age groups...</p>
-            ) : (ageGroups.items || []).length > 0 ? (
-              <div className="settings-age-group-list">
-                {(ageGroups.items || []).map((group) => {
-                  const expanded = Boolean(expandedAgeGroupKeys[group.age_group_key]);
-                  const detailState = ageGroupDetailsByKey[group.age_group_key] || {};
-                  const detailGroup = detailState.group;
-                  const expandedCopies = [
-                    ...((detailGroup?.auto_matched_copies || []).map((copy) => ({ ...copy, membership: "Auto" }))),
-                    ...((detailGroup?.manual_linked_copies || []).map((copy) => ({ ...copy, membership: "Manual" }))),
-                  ];
-                  return (
-                    <article
-                      className={[
-                        "settings-age-group-row",
-                        expanded ? "settings-age-group-row--expanded" : "",
-                      ].filter(Boolean).join(" ")}
-                      key={group.age_group_key}
+            ) : ageGroupsPanelOpen && restrictedAgeBuckets.length > 0 ? (
+              <div className="settings-age-bucket-list">
+                {restrictedAgeBuckets.map((bucket) => (
+                  <article className="settings-age-bucket-card" key={`age-bucket-${bucket.age}`}>
+                    <span className="status-pill settings-age-bucket-card__age">{bucket.ageLabel}</span>
+                    <div className="settings-age-group-row__copy">
+                      <strong>{formatCountLabel(bucket.groupCount, "movie group")}</strong>
+                      <small>
+                        {formatCountLabel(bucket.copiesCount, "copy", "copies")}
+                        {bucket.manualLinksCount ? ` · ${formatCountLabel(bucket.manualLinksCount, "manual link")}` : ""}
+                      </small>
+                    </div>
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      onClick={() => handleOpenAgeBucket(bucket)}
+                      type="button"
                     >
-                      <div className="settings-age-group-row__top">
-                        <button
-                          aria-expanded={expanded}
-                          className="settings-age-group-row__header"
-                          onClick={() => handleToggleAgeGroupRow(group)}
-                          type="button"
-                        >
-                          <div className="settings-age-group-row__copy">
-                            <strong>{group.display_title}</strong>
-                            <small>
-                              {group.year || "Year unknown"} · {group.copies_count} copies
-                              {group.manual_links_count ? ` · ${group.manual_links_count} manual` : ""}
-                            </small>
-                          </div>
-                          <span className="status-pill">{group.age_requirement_display || formatAgeRequirement(group.age_requirement)}</span>
-                        </button>
-                        <button
-                          className="ghost-button ghost-button--inline"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleOpenAgeGroupManager(group);
-                          }}
-                          type="button"
-                        >
-                          Manage
-                        </button>
-                      </div>
-                      {expanded ? (
-                        <div className="settings-age-group-row__details">
-                          {detailState.loading ? <p className="page-subnote">Loading copies...</p> : null}
-                          {detailState.error ? <p className="form-error">{detailState.error}</p> : null}
-                          {!detailState.loading && !detailState.error ? (
-                            expandedCopies.length > 0 ? (
-                              <div className="settings-age-group-row__movies">
-                                {expandedCopies.map((copy) => (
-                                  <article className="settings-age-group-copy" key={`age-row-copy-${copy.membership}-${copy.id}`}>
-                                    <strong>{copy.title}</strong>
-                                    <small>{copy.membership} · {copy.year || "Year unknown"} · {copy.source_label}</small>
-                                  </article>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="page-subnote">No copies found.</p>
-                            )
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </article>
-                  );
-                })}
+                      Manage
+                    </button>
+                  </article>
+                ))}
               </div>
-            ) : (
-              <p className="page-subnote">No age groups found yet.</p>
-            )}
+            ) : ageGroupsPanelOpen ? (
+              <div className="settings-age-group-empty">
+                <strong>No age-restricted movies yet.</strong>
+                <small>Set an age requirement from a movie's Info panel.</small>
+              </div>
+            ) : null}
           </section>
         ) : null}
 

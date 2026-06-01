@@ -53,8 +53,43 @@ const defaultSettings = {
   media_library_reference_effective_value: "",
 };
 
-function mockApi(initialSettings = defaultSettings) {
+function mockApi(initialSettings = defaultSettings, options = {}) {
   let settings = { ...initialSettings };
+  let ageGroupItems = options.ageGroupItems || [
+    {
+      age_group_key: "age:title:galaxy|2026",
+      display_title: "Galaxy",
+      year: 2026,
+      age_requirement: 18,
+      age_requirement_display: "18+",
+      copies_count: 2,
+      auto_count: 1,
+      manual_links_count: 1,
+      primary_media_item_id: 42,
+    },
+    {
+      age_group_key: "age:title:gentle cartoon|2024",
+      display_title: "Gentle Cartoon",
+      year: 2024,
+      age_requirement: 6,
+      age_requirement_display: "6",
+      copies_count: 3,
+      auto_count: 3,
+      manual_links_count: 0,
+      primary_media_item_id: 52,
+    },
+    {
+      age_group_key: "age:title:unrestricted|2023",
+      display_title: "Unrestricted",
+      year: 2023,
+      age_requirement: null,
+      age_requirement_display: "None",
+      copies_count: 4,
+      auto_count: 4,
+      manual_links_count: 0,
+      primary_media_item_id: 62,
+    },
+  ];
   apiRequest.mockImplementation((requestPath, options = {}) => {
     if (requestPath === "/api/user-settings" && !options.method) {
       return Promise.resolve(settings);
@@ -120,20 +155,8 @@ function mockApi(initialSettings = defaultSettings) {
     }
     if (requestPath === "/api/library/age-groups") {
       return Promise.resolve({
-        total: 1,
-        items: [
-          {
-            age_group_key: "age:title:galaxy|2026",
-            display_title: "Galaxy",
-            year: 2026,
-            age_requirement: 18,
-            age_requirement_display: "18+",
-            copies_count: 2,
-            auto_count: 1,
-            manual_links_count: 1,
-            primary_media_item_id: 42,
-          },
-        ],
+        total: ageGroupItems.length,
+        items: ageGroupItems,
       });
     }
     if (requestPath === "/api/library/age-groups/age%3Atitle%3Agalaxy%7C2026") {
@@ -184,6 +207,11 @@ function mockApi(initialSettings = defaultSettings) {
       return Promise.resolve({ linked: false });
     }
     if (requestPath === "/api/library/item/42/age-requirement" && options.method === "PATCH") {
+      ageGroupItems = ageGroupItems.map((group) => (
+        group.age_group_key === "age:title:galaxy|2026"
+          ? { ...group, age_requirement: null, age_requirement_display: "None" }
+          : group
+      ));
       return Promise.resolve({});
     }
     if (requestPath === "/api/auth/totp/status") {
@@ -244,6 +272,10 @@ describe("SettingsPage Display background controls", () => {
     expect(styles).toMatch(/@media \(max-width:\s*640px\) and \(orientation:\s*portrait\)[\s\S]*--app-shell-inline-gutter:\s*clamp\(1\.15rem,\s*5\.5vw,\s*1\.55rem\);/);
     expect(styles).toMatch(/\.settings-card \.settings-segmented-control\s*\{[^}]*inline-size:\s*100%;/s);
     expect(styles).toMatch(/\.settings-card \.settings-segmented-control__button\s*\{[^}]*min-width:\s*0;/s);
+    expect(styles).toMatch(/\.detail-info-modal__body\s*\{[^}]*scrollbar-width:\s*none;/s);
+    expect(styles).toContain(".detail-info-modal__body::-webkit-scrollbar");
+    expect(styles).not.toMatch(/\.detail-info-modal__body\s*\{[^}]*scrollbar-color:/s);
+    expect(styles).toMatch(/\.settings-directory-picker__body\s*\{[^}]*scrollbar-width:\s*none;/s);
   });
 
   test("floating island drag is gated off for phone and tablet while settings segments stay draggable", () => {
@@ -277,11 +309,49 @@ describe("SettingsPage Display background controls", () => {
     );
 
     await screen.findByRole("heading", { name: "Age Groups" });
-    expect(screen.getByText("Galaxy")).toBeInTheDocument();
+    expect(screen.queryByText("Galaxy")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Review automatic movie age groups and explicit manual links."));
+
+    expect(screen.queryByText("Unrestricted")).not.toBeInTheDocument();
+    expect(screen.queryByText("None")).not.toBeInTheDocument();
+    expect(screen.getByText("6")).toBeInTheDocument();
     expect(screen.getByText("18+")).toBeInTheDocument();
+    expect(screen.getByText("3 copies")).toBeInTheDocument();
+    expect(screen.getByText("2 copies · 1 manual link")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Manage" }));
+    const adultBucket = screen.getByText("18+").closest("article");
+    fireEvent.click(within(adultBucket).getByRole("button", { name: "Manage" }));
 
+    await screen.findByRole("heading", { name: "Age 18+ groups" });
+    expect(screen.getByText("Galaxy")).toBeInTheDocument();
+    expect(screen.queryByText("Gentle Cartoon")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove age requirement" }));
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/library/item/42/age-requirement", {
+        method: "PATCH",
+        data: { age_requirement: null },
+      });
+    });
+    expect(await screen.findByText("No groups remain in this age bucket.")).toBeInTheDocument();
+  });
+
+  test("Age Groups manager opens individual group flow from a restricted bucket", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Age Groups" });
+    fireEvent.click(screen.getByText("Review automatic movie age groups and explicit manual links."));
+    const adultBucket = screen.getByText("18+").closest("article");
+    fireEvent.click(within(adultBucket).getByRole("button", { name: "Manage" }));
+    await screen.findByRole("heading", { name: "Age 18+ groups" });
+    fireEvent.click(screen.getByRole("button", { name: "Manage group" }));
     await screen.findByRole("heading", { name: "Age group" });
     expect(screen.getByText("Auto copies")).toBeInTheDocument();
     expect(screen.getByText("Manual copies")).toBeInTheDocument();
@@ -301,6 +371,35 @@ describe("SettingsPage Display background controls", () => {
         },
       });
     });
+  });
+
+  test("Age Groups panel shows the empty state when every group is unrestricted", async () => {
+    mockAuthState.role = "admin";
+    mockApi(defaultSettings, {
+      ageGroupItems: [
+        {
+          age_group_key: "age:title:unrestricted|2023",
+          display_title: "Unrestricted",
+          year: 2023,
+          age_requirement: null,
+          age_requirement_display: "None",
+          copies_count: 4,
+          manual_links_count: 0,
+          primary_media_item_id: 62,
+        },
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Age Groups" });
+    fireEvent.click(screen.getByText("Review automatic movie age groups and explicit manual links."));
+    expect(screen.getByText("No age-restricted movies yet.")).toBeInTheDocument();
+    expect(screen.getByText("Set an age requirement from a movie's Info panel.")).toBeInTheDocument();
+    expect(screen.queryByText("Unrestricted")).not.toBeInTheDocument();
   });
 
   test("Age Groups section is admin-only", async () => {
