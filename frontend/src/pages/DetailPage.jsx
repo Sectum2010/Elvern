@@ -534,6 +534,12 @@ export function DetailPage() {
     pending: false,
     error: "",
   });
+  const [ageGroupModal, setAgeGroupModal] = useState({
+    open: false,
+    loading: false,
+    error: "",
+    group: null,
+  });
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [hiddenActionPending, setHiddenActionPending] = useState(false);
@@ -2042,6 +2048,34 @@ export function DetailPage() {
     }
   }
 
+  async function openAgeGroupModal() {
+    if (!item?.age_group_key || !isAdmin) {
+      return;
+    }
+    setAgeGroupModal({
+      open: true,
+      loading: true,
+      error: "",
+      group: null,
+    });
+    try {
+      const payload = await apiRequest(`/api/library/age-groups/${encodeURIComponent(item.age_group_key)}`);
+      setAgeGroupModal({
+        open: true,
+        loading: false,
+        error: "",
+        group: payload,
+      });
+    } catch (requestError) {
+      setAgeGroupModal({
+        open: true,
+        loading: false,
+        error: requestError.message || "Failed to load age group",
+        group: null,
+      });
+    }
+  }
+
   function clearDownloadRuntimeTimers() {
     window.clearInterval(downloadStallTimerRef.current);
     downloadStallTimerRef.current = 0;
@@ -3244,6 +3278,13 @@ export function DetailPage() {
                       {isAdmin ? (
                         <>
                           <p className="page-subnote">This applies to matching copies of this movie.</p>
+                          <button
+                            className="detail-age-group-link"
+                            onClick={openAgeGroupModal}
+                            type="button"
+                          >
+                            Manage age group
+                          </button>
                           <div className="admin-list__actions">
                             <button className="ghost-button" onClick={startAgeRequirementEdit} type="button">
                               Edit age requirement
@@ -3349,6 +3390,91 @@ export function DetailPage() {
                   )}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {ageGroupModal.open ? (
+        <div
+          aria-labelledby="detail-age-group-modal-title"
+          aria-modal="true"
+          className="browser-resume-modal"
+          role="dialog"
+        >
+          <div
+            aria-hidden="true"
+            className="browser-resume-modal__backdrop"
+            onClick={() => setAgeGroupModal((current) => ({ ...current, open: false }))}
+          />
+          <div className="browser-resume-modal__card detail-info-modal__card detail-age-group-modal">
+            <div className="detail-info-modal__header">
+              <div className="detail-info-modal__copy">
+                <p className="eyebrow detail-info-modal__eyebrow">Admin</p>
+                <h2 className="detail-info-modal__title" id="detail-age-group-modal-title">Age group</h2>
+              </div>
+              <button
+                className="ghost-button ghost-button--inline detail-info-modal__close"
+                onClick={() => setAgeGroupModal((current) => ({ ...current, open: false }))}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <div className="detail-info-modal__body detail-age-group-modal__body">
+              {ageGroupModal.loading ? <p className="page-subnote">Loading age group...</p> : null}
+              {ageGroupModal.error ? <p className="form-error">{ageGroupModal.error}</p> : null}
+              {ageGroupModal.group ? (
+                <>
+                  <div className="detail-age-group-modal__summary">
+                    <div>
+                      <strong>{detailTitle}</strong>
+                      <small>
+                        {item.year || "Year unknown"}
+                        {" · "}
+                        {item.age_requirement_display || formatAgeRequirement(item.age_requirement)}
+                      </small>
+                    </div>
+                    <span className="status-pill">{ageGroupModal.group.copies_count} copies</span>
+                  </div>
+                  <div className="settings-age-group-columns">
+                    <div className="settings-age-group-copy-list">
+                      <h3>Auto copies</h3>
+                      {(ageGroupModal.group.auto_matched_copies || []).length > 0 ? (
+                        ageGroupModal.group.auto_matched_copies.map((copy) => (
+                          <article className="settings-age-group-copy" key={`detail-auto-${copy.id}`}>
+                            <strong>{copy.title}</strong>
+                            <small>{copy.year || "Year unknown"} · {copy.source_label}</small>
+                          </article>
+                        ))
+                      ) : (
+                        <p className="page-subnote">No automatic copies.</p>
+                      )}
+                    </div>
+                    <div className="settings-age-group-copy-list">
+                      <h3>Manual copies</h3>
+                      {(ageGroupModal.group.manual_linked_copies || []).length > 0 ? (
+                        ageGroupModal.group.manual_linked_copies.map((copy) => (
+                          <article className="settings-age-group-copy" key={`detail-manual-${copy.id}`}>
+                            <strong>{copy.title}</strong>
+                            <small>{copy.year || "Year unknown"} · {copy.source_label}</small>
+                          </article>
+                        ))
+                      ) : (
+                        <p className="page-subnote">No manual links.</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="admin-list__actions">
+                    <button className="ghost-button" onClick={startAgeRequirementEdit} type="button">
+                      Edit age requirement
+                    </button>
+                    <Link className="ghost-button ghost-button--inline" to="/settings?section=libraries">
+                      Open Age Groups in Settings
+                    </Link>
+                  </div>
+                </>
+              ) : null}
             </div>
           </div>
         </div>

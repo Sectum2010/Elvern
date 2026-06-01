@@ -262,6 +262,18 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS media_age_manual_group_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        age_group_key TEXT NOT NULL,
+        media_item_id INTEGER NOT NULL UNIQUE,
+        created_by_user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        note TEXT,
+        FOREIGN KEY (media_item_id) REFERENCES media_items(id) ON DELETE CASCADE,
+        FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS password_help_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username_snapshot TEXT NOT NULL,
@@ -764,6 +776,8 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_invite_codes_expires_at ON invite_codes (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by ON invite_codes (created_by_user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_media_age_requirements_updated_at ON media_age_requirements (updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_media_age_manual_group_links_group ON media_age_manual_group_links (age_group_key)",
+    "CREATE INDEX IF NOT EXISTS idx_media_age_manual_group_links_created_by ON media_age_manual_group_links (created_by_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_status ON password_help_requests (status, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_user ON password_help_requests (user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_bucket ON password_help_requests (requester_bucket_hash, created_at DESC)",

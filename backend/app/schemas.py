@@ -518,6 +518,10 @@ class MediaItemDetail(LibraryItemSummary):
     age_group_source: str = ""
     age_group_display_title: str = ""
     age_group_year: int | None = None
+    automatic_age_group_key: str = ""
+    automatic_age_group_display_title: str = ""
+    automatic_age_group_year: int | None = None
+    age_group_manual_link: dict[str, object] | None = None
     age_requirement: int | None = Field(default=None, ge=1, le=18)
     age_requirement_display: str = "None"
     age_requirement_updated_at: str | None = None
@@ -526,6 +530,13 @@ class MediaItemDetail(LibraryItemSummary):
 
 class MediaAgeRequirementUpdateRequest(BaseModel):
     age_requirement: int | None = Field(default=None, ge=1, le=18)
+
+
+class MediaAgeManualGroupLinkRequest(BaseModel):
+    target_media_item_id: int
+    source_item_id: int | None = None
+    age_group_key: str | None = None
+    note: str | None = None
 
 
 class GoogleDriveConnectionResponse(BaseModel):

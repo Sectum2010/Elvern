@@ -83,8 +83,12 @@ describe("DetailPage hook-order guards", () => {
     expect(source).toContain("const AGE_REQUIREMENT_OPTIONS = [null, ...Array.from({ length: 18 }");
     expect(source).toContain("function formatAgeRequirement(value)");
     expect(source).toContain("/api/library/item/${item.id}/age-requirement");
+    expect(source).toContain("/api/library/age-groups/${encodeURIComponent(item.age_group_key)}");
     expect(source).toContain("<h2>Age Requirement</h2>");
     expect(source).toContain("This applies to matching copies of this movie.");
+    expect(source).toContain("Manage age group");
+    expect(source).toContain("detail-age-group-link");
+    expect(source).toContain("Open Age Groups in Settings");
     expect(source).toContain("Edit age requirement");
     expect(source).toContain("onClick={saveAgeRequirement}");
     expect(source).toContain("ageRequirementEditor.pending ? \"Saving...\" : \"Save\"");

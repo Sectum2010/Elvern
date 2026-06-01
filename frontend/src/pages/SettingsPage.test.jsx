@@ -13,12 +13,14 @@ import {
 } from "../lib/userBackground";
 import { SettingsPage } from "./SettingsPage";
 
+const mockAuthState = vi.hoisted(() => ({ role: "standard_user" }));
+
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({
     user: {
       id: 7,
       username: "display-user",
-      role: "standard_user",
+      role: mockAuthState.role,
     },
   }),
 }));
@@ -81,12 +83,108 @@ function mockApi(initialSettings = defaultSettings) {
     if (requestPath === "/api/user-hidden-items") {
       return Promise.resolve({ items: [] });
     }
+    if (requestPath === "/api/admin/global-hidden-items") {
+      return Promise.resolve({ items: [] });
+    }
+    if (requestPath === "/api/admin/media-library-reference") {
+      return Promise.resolve({ configured_value: null, effective_value: "", default_value: "" });
+    }
+    if (requestPath === "/api/admin/poster-reference-location") {
+      return Promise.resolve({ configured_value: null, effective_value: "", default_value: "" });
+    }
+    if (requestPath === "/api/admin/google-drive-setup") {
+      return Promise.resolve({
+        https_origin: "",
+        client_id: "",
+        client_secret: "",
+        javascript_origin: "",
+        redirect_uri: "",
+        callback_source: "unconfigured",
+        callback_warning: null,
+        configuration_state: "not_configured",
+        configuration_label: "Not configured",
+        status_message: "",
+        missing_fields: [],
+        connected: false,
+        account_email: null,
+        account_name: null,
+        instructions: [],
+      });
+    }
     if (requestPath === "/api/cloud-libraries") {
       return Promise.resolve({
         google: { enabled: false, connected: false },
         my_libraries: [],
         shared_libraries: [],
       });
+    }
+    if (requestPath === "/api/library/age-groups") {
+      return Promise.resolve({
+        total: 1,
+        items: [
+          {
+            age_group_key: "age:title:galaxy|2026",
+            display_title: "Galaxy",
+            year: 2026,
+            age_requirement: 18,
+            age_requirement_display: "18+",
+            copies_count: 2,
+            auto_count: 1,
+            manual_links_count: 1,
+            primary_media_item_id: 42,
+          },
+        ],
+      });
+    }
+    if (requestPath === "/api/library/age-groups/age%3Atitle%3Agalaxy%7C2026") {
+      return Promise.resolve({
+        age_group_key: "age:title:galaxy|2026",
+        display_title: "Galaxy",
+        year: 2026,
+        age_requirement: 18,
+        age_requirement_display: "18+",
+        copies_count: 2,
+        manual_links_count: 1,
+        primary_media_item_id: 42,
+        auto_matched_copies: [{ id: 42, title: "Galaxy", year: 2026, source_label: "DGX" }],
+        manual_linked_copies: [{ id: 43, title: "Galaxy Extended", year: 2026, source_label: "Cloud" }],
+      });
+    }
+    if (requestPath.startsWith("/api/library/age-groups/search")) {
+      return Promise.resolve({
+        items: [
+          {
+            id: 44,
+            title: "Galaxy 3D",
+            year: 2026,
+            source_label: "DGX",
+            automatic_age_group_key: "age:title:galaxy 3d|2026",
+          },
+        ],
+      });
+    }
+    if (requestPath === "/api/library/age-groups/link" && options.method === "POST") {
+      return Promise.resolve({
+        linked: true,
+        age_group: {
+          age_group_key: "age:title:galaxy|2026",
+          display_title: "Galaxy",
+          year: 2026,
+          age_requirement: 18,
+          age_requirement_display: "18+",
+          copies_count: 2,
+          manual_links_count: 1,
+          primary_media_item_id: 42,
+          auto_matched_copies: [{ id: 42, title: "Galaxy", year: 2026, source_label: "DGX" }],
+          manual_linked_copies: [{ id: 44, title: "Galaxy 3D", year: 2026, source_label: "DGX" }],
+        },
+      });
+    }
+    if (requestPath.startsWith("/api/library/age-groups/links/") && options.method === "DELETE") {
+      return Promise.resolve({ linked: false });
+    }
+    if (requestPath === "/api/library/item/42/age-requirement" && options.method === "PATCH") {
+      return Promise.resolve({});
     }
     if (requestPath === "/api/auth/totp/status") {
       return Promise.resolve({ enabled: false, setup_available: false });
@@ -108,6 +206,7 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
 
 beforeEach(() => {
   apiRequest.mockReset();
+  mockAuthState.role = "standard_user";
   window.localStorage.clear();
 });
 
@@ -166,6 +265,54 @@ describe("SettingsPage Display background controls", () => {
 
     expect(screen.getByText("Dynamic search button")).toBeInTheDocument();
     expect(screen.queryByText("Floating library search")).not.toBeInTheDocument();
+  });
+
+  test("admin Libraries panel shows and manages age groups", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Age Groups" });
+    expect(screen.getByText("Galaxy")).toBeInTheDocument();
+    expect(screen.getByText("18+")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage" }));
+
+    await screen.findByRole("heading", { name: "Age group" });
+    expect(screen.getByText("Auto copies")).toBeInTheDocument();
+    expect(screen.getByText("Manual copies")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Search movie title"), { target: { value: "Galaxy" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await screen.findByText(/Auto group differs/);
+    fireEvent.click(screen.getByRole("button", { name: "Link" }));
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/library/age-groups/link", {
+        method: "POST",
+        data: {
+          age_group_key: "age:title:galaxy|2026",
+          target_media_item_id: 44,
+        },
+      });
+    });
+  });
+
+  test("Age Groups section is admin-only", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Library" });
+    expect(screen.queryByRole("heading", { name: "Age Groups" })).not.toBeInTheDocument();
   });
 
   test("poster appearance controls still save through the existing settings endpoint", async () => {

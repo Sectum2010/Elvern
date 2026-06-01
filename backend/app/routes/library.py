@@ -5,7 +5,13 @@ from fastapi.responses import FileResponse
 
 from ..auth import CurrentAdmin, CurrentUser, resolve_client_ip
 from ..progress import refresh_recent_tracking
-from ..schemas import LibraryListResponse, MediaAgeRequirementUpdateRequest, MediaItemDetail, ScanResponse
+from ..schemas import (
+    LibraryListResponse,
+    MediaAgeManualGroupLinkRequest,
+    MediaAgeRequirementUpdateRequest,
+    MediaItemDetail,
+    ScanResponse,
+)
 from ..services.backup_service import create_backup_checkpoint, prune_backup_checkpoints
 from ..services.cloud_library_service import sync_all_google_drive_sources
 from ..services.library_service import (
@@ -18,8 +24,13 @@ from ..services.media_technical_metadata_service import run_one_media_item_techn
 from ..services.account_access_service import is_item_download_allowed
 from ..services.media_age_access_service import (
     assert_user_can_access_media_by_age,
+    link_media_item_to_age_group,
+    list_age_group_members,
+    list_age_groups_for_admin,
     revoke_persistent_sessions_for_age_group,
+    search_media_items_for_age_group_link,
     set_media_age_requirement,
+    unlink_media_item_from_age_group,
 )
 from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
 from ..services.user_settings_service import get_poster_card_display_max_width
@@ -28,6 +39,17 @@ from ..services.security_event_service import log_security_event
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+
+def _invalidate_mobile_sessions_from_revoke_summary(request: Request, revoke_summary: dict[str, object], *, reason: str) -> None:
+    manager = getattr(request.app.state, "mobile_playback_manager", None)
+    invalidate = getattr(manager, "invalidate_sessions_for_media_items_and_users", None)
+    if callable(invalidate):
+        invalidate(
+            media_item_ids=[int(item_id) for item_id in revoke_summary.get("media_item_ids") or []],
+            user_ids=[int(user_id) for user_id in revoke_summary.get("user_ids") or []],
+            reason=reason,
+        )
 
 
 def _recent_refresh_message(refresh_summary: dict[str, object]) -> str:
@@ -87,6 +109,65 @@ def search(request: Request, q: str, user=CurrentUser) -> LibraryListResponse:
     return LibraryListResponse(**payload)
 
 
+@router.get("/age-groups")
+def list_age_groups(request: Request, user=CurrentAdmin) -> dict[str, object]:
+    del user
+    return list_age_groups_for_admin(request.app.state.settings)
+
+
+@router.get("/age-groups/search")
+def search_age_groups(request: Request, q: str = "", user=CurrentAdmin) -> dict[str, object]:
+    del user
+    return search_media_items_for_age_group_link(request.app.state.settings, q)
+
+
+@router.get("/age-groups/{age_group_key:path}")
+def get_age_group(age_group_key: str, request: Request, user=CurrentAdmin) -> dict[str, object]:
+    del user
+    return list_age_group_members(request.app.state.settings, age_group_key)
+
+
+@router.post("/age-groups/link")
+def link_age_group(
+    payload: MediaAgeManualGroupLinkRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> dict[str, object]:
+    result = link_media_item_to_age_group(
+        request.app.state.settings,
+        target_media_item_id=payload.target_media_item_id,
+        source_item_id=payload.source_item_id,
+        age_group_key=payload.age_group_key,
+        note=payload.note,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    _invalidate_mobile_sessions_from_revoke_summary(
+        request,
+        result.get("revoked_sessions") or {},
+        reason="age_group_manual_link_changed",
+    )
+    return result
+
+
+@router.delete("/age-groups/links/{media_item_id}")
+def unlink_age_group(media_item_id: int, request: Request, user=CurrentAdmin) -> dict[str, object]:
+    result = unlink_media_item_from_age_group(
+        request.app.state.settings,
+        target_media_item_id=media_item_id,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    _invalidate_mobile_sessions_from_revoke_summary(
+        request,
+        result.get("revoked_sessions") or {},
+        reason="age_group_manual_link_removed",
+    )
+    return result
+
+
 @router.get("/item/{item_id}", response_model=MediaItemDetail)
 def get_item(item_id: int, request: Request, user=CurrentUser) -> MediaItemDetail:
     item = get_media_item_detail(
@@ -131,14 +212,7 @@ def update_item_age_requirement(
         age_requirement=updated_requirement["age_requirement"],
         reason="age_requirement_changed",
     )
-    manager = getattr(request.app.state, "mobile_playback_manager", None)
-    invalidate = getattr(manager, "invalidate_sessions_for_media_items_and_users", None)
-    if callable(invalidate):
-        invalidate(
-            media_item_ids=[int(item_id) for item_id in revoke_summary.get("media_item_ids") or []],
-            user_ids=[int(user_id) for user_id in revoke_summary.get("user_ids") or []],
-            reason="age_requirement_changed",
-        )
+    _invalidate_mobile_sessions_from_revoke_summary(request, revoke_summary, reason="age_requirement_changed")
     item = get_media_item_detail(
         request.app.state.settings,
         user_id=user.id,

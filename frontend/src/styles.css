@@ -3192,6 +3192,15 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 @media (max-width: 519px) {
+  .settings-age-group-columns,
+  .settings-age-group-row,
+  .settings-age-group-copy,
+  .settings-age-group-search__result,
+  .settings-age-group-modal__summary,
+  .detail-age-group-modal__summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .password-help-request-card__details {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -4209,6 +4218,98 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   margin: 0;
   padding-left: 1.2rem;
   color: var(--text-muted);
+}
+
+.settings-age-group-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.settings-age-group-row,
+.settings-age-group-copy,
+.settings-age-group-search__result,
+.settings-age-group-modal__summary,
+.detail-age-group-modal__summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid rgba(152, 176, 201, 0.16);
+  border-radius: 0.9rem;
+  background: rgba(11, 17, 24, 0.72);
+}
+
+.settings-age-group-row__copy,
+.settings-age-group-copy-list,
+.settings-age-group-search,
+.settings-age-group-modal__summary > div,
+.detail-age-group-modal__summary > div {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.settings-age-group-row small,
+.settings-age-group-copy small,
+.settings-age-group-search__result small,
+.settings-age-group-modal__summary small,
+.detail-age-group-modal__summary small {
+  color: var(--text-muted);
+}
+
+.settings-age-group-modal {
+  width: min(100%, 52rem);
+  max-height: min(86vh, 46rem);
+  padding: 0;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0;
+}
+
+.settings-age-group-modal__body,
+.detail-age-group-modal__body {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-age-group-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.settings-age-group-copy-list h3 {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.settings-age-group-copy {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.settings-age-group-search__results {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.detail-age-group-link {
+  appearance: none;
+  justify-self: start;
+  width: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.detail-age-group-link:hover,
+.detail-age-group-link:focus-visible {
+  color: #d8ebff;
+  text-decoration: underline;
 }
 
 .google-drive-setup-instructions li + li {

@@ -11,11 +11,17 @@ from backend.app.services.admin_service import create_user
 from backend.app.services.media_age_access_service import (
     AGE_ACCESS_DENIED_18,
     assert_user_can_access_media_by_age,
+    link_media_item_to_age_group,
+    list_age_group_members,
+    list_age_groups_for_admin,
+    normalize_age_group_identity_title,
     revoke_persistent_sessions_for_age_group,
     revoke_persistent_sessions_for_user_age_change,
     resolve_age_restriction_movie_group,
+    resolve_effective_age_group,
     resolve_media_age_requirement,
     set_media_age_requirement,
+    unlink_media_item_from_age_group,
 )
 from backend.app.services.library_movie_identity_service import _dedupe_group_key
 
@@ -45,6 +51,11 @@ def _admin_user(settings):
     assert failure_reason is None
     assert user is not None
     return user
+
+
+def _login(client, *, username: str, password: str) -> None:
+    response = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert response.status_code == 200, response.text
 
 
 def _create_media_item(
@@ -222,6 +233,25 @@ def test_age_group_normalizes_safe_numbered_contexts() -> None:
     )
 
 
+def test_age_group_does_not_global_convert_final_roman_numerals() -> None:
+    assert _age_group_key("Project V", year=2024) != _age_group_key("Project 5", year=2024, item_id=2)
+    assert _age_group_key("Malcolm X", year=1992, item_id=3) != _age_group_key("Malcolm 10", year=1992, item_id=4)
+    assert _age_group_key("Episode IV", year=2024, item_id=5) == _age_group_key(
+        "Episode 4",
+        year=2024,
+        item_id=6,
+    )
+
+
+def test_age_group_strips_3d_only_with_metadata_context() -> None:
+    assert normalize_age_group_identity_title("Project 3D", year=2024) == "project 3d"
+    assert normalize_age_group_identity_title(
+        "Jurassic Park 3D",
+        year=1993,
+        metadata={"warnings": ["metadata_suffix_removed"]},
+    ) == "jurassic park"
+
+
 def test_age_group_keeps_out_of_scope_aliases_separate() -> None:
     assert _age_group_key("LOTR Return Of The King", year=2003) != _age_group_key(
         "The Lord of the Rings: The Return of the King",
@@ -284,6 +314,115 @@ def test_age_group_ignores_edition_identity_without_changing_local_dedupe() -> N
         item_id=2,
     )
     assert _dedupe_group_key(standard_row) != _dedupe_group_key(extended_row)
+
+
+def test_manual_age_group_link_overrides_age_group_without_touching_dedupe(initialized_settings) -> None:
+    admin_user = _admin_user(initialized_settings)
+    source_item_id = _create_media_item(
+        initialized_settings,
+        title="LOTR Return Of The King",
+        original_filename="LOTR.Return.Of.The.King.2003.mkv",
+        year=2003,
+    )
+    target_item_id = _create_media_item(
+        initialized_settings,
+        title="The Lord of the Rings: The Return of the King",
+        original_filename="The.Lord.of.the.Rings.The.Return.of.the.King.2003.mkv",
+        year=2003,
+    )
+
+    source_auto = resolve_effective_age_group(initialized_settings, source_item_id)
+    target_auto = resolve_effective_age_group(initialized_settings, target_item_id)
+    assert source_auto["age_group_key"] != target_auto["age_group_key"]
+
+    linked = link_media_item_to_age_group(
+        initialized_settings,
+        target_media_item_id=target_item_id,
+        source_item_id=source_item_id,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    target_effective = resolve_effective_age_group(initialized_settings, target_item_id)
+    assert target_effective["age_group_key"] == source_auto["age_group_key"]
+    assert target_effective["manual_link"]["media_item_id"] == target_item_id
+    assert linked["age_group"]["manual_links_count"] == 1
+    members = list_age_group_members(initialized_settings, str(source_auto["age_group_key"]))
+    assert {item["id"] for item in members["manual_linked_copies"]} == {target_item_id}
+    assert _dedupe_group_key({
+        "title": "LOTR Return Of The King",
+        "year": 2003,
+        "original_filename": "LOTR.Return.Of.The.King.2003.mkv",
+        "source_kind": "local",
+    }) != _dedupe_group_key({
+        "title": "The Lord of the Rings: The Return of the King",
+        "year": 2003,
+        "original_filename": "The.Lord.of.the.Rings.The.Return.of.the.King.2003.mkv",
+        "source_kind": "local",
+    })
+
+    unlinked = unlink_media_item_from_age_group(
+        initialized_settings,
+        target_media_item_id=target_item_id,
+        actor=admin_user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    assert unlinked["linked"] is False
+    assert resolve_effective_age_group(initialized_settings, target_item_id)["age_group_key"] == target_auto["age_group_key"]
+    with get_connection(initialized_settings) as connection:
+        actions = [
+            row["action"]
+            for row in connection.execute(
+                "SELECT action FROM audit_logs WHERE action LIKE 'admin.media_age_group.%' ORDER BY id"
+            ).fetchall()
+        ]
+    assert actions == ["admin.media_age_group.link", "admin.media_age_group.unlink"]
+
+
+def test_admin_age_group_routes_are_admin_only(client, initialized_settings, admin_credentials) -> None:
+    source_item_id = _create_media_item(
+        initialized_settings,
+        title="Admin Age Group Movie",
+        original_filename="Admin.Age.Group.Movie.2026.mkv",
+        year=2026,
+    )
+    target_item_id = _create_media_item(
+        initialized_settings,
+        title="Admin Age Group Movie Extended Cut",
+        original_filename="Admin.Age.Group.Movie.2026.Extended.Cut.mkv",
+        year=2026,
+    )
+
+    unauthenticated = client.get("/api/library/age-groups")
+    assert unauthenticated.status_code == 401
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    groups_response = client.get("/api/library/age-groups")
+    assert groups_response.status_code == 200
+    groups = groups_response.json()["items"]
+    assert any(group["display_title"] == "Admin Age Group Movie" for group in groups)
+
+    source_group = resolve_effective_age_group(initialized_settings, source_item_id)["age_group_key"]
+    link_response = client.post(
+        "/api/library/age-groups/link",
+        json={
+            "age_group_key": source_group,
+            "target_media_item_id": target_item_id,
+        },
+    )
+    assert link_response.status_code == 200
+    assert link_response.json()["linked"] is True
+
+    group_response = client.get(f"/api/library/age-groups/{source_group}")
+    assert group_response.status_code == 200
+    assert group_response.json()["manual_links_count"] == 1
+
+    unlink_response = client.delete(f"/api/library/age-groups/links/{target_item_id}")
+    assert unlink_response.status_code == 200
+    assert unlink_response.json()["linked"] is False
 
 
 def test_age_requirement_denies_standard_user_and_admin_bypasses(initialized_settings) -> None:

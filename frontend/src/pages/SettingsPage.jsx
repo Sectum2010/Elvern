@@ -33,6 +33,7 @@ const SETTINGS_SECTIONS = [
 ];
 const SETTINGS_SECTION_KEYS = SETTINGS_SECTIONS.map((section) => section.key);
 const SETTINGS_ACTIVE_SECTION_STORAGE_KEY = "elvern:settings-active-section";
+const AGE_REQUIREMENT_OPTIONS = [null, ...Array.from({ length: 18 }, (_, index) => index + 1)];
 
 const POSTER_CARD_APPEARANCE_OPTIONS = [
   { value: "classic", label: "Classic" },
@@ -53,6 +54,18 @@ const POSTER_DISPLAY_WIDTH_OPTIONS = [
 ];
 
 const BACKGROUND_PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+
+function formatAgeRequirement(value) {
+  if (value == null || value === "") {
+    return "None";
+  }
+  const age = Number(value);
+  if (!Number.isFinite(age)) {
+    return "None";
+  }
+  return age >= 18 ? "18+" : String(age);
+}
 
 
 function getBackgroundColorPickerValue(backgroundDraft) {
@@ -647,6 +660,176 @@ function DirectoryPickerModal({
 }
 
 
+function AgeGroupManagerModal({
+  open,
+  loading,
+  error,
+  group,
+  ageRequirementValue,
+  saving,
+  searchQuery,
+  searchResults,
+  searching,
+  onAgeRequirementChange,
+  onClose,
+  onSaveAgeRequirement,
+  onSearchQueryChange,
+  onSearch,
+  onLinkItem,
+  onUnlinkItem,
+}) {
+  if (!open) {
+    return null;
+  }
+
+  const autoCopies = group?.auto_matched_copies || [];
+  const manualCopies = group?.manual_linked_copies || [];
+
+  return (
+    <div
+      aria-labelledby="settings-age-group-manager-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <div aria-hidden="true" className="browser-resume-modal__backdrop" onClick={onClose} />
+      <div className="browser-resume-modal__card settings-age-group-modal">
+        <div className="detail-info-modal__header">
+          <div className="detail-info-modal__copy">
+            <p className="eyebrow detail-info-modal__eyebrow">Admin</p>
+            <h2 className="detail-info-modal__title" id="settings-age-group-manager-title">Age group</h2>
+          </div>
+          <button className="ghost-button ghost-button--inline detail-info-modal__close" onClick={onClose} type="button">
+            Close
+          </button>
+        </div>
+
+        <div className="detail-info-modal__body settings-age-group-modal__body">
+          {loading ? <p className="page-subnote">Loading age group...</p> : null}
+          {error ? <p className="form-error">{error}</p> : null}
+          {group ? (
+            <>
+              <div className="settings-age-group-modal__summary">
+                <div>
+                  <strong>{group.display_title}</strong>
+                  <small>{group.year || "Year unknown"}</small>
+                </div>
+                <span className="status-pill">{group.copies_count} copies</span>
+              </div>
+
+              <label className="settings-field">
+                <span>
+                  <strong>Age requirement</strong>
+                  <small>Applies to the linked age group only.</small>
+                </span>
+                <select
+                  className="admin-select"
+                  disabled={saving}
+                  onChange={(event) => onAgeRequirementChange(event.target.value)}
+                  value={ageRequirementValue}
+                >
+                  {AGE_REQUIREMENT_OPTIONS.map((age) => (
+                    <option key={age == null ? "none" : age} value={age == null ? "" : age}>
+                      {formatAgeRequirement(age)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="player-actions">
+                <button
+                  className="ghost-button ghost-button--inline"
+                  disabled={saving || !group.primary_media_item_id}
+                  onClick={onSaveAgeRequirement}
+                  type="button"
+                >
+                  {saving ? "Saving..." : "Save age requirement"}
+                </button>
+              </div>
+
+              <div className="settings-age-group-columns">
+                <div className="settings-age-group-copy-list">
+                  <h3>Auto copies</h3>
+                  {autoCopies.length > 0 ? autoCopies.map((copy) => (
+                    <article className="settings-age-group-copy" key={`auto-${copy.id}`}>
+                      <strong>{copy.title}</strong>
+                      <small>{copy.year || "Year unknown"} · {copy.source_label}</small>
+                    </article>
+                  )) : <p className="page-subnote">No automatic copies.</p>}
+                </div>
+                <div className="settings-age-group-copy-list">
+                  <h3>Manual copies</h3>
+                  {manualCopies.length > 0 ? manualCopies.map((copy) => (
+                    <article className="settings-age-group-copy" key={`manual-${copy.id}`}>
+                      <div>
+                        <strong>{copy.title}</strong>
+                        <small>{copy.year || "Year unknown"} · {copy.source_label}</small>
+                      </div>
+                      <button
+                        className="ghost-button ghost-button--inline ghost-button--danger"
+                        disabled={saving}
+                        onClick={() => onUnlinkItem(copy.id)}
+                        type="button"
+                      >
+                        Unlink
+                      </button>
+                    </article>
+                  )) : <p className="page-subnote">No manual links.</p>}
+                </div>
+              </div>
+
+              <div className="settings-age-group-search">
+                <label className="settings-field">
+                  <span>
+                    <strong>Add movie</strong>
+                    <small>Manual links are explicit and reversible.</small>
+                  </span>
+                  <input
+                    className="cloud-source-form__input"
+                    onChange={(event) => onSearchQueryChange(event.target.value)}
+                    placeholder="Search movie title"
+                    type="search"
+                    value={searchQuery}
+                  />
+                </label>
+                <button className="ghost-button ghost-button--inline" disabled={searching} onClick={onSearch} type="button">
+                  {searching ? "Searching..." : "Search"}
+                </button>
+                {searchResults.length > 0 ? (
+                  <div className="settings-age-group-search__results">
+                    {searchResults.map((result) => {
+                      const differs = result.automatic_age_group_key !== group.age_group_key;
+                      return (
+                        <article className="settings-age-group-search__result" key={`age-search-${result.id}`}>
+                          <div>
+                            <strong>{result.title}</strong>
+                            <small>
+                              {result.year || "Year unknown"}
+                              {differs ? " · Auto group differs" : ""}
+                            </small>
+                          </div>
+                          <button
+                            className="ghost-button ghost-button--inline"
+                            disabled={saving}
+                            onClick={() => onLinkItem(result.id)}
+                            type="button"
+                          >
+                            Link
+                          </button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function BackgroundResetConfirmModal({ open, pending, onCancel, onConfirm }) {
   if (!open) {
     return null;
@@ -756,6 +939,18 @@ export function SettingsPage() {
     shared_libraries: [],
   });
   const [cloudBusyKey, setCloudBusyKey] = useState("");
+  const [ageGroups, setAgeGroups] = useState({ items: [], total: 0 });
+  const [ageGroupManager, setAgeGroupManager] = useState({
+    open: false,
+    loading: false,
+    error: "",
+    group: null,
+    ageRequirementValue: "",
+    saving: false,
+    searchQuery: "",
+    searchResults: [],
+    searching: false,
+  });
   const [myLibraryDraft, setMyLibraryDraft] = useState({
     resource_type: "folder",
     resource_id: "",
@@ -851,6 +1046,7 @@ export function SettingsPage() {
           cloudPayload,
           googleSetupPayload,
           totpPayload,
+          ageGroupsPayload,
         ] = await Promise.all([
           apiRequest("/api/user-settings"),
           apiRequest("/api/user-hidden-items"),
@@ -868,6 +1064,9 @@ export function SettingsPage() {
             ? apiRequest("/api/admin/google-drive-setup")
             : Promise.resolve(null),
           apiRequest("/api/auth/totp/status"),
+          user?.role === "admin"
+            ? apiRequest("/api/library/age-groups")
+            : Promise.resolve({ items: [], total: 0 }),
         ]);
         if (active) {
           setSettings(settingsPayload);
@@ -875,6 +1074,7 @@ export function SettingsPage() {
           setHiddenItems(hiddenPayload.items || []);
           setGlobalHiddenItems(globalHiddenPayload.items || []);
           setCloudLibraries(cloudPayload);
+          setAgeGroups(ageGroupsPayload || { items: [], total: 0 });
           if (user?.role === "admin" && mediaLibraryReferencePayload) {
             setSharedMediaLibraryReference(mediaLibraryReferencePayload);
             setSharedMediaLibraryReferenceInput(
@@ -950,9 +1150,32 @@ export function SettingsPage() {
         client_id: "",
         client_secret: "",
       });
+      setAgeGroups({ items: [], total: 0 });
+      setAgeGroupManager({
+        open: false,
+        loading: false,
+        error: "",
+        group: null,
+        ageRequirementValue: "",
+        saving: false,
+        searchQuery: "",
+        searchResults: [],
+        searching: false,
+      });
     } else {
     }
   }, [user?.role]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const section = params.get("section");
+    if (!section || !SETTINGS_SECTION_KEYS.includes(section)) {
+      return;
+    }
+    writePersistedPanelState(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, section, SETTINGS_SECTION_KEYS);
+    setActiveSettingsSection(section);
+    setActiveSettingsButtonExpanded(true);
+  }, [location.search]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -1591,6 +1814,160 @@ export function SettingsPage() {
     return payload;
   }
 
+  async function refreshAgeGroups() {
+    if (user?.role !== "admin") {
+      return { items: [], total: 0 };
+    }
+    const payload = await apiRequest("/api/library/age-groups");
+    setAgeGroups(payload);
+    return payload;
+  }
+
+  async function loadAgeGroupDetail(ageGroupKey) {
+    const payload = await apiRequest(`/api/library/age-groups/${encodeURIComponent(ageGroupKey)}`);
+    setAgeGroupManager((current) => ({
+      ...current,
+      loading: false,
+      error: "",
+      group: payload,
+      ageRequirementValue: payload.age_requirement == null ? "" : String(payload.age_requirement),
+    }));
+    return payload;
+  }
+
+  async function handleOpenAgeGroupManager(group) {
+    if (!group?.age_group_key) {
+      return;
+    }
+    setAgeGroupManager({
+      open: true,
+      loading: true,
+      error: "",
+      group: null,
+      ageRequirementValue: "",
+      saving: false,
+      searchQuery: "",
+      searchResults: [],
+      searching: false,
+    });
+    try {
+      await loadAgeGroupDetail(group.age_group_key);
+    } catch (requestError) {
+      setAgeGroupManager((current) => ({
+        ...current,
+        loading: false,
+        error: requestError.message || "Failed to load age group",
+      }));
+    }
+  }
+
+  async function handleSaveAgeGroupRequirement() {
+    const group = ageGroupManager.group;
+    if (!group?.primary_media_item_id || ageGroupManager.saving) {
+      return;
+    }
+    setAgeGroupManager((current) => ({ ...current, saving: true, error: "" }));
+    try {
+      await apiRequest(`/api/library/item/${group.primary_media_item_id}/age-requirement`, {
+        method: "PATCH",
+        data: {
+          age_requirement: ageGroupManager.ageRequirementValue === ""
+            ? null
+            : Number(ageGroupManager.ageRequirementValue),
+        },
+      });
+      await refreshAgeGroups();
+      await loadAgeGroupDetail(group.age_group_key);
+      setMessage("Age requirement saved.");
+      setError("");
+    } catch (requestError) {
+      setAgeGroupManager((current) => ({
+        ...current,
+        saving: false,
+        error: requestError.message || "Failed to save age requirement",
+      }));
+      return;
+    }
+    setAgeGroupManager((current) => ({ ...current, saving: false }));
+  }
+
+  async function handleSearchAgeGroupCandidates() {
+    const query = ageGroupManager.searchQuery.trim();
+    setAgeGroupManager((current) => ({ ...current, searching: true, error: "" }));
+    try {
+      const params = new URLSearchParams({ q: query });
+      const payload = await apiRequest(`/api/library/age-groups/search?${params.toString()}`);
+      setAgeGroupManager((current) => ({
+        ...current,
+        searching: false,
+        searchResults: payload.items || [],
+      }));
+    } catch (requestError) {
+      setAgeGroupManager((current) => ({
+        ...current,
+        searching: false,
+        error: requestError.message || "Failed to search movies",
+      }));
+    }
+  }
+
+  async function handleLinkAgeGroupItem(targetMediaItemId) {
+    const group = ageGroupManager.group;
+    if (!group?.age_group_key || ageGroupManager.saving) {
+      return;
+    }
+    setAgeGroupManager((current) => ({ ...current, saving: true, error: "" }));
+    try {
+      const payload = await apiRequest("/api/library/age-groups/link", {
+        method: "POST",
+        data: {
+          age_group_key: group.age_group_key,
+          target_media_item_id: targetMediaItemId,
+        },
+      });
+      await refreshAgeGroups();
+      setAgeGroupManager((current) => ({
+        ...current,
+        saving: false,
+        group: payload.age_group,
+        ageRequirementValue: payload.age_group?.age_requirement == null
+          ? ""
+          : String(payload.age_group.age_requirement),
+        searchResults: [],
+        searchQuery: "",
+      }));
+    } catch (requestError) {
+      setAgeGroupManager((current) => ({
+        ...current,
+        saving: false,
+        error: requestError.message || "Failed to link movie",
+      }));
+    }
+  }
+
+  async function handleUnlinkAgeGroupItem(targetMediaItemId) {
+    const group = ageGroupManager.group;
+    if (!group?.age_group_key || ageGroupManager.saving) {
+      return;
+    }
+    setAgeGroupManager((current) => ({ ...current, saving: true, error: "" }));
+    try {
+      await apiRequest(`/api/library/age-groups/links/${targetMediaItemId}`, {
+        method: "DELETE",
+      });
+      await refreshAgeGroups();
+      await loadAgeGroupDetail(group.age_group_key);
+    } catch (requestError) {
+      setAgeGroupManager((current) => ({
+        ...current,
+        saving: false,
+        error: requestError.message || "Failed to unlink movie",
+      }));
+      return;
+    }
+    setAgeGroupManager((current) => ({ ...current, saving: false }));
+  }
+
   function buildCloudRefreshWarning(successMessage, requestError) {
     const refreshMessage = typeof requestError?.message === "string"
       ? requestError.message.trim()
@@ -1825,6 +2202,28 @@ export function SettingsPage() {
         onConfirm={handleBackgroundReset}
         open={backgroundResetConfirmOpen}
         pending={backgroundSaving}
+      />
+      <AgeGroupManagerModal
+        ageRequirementValue={ageGroupManager.ageRequirementValue}
+        error={ageGroupManager.error}
+        group={ageGroupManager.group}
+        loading={ageGroupManager.loading}
+        onAgeRequirementChange={(value) =>
+          setAgeGroupManager((current) => ({ ...current, ageRequirementValue: value }))
+        }
+        onClose={() => setAgeGroupManager((current) => ({ ...current, open: false }))}
+        onLinkItem={handleLinkAgeGroupItem}
+        onSaveAgeRequirement={handleSaveAgeGroupRequirement}
+        onSearch={handleSearchAgeGroupCandidates}
+        onSearchQueryChange={(value) =>
+          setAgeGroupManager((current) => ({ ...current, searchQuery: value }))
+        }
+        onUnlinkItem={handleUnlinkAgeGroupItem}
+        open={ageGroupManager.open}
+        saving={ageGroupManager.saving}
+        searchQuery={ageGroupManager.searchQuery}
+        searchResults={ageGroupManager.searchResults}
+        searching={ageGroupManager.searching}
       />
 
       <div className="admin-nav-card settings-section-nav-card" aria-label="Settings sections">
@@ -2150,6 +2549,47 @@ export function SettingsPage() {
             </label>
           )}
         </section>
+
+        {user?.role === "admin" ? (
+          <section className="settings-card settings-card--wide settings-age-groups-card">
+            <div className="settings-inline-header">
+              <div>
+                <h2>Age Groups</h2>
+                <p className="page-subnote">Review automatic movie age groups and explicit manual links.</p>
+              </div>
+              <button className="ghost-button ghost-button--inline" onClick={refreshAgeGroups} type="button">
+                Refresh
+              </button>
+            </div>
+            {loading ? (
+              <p className="page-subnote">Loading age groups...</p>
+            ) : (ageGroups.items || []).length > 0 ? (
+              <div className="settings-age-group-list">
+                {(ageGroups.items || []).map((group) => (
+                  <article className="settings-age-group-row" key={group.age_group_key}>
+                    <div className="settings-age-group-row__copy">
+                      <strong>{group.display_title}</strong>
+                      <small>
+                        {group.year || "Year unknown"} · {group.copies_count} copies
+                        {group.manual_links_count ? ` · ${group.manual_links_count} manual` : ""}
+                      </small>
+                    </div>
+                    <span className="status-pill">{group.age_requirement_display || formatAgeRequirement(group.age_requirement)}</span>
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      onClick={() => handleOpenAgeGroupManager(group)}
+                      type="button"
+                    >
+                      Manage
+                    </button>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="page-subnote">No age groups found yet.</p>
+            )}
+          </section>
+        ) : null}
 
         <SettingsAccordionSection
           badge={cloudLibraries.my_libraries.length}
