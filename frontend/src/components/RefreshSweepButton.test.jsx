@@ -1,12 +1,15 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { REFRESH_SWEEP_MS, RefreshSweepButton } from "./RefreshSweepButton.jsx";
 
 
+const FAKE_TIMER_APIS = ["setTimeout", "clearTimeout"];
+
+
 describe("RefreshSweepButton", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: FAKE_TIMER_APIS });
     vi.stubGlobal("requestAnimationFrame", (callback) => {
       callback();
       return 1;
@@ -14,8 +17,10 @@ describe("RefreshSweepButton", () => {
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    cleanup();
   });
 
   test("draws a single rounded rectangle sweep for the fixed refresh duration", () => {

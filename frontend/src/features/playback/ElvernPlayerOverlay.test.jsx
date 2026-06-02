@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import ElvernPlayerOverlay from "./ElvernPlayerOverlay.jsx";
 import { ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS } from "../../lib/elvernOverlayLayout.js";
 
+const FAKE_TIMER_APIS = ["setTimeout", "clearTimeout", "setInterval", "clearInterval"];
+
 function renderOverlay({
   backendAudioTracks = [],
   backendSubtitleTracks = [],
@@ -201,13 +203,12 @@ function makeTimeRanges(ranges) {
 
 describe("ElvernPlayerOverlay controls visibility", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: FAKE_TIMER_APIS });
   });
 
   afterEach(() => {
-    cleanup();
-    vi.clearAllTimers();
     vi.useRealTimers();
+    cleanup();
   });
 
   test("playing overlay auto-hides after the idle delay", () => {
