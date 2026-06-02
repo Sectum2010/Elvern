@@ -49,6 +49,16 @@ Latest generated reports:
 - `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-classified-summary.txt`
 - `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-all-failed-results.txt`
 - `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-manual-review-buckets.md`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-phase20-bucket-plan.md`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase20-before.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase20-after.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-failed-sample.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-classified-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-classified-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-all-failed-results.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-manual-review-buckets.md`
 
 ## Phase 1.8 Bracket Spans and Release-Year Grammar
 
@@ -287,6 +297,125 @@ These remain intentionally deferred because broad rules would risk over-trimming
 - Do not strip country/year or alternate-title brackets without stronger metadata evidence.
 - Do not remove `S01E03`, `1x02`, `EP01`, `OVA 01`, or similar TV/anime/cartoon identity tokens.
 - Do not chase the 99% target by widening metadata cuts into cast/director parentheticals, alternate titles, or title subtitles.
+
+## Phase 2.0 Safe TRUE Failure Reduction
+
+### Scope
+
+Phase 2.0 targets only the remaining safe deterministic parser buckets from the Phase 1.9 report. It adds no LLM/AI title scrubbing, performs no DB writes or batch rescrubs, and does not touch frontend UI, playback, audio switching, subtitles, burn-in, Route2, native-HLS, adaptive behavior, cloud probing, age grouping, duplicate hiding, or library presentation behavior.
+
+### Bucket Plan
+
+The pre-change plan is saved at `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-phase20-bucket-plan.md`.
+
+Safe-now parser work:
+
+- director/year parentheticals with person-like content, such as `(Spielberg, 2002)`;
+- `+ Extras` suffixes after a parsed movie year and technical extras metadata;
+- hyphen-separated release years followed by strong technical metadata, such as `Title-2007-BdRip`.
+
+Deferred/high-risk work:
+
+- country/year descriptive brackets such as `[1978 - Japan]`;
+- alternate-title brackets that also contain a year, such as `(Into the Night, 1985)`;
+- collection/range titles and season packs;
+- real dash-title continuations and translated-title aliases;
+- true over-trim rows involving title numbers, roman numerals, or episode identity.
+
+### Parser Fixes
+
+- Removed director/year parenthetical spans only when the non-year side looks like a compact person name. This fixes `Minority Report (Spielberg, 2002)`, `American Psycho (Harron, 2000)`, `Danny the Dog (Leterrier, 2005)`, and `Herbie il Super Maggiolino (2005, Robinson)`.
+- Removed trailing `+ Extras`, `+ EXTRAS`, and similar bonus-feature suffixes only after a parsed year is already known. This fixes `The Big Lebowski (1998) + EXTRAS ...` and `Inside Man (2006) + Extras ...`.
+- Allowed hyphen-separated release-year metadata cuts for `Title-2007-BdRip` style rows while preserving title/date ranges whose left side already ends in a year. This fixes `Ocean's Thirteen-2007-BdRip-(1080p)-Italian AC3-English AAC-x264` without treating `Russia 1985-1999 ...` as a release-year boundary.
+
+### Classifier Changes
+
+Phase 2.0 classifier changes are diagnostic-only under project `tmp/`.
+
+- Phase 2.0 reports compare directly against Phase 1.9.
+- Clean single-word titles with strong `full-movie`/download/source metadata suffixes are no longer counted as over-trim just because the old metadata-heavy raw name had many tokens.
+- Episode/date-range and bare season-pack rows are review buckets instead of confirmed movie-title parser failures.
+- Manual review buckets are saved at `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase20-manual-review-buckets.md`.
+
+### Probe Results
+
+The Phase 2.0 probe was run before and after parser changes:
+
+- Before: 52/58 passed.
+- After: 58/58 passed.
+
+Probe text files:
+
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase20-before.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase20-after.txt`
+
+Examples fixed:
+
+- `Minority Report (Spielberg, 2002).mkv` -> `Minority Report`, year `2002`
+- `American Psycho (Harron, 2000).mkv` -> `American Psycho`, year `2000`
+- `Danny the Dog (Leterrier, 2005)` -> `Danny the Dog`, year `2005`
+- `The Big Lebowski (1998) + EXTRAS ...` -> `The Big Lebowski`, year `1998`
+- `Inside Man (2006) + Extras ...` -> `Inside Man`, year `2006`
+- `Ocean's Thirteen-2007-BdRip-(1080p)-Italian AC3-English AAC-x264` -> `Ocean's Thirteen`, year `2007`
+
+Guarded examples:
+
+- `Beast (Bestia) 2021 ...` remains `Beast (Bestia)`, year `2021`
+- `Bad Hair (Pelo Malo) 2013 ...` remains `Bad Hair (Pelo Malo)`, year `2013`
+- `For Love And Gold (L'Armata Brancaleone) 1966 ...` remains `For Love And Gold (L'Armata Brancaleone)`, year `1966`
+- `Russia.1985-1999.TraumaZone.S01E07.WEBRip.x264-XEN0N` remains a date-range/episode identity with no parsed movie release year.
+
+### 75k Diagnostic Comparison
+
+Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+
+Phase 1.9 classifier run:
+
+- Total movie strings: 75,814
+- Legacy-style suspected failures: 7,932
+- TRUE failures: 2,109
+- TRUE over-trim: 205
+
+Phase 2.0 classifier run:
+
+- Total movie strings: 75,814
+- Legacy-style suspected failures: 7,443
+- TRUE failures: 1,719
+- TRUE failure delta vs Phase 1.9: `-390`
+- TRUE over-trim: 199
+
+Phase 2.0 classification counts:
+
+- `PASS`: 66,041
+- `FALSE_POSITIVE_CLEAN_OUTPUT`: 4,488
+- `EXPECTED_COLLECTION_OR_RANGE`: 2,636
+- `EXPECTED_EVENT_OR_SPORTS`: 863
+- `TRUE_FAIL_RELEASE_YEAR_GRAMMAR`: 685
+- `TRUE_FAIL_METADATA_SUFFIX`: 550
+- `TRUE_FAIL_OVERTRIM_REAL`: 199
+- `TRUE_FAIL_DASH_TITLE`: 180
+- `TRUE_FAIL_BRACKET_SPAN`: 105
+- `EXPECTED_EDITION_STRIP`: 67
+
+### 99% Target Distance
+
+For 75,814 rows, a 99% pass target allows about 758 TRUE failures. Phase 2.0 has 1,719 TRUE failures, leaving a gap of 961 TRUE failures to reach that target.
+
+Remaining largest blockers:
+
+- `TRUE_FAIL_RELEASE_YEAR_GRAMMAR`: 685
+- `TRUE_FAIL_METADATA_SUFFIX`: 550
+- `TRUE_FAIL_OVERTRIM_REAL`: 199
+- `TRUE_FAIL_DASH_TITLE`: 180
+- `TRUE_FAIL_BRACKET_SPAN`: 105
+
+### Do Not Regress
+
+- Do not strip alternate-title parentheticals as director/year spans unless the non-year side is compact person-like content.
+- Do not remove `+ Extras` unless a release year is already parsed.
+- Do not treat `YYYY-YYYY` date-range forms as ordinary movie release-year metadata; bare season-pack handling remains diagnostic/review-only in this phase.
+- Do not widen one-word title cleanup into production parser logic without separate review.
+- Do not chase the 99% target by stripping country/year brackets, translated title continuations, or title-number identity.
 
 ## Phase 1.7 TRUE Failure Classification and Targeted Parser Patch
 

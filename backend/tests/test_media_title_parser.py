@@ -217,6 +217,24 @@ PHASE19_DETERMINISTIC_CASES = [
     ("Anime.Title.EP01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title EP01", None),
     ("Anime.Title.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title OVA 01", None),
 ]
+PHASE20_DETERMINISTIC_CASES = [
+    ("Minority Report (Spielberg, 2002).mkv", "Minority Report", 2002),
+    ("American Psycho (Harron, 2000).mkv", "American Psycho", 2000),
+    ("Danny the Dog (Leterrier, 2005)", "Danny the Dog", 2005),
+    ("Herbie il Super Maggiolino (2005, Robinson) [BDMux1080p Ita-Eng]", "Herbie il Super Maggiolino", 2005),
+    (
+        "The Big Lebowski (1998) + EXTRAS (1080p BluRay x265 10bit HDR ITA ENG MULTISUB) - [GEGE] [6.65GB]",
+        "The Big Lebowski",
+        1998,
+    ),
+    (
+        "Inside Man (2006) + Extras (1080p BluRay x265 10bit ITA ENG SUB ITA ENG) - GEGE [7.7gb]",
+        "Inside Man",
+        2006,
+    ),
+    ("Ocean's Thirteen-2007-BdRip-(1080p)-Italian AC3-English AAC-x264", "Ocean's Thirteen", 2007),
+    ("Harold-And-Kumar-Go-To-White-Castle-2004-1080p-Blu-Ray-HEVC-x265-10-Bit-DDP5-1-Subs-KINGDOM", "Harold-And-Kumar-Go-To-White-Castle", 2004),
+]
 
 
 @pytest.mark.parametrize("case", FIXTURE_CASES, ids=[case["name"] for case in FIXTURE_CASES])
@@ -347,6 +365,25 @@ def test_phase19_remaining_true_failure_examples(
 
 @pytest.mark.parametrize(
     ("original_filename", "expected_title", "expected_year"),
+    PHASE20_DETERMINISTIC_CASES,
+)
+def test_phase20_safe_true_failure_examples(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int | None,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
     [
         ("[REC].2007.1080p.BluRay.x264.mkv", "[REC]", 2007),
         ("Show.Name.S01E01.1080p.WEB-DL.x264-GROUP.mkv", "Show Name S01E01", None),
@@ -369,6 +406,17 @@ def test_phase15_negative_guards_preserve_titles_and_episode_identity(
     assert parsed["display_title"] == expected_title
     assert parsed["parsed_year"] == expected_year
     assert parsed["suspicious_output"] is False
+
+
+def test_phase20_hyphenated_date_range_is_not_treated_as_release_year() -> None:
+    parsed = parse_media_title(
+        title=None,
+        original_filename="Russia.1985-1999.TraumaZone.S01E07.WEBRip.x264-XEN0N",
+        year=None,
+    )
+
+    assert parsed["display_title"] == "Russia 1985-1999 TraumaZone S01E07"
+    assert parsed["parsed_year"] is None
 
 
 @pytest.mark.parametrize(

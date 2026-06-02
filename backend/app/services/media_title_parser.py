@@ -741,6 +741,11 @@ def _parse_title_candidate(
         warnings.append("trailing_metadata_removed")
         signal_score += 1
 
+    working, removed_extras = _strip_trailing_extras_suffix(working, parsed_year=parsed_year)
+    if removed_extras:
+        warnings.append("extras_suffix_removed")
+        signal_score += 1
+
     working, stripped_year, removed_year = _strip_trailing_year(working, parsed_year=parsed_year)
     if stripped_year is not None:
         parsed_year = stripped_year
@@ -1102,6 +1107,14 @@ def _remove_metadata_bracket_spans(value: str, *, parsed_year: int | None) -> tu
             warnings.append("edition_block_extracted")
             signal_score += 1
             continue
+        director_year = _director_year_parenthetical(content)
+        if director_year is not None:
+            if detected_year is None:
+                detected_year = director_year
+            remove_ranges.append((start, end))
+            warnings.append("director_year_block_removed")
+            signal_score += 1
+            continue
         if _looks_like_edition_bracket_span(content, classification):
             edition_markers.extend([str(marker) for marker in classification["edition_markers"]])
             remove_ranges.append((start, end))
@@ -1240,6 +1253,30 @@ def _looks_like_edition_bracket_span(content: str, classification: dict[str, obj
         r"(?i)(?:festival\s+cut|korean\s+edition|unrated\s+version|unrated\s+cut|resolve\s+color\s+grade)",
         cleaned,
     ) is not None
+
+
+def _director_year_parenthetical(content: str) -> int | None:
+    cleaned = collapse_spaces(content).strip(" -")
+    if not cleaned or "," not in cleaned:
+        return None
+    match = re.fullmatch(
+        r"(?P<name>[A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){0,2}),\s*(?P<year>19\d{2}|20\d{2})",
+        cleaned,
+    )
+    if match is None:
+        match = re.fullmatch(
+            r"(?P<year>19\d{2}|20\d{2}),\s*(?P<name>[A-Z][A-Za-z'’.-]*(?:\s+[A-Z][A-Za-z'’.-]*){0,2})",
+            cleaned,
+        )
+    if match is None:
+        return None
+    name = collapse_spaces(match.group("name"))
+    name_tokens = [_canonical_metadata_token(token) for token in name.split()]
+    if not name_tokens or len(name_tokens) > 3:
+        return None
+    if any(token in SMART_CASE_STOPWORDS or _token_is_metadata(token) for token in name_tokens):
+        return None
+    return _coerce_year(match.group("year"))
 
 
 def _extract_meaningful_title_number_hints(
@@ -1576,7 +1613,8 @@ def _release_year_metadata_suffix_cut(value: str) -> tuple[str, str] | None:
         return None
     for match in YEAR_PATTERN.finditer(working):
         year_text = match.group(1)
-        if _year_match_is_collection_or_date_range(working, match):
+        separator_release_year = _looks_like_hyphen_separated_release_year_metadata(working, match)
+        if _year_match_is_collection_or_date_range(working, match) and not separator_release_year:
             continue
         prefix = working[: match.start()].strip(" -")
         suffix = working[match.end() :].strip(" -")
@@ -1596,6 +1634,26 @@ def _release_year_metadata_suffix_cut(value: str) -> tuple[str, str] | None:
                 prefix = prefix.rstrip("!.,_:")
             return prefix, f"{year_text} {suffix}".strip()
     return None
+
+
+def _looks_like_hyphen_separated_release_year_metadata(value: str, match: re.Match[str]) -> bool:
+    if match.start() <= 0 or value[match.start() - 1] not in "-–":
+        return False
+    if re.match(r"\s*[-–]\s*(?:19\d{2}|20\d{2})", value[match.end() :]):
+        return False
+    prefix = value[: match.start()].strip(" -")
+    suffix = value[match.end() :].strip(" -")
+    if not prefix or not suffix:
+        return False
+    if re.search(r"(?:19\d{2}|20\d{2})\s*$", prefix):
+        return False
+    if re.search(
+        r"\b(?:collection|saga|trilogy|quadrilogy|duology|anthology|franchise|movies|films|movie\s+pack|film\s+pack|pack)\b",
+        prefix,
+        re.IGNORECASE,
+    ):
+        return False
+    return _suffix_after_release_year_is_metadata(suffix)
 
 
 def _release_year_cut_starts_with_descriptor_span(suffix: str) -> bool:
@@ -2486,6 +2544,20 @@ def _strip_trailing_metadata_tokens(value: str) -> tuple[str, bool]:
         tokens.pop()
         removed_any = True
     return " ".join(tokens).strip(" -"), removed_any
+
+
+def _strip_trailing_extras_suffix(value: str, *, parsed_year: int | None) -> tuple[str, bool]:
+    working = collapse_spaces(value).strip(" -")
+    if parsed_year is None or not working:
+        return working, False
+    updated = re.sub(
+        r"(?i)\s*\+\s*(?:extras?|bonus(?:\s+features?)?|special\s+features?)?\s*$",
+        "",
+        working,
+    ).strip(" -")
+    if updated and updated != working:
+        return updated, True
+    return working, False
 
 
 def _canonical_metadata_token(token: str) -> str:
