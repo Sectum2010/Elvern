@@ -29,6 +29,59 @@ EDITION_PHRASE_MAP = {
     "extended": ["extended"],
     "unrated": ["unrated"],
 }
+PHASE15_DETERMINISTIC_CASES = [
+    (
+        "Avatar - The Way of Water (2022) IMAX 1080p 10bit Bluray x265 HEVC [Org DDP 5.1 Hindi + DDP 7.1 Atmos English] MSubs ~ TombDoc",
+        "Avatar - The Way of Water",
+        2022,
+    ),
+    ("Dune - Part Two (2024) AV1 1080p 7RIP", "Dune - Part Two", 2024),
+    ("Dune - Part One (2021) AV1 1080p 7RIP", "Dune - Part One", 2021),
+    (
+        "Venom - The Last Dance (2024) 1080p 10bit Bluray x265 HEVC [Org DD 5.1 Hindi + DD 5.1 English] ESubs ~ TombDoc",
+        "Venom - The Last Dance",
+        2024,
+    ),
+    (
+        "F1 - The Movie (2025) EUR 1080p 10bit Bluray x265 HEVC [Org DDP 5.1 Atmos Hindi + DDP 7.1 Atmos English] MSubs ~ TombDoc",
+        "F1 - The Movie",
+        2025,
+    ),
+    ("The Italian Job 2003 2160p Bluray x265 DDP+DTS-KiNGDOM", "The Italian Job", 2003),
+    ("The Final Cut (2004) WEBRip 1080p HEVC AAC ITA ENG - Lullozzo", "The Final Cut", 2004),
+    ("LEGO DC - Shazam! Magic and Monsters (2020).1080p.H265.EAC3.6CH-MNKYDDL", "LEGO DC - Shazam! Magic and Monsters", 2020),
+    ("LEGO DC Batman - Family Matters (2019).1080p.H265.EAC3.6CH-MNKYDDL", "LEGO DC Batman - Family Matters", 2019),
+    (
+        "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash (2016).1080p.H265.EAC3.6CH-MNKYDDL",
+        "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash",
+        2016,
+    ),
+    ("A Beautiful Mind (2001) (2160p x265 10bit HDR UHD BD Atmos) [Prof]", "A Beautiful Mind", 2001),
+    ("The Nice Guys (2016) (2160p x265 10bit HDR UHD BD Atmos) [Prof]", "The Nice Guys", 2016),
+    ("The Red Turtle (2016) (1080p BluRay x265 10-bit Fre 5.1 AAC) [WeSLeY]", "The Red Turtle", 2016),
+    ("Spirited Away (2001) (1080p BluRay x265 10-bit Eng 5.1 + Jap 5.1 AAC) [WeSLeY]", "Spirited Away", 2001),
+    ("Kill Bill Vol. 2 (2004) (2160p x265 10bit HDR UHD BD DTS-HD MA 5.1) [Prof]", "Kill Bill Vol 2", 2004),
+    ("Death By Hanging 1968 JPN SUB ENG, ITA 1080p BluRay x264", "Death By Hanging", 1968),
+    ("A Love Story 1942 ITA SUB ENG, ITA DVDRip x264", "A Love Story", 1942),
+    ("The Man With The Suitcase 1984 FRE SUB ENG, ITA 1080p BluRay x264", "The Man With The Suitcase", 1984),
+    ("Apocalypse In The Tropics 2024 PT-BR MULTISUB 1080p WEB-DL x264", "Apocalypse In The Tropics", 2024),
+    ("The.Roundup.2022.iTA-KOR.Bluray.1080p.x264-CYBER.mkv", "The Roundup", 2022),
+    ("The Matrix (1999) DVDRip - NonyMovies", "The Matrix", 1999),
+    ("Annie (1999) DVDRIP", "Annie", 1999),
+    ("Il testimone (2001) DVDRip SD x264 AAC ITA - Bifra", "Il testimone", 2001),
+    ("Chiedimi quello che vuoi (2024) DVDRip Mkv H264 AC3 iTA 5.1 No Sub - CoSmo Crew", "Chiedimi quello che vuoi", 2024),
+    ("The Animal (2001) DVDRip SD H264 ITA ENG SPA Ac3 5.1 sub Ita Eng Spa [ArMor] iDN_CreW", "The Animal", 2001),
+    ("V/H/S (2012) (1080p BluRay x265 10bit EAC3 5.1 Ghost) [QxR]", "V/H/S", 2012),
+    ("V/H/S: Viral (2014) (1080p BluRay x265 10bit EAC3 5.1 Ghost) [QxR]", "V/H/S: Viral", 2014),
+    ("Pirates Of The Caribbean 3 At World's End 2007 [EN/FR/ES] Bluray 1080p AV1 OPUS 5.1-UH", "Pirates Of The Caribbean 3 At World's End", 2007),
+    ("Batman Begins 2005 Bluray IMAX 2160p AV1 HDR10 EN/FR/ES/DE OPUS 5.1-UH", "Batman Begins", 2005),
+    ("Lethal Weapon 4 1998 Bluray 1080p AV1 EN/FR/DE/ITA/ES OPUS 5.1-UH", "Lethal Weapon 4", 1998),
+    ("My.Show.S01E01.1080p.WEB-DL.x264-GROUP.mkv", "My Show S01E01", None),
+    ("My.Show.S1E1.720p.HDTV.x264-GROUP.mkv", "My Show S1E1", None),
+    ("My.Show.1x02.1080p.WEB-DL.x265-GROUP.mkv", "My Show 1x02", None),
+    ("Anime.Title.EP01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title EP01", None),
+    ("Anime.Title.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title OVA 01", None),
+]
 
 
 @pytest.mark.parametrize("case", FIXTURE_CASES, ids=[case["name"] for case in FIXTURE_CASES])
@@ -78,6 +131,49 @@ def test_dirty_stored_title_does_not_beat_filename_source() -> None:
 
     assert parsed["display_title"] == "One Piece Film Strong World"
     assert parsed["title_source"] == "original_filename"
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    PHASE15_DETERMINISTIC_CASES,
+)
+def test_phase15_deterministic_scrubbing_examples(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int | None,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        ("[REC].2007.1080p.BluRay.x264.mkv", "[REC]", 2007),
+        ("Show.Name.S01E01.1080p.WEB-DL.x264-GROUP.mkv", "Show Name S01E01", None),
+        ("Show.Name.S1E1.720p.HDTV.x264-GROUP.mkv", "Show Name S1E1", None),
+        ("Show.Name.1x02.1080p.WEB-DL.x265-GROUP.mkv", "Show Name 1x02", None),
+        ("Anime.Name.E01.1080p.WEB-DL.x264-GROUP.mkv", "Anime Name E01", None),
+        ("Anime.Name.EP01.1080p.WEB-DL.x264-GROUP.mkv", "Anime Name EP01", None),
+        ("Anime.Name.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Name OVA 01", None),
+    ],
+)
+def test_phase15_negative_guards_preserve_titles_and_episode_identity(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int | None,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
     assert parsed["suspicious_output"] is False
 
 

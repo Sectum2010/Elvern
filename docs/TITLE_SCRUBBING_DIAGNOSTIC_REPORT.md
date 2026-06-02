@@ -16,6 +16,114 @@ Latest generated reports:
 
 - `/tmp/elvern-title-scrub-after-overtrim-fix-report.json`
 - `/tmp/elvern-title-scrub-after-overtrim-fix-summary.txt`
+- `/tmp/elvern-title-scrub-75k-phase15-report.json`
+- `/tmp/elvern-title-scrub-75k-phase15-summary.txt`
+- `/tmp/elvern-title-scrub-75k-phase15-failed-sample.txt`
+
+## Phase 1.5 75k Deterministic Hardening
+
+### Scope
+
+Phase 1.5 hardens high-frequency, low-false-positive parser patterns found in the 75k scrubber report. It remains deterministic parser work only.
+
+No LLM/AI title scrubbing was added. No database rows were rewritten or batch-rescrubbed. Frontend UI, playback, audio switching, subtitles, burn-in, Route2, native-HLS, adaptive behavior, cloud probing, age grouping, and duplicate hiding were not changed.
+
+### Fixed Patterns
+
+- Dash subtitle titles are preserved when metadata follows the subtitle segment:
+  - `Avatar - The Way of Water`
+  - `Dune - Part Two`
+  - `Venom - The Last Dance`
+  - `F1 - The Movie`
+- LEGO/DC titles are no longer confused with edition metadata:
+  - `LEGO DC - Shazam! Magic and Monsters`
+  - `LEGO DC Batman - Family Matters`
+  - `LEGO DC Comics Super Heroes - Justice League - Cosmic Clash`
+- Trailing title-cased release-group brackets are stripped only after dense technical metadata:
+  - `[Prof]`, `[Kris]`, and similar uploader tags after codec/source brackets are removed.
+  - Leading short acronym titles such as `[REC]` are preserved.
+- Year/language/source suffixes are scrubbed for common `JPN SUB ENG`, `ITA SUB`, `PT-BR MULTISUB`, and `iTA-KOR` chains.
+- Additional video/source/audio/container tokens are recognized, including `DVDRip`, `HDTV`, `BDMux`, `BDrmx`, `H254`, `OPUS`, `Mkv`, `SD`, `HD`, `60FPS`, `MULTISUB`, and `7RIP`.
+- Slash titles and language slashes are preserved correctly:
+  - `V/H/S`
+  - `V/H/S: Viral`
+  - `EN/FR/ES` and longer language chains no longer trigger path-basename truncation.
+- TV/anime/cartoon episode identity tokens are preserved:
+  - `S01E01`
+  - `S1E1`
+  - `1x02`
+  - `E01`
+  - `EP01`
+  - `OVA 01`
+
+### Probe Results
+
+The required 35-case probe was run before and after Phase 1.5:
+
+- Before: 3/35 passed, 32/35 failed.
+- After: 35/35 passed, 0/35 failed.
+
+The after-probe output is saved at `/tmp/elvern-title-parser-phase15-after.txt`.
+
+### 75k Diagnostic Comparison
+
+Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+
+Before baseline:
+
+- Total movie strings: 75,814
+- Suspected failures: 18,507
+- Suspected failure rate: 24.41%
+- Title over-trimmed primary pattern: 141
+
+After Phase 1.5:
+
+- Total movie strings: 75,814
+- Suspected failures: 16,727
+- Suspected failure rate: 22.06%
+- Title over-trimmed primary pattern: 92
+
+Delta:
+
+- Suspected failures: -1,780
+- Suspected failure rate: -2.35 percentage points
+- Title over-trimmed primary pattern: -49
+
+Primary failure pattern counts after Phase 1.5:
+
+- year extraction failed: 8,830
+- release group leaked: 4,008
+- language token leaked: 1,127
+- bracket metadata leaked: 850
+- video/source token leaked: 746
+- audio channel token leaked: 651
+- roman/number issue: 210
+- audio token leaked: 108
+- title over-trimmed: 92
+- suspicious parser output: 77
+- compound language token leaked: 14
+- fallback/low confidence: 7
+- subtitle token leaked: 6
+- poster candidate missing alternate spelling: 1
+
+### Remaining Weaknesses
+
+The remaining 75k suspected failures are intentionally not chased in this phase:
+
+- Year extraction remains difficult when title text contains multiple human names, date ranges, TV collections, or music-like descriptors.
+- Release-group heuristics still conservatively flag bracketed title-like text and some dash suffixes.
+- Long TV, anime, documentary, and collection strings can still contain source/video tokens.
+- Some language/subtitle token chains remain in mixed-format strings.
+- Broad heuristic perfection is out of scope; Phase 1.5 prioritizes deterministic parser safety and over-trim prevention.
+
+### Do Not Regress
+
+- Do not collapse dash-subtitle titles to the first word or franchise root.
+- Do not treat `DC` in LEGO/DC titles as director's cut metadata.
+- Do not strip `[REC]` or short leading bracket acronym titles.
+- Do not strip TV/anime episode identities such as `S01E01`, `1x02`, `EP01`, or `OVA 01`.
+- Do not use path basename logic on slash titles such as `V/H/S` or language chains such as `EN/FR/ES`.
+- Do not chase 100% heuristic pass rate by increasing over-trim risk.
 
 ## Over-Trim Regression After Phase 1
 
