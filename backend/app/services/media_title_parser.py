@@ -11,6 +11,8 @@ BRACKET_GROUP_PATTERN = re.compile(r"(\(|\[|\{)([^()\[\]{}]*)(\)|\]|\})")
 RIGHT_SIDE_SPLIT_PATTERN = re.compile(r"\s+-\s*")
 ROMAN_NUMERAL_PATTERN = re.compile(r"^(?:ii|iii|iv|v|vi|vii|viii|ix|x)$", re.IGNORECASE)
 TITLE_PARSER_VERSION = "movie-title-pipeline-2026-04-23-pattern-hardening"
+BRACKET_OPEN_TO_CLOSE = {"(": ")", "[": "]", "{": "}"}
+BRACKET_CLOSE_TO_OPEN = {close: open_ for open_, close in BRACKET_OPEN_TO_CLOSE.items()}
 SMART_CASE_STOPWORDS = {
     "a",
     "an",
@@ -133,6 +135,7 @@ METADATA_TOKENS = {
     "web-dl",
     "web",
     "hdtv",
+    "vhsrip",
     "hdlight",
     "remux",
     "bdmux",
@@ -170,6 +173,7 @@ METADATA_TOKENS = {
     "mp4",
     "mp3",
     "mpeg2",
+    "mpeg-2",
     "matte",
     "ntsc",
     "opus",
@@ -216,6 +220,8 @@ METADATA_TOKENS = {
     "untouched",
     "upscaled",
     "aienhanced",
+    "aiupscale",
+    "originalaudio",
 }
 STRONG_METADATA_TOKENS = {
     "2160p",
@@ -229,10 +235,14 @@ STRONG_METADATA_TOKENS = {
     "brrip",
     "dvdrip",
     "dvd-rip",
+    "dvd5",
+    "dvd9",
     "webrip",
     "webdl",
     "web-dl",
     "hdtv",
+    "tvrip",
+    "vhsrip",
     "remux",
     "bdmux",
     "bdremux",
@@ -240,6 +250,7 @@ STRONG_METADATA_TOKENS = {
     "bdrmx",
     "x264",
     "x265",
+    "xvid",
     "h264",
     "h265",
     "h254",
@@ -513,6 +524,15 @@ def _parse_title_candidate(
         working = EMPTY_BRACKET_PATTERN.sub(" ", working)
         warnings.append("empty_bracket_group_removed")
         signal_score += 1
+
+    working, bracket_hints = _remove_metadata_bracket_spans(working, parsed_year=parsed_year)
+    if bracket_hints["parsed_year"] is not None and parsed_year is None:
+        parsed_year = bracket_hints["parsed_year"]
+    edition_markers.extend([str(marker) for marker in bracket_hints["edition_markers"]])
+    warnings.extend([str(marker) for marker in bracket_hints["warnings"]])
+    if bracket_hints["removed_metadata_bracket_suffix"]:
+        removed_metadata_bracket_suffix = True
+    signal_score += int(bracket_hints["signal_score"])
 
     def replace_bracket_group(match: re.Match[str]) -> str:
         nonlocal parsed_year
@@ -892,7 +912,12 @@ def _candidate_basename(value: str) -> str:
         return raw.split("\\")[-1]
     if "/" not in raw:
         return raw
-    if _contains_language_slash(raw) or _looks_like_slash_title(raw) or _looks_like_spaced_slash_title(raw):
+    if (
+        _contains_language_slash(raw)
+        or _looks_like_slash_title(raw)
+        or _looks_like_spaced_slash_title(raw)
+        or _slash_is_inside_bracket_span(raw)
+    ):
         return raw
     parts = raw.split("/")
     if raw.startswith("/") or len(parts) > 2 or re.search(r"\.[a-z0-9]{2,5}$", parts[-1], re.IGNORECASE):
@@ -933,6 +958,208 @@ def _looks_like_spaced_slash_title(value: str) -> bool:
     if "／" in raw:
         return True
     return re.search(r"(?<!^)\((?:19\d{2}|20\d{2})/(?:19\d{2}|20\d{2})\)", raw) is not None
+
+
+def _slash_is_inside_bracket_span(value: str) -> bool:
+    raw = str(value or "")
+    for span in _find_bracket_spans(raw):
+        if "/" in str(span["content"]):
+            return True
+    return False
+
+
+def _find_bracket_spans(value: str) -> list[dict[str, object]]:
+    spans: list[dict[str, object]] = []
+    stack: list[tuple[str, int]] = []
+    for index, char in enumerate(str(value or "")):
+        if char in BRACKET_OPEN_TO_CLOSE:
+            stack.append((char, index))
+            continue
+        if char not in BRACKET_CLOSE_TO_OPEN:
+            continue
+        expected_open = BRACKET_CLOSE_TO_OPEN[char]
+        matching_index = next(
+            (position for position in range(len(stack) - 1, -1, -1) if stack[position][0] == expected_open),
+            None,
+        )
+        if matching_index is None:
+            continue
+        open_char, start = stack[matching_index]
+        del stack[matching_index:]
+        spans.append(
+            {
+                "start": start,
+                "end": index + 1,
+                "content_start": start + 1,
+                "content_end": index,
+                "content": value[start + 1 : index],
+                "open": open_char,
+                "close": char,
+            }
+        )
+    return sorted(spans, key=lambda span: (int(span["start"]), int(span["end"])))
+
+
+def _remove_metadata_bracket_spans(value: str, *, parsed_year: int | None) -> tuple[str, dict[str, object]]:
+    spans = _find_bracket_spans(value)
+    if not spans:
+        return value, {
+            "warnings": [],
+            "edition_markers": [],
+            "parsed_year": None,
+            "signal_score": 0,
+            "removed_metadata_bracket_suffix": False,
+        }
+
+    remove_ranges: list[tuple[int, int]] = []
+    warnings: list[str] = []
+    edition_markers: list[str] = []
+    detected_year = parsed_year
+    signal_score = 0
+    removed_metadata_bracket_suffix = False
+
+    for span in sorted(spans, key=lambda item: (-(int(item["end"]) - int(item["start"])), int(item["start"]))):
+        start = int(span["start"])
+        end = int(span["end"])
+        if any(existing_start <= start and end <= existing_end for existing_start, existing_end in remove_ranges):
+            continue
+        content = collapse_spaces(str(span["content"]))
+        if not content:
+            remove_ranges.append((start, end))
+            warnings.append("empty_bracket_group_removed")
+            signal_score += 1
+            continue
+        if _looks_like_leading_bracket_title_acronym(content, value[end:]) or content == "18+":
+            continue
+
+        year_pair_match = re.fullmatch(r"(19\d{2}|20\d{2})/(?:19\d{2}|20\d{2})", content)
+        if year_pair_match:
+            if detected_year is None:
+                detected_year = _coerce_year(year_pair_match.group(1))
+            remove_ranges.append((start, end))
+            warnings.append("year_block_removed")
+            signal_score += 1
+            continue
+
+        classification = _classify_segment(content)
+        leading_bracket_group = not value[:start].strip(" -")
+        trailing_bracket_group = not value[end:].strip(" -")
+        prefix_before_bracket = value[:start].strip(" -")
+        if classification["kind"] == "year":
+            if detected_year is None:
+                detected_year = _coerce_year(content)
+            remove_ranges.append((start, end))
+            warnings.append("year_block_removed")
+            signal_score += 1
+            continue
+        if classification["kind"] == "edition":
+            edition_markers.extend([str(marker) for marker in classification["edition_markers"]])
+            remove_ranges.append((start, end))
+            warnings.append("edition_block_extracted")
+            signal_score += 1
+            continue
+        if leading_bracket_group and _looks_like_leading_release_group_prefix(content, value[end:]):
+            remove_ranges.append((start, end))
+            warnings.append("bracket_release_group_removed")
+            warnings.append("metadata_bracket_suffix_removed")
+            signal_score += 1
+            continue
+        if (
+            trailing_bracket_group
+            and prefix_before_bracket
+            and (
+                _looks_like_release_group_span_content(content)
+                or _looks_like_trailing_release_group_after_metadata(content, prefix_before_bracket)
+            )
+        ):
+            remove_ranges.append((start, end))
+            warnings.append("bracket_release_group_removed")
+            warnings.append("metadata_bracket_suffix_removed")
+            removed_metadata_bracket_suffix = True
+            signal_score += 1
+            continue
+        if classification["kind"] in {"metadata", "id"} or _looks_like_metadata_bracket_span(content):
+            if classification["edition_markers"]:
+                edition_markers.extend([str(marker) for marker in classification["edition_markers"]])
+                warnings.append("edition_block_extracted")
+            if detected_year is None and classification.get("parsed_year") is not None:
+                detected_year = _coerce_year(classification.get("parsed_year"))
+            remove_ranges.append((start, end))
+            warnings.append(
+                "metadata_id_block_removed"
+                if classification["kind"] == "id"
+                else "metadata_block_removed"
+            )
+            warnings.append("bracket_metadata_removed")
+            warnings.append("metadata_bracket_suffix_removed")
+            removed_metadata_bracket_suffix = True
+            signal_score += 2 if classification["kind"] == "id" else 1
+
+    if not remove_ranges:
+        return value, {
+            "warnings": [],
+            "edition_markers": [],
+            "parsed_year": None if parsed_year == detected_year else detected_year,
+            "signal_score": 0,
+            "removed_metadata_bracket_suffix": False,
+        }
+
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in sorted(remove_ranges):
+        if start < cursor:
+            continue
+        pieces.append(value[cursor:start])
+        pieces.append(" ")
+        cursor = end
+    pieces.append(value[cursor:])
+    return collapse_spaces("".join(pieces)), {
+        "warnings": _dedupe_strings(warnings),
+        "edition_markers": _dedupe_strings(edition_markers),
+        "parsed_year": None if parsed_year == detected_year else detected_year,
+        "signal_score": signal_score,
+        "removed_metadata_bracket_suffix": removed_metadata_bracket_suffix,
+    }
+
+
+def _looks_like_release_group_span_content(content: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]", "", str(content or "").lower())
+    if not compact:
+        return False
+    if compact in {"ytsmx", "ytstvmx", "yify", "rarbg"} or (compact.startswith("yts") and compact.endswith("mx")):
+        return True
+    known = {re.sub(r"[^a-z0-9]", "", value.lower()) for value in KNOWN_LOWERCASE_LEADING_RELEASE_GROUPS}
+    return compact in known or _looks_like_bare_release_group_token(compact)
+
+
+def _looks_like_metadata_bracket_span(content: str) -> bool:
+    cleaned = collapse_spaces(content)
+    if not cleaned:
+        return False
+    tokens = _classification_tokens(cleaned)
+    profile = _segment_metadata_profile(tokens)
+    if tokens and len(tokens) <= 3:
+        numeric_parts = {
+            _canonical_metadata_token(token)
+            for token in tokens
+            if _canonical_metadata_token(token)
+        }
+        if numeric_parts and numeric_parts.issubset({"0", "1", "2", "5", "6", "7", "8"}):
+            return True
+    if profile["strong_hits"] >= 1 and profile["suffix_hits"] + profile["numeric_channel_hits"] >= max(1, len(tokens) - 1):
+        return True
+    if profile["strong_hits"] >= 1 and _contains_compound_localization_token(cleaned):
+        return True
+    if _contains_metadata_id(cleaned):
+        return True
+    compact = re.sub(r"[^a-z0-9]", "", cleaned.lower())
+    if any(token in compact for token in ("bdmux", "bdremux", "webrip", "webdl", "bluray", "brrip")) and any(
+        _token_is_localization_metadata(token) for token in tokens
+    ):
+        return True
+    if re.search(r"(?i)\b(?:gb|gib|mb|mib)\b", cleaned) and any(char.isdigit() for char in cleaned):
+        return True
+    return False
 
 
 def _extract_meaningful_title_number_hints(
@@ -1215,6 +1442,15 @@ def _cut_non_title_suffix(value: str) -> tuple[str, bool, dict[str, object]]:
     rule_markers: list[str] = []
     cut_any = False
 
+    release_year_cut = _release_year_metadata_suffix_cut(working)
+    if release_year_cut is not None:
+        title_prefix, suffix = release_year_cut
+        removed_suffix_fragments.append(suffix)
+        rule_markers.append("standalone_release_year_cut")
+        rule_markers.append("technical_suffix_density_cut")
+        working = title_prefix
+        cut_any = True
+
     if " - " in working:
         left, right = working.split(" - ", 1)
         right_classification = _classify_segment(right)
@@ -1240,6 +1476,8 @@ def _cut_non_title_suffix(value: str) -> tuple[str, bool, dict[str, object]]:
         if boundary_info is None:
             break
         boundary, boundary_markers = boundary_info
+        if boundary <= 0:
+            break
         removed_suffix_fragments.append(" ".join(tokens[boundary:]))
         rule_markers.extend(boundary_markers)
         working = " ".join(tokens[:boundary]).strip(" -")
@@ -1250,6 +1488,92 @@ def _cut_non_title_suffix(value: str) -> tuple[str, bool, dict[str, object]]:
 
     suffix = " ".join(fragment for fragment in removed_suffix_fragments if fragment)
     return working, True, _suffix_parse_hints(suffix, *rule_markers)
+
+
+def _release_year_metadata_suffix_cut(value: str) -> tuple[str, str] | None:
+    working = collapse_spaces(value).strip(" -")
+    if not working:
+        return None
+    for match in YEAR_PATTERN.finditer(working):
+        year_text = match.group(1)
+        if _year_match_is_collection_or_date_range(working, match):
+            continue
+        prefix = working[: match.start()].strip(" -")
+        suffix = working[match.end() :].strip(" -")
+        if not prefix or not suffix:
+            continue
+        if _suffix_contains_later_release_year_metadata(suffix):
+            continue
+        prefix_tokens = [
+            token
+            for token in _classification_tokens(prefix)
+            if token and not _token_is_suffix_metadata(token) and not _is_standalone_year(token)
+        ]
+        if not prefix_tokens:
+            continue
+        if _suffix_after_release_year_is_metadata(suffix):
+            if match.start() > 0 and not working[match.start() - 1].isspace():
+                prefix = prefix.rstrip("!.,_:")
+            return prefix, f"{year_text} {suffix}".strip()
+    return None
+
+
+def _suffix_contains_later_release_year_metadata(value: str) -> bool:
+    suffix = collapse_spaces(value).strip(" -")
+    if not suffix:
+        return False
+    for later_match in YEAR_PATTERN.finditer(suffix):
+        if _year_match_is_collection_or_date_range(suffix, later_match):
+            continue
+        later_suffix = suffix[later_match.end() :].strip(" -")
+        if later_suffix and _suffix_after_release_year_is_metadata(later_suffix):
+            return True
+    return False
+
+
+def _year_match_is_collection_or_date_range(value: str, match: re.Match[str]) -> bool:
+    start = match.start()
+    end = match.end()
+    before = value[max(0, start - 2) : start]
+    after = value[end : end + 8]
+    if "-" in before or re.match(r"\s*[-–]\s*(?:19\d{2}|20\d{2})", after):
+        return True
+    lowered = value.lower()
+    if re.search(r"\b(?:collection|saga|trilogy|quadrilogy|duology|anthology|franchise|movies?|films?|pack)\b", lowered):
+        suffix = value[end:].lower()
+        if re.match(r"\s*(?:the\s+)?criterion\s+collection\b", suffix):
+            return False
+        return True
+    return re.search(r"\b\d{1,2}[._ -]\d{1,2}[._ -](?:19\d{2}|20\d{2})\b", value) is not None
+
+
+def _suffix_after_release_year_is_metadata(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -")
+    if not cleaned:
+        return False
+    without_spans, hints = _remove_metadata_bracket_spans(cleaned, parsed_year=None)
+    if hints["signal_score"] > 0:
+        cleaned = without_spans
+    tokens = cleaned.split()
+    if not tokens:
+        return bool(hints["signal_score"])
+    metrics = _suffix_metadata_metrics(tokens)
+    if metrics["strong_hits"] >= 1 and metrics["metadata_hits"] >= 1:
+        return True
+    if any(_contains_compound_metadata_token(token) for token in tokens):
+        return True
+    if any(_contains_compound_localization_token(token) for token in tokens) and metrics["metadata_hits"] >= 1:
+        return True
+    if any(_token_is_subtitle_metadata(_canonical_metadata_token(token)) for token in tokens) and any(
+        _token_is_localization_metadata(_canonical_metadata_token(token)) for token in tokens
+    ):
+        return True
+    lowered = cleaned.lower()
+    if re.search(r"\b(?:no\s+language|no\s+sub(?:s|titles)?|open\s+matte|criterion\s+collection|original\s+audio|org\s+auds)\b", lowered):
+        return True
+    if re.search(r"\b(?:restored|remastered|uncut|explicit|alternate\s+version|open[- ]matte|upscaled|ai[- ]?enhanced)\b", lowered):
+        return metrics["metadata_hits"] >= 1 or any(_token_is_strong_metadata(_canonical_metadata_token(token)) for token in tokens)
+    return False
 
 
 def _metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None:
@@ -1273,6 +1597,11 @@ def _metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None
         ):
             return index, ["standalone_release_year_cut", "technical_suffix_density_cut"]
         if _is_metadata_boundary_token(tokens[index], current):
+            if index > 0 and suffix_metrics["strong_hits"] >= 1 and suffix_metrics["metadata_hits"] >= 1:
+                markers = ["technical_suffix_density_cut"]
+                if _contains_compound_localization_token(tokens[index]):
+                    markers.append("compound_language_suffix_removed")
+                return index, markers
             if index > 0 and suffix_metrics["strong_hits"] >= 1 and suffix_metrics["metadata_hits"] >= 2:
                 markers = ["technical_suffix_density_cut"]
                 if _contains_compound_localization_token(tokens[index]):
@@ -1988,7 +2317,7 @@ def _strip_trailing_year(value: str, *, parsed_year: int | None) -> tuple[str, i
 def _strip_trailing_metadata_tokens(value: str) -> tuple[str, bool]:
     tokens = collapse_spaces(value).split()
     removed_any = False
-    while tokens and _token_is_metadata(_canonical_metadata_token(tokens[-1])):
+    while len(tokens) > 1 and _token_is_metadata(_canonical_metadata_token(tokens[-1])):
         tokens.pop()
         removed_any = True
     return " ".join(tokens).strip(" -"), removed_any

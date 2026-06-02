@@ -24,14 +24,112 @@ Latest generated reports:
 - `/tmp/elvern-title-scrub-75k-phase16-failed-sample.txt`
 - `/tmp/elvern-title-scrub-75k-phase16-legacy-fast-summary.json`
 - `/tmp/elvern-title-scrub-75k-phase16-legacy-fast-summary.txt`
-- `/tmp/elvern-title-scrub-75k-phase17-before-report.json`
-- `/tmp/elvern-title-scrub-75k-phase17-before-summary.txt`
-- `/tmp/elvern-title-scrub-75k-phase17-before-failed-sample.txt`
-- `/tmp/elvern-title-scrub-75k-phase17-classified-report.json`
-- `/tmp/elvern-title-scrub-75k-phase17-classified-summary.txt`
-- `/tmp/elvern-title-scrub-75k-phase17-report.json`
-- `/tmp/elvern-title-scrub-75k-phase17-summary.txt`
-- `/tmp/elvern-title-scrub-75k-phase17-failed-sample.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-before-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-before-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-before-failed-sample.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-classified-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-classified-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase17-failed-sample.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-failed-sample.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-classified-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-classified-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-all-failed-results.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-manual-review-buckets.md`
+
+## Phase 1.8 Bracket Spans and Release-Year Grammar
+
+### Scope
+
+Phase 1.8 hardens deterministic parsing only. It adds no LLM/AI title scrubbing, performs no database writes, and does not batch-rescrub `media_items`. Frontend UI, playback, audio switching, subtitles, burn-in, Route2, native-HLS, adaptive behavior, cloud probing, age grouping, duplicate hiding, and library presentation behavior were not changed.
+
+### Parser Fixes
+
+- Added a balanced bracket-span parser for `()`, `[]`, and `{}` so nested or adjacent metadata spans can be removed without slicing across title text.
+- Preserved slash-heavy bracket metadata while preventing `/` inside brackets from being treated as a filesystem path separator.
+- Removed bracketed audio-channel spans such as `[5.1]` and compact release-group spans such as `[YTS.MX]`.
+- Added release-year grammar for `title year technical-suffix` cases, including glued year forms such as `Sposa!2026`, without stripping title-number years such as `Blade Runner 2049`.
+- Recognized more technical suffix tokens in strict contexts, including `TVRip`, `XviD`, `DVD5`, `DVD9`, and `VHSRip`.
+- Prevented one-word titles such as `Hybrid` from being erased just because the word can also appear in technical metadata.
+- Narrowed the collection/range guard so `Criterion Collection 1080p...` after a real release year can be treated as metadata, while collection/range examples remain review cases.
+
+### 75k Diagnostic Comparison
+
+Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+
+Phase 1.7 classifier run:
+
+- Total movie strings: 75,814
+- Legacy-style suspected failures: 14,896
+- TRUE failures: 10,756
+- Top TRUE patterns: bracket metadata `4,495`, release-year grammar `4,116`, source/video/codec token `1,369`, TRUE over-trim `623`
+
+Phase 1.8 classifier run:
+
+- Total movie strings: 75,814
+- Legacy-style suspected failures: 9,981
+- TRUE failures: 5,605
+- TRUE failure delta vs Phase 1.7: `-5,151`
+
+Phase 1.8 classification counts:
+
+- `PASS`: 64,806
+- `FALSE_POSITIVE_CLEAN_OUTPUT`: 3,617
+- `TRUE_FAIL_BRACKET_SPAN`: 3,147
+- `TRUE_FAIL_METADATA_SUFFIX`: 933
+- `EXPECTED_COLLECTION_OR_RANGE`: 920
+- `EXPECTED_EVENT_OR_SPORTS`: 866
+- `TRUE_FAIL_RELEASE_YEAR_GRAMMAR`: 787
+- `TRUE_FAIL_DASH_TITLE`: 373
+- `TRUE_FAIL_OVERTRIM_REAL`: 365
+
+Top TRUE failure patterns remaining:
+
+- bracket metadata: 3,147
+- clear release year was not parsed: 787
+- source/video/codec token: 657
+- compound metadata token: 548
+- lost dash title continuation: 373
+- lost episode identity: 235
+- release group: 214
+- compound language token: 180
+- metadata token suffix chain: 173
+- subtitle token suffix chain: 79
+
+### Fixed Examples
+
+- `Hybrid (2007) 720p WEB-DL x264 Eng Subs [Dual Audio] [Hindi DDP 2.0 - English DDP 5.1] Exclusive By -=!Dr.STAR!=-` parses as `Hybrid`, year `2007`.
+- `Aurore (2005) DVDRip x264 [French-AC3-5.1/Stereo] [English/French Subs] [Frankvjecy]` parses as `Aurore`, year `2005`.
+- `The.Brothers.Karamazov.1958.(Yul Brynner-Maria Schell).720p.x264-Classics` parses as `The Brothers Karamazov`, year `1958`.
+- `Il Padrone Sono Me 1955 ITA TVRip XviD` parses as `Il Padrone Sono Me`, year `1955`.
+- `I 600 Giorni Di Salò 1991 ITA SUB ITA DVD9` parses as `I 600 Giorni Di Salò`, year `1991`.
+- `Luciferina (2018) [1080p] [BluRay] [5.1] [YTS.MX]` parses as `Luciferina`, year `2018`.
+- `Dr. Dolittle 3 2006-ENG-SD-WEBRip-334MiB-AAC-x264 [PortalGoods]` parses as `Dr Dolittle 3`, year `2006`.
+- `Catch.Me.If.You.Can[2002]1080p.BRrip-aЯRo` parses as `Catch Me If You Can`, year `2002`.
+- `Chinese Zodiac 2012 Upscaled BluRay 2160p HDR10 HEVC DTS-HD MA 5.1 x265-E` parses as `Chinese Zodiac`, year `2012`.
+- `No.Country.for.Old.Men.2007.Criterion.Collection.1080p.Bluray.DDP5.1.HEVC.x265-BluBirD.mkv` parses as `No Country for Old Men`, year `2007`.
+
+### Review Buckets
+
+Manual review buckets were written to `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-manual-review-buckets.md`.
+
+Examples intentionally left for review:
+
+- collection/range packs such as `Essential Fellini - Criterion Collection (1950-1997) ...`;
+- director/cast parentheticals such as `Marshall (Hudlin, 2017)`;
+- sports/event/date strings where the title grammar is not a normal movie release-year pattern;
+- remaining bracket spans where a broader rule may over-trim alternate titles, anime batch identities, or collection names.
+
+### Do Not Regress
+
+- Do not use system `/tmp` for project scrub reports; write project scratch reports under `/home/sectum/Projects/Elvern/tmp`.
+- Do not treat collection/range/event buckets as automatic parser failures.
+- Do not strip one-word real titles because the word can also be technical metadata.
+- Do not strip `Blade Runner 2049`, `1917`, roman numerals, TV/anime episode identities, or slash title identity.
+- Do not chase 100% by widening bracket/span removal into cast, alternate-title, or collection text.
 
 ## Phase 1.7 TRUE Failure Classification and Targeted Parser Patch
 

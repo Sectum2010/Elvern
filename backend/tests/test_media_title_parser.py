@@ -122,6 +122,43 @@ PHASE17_DETERMINISTIC_CASES = [
     ("[moon] Interstellar 2014 WEBRip x264 AAC.mkv", "Interstellar", 2014),
     ("[18+] Diet of Sex 2014 DVDRip.mkv", "[18+] Diet of Sex", 2014),
 ]
+PHASE18_DETERMINISTIC_CASES = [
+    (
+        "Hybrid (2007) 720p WEB-DL x264 Eng Subs [Dual Audio] [Hindi DDP 2.0 - English DDP 5.1] Exclusive By -=!Dr.STAR!=-",
+        "Hybrid",
+        2007,
+    ),
+    (
+        "Aurore (2005) DVDRip x264 [French-AC3-5.1/Stereo] [English/French Subs] [Frankvjecy]",
+        "Aurore",
+        2005,
+    ),
+    (
+        "The.Brothers.Karamazov.1958.(Yul Brynner-Maria Schell).720p.x264-Classics",
+        "The Brothers Karamazov",
+        1958,
+    ),
+    ("Il Padrone Sono Me 1955 ITA TVRip XviD", "Il Padrone Sono Me", 1955),
+    ("I 600 Giorni Di Salò 1991 ITA SUB ITA DVD9", "I 600 Giorni Di Salò", 1991),
+    ("Luciferina (2018) [1080p] [BluRay] [5.1] [YTS.MX]", "Luciferina", 2018),
+    (
+        "Dr. Dolittle 3 2006-ENG-SD-WEBRip-334MiB-AAC-x264 [PortalGoods]",
+        "Dr Dolittle 3",
+        2006,
+    ),
+    ("Catch.Me.If.You.Can[2002]1080p.BRrip-aЯRo", "Catch Me If You Can", 2002),
+    (
+        "Chinese Zodiac 2012 Upscaled BluRay 2160p HDR10 HEVC DTS-HD MA 5.1 x265-E",
+        "Chinese Zodiac",
+        2012,
+    ),
+    (
+        "No.Country.for.Old.Men.2007.Criterion.Collection.1080p.Bluray.DDP5.1.HEVC.x265-BluBirD.mkv",
+        "No Country for Old Men",
+        2007,
+    ),
+    ("Moana 2 (2024) [1080p] [WEBRip] [5.1]", "Moana 2", 2024),
+]
 
 
 @pytest.mark.parametrize("case", FIXTURE_CASES, ids=[case["name"] for case in FIXTURE_CASES])
@@ -198,6 +235,25 @@ def test_phase15_deterministic_scrubbing_examples(
     PHASE17_DETERMINISTIC_CASES,
 )
 def test_phase17_true_failure_classifier_examples(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int | None,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    PHASE18_DETERMINISTIC_CASES,
+)
+def test_phase18_bracket_spans_and_release_year_grammar(
     original_filename: str,
     expected_title: str,
     expected_year: int | None,
