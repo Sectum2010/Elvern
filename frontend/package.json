@@ -8,16 +8,21 @@
     "build": "vite build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "ui:qa": "playwright test",
+    "ui:qa:headed": "playwright test --headed",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "serve": "node server.mjs"
   },
   "dependencies": {
     "hls.js": "^1.6.15",
+    "lucide-react": "^1.17.0",
+    "motion": "^12.40.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

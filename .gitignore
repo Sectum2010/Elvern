@@ -41,6 +41,9 @@ htmlcov/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/ui-screenshots/
 
 # Desktop helper build outputs
 clients/desktop-vlc-opener/artifacts/
@@ -52,12 +55,14 @@ dev/artifacts/
 
 # Insider-only archives / unpublished analysis exports
 tmp/
+data/
 
 # Local/private security review notes
 docs/security-audit-2026-05-08.md
 
 # Editor / local agent state
 .vscode/
+.agents/
 .claude/
 .codex/
 .idea/
