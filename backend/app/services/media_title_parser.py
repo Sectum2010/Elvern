@@ -31,6 +31,53 @@ SMART_CASE_STOPWORDS = {
 }
 SMART_CASE_CONTRACTION_SUFFIXES = {"d", "ll", "m", "re", "s", "t", "ve"}
 SMART_CASE_ACRONYMS = {"dc", "f1", "jfk", "lego", "rec", "vhs"}
+DC_TITLE_CONTEXT_FOLLOWERS = {
+    "animated",
+    "batman",
+    "catwoman",
+    "comic",
+    "comics",
+    "girls",
+    "hero",
+    "heroes",
+    "justice",
+    "league",
+    "shazam",
+    "showcase",
+    "super",
+    "superman",
+    "universe",
+}
+DC_TITLE_CONTEXT_PRECEDERS = {"ac", "lego"}
+DC_EDITION_CONTEXT_NEIGHBORS = {
+    "cut",
+    "extended",
+    "roadshow",
+    "theatrical",
+    "unrated",
+    "version",
+}
+KNOWN_LOWERCASE_LEADING_RELEASE_GROUPS = {
+    "cheerfultomato",
+    "frankvjecy",
+    "kris",
+    "mirc",
+    "mircrew",
+    "moon",
+    "mrpanda",
+    "paso77",
+    "portalgoods",
+    "prof",
+    "qx r",
+    "qxr",
+    "sbin k",
+    "sbink",
+    "sev",
+    "tgx",
+    "ukbandit",
+    "wesley",
+    "yts",
+}
 
 METADATA_TOKENS = {
     "2160p",
@@ -499,6 +546,9 @@ def _parse_title_candidate(
             return " "
         if classification["kind"] in {"metadata", "id"} and not preserve_leading_bracket_title:
             removed_metadata_bracket_suffix = True
+            if classification["edition_markers"]:
+                edition_markers.extend(classification["edition_markers"])
+                warnings.append("edition_block_extracted")
             if parsed_year is None and classification.get("parsed_year") is not None:
                 parsed_year = _coerce_year(classification.get("parsed_year"))
             warnings.append(
@@ -590,7 +640,11 @@ def _parse_title_candidate(
         warnings.append("trailing_year_removed")
         signal_score += 1
 
-    working, stripped_editions = _strip_edition_suffixes(working)
+    working, stripped_editions = _strip_edition_suffixes(
+        working,
+        parsed_year=parsed_year,
+        suffix_context=bool(edition_markers),
+    )
     if stripped_editions:
         edition_markers.extend(stripped_editions)
         warnings.append("edition_suffix_extracted")
@@ -779,6 +833,7 @@ def _prepare_candidate_text(value: object) -> str:
     basename = _candidate_basename(str(value))
     without_extension = re.sub(r"\.[a-z0-9]{2,5}$", "", basename, flags=re.IGNORECASE)
     normalized = unicodedata.normalize("NFKC", without_extension)
+    normalized = normalized.replace("\\'", "'").replace('\\"', '"')
     normalized = normalized.replace("\u00a0", " ")
     normalized = normalized.replace("–", "-").replace("—", "-")
     normalized = re.sub(r"[._]+", " ", normalized)
@@ -789,7 +844,7 @@ def _prepare_candidate_text(value: object) -> str:
 
 def _candidate_basename(value: str) -> str:
     raw = str(value or "")
-    if "\\" in raw:
+    if _looks_like_windows_path(raw):
         return raw.split("\\")[-1]
     if "/" not in raw:
         return raw
@@ -799,6 +854,20 @@ def _candidate_basename(value: str) -> str:
     if raw.startswith("/") or len(parts) > 2 or re.search(r"\.[a-z0-9]{2,5}$", parts[-1], re.IGNORECASE):
         return parts[-1]
     return raw
+
+
+def _looks_like_windows_path(value: str) -> bool:
+    if not value or "\\" not in value:
+        return False
+    if re.match(r"^[a-zA-Z]:\\", value):
+        return True
+    if value.startswith("\\\\"):
+        return True
+    parts = [part for part in value.split("\\") if part]
+    if len(parts) < 3:
+        return False
+    final_part = parts[-1]
+    return re.search(r"\.[a-z0-9]{2,5}$", final_part, re.IGNORECASE) is not None
 
 
 def _contains_language_slash(value: str) -> bool:
@@ -1017,6 +1086,8 @@ def _classify_segment(value: str) -> dict[str, object]:
     for edition_key, pattern in EDITION_PATTERNS:
         if edition_key in edition_markers:
             cleaned_without_editions = pattern.sub(" ", cleaned_without_editions)
+    if "director's cut" in edition_markers:
+        cleaned_without_editions = re.sub(r"(?i)\bdc\b", " ", cleaned_without_editions)
     cleaned_without_editions = collapse_spaces(cleaned_without_editions).strip(" -")
     if edition_markers and not cleaned_without_editions:
         return {"kind": "edition", "edition_markers": edition_markers, "parsed_year": None}
@@ -1408,6 +1479,14 @@ def _suffix_parse_hints(value: str, *rule_markers: str) -> dict[str, object]:
     edition_markers = _segment_edition_markers(working)
     year_matches = list(YEAR_PATTERN.finditer(working))
     parsed_year = int(year_matches[0].group(1)) if year_matches else None
+    for marker in _dc_abbreviation_edition_markers(
+        working,
+        parsed_year=parsed_year,
+        metadata_seen=True,
+        suffix_context=True,
+    ):
+        if marker not in edition_markers:
+            edition_markers.append(marker)
     marker_priority = {
         "standalone_release_year_cut": 0,
         "technical_suffix_density_cut": 1,
@@ -1440,7 +1519,7 @@ def _starts_edition_suffix(tokens: list[str], index: int) -> bool:
     if not suffix:
         return False
     prefix = collapse_spaces(" ".join(tokens[:index])).lower()
-    if prefix in {"the", "a", "an"}:
+    if not prefix or prefix in {"the", "a", "an"}:
         return False
     for _edition_key, pattern in EDITION_PATTERNS:
         match = pattern.match(suffix)
@@ -1505,7 +1584,13 @@ def _looks_like_dash_suffix_junk_segment(value: str) -> bool:
 
 def _looks_like_leading_release_group_prefix(content: str, remainder: str) -> bool:
     cleaned = collapse_spaces(content).strip(" -")
-    if not cleaned or not _looks_like_bare_release_group_token(cleaned):
+    if not cleaned:
+        return False
+    release_group_like = _looks_like_bare_release_group_token(cleaned) or cleaned.lower() in KNOWN_LOWERCASE_LEADING_RELEASE_GROUPS
+    if not release_group_like:
+        if cleaned.islower() and re.fullmatch(r"[a-z0-9]{3,16}", cleaned):
+            release_group_like = True
+    if not release_group_like:
         return False
     if cleaned.isupper() and len(cleaned) <= 4:
         return False
@@ -1572,6 +1657,87 @@ def _classification_tokens(value: str) -> list[str]:
     return tokens
 
 
+def _ordered_context_tokens(value: str) -> list[str]:
+    return [
+        _canonical_metadata_token(token)
+        for token in re.findall(r"[A-Za-z0-9]+", str(value or ""))
+        if _canonical_metadata_token(token)
+    ]
+
+
+def _has_meaningful_title_prefix(tokens: list[str], index: int) -> bool:
+    for token in tokens[:index]:
+        if token in {"a", "an", "the"}:
+            continue
+        if _is_standalone_year(token) or _token_is_suffix_metadata(token):
+            continue
+        return True
+    return False
+
+
+def _is_dc_title_context(tokens: list[str], index: int) -> bool:
+    if index < 0 or index >= len(tokens) or tokens[index] != "dc":
+        return False
+    previous_token = tokens[index - 1] if index > 0 else ""
+    next_token = tokens[index + 1] if index + 1 < len(tokens) else ""
+    following_token = tokens[index + 2] if index + 2 < len(tokens) else ""
+    if previous_token in DC_TITLE_CONTEXT_PRECEDERS:
+        return True
+    if next_token in DC_TITLE_CONTEXT_FOLLOWERS:
+        return True
+    if next_token == "super" and following_token in {"girl", "girls", "hero", "heroes"}:
+        return True
+    return False
+
+
+def _is_directors_cut_abbreviation_context(
+    tokens: list[str],
+    index: int,
+    *,
+    parsed_year: int | None,
+    metadata_seen: bool,
+    suffix_context: bool,
+) -> bool:
+    if index < 0 or index >= len(tokens) or tokens[index] != "dc":
+        return False
+    if _is_dc_title_context(tokens, index):
+        return False
+
+    previous_token = tokens[index - 1] if index > 0 else ""
+    next_token = tokens[index + 1] if index + 1 < len(tokens) else ""
+    if _is_standalone_year(previous_token):
+        return True
+    if previous_token in DC_EDITION_CONTEXT_NEIGHBORS:
+        return True
+    if next_token in DC_EDITION_CONTEXT_NEIGHBORS:
+        return True
+    if next_token and _token_is_strong_metadata(next_token):
+        return True
+    if index == len(tokens) - 1 and _has_meaningful_title_prefix(tokens, index):
+        return bool(parsed_year is not None or metadata_seen or suffix_context)
+    return False
+
+
+def _dc_abbreviation_edition_markers(
+    value: str,
+    *,
+    parsed_year: int | None,
+    metadata_seen: bool = False,
+    suffix_context: bool = False,
+) -> list[str]:
+    tokens = _ordered_context_tokens(value)
+    for index, token in enumerate(tokens):
+        if token == "dc" and _is_directors_cut_abbreviation_context(
+            tokens,
+            index,
+            parsed_year=parsed_year,
+            metadata_seen=metadata_seen,
+            suffix_context=suffix_context,
+        ):
+            return ["director's cut"]
+    return []
+
+
 def _token_is_metadata(token: str) -> bool:
     if token in METADATA_TOKENS:
         return True
@@ -1622,15 +1788,63 @@ def _segment_edition_markers(value: str) -> list[str]:
     for edition_key, pattern in EDITION_PATTERNS:
         if pattern.search(value) and edition_key not in markers:
             markers.append(edition_key)
+    dc_markers = _dc_abbreviation_edition_markers(
+        value,
+        parsed_year=_coerce_year(next(iter(YEAR_PATTERN.findall(str(value or ""))), None)),
+        suffix_context=False,
+    )
+    for marker in dc_markers:
+        if marker not in markers:
+            markers.append(marker)
     return markers
 
 
-def _strip_edition_suffixes(value: str) -> tuple[str, list[str]]:
+def _strip_dc_abbreviation_suffix(
+    value: str,
+    *,
+    parsed_year: int | None,
+    suffix_context: bool,
+) -> tuple[str, bool]:
+    working = collapse_spaces(value).strip(" -")
+    tokens = _ordered_context_tokens(working)
+    if not tokens or tokens[-1] != "dc":
+        return working, False
+    if not _is_directors_cut_abbreviation_context(
+        tokens,
+        len(tokens) - 1,
+        parsed_year=parsed_year,
+        metadata_seen=False,
+        suffix_context=suffix_context,
+    ):
+        return working, False
+    prefix = re.sub(r"(?i)(?:^|[\s._-]+)\bdc\b\s*$", "", working).strip(" -")
+    if not prefix or prefix.lower() in {"the", "a", "an"}:
+        return working, False
+    return prefix, True
+
+
+def _strip_edition_suffixes(
+    value: str,
+    *,
+    parsed_year: int | None = None,
+    suffix_context: bool = False,
+) -> tuple[str, list[str]]:
     working = collapse_spaces(value).strip(" -")
     extracted: list[str] = []
     changed = True
     while changed and working:
         changed = False
+        working_after_dc, stripped_dc = _strip_dc_abbreviation_suffix(
+            working,
+            parsed_year=parsed_year,
+            suffix_context=suffix_context,
+        )
+        if stripped_dc:
+            working = working_after_dc
+            if "director's cut" not in extracted:
+                extracted.insert(0, "director's cut")
+            changed = True
+            continue
         for edition_key, pattern in EDITION_PATTERNS:
             match = list(pattern.finditer(working))
             if not match:

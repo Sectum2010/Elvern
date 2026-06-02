@@ -19,6 +19,97 @@ Latest generated reports:
 - `/tmp/elvern-title-scrub-75k-phase15-report.json`
 - `/tmp/elvern-title-scrub-75k-phase15-summary.txt`
 - `/tmp/elvern-title-scrub-75k-phase15-failed-sample.txt`
+- `/tmp/elvern-title-scrub-75k-phase16-report.json`
+- `/tmp/elvern-title-scrub-75k-phase16-summary.txt`
+- `/tmp/elvern-title-scrub-75k-phase16-failed-sample.txt`
+- `/tmp/elvern-title-scrub-75k-phase16-legacy-fast-summary.json`
+- `/tmp/elvern-title-scrub-75k-phase16-legacy-fast-summary.txt`
+
+## Phase 1.6 DC Context and Title-Preservation Patch
+
+### Scope
+
+Phase 1.6 fixes narrowly-scoped deterministic parser regressions found after the Phase 1.5 scrubber run. It does not attempt to chase a 100% heuristic pass rate.
+
+No LLM/AI title scrubbing was added. No database rows were rewritten or batch-rescrubbed. Frontend UI, playback, audio switching, subtitles, burn-in, Route2, native-HLS, adaptive behavior, cloud probing, age grouping, and duplicate hiding were not changed.
+
+### Root Causes
+
+- `DC` needed context-aware handling. It should be stripped as `director's cut` when it follows a real title, year, edition marker, or technical metadata, but it must remain in DC franchise titles.
+- Metadata brackets such as `(DC 1080p BluRay...)` were removed as technical metadata, but their `director's cut` edition marker was not being carried into `edition_identity`.
+- A literal escaped apostrophe, as in `Monster\\'s Ball`, was treated as a Windows path separator before normalization. That turned the title into a broken basename and could hang the large diagnostic path.
+- Edition suffix stripping needed an article-only guard so titles like `The Final Cut` and `Director's Cut` are not collapsed to `The` or an empty title.
+
+### Fixed Examples
+
+- `Kingdom.of.Heaven.DC.Roadshow.Version.2005...` parses as:
+  - display title: `Kingdom of Heaven`
+  - year: `2005`
+  - edition: `roadshow|director's cut`
+- `Legend 1985 DC.mkv`, `Troy DC 2004...`, and `Movie.Name.2000.DC...` now strip `DC` only as a director's-cut edition marker.
+- `Monster\\'s Ball [Unrated DC].2001...` now parses as:
+  - display title: `Monster's Ball`
+  - year: `2001`
+  - edition: `unrated|director's cut`
+- `(DC 1080p BluRay...)` technical brackets now carry the `director's cut` marker before the bracket is removed.
+
+### Preserved Guards
+
+- DC franchise titles remain title text, not edition metadata:
+  - `LEGO DC - Shazam! Magic and Monsters`
+  - `LEGO DC Batman - Family Matters`
+  - `LEGO DC Comics Super Heroes - Justice League - Cosmic Clash`
+  - `DC League of Super-Pets`
+  - `DC Showcase Catwoman`
+- Slash titles and language slash chains remain protected:
+  - `V/H/S`
+  - `V/H/S: Viral`
+  - `The Hunt/Jagten`
+- Dash subtitles remain protected when technical metadata follows:
+  - `Avatar - The Way of Water`
+  - `Dune - Part Two`
+  - `Venom - The Last Dance`
+  - `F1 - The Movie`
+- TV/anime episode identity tokens remain protected:
+  - `S01E01`
+  - `S1E1`
+  - `1x02`
+  - `E01`
+  - `EP01`
+  - `OVA 01`
+
+### 75k Diagnostic Comparison
+
+Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+
+Comparable legacy heuristic summary after Phase 1.6:
+
+- Total movie strings: 75,814
+- Suspected failures: 16,646
+- Suspected failure rate: 21.96%
+- Title over-trimmed primary pattern: 88
+
+Delta from Phase 1.5:
+
+- Suspected failures: -81
+- Suspected failure rate: -0.10 percentage points
+- Title over-trimmed primary pattern: -4
+
+The stricter Phase 1.6 supplemental diagnostic also completed without hanging:
+
+- Total movie strings: 75,814
+- Suspected failures: 20,417
+- DC director-context primary pattern: 2
+
+The remaining DC-context flags are ambiguous collection/date-range strings such as `EX RM DC 1984-2015`; they are intentionally left for later deterministic parser work rather than broadening `DC` inference.
+
+### Do Not Regress
+
+- Do not strip `DC` from DC franchise titles.
+- Do not leave `DC` in display titles when it is clearly a director's-cut suffix or technical-bracket marker.
+- Do not treat escaped punctuation inside titles as path separators.
+- Do not collapse article-plus-edition titles such as `The Final Cut`.
+- Do not chase the remaining 75k heuristic failures by increasing over-trim risk.
 
 ## Phase 1.5 75k Deterministic Hardening
 

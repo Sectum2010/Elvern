@@ -177,6 +177,212 @@ def test_phase15_negative_guards_preserve_titles_and_episode_identity(
     assert parsed["suspicious_output"] is False
 
 
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year", "expected_edition_markers"),
+    [
+        (
+            "Kingdom.of.Heaven.DC.Roadshow.Version.2005.2160p.UHD.Blu-ray.Remux.DV.HDR.HEVC.TrueHD.Atmos.7.1-CiNEPHiLES.mkv",
+            "Kingdom of Heaven",
+            2005,
+            {"director's cut", "roadshow"},
+        ),
+        ("Legend 1985 DC.mkv", "Legend", 1985, {"director's cut"}),
+        ("Troy DC 2004 1080p BluRay x264.mkv", "Troy", 2004, {"director's cut"}),
+        ("Movie.Name.2000.DC.1080p.BluRay.x264-GROUP.mkv", "Movie Name", 2000, {"director's cut"}),
+        (
+            "Monster\\'s Ball [Unrated DC].2001.BRRip.XviD.AC3[5.1]-VLiS",
+            "Monster's Ball",
+            2001,
+            {"unrated", "director's cut"},
+        ),
+        ("Spawn (1997) (DC 1080p BluRay x265).mkv", "Spawn", 1997, {"director's cut"}),
+    ],
+)
+def test_dc_abbreviation_stripped_only_in_directors_cut_context(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+    expected_edition_markers: set[str],
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert expected_edition_markers.issubset(set(str(parsed["edition_identity"]).split("|")))
+    assert "DC" not in parsed["display_title"]
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        ("LEGO DC - Shazam! Magic and Monsters (2020).1080p.H265.EAC3.6CH-MNKYDDL", "LEGO DC - Shazam! Magic and Monsters", 2020),
+        ("LEGO DC Batman - Family Matters (2019).1080p.H265.EAC3.6CH-MNKYDDL", "LEGO DC Batman - Family Matters", 2019),
+        (
+            "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash (2016).1080p.H265.EAC3.6CH-MNKYDDL",
+            "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash",
+            2016,
+        ),
+        ("DC.League.of.Super-Pets.2022.1080p.BluRay.x264-iFT_EniaHD", "DC League of Super-Pets", 2022),
+        ("DC.Showcase.Catwoman.2011.1080p.BluRay.x264.mkv", "DC Showcase Catwoman", 2011),
+    ],
+)
+def test_dc_franchise_titles_preserved(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["edition_identity"] == "standard"
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        ("V/H/S (2012) (1080p BluRay x265 10bit EAC3 5.1 Ghost) [QxR]", "V/H/S", 2012),
+        ("V/H/S: Viral (2014) (1080p BluRay x265 10bit EAC3 5.1 Ghost) [QxR]", "V/H/S: Viral", 2014),
+        ("The Hunt/Jagten (2012) (1080p BluRay x265 8-bit AC-3 5.1) [WeSLeY]", "The Hunt/Jagten", 2012),
+        ("/mnt/media/Movie.2020.1080p.mkv", "Movie", 2020),
+        (r"C:\Media\Movie.2020.1080p.mkv", "Movie", 2020),
+    ],
+)
+def test_slash_titles_not_treated_as_paths(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        (
+            "Avatar - The Way of Water (2022) IMAX 1080p 10bit Bluray x265 HEVC [Org DDP 5.1 Hindi + DDP 7.1 Atmos English] MSubs ~ TombDoc",
+            "Avatar - The Way of Water",
+            2022,
+        ),
+        ("Dune - Part Two (2024) AV1 1080p 7RIP", "Dune - Part Two", 2024),
+        (
+            "Venom - The Last Dance (2024) 1080p 10bit Bluray x265 HEVC [Org DD 5.1 Hindi + DD 5.1 English] ESubs ~ TombDoc",
+            "Venom - The Last Dance",
+            2024,
+        ),
+        (
+            "F1 - The Movie (2025) EUR 1080p 10bit Bluray x265 HEVC [Org DDP 5.1 Atmos Hindi + DDP 7.1 Atmos English] MSubs ~ TombDoc",
+            "F1 - The Movie",
+            2025,
+        ),
+        (
+            "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash (2016).1080p.H265.EAC3.6CH-MNKYDDL",
+            "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash",
+            2016,
+        ),
+        ("The Texas Chainsaw Massacre - The Beginning (2006).1080p.BluRay.x264.mkv", "The Texas Chainsaw Massacre - The Beginning", 2006),
+        ("Aliens - The Big Think (2016).1080p.WEB-DL.x264.mkv", "Aliens - The Big Think", 2016),
+    ],
+)
+def test_dash_subtitle_preserved_before_metadata(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title"),
+    [
+        ("My.Show.S01E01.1080p.WEB-DL.x264-GROUP.mkv", "My Show S01E01"),
+        ("My.Show.S1E1.720p.HDTV.x264-GROUP.mkv", "My Show S1E1"),
+        ("My.Show.1x02.1080p.WEB-DL.x265-GROUP.mkv", "My Show 1x02"),
+        ("Anime.Title.E01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title E01"),
+        ("Anime.Title.EP01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title EP01"),
+        ("Anime.Title.Ep.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title Ep 01"),
+        ("Anime.Title.Episode.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title Episode 01"),
+        ("Anime.Title.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title OVA 01"),
+        ("Anime.Title.OAD.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title OAD 01"),
+        ("Anime.Title.Special.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title Special 01"),
+    ],
+)
+def test_tv_anime_episode_tokens_preserved(original_filename: str, expected_title: str) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] is None
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year", "expected_edition"),
+    [
+        ("The Final Cut (2004) WEBRip 1080p HEVC AAC ITA ENG - Lullozzo", "The Final Cut", 2004, "standard"),
+        ("Final Cut (1998).1080p.WEB-DL.x264.mkv", "Final Cut", 1998, "standard"),
+        ("Director's Cut (2000).1080p.WEB-DL.x264.mkv", "Director's Cut", 2000, "standard"),
+        ("Troy Director's Cut (2004).1080p.BluRay.x264.mkv", "Troy", 2004, "director's cut"),
+        ("Saw Director's Cut 2004 1080p BluRay x264.mkv", "Saw", 2004, "director's cut"),
+        (
+            "Kingdom.of.Heaven.DC.Roadshow.Version.2005.2160p.UHD.Blu-ray.Remux.DV.HDR.HEVC.TrueHD.Atmos.7.1-CiNEPHiLES.mkv",
+            "Kingdom of Heaven",
+            2005,
+            "roadshow|director's cut",
+        ),
+    ],
+)
+def test_the_final_cut_not_collapsed_to_article(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+    expected_edition: str,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["edition_identity"] == expected_edition
+    assert parsed["display_title"] not in {"The", "A", "An"}
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    [
+        ("A Beautiful Mind (2001) (2160p x265 10bit HDR UHD BD Atmos) [Prof]", "A Beautiful Mind", 2001),
+        ("The Nice Guys (2016) (2160p x265 10bit HDR UHD BD Atmos) [Prof]", "The Nice Guys", 2016),
+        ("Spirited Away (2001) (1080p BluRay x265 10-bit Eng 5.1 + Jap 5.1 AAC) [WeSLeY]", "Spirited Away", 2001),
+        ("Ponyo (2008) (1080p BluRay x265 10-bit Eng 5.1 + Jap 5.1 AAC) [WeSLeY]", "Ponyo", 2008),
+        ("Kill Bill Vol. 2 (2004) (2160p x265 10bit HDR UHD BD DTS-HD MA 5.1) [Prof]", "Kill Bill Vol 2", 2004),
+        ("[moon] Ted 2 2015 WEBRip x264 AAC.mkv", "Ted 2", 2015),
+        ("[moon] Project X 2012 WEBRip x264 AAC.mkv", "Project X", 2012),
+        ("[REC].2007.1080p.BluRay.x264.mkv", "[REC]", 2007),
+        ("[18+] Monamour 2006 DVDRip.mkv", "[18+] Monamour", 2006),
+    ],
+)
+def test_bracket_release_groups_removed_only_in_suffix_context(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
 def test_trusted_clean_title_beats_dirty_filename_when_available() -> None:
     parsed = parse_media_title(
         title="Ocean's Eleven",
