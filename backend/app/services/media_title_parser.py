@@ -123,6 +123,53 @@ GENRE_DESCRIPTOR_TOKENS = {
     "war",
     "western",
 }
+POST_COUNTRY_YEAR_DESCRIPTOR_TOKENS = {
+    *GENRE_DESCRIPTOR_TOKENS,
+    "budget",
+    "classic",
+    "cult",
+    "dual",
+    "eng",
+    "english",
+    "erotic",
+    "explicit",
+    "hardcoded",
+    "korean",
+    "multi",
+    "no",
+    "sci",
+    "sub",
+    "subs",
+    "version",
+}
+COUNTRY_YEAR_WORDS = {
+    "argentina",
+    "australia",
+    "belgium",
+    "brazil",
+    "canada",
+    "china",
+    "denmark",
+    "france",
+    "germany",
+    "greece",
+    "hong",
+    "india",
+    "italy",
+    "japan",
+    "kong",
+    "mexico",
+    "netherlands",
+    "philippines",
+    "poland",
+    "spain",
+    "sweden",
+    "taiwan",
+    "uk",
+    "ukraine",
+    "usa",
+    "us",
+}
 
 METADATA_TOKENS = {
     "2160p",
@@ -385,6 +432,16 @@ SUBTITLE_METADATA_TOKENS = {
     "subbed",
     "subs",
 }
+LEADING_DECORATOR_PREFIXES = {
+    "charlie chaplin",
+    "clint eastwood",
+    "elvis presley",
+    "humphrey bogart",
+    "james bond",
+    "john wayne",
+    "kirk douglas",
+    "walt disney",
+}
 AUDIO_CHANNEL_TOKEN_PATTERN = re.compile(r"(?:[257]\.1|[257]ch|\d+ch|dd[257]\.1|ddp[257]\.1|\d\.\d)")
 EDITION_PATTERNS = (
     ("roadshow", re.compile(r"\broadshow(?:\s+version)?\b", re.IGNORECASE)),
@@ -552,6 +609,36 @@ def _parse_title_candidate(
         warnings.append("empty_bracket_group_removed")
         signal_score += 1
 
+    working, star_year_normalized = _normalize_star_year_blocks(working)
+    if star_year_normalized:
+        warnings.append("star_year_block_normalized")
+        signal_score += 1
+
+    explicit_year_cut = _explicit_year_block_suffix_cut(working)
+    if explicit_year_cut is not None:
+        working = str(explicit_year_cut["title"])
+        parsed_year = _coerce_year(explicit_year_cut["parsed_year"]) or parsed_year
+        edition_markers.extend([str(marker) for marker in explicit_year_cut.get("edition_markers") or []])
+        warnings.extend([str(marker) for marker in explicit_year_cut["warnings"]])
+        signal_score += int(explicit_year_cut["signal_score"])
+
+    if filename_like:
+        early_release_year_cut = _release_year_metadata_suffix_cut(working)
+        if early_release_year_cut is not None:
+            title_prefix, suffix = early_release_year_cut
+            suffix_hints = _suffix_parse_hints(
+                suffix,
+                "standalone_release_year_cut",
+                "technical_suffix_density_cut",
+            )
+            edition_markers.extend(suffix_hints["edition_markers"])
+            if parsed_year is None and suffix_hints["parsed_year"] is not None:
+                parsed_year = suffix_hints["parsed_year"]
+            warnings.extend([str(marker) for marker in suffix_hints.get("rule_markers") or []])
+            warnings.append("metadata_suffix_removed")
+            signal_score += 2
+            working = title_prefix
+
     working, bracket_hints = _remove_metadata_bracket_spans(working, parsed_year=parsed_year)
     if bracket_hints["parsed_year"] is not None and parsed_year is None:
         parsed_year = bracket_hints["parsed_year"]
@@ -560,6 +647,18 @@ def _parse_title_candidate(
     if bracket_hints["removed_metadata_bracket_suffix"]:
         removed_metadata_bracket_suffix = True
     signal_score += int(bracket_hints["signal_score"])
+
+    if "country_year_block_removed" in warnings:
+        working, stripped_country_suffix = _strip_post_country_year_descriptor_suffix(working)
+        if stripped_country_suffix:
+            warnings.append("post_country_year_descriptor_suffix_removed")
+            signal_score += 1
+
+    working, stripped_leading_release_group_bracket = _strip_leading_release_group_bracket_prefix(working)
+    if stripped_leading_release_group_bracket:
+        warnings.append("bracket_release_group_removed")
+        warnings.append("metadata_bracket_suffix_removed")
+        signal_score += 1
 
     def replace_bracket_group(match: re.Match[str]) -> str:
         nonlocal parsed_year
@@ -590,6 +689,13 @@ def _parse_title_candidate(
             warnings.append("edition_block_extracted")
             signal_score += 1
             return " "
+        country_year = _country_year_bracket_year(content)
+        if country_year is not None and working[: match.start()].strip(" -"):
+            if parsed_year is None:
+                parsed_year = country_year
+            warnings.append("country_year_block_removed")
+            signal_score += 1
+            return " "
         leading_bracket_group = not working[: match.start()].strip(" -")
         if leading_bracket_group and _looks_like_leading_release_group_prefix(
             content,
@@ -599,9 +705,9 @@ def _parse_title_candidate(
             warnings.append("metadata_bracket_suffix_removed")
             signal_score += 1
             return " "
-        preserve_leading_bracket_title = leading_bracket_group and _looks_like_leading_bracket_title_acronym(
-            content,
-            working[match.end() :],
+        preserve_leading_bracket_title = leading_bracket_group and (
+            _looks_like_leading_bracket_title_acronym(content, working[match.end() :])
+            or content.upper() == "REC"
         )
         trailing_bracket_group = not working[match.end() :].strip(" -")
         prefix_before_bracket = working[: match.start()].strip(" -")
@@ -647,6 +753,25 @@ def _parse_title_candidate(
         if updated_working == working:
             break
         working = updated_working
+
+    working, stripped_trailing_credit = _strip_trailing_post_year_credit_suffix(
+        working,
+        parsed_year=parsed_year,
+        allow_dash_person_suffix=removed_metadata_bracket_suffix,
+    )
+    if stripped_trailing_credit:
+        warnings.append("post_year_credit_suffix_removed")
+        signal_score += 1
+
+    working, stripped_dash_genre = _strip_trailing_dash_genre_descriptor(working)
+    if stripped_dash_genre:
+        warnings.append("dash_genre_descriptor_removed")
+        signal_score += 1
+
+    working, stripped_leading_credit = _strip_leading_credit_prefix(working, parsed_year=parsed_year)
+    if stripped_leading_credit:
+        warnings.append("leading_credit_prefix_removed")
+        signal_score += 1
 
     if filename_like:
         release_year_cut = _release_year_metadata_suffix_cut(working)
@@ -727,7 +852,7 @@ def _parse_title_candidate(
             signal_score += 1
 
     if filename_like:
-        working, cut_suffix, suffix_hints = _cut_non_title_suffix(working)
+        working, cut_suffix, suffix_hints = _cut_non_title_suffix(working, parsed_year=parsed_year)
         if cut_suffix:
             edition_markers.extend(suffix_hints["edition_markers"])
             if parsed_year is None and suffix_hints["parsed_year"] is not None:
@@ -1049,6 +1174,340 @@ def _find_bracket_spans(value: str) -> list[dict[str, object]]:
     return sorted(spans, key=lambda span: (int(span["start"]), int(span["end"])))
 
 
+def _normalize_star_year_blocks(value: str) -> tuple[str, bool]:
+    updated = re.sub(r"\*(19\d{2}|20\d{2})\*", r"(\1)", value)
+    return updated, updated != value
+
+
+def _explicit_year_block_suffix_cut(value: str) -> dict[str, object] | None:
+    working = collapse_spaces(value).strip(" -")
+    if not working:
+        return None
+    for span in _find_bracket_spans(working):
+        start = int(span["start"])
+        end = int(span["end"])
+        prefix = working[:start].strip(" -")
+        suffix = working[end:].strip(" -")
+        if not prefix:
+            continue
+        content = collapse_spaces(str(span["content"]))
+        parsed_year: int | None = None
+        title_prefix = prefix
+        warnings: list[str] = []
+        if _is_standalone_year(content):
+            parsed_year = _coerce_year(content)
+            if not suffix or not _post_year_suffix_is_stripworthy(suffix):
+                continue
+            warnings.extend(["year_block_removed", "metadata_suffix_removed"])
+        else:
+            country_year = _country_year_bracket_year(content)
+            if country_year is not None:
+                parsed_year = country_year
+                if suffix and not _post_country_year_suffix_is_stripworthy(suffix):
+                    continue
+                warnings.append("country_year_block_removed")
+                if suffix:
+                    warnings.append("post_country_year_descriptor_suffix_removed")
+            else:
+                director_year = _director_year_parenthetical(content)
+                if director_year is not None and (not suffix or _post_year_suffix_is_stripworthy(suffix)):
+                    parsed_year = director_year
+                    warnings.append("director_year_block_removed")
+                    if suffix:
+                        warnings.append("metadata_suffix_removed")
+                else:
+                    alternate = _alternate_title_year_parenthetical(content)
+                    if alternate is None:
+                        continue
+                    alternate_title, alternate_year = alternate
+                    if suffix and not _post_year_suffix_is_stripworthy(suffix):
+                        continue
+                    parsed_year = alternate_year
+                    title_prefix = f"{prefix} ({alternate_title})"
+                    warnings.append("alternate_title_year_block_extracted")
+                    if suffix:
+                        warnings.append("metadata_suffix_removed")
+        if parsed_year is None:
+            continue
+        suffix_hints = _suffix_parse_hints(suffix, "technical_suffix_density_cut") if suffix else {
+            "edition_markers": [],
+            "rule_markers": [],
+        }
+        return {
+            "title": collapse_spaces(title_prefix).strip(" -"),
+            "parsed_year": parsed_year,
+            "warnings": _dedupe_strings([*warnings, "technical_suffix_density_cut"] if suffix else warnings),
+            "edition_markers": suffix_hints["edition_markers"],
+            "signal_score": 2 if suffix else 1,
+        }
+    return None
+
+
+def _country_year_bracket_year(content: str) -> int | None:
+    cleaned = collapse_spaces(content).strip(" -")
+    match = re.fullmatch(
+        r"(?i)(?P<year>19\d{2}|20\d{2})\s*(?:[-+/]|and)\s*(?P<countries>[A-Za-z][A-Za-z .,'&+-]{1,80})",
+        cleaned,
+    )
+    if match is None:
+        match = re.fullmatch(
+            r"(?i)(?P<countries>[A-Za-z][A-Za-z .,'&+-]{1,80})\s*(?:[-+/]|and)\s*(?P<year>19\d{2}|20\d{2})",
+            cleaned,
+        )
+    if match is None:
+        return None
+    countries = collapse_spaces(match.group("countries")).strip(" -+")
+    if not countries or YEAR_PATTERN.search(countries):
+        return None
+    tokens = [
+        token
+        for token in re.findall(r"[A-Za-z]+", countries)
+        if token.lower() not in {"and"}
+    ]
+    if not tokens or len(tokens) > 8:
+        return None
+    if not all(token.lower() in COUNTRY_YEAR_WORDS for token in tokens):
+        return None
+    return _coerce_year(match.group("year"))
+
+
+def _alternate_title_year_parenthetical(content: str) -> tuple[str, int] | None:
+    cleaned = collapse_spaces(content).strip(" -")
+    match = re.fullmatch(r"(.+?)\s*[-,]\s*(19\d{2}|20\d{2})", cleaned)
+    if match is None:
+        return None
+    alternate = collapse_spaces(match.group(1)).strip(" -")
+    if not alternate or _looks_like_genre_descriptor(alternate) or _looks_like_metadata_bracket_span(alternate):
+        return None
+    if len(_meaningful_title_tokens_for_suffix(alternate)) < 1:
+        return None
+    return alternate, int(match.group(2))
+
+
+def _post_year_suffix_is_stripworthy(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -_.,)")
+    if not cleaned:
+        return False
+    if _label_suffix_is_metadata(cleaned):
+        return True
+    if _post_year_person_credit_suffix(cleaned):
+        return True
+    if _suffix_after_release_year_is_metadata(cleaned):
+        return True
+    if _metadata_suffix_core_is_strong(cleaned):
+        return True
+    if _post_year_plain_descriptor_prefix(cleaned) != cleaned and _metadata_suffix_core_is_strong(
+        _post_year_plain_descriptor_prefix(cleaned)
+    ):
+        return True
+    return False
+
+
+def _label_suffix_is_metadata(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -_.,)")
+    if not cleaned:
+        return False
+    return re.search(
+        r"(?i)\b(?:language|lang|subs?|with\s+subs?|hardcoded\s+[a-z]{2,3}\s+subs?|audio[-\s]+no\s+subs?|english\s+subs?|nl\s+subs?|srt|ptbr)\b",
+        cleaned,
+    ) is not None
+
+
+def _post_year_person_credit_suffix(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -")
+    if not cleaned:
+        return False
+    if not (
+        _metadata_suffix_core_is_strong(cleaned)
+        or _contains_compound_metadata_token(cleaned)
+        or any(_token_is_strong_metadata(token) for token in _classification_tokens(cleaned))
+    ):
+        return False
+    first_piece = re.split(r"\b(?:1080p|720p|2160p|480p|h264|h265|x264|x265|ac\s*3|ac3|aac|dts|dolby|dvd|blu|web|brrip|bdrip)\b", cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+    first_piece = collapse_spaces(first_piece).strip(" -&")
+    if not first_piece:
+        return True
+    lowered = first_piece.lower()
+    if lowered in LEADING_DECORATOR_PREFIXES or lowered in {
+        "cartoon",
+        "cartoon movie",
+        "demo",
+        "james bond",
+        "moviesbyrizzo",
+        "mrpanda",
+        "nickarad",
+        "remastered",
+        "walt disney",
+    }:
+        return True
+    return _looks_like_person_credit_phrase(first_piece)
+
+
+def _post_year_plain_descriptor_prefix(value: str) -> str:
+    working = collapse_spaces(value).strip(" -")
+    updated = re.sub(r"(?i)^(?:\d+(?:st|nd|rd|th)\s+anniv(?:ersary)?|anniversary|remastered|uncut|nc-17|english\s+version|eng(?:lish)?|dual\s+[a-z ]+|cartoon(?:\s+movie)?|walt\s+disney|james\s+bond)\b[\s:-]*", "", working).strip(" -")
+    return collapse_spaces(updated)
+
+
+def _post_country_year_suffix_is_stripworthy(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -_.,)")
+    if not cleaned:
+        return False
+    if _post_year_suffix_is_stripworthy(cleaned):
+        return True
+    without_brackets = BRACKET_GROUP_PATTERN.sub(" ", cleaned)
+    tokens = [
+        _canonical_metadata_token(token)
+        for token in re.findall(r"[A-Za-z0-9]+", without_brackets)
+        if _canonical_metadata_token(token)
+    ]
+    if not tokens or YEAR_PATTERN.search(cleaned):
+        return False
+    if len(tokens) > 12:
+        return False
+    if any(token in GENRE_DESCRIPTOR_TOKENS for token in tokens):
+        return True
+    return all(token in POST_COUNTRY_YEAR_DESCRIPTOR_TOKENS for token in tokens)
+
+
+def _strip_post_country_year_descriptor_suffix(value: str) -> tuple[str, bool]:
+    working = collapse_spaces(value).strip(" -")
+    if not working:
+        return working, False
+    tokens = working.split()
+    for index in range(1, len(tokens)):
+        suffix = " ".join(tokens[index:])
+        if _post_country_year_suffix_is_stripworthy(suffix):
+            prefix = " ".join(tokens[:index]).strip(" -")
+            if prefix:
+                return prefix, True
+    return working, False
+
+
+def _strip_leading_credit_prefix(value: str, *, parsed_year: int | None) -> tuple[str, bool]:
+    if parsed_year is None:
+        return value, False
+    working = collapse_spaces(value).strip(" -")
+    if not working:
+        return working, False
+    match = re.match(r"^(.{2,80}?)\s*-\s*(.+)$", working)
+    if match is None:
+        return working, False
+    left = collapse_spaces(match.group(1)).strip(" -")
+    right = collapse_spaces(match.group(2)).strip(" -")
+    if not left or not right:
+        return working, False
+    if not _looks_like_credit_prefix(left):
+        return working, False
+    if _looks_like_genre_descriptor(right):
+        return working, False
+    right_tokens = _meaningful_title_tokens_for_suffix(right)
+    if len(right_tokens) < 2 and not right_tokens[:1] == ["20000"]:
+        return working, False
+    return right, True
+
+
+def _looks_like_credit_prefix(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -")
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered in LEADING_DECORATOR_PREFIXES:
+        return True
+    return False
+
+
+def _strip_leading_release_group_bracket_prefix(value: str) -> tuple[str, bool]:
+    working = collapse_spaces(value).strip(" -")
+    match = re.match(r"^\[([^\[\]]{2,40})\]\s+(.+)$", working)
+    if match is None:
+        return working, False
+    content = collapse_spaces(match.group(1))
+    if _looks_like_leading_bracket_title_acronym(content, match.group(2)) or content == "18+":
+        return working, False
+    if not (
+        _looks_like_release_group_span_content(content)
+        or _looks_like_metadata_bracket_span(content)
+        or content.lower() in KNOWN_LOWERCASE_LEADING_RELEASE_GROUPS
+    ):
+        return working, False
+    remainder = collapse_spaces(match.group(2)).strip(" -")
+    if not remainder:
+        return working, False
+    return remainder, True
+
+
+def _strip_trailing_dash_genre_descriptor(value: str) -> tuple[str, bool]:
+    working = collapse_spaces(value).strip(" -")
+    if " - " not in working:
+        return working, False
+    left, right = working.rsplit(" - ", 1)
+    if not left or not right:
+        return working, False
+    if not _looks_like_genre_descriptor(right):
+        return working, False
+    return left.strip(" -"), True
+
+
+def _strip_trailing_post_year_credit_suffix(
+    value: str,
+    *,
+    parsed_year: int | None,
+    allow_dash_person_suffix: bool,
+) -> tuple[str, bool]:
+    if parsed_year is None:
+        return value, False
+    working = collapse_spaces(value).strip(" -")
+    if not working:
+        return working, False
+    updated = re.sub(r"\s*[\[(](?:cast|credits?|actors?)[\])]\s*$", "", working, flags=re.IGNORECASE).strip(" -")
+    if updated and updated != working:
+        return updated, True
+    spans = _find_bracket_spans(working)
+    if spans:
+        last = spans[-1]
+        if int(last["end"]) == len(working):
+            content = collapse_spaces(str(last["content"]))
+            prefix = working[: int(last["start"])].strip(" -")
+            if allow_dash_person_suffix and prefix and _looks_like_person_credit_phrase(content):
+                return prefix, True
+    if allow_dash_person_suffix and " - " in working:
+        left, right = working.rsplit(" - ", 1)
+        if left and _looks_like_person_credit_phrase(right):
+            return left.strip(" -"), True
+    return working, False
+
+
+def _looks_like_person_credit_phrase(value: str) -> bool:
+    pieces = [
+        collapse_spaces(piece).strip(" -")
+        for piece in re.split(r"\s*(?:&|,|\band\b)\s*", value)
+        if collapse_spaces(piece).strip(" -")
+    ]
+    if not pieces or len(pieces) > 4:
+        return False
+    return all(_looks_like_compact_person_name(piece) for piece in pieces)
+
+
+def _looks_like_compact_person_name(value: str) -> bool:
+    tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ'’.-]+", value)
+    if not tokens or len(tokens) > 3:
+        return False
+    lowered = [_canonical_metadata_token(token) for token in tokens]
+    if any(token in SMART_CASE_STOPWORDS or _token_is_metadata(token) for token in lowered):
+        return False
+    return all(token[:1].isupper() or token.isupper() for token in tokens)
+
+
+def _meaningful_title_tokens_for_suffix(value: str) -> list[str]:
+    result: list[str] = []
+    for token in _classification_tokens(value):
+        if not token or _is_standalone_year(token) or _token_is_suffix_metadata(token):
+            continue
+        result.append(token)
+    return result
+
+
 def _remove_metadata_bracket_spans(value: str, *, parsed_year: int | None) -> tuple[str, dict[str, object]]:
     spans = _find_bracket_spans(value)
     if not spans:
@@ -1078,7 +1537,7 @@ def _remove_metadata_bracket_spans(value: str, *, parsed_year: int | None) -> tu
             warnings.append("empty_bracket_group_removed")
             signal_score += 1
             continue
-        if _looks_like_leading_bracket_title_acronym(content, value[end:]) or content == "18+":
+        if _looks_like_leading_bracket_title_acronym(content, value[end:]) or content.upper() == "REC" or content == "18+":
             continue
 
         year_pair_match = re.fullmatch(r"(19\d{2}|20\d{2})/(?:19\d{2}|20\d{2})", content)
@@ -1105,6 +1564,14 @@ def _remove_metadata_bracket_spans(value: str, *, parsed_year: int | None) -> tu
             edition_markers.extend([str(marker) for marker in classification["edition_markers"]])
             remove_ranges.append((start, end))
             warnings.append("edition_block_extracted")
+            signal_score += 1
+            continue
+        country_year = _country_year_bracket_year(content)
+        if country_year is not None and prefix_before_bracket:
+            if detected_year is None:
+                detected_year = country_year
+            remove_ranges.append((start, end))
+            warnings.append("country_year_block_removed")
             signal_score += 1
             continue
         director_year = _director_year_parenthetical(content)
@@ -1202,6 +1669,8 @@ def _looks_like_metadata_bracket_span(content: str) -> bool:
         return False
     tokens = _classification_tokens(cleaned)
     profile = _segment_metadata_profile(tokens)
+    if tokens and len(tokens) <= 4 and any(_token_is_strong_metadata(token) for token in tokens):
+        return True
     if tokens and len(tokens) <= 10:
         if _contains_compound_localization_token(cleaned):
             return True
@@ -1288,7 +1757,7 @@ def _extract_meaningful_title_number_hints(
     if not prepared:
         return []
 
-    title_region, _cut_suffix, suffix_hints = _cut_non_title_suffix(prepared)
+    title_region, _cut_suffix, suffix_hints = _cut_non_title_suffix(prepared, parsed_year=parsed_year)
     effective_year = parsed_year or _coerce_year(suffix_hints["parsed_year"])
     title_region, stripped_year, _removed_year = _strip_trailing_year(
         title_region,
@@ -1382,7 +1851,7 @@ def _split_dash_title_continuation(value: str) -> tuple[str, str, dict[str, obje
     cleaned = collapse_spaces(value).strip(" -")
     if not cleaned:
         return None
-    prefix, cut_suffix, suffix_hints = _cut_non_title_suffix(cleaned)
+    prefix, cut_suffix, suffix_hints = _cut_non_title_suffix(cleaned, parsed_year=None)
     if not cut_suffix:
         return None
     prefix = collapse_spaces(prefix).strip(" -")
@@ -1396,7 +1865,7 @@ def _dash_genre_descriptor_suffix_hints(value: str) -> dict[str, object] | None:
     cleaned = collapse_spaces(value).strip(" -")
     if not cleaned:
         return None
-    prefix, cut_suffix, suffix_hints = _cut_non_title_suffix(cleaned)
+    prefix, cut_suffix, suffix_hints = _cut_non_title_suffix(cleaned, parsed_year=None)
     if not cut_suffix:
         return None
     if not _looks_like_genre_descriptor(prefix):
@@ -1476,7 +1945,7 @@ def _is_trusted_title_input(value: object) -> bool:
             if classification["kind"] in {"metadata", "id", "year"}:
                 return False
     if " - " in prepared:
-        _kept, cut_suffix, _suffix_hints = _cut_non_title_suffix(prepared)
+        _kept, cut_suffix, _suffix_hints = _cut_non_title_suffix(prepared, parsed_year=None)
         if cut_suffix:
             return False
     if _looks_like_metadata_contaminated_title(prepared):
@@ -1550,7 +2019,7 @@ def _classify_segment(value: str) -> dict[str, object]:
     return {"kind": "title", "edition_markers": edition_markers, "parsed_year": None}
 
 
-def _cut_non_title_suffix(value: str) -> tuple[str, bool, dict[str, object]]:
+def _cut_non_title_suffix(value: str, *, parsed_year: int | None = None) -> tuple[str, bool, dict[str, object]]:
     working = collapse_spaces(value).strip(" -")
     if not working:
         return working, False, {"edition_markers": [], "parsed_year": None, "rule_markers": []}
@@ -1589,7 +2058,10 @@ def _cut_non_title_suffix(value: str) -> tuple[str, bool, dict[str, object]]:
 
     while True:
         tokens = working.split()
-        boundary_info = _backward_metadata_suffix_boundary(tokens) or _metadata_suffix_boundary(tokens)
+        boundary_info = _backward_metadata_suffix_boundary(tokens, parsed_year=parsed_year) or _metadata_suffix_boundary(
+            tokens,
+            parsed_year=parsed_year,
+        )
         if boundary_info is None:
             break
         boundary, boundary_markers = boundary_info
@@ -1630,8 +2102,7 @@ def _release_year_metadata_suffix_cut(value: str) -> tuple[str, str] | None:
         if not prefix_tokens:
             continue
         if _suffix_after_release_year_is_metadata(suffix):
-            if match.start() > 0 and not working[match.start() - 1].isspace():
-                prefix = prefix.rstrip("!.,_:")
+            prefix = prefix.rstrip("!.,_:([")
             return prefix, f"{year_text} {suffix}".strip()
     return None
 
@@ -1693,6 +2164,8 @@ def _year_match_is_collection_or_date_range(value: str, match: re.Match[str]) ->
     lowered = value.lower()
     if re.search(r"\b(?:collection|saga|trilogy|quadrilogy|duology|anthology|franchise|movies|films|movie\s+pack|film\s+pack|pack)\b", lowered):
         suffix = value[end:].lower()
+        if re.match(r"\s*\(?\s*1001[ ._-]+movies?", suffix):
+            return False
         if re.match(r"\s*(?:the\s+)?criterion\s+collection\b", suffix):
             return False
         return True
@@ -1703,9 +2176,19 @@ def _suffix_after_release_year_is_metadata(value: str) -> bool:
     cleaned = collapse_spaces(value).strip(" -")
     if not cleaned:
         return False
+    if _label_suffix_is_metadata(cleaned):
+        return True
     ordered_tokens = _ordered_context_tokens(cleaned)
     if ordered_tokens and _looks_like_episode_identity_token(ordered_tokens[0]):
         return False
+    if len(ordered_tokens) >= 1 and all(
+        _token_is_localization_metadata(token) or _token_is_subtitle_metadata(token)
+        for token in ordered_tokens
+    ):
+        return True
+    without_plain_descriptors = _post_year_plain_descriptor_prefix(cleaned)
+    if without_plain_descriptors != cleaned and _metadata_suffix_core_is_strong(without_plain_descriptors):
+        return True
     without_descriptor_spans = _strip_leading_post_year_descriptor_spans(cleaned)
     if without_descriptor_spans != cleaned and _metadata_suffix_core_is_strong(without_descriptor_spans):
         return True
@@ -1785,6 +2268,8 @@ def _looks_like_post_year_descriptor_span(content: str) -> bool:
         return False
     if _looks_like_metadata_bracket_span(cleaned):
         return True
+    if re.search(r"(?i)\b1001\s+movies?(?:\s+you\s+must\s+see(?:\s+before\s+you\s+die)?)?\b", cleaned):
+        return True
     if _looks_like_genre_descriptor(cleaned):
         return True
     lowered = cleaned.lower()
@@ -1795,7 +2280,7 @@ def _looks_like_post_year_descriptor_span(content: str) -> bool:
     return False
 
 
-def _metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None:
+def _metadata_suffix_boundary(tokens: list[str], *, parsed_year: int | None = None) -> tuple[int, list[str]] | None:
     for index in range(len(tokens)):
         suffix_tokens = tokens[index:]
         current = _canonical_metadata_token(tokens[index])
@@ -1806,6 +2291,7 @@ def _metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None
             return index, ["edition_segment_extracted"]
         if (
             _is_standalone_year(current)
+            and (parsed_year is None or _coerce_year(current) == parsed_year)
             and suffix_metrics["metadata_hits"] >= 1
             and (
                 suffix_metrics["strong_hits"] >= 1
@@ -1837,7 +2323,7 @@ def _metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None
     return None
 
 
-def _backward_metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None:
+def _backward_metadata_suffix_boundary(tokens: list[str], *, parsed_year: int | None = None) -> tuple[int, list[str]] | None:
     if not tokens:
         return None
     suffix_start: int | None = None
@@ -1887,7 +2373,12 @@ def _backward_metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str
                     suffix_start = index
                     markers.append("technical_suffix_density_cut")
                     continue
-            if _is_standalone_year(canonical) and metadata_seen and _looks_like_release_year_boundary(tokens, index):
+            if (
+                _is_standalone_year(canonical)
+                and metadata_seen
+                and (parsed_year is None or _coerce_year(canonical) == parsed_year)
+                and _looks_like_release_year_boundary(tokens, index)
+            ):
                 suffix_start = index
                 markers.append("standalone_release_year_cut")
                 markers.append("technical_suffix_density_cut")
@@ -2212,7 +2703,7 @@ def _looks_like_dash_suffix_junk_segment(value: str) -> bool:
     if not cleaned:
         return False
     words = cleaned.split()
-    if len(words) > 3:
+    if len(words) >= 3:
         return False
     if len(words) == 1:
         word = words[0]
@@ -2681,10 +3172,20 @@ def _cleanup_title_text(value: str) -> str:
     working = collapse_spaces(value)
     working = EMPTY_BRACKET_PATTERN.sub(" ", working)
     working = working.replace(" - ", " - ").strip(" -")
+    working = _space_unspaced_alternate_title_dash(working)
+    working = re.sub(r"(?i)\bwho\s+s\b", "who's", working)
     working = re.sub(r"\s+([)\]}])", r"\1", working)
     working = re.sub(r"([([{])\s+", r"\1", working)
     working = collapse_spaces(working)
     return working
+
+
+def _space_unspaced_alternate_title_dash(value: str) -> str:
+    working = str(value or "")
+    pattern = re.compile(
+        r"(?P<left>(?:[A-Za-zÀ-ÖØ-öø-ÿ'’]+\s+){2,}[A-Za-zÀ-ÖØ-öø-ÿ'’]+)-(?P<right>[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’]+(?:\s+[A-Za-zÀ-ÖØ-öø-ÿ'’]+){2,})"
+    )
+    return pattern.sub(lambda match: f"{match.group('left')} - {match.group('right')}", working)
 
 
 def _merge_edition_identities(*values: object) -> str:

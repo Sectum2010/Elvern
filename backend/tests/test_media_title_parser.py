@@ -235,6 +235,49 @@ PHASE20_DETERMINISTIC_CASES = [
     ("Ocean's Thirteen-2007-BdRip-(1080p)-Italian AC3-English AAC-x264", "Ocean's Thirteen", 2007),
     ("Harold-And-Kumar-Go-To-White-Castle-2004-1080p-Blu-Ray-HEVC-x265-10-Bit-DDP5-1-Subs-KINGDOM", "Harold-And-Kumar-Go-To-White-Castle", 2004),
 ]
+PHASE21_DETERMINISTIC_CASES = [
+    ("Blade Runner 2049 (2017) AV1-10bit 1080p 7RIP", "Blade Runner 2049", 2017),
+    ("Wonder Woman 1984 (2020) 1080p BluRay x264", "Wonder Woman 1984", 2020),
+    ("Argentina 1985 (2022) 1080p WEB-DL x264", "Argentina 1985", 2022),
+    ("Death Race 2000 (1975) 1080p BluRay", "Death Race 2000", 1975),
+    (
+        "The African Queen (1951)-Humphrey Bogart & Katharine Hepburn-1080p-H264-AC 3 (DolbyDigital-5.1) ? nickarad",
+        "The African Queen",
+        1951,
+    ),
+    ("The Great Escape (1963) 1080p-H264-AAC", "The Great Escape", 1963),
+    ("Lady and the Tramp (1955) Cartoon movie-1080p-H264-AC 3", "Lady and the Tramp", 1955),
+    ("Blonde Death [1984 - USA] no budget cult classic", "Blonde Death", 1984),
+    ("Message from Space [1978 - Japan] (English Version) sci fi", "Message from Space", 1978),
+    ("Annie - The Virgin of Saint Tropez [1975 - France] (ENG) erotic drama", "Annie - The Virgin of Saint Tropez", 1975),
+    ("Black Tea [2024 - France + Taiwan] (DUAL Zho Fra) drama", "Black Tea", 2024),
+    ("Armadillo *2010* [BDRip.XviD-miguel] [ENG]", "Armadillo", 2010),
+    ("Trust.1990.(1001.Movies.You.Must.See).1080p.BRRip.x264-Classics", "Trust", 1990),
+    ("The Sound of Music 1965 45th Anniv (1080p Bluray)", "The Sound of Music", 1965),
+    ("Bobby (2006) Language:English-Russian, Subs:Spanish-Russian-English", "Bobby", 2006),
+    ("La viaccia - Le mauvais chemin (1961) lang: IT+SP with subs: FR+EN", "La viaccia - Le mauvais chemin", 1961),
+    ("The Hollywood Ten (John Berry, 1950)_Sub.srt.PTBR", "The Hollywood Ten", 1950),
+    ("Righteous.Kill[2008]BRrip-aЯRo", "Righteous Kill", 2008),
+    ("Persepolis (2007) [HDRip-AC3][Spanish]", "Persepolis", 2007),
+    ("Help! (1965)Mp-4-Blu-Ray Rip-1080p-AAC-DSD", "Help!", 1965),
+    ("[Blu-ray] Borsalino (1970) [Jacques Deray, Belmondo, Alain Delon]", "Borsalino", 1970),
+    ("[TVRip low quality] Madly / The Love Mates (1970) - Roger Kahane", "Madly / The Love Mates", 1970),
+    ("[FOUND] Terrore.Sul.Treno-Terror.On.A.Train.(1953).ITA-ENG", "Terrore Sul Treno - Terror On A Train", 1953),
+    ("Humphrey Bogart- The Caine Mutiny (1954) 1080p-H264", "The Caine Mutiny", 1954),
+    ("Kirk Douglas - 20000 League Under Sea [1954] 1080p-H264", "20000 League Under Sea", 1954),
+    ("Walt Disney - Corn Chips (1951) 1080p-H264", "Corn Chips", 1951),
+    ("JAMES BOND-From Russia With Love (1963) 1080p-H264", "From Russia With Love", 1963),
+    ("Mr. Ove - En Man Som Heter Ove (2015) 1080p H265", "Mr Ove - En Man Som Heter Ove", 2015),
+    ("Dirty Dancing 2 - Havana Nights (2004) WEBDL 1080p", "Dirty Dancing 2 - Havana Nights", 2004),
+    ("Psycho - Psyco.1960.iTA.ENG", "Psycho - Psyco", 1960),
+    ("Indovina chi viene a cena-Guess who.s coming to dinner (1967)", "Indovina chi viene a cena - Guess who's coming to dinner", 1967),
+    ("Cenerentola (Cinderella - 1950)[1080p]", "Cenerentola (Cinderella)", 1950),
+    ("Safe.-.2012.-.Blu-ray.-.1080p.-.x264", "Safe", 2012),
+    ("The Matrix (1999) DVDRip - NonyMovies", "The Matrix", 1999),
+    ("Harry Potter 2009 Open Matte 1080p WEBRip x265", "Harry Potter", 2009),
+    ("[REC].2007.1080p.BluRay.x264.mkv", "[REC]", 2007),
+    ("[18+] Diet of Sex 2014 DVDRip", "[18+] Diet of Sex", 2014),
+]
 
 
 @pytest.mark.parametrize("case", FIXTURE_CASES, ids=[case["name"] for case in FIXTURE_CASES])
@@ -368,6 +411,25 @@ def test_phase19_remaining_true_failure_examples(
     PHASE20_DETERMINISTIC_CASES,
 )
 def test_phase20_safe_true_failure_examples(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int | None,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    PHASE21_DETERMINISTIC_CASES,
+)
+def test_phase21_title_number_and_post_year_suffix_grammar(
     original_filename: str,
     expected_title: str,
     expected_year: int | None,

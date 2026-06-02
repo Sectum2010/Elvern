@@ -822,3 +822,103 @@ Remaining suspected failures are intentionally left for later deterministic pars
 - Do not use poster-candidate variants as display titles.
 - Do not write or rescrub the database without a separate explicit remediation phase.
 - Do not add LLM/AI title rewriting.
+
+## Phase 2.1 Post-Year and Country-Year Grammar
+
+### Scope
+
+Phase 2.1 is deterministic parser hardening plus project-`tmp` diagnostic classifier cleanup only. No LLM/AI title scrubbing was added. No database rows were rewritten or batch-rescrubbed. Frontend UI, playback, audio switching, subtitles, burn-in, Route2, native-HLS, adaptive behavior, cloud probing, age grouping, duplicate hiding, and library presentation behavior were not changed.
+
+### Bucket Plan and Probe
+
+The Phase 2.1 bucket plan was created before parser changes at `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-phase21-bucket-plan.md`.
+
+Probe files:
+
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase21-before.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase21-after.txt`
+
+Probe result:
+
+- Before: 27/91 passed.
+- After: 91/91 passed.
+
+### Parser Changes
+
+- Preserved four-digit title numbers before a distinct explicit release-year block, including `Blade Runner 2049`, `Wonder Woman 1984`, `Argentina 1985`, `Death Race 2000`, and `Equalizer 2000`.
+- Added post-year decorative credit plus technical-suffix grammar for rows such as Nickarad/actor-credit/Cartoon/Walt Disney suffixes after a parsed year.
+- Added country-year bracket grammar for `[1984 - USA]`, `[2024 - France + Taiwan]`, and equivalent parenthetical forms, while preserving `[REC]`, `[18+]`, and collection/range cases.
+- Added star-year grammar for `*YYYY*` release-year blocks.
+- Added `1001 Movies` and anniversary descriptor cleanup after release years.
+- Added label-based language/subtitle suffix cleanup for `Language:`, `Lang:`, `Subs:`, hardcoded subs, `audio-no subs`, `srt`, and `PTBR` suffixes.
+- Added compact year-plus-metadata suffix cleanup for `[2008]BRRip`, `(1955)Mp-4`, `[HDRip-AC3]`, and related technical chains.
+- Added narrow leading metadata/decorator cleanup for leading source brackets and known person/franchise/decorator prefixes only when a plausible title plus year follows.
+- Protected dash alternate titles and translation titles, including `Mr Ove - En Man Som Heter Ove`, `Dirty Dancing 2 - Havana Nights`, `Saw - L'enigmista`, `Psycho - Psyco`, and `Cenerentola (Cinderella)`.
+- Narrowed unspaced dash cleanup so real hyphen compounds such as `Half-Blood` and `Gold-II` remain intact.
+
+### Classifier Changes
+
+- Metadata suffix TRUE failures now require visible metadata in the display/base title, not just stale parser warnings.
+- Clean one-word titles such as `Apex`, `Alive`, `Thor`, `Grabbers`, `Hondo`, and `Psycho` are no longer automatically treated as over-trims.
+- Added expected handling for genre descriptor strips and non-single-movie collection/range/series/episode rows.
+- Preserved TRUE failures for visible bad outputs such as article-only titles, obvious metadata leakage, release-group leakage, and real dash-title loss.
+- Kept multi-movie packs and series rows in expected/review buckets instead of counting them as single-movie scrub failures.
+
+### 75k Diagnostic Comparison
+
+Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+
+Output files:
+
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase21-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase21-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase21-failed-sample.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase21-classified-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase21-classified-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase21-all-failed-results.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase21-manual-review-buckets.md`
+
+| Metric | Phase 2.0 | Phase 2.1 | Delta |
+| --- | ---: | ---: | ---: |
+| TRUE failures | 1,719 | 519 | -1,200 |
+| TRUE pass rate | 97.73% | 99.32% | +1.59 pp |
+| TRUE_FAIL_RELEASE_YEAR_GRAMMAR | 685 | 234 | -451 |
+| TRUE_FAIL_METADATA_SUFFIX | 550 | 165 | -385 |
+| TRUE_FAIL_OVERTRIM_REAL | 199 | 23 | -176 |
+| TRUE_FAIL_DASH_TITLE | 180 | 93 | -87 |
+| TRUE_FAIL_BRACKET_SPAN | 105 | 4 | -101 |
+| EXPECTED_COLLECTION_OR_RANGE | 2,636 | 4,055 | +1,419 |
+| FALSE_POSITIVE_CLEAN_OUTPUT | 4,488 | 3,368 | -1,120 |
+
+Phase 2.1 is below the 99% target threshold of about 758 TRUE failures by 239 failures.
+
+### Examples Fixed
+
+- `Blade Runner 2049 (2017) AV1-10bit 1080p 7RIP` -> `Blade Runner 2049`, year `2017`.
+- `Wonder Woman 1984 (2020) 1080p BluRay x264` -> `Wonder Woman 1984`, year `2020`.
+- `The African Queen (1951)-Humphrey Bogart & Katharine Hepburn-1080p-H264-AC 3 ... nickarad` -> `The African Queen`, year `1951`.
+- `Blonde Death [1984 - USA] no budget cult classic` -> `Blonde Death`, year `1984`.
+- `Black Tea [2024 - France + Taiwan] (DUAL Zho Fra) drama` -> `Black Tea`, year `2024`.
+- `Armadillo *2010* [BDRip.XviD-miguel] [ENG]` -> `Armadillo`, year `2010`.
+- `Trust.1990.(1001.Movies.You.Must.See).1080p.BRRip.x264-Classics` -> `Trust`, year `1990`.
+- `Bobby (2006) Language:English-Russian, Subs:Spanish-Russian-English` -> `Bobby`, year `2006`.
+- `Righteous.Kill[2008]BRrip-aЯRo` -> `Righteous Kill`, year `2008`.
+- `[Blu-ray] Borsalino (1970) [Jacques Deray, Belmondo, Alain Delon...]` -> `Borsalino`, year `1970`.
+- `JAMES BOND-From Russia With Love (1963) 1080p-H264` -> `From Russia With Love`, year `1963`.
+- `Cenerentola (Cinderella - 1950)[1080p]` -> `Cenerentola (Cinderella)`, year `1950`.
+
+### Deferred Examples
+
+- Remaining release-year grammar rows with ambiguous concerts, director/anthology descriptors, old language/source suffixes, and non-movie event rows.
+- Remaining dash-title rows where a broader rule may confuse real alternate titles with metadata descriptors.
+- Remaining low-count bracket failures with anime/release-group identities or unclear bracket semantics.
+- Collection, range, series, and episode rows remain review buckets rather than forced single-movie titles.
+
+### Do Not Regress
+
+- Do not strip four-digit title numbers when a different release year follows.
+- Do not count clean output as TRUE failure just because warnings mention metadata.
+- Do not treat collection/range/series/episode rows as normal single-movie parser failures.
+- Do not remove `[REC]`, `[18+]`, slash titles, episode identities, title roman numerals, or real dash-title continuations.
+- Do not chase lower failure counts by stripping actor/decorator text unless strong post-year technical metadata anchors the suffix.
+- Do not write system `/tmp` for project scrub reports; keep diagnostics under `/home/sectum/Projects/Elvern/tmp`.
