@@ -444,6 +444,63 @@ def test_phase21_title_number_and_post_year_suffix_grammar(
     assert parsed["suspicious_output"] is False
 
 
+def test_title_scrubber_v1_protected_regression_set() -> None:
+    cases = [
+        ("Never Ending Story (1984) 1080p BluRay", "Never Ending Story", 1984),
+        ("John Wick Chapter 2 (2017) 1080p BluRay", "John Wick Chapter 2", 2017),
+        ("Big Hero 6 (2014) 1080p BluRay", "Big Hero 6", 2014),
+        ("Inside Out 2 (2024) 1080p WEB-DL", "Inside Out 2", 2024),
+        ("The BFG (2016) 1080p BluRay", "The BFG", 2016),
+        ("Kingdom of Heaven DC Roadshow Version 2005 2160p UHD", "Kingdom of Heaven", 2005),
+        ("Legend 1985 DC 1080p BluRay", "Legend", 1985),
+        (
+            "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash (2016).1080p.H265",
+            "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash",
+            2016,
+        ),
+        ("DC.League.of.Super-Pets.2022.1080p.BluRay.x264", "DC League of Super-Pets", 2022),
+        ("The Final Cut (2004) WEBRip 1080p HEVC AAC", "The Final Cut", 2004),
+        (
+            "A.Final.Cut.For.Orson.40.Years.in.The.Making.2018.1080p.NF.WEBRip",
+            "A Final Cut For Orson 40 Years in The Making",
+            2018,
+        ),
+        ("V/H/S (2012) (1080p BluRay x265)", "V/H/S", 2012),
+        ("V/H/S: Viral (2014) (1080p BluRay x265)", "V/H/S: Viral", 2014),
+        ("[REC] (2007) 1080p BluRay", "[REC]", 2007),
+        ("[18+] Diet of Sex 2014 DVDRip", "[18+] Diet of Sex", 2014),
+        ("My.Show.S01E01.1080p.WEB-DL.x264-GROUP.mkv", "My Show S01E01", None),
+        ("My.Show.S1E1.720p.HDTV.x264-GROUP.mkv", "My Show S1E1", None),
+        ("My.Show.1x02.1080p.WEB-DL.x265-GROUP.mkv", "My Show 1x02", None),
+        ("Anime.Title.E01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title E01", None),
+        ("Anime.Title.EP01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title EP01", None),
+        ("Anime.Title.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title OVA 01", None),
+        ("Blade Runner 2049 (2017) AV1-10bit 1080p 7RIP", "Blade Runner 2049", 2017),
+        ("Wonder Woman 1984 (2020) 1080p BluRay x264", "Wonder Woman 1984", 2020),
+        ("Argentina 1985 (2022) 1080p WEB-DL x264", "Argentina 1985", 2022),
+        ("Death Race 2000 (1975) 1080p BluRay", "Death Race 2000", 1975),
+        ("The Italian Job 1969 1080p BluRay", "The Italian Job", 1969),
+        ("The French Connection 1971 1080p BluRay", "The French Connection", 1971),
+        (
+            "The African Queen (1951)-Humphrey Bogart & Katharine Hepburn-1080p-H264-AC 3 (DolbyDigital-5.1) ? nickarad",
+            "The African Queen",
+            1951,
+        ),
+        ("Blonde Death [1984 - USA] no budget cult classic", "Blonde Death", 1984),
+        ("Armadillo *2010* [BDRip.XviD-miguel] [ENG]", "Armadillo", 2010),
+        ("Trust.1990.(1001.Movies.You.Must.See).1080p.BRRip.x264-Classics", "Trust", 1990),
+        ("Righteous.Kill[2008]BRrip-aЯRo", "Righteous Kill", 2008),
+        ("Bobby (2006) Language:English-Russian, Subs:Spanish-Russian-English", "Bobby", 2006),
+    ]
+
+    for original_filename, expected_title, expected_year in cases:
+        parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+        assert parsed["display_title"] == expected_title
+        assert parsed["parsed_year"] == expected_year
+        assert parsed["parser_version"] == "title-scrubber-v1.0.0"
+        assert parsed["suspicious_output"] is False
+
+
 @pytest.mark.parametrize(
     ("original_filename", "expected_title", "expected_year"),
     [
