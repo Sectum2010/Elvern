@@ -39,6 +39,16 @@ Latest generated reports:
 - `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-classified-summary.txt`
 - `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-all-failed-results.txt`
 - `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase18-manual-review-buckets.md`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-phase19-bucket-plan.md`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase19-before.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase19-after.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-failed-sample.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-classified-report.json`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-classified-summary.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-all-failed-results.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-manual-review-buckets.md`
 
 ## Phase 1.8 Bracket Spans and Release-Year Grammar
 
@@ -130,6 +140,153 @@ Examples intentionally left for review:
 - Do not strip one-word real titles because the word can also be technical metadata.
 - Do not strip `Blade Runner 2049`, `1917`, roman numerals, TV/anime episode identities, or slash title identity.
 - Do not chase 100% by widening bracket/span removal into cast, alternate-title, or collection text.
+
+## Phase 1.9 Remaining TRUE Failure Reduction
+
+### Scope
+
+Phase 1.9 reduces remaining TRUE failures from the Phase 1.8 diagnostic without broad over-trim rules. It is deterministic parser and ignored project-`tmp` diagnostic work only.
+
+No LLM/AI title scrubbing was added. No database rows were rewritten or batch-rescrubbed. Frontend UI, playback, audio switching, subtitles, burn-in, Route2, native-HLS, adaptive behavior, cloud probing, age grouping, duplicate hiding, and library presentation behavior were not changed.
+
+### Bucket Plan
+
+The Phase 1.8 failures were bucketed before parser changes. The plan is saved at `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-phase19-bucket-plan.md`.
+
+Safe-now buckets:
+
+- metadata-heavy bracket spans and uploader brackets;
+- trusted release-group suffixes only when tied to metadata context;
+- classics-style `Title.Year.(cast - genre).technical` suffixes;
+- genre descriptor dash suffixes such as `Sci-Fi Rom-Com` and `Fantasy`;
+- edition/cut phrases that intentionally collapse to the base movie title.
+
+Deferred/high-risk buckets:
+
+- country/year descriptive brackets such as `[2006 - USA]`;
+- alternate-title brackets;
+- collection and multi-year packs;
+- sports/events/date strings;
+- real dash-title continuations;
+- TV/anime episode identity over-trim candidates.
+
+### Parser Fixes
+
+- Added known lowercase release/uploader groups seen in the 75k data, including `armor`, `bifra`, `cosmo`, `cyber`, `d3lt4crew`, `dr4gon`, `idncrew`, `lullozzo`, `nonymovies`, `psychic`, `tombdoc`, and `ytsmx`.
+- Expanded safe genre descriptor handling for dash suffixes, including `adventure`, `biography`, `fantasy`, `history`, `mystery`, `noir`, `rom-com`, `softcore`, `war`, and `western`.
+- Removed trusted edition bracket spans such as `[Unrated Version]`, `[Festival Cut]`, `[Korean Edition]`, `[Special Edition Miramax]`, and `[Resolve Color Grade]`.
+- Improved post-year descriptor handling for classics-style names such as `The.Beast.of.the.City.1932.(Walter Huston - Film Noir).1080p...`.
+- Narrowed collection/range detection so singular `Film` in `Film Noir` is not mistaken for a collection marker.
+- Added a release-year suffix token pass that recognizes dot-chained technical suffixes after descriptor spans.
+- Added a guard so release-year suffix cleanup cannot remove TV/anime episode identities such as `S01E03` after a title/year prefix.
+- Kept the existing title preservation guards for slash titles, roman numerals, sequel numbers, `[REC]`, `[18+]`, and episode tokens.
+
+### Classifier Changes
+
+- Phase 1.9 reports are written under project `tmp/`, not system `/tmp`.
+- Bracket classification now reuses parser-aligned metadata/release-group checks instead of treating every short bracket as TRUE metadata.
+- Descriptive brackets such as `[2006 - USA]` and alternate-title brackets are no longer counted as confirmed bracket metadata failures.
+- `EXPECTED_EDITION_STRIP` was added for successful base-title collapse of edition/cut markers such as `Director's Cut`, `Theatrical Version`, `Unrated`, and `Extended Collector's Edition`.
+- Collection/range detection now catches more multi-year collection rows while avoiding singular `film` false positives.
+- Manual review buckets are saved at `/home/sectum/Projects/Elvern/tmp/elvern-title-scrub-75k-phase19-manual-review-buckets.md`.
+
+### Probe Results
+
+The required 50-case Phase 1.9 probe was run before and after parser changes:
+
+- Before: 49/50 passed.
+- After: 50/50 passed.
+
+Probe text files:
+
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase19-before.txt`
+- `/home/sectum/Projects/Elvern/tmp/elvern-title-parser-phase19-after.txt`
+
+The before failure was:
+
+- `Space Oddity - Sci-Fi Rom-Com 2022 Eng Rus Multi Subs 720p [HEVC-mp4]`
+  - before output: `Space Oddity - Sci-Fi Rom-Com`, year `2022`
+  - after output: `Space Oddity`, year `2022`
+
+Additional guarded fixes include:
+
+- `The.Beast.of.the.City.1932.(Walter Huston - Film Noir).1080p.BRRip.x264-Classics` -> `The Beast of the City`, year `1932`
+- `El.Condor.1970.(Lee Van Cleef - Jim Brown - Western).720p.x264-Classics` -> `El Condor`, year `1970`
+- `Dogma - Fantasy 1999 Eng Rus Multi Subs 720p [H264-mp4]` -> `Dogma`, year `1999`
+- `His and Hers 2026 S01E03 XviD-AFG` remains `His and Hers 2026 S01E03`, year `None`
+
+### 75k Diagnostic Comparison
+
+Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+
+Phase 1.8 classifier run:
+
+- Total movie strings: 75,814
+- Legacy-style suspected failures: 9,981
+- TRUE failures: 5,605
+
+Phase 1.9 classifier run:
+
+- Total movie strings: 75,814
+- Legacy-style suspected failures: 7,932
+- TRUE failures: 2,109
+- TRUE failure delta vs Phase 1.8: `-3,496`
+
+Phase 1.9 classification counts:
+
+- `PASS`: 66,540
+- `FALSE_POSITIVE_CLEAN_OUTPUT`: 4,710
+- `EXPECTED_COLLECTION_OR_RANGE`: 1,519
+- `TRUE_FAIL_METADATA_SUFFIX`: 934
+- `EXPECTED_EVENT_OR_SPORTS`: 867
+- `TRUE_FAIL_RELEASE_YEAR_GRAMMAR`: 722
+- `TRUE_FAIL_OVERTRIM_REAL`: 205
+- `TRUE_FAIL_DASH_TITLE`: 169
+- `TRUE_FAIL_BRACKET_SPAN`: 79
+- `EXPECTED_EDITION_STRIP`: 69
+
+Top TRUE failure deltas from Phase 1.8 to Phase 1.9:
+
+- `TRUE_FAIL_BRACKET_SPAN`: `3,147` -> `79`
+- `TRUE_FAIL_RELEASE_YEAR_GRAMMAR`: `787` -> `722`
+- `TRUE_FAIL_METADATA_SUFFIX`: `933` -> `934`
+- `TRUE_FAIL_DASH_TITLE`: `373` -> `169`
+- `TRUE_FAIL_OVERTRIM_REAL`: `365` -> `205`
+- `EXPECTED_COLLECTION_OR_RANGE`: `920` -> `1,519`
+- `FALSE_POSITIVE_CLEAN_OUTPUT`: `3,617` -> `4,710`
+- `EXPECTED_EDITION_STRIP`: `0` -> `69`
+
+### 99% Target Distance
+
+For 75,814 rows, a 99% pass target allows about 758 TRUE failures. Phase 1.9 has 2,109 TRUE failures, leaving a gap of 1,351 TRUE failures to reach that target.
+
+The largest remaining blockers are:
+
+- `TRUE_FAIL_METADATA_SUFFIX`: 934
+- `TRUE_FAIL_RELEASE_YEAR_GRAMMAR`: 722
+- `TRUE_FAIL_OVERTRIM_REAL`: 205
+- `TRUE_FAIL_DASH_TITLE`: 169
+- `TRUE_FAIL_BRACKET_SPAN`: 79
+
+### Deferred Examples
+
+These remain intentionally deferred because broad rules would risk over-trimming:
+
+- `Marshall (Hudlin, 2017) [BDMux1080p Ita-Eng]`
+- `Black Phone 1-2 SAGA (2021-25) 720p h264 Ac3 5.1 Ita Eng-MIRCrew`
+- `Mr. Ove - En Man Som Heter Ove (2015) 1080p H265 ITA SWE AC3 5.1 MULTISUB - Tarek`
+- `Dirty Dancing 2 - Havana Nights (2004) WEBDL 1080p H264 MultiLang Ac3 5.1 MultiSub [ArMor] iDN_CreW`
+- `Blade Runner 2049 (2017) 2160p 4K UHD HDR10 DV Blu-ray REMUX Dual Audio [Hindi + English] ESub ~ RemuxDoc`
+- `Persepolis (2007) [HDRip-AC3][Spanish]`
+
+### Do Not Regress
+
+- Do not use system `/tmp` for project scrub reports; write project scratch reports under `/home/sectum/Projects/Elvern/tmp`.
+- Do not count edition/cut stripping as over-trim when the output is the intended base movie title.
+- Do not use singular `film` as a collection/range marker.
+- Do not strip country/year or alternate-title brackets without stronger metadata evidence.
+- Do not remove `S01E03`, `1x02`, `EP01`, `OVA 01`, or similar TV/anime/cartoon identity tokens.
+- Do not chase the 99% target by widening metadata cuts into cast/director parentheticals, alternate titles, or title subtitles.
 
 ## Phase 1.7 TRUE Failure Classification and Targeted Parser Patch
 

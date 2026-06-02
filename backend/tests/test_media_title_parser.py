@@ -159,6 +159,64 @@ PHASE18_DETERMINISTIC_CASES = [
     ),
     ("Moana 2 (2024) [1080p] [WEBRip] [5.1]", "Moana 2", 2024),
 ]
+PHASE19_DETERMINISTIC_CASES = [
+    ("Project Hail Mary (2026) (1080p DS4K Web-DL x265 10bit HDR E-AC-3 5.1) [Kris]", "Project Hail Mary", 2026),
+    ("Crime 101 (2026) (1080p DS4K Web-DL x265 10bit HDR E-AC-3 5.1) [Kris]", "Crime 101", 2026),
+    ("The Notebook (2004) (1080p BluRay x265 8bit AAC 5.1) [Kris]", "The Notebook", 2004),
+    ("The Grand Budapest Hotel (2014) (2160p x265 10bit HDR UHD BD DTS-HD MA 5.1) [Prof]", "The Grand Budapest Hotel", 2014),
+    ("No Country for Old Men (2007) (2160p x265 10bit HDR UHD BD DTS-HD MA 5.1) [Prof]", "No Country for Old Men", 2007),
+    ("Ocean's Thirteen (2007) (2160p BluRay x265 10bit HDR DTS-HD MA 5.1 English + Czech + French + German + Italian + Japanese + Spanish r00t) [QxR]", "Ocean's Thirteen", 2007),
+    ("Luciferina (2018) [1080p] [BluRay] [5.1] [YTS.MX]", "Luciferina", 2018),
+    ("Our Friend, Martin (1999) [DVDRip 480p] [10 bit x265 HEVC] [AC-3] [SBinK]", "Our Friend, Martin", 1999),
+    ("Sleepy Hollow (1999) [BluRayRip 2160p] [10 bit x265 HEVC HDR10] [DTS-HD 5.1] [AC-3] [SBinK]", "Sleepy Hollow", 1999),
+    ("Bleach the Movie Hell Verse (2010) [tmdbid-73245] - [Remux-1080p][DTS-HD MA 5.1][EN+JA][h264]-psychic", "Bleach the Movie Hell Verse", 2010),
+    ("Death By Hanging 1968 JPN SUB ENG, ITA 1080p BluRay x264", "Death By Hanging", 1968),
+    ("The Man With The Suitcase 1984 FRE SUB ENG, ITA 1080p BluRay x264", "The Man With The Suitcase", 1984),
+    ("Apocalypse In The Tropics 2024 PT-BR MULTISUB 1080p WEB-DL x264", "Apocalypse In The Tropics", 2024),
+    ("The.Roundup.2022.iTA-KOR.Bluray.1080p.x264-CYBER.mkv", "The Roundup", 2022),
+    ("Sex.2024.iTA-NOR.Bluray.1080p.x264-CYBER.mkv", "Sex", 2024),
+    ("Love.2024.iTA-NOR.Bluray.1080p.x264-CYBER.mkv", "Love", 2024),
+    ("Othello 67 1967 No Language 1080p WEB-DL x264", "Othello 67", 1967),
+    ("Dyketactics 1974 No Language 1080p WEB-DL x264", "Dyketactics", 1974),
+    ("Annie (1999) DVDRIP", "Annie", 1999),
+    ("The World Is Not Enough (1999) DVDRip - NonyMovies", "The World Is Not Enough", 1999),
+    ("Mission: Impossible II (2000) DVDRip - NonyMovies", "Mission: Impossible II", 2000),
+    ("American Psycho (2000) DVDRip - NonyMovies", "American Psycho", 2000),
+    ("Il testimone (2001) DVDRip SD x264 AAC ITA - Bifra", "Il testimone", 2001),
+    ("Chiedimi quello che vuoi (2024) DVDRip Mkv H264 AC3 iTA 5.1 No Sub - CoSmo Crew", "Chiedimi quello che vuoi", 2024),
+    ("The Animal (2001) DVDRip SD H264 ITA ENG SPA Ac3 5.1 sub Ita Eng Spa [ArMor] iDN_CreW", "The Animal", 2001),
+    ("Harry.Potter.and.the.Half-Blood.Prince.2009.Open.Matte.1080p.WEBRip.x265-KONTRAST", "Harry Potter and the Half-Blood Prince", 2009),
+    ("No.Country.for.Old.Men.2007.Criterion.Collection.1080p.Bluray.DDP5.1.HEVC.x265-BluBirD.mkv", "No Country for Old Men", 2007),
+    ("The.Fall.2006.Restored.UHD.BluRay.1080p.DDP.5.1.DoVi.HDR10.x265-SM737", "The Fall", 2006),
+    ("Casino Royale 2006 Uncut UHD BluRay 2160p DTS-HD MA 5 1 DV HEVC REMUX-FraMeSToR", "Casino Royale", 2006),
+    ("Dune - Part Two (2024) 1080p 10bit Bluray x265 HEVC [Org DD 5.1 Hindi + DD 5.1 English] MSubs ~ TombDoc", "Dune - Part Two", 2024),
+    ("Dune - Part One (2021) 1080p 10bit Bluray x265 HEVC [Org DD 5.1 Hindi + DD 5.1 English] MSubs ~ TombDoc", "Dune - Part One", 2021),
+    ("The Texas Chainsaw Massacre - The Beginning 2006 1080p Blu-Ray HEVC x265 10Bit DDP5.1 Subs KINGDOM", "The Texas Chainsaw Massacre - The Beginning", 2006),
+    ("Aliens - The Big Think (2016) 720p x265", "Aliens - The Big Think", 2016),
+    ("F9 - The Fast Saga (2021) Director's Cut 1080p 10bit Bluray x265 HEVC [Org DDP 5.1 Hindi + DDP 5.1 Atmos English] ESubs ~ TombDoc", "F9 - The Fast Saga", 2021),
+    ("F1 - The Movie (2025) EUR 1080p 10bit Bluray x265 HEVC [Org DDP 5.1 Atmos Hindi + DDP 7.1 Atmos English] MSubs ~ TombDoc", "F1 - The Movie", 2025),
+    ("Avatar - The Way of Water (2022) IMAX 1080p 10bit Bluray x265 HEVC [Org DDP 5.1 Hindi + DDP 7.1 Atmos English] MSubs ~ TombDoc", "Avatar - The Way of Water", 2022),
+    ("Space Oddity - Sci-Fi Rom-Com 2022 Eng Rus Multi Subs 720p [HEVC-mp4]", "Space Oddity", 2022),
+    ("Dead Heat Remastered - Horror 1988 Eng Rus Comm Multi Subs 720p [HEVC-mp4]", "Dead Heat", 1988),
+    ("The.Beast.of.the.City.1932.(Walter Huston - Film Noir).1080p.BRRip.x264-Classics", "The Beast of the City", 1932),
+    ("El.Condor.1970.(Lee Van Cleef - Jim Brown - Western).720p.x264-Classics", "El Condor", 1970),
+    ("Sunshine.1973.(Joseph Sargent - Drama).720p.x264-Classics", "Sunshine", 1973),
+    ("The.Undying.Monster.1942.(Horror - Mystery).720p.BRRip.x264-Classics", "The Undying Monster", 1942),
+    ("Dogma - Fantasy 1999 Eng Rus Multi Subs 720p [H264-mp4]", "Dogma", 1999),
+    ("Kull The Conqueror - Fantasy 1997 Eng Rus Multi Subs 720p [H264-mp4]", "Kull The Conqueror", 1997),
+    ("The Final Cut (2004) WEBRip 1080p HEVC AAC ITA ENG - Lullozzo", "The Final Cut", 2004),
+    ("A.Final.Cut.For.Orson.40.Years.in.The.Making.2018.1080p.NF.WEBRip.DD5.1.x264-NTG", "A Final Cut For Orson 40 Years in The Making", 2018),
+    ("LEGO DC Comics Super Heroes - Justice League - Cosmic Clash (2016).1080p.H265.EAC3.6CH-MNKYDDL", "LEGO DC Comics Super Heroes - Justice League - Cosmic Clash", 2016),
+    ("DC.League.of.Super-Pets.2022.1080p.BluRay.x264-iFT_EniaHD", "DC League of Super-Pets", 2022),
+    ("V/H/S (2012) (1080p BluRay x265 10bit EAC3 5.1 Ghost) [QxR]", "V/H/S", 2012),
+    ("V/H/S: Viral (2014) (1080p BluRay x265 10bit EAC3 5.1 Ghost) [QxR]", "V/H/S: Viral", 2014),
+    ("Pirates Of The Caribbean 3 At World's End 2007 [EN/FR/ES] Bluray 1080p AV1 OPUS 5.1-UH", "Pirates Of The Caribbean 3 At World's End", 2007),
+    ("Batman Begins 2005 Bluray IMAX 2160p AV1 HDR10 EN/FR/ES/DE OPUS 5.1-UH", "Batman Begins", 2005),
+    ("Lethal Weapon 4 1998 Bluray 1080p AV1 EN/FR/DE/ITA/ES OPUS 5.1-UH", "Lethal Weapon 4", 1998),
+    ("My.Show.S01E01.1080p.WEB-DL.x264-GROUP.mkv", "My Show S01E01", None),
+    ("Anime.Title.EP01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title EP01", None),
+    ("Anime.Title.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title OVA 01", None),
+]
 
 
 @pytest.mark.parametrize("case", FIXTURE_CASES, ids=[case["name"] for case in FIXTURE_CASES])
@@ -270,6 +328,25 @@ def test_phase18_bracket_spans_and_release_year_grammar(
 
 @pytest.mark.parametrize(
     ("original_filename", "expected_title", "expected_year"),
+    PHASE19_DETERMINISTIC_CASES,
+)
+def test_phase19_remaining_true_failure_examples(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int | None,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
     [
         ("[REC].2007.1080p.BluRay.x264.mkv", "[REC]", 2007),
         ("Show.Name.S01E01.1080p.WEB-DL.x264-GROUP.mkv", "Show Name S01E01", None),
@@ -278,6 +355,8 @@ def test_phase18_bracket_spans_and_release_year_grammar(
         ("Anime.Name.E01.1080p.WEB-DL.x264-GROUP.mkv", "Anime Name E01", None),
         ("Anime.Name.EP01.1080p.WEB-DL.x264-GROUP.mkv", "Anime Name EP01", None),
         ("Anime.Name.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Name OVA 01", None),
+        ("His and Hers 2026 S01E03 XviD-AFG", "His and Hers 2026 S01E03", None),
+        ("Road Wars 2022 S02E08 XviD-AFG", "Road Wars 2022 S02E08", None),
     ],
 )
 def test_phase15_negative_guards_preserve_titles_and_episode_identity(
