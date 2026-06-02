@@ -24,6 +24,114 @@ Latest generated reports:
 - `/tmp/elvern-title-scrub-75k-phase16-failed-sample.txt`
 - `/tmp/elvern-title-scrub-75k-phase16-legacy-fast-summary.json`
 - `/tmp/elvern-title-scrub-75k-phase16-legacy-fast-summary.txt`
+- `/tmp/elvern-title-scrub-75k-phase17-before-report.json`
+- `/tmp/elvern-title-scrub-75k-phase17-before-summary.txt`
+- `/tmp/elvern-title-scrub-75k-phase17-before-failed-sample.txt`
+- `/tmp/elvern-title-scrub-75k-phase17-classified-report.json`
+- `/tmp/elvern-title-scrub-75k-phase17-classified-summary.txt`
+- `/tmp/elvern-title-scrub-75k-phase17-report.json`
+- `/tmp/elvern-title-scrub-75k-phase17-summary.txt`
+- `/tmp/elvern-title-scrub-75k-phase17-failed-sample.txt`
+
+## Phase 1.7 TRUE Failure Classification and Targeted Parser Patch
+
+### Scope
+
+Phase 1.7 separates the old broad scrubber heuristic from a stricter TRUE pass/fail classifier, then fixes a small set of high-confidence deterministic parser patterns.
+
+No LLM/AI title scrubbing was added. No database rows were rewritten or batch-rescrubbed. Frontend UI, playback, audio switching, subtitles, burn-in, Route2, native-HLS, adaptive behavior, cloud probing, age grouping, and duplicate hiding were not changed.
+
+### Classifier Changes
+
+The previous 75k suspected-failure heuristic was useful for finding candidates, but it counted several clean outputs as failures. Phase 1.7 splits rows into:
+
+- `TRUE_FAIL_METADATA_LEAK`: visible source/video/codec/audio/language/subtitle/release-group metadata remains in the display title.
+- `TRUE_FAIL_YEAR_EXTRACTION`: a clear title-year-metadata suffix exists, but no release year was parsed.
+- `TRUE_FAIL_OVERTRIM`: the parser lost real title identity such as dash subtitles, episode tokens, sequel numbers, or collapsed to an article/franchise-only title.
+- `EXPECTED_OR_REVIEW`: collection ranges, date/event strings, alternate-title strings, or other cases that should not be counted as definite parser failure.
+- `FALSE_POSITIVE_CLEAN_OUTPUT`: the old heuristic still flags a row, but the display title is clean enough.
+
+Language-like words are no longer counted as visible metadata just because they appear in a title. For example, `The French Italian`, `The Japanese Wife`, `No Time To Die`, and `Open Range` are not TRUE metadata leaks unless a visible suffix chain still looks like release metadata.
+
+### 75k Diagnostic Comparison
+
+Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+
+Phase 1.6 legacy heuristic:
+
+- Total movie strings: 75,814
+- Suspected failures: 16,646
+- Suspected failure rate: 21.96%
+- Title over-trimmed primary pattern: 88
+
+Phase 1.7 classifier run:
+
+- Total movie strings: 75,814
+- Legacy-style suspected failures under the refined diagnostic: 14,896
+- TRUE failures: 10,756
+- FALSE_POSITIVE_CLEAN_OUTPUT: 3,783
+- EXPECTED_OR_REVIEW: 720
+- TRUE_FAIL_OVERTRIM: 623
+
+The Phase 1.7 `TRUE_FAIL_OVERTRIM` count is intentionally broader than the old single "title over-trimmed primary pattern"; it includes dash-title loss, episode-token loss, article-only output, implausibly short output, and franchise-only collapse. It is not a direct apples-to-apples replacement for the Phase 1.6 primary-pattern count.
+
+Phase 1.7 classification counts:
+
+- `PASS`: 60,555
+- `TRUE_FAIL_METADATA_LEAK`: 6,017
+- `TRUE_FAIL_YEAR_EXTRACTION`: 4,116
+- `FALSE_POSITIVE_CLEAN_OUTPUT`: 3,783
+- `EXPECTED_OR_REVIEW`: 720
+- `TRUE_FAIL_OVERTRIM`: 623
+
+Top TRUE failure patterns remaining:
+
+- bracket metadata: 4,495
+- clear release year was not parsed: 4,116
+- source/video/codec token: 1,369
+- compound metadata token: 608
+- language token suffix chain: 406
+- lost dash title continuation: 391
+- release group: 361
+- metadata token suffix chain: 315
+- compound language token: 246
+- subtitle token suffix chain: 121
+
+### Parser Fixes
+
+- Metadata bracket removal now runs through bounded repeated passes so parenthetical metadata containing nested language brackets can be fully removed.
+- Year-pair parentheticals such as `(2001/2003)` are removed as metadata while preserving the first year.
+- Clear dash genre descriptors followed by year/source/language metadata, such as `- Sci-Fi Comedy 2021 ...` and `- Horror 1999 ...`, are stripped.
+- Meaningful dash subtitles remain protected, including `Part One`, `Part 2`, `Ghost Protocol`, and similar title continuations.
+- `No Language`, `No Sub`, `No Subs`, `No Subtitles`, `TVRip`, `Matte`, and `AIEnhanced` are recognized as metadata only in suffix/technical contexts.
+- Spaced slash and fullwidth slash alternate-title strings are not mistaken for filesystem paths.
+- The backward suffix pass no longer strips language-like title words immediately before a release year, preserving `The French Italian`.
+- Clear `title year compound-metadata` suffixes, such as `1972 remux-framestor`, are still cut.
+
+### Fixed Examples
+
+- `Transporter 2 (2005) (WEBDL-1080p x265 AC3 5.1 [EN] [EN+SV]) MrPanda` parses as `Transporter 2`, year `2005`.
+- `Beast (Bestia) 2021 No Language 1080p WEB-DL x264` parses as `Beast (Bestia)`, year `2021`.
+- `The French Italian 2025 1080p AMZN WEBRip DDP2.0 H265` parses as `The French Italian`, year `2025`.
+- `Dont Look Up - Sci-Fi Comedy 2021 Eng Fra Ita Rus Ukr Multi Subs 2160p [HEVC-mp4]` parses as `Dont Look Up`, year `2021`.
+- `Solaris - Sci-Fi 1972 Eng Rus Comm Multi Subs 1080p [HEVC-mp4]` parses as `Solaris`, year `1972`.
+- `Mission: Impossible - Ghost Protocol (2011) 1080p BluRay x264.mkv` preserves `Mission: Impossible - Ghost Protocol`, year `2011`.
+- `The Hunger Games: Mockingjay - Part 2 (2015) 1080p BluRay x264.mkv` preserves `The Hunger Games: Mockingjay - Part 2`, year `2015`.
+- `Epoch / Epoch: Evolution (2001/2003) SD` preserves the alternate-title slash string and parses year `2001`.
+- `Help! I'm a Fish／Hjælp! Jeg er en fisk／A Fish Tale (2000) DVDRip.mkv` preserves the slash alternate-title string and parses year `2000`.
+
+### Remaining Hard Patterns
+
+The remaining TRUE failure rows are intentionally left for later phases. Common hard cases include dense cast/director parentheticals, complex collection/date ranges, sports or event strings, mixed alternate-title metadata, and malformed source/release suffixes where a wider rule would risk over-trimming real titles.
+
+### Do Not Regress
+
+- Do not treat the old suspected-failure percentage as the true parser failure rate.
+- Do not count clean outputs as failures only because warnings were emitted.
+- Do not strip language-like words from real titles such as `The French Italian`, `The Japanese Wife`, `No Time To Die`, or `Open Range`.
+- Do not strip `[REC]` or `[18+]` prefix title identity.
+- Do not strip TV/anime/cartoon episode identity tokens such as `S01E01`, `S1E1`, `1x02`, `E01`, `EP01`, or `OVA 01`.
+- Do not chase 100% by increasing over-trim risk.
 
 ## Phase 1.6 DC Context and Title-Preservation Patch
 

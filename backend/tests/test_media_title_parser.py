@@ -82,6 +82,46 @@ PHASE15_DETERMINISTIC_CASES = [
     ("Anime.Title.EP01.1080p.WEB-DL.AAC2.0.x264-GROUP.mkv", "Anime Title EP01", None),
     ("Anime.Title.OVA.01.1080p.BluRay.x265-GROUP.mkv", "Anime Title OVA 01", None),
 ]
+PHASE17_DETERMINISTIC_CASES = [
+    (
+        "Transporter 2 (2005) (WEBDL-1080p x265 AC3 5.1 [EN] [EN+SV]) MrPanda",
+        "Transporter 2",
+        2005,
+    ),
+    ("Beast (Bestia) 2021 No Language 1080p WEB-DL x264", "Beast (Bestia)", 2021),
+    ("The French Italian 2025 1080p AMZN WEBRip DDP2.0 H265", "The French Italian", 2025),
+    (
+        "Dont Look Up - Sci-Fi Comedy 2021 Eng Fra Ita Rus Ukr Multi Subs 2160p [HEVC-mp4]",
+        "Dont Look Up",
+        2021,
+    ),
+    (
+        "Solaris - Sci-Fi 1972 Eng Rus Comm Multi Subs 1080p [HEVC-mp4]",
+        "Solaris",
+        1972,
+    ),
+    ("Stigmata - Horror 1999 Eng Rus 1080p BluRay x264.mkv", "Stigmata", 1999),
+    ("Mission: Impossible - Ghost Protocol (2011) 1080p BluRay x264.mkv", "Mission: Impossible - Ghost Protocol", 2011),
+    (
+        "The Hunger Games: Mockingjay - Part 2 (2015) 1080p BluRay x264.mkv",
+        "The Hunger Games: Mockingjay - Part 2",
+        2015,
+    ),
+    ("Epoch / Epoch: Evolution (2001/2003) SD", "Epoch / Epoch: Evolution", 2001),
+    (
+        "Help! I'm a Fish／Hjælp! Jeg er en fisk／A Fish Tale (2000) DVDRip.mkv",
+        "Help! I'm a Fish/Hjælp! Jeg er en fisk/A Fish Tale",
+        2000,
+    ),
+    ("Fantastic Mr Fox 2009 1080p BluRay x264.mkv", "Fantastic Mr Fox", 2009),
+    (
+        "Avatar.The.Way.Of.The.Water.2022.48fps.2160p.UHD.BluRay.x265.mkv",
+        "Avatar The Way Of The Water",
+        2022,
+    ),
+    ("[moon] Interstellar 2014 WEBRip x264 AAC.mkv", "Interstellar", 2014),
+    ("[18+] Diet of Sex 2014 DVDRip.mkv", "[18+] Diet of Sex", 2014),
+]
 
 
 @pytest.mark.parametrize("case", FIXTURE_CASES, ids=[case["name"] for case in FIXTURE_CASES])
@@ -139,6 +179,25 @@ def test_dirty_stored_title_does_not_beat_filename_source() -> None:
     PHASE15_DETERMINISTIC_CASES,
 )
 def test_phase15_deterministic_scrubbing_examples(
+    original_filename: str,
+    expected_title: str,
+    expected_year: int | None,
+) -> None:
+    parsed = parse_media_title(title=None, original_filename=original_filename, year=None)
+
+    assert parsed["display_title"] == expected_title
+    assert parsed["base_title"] == expected_title
+    assert parsed["poster_match_title"] == expected_title
+    assert parsed["parsed_year"] == expected_year
+    assert parsed["poster_match_year"] == expected_year
+    assert parsed["suspicious_output"] is False
+
+
+@pytest.mark.parametrize(
+    ("original_filename", "expected_title", "expected_year"),
+    PHASE17_DETERMINISTIC_CASES,
+)
+def test_phase17_true_failure_classifier_examples(
     original_filename: str,
     expected_title: str,
     expected_year: int | None,

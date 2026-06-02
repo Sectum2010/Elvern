@@ -78,6 +78,22 @@ KNOWN_LOWERCASE_LEADING_RELEASE_GROUPS = {
     "wesley",
     "yts",
 }
+GENRE_DESCRIPTOR_TOKENS = {
+    "action",
+    "animation",
+    "comedy",
+    "crime",
+    "documentary",
+    "drama",
+    "fi",
+    "horror",
+    "romance",
+    "sci",
+    "scifi",
+    "science",
+    "fiction",
+    "thriller",
+}
 
 METADATA_TOKENS = {
     "2160p",
@@ -123,6 +139,7 @@ METADATA_TOKENS = {
     "bdremux",
     "brremux",
     "bdrmx",
+    "tvrip",
     "x264",
     "x265",
     "h264",
@@ -153,6 +170,7 @@ METADATA_TOKENS = {
     "mp4",
     "mp3",
     "mpeg2",
+    "matte",
     "ntsc",
     "opus",
     "pal",
@@ -197,6 +215,7 @@ METADATA_TOKENS = {
     "sub",
     "untouched",
     "upscaled",
+    "aienhanced",
 }
 STRONG_METADATA_TOKENS = {
     "2160p",
@@ -315,9 +334,14 @@ SUBTITLE_METADATA_TOKENS = {
     "esub",
     "esubs",
     "forced",
+    "language",
     "multisub",
     "multisubs",
     "msubs",
+    "no",
+    "nosub",
+    "nosubs",
+    "nosubtitles",
     "srt",
     "sub",
     "subbed",
@@ -499,6 +523,13 @@ def _parse_title_candidate(
             warnings.append("empty_bracket_group_removed")
             signal_score += 1
             return " "
+        year_pair_match = re.fullmatch(r"(19\d{2}|20\d{2})/(?:19\d{2}|20\d{2})", content)
+        if year_pair_match:
+            if parsed_year is None:
+                parsed_year = _coerce_year(year_pair_match.group(1))
+            warnings.append("year_block_removed")
+            signal_score += 1
+            return " "
 
         classification = _classify_segment(content)
         if classification["kind"] == "year":
@@ -563,14 +594,27 @@ def _parse_title_candidate(
             return " "
         return f"{match.group(1)}{content}{match.group(3)}"
 
-    working = BRACKET_GROUP_PATTERN.sub(replace_bracket_group, working)
-    working = collapse_spaces(working)
+    for _iteration in range(4):
+        updated_working = BRACKET_GROUP_PATTERN.sub(replace_bracket_group, working)
+        updated_working = collapse_spaces(updated_working)
+        if updated_working == working:
+            break
+        working = updated_working
 
     kept_segments: list[str] = []
     for index, segment in enumerate(RIGHT_SIDE_SPLIT_PATTERN.split(working)):
         cleaned_segment = collapse_spaces(segment).strip(" -")
         if not cleaned_segment:
             continue
+        if index > 0:
+            genre_suffix_hints = _dash_genre_descriptor_suffix_hints(cleaned_segment)
+            if genre_suffix_hints is not None:
+                if parsed_year is None and genre_suffix_hints["parsed_year"] is not None:
+                    parsed_year = _coerce_year(genre_suffix_hints["parsed_year"])
+                warnings.extend([str(marker) for marker in genre_suffix_hints.get("rule_markers") or []])
+                warnings.append("dash_genre_descriptor_removed")
+                signal_score += 1
+                continue
         classification = _classify_segment(cleaned_segment)
         if index > 0 and classification["kind"] in {"metadata", "id", "edition", "year"}:
             continuation = _split_dash_title_continuation(cleaned_segment)
@@ -848,7 +892,7 @@ def _candidate_basename(value: str) -> str:
         return raw.split("\\")[-1]
     if "/" not in raw:
         return raw
-    if _contains_language_slash(raw) or _looks_like_slash_title(raw):
+    if _contains_language_slash(raw) or _looks_like_slash_title(raw) or _looks_like_spaced_slash_title(raw):
         return raw
     parts = raw.split("/")
     if raw.startswith("/") or len(parts) > 2 or re.search(r"\.[a-z0-9]{2,5}$", parts[-1], re.IGNORECASE):
@@ -880,6 +924,15 @@ def _contains_language_slash(value: str) -> bool:
 
 def _looks_like_slash_title(value: str) -> bool:
     return re.search(r"(?i)\b(?:v/h/s|[a-z]/[a-z]/[a-z])\b", value) is not None
+
+
+def _looks_like_spaced_slash_title(value: str) -> bool:
+    raw = str(value or "")
+    if " / " in raw:
+        return True
+    if "／" in raw:
+        return True
+    return re.search(r"(?<!^)\((?:19\d{2}|20\d{2})/(?:19\d{2}|20\d{2})\)", raw) is not None
 
 
 def _extract_meaningful_title_number_hints(
@@ -995,6 +1048,32 @@ def _split_dash_title_continuation(value: str) -> tuple[str, str, dict[str, obje
     return prefix, metadata_suffix, suffix_hints
 
 
+def _dash_genre_descriptor_suffix_hints(value: str) -> dict[str, object] | None:
+    cleaned = collapse_spaces(value).strip(" -")
+    if not cleaned:
+        return None
+    prefix, cut_suffix, suffix_hints = _cut_non_title_suffix(cleaned)
+    if not cut_suffix:
+        return None
+    if not _looks_like_genre_descriptor(prefix):
+        return None
+    return suffix_hints
+
+
+def _looks_like_genre_descriptor(value: str) -> bool:
+    cleaned = collapse_spaces(value).strip(" -").lower()
+    if not cleaned:
+        return False
+    tokens = re.findall(r"[a-z0-9]+", cleaned)
+    if not tokens:
+        return False
+    if tokens == ["sci", "fi"]:
+        return True
+    if tokens == ["science", "fiction"]:
+        return True
+    return all(token in GENRE_DESCRIPTOR_TOKENS for token in tokens)
+
+
 def _looks_like_meaningful_dash_title_prefix(value: str) -> bool:
     cleaned = collapse_spaces(value).strip(" -")
     if not cleaned:
@@ -1007,7 +1086,7 @@ def _looks_like_meaningful_dash_title_prefix(value: str) -> bool:
     ]
     if not non_metadata_tokens:
         return False
-    if cleaned.lower() in {"sci-fi", "scifi", "comedy", "horror", "thriller", "action"}:
+    if _looks_like_genre_descriptor(cleaned):
         return False
     first = non_metadata_tokens[0]
     meaningful_starters = {
@@ -1185,7 +1264,11 @@ def _metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str]] | None
         if (
             _is_standalone_year(current)
             and suffix_metrics["metadata_hits"] >= 1
-            and (suffix_metrics["strong_hits"] >= 1 or suffix_metrics["release_group_hits"] >= 1)
+            and (
+                suffix_metrics["strong_hits"] >= 1
+                or suffix_metrics["release_group_hits"] >= 1
+                or any(_contains_compound_metadata_token(token) for token in suffix_tokens)
+            )
             and _looks_like_release_year_boundary(tokens, index)
         ):
             return index, ["standalone_release_year_cut", "technical_suffix_density_cut"]
@@ -1227,6 +1310,14 @@ def _backward_metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str
         ):
             break
         previous = _canonical_metadata_token(tokens[index - 1]) if index > 0 else ""
+        next_token = _canonical_metadata_token(tokens[index + 1]) if index + 1 < len(tokens) else ""
+        if (
+            metadata_seen
+            and next_token
+            and _is_standalone_year(next_token)
+            and _token_is_localization_metadata(canonical)
+        ):
+            break
         if ROMAN_NUMERAL_PATTERN.fullmatch(canonical):
             break
         if canonical in {"0", "1", "2", "5", "6", "7", "8"} and previous == "part":
@@ -1269,6 +1360,8 @@ def _backward_metadata_suffix_boundary(tokens: list[str]) -> tuple[int, list[str
         return None
     suffix_metrics = _suffix_metadata_metrics(tokens[suffix_start:])
     if suffix_metrics["metadata_hits"] < 1:
+        return None
+    if suffix_metrics["strong_hits"] < 1 and suffix_metrics["release_group_hits"] < 1:
         return None
     return suffix_start, _dedupe_strings(markers or ["technical_suffix_density_cut"])
 
