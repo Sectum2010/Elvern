@@ -906,6 +906,8 @@ button {
   position: relative;
   overflow-x: auto;
   overflow-y: hidden;
+  margin-top: -0.45rem;
+  padding-top: 0.45rem;
   padding-bottom: 0.2rem;
   scrollbar-width: none;
   scroll-behavior: smooth;
@@ -1037,7 +1039,9 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .app-shell--poster-card-modern.app-shell--library-root .media-card:focus-within,
 .app-shell--poster-card-modern.app-shell--library-source .media-card:hover,
 .app-shell--poster-card-modern.app-shell--library-source .media-card:focus-within {
-  border-color: transparent;
+  border-width: 2px;
+  border-style: solid;
+  border-color: rgba(146, 225, 255, 0.96);
   box-shadow: none;
 }
 
@@ -1051,7 +1055,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .app-shell--poster-card-modern.app-shell--library-root .media-card:focus-within .media-card__poster,
 .app-shell--poster-card-modern.app-shell--library-source .media-card:hover .media-card__poster,
 .app-shell--poster-card-modern.app-shell--library-source .media-card:focus-within .media-card__poster {
-  box-shadow: 0 20px 38px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(143, 182, 218, 0.14);
+  box-shadow: none;
 }
 
 .app-shell--poster-card-modern.app-shell--library-root .media-card__body,
@@ -1083,7 +1087,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .app-shell--poster-card-clean.app-shell--library-root .media-card:focus-within,
 .app-shell--poster-card-clean.app-shell--library-source .media-card:hover,
 .app-shell--poster-card-clean.app-shell--library-source .media-card:focus-within {
-  border-color: transparent;
+  border: 2px solid rgba(146, 225, 255, 0.96);
   box-shadow: none;
 }
 
@@ -1108,6 +1112,21 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .app-shell--poster-card-clean.app-shell--library-root .media-card__background-playback-indicator,
 .app-shell--poster-card-clean.app-shell--library-source .media-card__background-playback-indicator {
   display: none;
+}
+
+.app-shell--library-root .media-card,
+.app-shell--library-source .media-card {
+  box-shadow: none;
+}
+
+.app-shell--library-root .media-card:hover,
+.app-shell--library-root .media-card:focus-within,
+.app-shell--library-source .media-card:hover,
+.app-shell--library-source .media-card:focus-within {
+  border-width: 2px;
+  border-style: solid;
+  border-color: rgba(146, 225, 255, 0.96);
+  box-shadow: none;
 }
 
 .series-rail-pack-row {
@@ -1151,7 +1170,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   width: min(100%, 16rem);
   overflow: hidden;
   border-radius: 1.15rem;
-  transition: transform 150ms ease, border-color 150ms ease;
+  transition: transform 180ms ease, border-color 180ms ease, border-width 180ms ease, box-shadow 180ms ease;
 }
 
 .media-card:hover,
@@ -1212,6 +1231,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .media-card__poster-image {
   display: block;
   object-fit: cover;
+  transition: transform 220ms ease, filter 220ms ease;
 }
 
 .media-card__poster-fallback {
@@ -1221,6 +1241,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   background:
     linear-gradient(160deg, rgba(143, 182, 218, 0.3), rgba(72, 98, 124, 0.12)),
     linear-gradient(0deg, rgba(11, 17, 24, 0.84), rgba(11, 17, 24, 0.2));
+  transition: transform 220ms ease, filter 220ms ease;
 }
 
 .media-card__poster-fallback--deferred {
@@ -1250,6 +1271,45 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #7cc4a0, #9ad6eb);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .series-rail__viewport {
+    margin-inline: -0.45rem;
+    padding-inline: 0.45rem;
+  }
+
+  .media-card:hover,
+  .media-card:focus-within {
+    transform: translateY(-4px) scale(1.012);
+  }
+
+  .app-shell--poster-card-modern.app-shell--library-root .media-card:hover,
+  .app-shell--poster-card-modern.app-shell--library-root .media-card:focus-within,
+  .app-shell--poster-card-modern.app-shell--library-source .media-card:hover,
+  .app-shell--poster-card-modern.app-shell--library-source .media-card:focus-within,
+  .app-shell--library-root .series-rail__slide .media-card:hover,
+  .app-shell--library-root .series-rail__slide .media-card:focus-within,
+  .app-shell--library-source .series-rail__slide .media-card:hover,
+  .app-shell--library-source .series-rail__slide .media-card:focus-within {
+    border-width: 2px;
+    border-style: solid;
+    border-color: rgba(146, 225, 255, 0.96);
+    box-shadow: none;
+  }
+
+  .app-shell--poster-card-modern.app-shell--library-root .media-card:hover .media-card__poster,
+  .app-shell--poster-card-modern.app-shell--library-root .media-card:focus-within .media-card__poster,
+  .app-shell--poster-card-modern.app-shell--library-source .media-card:hover .media-card__poster,
+  .app-shell--poster-card-modern.app-shell--library-source .media-card:focus-within .media-card__poster {
+    box-shadow: none;
+  }
+
+  .media-card:hover .media-card__poster-image,
+  .media-card:hover .media-card__poster-fallback {
+    transform: scale(1.025);
+    filter: saturate(1.08) contrast(1.04);
+  }
 }
 
 .media-card__body {
@@ -7103,6 +7163,19 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .media-card,
+  .media-card__poster-image,
+  .media-card__poster-fallback {
+    transition: none;
+  }
+
+  .media-card:hover,
+  .media-card:hover .media-card__poster-image,
+  .media-card:hover .media-card__poster-fallback {
+    transform: none;
+    filter: none;
+  }
+
   .elvern-overlay,
   .elvern-overlay__icon-button,
   .elvern-overlay__center-transport {
