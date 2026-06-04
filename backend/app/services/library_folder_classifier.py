@@ -111,26 +111,21 @@ class LibraryFolderDiscovery:
 
 def parse_folder_suffixes(folder_name: str) -> ParsedFolderSuffixes:
     working_name = str(folder_name or "").rstrip()
-    suffix_tokens_reversed: list[str] = []
-    while True:
-        match = _TRAILING_SUFFIX_TOKEN_RE.search(working_name)
-        if match is None:
-            break
+    display_name = working_name.strip()
+    suffix_tokens: tuple[str, ...] = ()
+    match = _TRAILING_SUFFIX_TOKEN_RE.search(working_name)
+    if match is not None:
         token = match.group(1)
-        if token not in RECOGNIZED_FOLDER_SUFFIXES:
-            suffix_tokens_reversed.append(token)
-            break
-        suffix_tokens_reversed.append(token)
-        working_name = working_name[: match.start()].rstrip()
+        suffix_tokens = (token,)
+        if token in RECOGNIZED_FOLDER_SUFFIXES:
+            display_name = working_name[: match.start()].rstrip().strip()
 
-    suffix_tokens = tuple(reversed(suffix_tokens_reversed))
     recognized_suffixes = tuple(
         token for token in suffix_tokens if token in RECOGNIZED_FOLDER_SUFFIXES
     )
     unknown_suffixes = tuple(
         token for token in suffix_tokens if token not in RECOGNIZED_FOLDER_SUFFIXES
     )
-    display_name = working_name.strip()
     if not display_name:
         display_name = str(folder_name or "").strip() or "Untitled folder"
     return ParsedFolderSuffixes(
