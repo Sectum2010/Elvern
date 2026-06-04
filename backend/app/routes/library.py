@@ -19,6 +19,7 @@ from ..services.library_service import (
     get_media_item_detail,
     get_media_item_poster_path,
     list_library,
+    normalize_library_category,
     search_library,
 )
 from ..services.media_technical_metadata_service import run_one_media_item_technical_metadata_enrichment
@@ -41,6 +42,16 @@ from ..services.security_event_service import log_security_event
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+
+def _validated_library_category(category: str | None) -> str:
+    try:
+        return normalize_library_category(category)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
 
 
 def _invalidate_mobile_sessions_from_revoke_summary(request: Request, revoke_summary: dict[str, object], *, reason: str) -> None:
@@ -97,16 +108,18 @@ def _rescan_message(
 
 
 @router.get("", response_model=LibraryListResponse)
-def get_library(request: Request, user=CurrentUser) -> LibraryListResponse:
+def get_library(request: Request, category: str | None = None, user=CurrentUser) -> LibraryListResponse:
+    normalized_category = _validated_library_category(category)
     request.app.state.scan_service.maybe_refresh_local_library(trigger="library")
-    payload = list_library(request.app.state.settings, user_id=user.id)
+    payload = list_library(request.app.state.settings, user_id=user.id, category=normalized_category)
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
     return LibraryListResponse(**payload)
 
 
 @router.get("/search", response_model=LibraryListResponse)
-def search(request: Request, q: str, user=CurrentUser) -> LibraryListResponse:
-    payload = search_library(request.app.state.settings, user_id=user.id, query=q)
+def search(request: Request, q: str, category: str | None = None, user=CurrentUser) -> LibraryListResponse:
+    normalized_category = _validated_library_category(category)
+    payload = search_library(request.app.state.settings, user_id=user.id, query=q, category=normalized_category)
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
     return LibraryListResponse(**payload)
 

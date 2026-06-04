@@ -187,6 +187,12 @@ class LibraryItemSummary(BaseModel):
     library_source_id: int | None = None
     library_source_name: str | None = None
     library_source_shared: bool = False
+    library_category: Literal["movies", "tv", "anime", "cartoon"] | None = None
+    library_category_path: str | None = None
+    library_category_name: str | None = None
+    library_folder_role: str | None = None
+    library_folder_path: str | None = None
+    library_folder_name: str | None = None
     poster_url: str | None = None
     edition_label: str | None = None
     hidden_for_user: bool = False

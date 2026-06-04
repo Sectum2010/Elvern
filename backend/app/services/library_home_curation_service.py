@@ -158,6 +158,10 @@ def _series_folder_key(settings: Settings, row, *, include_cloud: bool = False) 
         return None
     if source_kind != "local":
         return None
+    folder_key = str(_row_value(row, "series_folder_key", "") or "").strip()
+    folder_name = str(_row_value(row, "series_folder_name", "") or "").strip()
+    if folder_key and folder_name:
+        return folder_key, folder_name
     file_path = str(_row_value(row, "file_path", "") or "").strip()
     if not file_path:
         return None

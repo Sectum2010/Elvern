@@ -138,8 +138,9 @@ export function MediaCard({
   const storageKind = (item.source_kind || "local") === "cloud" ? "cloud" : "local";
   const storageLabel = storageKind === "cloud" ? "Cloud" : "Local";
   const detailPath = `/library/${item.id}`;
+  const libraryListPath = `${location.pathname}${location.search || ""}`;
   const detailState = buildLibraryReturnState({
-    listPath: location.pathname,
+    listPath: libraryListPath,
     anchorItemId: item.id,
     anchorInstanceKey: cardInstanceKey,
     scrollY: typeof window !== "undefined" ? window.scrollY : 0,
@@ -148,7 +149,7 @@ export function MediaCard({
   function handleOpenDetail(event) {
     rememberLibraryReturnTarget(getLibraryReturnTargetFromCardClick({
       event,
-      listPath: location.pathname,
+      listPath: libraryListPath,
       itemId: item.id,
       fallbackInstanceKey: cardInstanceKey,
     }));

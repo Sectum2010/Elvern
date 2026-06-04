@@ -24,8 +24,15 @@ function normalizeString(value) {
 }
 
 export function normalizeLibraryListPath(pathname = "") {
-  if (pathname === "/library/local" || pathname === "/library/cloud") {
-    return pathname;
+  const normalizedPath = String(pathname || "").split("#", 1)[0];
+  const queryIndex = normalizedPath.indexOf("?");
+  const pathOnly = queryIndex >= 0 ? normalizedPath.slice(0, queryIndex) : normalizedPath;
+  const search = queryIndex >= 0 ? normalizedPath.slice(queryIndex) : "";
+  if (pathOnly === "/library/local" || pathOnly === "/library/cloud") {
+    return pathOnly;
+  }
+  if (pathOnly === "/library") {
+    return search ? `/library${search}` : "/library";
   }
   return "/library";
 }

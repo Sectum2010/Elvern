@@ -52,6 +52,31 @@ from ..db import get_connection
 
 TEXT_SUBTITLE_CODECS = {"ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", "mov_text", "tx3g"}
 IMAGE_SUBTITLE_CODECS = {"dvd_subtitle", "dvdsub", "dvb_subtitle", "hdmv_pgs_subtitle", "pgs", "xsub"}
+LIBRARY_CATEGORY_VALUES = ("movies", "tv", "anime", "cartoon")
+LIBRARY_CATEGORY_VALUE_SET = set(LIBRARY_CATEGORY_VALUES)
+
+
+def normalize_library_category(category: str | None = None) -> str:
+    normalized = str(category or "").strip().lower() or "movies"
+    if normalized not in LIBRARY_CATEGORY_VALUE_SET:
+        expected = ", ".join(LIBRARY_CATEGORY_VALUES)
+        raise ValueError(f"Invalid library category '{category}'. Expected one of: {expected}.")
+    return normalized
+
+
+def _row_library_category(row) -> str:
+    return str(_row_value(row, "library_category", "") or "").strip().lower()
+
+
+def _matches_library_category(row, category: str) -> bool:
+    library_category = _row_library_category(row)
+    if library_category:
+        return library_category == category
+    return category == "movies"
+
+
+def _filter_rows_for_library_category(rows: list, category: str) -> list:
+    return [row for row in rows if _matches_library_category(row, category)]
 
 
 def _utc_iso_to_epoch_seconds(value: object) -> int:
@@ -191,6 +216,12 @@ def _base_query() -> str:
             m.library_source_id,
             m.series_folder_key,
             m.series_folder_name,
+            m.library_category,
+            m.library_category_path,
+            m.library_category_name,
+            m.library_folder_role,
+            m.library_folder_path,
+            m.library_folder_name,
             s.display_name AS library_source_name,
             COALESCE(s.is_shared, 0) AS library_source_shared,
             m.file_size,
@@ -235,7 +266,8 @@ def _base_query() -> str:
     """
 
 
-def list_library(settings: Settings, *, user_id: int) -> dict[str, object]:
+def list_library(settings: Settings, *, user_id: int, category: str = "movies") -> dict[str, object]:
+    normalized_category = normalize_library_category(category)
     user_settings = get_user_settings(settings, user_id=user_id)
     with get_connection(settings) as connection:
         shared_local_source_id = ensure_current_shared_local_source_binding(
@@ -283,18 +315,17 @@ def list_library(settings: Settings, *, user_id: int) -> dict[str, object]:
             """,
             (user_id,),
         ).fetchall()
-        recent_rows = connection.execute(
-            _base_query()
-            + """
-              ORDER BY datetime(m.last_scanned_at) DESC
-              LIMIT 12
-              """,
-            (user_id, user_id, shared_local_source_id, user_id),
-        ).fetchall()
         globally_hidden_media_item_ids = _load_globally_hidden_media_item_ids(connection)
         globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
         hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
         hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
+    all_rows = _filter_rows_for_library_category(list(all_rows), normalized_category)
+    continue_rows = _filter_rows_for_library_category(list(continue_rows), normalized_category)
+    recent_rows = sorted(
+        all_rows,
+        key=lambda row: str(_row_value(row, "last_scanned_at", "") or ""),
+        reverse=True,
+    )[:12]
     watch_seconds_total_by_media_item_id = {
         int(row["media_item_id"]): float(row["watch_seconds_total"] or 0)
         for row in watch_history_rows
@@ -381,7 +412,8 @@ def _search_match_score(row, query: str) -> int:
     return score if matched else 0
 
 
-def search_library(settings: Settings, *, user_id: int, query: str) -> dict[str, object]:
+def search_library(settings: Settings, *, user_id: int, query: str, category: str = "movies") -> dict[str, object]:
+    normalized_category = normalize_library_category(category)
     normalized_query = query.strip()
     if not normalized_query:
         return {
@@ -403,6 +435,7 @@ def search_library(settings: Settings, *, user_id: int, query: str) -> dict[str,
             _base_query() + " ORDER BY lower(m.title) ASC",
             (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
+    rows = _filter_rows_for_library_category(list(rows), normalized_category)
     scored_rows: list[tuple[int, object]] = []
     for row in rows:
         score = _search_match_score(row, normalized_query)

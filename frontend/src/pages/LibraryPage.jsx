@@ -55,6 +55,46 @@ import {
 } from "../lib/viewportAnchor";
 
 
+export const LIBRARY_CATEGORY_OPTIONS = [
+  { key: "movies", label: "Movies", otherHeading: "Other Movies" },
+  { key: "tv", label: "TV Shows", otherHeading: "Other TV Shows" },
+  { key: "anime", label: "Anime", otherHeading: "Other Anime" },
+  { key: "cartoon", label: "Cartoon", otherHeading: "Other Cartoon" },
+];
+
+const DEFAULT_LIBRARY_CATEGORY = "movies";
+const LIBRARY_CATEGORY_KEYS = new Set(LIBRARY_CATEGORY_OPTIONS.map((category) => category.key));
+
+
+export function resolveLibraryCategoryFromSearch(search = "") {
+  const params = new URLSearchParams(search);
+  const category = String(params.get("category") || "").trim().toLowerCase();
+  return LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY;
+}
+
+
+export function buildLibraryCategorySearch(currentSearch = "", category = DEFAULT_LIBRARY_CATEGORY) {
+  const params = new URLSearchParams(currentSearch);
+  params.set("category", LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY);
+  const nextSearch = params.toString();
+  return nextSearch ? `?${nextSearch}` : "";
+}
+
+
+export function buildLibraryRequestPath({ category = DEFAULT_LIBRARY_CATEGORY, query = "" } = {}) {
+  const normalizedCategory = LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY;
+  const trimmedQuery = query.trim();
+  const params = new URLSearchParams();
+  if (trimmedQuery) {
+    params.set("q", trimmedQuery);
+  }
+  params.set("category", normalizedCategory);
+  return trimmedQuery
+    ? `/api/library/search?${params.toString()}`
+    : `/api/library?${params.toString()}`;
+}
+
+
 function MediaGrid({
   items,
   activeBrowserPlaybackItemId = null,
@@ -119,6 +159,18 @@ export function LibraryPage() {
   } = useProviderAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const activeLibraryCategory = useMemo(
+    () => resolveLibraryCategoryFromSearch(location.search),
+    [location.search],
+  );
+  const activeLibraryCategoryConfig = useMemo(
+    () => LIBRARY_CATEGORY_OPTIONS.find((category) => category.key === activeLibraryCategory) || LIBRARY_CATEGORY_OPTIONS[0],
+    [activeLibraryCategory],
+  );
+  const currentLibraryListPath = useMemo(
+    () => `${location.pathname}${location.search || ""}`,
+    [location.pathname, location.search],
+  );
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -271,9 +323,10 @@ export function LibraryPage() {
     }
     setError("");
     try {
-      const target = deferredQuery.trim()
-        ? `/api/library/search?q=${encodeURIComponent(deferredQuery.trim())}`
-        : "/api/library";
+      const target = buildLibraryRequestPath({
+        category: activeLibraryCategory,
+        query: deferredQuery,
+      });
       const payload = await apiRequest(target, { signal });
       if (!deferredQuery.trim()) {
         const nextSourceCounts = (payload.items || []).reduce(
@@ -339,7 +392,7 @@ export function LibraryPage() {
     return () => {
       controller.abort();
     };
-  }, [deferredQuery]);
+  }, [activeLibraryCategory, deferredQuery]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -379,7 +432,7 @@ export function LibraryPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [library.scan_in_progress, deferredQuery]);
+  }, [activeLibraryCategory, library.scan_in_progress, deferredQuery]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") {
@@ -836,11 +889,11 @@ export function LibraryPage() {
     }
     const rememberedTarget = readLibraryReturnTarget();
     const shouldRestore = Boolean(location.state?.restoreLibraryReturn) || Boolean(rememberedTarget?.pendingRestore);
-    if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== location.pathname) {
+    if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== currentLibraryListPath) {
       return undefined;
     }
     const restoreKey = [
-      location.pathname,
+      currentLibraryListPath,
       rememberedTarget.anchorInstanceKey || rememberedTarget.anchorItemId || "none",
       rememberedTarget.anchorViewportRatioY ?? "none",
       rememberedTarget.scrollY,
@@ -881,7 +934,7 @@ export function LibraryPage() {
     return () => {
       window.clearTimeout(timerId);
     };
-  }, [library.items, loading, location.pathname, location.state]);
+  }, [currentLibraryListPath, library.items, loading, location.state]);
 
   async function handleRescan() {
     setRescanPending(true);
@@ -933,6 +986,18 @@ export function LibraryPage() {
     setQuery(nextSearchValue);
   }
 
+  function handleCategoryChange(category) {
+    const nextSearch = buildLibraryCategorySearch(location.search, category);
+    navigate(
+      {
+        pathname: location.pathname,
+        search: nextSearch,
+        hash: location.hash,
+      },
+      { replace: false },
+    );
+  }
+
   const isSearching = deferredQuery.trim().length > 0;
 
   return (
@@ -968,6 +1033,26 @@ export function LibraryPage() {
           >
             {rescanPending ? "Starting scan..." : "Rescan library"}
           </RefreshSweepButton>
+        </div>
+        <div className="library-category-switch" role="tablist" aria-label="Library category">
+          {LIBRARY_CATEGORY_OPTIONS.map((category) => {
+            const active = category.key === activeLibraryCategory;
+            return (
+              <button
+                aria-selected={active}
+                className={[
+                  "library-category-switch__button",
+                  active ? "library-category-switch__button--active" : "",
+                ].filter(Boolean).join(" ")}
+                key={category.key}
+                onClick={() => handleCategoryChange(category.key)}
+                role="tab"
+                type="button"
+              >
+                {category.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -1115,7 +1200,7 @@ export function LibraryPage() {
 
           <section className="content-section">
             <div className="section-header section-header--compact">
-              <h2>Other Movies</h2>
+              <h2>{activeLibraryCategoryConfig.otherHeading}</h2>
             </div>
             {visibleLibraryGridItems.length > 0 ? (
             <MediaGrid

@@ -85,6 +85,29 @@ test("library return state remains backward compatible with item-id-only payload
   );
 });
 
+test("library return state preserves library query parameters", () => {
+  assert.deepEqual(
+    normalizeLibraryReturnTarget({
+      listPath: "/library?category=anime",
+      anchorItemId: 77,
+      scrollY: 240,
+    }),
+    {
+      listPath: "/library?category=anime",
+      anchorItemId: 77,
+      anchorInstanceKey: null,
+      scrollY: 240,
+      pendingRestore: false,
+      anchorViewportRatioY: null,
+      anchorViewportRatioX: null,
+      viewportWidth: null,
+      viewportHeight: null,
+      railKey: null,
+      railScrollLeft: null,
+    },
+  );
+});
+
 test("library return state normalizes invalid values safely", () => {
   assert.deepEqual(
     normalizeLibraryReturnTarget({

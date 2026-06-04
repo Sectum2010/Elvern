@@ -640,6 +640,46 @@ button {
   display: none;
 }
 
+.library-category-switch {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+  width: 100%;
+  max-width: 36rem;
+  padding: 0.24rem;
+  border: 1px solid rgba(152, 176, 201, 0.16);
+  border-radius: 999px;
+  background: rgba(7, 11, 23, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.library-category-switch__button {
+  min-width: 0;
+  min-height: 2.2rem;
+  padding: 0.42rem 0.5rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-weight: 750;
+  letter-spacing: 0;
+  white-space: nowrap;
+  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+.library-category-switch__button:hover,
+.library-category-switch__button:focus-visible {
+  color: #eef8ff;
+}
+
+.library-category-switch__button--active {
+  background:
+    linear-gradient(180deg, rgba(94, 143, 177, 0.84), rgba(45, 76, 104, 0.92));
+  color: #f5fbff;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
+}
+
 .library-mobile-search-card {
   display: grid;
   padding: 0.95rem 1rem;
@@ -5935,6 +5975,10 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   .app-shell--library-root .library-desktop-hero__row {
     width: 100%;
     gap: 1rem;
+  }
+
+  .app-shell--library-root .library-category-switch {
+    justify-self: start;
   }
 
   .app-shell--library-root .library-desktop-hero__search {
