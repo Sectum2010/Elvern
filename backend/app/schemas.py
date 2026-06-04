@@ -279,6 +279,9 @@ class MediaLibraryReferenceResponse(BaseModel):
     configured_value: str | None = None
     effective_value: str
     default_value: str
+    configured_locations: list[str] = Field(default_factory=list)
+    effective_locations: list[str] = Field(default_factory=list)
+    category_summary: dict[str, list[dict[str, str]]] = Field(default_factory=dict)
     validation_rules: list[str] = Field(default_factory=list)
 
 
@@ -526,10 +529,19 @@ class MediaItemDetail(LibraryItemSummary):
     age_requirement_display: str = "None"
     age_requirement_updated_at: str | None = None
     age_requirement_updated_by_user_id: int | None = None
+    genre_group_key: str = ""
+    genre_group_display_title: str = ""
+    genre_group_year: int | None = None
+    genres: list[str] = Field(default_factory=list)
+    genre_display: str = "Unknown"
 
 
 class MediaAgeRequirementUpdateRequest(BaseModel):
     age_requirement: int | None = Field(default=None, ge=1, le=18)
+
+
+class MediaGenreUpdateRequest(BaseModel):
+    genres: list[str] = Field(default_factory=list)
 
 
 class MediaAgeManualGroupLinkRequest(BaseModel):

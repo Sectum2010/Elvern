@@ -39,6 +39,7 @@ from .library_presentation_service import (
     _serialize_media_item,
 )
 from .media_age_access_service import resolve_media_age_requirement
+from .media_genre_service import get_media_genre_metadata
 from .title_normalization import (
     build_search_index,
     match_search_query,
@@ -605,6 +606,7 @@ def get_media_item_detail(
         track_scan_source = "not_scanned"
     payload = _serialize_media_item(settings, row, poster_dir=poster_dir)
     age_requirement_payload = resolve_media_age_requirement(settings, item_id)
+    genre_payload = get_media_genre_metadata(settings, item_id)
     payload.update(
         {
             "hidden_for_user": hidden_for_user,
@@ -663,6 +665,7 @@ def get_media_item_detail(
                 ],
             },
             **age_requirement_payload,
+            **genre_payload,
         }
     )
     return payload

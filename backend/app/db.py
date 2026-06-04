@@ -91,6 +91,12 @@ TABLE_STATEMENTS = (
         cloud_resource_key TEXT,
         series_folder_key TEXT,
         series_folder_name TEXT,
+        library_category TEXT,
+        library_category_path TEXT,
+        library_category_name TEXT,
+        library_folder_role TEXT,
+        library_folder_path TEXT,
+        library_folder_name TEXT,
         file_size INTEGER NOT NULL,
         file_mtime REAL NOT NULL,
         duration_seconds REAL,
@@ -271,6 +277,17 @@ TABLE_STATEMENTS = (
         note TEXT,
         FOREIGN KEY (media_item_id) REFERENCES media_items(id) ON DELETE CASCADE,
         FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS media_genre_groups (
+        genre_group_key TEXT PRIMARY KEY,
+        display_title TEXT NOT NULL,
+        year INTEGER,
+        genres_json TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL,
+        updated_by_user_id INTEGER,
+        FOREIGN KEY (updated_by_user_id) REFERENCES users (id) ON DELETE SET NULL
     )
     """,
     """
@@ -778,6 +795,7 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_media_age_requirements_updated_at ON media_age_requirements (updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_media_age_manual_group_links_group ON media_age_manual_group_links (age_group_key)",
     "CREATE INDEX IF NOT EXISTS idx_media_age_manual_group_links_created_by ON media_age_manual_group_links (created_by_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_media_genre_groups_updated_at ON media_genre_groups (updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_status ON password_help_requests (status, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_user ON password_help_requests (user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_password_help_requests_bucket ON password_help_requests (requester_bucket_hash, created_at DESC)",
@@ -880,6 +898,12 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "media_items", "cloud_resource_key", "TEXT")
     _ensure_column(connection, "media_items", "series_folder_key", "TEXT")
     _ensure_column(connection, "media_items", "series_folder_name", "TEXT")
+    _ensure_column(connection, "media_items", "library_category", "TEXT")
+    _ensure_column(connection, "media_items", "library_category_path", "TEXT")
+    _ensure_column(connection, "media_items", "library_category_name", "TEXT")
+    _ensure_column(connection, "media_items", "library_folder_role", "TEXT")
+    _ensure_column(connection, "media_items", "library_folder_path", "TEXT")
+    _ensure_column(connection, "media_items", "library_folder_name", "TEXT")
 
     _ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'standard_user'")
     _ensure_column(connection, "users", "enabled", "INTEGER NOT NULL DEFAULT 1")

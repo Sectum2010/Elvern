@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from .config import Settings
-from .services.local_library_source_service import get_effective_shared_local_library_path
+from .services.local_library_source_service import get_effective_library_reference_locations
 
 
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)")
@@ -18,15 +18,17 @@ VALIDATED_STREAM_DEFAULT_CHUNK_SIZE = 64 * 1024
 
 def ensure_media_path_within_root(file_path: Path, settings: Settings) -> Path:
     resolved = file_path.resolve()
-    media_root = get_effective_shared_local_library_path(settings).resolve()
-    try:
-        resolved.relative_to(media_root)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Media path escapes configured media root",
-        ) from exc
-    return resolved
+    media_roots = [root.resolve() for root in get_effective_library_reference_locations(settings)]
+    for media_root in media_roots:
+        try:
+            resolved.relative_to(media_root)
+            return resolved
+        except ValueError:
+            continue
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Media path escapes configured media root",
+    )
 
 
 def _parse_range_header(range_header: str | None, file_size: int) -> tuple[int, int, bool]:

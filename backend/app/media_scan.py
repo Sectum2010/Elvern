@@ -11,7 +11,13 @@ from .db import get_connection, preserve_hidden_movie_keys_for_media_item, utcno
 from .db_hidden_movie_keys import prune_recreated_local_hidden_movie_keys
 from .services.local_library_source_service import (
     ensure_current_shared_local_source_binding,
+    get_effective_library_reference_locations,
     get_effective_shared_local_library_path,
+)
+from .services.library_folder_classifier import (
+    DiscoveredMediaFile,
+    discover_library_folders,
+    path_is_same_or_inside,
 )
 from .services.media_title_parser import parse_media_title
 
@@ -64,6 +70,46 @@ def _inside_media_root(candidate: Path, media_root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _inside_any_media_root(candidate: Path, media_roots: list[Path]) -> bool:
+    return any(_inside_media_root(candidate, media_root) for media_root in media_roots)
+
+
+def _resolve_poster_reference_path_for_scan(settings: Settings, media_root: Path) -> Path:
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT value
+            FROM app_settings
+            WHERE key = 'poster_reference_location'
+            LIMIT 1
+            """
+        ).fetchone()
+    configured_value = str(row["value"] or "").strip() if row else ""
+    if configured_value:
+        configured_path = Path(configured_value).expanduser().resolve()
+        if configured_path.exists() and configured_path.is_dir():
+            return configured_path
+    return (media_root / "Posters").resolve()
+
+
+def _scan_metadata_for_file(discovered_file: DiscoveredMediaFile) -> dict[str, object]:
+    metadata = discovered_file.metadata
+    return {
+        "series_folder_key": metadata.series_folder_key,
+        "series_folder_name": metadata.series_folder_name,
+        "library_category": metadata.category,
+        "library_category_path": str(metadata.category_path) if metadata.category_path else None,
+        "library_category_name": metadata.category_display_name,
+        "library_folder_role": metadata.role,
+        "library_folder_path": str(metadata.folder_path),
+        "library_folder_name": metadata.folder_display_name,
+    }
+
+
+def _scan_metadata_matches(row, scan_metadata: dict[str, object]) -> bool:
+    return all((row[key] or None) == (value or None) for key, value in scan_metadata.items())
 
 
 def extract_media_metadata(file_path: Path, settings: Settings) -> dict[str, object]:
@@ -187,63 +233,92 @@ def extract_media_metadata(file_path: Path, settings: Settings) -> dict[str, obj
 
 
 def build_local_library_freshness_snapshot(settings: Settings) -> dict[str, object]:
-    media_root = get_effective_shared_local_library_path(settings).resolve()
+    media_roots = [
+        path.resolve()
+        for path in get_effective_library_reference_locations(settings)
+    ]
+    media_root = media_roots[0] if media_roots else get_effective_shared_local_library_path(settings).resolve()
     snapshot: dict[str, object] = {
         "version": LOCAL_LIBRARY_FRESHNESS_SNAPSHOT_VERSION,
         "media_root": str(media_root),
+        "media_roots": [str(path) for path in media_roots],
         "snapshot_state": "unknown",
         "root_identity": None,
+        "root_identities": [],
         "top_level_count": 0,
         "top_level_fingerprint": None,
+        "top_level_fingerprints": [],
     }
 
-    if not media_root.exists():
+    if not media_roots:
         snapshot["snapshot_state"] = "missing"
         return snapshot
 
+    root_identities: list[dict[str, int]] = []
+    all_top_level_entries: list[dict[str, object]] = []
+    root_fingerprints: list[str] = []
     try:
-        root_stat = media_root.stat()
-        top_level_entries: list[dict[str, object]] = []
-        for entry in sorted(media_root.iterdir(), key=lambda candidate: candidate.name.lower()):
-            try:
-                entry_stat = entry.stat()
-            except OSError:
-                snapshot["snapshot_state"] = "error"
+        for root_index, root in enumerate(media_roots):
+            if not root.exists() or not root.is_dir():
+                snapshot["snapshot_state"] = "missing"
                 return snapshot
-            if entry.is_dir():
-                entry_kind = "dir"
-                entry_size = 0
-            elif entry.is_file():
-                entry_kind = "file"
-                entry_size = int(entry_stat.st_size)
-            else:
-                entry_kind = "other"
-                entry_size = 0
-            top_level_entries.append(
+            root_stat = root.stat()
+            root_identities.append(
                 {
-                    "name": entry.name,
-                    "kind": entry_kind,
-                    "mtime_ns": int(entry_stat.st_mtime_ns),
-                    "size": entry_size,
+                    "st_dev": int(root_stat.st_dev),
+                    "st_ino": int(root_stat.st_ino),
                 }
             )
+            root_entries: list[dict[str, object]] = []
+            for entry in sorted(root.iterdir(), key=lambda candidate: candidate.name.lower()):
+                try:
+                    entry_stat = entry.stat()
+                except OSError:
+                    snapshot["snapshot_state"] = "error"
+                    return snapshot
+                if entry.is_dir():
+                    entry_kind = "dir"
+                    entry_size = 0
+                elif entry.is_file():
+                    entry_kind = "file"
+                    entry_size = int(entry_stat.st_size)
+                else:
+                    entry_kind = "other"
+                    entry_size = 0
+                root_entries.append(
+                    {
+                        "root_index": root_index,
+                        "root": str(root),
+                        "name": entry.name,
+                        "kind": entry_kind,
+                        "mtime_ns": int(entry_stat.st_mtime_ns),
+                        "size": entry_size,
+                    }
+                )
+            encoded_root_entries = json.dumps(
+                root_entries,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            root_fingerprints.append(hashlib.sha256(encoded_root_entries).hexdigest())
+            all_top_level_entries.extend(root_entries)
     except OSError:
         snapshot["snapshot_state"] = "error"
         return snapshot
 
     encoded_entries = json.dumps(
-        top_level_entries,
+        all_top_level_entries,
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
     snapshot["snapshot_state"] = "ready"
-    snapshot["root_identity"] = {
-        "st_dev": int(root_stat.st_dev),
-        "st_ino": int(root_stat.st_ino),
-    }
-    snapshot["top_level_count"] = len(top_level_entries)
+    snapshot["root_identity"] = root_identities[0] if root_identities else None
+    snapshot["root_identities"] = root_identities
+    snapshot["top_level_count"] = len(all_top_level_entries)
     snapshot["top_level_fingerprint"] = hashlib.sha256(encoded_entries).hexdigest()
+    snapshot["top_level_fingerprints"] = root_fingerprints
     return snapshot
 
 
@@ -254,8 +329,20 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
     files_changed = 0
     files_removed = 0
     hidden_movie_keys_pruned = 0
+    folder_warnings: list[dict[str, object]] = []
 
     with get_connection(settings) as connection:
+        library_reference_locations = [
+            path.resolve()
+            for path in get_effective_library_reference_locations(settings, connection=connection)
+        ]
+        poster_reference_path = _resolve_poster_reference_path_for_scan(settings, media_root)
+        discovery = discover_library_folders(
+            library_reference_locations,
+            allowed_video_extensions=settings.allowed_video_extensions,
+            poster_reference_path=poster_reference_path,
+        )
+        folder_warnings = discovery.warnings
         shared_local_source_id = ensure_current_shared_local_source_binding(
             settings,
             connection=connection,
@@ -269,24 +356,36 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
         )
         job_id = cursor.lastrowid
         try:
-            current_files: list[tuple[Path, object]] = []
+            current_files: list[tuple[Path, object, dict[str, object]]] = []
             current_paths: set[str] = set()
-            for candidate in media_root.rglob("*"):
-                if not candidate.is_file():
-                    continue
-                if candidate.suffix.lower() not in settings.allowed_video_extensions:
-                    continue
-                resolved = candidate.resolve()
-                if not _inside_media_root(resolved, media_root):
+            for discovered_file in discovery.files:
+                resolved = discovered_file.path.resolve()
+                if not _inside_any_media_root(resolved, library_reference_locations):
                     logger.warning("Skipping out-of-root media path %s", resolved)
                     continue
+                if poster_reference_path and path_is_same_or_inside(resolved, poster_reference_path):
+                    continue
                 stat = resolved.stat()
-                current_files.append((resolved, stat))
+                current_files.append((resolved, stat, _scan_metadata_for_file(discovered_file)))
                 current_paths.add(str(resolved))
 
             existing_rows = connection.execute(
                 """
-                SELECT id, file_path, original_filename, file_size, file_mtime, year
+                SELECT
+                    id,
+                    file_path,
+                    original_filename,
+                    file_size,
+                    file_mtime,
+                    year,
+                    series_folder_key,
+                    series_folder_name,
+                    library_category,
+                    library_category_path,
+                    library_category_name,
+                    library_folder_role,
+                    library_folder_path,
+                    library_folder_name
                 FROM media_items
                 WHERE COALESCE(source_kind, 'local') = 'local'
                 """
@@ -305,7 +404,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
             seen_paths: set[str] = set()
             rename_matched_existing_ids: set[int] = set()
 
-            for resolved, stat in current_files:
+            for resolved, stat, scan_metadata in current_files:
                 file_path = str(resolved)
                 seen_paths.add(file_path)
                 files_seen += 1
@@ -329,6 +428,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     existing
                     and existing["file_size"] == stat.st_size
                     and existing["file_mtime"] == stat.st_mtime
+                    and _scan_metadata_matches(existing, scan_metadata)
                 ):
                     continue
 
@@ -371,6 +471,14 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                             audio_codec = ?,
                             container = ?,
                             year = ?,
+                            series_folder_key = ?,
+                            series_folder_name = ?,
+                            library_category = ?,
+                            library_category_path = ?,
+                            library_category_name = ?,
+                            library_folder_role = ?,
+                            library_folder_path = ?,
+                            library_folder_name = ?,
                             updated_at = ?,
                             last_scanned_at = ?
                         WHERE id = ?
@@ -389,6 +497,14 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                             metadata["audio_codec"],
                             metadata["container"],
                             preserved_year,
+                            scan_metadata["series_folder_key"],
+                            scan_metadata["series_folder_name"],
+                            scan_metadata["library_category"],
+                            scan_metadata["library_category_path"],
+                            scan_metadata["library_category_name"],
+                            scan_metadata["library_folder_role"],
+                            scan_metadata["library_folder_path"],
+                            scan_metadata["library_folder_name"],
                             now,
                             now,
                             media_item_id,
@@ -412,10 +528,18 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                             audio_codec,
                             container,
                             year,
+                            series_folder_key,
+                            series_folder_name,
+                            library_category,
+                            library_category_path,
+                            library_category_name,
+                            library_folder_role,
+                            library_folder_path,
+                            library_folder_name,
                             created_at,
                             updated_at,
                             last_scanned_at
-                        ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(file_path) DO UPDATE SET
                             title = excluded.title,
                             original_filename = excluded.original_filename,
@@ -430,6 +554,14 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                             audio_codec = excluded.audio_codec,
                             container = excluded.container,
                             year = excluded.year,
+                            series_folder_key = excluded.series_folder_key,
+                            series_folder_name = excluded.series_folder_name,
+                            library_category = excluded.library_category,
+                            library_category_path = excluded.library_category_path,
+                            library_category_name = excluded.library_category_name,
+                            library_folder_role = excluded.library_folder_role,
+                            library_folder_path = excluded.library_folder_path,
+                            library_folder_name = excluded.library_folder_name,
                             updated_at = excluded.updated_at,
                             last_scanned_at = excluded.last_scanned_at
                         """,
@@ -447,6 +579,14 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                             metadata["audio_codec"],
                             metadata["container"],
                             preserved_year,
+                            scan_metadata["series_folder_key"],
+                            scan_metadata["series_folder_name"],
+                            scan_metadata["library_category"],
+                            scan_metadata["library_category_path"],
+                            scan_metadata["library_category_name"],
+                            scan_metadata["library_folder_role"],
+                            scan_metadata["library_folder_path"],
+                            scan_metadata["library_folder_name"],
                             now,
                             now,
                             now,
@@ -563,5 +703,6 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
         "files_changed": files_changed,
         "files_removed": files_removed,
         "hidden_movie_keys_pruned": hidden_movie_keys_pruned,
+        "folder_warnings": folder_warnings,
         "message": "Scan completed",
     }

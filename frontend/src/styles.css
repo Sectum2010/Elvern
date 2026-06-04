@@ -2306,6 +2306,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .admin-form input,
+.admin-form textarea,
 .admin-select {
   width: 100%;
   border-radius: 0.95rem;
@@ -2315,13 +2316,19 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   color: #f4f8fb;
 }
 
+.admin-form textarea {
+  min-block-size: 5.2rem;
+  resize: vertical;
+}
+
 .settings-path-picker__row {
   display: flex;
   gap: 0.65rem;
-  align-items: center;
+  align-items: flex-start;
 }
 
-.settings-path-picker__row input {
+.settings-path-picker__row input,
+.settings-path-picker__row textarea {
   margin-top: 0;
   flex: 1 1 auto;
   min-width: 0;
@@ -2332,6 +2339,40 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   inline-size: 2.8rem;
   padding-inline: 0;
   font-size: 1.15rem;
+}
+
+.settings-library-reference-summary {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.settings-library-reference-summary__row {
+  display: grid;
+  grid-template-columns: minmax(8.5rem, 0.42fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.68rem 0.8rem;
+  border: 1px solid rgba(143, 182, 218, 0.16);
+  border-radius: 0.75rem;
+  background: rgba(8, 14, 22, 0.42);
+}
+
+.settings-library-reference-summary__row > span {
+  color: var(--text-muted);
+}
+
+.settings-library-reference-summary__row strong {
+  display: grid;
+  gap: 0.28rem;
+  min-width: 0;
+  color: var(--accent-strong);
+  font-size: 0.92rem;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.settings-library-reference-summary__path {
+  color: var(--accent-strong);
 }
 
 .admin-intro-card,
@@ -3263,8 +3304,14 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   .settings-age-group-copy,
   .settings-age-group-search__result,
   .settings-age-group-modal__summary,
-  .detail-age-group-modal__summary {
+  .detail-age-group-modal__summary,
+  .settings-library-reference-summary__row,
+  .detail-genre-custom-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detail-genre-editor__header {
+    display: grid;
   }
 
   .password-help-request-card__details {
@@ -5362,6 +5409,158 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .detail-info-modal__title {
   margin: 0;
+}
+
+.detail-info-modal__genres {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.detail-genre-chip-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.detail-genre-chip-area {
+  cursor: pointer;
+}
+
+button.detail-genre-chip-area:focus-visible,
+.detail-genre-edit-button:focus-visible,
+.detail-genre-option:focus-visible,
+.detail-genre-selected:focus-visible {
+  outline: 2px solid rgba(143, 182, 218, 0.46);
+  outline-offset: 2px;
+}
+
+.detail-genre-chip,
+.detail-genre-selected {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  min-height: 1.8rem;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid rgba(112, 214, 180, 0.28);
+  border-radius: 999px;
+  background: rgba(59, 173, 142, 0.12);
+  color: #bff6df;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.detail-genre-chip svg,
+.detail-genre-selected svg {
+  inline-size: 0.9rem;
+  block-size: 0.9rem;
+  flex: 0 0 auto;
+}
+
+.detail-genre-chip--unknown {
+  border-color: rgba(143, 182, 218, 0.22);
+  background: rgba(143, 182, 218, 0.1);
+  color: var(--accent-strong);
+}
+
+.detail-genre-edit-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.detail-genre-edit-button:hover {
+  color: #f4f8fb;
+}
+
+.detail-genre-editor {
+  display: grid;
+  gap: 0.8rem;
+  margin-bottom: 0.95rem;
+  padding: 0.9rem;
+  border: 1px solid rgba(143, 182, 218, 0.16);
+  border-radius: 0.85rem;
+  background: rgba(8, 14, 22, 0.5);
+}
+
+.detail-genre-editor__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: flex-start;
+}
+
+.detail-genre-editor__header h2 {
+  margin: 0;
+}
+
+.detail-genre-option-grid,
+.detail-genre-selected-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.detail-genre-option {
+  min-height: 2rem;
+  padding: 0.38rem 0.62rem;
+  border: 1px solid rgba(143, 182, 218, 0.18);
+  border-radius: 999px;
+  background: rgba(143, 182, 218, 0.08);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.detail-genre-option--selected {
+  border-color: rgba(112, 214, 180, 0.38);
+  background: rgba(59, 173, 142, 0.16);
+  color: #bff6df;
+}
+
+.detail-genre-option:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.detail-genre-custom-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+}
+
+.detail-genre-custom-row input {
+  width: 100%;
+  min-width: 0;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(164, 181, 199, 0.18);
+  padding: 0.75rem 0.85rem;
+  background: rgba(11, 17, 24, 0.92);
+  color: #f4f8fb;
+}
+
+.detail-genre-selected {
+  border-color: rgba(143, 182, 218, 0.22);
+  background: rgba(143, 182, 218, 0.11);
+  color: var(--accent-strong);
+  font: inherit;
+  cursor: pointer;
 }
 
 .detail-info-modal__close {

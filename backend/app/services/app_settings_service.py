@@ -14,15 +14,19 @@ from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..media_scan import scan_media_library
 from .local_library_source_service import (
+    MEDIA_LIBRARY_REFERENCE_KEY,
     get_effective_shared_local_library_path,
+    get_effective_library_reference_locations,
+    get_library_reference_category_summary,
     ensure_shared_local_library_source,
+    serialize_library_reference_locations,
     purge_shared_local_media_items,
     shared_local_library_bootstrap_path,
     update_shared_local_library_path,
+    validate_library_reference_locations,
 )
 
 
-MEDIA_LIBRARY_REFERENCE_KEY = "media_library_reference"
 POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
 GOOGLE_OAUTH_CLIENT_ID_KEY = "google_oauth_client_id"
 GOOGLE_OAUTH_CLIENT_SECRET_KEY = "google_oauth_client_secret"
@@ -340,9 +344,11 @@ def update_google_drive_setup(
 
 def media_library_reference_validation_rules(settings: Settings) -> list[str]:
     return [
-        f"Leave blank to reset to the default shared local path: {normalize_media_library_reference_default_path(settings=settings)['default_value']}",
-        "This is the real shared local library path currently used by Elvern for the shared local library.",
-        "Use an absolute Linux directory path that already exists on this host.",
+        f"Leave blank to use the default library reference location: {normalize_media_library_reference_default_path(settings=settings)['default_value']}",
+        "Choose one or more parent folders where Elvern should look for media folders.",
+        "Use one absolute Linux directory path per line.",
+        "Elvern auto-discovers folders marked with -M, -TV, -AN, -C, -L, -S, and -X.",
+        "Poster reference location stays manually configured below.",
     ]
 
 
@@ -369,24 +375,57 @@ def get_media_library_reference_payload(
     connection: sqlite3.Connection | None = None,
 ) -> dict[str, object]:
     default_payload = normalize_media_library_reference_default_path(settings=settings)
-    effective_value = str(
-        get_effective_shared_local_library_path(settings, connection=connection)
+    effective_locations = [
+        str(path)
+        for path in get_effective_library_reference_locations(settings, connection=connection)
+    ]
+    configured_value = get_global_app_setting(
+        settings,
+        key=MEDIA_LIBRARY_REFERENCE_KEY,
+        connection=connection,
     )
+    configured_locations: list[str] = []
+    if configured_value:
+        configured_locations = effective_locations
+    effective_value = "\n".join(effective_locations)
     return {
-        "configured_value": effective_value,
+        "configured_value": "\n".join(configured_locations) if configured_locations else None,
         "effective_value": effective_value,
         "default_value": default_payload["default_value"],
+        "configured_locations": configured_locations,
+        "effective_locations": effective_locations,
+        "category_summary": get_library_reference_category_summary(settings, connection=connection),
         "validation_rules": media_library_reference_validation_rules(settings),
     }
 
 
 def update_media_library_reference(settings: Settings, *, value: str | None) -> dict[str, object]:
+    normalized_locations = validate_library_reference_locations(settings, value=value)
+    default_location = normalize_media_library_reference_default_path(settings=settings)["default_value"]
+    configured_value = (
+        None
+        if normalized_locations == [default_location]
+        else serialize_library_reference_locations(normalized_locations)
+    )
     with get_connection(settings) as connection:
         update_shared_local_library_path(
             settings,
-            value=value,
+            value=normalized_locations[0],
             connection=connection,
         )
+        if configured_value is None:
+            connection.execute("DELETE FROM app_settings WHERE key = ?", (MEDIA_LIBRARY_REFERENCE_KEY,))
+        else:
+            connection.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (MEDIA_LIBRARY_REFERENCE_KEY, configured_value, utcnow_iso()),
+            )
         shared_source_id = ensure_shared_local_library_source(
             settings,
             connection=connection,
@@ -397,8 +436,7 @@ def update_media_library_reference(settings: Settings, *, value: str | None) -> 
         )
         connection.commit()
 
-    scan_media_library(settings, reason="shared_local_path_update")
-    set_global_app_setting(settings, key=MEDIA_LIBRARY_REFERENCE_KEY, value=None)
+    scan_media_library(settings, reason="library_reference_locations_update")
     return get_media_library_reference_payload(settings)
 
 

@@ -5,8 +5,13 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from backend.app.db import get_connection, utcnow_iso
 from backend.app.media_stream import ensure_media_path_within_root, resolve_effective_stream_chunk_size
-from backend.app.services.local_library_source_service import update_shared_local_library_path
+from backend.app.services.local_library_source_service import (
+    MEDIA_LIBRARY_REFERENCE_KEY,
+    serialize_library_reference_locations,
+    update_shared_local_library_path,
+)
 
 
 def test_media_root_allows_real_files_inside_root(initialized_settings) -> None:
@@ -51,6 +56,37 @@ def test_media_root_uses_live_shared_local_library_path(initialized_settings, tm
     update_shared_local_library_path(initialized_settings, value=str(replacement_root))
 
     media_file = replacement_root / "clip.mp4"
+    media_file.write_bytes(b"test payload")
+
+    resolved = ensure_media_path_within_root(media_file, initialized_settings)
+
+    assert resolved == media_file.resolve()
+
+
+def test_media_root_allows_files_inside_additional_library_reference_location(initialized_settings, tmp_path) -> None:
+    second_root = tmp_path / "second-reference"
+    second_root.mkdir()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (
+                MEDIA_LIBRARY_REFERENCE_KEY,
+                serialize_library_reference_locations([
+                    str(initialized_settings.media_root.resolve()),
+                    str(second_root.resolve()),
+                ]),
+                utcnow_iso(),
+            ),
+        )
+        connection.commit()
+
+    media_file = second_root / "clip.mp4"
     media_file.write_bytes(b"test payload")
 
     resolved = ensure_media_path_within_root(media_file, initialized_settings)

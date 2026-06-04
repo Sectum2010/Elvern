@@ -93,4 +93,27 @@ describe("DetailPage hook-order guards", () => {
     expect(source).toContain("onClick={saveAgeRequirement}");
     expect(source).toContain("ageRequirementEditor.pending ? \"Saving...\" : \"Save\"");
   });
+
+  test("movie info exposes genres only inside the Info modal", () => {
+    const source = readDetailPage();
+    const infoModalStart = source.indexOf("{infoModalOpen ? (");
+    const infoModalEnd = source.indexOf("{ageGroupModal.open ? (", infoModalStart);
+    expect(infoModalStart).toBeGreaterThan(0);
+    expect(infoModalEnd).toBeGreaterThan(infoModalStart);
+
+    const beforeInfoModal = source.slice(0, infoModalStart);
+    const infoModalSource = source.slice(infoModalStart, infoModalEnd);
+
+    expect(source).toContain("const COMMON_GENRE_OPTIONS = [");
+    expect(source).toContain("const MAX_GENRE_COUNT = 3;");
+    expect(source).toContain("/api/library/item/${item.id}/genres");
+    expect(infoModalSource).toContain("detail-genre-chip");
+    expect(infoModalSource).toContain("Unknown");
+    expect(infoModalSource).toContain("Edit genres");
+    expect(infoModalSource).toContain("Save genres");
+    expect(infoModalSource).toContain("isAdmin && !genreEditor.editing");
+    expect(infoModalSource).toContain("COMMON_GENRE_OPTIONS.map");
+    expect(beforeInfoModal).not.toContain("detail-genre-chip");
+    expect(beforeInfoModal).not.toContain("Edit genres");
+  });
 });

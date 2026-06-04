@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Tag } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useProviderAuth } from "../auth/ProviderAuthContext";
@@ -143,6 +144,25 @@ const INITIAL_DOWNLOAD_STATE = {
 };
 
 const AGE_REQUIREMENT_OPTIONS = [null, ...Array.from({ length: 18 }, (_, index) => index + 1)];
+const MAX_GENRE_COUNT = 3;
+const COMMON_GENRE_OPTIONS = [
+  "Action",
+  "Adventure",
+  "Animation",
+  "Comedy",
+  "Crime",
+  "Documentary",
+  "Drama",
+  "Family",
+  "Fantasy",
+  "Horror",
+  "Mystery",
+  "Romance",
+  "Sci-Fi",
+  "Thriller",
+  "War",
+  "Western",
+];
 
 function formatAgeRequirement(value) {
   if (value == null || value === "") {
@@ -153,6 +173,27 @@ function formatAgeRequirement(value) {
     return "None";
   }
   return age >= 18 ? "18+" : String(age);
+}
+
+
+function normalizeGenreLabel(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+
+function normalizeGenreList(values) {
+  const normalized = [];
+  const seen = new Set();
+  (Array.isArray(values) ? values : []).forEach((value) => {
+    const label = normalizeGenreLabel(value);
+    const key = label.toLocaleLowerCase();
+    if (!label || seen.has(key)) {
+      return;
+    }
+    normalized.push(label);
+    seen.add(key);
+  });
+  return normalized.slice(0, MAX_GENRE_COUNT);
 }
 
 
@@ -531,6 +572,13 @@ export function DetailPage() {
   const [ageRequirementEditor, setAgeRequirementEditor] = useState({
     editing: false,
     value: "",
+    pending: false,
+    error: "",
+  });
+  const [genreEditor, setGenreEditor] = useState({
+    editing: false,
+    selected: [],
+    customValue: "",
     pending: false,
     error: "",
   });
@@ -2020,6 +2068,118 @@ export function DetailPage() {
     });
   }
 
+  function startGenreEdit() {
+    if (!item || !isAdmin) {
+      return;
+    }
+    setGenreEditor({
+      editing: true,
+      selected: normalizeGenreList(item.genres),
+      customValue: "",
+      pending: false,
+      error: "",
+    });
+  }
+
+  function cancelGenreEdit() {
+    setGenreEditor({
+      editing: false,
+      selected: [],
+      customValue: "",
+      pending: false,
+      error: "",
+    });
+  }
+
+  function toggleGenreSelection(genre) {
+    const normalizedGenre = normalizeGenreLabel(genre);
+    if (!normalizedGenre || genreEditor.pending) {
+      return;
+    }
+    setGenreEditor((current) => {
+      const existingIndex = current.selected.findIndex(
+        (selectedGenre) => selectedGenre.toLocaleLowerCase() === normalizedGenre.toLocaleLowerCase(),
+      );
+      if (existingIndex >= 0) {
+        return {
+          ...current,
+          selected: current.selected.filter((_, index) => index !== existingIndex),
+          error: "",
+        };
+      }
+      if (current.selected.length >= MAX_GENRE_COUNT) {
+        return {
+          ...current,
+          error: `Choose up to ${MAX_GENRE_COUNT} genres.`,
+        };
+      }
+      return {
+        ...current,
+        selected: [...current.selected, normalizedGenre],
+        error: "",
+      };
+    });
+  }
+
+  function addCustomGenre() {
+    const normalizedGenre = normalizeGenreLabel(genreEditor.customValue);
+    if (!normalizedGenre || genreEditor.pending) {
+      return;
+    }
+    setGenreEditor((current) => {
+      const alreadySelected = current.selected.some(
+        (selectedGenre) => selectedGenre.toLocaleLowerCase() === normalizedGenre.toLocaleLowerCase(),
+      );
+      if (alreadySelected) {
+        return {
+          ...current,
+          customValue: "",
+          error: "",
+        };
+      }
+      if (current.selected.length >= MAX_GENRE_COUNT) {
+        return {
+          ...current,
+          error: `Choose up to ${MAX_GENRE_COUNT} genres.`,
+        };
+      }
+      return {
+        ...current,
+        selected: [...current.selected, normalizedGenre],
+        customValue: "",
+        error: "",
+      };
+    });
+  }
+
+  async function saveGenres() {
+    if (!item || !isAdmin || genreEditor.pending) {
+      return;
+    }
+    const genres = normalizeGenreList(genreEditor.selected);
+    setGenreEditor((current) => ({ ...current, selected: genres, pending: true, error: "" }));
+    try {
+      const payload = await apiRequest(`/api/library/item/${item.id}/genres`, {
+        method: "PATCH",
+        data: { genres },
+      });
+      setItem(payload);
+      setGenreEditor({
+        editing: false,
+        selected: [],
+        customValue: "",
+        pending: false,
+        error: "",
+      });
+    } catch (requestError) {
+      setGenreEditor((current) => ({
+        ...current,
+        pending: false,
+        error: requestError.message || "Failed to update genres",
+      }));
+    }
+  }
+
   async function saveAgeRequirement() {
     if (!item || !isAdmin || ageRequirementEditor.pending) {
       return;
@@ -2554,6 +2714,8 @@ export function DetailPage() {
   }
 
   const detailTitle = getMovieCardTitle(item);
+  const genreLabels = normalizeGenreList(item.genres);
+  const visibleGenreLabels = genreLabels.length > 0 ? genreLabels : ["Unknown"];
 
   if (item.hidden_globally && isAdmin) {
     return (
@@ -3206,6 +3368,42 @@ export function DetailPage() {
               <div className="detail-info-modal__copy">
                 <p className="eyebrow detail-info-modal__eyebrow">Info</p>
                 <h2 className="detail-info-modal__title" id="detail-info-modal-title">{detailTitle}</h2>
+                <div className="detail-info-modal__genres">
+                  {isAdmin && !genreEditor.editing ? (
+                    <button
+                      className="detail-genre-chip-area"
+                      onClick={startGenreEdit}
+                      type="button"
+                    >
+                      {visibleGenreLabels.map((genre) => (
+                        <span
+                          className={`detail-genre-chip${genre === "Unknown" ? " detail-genre-chip--unknown" : ""}`}
+                          key={genre}
+                        >
+                          <Tag aria-hidden="true" />
+                          {genre}
+                        </span>
+                      ))}
+                    </button>
+                  ) : (
+                    <div className="detail-genre-chip-area detail-genre-chip-area--static">
+                      {visibleGenreLabels.map((genre) => (
+                        <span
+                          className={`detail-genre-chip${genre === "Unknown" ? " detail-genre-chip--unknown" : ""}`}
+                          key={genre}
+                        >
+                          <Tag aria-hidden="true" />
+                          {genre}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {isAdmin && !genreEditor.editing ? (
+                    <button className="detail-genre-edit-button" onClick={startGenreEdit} type="button">
+                      Edit genres
+                    </button>
+                  ) : null}
+                </div>
               </div>
               <button
                 className="ghost-button ghost-button--inline detail-info-modal__close"
@@ -3217,6 +3415,99 @@ export function DetailPage() {
             </div>
 
             <div className="detail-info-modal__body">
+              {isAdmin && genreEditor.editing ? (
+                <div className="detail-genre-editor">
+                  <div className="detail-genre-editor__header">
+                    <div>
+                      <h2>Genres</h2>
+                      <p className="page-subnote">{genreEditor.selected.length}/{MAX_GENRE_COUNT} selected</p>
+                    </div>
+                    <button
+                      className="ghost-button ghost-button--inline"
+                      disabled={genreEditor.pending}
+                      onClick={cancelGenreEdit}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <div className="detail-genre-option-grid">
+                    {COMMON_GENRE_OPTIONS.map((genre) => {
+                      const selected = genreEditor.selected.some(
+                        (selectedGenre) => selectedGenre.toLocaleLowerCase() === genre.toLocaleLowerCase(),
+                      );
+                      const disabled = genreEditor.pending || (!selected && genreEditor.selected.length >= MAX_GENRE_COUNT);
+                      return (
+                        <button
+                          aria-pressed={selected}
+                          className={`detail-genre-option${selected ? " detail-genre-option--selected" : ""}`}
+                          disabled={disabled}
+                          key={genre}
+                          onClick={() => toggleGenreSelection(genre)}
+                          type="button"
+                        >
+                          {genre}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="detail-genre-custom-row">
+                    <input
+                      disabled={genreEditor.pending}
+                      onChange={(event) =>
+                        setGenreEditor((current) => ({ ...current, customValue: event.target.value, error: "" }))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          addCustomGenre();
+                        }
+                      }}
+                      placeholder="Custom genre"
+                      type="text"
+                      value={genreEditor.customValue}
+                    />
+                    <button
+                      className="ghost-button"
+                      disabled={genreEditor.pending || !normalizeGenreLabel(genreEditor.customValue)}
+                      onClick={addCustomGenre}
+                      type="button"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div className="detail-genre-selected-list">
+                    {genreEditor.selected.length > 0 ? genreEditor.selected.map((genre) => (
+                      <button
+                        className="detail-genre-selected"
+                        disabled={genreEditor.pending}
+                        key={genre}
+                        onClick={() => toggleGenreSelection(genre)}
+                        type="button"
+                      >
+                        <Tag aria-hidden="true" />
+                        {genre}
+                      </button>
+                    )) : (
+                      <span className="detail-genre-chip detail-genre-chip--unknown">
+                        <Tag aria-hidden="true" />
+                        Unknown
+                      </span>
+                    )}
+                  </div>
+                  {genreEditor.error ? <p className="form-error">{genreEditor.error}</p> : null}
+                  <div className="admin-list__actions">
+                    <button
+                      className="primary-button"
+                      disabled={genreEditor.pending}
+                      onClick={saveGenres}
+                      type="button"
+                    >
+                      {genreEditor.pending ? "Saving..." : "Save genres"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <div className="detail-grid detail-grid--modal">
                 <div className="detail-block">
                   <h2>Playback</h2>

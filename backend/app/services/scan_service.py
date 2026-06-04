@@ -149,12 +149,15 @@ class ScanService:
             return True, "Startup scan allowed: current local library freshness state is unknown."
         if (
             previous_snapshot.get("media_root") != current_snapshot.get("media_root")
+            or previous_snapshot.get("media_roots") != current_snapshot.get("media_roots")
             or previous_snapshot.get("root_identity") != current_snapshot.get("root_identity")
+            or previous_snapshot.get("root_identities") != current_snapshot.get("root_identities")
         ):
             return True, "Startup scan allowed: media root identity changed."
         if (
             previous_snapshot.get("top_level_count") != current_snapshot.get("top_level_count")
             or previous_snapshot.get("top_level_fingerprint") != current_snapshot.get("top_level_fingerprint")
+            or previous_snapshot.get("top_level_fingerprints") != current_snapshot.get("top_level_fingerprints")
         ):
             return True, "Startup scan allowed: top-level library state changed."
         return False, "Startup scan skipped: local library top-level state matches the last successful scan."

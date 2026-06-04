@@ -1739,16 +1739,25 @@ def test_admin_media_library_reference_smoke(client, admin_credentials) -> None:
     initial_response = client.get("/api/admin/media-library-reference")
     assert initial_response.status_code == 200
     initial_path = Path(initial_response.json()["effective_value"])
-    assert initial_response.json() == {
-        "configured_value": str(initial_path),
-        "effective_value": str(initial_path),
-        "default_value": str(initial_path),
-        "validation_rules": [
-            f"Leave blank to reset to the default shared local path: {initial_path}",
-            "This is the real shared local library path currently used by Elvern for the shared local library.",
-            "Use an absolute Linux directory path that already exists on this host.",
-        ],
+    initial_payload = initial_response.json()
+    assert initial_payload["configured_value"] is None
+    assert initial_payload["effective_value"] == str(initial_path)
+    assert initial_payload["default_value"] == str(initial_path)
+    assert initial_payload["configured_locations"] == []
+    assert initial_payload["effective_locations"] == [str(initial_path)]
+    assert initial_payload["category_summary"] == {
+        "movies": [],
+        "tv": [],
+        "cartoon": [],
+        "anime": [],
     }
+    assert initial_payload["validation_rules"] == [
+        f"Leave blank to use the default library reference location: {initial_path}",
+        "Choose one or more parent folders where Elvern should look for media folders.",
+        "Use one absolute Linux directory path per line.",
+        "Elvern auto-discovers folders marked with -M, -TV, -AN, -C, -L, -S, and -X.",
+        "Poster reference location stays manually configured below.",
+    ]
 
     replacement_path = initial_path.parent / "shared-library-alt"
     replacement_path.mkdir()
@@ -1758,16 +1767,12 @@ def test_admin_media_library_reference_smoke(client, admin_credentials) -> None:
         json={"value": str(replacement_path)},
     )
     assert update_response.status_code == 200
-    assert update_response.json() == {
-        "configured_value": str(replacement_path),
-        "effective_value": str(replacement_path),
-        "default_value": str(initial_path),
-        "validation_rules": [
-            f"Leave blank to reset to the default shared local path: {initial_path}",
-            "This is the real shared local library path currently used by Elvern for the shared local library.",
-            "Use an absolute Linux directory path that already exists on this host.",
-        ],
-    }
+    update_payload = update_response.json()
+    assert update_payload["configured_value"] == str(replacement_path.resolve())
+    assert update_payload["effective_value"] == str(replacement_path.resolve())
+    assert update_payload["default_value"] == str(initial_path)
+    assert update_payload["configured_locations"] == [str(replacement_path.resolve())]
+    assert update_payload["effective_locations"] == [str(replacement_path.resolve())]
 
 
 def test_admin_google_drive_setup_save_smoke(client, admin_credentials) -> None:
@@ -2647,4 +2652,4 @@ def test_admin_shared_local_library_path_rejects_missing_directory(client, admin
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Shared local library path does not exist on this host."
+    assert response.json()["detail"] == "Library reference location does not exist on this host."

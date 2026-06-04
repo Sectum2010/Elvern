@@ -122,7 +122,24 @@ function mockApi(initialSettings = defaultSettings, options = {}) {
       return Promise.resolve({ items: [] });
     }
     if (requestPath === "/api/admin/media-library-reference") {
-      return Promise.resolve({ configured_value: null, effective_value: "", default_value: "" });
+      return Promise.resolve({
+        configured_value: "/srv/media",
+        effective_value: "/srv/media",
+        default_value: "/srv/media",
+        configured_locations: ["/srv/media"],
+        effective_locations: ["/srv/media"],
+        category_summary: {
+          movies: [{ path: "/srv/media/Movies -M", name: "Movies" }],
+          tv: [],
+          cartoon: [{ path: "/srv/media/Cartoons -C", name: "Cartoons" }],
+          anime: [],
+        },
+        validation_rules: [
+          "Choose one or more parent folders where Elvern should look for media folders.",
+          "Elvern auto-discovers folders marked with -M, -TV, -AN, -C, -L, -S, and -X.",
+          "Poster reference location stays manually configured below.",
+        ],
+      });
     }
     if (requestPath === "/api/admin/poster-reference-location") {
       return Promise.resolve({ configured_value: null, effective_value: "", default_value: "" });
@@ -412,6 +429,29 @@ describe("SettingsPage Display background controls", () => {
 
     await screen.findByRole("heading", { name: "Library" });
     expect(screen.queryByRole("heading", { name: "Age Groups" })).not.toBeInTheDocument();
+  });
+
+  test("admin Advanced panel shows Library reference locations summary", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=advanced"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Library reference locations");
+    fireEvent.click(screen.getByText("Library reference locations"));
+
+    expect(screen.getByLabelText("Reference locations")).toHaveValue("/srv/media");
+    expect(screen.getByText("Movies stored under:")).toBeInTheDocument();
+    expect(screen.getByText("/srv/media/Movies -M")).toBeInTheDocument();
+    expect(screen.getByText("TV stored under:")).toBeInTheDocument();
+    expect(screen.getAllByText("Unknown").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("Cartoon stored under:")).toBeInTheDocument();
+    expect(screen.getByText("/srv/media/Cartoons -C")).toBeInTheDocument();
+    expect(screen.getByText("Anime stored under:")).toBeInTheDocument();
+    expect(screen.queryByText("Shared local library path")).not.toBeInTheDocument();
   });
 
   test("poster appearance controls still save through the existing settings endpoint", async () => {

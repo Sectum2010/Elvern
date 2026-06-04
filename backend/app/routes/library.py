@@ -9,6 +9,7 @@ from ..schemas import (
     LibraryListResponse,
     MediaAgeManualGroupLinkRequest,
     MediaAgeRequirementUpdateRequest,
+    MediaGenreUpdateRequest,
     MediaItemDetail,
     ScanResponse,
 )
@@ -32,6 +33,7 @@ from ..services.media_age_access_service import (
     set_media_age_requirement,
     unlink_media_item_from_age_group,
 )
+from ..services.media_genre_service import set_media_genres
 from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
 from ..services.user_settings_service import get_poster_card_display_max_width
 from ..services.audit_service import log_audit_event
@@ -213,6 +215,37 @@ def update_item_age_requirement(
         reason="age_requirement_changed",
     )
     _invalidate_mobile_sessions_from_revoke_summary(request, revoke_summary, reason="age_requirement_changed")
+    item = get_media_item_detail(
+        request.app.state.settings,
+        user_id=user.id,
+        item_id=item_id,
+        allow_globally_hidden=True,
+    )
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")
+    item["download_access_allowed"] = is_item_download_allowed(
+        request.app.state.settings,
+        user_id=user.id,
+        item_id=item_id,
+    )
+    return MediaItemDetail(**item)
+
+
+@router.patch("/item/{item_id}/genres", response_model=MediaItemDetail)
+def update_item_genres(
+    item_id: int,
+    payload: MediaGenreUpdateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> MediaItemDetail:
+    set_media_genres(
+        request.app.state.settings,
+        item_id=item_id,
+        genres=payload.genres,
+        actor=user,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     item = get_media_item_detail(
         request.app.state.settings,
         user_id=user.id,

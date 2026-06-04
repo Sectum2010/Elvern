@@ -476,6 +476,50 @@ function StatusRow({ label, value }) {
 }
 
 
+const LIBRARY_REFERENCE_SUMMARY_CATEGORIES = [
+  { key: "movies", label: "Movies stored under" },
+  { key: "tv", label: "TV stored under" },
+  { key: "cartoon", label: "Cartoon stored under" },
+  { key: "anime", label: "Anime stored under" },
+];
+
+
+function firstNonEmptyLine(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+}
+
+
+function LibraryReferenceCategorySummary({ summary }) {
+  const safeSummary = summary && typeof summary === "object" ? summary : {};
+  return (
+    <div className="settings-library-reference-summary">
+      {LIBRARY_REFERENCE_SUMMARY_CATEGORIES.map((category) => {
+        const locations = Array.isArray(safeSummary[category.key]) ? safeSummary[category.key] : [];
+        return (
+          <div className="settings-library-reference-summary__row" key={category.key}>
+            <span>{category.label}:</span>
+            <strong>
+              {locations.length > 0 ? (
+                locations.map((location) => (
+                  <span className="settings-library-reference-summary__path" key={location.path || location.name}>
+                    {location.path || location.name || "Unknown"}
+                  </span>
+                ))
+              ) : (
+                "Unknown"
+              )}
+            </strong>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function validatePosterReferenceLocationInput(value) {
   const candidate = String(value || "").trim();
   if (!candidate) {
@@ -1021,6 +1065,9 @@ export function SettingsPage() {
     configured_value: null,
     effective_value: "",
     default_value: "",
+    configured_locations: [],
+    effective_locations: [],
+    category_summary: {},
     validation_rules: [],
   });
   const [sharedMediaLibraryReferenceInput, setSharedMediaLibraryReferenceInput] = useState("");
@@ -1235,12 +1282,15 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (user?.role !== "admin") {
-      setSharedMediaLibraryReference({
-        configured_value: null,
-        effective_value: "",
-        default_value: "",
-        validation_rules: [],
-      });
+          setSharedMediaLibraryReference({
+            configured_value: null,
+            effective_value: "",
+            default_value: "",
+            configured_locations: [],
+            effective_locations: [],
+            category_summary: {},
+            validation_rules: [],
+          });
       setSharedMediaLibraryReferenceInput("");
       setPosterReference({
         configured_value: null,
@@ -1779,9 +1829,9 @@ export function SettingsPage() {
       });
       setSharedMediaLibraryReference(payload);
       setSharedMediaLibraryReferenceInput(payload.configured_value || payload.default_value || "");
-      setMessage("Shared local library path saved.");
+      setMessage("Library reference locations saved.");
     } catch (requestError) {
-      setError(requestError.message || "Failed to save shared local library path");
+      setError(requestError.message || "Failed to save library reference locations");
     } finally {
       setSharedMediaLibraryReferenceSaving(false);
     }
@@ -1792,7 +1842,7 @@ export function SettingsPage() {
       ...current,
       open: true,
       target,
-      title: target === "poster-reference" ? "Browse poster directories" : "Browse shared local library directories",
+      title: target === "poster-reference" ? "Browse poster directories" : "Browse library reference directories",
       loading: true,
       error: "",
     }));
@@ -1806,7 +1856,7 @@ export function SettingsPage() {
         ...current,
         open: true,
         target,
-        title: target === "poster-reference" ? "Browse poster directories" : "Browse shared local library directories",
+        title: target === "poster-reference" ? "Browse poster directories" : "Browse library reference directories",
         loading: false,
         error: "",
         current_path: payload.current_path || "",
@@ -1818,7 +1868,7 @@ export function SettingsPage() {
         ...current,
         open: true,
         target,
-        title: target === "poster-reference" ? "Browse poster directories" : "Browse shared local library directories",
+        title: target === "poster-reference" ? "Browse poster directories" : "Browse library reference directories",
         loading: false,
         error: requestError.message || "Failed to browse server directories",
       }));
@@ -1830,7 +1880,8 @@ export function SettingsPage() {
     const sameHostHint = isSettingsLocalDevelopmentLoopback(platform);
     const initialPath = target === "poster-reference"
       ? posterReferenceInput || posterReference.effective_value || posterReference.default_value || ""
-      : sharedMediaLibraryReferenceInput
+      : firstNonEmptyLine(sharedMediaLibraryReferenceInput)
+        || firstNonEmptyLine(sharedMediaLibraryReference.effective_value)
         || sharedMediaLibraryReference.effective_value
         || sharedMediaLibraryReference.default_value
         || "";
@@ -1865,7 +1916,7 @@ export function SettingsPage() {
           path: initialPath,
           title: target === "poster-reference"
             ? "Select poster directory"
-            : "Select shared local library directory",
+            : "Select library reference directory",
           platform,
           same_host_hint: sameHostHint,
         },
@@ -3343,24 +3394,28 @@ export function SettingsPage() {
 
         {user?.role === "admin" ? (
           <SettingsAccordionSection
-            description="Admin-only real shared local library path. This is the live shared local library path Elvern currently uses."
+            description="Choose parent folders where Elvern should scan for media folders. Poster folders stay configured separately below."
             isOpen={openSections.mediaLibraryReference}
             onToggle={() => toggleSection("mediaLibraryReference")}
-            title="Shared local library path"
+            title="Library reference locations"
           >
             <form className="admin-form" onSubmit={handleSharedMediaLibraryReferenceSave}>
               <label>
-                Shared local library path
+                Reference locations
                 <div className="settings-path-picker__row">
-                  <input
+                  <textarea
+                    autoCapitalize="off"
+                    autoComplete="off"
+                    autoCorrect="off"
                     disabled={loading || sharedMediaLibraryReferenceSaving}
                     onChange={(event) => setSharedMediaLibraryReferenceInput(event.target.value)}
                     placeholder={sharedMediaLibraryReference.default_value || ""}
-                    type="text"
+                    rows={Math.max(2, Math.min(5, String(sharedMediaLibraryReferenceInput || "").split(/\r?\n/).length))}
+                    spellCheck="false"
                     value={sharedMediaLibraryReferenceInput}
                   />
                   <button
-                    aria-label="Browse shared local library directories on the Elvern host"
+                    aria-label="Browse library reference directories on the Elvern host"
                     className="ghost-button ghost-button--inline settings-path-picker__button"
                     disabled={
                       loading
@@ -3369,15 +3424,16 @@ export function SettingsPage() {
                       || nativePickerPendingTarget === "shared-library"
                     }
                     onClick={() => handleOpenDirectoryPicker("shared-library")}
-                    title="Browse shared local library directories on the Elvern host"
+                    title="Browse library reference directories on the Elvern host"
                     type="button"
                   >
                     <span aria-hidden="true">📁</span>
                   </button>
                 </div>
               </label>
-              <StatusRow label="Current path" value={sharedMediaLibraryReference.effective_value || "Unknown"} />
-              <StatusRow label="Default path" value={sharedMediaLibraryReference.default_value || "Unknown"} />
+              <StatusRow label="Active locations" value={sharedMediaLibraryReference.effective_value || "Unknown"} />
+              <StatusRow label="Default location" value={sharedMediaLibraryReference.default_value || "Unknown"} />
+              <LibraryReferenceCategorySummary summary={sharedMediaLibraryReference.category_summary} />
               <div className="desktop-playback-notes">
                 {(sharedMediaLibraryReference.validation_rules || []).map((rule) => (
                   <p className="page-subnote" key={rule}>
@@ -3410,7 +3466,7 @@ export function SettingsPage() {
                   disabled={loading || sharedMediaLibraryReferenceSaving}
                   type="submit"
                 >
-                  {sharedMediaLibraryReferenceSaving ? "Saving..." : "Save shared local library path"}
+                  {sharedMediaLibraryReferenceSaving ? "Saving..." : "Save reference locations"}
                 </button>
               </div>
             </form>

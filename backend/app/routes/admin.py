@@ -115,7 +115,7 @@ from ..services.media_technical_metadata_service import (
     trigger_local_technical_metadata_enrichment_batch,
 )
 from ..services.native_playback_service import get_admin_native_playback_status
-from ..services.local_library_source_service import validate_shared_local_library_path
+from ..services.local_library_source_service import validate_library_reference_locations
 from ..url_prefix_service import get_url_prefix_status, rotate_url_prefix
 
 
@@ -991,7 +991,7 @@ def admin_update_media_library_reference(
     request: Request,
     user=CurrentAdmin,
 ) -> MediaLibraryReferenceResponse:
-    validate_shared_local_library_path(request.app.state.settings, value=payload.value)
+    validate_library_reference_locations(request.app.state.settings, value=payload.value)
     existing_payload = get_media_library_reference_payload(request.app.state.settings)
     auto_backup_status = "created"
     auto_backup_error = None
