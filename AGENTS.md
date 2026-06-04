@@ -65,6 +65,8 @@ Local lifecycle and diagnostics:
 
 If a command is not listed here or in `README.md`, `CONTRIBUTING.md`, package files, compose files, or scripts, verify before use instead of guessing.
 
+For non-trivial Elvern code changes, especially backend+frontend, DB or migrations, scanning, playback, auth/security, or CI-sensitive dependency work, run `./scripts/elvern-ci-local.sh --fresh` before calling the task complete. Targeted tests do not replace the fresh CI mirror. If it cannot run, say why. If it fails, do not claim completion; report the failing command, phase/job, the last relevant 80-120 log lines, whether files were modified, and the recommended next fix.
+
 ## UI/UX Rules
 
 - Keep UI professional, clean, consistent, and calm.

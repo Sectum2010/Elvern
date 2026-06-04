@@ -10,6 +10,7 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
+from .library_folder_classifier import discover_library_folders
 
 
 LOCAL_FILESYSTEM_PROVIDER = "local_filesystem"
@@ -17,6 +18,7 @@ LOCAL_LIBRARY_RESOURCE_TYPE = "local_root"
 SHARED_LOCAL_LIBRARY_RESOURCE_ID = "shared_default"
 SHARED_LOCAL_LIBRARY_DISPLAY_NAME = "Shared Local Library"
 MEDIA_LIBRARY_REFERENCE_KEY = "media_library_reference"
+POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
 
 LIBRARY_REFERENCE_CATEGORY_ORDER = ("movies", "tv", "cartoon", "anime")
 LIBRARY_REFERENCE_CATEGORY_LABELS = {
@@ -406,48 +408,67 @@ def get_library_reference_category_summary(
     connection: sqlite3.Connection | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     if connection is not None:
-        return _get_library_reference_category_summary(connection)
+        return _get_library_reference_category_summary(connection, settings=settings)
     with get_connection(settings) as owned_connection:
-        return _get_library_reference_category_summary(owned_connection)
+        return _get_library_reference_category_summary(owned_connection, settings=settings)
 
 
 def _get_library_reference_category_summary(
     connection: sqlite3.Connection,
+    *,
+    settings: Settings,
 ) -> dict[str, list[dict[str, str]]]:
     summary: dict[str, list[dict[str, str]]] = {
         category: []
         for category in LIBRARY_REFERENCE_CATEGORY_ORDER
     }
-    rows = connection.execute(
-        """
-        SELECT DISTINCT
-            library_category,
-            library_category_path,
-            library_category_name
-        FROM media_items
-        WHERE COALESCE(source_kind, 'local') = 'local'
-          AND library_category IS NOT NULL
-          AND library_category_path IS NOT NULL
-        ORDER BY library_category, library_category_path
-        """
-    ).fetchall()
-    seen: set[tuple[str, str]] = set()
-    for row in rows:
-        category = str(row["library_category"] or "").strip()
-        path = str(row["library_category_path"] or "").strip()
-        if category not in summary or not path:
-            continue
-        key = (category, path)
-        if key in seen:
-            continue
-        seen.add(key)
-        summary[category].append(
-            {
-                "path": path,
-                "name": str(row["library_category_name"] or "").strip() or path,
-            }
-        )
+    discovery = discover_library_folders(
+        _get_effective_library_reference_locations(connection, settings=settings),
+        allowed_video_extensions=settings.allowed_video_extensions,
+        poster_reference_path=_get_effective_poster_reference_path(connection, settings=settings),
+    )
+    for category in LIBRARY_REFERENCE_CATEGORY_ORDER:
+        seen_paths: set[str] = set()
+        for root in sorted(
+            discovery.category_roots.get(category, []),
+            key=lambda candidate: candidate["path"].lower(),
+        ):
+            path = str(root.get("path") or "").strip()
+            if not path or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            summary[category].append(
+                {
+                    "path": path,
+                    "name": str(root.get("name") or "").strip() or path,
+                }
+            )
     return summary
+
+
+def _get_effective_poster_reference_path(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> Path:
+    row = connection.execute(
+        """
+        SELECT value
+        FROM app_settings
+        WHERE key = ?
+        LIMIT 1
+        """,
+        (POSTER_REFERENCE_LOCATION_KEY,),
+    ).fetchone()
+    configured_value = str(row["value"] or "").strip() if row else ""
+    if configured_value:
+        configured_path = Path(configured_value).expanduser().resolve()
+        if configured_path.exists() and configured_path.is_dir():
+            return configured_path
+    return (
+        _get_effective_shared_local_library_path(connection, settings=settings)
+        / "Posters"
+    ).resolve()
 
 
 def _update_shared_local_library_path(

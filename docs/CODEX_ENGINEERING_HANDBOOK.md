@@ -27,8 +27,12 @@ Use the fresh CI mirror before claiming GitHub parity:
 Fresh mode creates a temporary Python virtual environment and hides any existing
 `frontend/dist` while backend pytest runs, so tests cannot silently depend on a
 developer machine's cached frontend build or installed tools. Codex must not
-claim CI passes for security, auth, download, TOTP, backup, dependency, CI,
-SPA-routing, or playback-contract changes unless fresh mode passes.
+claim CI passes for non-trivial changes unless fresh mode passes, especially
+backend+frontend, DB or migrations, scanning, playback, auth/security, CI,
+dependency, SPA-routing, or playback-contract changes. Targeted tests do not
+replace the fresh CI mirror. If it cannot run, say why. If it fails, do not
+claim completion; report the failing command, phase/job, the last relevant
+80-120 log lines, whether files were modified, and the recommended next fix.
 
 Backend tests must be hermetic. Do not rely on local `/usr/bin/ffprobe`,
 leftover build artifacts, or machine-specific Route2 capacity when writing

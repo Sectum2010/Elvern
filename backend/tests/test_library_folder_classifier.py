@@ -19,12 +19,20 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4"}
 def test_suffix_parser_recognizes_supported_suffixes_and_cleans_display_names() -> None:
     expectations = [
         ("Movies -M", ("M",), "Movies"),
+        ("Movies-M", ("M",), "Movies"),
+        ("Movies   -M", ("M",), "Movies"),
         ("Shows -TV", ("TV",), "Shows"),
+        ("TV Shows-TV", ("TV",), "TV Shows"),
         ("Anime -AN", ("AN",), "Anime"),
+        ("Anime-AN", ("AN",), "Anime"),
         ("Cartoons -C", ("C",), "Cartoons"),
+        ("Cartoon-C", ("C",), "Cartoon"),
         ("Resident Evil -L", ("L",), "Resident Evil"),
+        ("Resident Evil-L", ("L",), "Resident Evil"),
         ("One Shot -S", ("S",), "One Shot"),
+        ("Single Movie-S", ("S",), "Single Movie"),
         ("Ignore Me -X", ("X",), "Ignore Me"),
+        ("Ignore Me-X", ("X",), "Ignore Me"),
     ]
 
     for folder_name, suffixes, display_name in expectations:
@@ -34,17 +42,93 @@ def test_suffix_parser_recognizes_supported_suffixes_and_cleans_display_names() 
         assert parsed.display_name == display_name
 
 
-def test_suffix_parser_allows_combined_suffixes_and_does_not_support_g() -> None:
-    combined = parse_folder_suffixes("Resident Evil -M -L")
-    unsupported = parse_folder_suffixes("Genres -G")
+def test_suffix_parser_allows_combined_suffixes_with_mixed_spacing() -> None:
+    for folder_name in [
+        "Resident Evil -M -L",
+        "Resident Evil-M-L",
+        "Resident Evil -M-L",
+        "Resident Evil-M -L",
+    ]:
+        combined = parse_folder_suffixes(folder_name)
 
-    assert combined.recognized_suffixes == ("M", "L")
-    assert combined.display_name == "Resident Evil"
-    assert combined.explicit_category == "movies"
-    assert combined.explicit_role == "list"
-    assert unsupported.recognized_suffixes == ()
-    assert unsupported.unknown_suffixes == ("G",)
-    assert unsupported.display_name == "Genres -G"
+        assert combined.recognized_suffixes == ("M", "L")
+        assert combined.display_name == "Resident Evil"
+        assert combined.explicit_category == "movies"
+        assert combined.explicit_role == "list"
+
+
+def test_suffix_parser_preserves_unsupported_g_suffix() -> None:
+    unsupported_spaced = parse_folder_suffixes("Genres -G")
+    unsupported_compact = parse_folder_suffixes("Genres-G")
+
+    assert unsupported_spaced.recognized_suffixes == ()
+    assert unsupported_spaced.unknown_suffixes == ("G",)
+    assert unsupported_spaced.display_name == "Genres -G"
+    assert unsupported_compact.recognized_suffixes == ()
+    assert unsupported_compact.unknown_suffixes == ("G",)
+    assert unsupported_compact.display_name == "Genres-G"
+
+
+def test_summary_uses_empty_category_folders_without_media_rows(initialized_settings) -> None:
+    media_root = Path(initialized_settings.media_root)
+    folders = {
+        "movies": media_root / "Movies -M",
+        "tv": media_root / "TV Shows-TV",
+        "cartoon": media_root / "Cartoon -C",
+        "anime": media_root / "Anime-AN",
+    }
+    for folder in folders.values():
+        folder.mkdir(parents=True)
+
+    with get_connection(initialized_settings) as connection:
+        media_item_count = connection.execute(
+            "SELECT COUNT(*) FROM media_items"
+        ).fetchone()[0]
+        summary = get_library_reference_category_summary(
+            initialized_settings,
+            connection=connection,
+        )
+
+    assert media_item_count == 0
+    assert summary == {
+        "movies": [{"path": str(folders["movies"].resolve()), "name": "Movies"}],
+        "tv": [{"path": str(folders["tv"].resolve()), "name": "TV Shows"}],
+        "cartoon": [{"path": str(folders["cartoon"].resolve()), "name": "Cartoon"}],
+        "anime": [{"path": str(folders["anime"].resolve()), "name": "Anime"}],
+    }
+
+
+def test_summary_keeps_compact_cartoon_category_folder(initialized_settings) -> None:
+    media_root = Path(initialized_settings.media_root)
+    cartoon_folder = media_root / "Cartoon-C"
+    cartoon_folder.mkdir(parents=True)
+
+    summary = get_library_reference_category_summary(initialized_settings)
+
+    assert summary["cartoon"] == [
+        {
+            "path": str(cartoon_folder.resolve()),
+            "name": "Cartoon",
+        }
+    ]
+
+
+def test_summary_excludes_poster_reference_and_x_category_folders(initialized_settings) -> None:
+    media_root = Path(initialized_settings.media_root)
+    poster_root = media_root / "Posters"
+    poster_root.mkdir(parents=True)
+    (poster_root / "Poster Category-C").mkdir()
+    excluded_folder = media_root / "Ignore Me-X" / "Hidden Cartoon-C"
+    excluded_folder.mkdir(parents=True)
+
+    summary = get_library_reference_category_summary(initialized_settings)
+
+    assert summary == {
+        "movies": [],
+        "tv": [],
+        "cartoon": [],
+        "anime": [],
+    }
 
 
 def test_discovery_inherits_category_and_excludes_x_subtrees(tmp_path: Path) -> None:
@@ -169,7 +253,10 @@ def test_scan_persists_folder_metadata_and_category_summary(initialized_settings
             "SELECT 1 FROM media_items WHERE file_path IN (?, ?)",
             (str(poster_video_path.resolve()), str(excluded_path.resolve())),
         ).fetchone()
-        summary = get_library_reference_category_summary(initialized_settings, connection=connection)
+        summary = get_library_reference_category_summary(
+            initialized_settings,
+            connection=connection,
+        )
 
     assert row is not None
     assert row["title"] == "Resident.Evil.2002"

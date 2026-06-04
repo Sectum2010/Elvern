@@ -44,7 +44,7 @@ SIDECAR_HELPER_EXTENSIONS = {
     ".xml",
 }
 
-_TRAILING_SUFFIX_TOKEN_RE = re.compile(r"\s+-([A-Z]{1,3})\s*$")
+_TRAILING_SUFFIX_TOKEN_RE = re.compile(r"\s*-([A-Z]{1,3})\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +101,7 @@ class LibraryFolderDiscovery:
     files: list[DiscoveredMediaFile] = field(default_factory=list)
     warnings: list[dict[str, object]] = field(default_factory=list)
     excluded_paths: list[str] = field(default_factory=list)
-    category_roots: dict[str, list[str]] = field(default_factory=lambda: {
+    category_roots: dict[str, list[dict[str, str]]] = field(default_factory=lambda: {
         "movies": [],
         "tv": [],
         "cartoon": [],
@@ -116,7 +116,11 @@ def parse_folder_suffixes(folder_name: str) -> ParsedFolderSuffixes:
         match = _TRAILING_SUFFIX_TOKEN_RE.search(working_name)
         if match is None:
             break
-        suffix_tokens_reversed.append(match.group(1))
+        token = match.group(1)
+        if token not in RECOGNIZED_FOLDER_SUFFIXES:
+            suffix_tokens_reversed.append(token)
+            break
+        suffix_tokens_reversed.append(token)
         working_name = working_name[: match.start()].rstrip()
 
     suffix_tokens = tuple(reversed(suffix_tokens_reversed))
@@ -127,15 +131,6 @@ def parse_folder_suffixes(folder_name: str) -> ParsedFolderSuffixes:
         token for token in suffix_tokens if token not in RECOGNIZED_FOLDER_SUFFIXES
     )
     display_name = working_name.strip()
-    if unknown_suffixes:
-        display_name = " ".join(
-            part
-            for part in [
-                display_name,
-                " ".join(f"-{token}" for token in unknown_suffixes),
-            ]
-            if part
-        )
     if not display_name:
         display_name = str(folder_name or "").strip() or "Untitled folder"
     return ParsedFolderSuffixes(
@@ -157,7 +152,8 @@ def path_is_same_or_inside(candidate: Path, parent: Path) -> bool:
 
 def _folder_key(path: Path) -> str:
     encoded = str(path.resolve()).encode("utf-8", errors="surrogatepass")
-    return f"local-folder:{hashlib.sha1(encoded).hexdigest()[:16]}"
+    digest = hashlib.sha1(encoded, usedforsecurity=False).hexdigest()
+    return f"local-folder:{digest[:16]}"
 
 
 def _is_video_file(path: Path, allowed_video_extensions: set[str]) -> bool:
@@ -289,8 +285,14 @@ def _walk_library_folder(
     if explicit_category:
         category_path = resolved_folder
         category_display_name = parsed.display_name
-        if str(resolved_folder) not in discovery.category_roots.setdefault(explicit_category, []):
-            discovery.category_roots[explicit_category].append(str(resolved_folder))
+        category_roots = discovery.category_roots.setdefault(explicit_category, [])
+        if not any(root["path"] == str(resolved_folder) for root in category_roots):
+            category_roots.append(
+                {
+                    "path": str(resolved_folder),
+                    "name": parsed.display_name,
+                }
+            )
 
     role = _classify_folder_role(
         parsed=parsed,
