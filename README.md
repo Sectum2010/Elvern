@@ -11,7 +11,7 @@
 
 <div align="center">
 
-<img src="Elvern_New_Example_Logo_512x512.png" alt="Elvern" width="180" />
+<img src="Elvern_Official_App_Logo.png" alt="Elvern" width="180" />
 
 # Elvern
 
@@ -28,7 +28,7 @@
 <a href="#"><img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776ab?style=flat-square&logo=python&logoColor=white&labelColor=1b1f3a"/></a>
 <a href="#"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white&labelColor=1b1f3a"/></a>
 <a href="#"><img alt="React" src="https://img.shields.io/badge/React-18-61dafb?style=flat-square&logo=react&logoColor=black&labelColor=1b1f3a"/></a>
-<a href="#"><img alt="Vite" src="https://img.shields.io/badge/Vite-5-646cff?style=flat-square&logo=vite&logoColor=white&labelColor=1b1f3a"/></a>
+<a href="#"><img alt="Vite" src="https://img.shields.io/badge/Vite-6-646cff?style=flat-square&logo=vite&logoColor=white&labelColor=1b1f3a"/></a>
 <a href="#"><img alt="Docker" src="https://img.shields.io/badge/Docker-ready-2496ed?style=flat-square&logo=docker&logoColor=white&labelColor=1b1f3a"/></a>
 <a href="#"><img alt="Tailscale" src="https://img.shields.io/badge/Tailscale-private-1d2733?style=flat-square&logo=tailscale&logoColor=white&labelColor=1b1f3a"/></a>
 <a href="#"><img alt="VLC" src="https://img.shields.io/badge/VLC-handoff-fb8c00?style=flat-square&logo=vlcmediaplayer&logoColor=white&labelColor=1b1f3a"/></a>
@@ -641,7 +641,7 @@ All runtime config lives in `deploy/env/elvern.env`. Below are the knobs that ma
 ```mermaid
 flowchart TB
     subgraph Clients["👥 Family devices on the tailnet"]
-        Browser[Browser PWA<br/>React 18 · Vite 5]
+        Browser[Browser PWA<br/>React 18 · Vite 6]
         VlcHelper[VLC Opener<br/>.NET 8 helper]
         VlcApp[Installed VLC]
     end
@@ -720,7 +720,7 @@ SQLite handles users, sessions, library items, per-user progress, audit log, ass
 
 ### The presentation plane
 
-The frontend is a **React 18 + Vite 5 PWA** with `react-router-dom`, `hls.js` for browser HLS, and a custom Node `server.mjs` that handles production serving (static delivery, cookie passthrough, health endpoint). Service worker, manifest, and icon set ship for proper PWA installability — add it to your iPhone home screen and it behaves like a native app.
+The frontend is a **React 18 + Vite 6 PWA** with `react-router-dom`, `hls.js` for browser HLS, and a custom Node `server.mjs` that handles production serving (static delivery, cookie passthrough, health endpoint). Service worker, manifest, and icon set ship for proper PWA installability — add it to your iPhone home screen and it behaves like a native app.
 
 ### Deeper docs
 
