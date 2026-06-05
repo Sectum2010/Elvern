@@ -581,25 +581,6 @@ button {
   gap: 1rem;
 }
 
-.library-focus-entry {
-  display: grid;
-  gap: 0.75rem;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.library-focus-entry__link {
-  display: grid;
-  gap: 0.3rem;
-  padding: 1rem 1.05rem;
-  border-radius: 1.1rem;
-  border: 1px solid rgba(212, 172, 74, 0.5);
-  background:
-    linear-gradient(180deg, rgba(31, 24, 14, 0.72) 0%, rgba(16, 15, 18, 0.92) 100%);
-  color: inherit;
-  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.18);
-  transition: transform 150ms ease, border-color 150ms ease, background-color 150ms ease;
-}
-
 .library-desktop-hero {
   position: relative;
   z-index: 80;
@@ -782,12 +763,42 @@ button {
 }
 
 .library-arrange__panel--mobile {
-  position: fixed;
-  inset-inline: max(0.75rem, env(safe-area-inset-left, 0px)) max(0.75rem, env(safe-area-inset-right, 0px));
-  inset-block-end: max(0.75rem, env(safe-area-inset-bottom, 0px));
-  max-height: min(78vh, 34rem);
-  overflow: auto;
-  z-index: 9000;
+  position: absolute;
+  inset-block-start: calc(100% + 0.45rem);
+  inset-inline-end: 0;
+  inline-size: min(20rem, calc(100vw - 1.5rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
+  max-height: min(26vh, 11.333rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.page-section--library[data-device-class="phone"] .library-desktop-hero {
+  overflow: visible;
+  align-items: stretch;
+  gap: 0.72rem;
+  padding-inline:
+    max(0.95rem, env(safe-area-inset-left, 0px))
+    max(0.95rem, env(safe-area-inset-right, 0px));
+}
+
+.page-section--library[data-device-class="phone"] .library-desktop-hero__category-row {
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.page-section--library[data-device-class="phone"] .library-category-switch {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+
+.page-section--library[data-device-class="phone"] .library-arrange {
+  align-self: end;
+  justify-self: end;
+  min-width: 0;
 }
 
 .library-arrange__section {
@@ -862,24 +873,6 @@ button {
   color: rgba(242, 229, 194, 0.78);
   font-size: 0.94rem;
   line-height: 1.45;
-}
-
-.library-focus-entry__link:hover,
-.library-focus-entry__link:focus-visible {
-  transform: translateY(-1px);
-  border-color: rgba(234, 197, 97, 0.78);
-  background:
-    linear-gradient(180deg, rgba(40, 31, 18, 0.82) 0%, rgba(18, 17, 20, 0.96) 100%);
-}
-
-.library-focus-entry__label {
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.library-focus-entry__meta {
-  color: rgba(242, 229, 194, 0.76);
-  font-size: 0.92rem;
 }
 
 .library-focus-hero,
@@ -6495,7 +6488,6 @@ html[data-device-shell="iphone"] .admin-recovery-card {
     flex-direction: column;
   }
 
-  .library-focus-entry,
   .library-focus-hero__row {
     display: grid;
   }
@@ -6537,6 +6529,18 @@ html[data-device-shell="iphone"] .admin-recovery-card {
 
   .app-shell--floating-island-top {
     padding-top: calc(5.9rem + env(safe-area-inset-top, 0px));
+  }
+}
+
+@media (max-width: 859px) and (orientation: portrait) {
+  .app-shell--library-root:has(.page-section--library[data-device-class="phone"]) .floating-library-search {
+    right: calc(max(4.1rem, calc(env(safe-area-inset-right, 0px) + 3.2rem)) + var(--app-viewport-offset-right, 0px));
+  }
+}
+
+@media (min-width: 740px) and (max-width: 1400px) and (any-pointer: coarse) {
+  .app-shell--library-root:not(:has(.page-section--library[data-device-class="phone"])) .floating-library-search {
+    right: calc(max(3.4rem, calc(env(safe-area-inset-right, 0px) + 2.75rem)) + var(--app-viewport-offset-right, 0px));
   }
 }
 

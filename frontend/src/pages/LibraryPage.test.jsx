@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { useEffect } from "react";
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -346,6 +347,20 @@ describe("LibraryPage category switching", () => {
     expect(screen.getByRole("button", { name: "Arrange library" })).toHaveTextContent("Local");
   });
 
+  test("cloud source option updates the URL and request path", async () => {
+    const user = userEvent.setup();
+    const { locations } = renderLibrary("/library?category=movies");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Arrange library" })).getByRole("button", { name: "Cloud" }));
+
+    await waitFor(() => {
+      expect(locations).toContain("/library?category=movies&source=cloud");
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies&source=cloud", expect.any(Object));
+    });
+    expect(screen.getByRole("button", { name: "Arrange library" })).toHaveTextContent("Cloud");
+  });
+
   test("genre option is single-select and updates the request path", async () => {
     const user = userEvent.setup();
     const { locations } = renderLibrary(
@@ -525,14 +540,23 @@ describe("LibraryPage category switching", () => {
     expect(visibleTitleLinkNames("Large Copy", "Small Copy")).toEqual(["Large Copy", "Small Copy"]);
   });
 
-  test("existing Local and Cloud cards still render", async () => {
+  test("root Local and Cloud cards are removed while source arrange controls remain", async () => {
+    const user = userEvent.setup();
     renderLibrary("/library");
 
-    expect(await screen.findByRole("link", { name: /Local/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Cloud/ })).toBeInTheDocument();
+    await screen.findByRole("button", { name: "Arrange library" });
+
+    expect(screen.queryByRole("link", { name: /Local/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Cloud/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Arrange library" }));
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    expect(within(panel).getByRole("button", { name: "All" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Local" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Cloud" })).toBeInTheDocument();
   });
 
-  test("phone arrange panel uses the mobile panel class", async () => {
+  test("phone arrange panel uses the mobile panel class and keeps controls available", async () => {
     mockPlatformState.deviceClass = "phone";
     mockPlatformState.platform = "iphone";
     const user = userEvent.setup();
@@ -540,7 +564,13 @@ describe("LibraryPage category switching", () => {
 
     await user.click(await screen.findByRole("button", { name: "Arrange library" }));
 
-    expect(screen.getByRole("dialog", { name: "Arrange library" })).toHaveClass("library-arrange__panel--mobile");
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    expect(panel).toHaveClass("library-arrange__panel--mobile");
+    expect(screen.getByRole("tablist", { name: "Library category" })).toBeInTheDocument();
+    expect(within(panel).getByText("Source")).toBeInTheDocument();
+    expect(within(panel).getByText("Genre")).toBeInTheDocument();
+    expect(within(panel).getByText("Quality")).toBeInTheDocument();
+    expect(within(panel).getByText("Sort")).toBeInTheDocument();
   });
 
   test("detail return target preserves the category query", async () => {
@@ -589,5 +619,26 @@ describe("LibraryPage category switching", () => {
     await userEvent.click(titleLink);
 
     expect(readLibraryReturnTarget()?.listPath).toBe("/library?category=anime");
+  });
+});
+
+
+describe("LibraryPage CSS guards", () => {
+  const styles = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
+
+  test("phone arrange dropdown opens downward at one third of the old mobile max height", () => {
+    expect(styles).toMatch(/\.library-arrange__panel--mobile\s*\{[^}]*position:\s*absolute;[^}]*inset-block-start:\s*calc\(100% \+ 0\.45rem\);[^}]*max-height:\s*min\(26vh,\s*11\.333rem\);[^}]*overflow-y:\s*auto;/s);
+  });
+
+  test("phone category row has a stable two-column layout for switch and arrange icon", () => {
+    expect(styles).toMatch(/\.page-section--library\[data-device-class="phone"\] \.library-desktop-hero__category-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto;[^}]*gap:\s*0\.5rem;/s);
+    expect(styles).toMatch(/\.page-section--library\[data-device-class="phone"\] \.library-category-switch\s*\{[^}]*max-width:\s*none;[^}]*min-width:\s*0;/s);
+  });
+
+  test("floating search offset remains platform aware without raising above the hero", () => {
+    expect(styles).toMatch(/\.library-desktop-hero\s*\{[^}]*z-index:\s*80;/s);
+    expect(styles).toMatch(/\.floating-library-search\s*\{[^}]*z-index:\s*17;/s);
+    expect(styles).toMatch(/@media \(max-width:\s*859px\) and \(orientation:\s*portrait\)[\s\S]*\.app-shell--library-root:has\(\.page-section--library\[data-device-class="phone"\]\) \.floating-library-search\s*\{[^}]*right:/s);
+    expect(styles).toMatch(/@media \(min-width:\s*740px\) and \(max-width:\s*1400px\) and \(any-pointer:\s*coarse\)[\s\S]*\.app-shell--library-root:not\(:has\(\.page-section--library\[data-device-class="phone"\]\)\) \.floating-library-search\s*\{[^}]*right:/s);
   });
 });

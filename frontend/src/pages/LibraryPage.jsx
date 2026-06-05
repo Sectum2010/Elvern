@@ -506,10 +506,6 @@ function MediaGrid({
   );
 }
 
-function formatMovieCount(count) {
-  return `${count} ${count === 1 ? "movie" : "movies"}`;
-}
-
 function isIpadPortraitLibraryViewport() {
   if (typeof window === "undefined") {
     return false;
@@ -588,7 +584,6 @@ export function LibraryPage() {
     total_items: 0,
     scan_in_progress: false,
   });
-  const [sourceCounts, setSourceCounts] = useState({ local: 0, cloud: 0 });
   const cloudSyncWarningRef = useRef("");
   const scanRunningRef = useRef(false);
   const orientationAnchorsRef = useRef([]);
@@ -726,20 +721,6 @@ export function LibraryPage() {
         arrange: activeLibraryArrange,
       });
       const payload = await apiRequest(target, { signal });
-      if (!deferredQuery.trim()) {
-        const nextSourceCounts = (payload.items || []).reduce(
-          (counts, item) => {
-            if ((item.source_kind || "local") === "cloud") {
-              counts.cloud += 1;
-            } else {
-              counts.local += 1;
-            }
-            return counts;
-          },
-          { local: 0, cloud: 0 },
-        );
-        setSourceCounts(nextSourceCounts);
-      }
       if (scanRunningRef.current && !payload.scan_in_progress) {
         if (cloudSyncWarningRef.current) {
           setError(formatCompletedRescanWarning(cloudSyncWarningRef.current));
@@ -1512,17 +1493,6 @@ export function LibraryPage() {
         placeholder="Search title or filename"
         value={query}
       />
-
-      <div className="library-focus-entry">
-        <Link className="library-focus-entry__link" to="/library/local">
-          <span className="library-focus-entry__label">Local</span>
-          <span className="library-focus-entry__meta">{formatMovieCount(sourceCounts.local)}</span>
-        </Link>
-        <Link className="library-focus-entry__link" to="/library/cloud">
-          <span className="library-focus-entry__label">Cloud</span>
-          <span className="library-focus-entry__meta">{formatMovieCount(sourceCounts.cloud)}</span>
-        </Link>
-      </div>
 
       {cloudReconnectPrompt && providerAuthDismissedThisSession ? (
         <section className="content-section cloud-auth-warning">

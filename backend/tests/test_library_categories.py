@@ -11,6 +11,9 @@ from backend.app.services.local_library_source_service import ensure_current_sha
 from backend.app.services.media_genre_service import COMMON_MOVIE_GENRES, resolve_genre_movie_group
 
 
+LIBRARY_TEST_CATEGORIES = ("movies", "tv", "anime", "cartoon")
+
+
 def _login(client, *, username: str, password: str) -> None:
     response = client.post("/api/auth/login", json={"username": username, "password": password})
     assert response.status_code == 200
@@ -540,28 +543,47 @@ def test_category_filter_preserves_hidden_and_duplicate_visibility(
     assert payload["items"][0]["id"] != hidden_id
 
 
-def test_library_source_filter_local_and_cloud(client, initialized_settings, admin_credentials) -> None:
+@pytest.mark.parametrize("category", LIBRARY_TEST_CATEGORIES)
+def test_library_source_filter_all_local_and_cloud_by_category(
+    client,
+    initialized_settings,
+    admin_credentials,
+    category: str,
+) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     cloud_source_id = _insert_cloud_source(initialized_settings)
+    other_category = next(value for value in LIBRARY_TEST_CATEGORIES if value != category)
     local_id = _insert_media_item(
         initialized_settings,
-        title="Local Movie",
-        original_filename="Local.Movie.2024.mkv",
-        category="movies",
+        title=f"{category.title()} Local Source",
+        original_filename=f"{category}.Local.Source.2024.mkv",
+        category=category,
         source_kind="local",
     )
     cloud_id = _insert_media_item(
         initialized_settings,
-        title="Cloud Movie",
-        original_filename="Cloud.Movie.2024.mkv",
-        category="movies",
+        title=f"{category.title()} Cloud Source",
+        original_filename=f"{category}.Cloud.Source.2024.mkv",
+        category=category,
         source_kind="cloud",
         library_source_id=cloud_source_id,
     )
+    other_category_id = _insert_media_item(
+        initialized_settings,
+        title=f"{other_category.title()} Local Source",
+        original_filename=f"{other_category}.Local.Source.2024.mkv",
+        category=other_category,
+        source_kind="local",
+    )
 
-    local_response = client.get("/api/library", params={"category": "movies", "source": "local"})
-    cloud_response = client.get("/api/library", params={"category": "movies", "source": "cloud"})
+    all_response = client.get("/api/library", params={"category": category, "source": "all"})
+    local_response = client.get("/api/library", params={"category": category, "source": "local"})
+    cloud_response = client.get("/api/library", params={"category": category, "source": "cloud"})
 
+    assert all_response.status_code == 200
+    assert {item["id"] for item in all_response.json()["items"]} == {local_id, cloud_id}
+    assert other_category_id not in {item["id"] for item in all_response.json()["items"]}
+    assert all_response.json()["arrange"]["source"] == "all"
     assert local_response.status_code == 200
     assert {item["id"] for item in local_response.json()["items"]} == {local_id}
     assert local_response.json()["arrange"]["source"] == "local"
@@ -570,39 +592,61 @@ def test_library_source_filter_local_and_cloud(client, initialized_settings, adm
     assert cloud_response.json()["arrange"]["source"] == "cloud"
 
 
-def test_library_search_respects_category_and_source_filter(client, initialized_settings, admin_credentials) -> None:
+@pytest.mark.parametrize("category", LIBRARY_TEST_CATEGORIES)
+def test_library_search_respects_category_and_source_filter(
+    client,
+    initialized_settings,
+    admin_credentials,
+    category: str,
+) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     cloud_source_id = _insert_cloud_source(initialized_settings)
-    anime_local_id = _insert_media_item(
+    other_category = next(value for value in LIBRARY_TEST_CATEGORIES if value != category)
+    local_id = _insert_media_item(
         initialized_settings,
-        title="One Piece Local",
-        original_filename="One.Piece.Local.2024.mkv",
-        category="anime",
+        title=f"Needle {category.title()} Local",
+        original_filename=f"Needle.{category}.Local.2024.mkv",
+        category=category,
         source_kind="local",
     )
-    _insert_media_item(
+    cloud_id = _insert_media_item(
         initialized_settings,
-        title="One Piece Cloud",
-        original_filename="One.Piece.Cloud.2024.mkv",
-        category="anime",
+        title=f"Needle {category.title()} Cloud",
+        original_filename=f"Needle.{category}.Cloud.2024.mkv",
+        category=category,
         source_kind="cloud",
         library_source_id=cloud_source_id,
     )
-    _insert_media_item(
+    other_category_id = _insert_media_item(
         initialized_settings,
-        title="One Piece Movie",
-        original_filename="One.Piece.Movie.2024.mkv",
-        category="movies",
+        title=f"Needle {other_category.title()} Local",
+        original_filename=f"Needle.{other_category}.Local.2024.mkv",
+        category=other_category,
         source_kind="local",
     )
 
-    response = client.get(
+    all_response = client.get(
         "/api/library/search",
-        params={"q": "one piece", "category": "anime", "source": "local"},
+        params={"q": "needle", "category": category, "source": "all"},
+    )
+    local_response = client.get(
+        "/api/library/search",
+        params={"q": "needle", "category": category, "source": "local"},
+    )
+    cloud_response = client.get(
+        "/api/library/search",
+        params={"q": "needle", "category": category, "source": "cloud"},
     )
 
-    assert response.status_code == 200
-    assert {item["id"] for item in response.json()["items"]} == {anime_local_id}
+    assert all_response.status_code == 200
+    assert {item["id"] for item in all_response.json()["items"]} == {local_id, cloud_id}
+    assert other_category_id not in {item["id"] for item in all_response.json()["items"]}
+    assert local_response.status_code == 200
+    assert {item["id"] for item in local_response.json()["items"]} == {local_id}
+    assert local_response.json()["arrange"]["source"] == "local"
+    assert cloud_response.status_code == 200
+    assert {item["id"] for item in cloud_response.json()["items"]} == {cloud_id}
+    assert cloud_response.json()["arrange"]["source"] == "cloud"
 
 
 def test_library_genre_filter_matches_membership_without_folder_inference(
@@ -780,14 +824,20 @@ def test_library_sort_modes(client, initialized_settings, admin_credentials) -> 
         assert [item["id"] for item in response.json()["items"]] == expected_ids
 
 
-def test_library_arrange_filters_compose_before_sorting(client, initialized_settings, admin_credentials) -> None:
+@pytest.mark.parametrize("category", LIBRARY_TEST_CATEGORIES)
+def test_library_arrange_filters_compose_before_sorting(
+    client,
+    initialized_settings,
+    admin_credentials,
+    category: str,
+) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     cloud_source_id = _insert_cloud_source(initialized_settings)
     beta_id = _insert_media_item(
         initialized_settings,
-        title="Beta Match",
-        original_filename="Beta.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
-        category="movies",
+        title=f"Beta {category.title()} Match",
+        original_filename=f"Beta.{category}.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category=category,
         source_kind="cloud",
         library_source_id=cloud_source_id,
         file_size=25 * 1024**3,
@@ -798,9 +848,9 @@ def test_library_arrange_filters_compose_before_sorting(client, initialized_sett
     )
     alpha_id = _insert_media_item(
         initialized_settings,
-        title="Alpha Match",
-        original_filename="Alpha.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
-        category="movies",
+        title=f"Alpha {category.title()} Match",
+        original_filename=f"Alpha.{category}.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category=category,
         source_kind="cloud",
         library_source_id=cloud_source_id,
         file_size=25 * 1024**3,
@@ -811,9 +861,9 @@ def test_library_arrange_filters_compose_before_sorting(client, initialized_sett
     )
     local_id = _insert_media_item(
         initialized_settings,
-        title="Local Match",
-        original_filename="Local.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
-        category="movies",
+        title=f"Local {category.title()} Match",
+        original_filename=f"Local.{category}.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category=category,
         source_kind="local",
         file_size=25 * 1024**3,
         width=1920,
@@ -823,9 +873,9 @@ def test_library_arrange_filters_compose_before_sorting(client, initialized_sett
     )
     wood_id = _insert_media_item(
         initialized_settings,
-        title="Wood Match",
-        original_filename="Wood.Match.2024.mkv",
-        category="movies",
+        title=f"Wood {category.title()} Match",
+        original_filename=f"Wood.{category}.Match.2024.mkv",
+        category=category,
         source_kind="cloud",
         library_source_id=cloud_source_id,
         file_size=256 * 1024**2,
@@ -836,9 +886,9 @@ def test_library_arrange_filters_compose_before_sorting(client, initialized_sett
     )
     drama_id = _insert_media_item(
         initialized_settings,
-        title="Drama Match",
-        original_filename="Drama.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
-        category="movies",
+        title=f"Drama {category.title()} Match",
+        original_filename=f"Drama.{category}.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category=category,
         source_kind="cloud",
         library_source_id=cloud_source_id,
         file_size=25 * 1024**3,
@@ -856,7 +906,7 @@ def test_library_arrange_filters_compose_before_sorting(client, initialized_sett
     response = client.get(
         "/api/library",
         params={
-            "category": "movies",
+            "category": category,
             "source": "cloud",
             "genre": "Action",
             "quality": "gold",
