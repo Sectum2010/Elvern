@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -70,6 +70,8 @@ const hopByHopHeaders = new Set([
 ]);
 
 const downloadSessionTokenPattern = /\/api\/download\/sessions\/[^/?#\s]+/g;
+const neutralRequestTargetOrigin = "http://elvern.local";
+const absoluteRequestTargetPattern = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
 
 class RequestBodyTooLargeError extends Error {
@@ -83,6 +85,14 @@ class RequestBodyTooLargeError extends Error {
 function sendError(response, statusCode, message) {
   response.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
   response.end(message);
+}
+
+function sendMethodNotAllowed(response, allowedMethods) {
+  response.writeHead(405, {
+    "Allow": allowedMethods.join(", "),
+    "Content-Type": "text/plain; charset=utf-8",
+  });
+  response.end("Method Not Allowed");
 }
 
 function redactSensitiveUrl(value) {
@@ -158,8 +168,101 @@ async function readBody(request) {
 }
 
 
-async function proxyRequest(request, response) {
-  const targetUrl = new URL(request.url, backendProxyOrigin);
+export function isAbsoluteRequestTarget(rawUrl) {
+  const candidate = String(rawUrl || "");
+  return absoluteRequestTargetPattern.test(candidate) || candidate.startsWith("//");
+}
+
+
+export function resolveSafeRequestTarget(rawUrl) {
+  const candidate = String(rawUrl || "");
+  if (!candidate || !candidate.startsWith("/") || isAbsoluteRequestTarget(candidate)) {
+    return null;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(candidate, neutralRequestTargetOrigin);
+  } catch {
+    return null;
+  }
+
+  if (parsedUrl.origin !== neutralRequestTargetOrigin || !parsedUrl.pathname.startsWith("/")) {
+    return null;
+  }
+
+  let decodedPathname;
+  try {
+    decodedPathname = decodeURIComponent(parsedUrl.pathname);
+  } catch {
+    return null;
+  }
+
+  if (!decodedPathname.startsWith("/")) {
+    return null;
+  }
+
+  return {
+    pathname: parsedUrl.pathname,
+    decodedPathname,
+    search: parsedUrl.search || "",
+  };
+}
+
+
+export function buildBackendProxyUrl(parsedTarget, backendOrigin = backendProxyOrigin) {
+  if (!parsedTarget || !parsedTarget.pathname || !parsedTarget.pathname.startsWith("/")) {
+    return null;
+  }
+
+  let expectedBackendOrigin;
+  let targetUrl;
+  try {
+    expectedBackendOrigin = new URL(backendOrigin).origin;
+    targetUrl = new URL(`${parsedTarget.pathname}${parsedTarget.search || ""}`, expectedBackendOrigin);
+  } catch {
+    return null;
+  }
+
+  if (targetUrl.origin !== expectedBackendOrigin) {
+    return null;
+  }
+
+  return targetUrl;
+}
+
+
+export function classifyFrontendRequestTarget(parsedTarget, urlPrefix, method = "GET") {
+  if (!parsedTarget) {
+    return { kind: "invalid" };
+  }
+
+  if (parsedTarget.pathname.startsWith("/api/")) {
+    return { kind: "proxy", route: "api" };
+  }
+
+  if (parsedTarget.pathname === "/health") {
+    return { kind: "proxy", route: "health" };
+  }
+
+  if (urlPrefix && parsedTarget.decodedPathname === `/${urlPrefix}/manifest.webmanifest`) {
+    if (method === "GET" || method === "HEAD") {
+      return { kind: "proxy", route: "manifest" };
+    }
+    return { kind: "method_not_allowed", route: "manifest", allowedMethods: ["GET", "HEAD"] };
+  }
+
+  return { kind: "asset" };
+}
+
+
+async function proxyRequest(request, response, targetUrl) {
+  const expectedBackendOrigin = new URL(backendProxyOrigin).origin;
+  if (!targetUrl || targetUrl.origin !== expectedBackendOrigin) {
+    sendError(response, 502, "Invalid upstream target");
+    return;
+  }
+
   const requestHeaders = new Headers();
 
   for (const [name, value] of Object.entries(request.headers)) {
@@ -203,6 +306,56 @@ async function proxyRequest(request, response) {
   }
 
   response.end();
+}
+
+
+export async function handleFrontendRequest(request, response) {
+  try {
+    if (!request.url) {
+      sendError(response, 400, "Bad Request");
+      return;
+    }
+
+    const parsedTarget = resolveSafeRequestTarget(request.url);
+    if (!parsedTarget) {
+      sendError(response, 400, "Bad Request");
+      return;
+    }
+
+    const initialRoute = classifyFrontendRequestTarget(parsedTarget, null, request.method);
+    if (initialRoute.kind === "proxy") {
+      await proxyRequest(request, response, buildBackendProxyUrl(parsedTarget));
+      return;
+    }
+
+    const urlPrefix = await getActiveUrlPrefix();
+    const route = classifyFrontendRequestTarget(parsedTarget, urlPrefix, request.method);
+    if (route.kind === "proxy") {
+      await proxyRequest(request, response, buildBackendProxyUrl(parsedTarget));
+      return;
+    }
+    if (route.kind === "method_not_allowed") {
+      sendMethodNotAllowed(response, route.allowedMethods);
+      return;
+    }
+
+    await serveAsset(request, response);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      sendError(response, 413, "Request body too large");
+      return;
+    }
+    console.error("Elvern frontend server error", {
+      url: redactSensitiveUrl(request.url),
+      error,
+    });
+    sendError(response, 502, "Upstream request failed");
+  }
+}
+
+
+export function createFrontendServer() {
+  return http.createServer(handleFrontendRequest);
 }
 
 
@@ -298,54 +451,23 @@ async function serveAsset(request, response) {
 }
 
 
-const server = http.createServer(async (request, response) => {
-  try {
-    if (!request.url) {
-      sendError(response, 400, "Bad Request");
-      return;
-    }
-
-    if (request.url.startsWith("/api/") || request.url === "/health") {
-      await proxyRequest(request, response);
-      return;
-    }
-
-    // The manifest must come from the backend so URL-prefix paths are rewritten.
-    // The static dist/manifest.webmanifest is only the unprefixed template.
-    const urlPrefix = await getActiveUrlPrefix();
-    if (urlPrefix) {
-      const manifestPath = `/${urlPrefix}/manifest.webmanifest`;
-      const parsedUrl = new URL(request.url, "http://elvern.local");
-      if (decodeURIComponent(parsedUrl.pathname) === manifestPath) {
-        await proxyRequest(request, response);
-        return;
-      }
-    }
-
-    await serveAsset(request, response);
-  } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) {
-      sendError(response, 413, "Request body too large");
-      return;
-    }
-    console.error("Elvern frontend server error", {
-      url: redactSensitiveUrl(request.url),
-      error,
-    });
-    sendError(response, 502, "Upstream request failed");
-  }
-});
-
-try {
-  await fsp.access(distEntry);
-} catch {
-  console.error("Missing frontend/dist/index.html. Run 'npm run build' in frontend/ first.");
-  process.exit(1);
+function isMainModule() {
+  return process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 }
 
 
-server.listen(frontendPort, frontendHost, () => {
-  console.log(
-    `Elvern frontend listening on http://${frontendHost}:${frontendPort} and proxying to ${backendProxyOrigin}`,
-  );
-});
+if (isMainModule()) {
+  try {
+    await fsp.access(distEntry);
+  } catch {
+    console.error("Missing frontend/dist/index.html. Run 'npm run build' in frontend/ first.");
+    process.exit(1);
+  }
+
+  const server = createFrontendServer();
+  server.listen(frontendPort, frontendHost, () => {
+    console.log(
+      `Elvern frontend listening on http://${frontendHost}:${frontendPort} and proxying to ${backendProxyOrigin}`,
+    );
+  });
+}
