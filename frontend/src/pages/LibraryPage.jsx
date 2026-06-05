@@ -99,6 +99,7 @@ const DEFAULT_LIBRARY_ARRANGE = {
   quality: "all",
   sort: "smart",
 };
+const SCROLLABLE_ARRANGE_DEVICE_CLASSES = new Set(["phone", "tablet"]);
 
 
 export function resolveLibraryCategoryFromSearch(search = "") {
@@ -346,6 +347,36 @@ function getArrangeActiveLabel(arrange) {
 }
 
 
+function getFloatingSearchViewportOrientation() {
+  if (typeof window === "undefined") {
+    return "portrait";
+  }
+  const visualViewport = window.visualViewport || null;
+  const width = visualViewport?.width
+    || window.innerWidth
+    || (typeof document !== "undefined" ? document.documentElement.clientWidth : 0);
+  const height = visualViewport?.height
+    || window.innerHeight
+    || (typeof document !== "undefined" ? document.documentElement.clientHeight : 0);
+  return width > height ? "landscape" : "portrait";
+}
+
+
+function getFloatingSearchHeroRightGutter(heroElement) {
+  if (typeof window === "undefined" || !heroElement) {
+    return null;
+  }
+  const visualViewport = window.visualViewport || null;
+  const viewportWidth = visualViewport?.width
+    || window.innerWidth
+    || (typeof document !== "undefined" ? document.documentElement.clientWidth : 0);
+  if (!viewportWidth) {
+    return null;
+  }
+  return `${Math.max(0, Math.round(viewportWidth - heroElement.getBoundingClientRect().right))}px`;
+}
+
+
 function ArrangeSection({ title, children }) {
   return (
     <section className="library-arrange__section">
@@ -375,10 +406,17 @@ function ArrangeOption({ active = false, label, onClick }) {
 }
 
 
-function LibraryArrangeControl({ arrange, availableGenres = [], mobile = false, onChange }) {
+function LibraryArrangeControl({
+  arrange,
+  availableGenres = [],
+  panelMode = "desktop",
+  panelSize = "",
+  onChange,
+}) {
   const [open, setOpen] = useState(false);
   const controlRef = useRef(null);
   const activeLabel = getArrangeActiveLabel(arrange);
+  const scrollablePanel = panelMode === "scrollable";
 
   useEffect(() => {
     if (!open || typeof document === "undefined") {
@@ -429,10 +467,14 @@ function LibraryArrangeControl({ arrange, availableGenres = [], mobile = false, 
           aria-label="Arrange library"
           className={[
             "library-arrange__panel",
-            mobile ? "library-arrange__panel--mobile" : "library-arrange__panel--desktop",
+            scrollablePanel ? "library-arrange__panel--scrollable" : "library-arrange__panel--desktop",
+            scrollablePanel && panelSize ? `library-arrange__panel--${panelSize}` : "",
           ].filter(Boolean).join(" ")}
           role="dialog"
         >
+          {scrollablePanel ? (
+            <span aria-hidden="true" className="library-arrange__mobile-handle" />
+          ) : null}
           <ArrangeSection title="Source">
             {LIBRARY_SOURCE_OPTIONS.map((option) => (
               <ArrangeOption
@@ -604,16 +646,25 @@ export function LibraryPage() {
   const orientationUserIntentVersionRef = useRef(0);
   const orientationSamplerRef = useRef(() => {});
   const orientationDebugLogAtRef = useRef(0);
+  const librarySectionRef = useRef(null);
+  const libraryHeroRef = useRef(null);
   const desktopSearchInputRef = useRef(null);
   const mobileSearchInputRef = useRef(null);
   const floatingSearchScrollYRef = useRef(null);
   const pendingFloatingSearchRestoreYRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
+  const [floatingSearchViewportOrientation, setFloatingSearchViewportOrientation] = useState(() => getFloatingSearchViewportOrientation());
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const clientPlatform = detectClientPlatform();
   const clientDeviceClass = detectClientDeviceClass();
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
-  const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
+  const libraryDeviceClass = SCROLLABLE_ARRANGE_DEVICE_CLASSES.has(clientDeviceClass)
+    ? clientDeviceClass
+    : undefined;
+  const arrangePanelMode = SCROLLABLE_ARRANGE_DEVICE_CLASSES.has(clientDeviceClass) ? "scrollable" : "desktop";
+  const arrangePanelSize = SCROLLABLE_ARRANGE_DEVICE_CLASSES.has(clientDeviceClass) ? clientDeviceClass : "";
+  const heroAlignedFloatingSearch = clientDeviceClass === "tablet"
+    || (clientDeviceClass === "phone" && floatingSearchViewportOrientation === "portrait");
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
   const categorySwitchDragEnabled = clientDeviceClass === "desktop";
   const floatingSearchScrollRestoreEnabled = ["desktop", "phone", "tablet"].includes(clientDeviceClass);
@@ -772,6 +823,43 @@ export function LibraryPage() {
       controller.abort();
     };
   }, [activeLibraryArrange, activeLibraryCategory, deferredQuery]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const sectionElement = librarySectionRef.current;
+    const heroElement = libraryHeroRef.current;
+    const visualViewport = window.visualViewport || null;
+
+    function updateFloatingSearchAlignment() {
+      setFloatingSearchViewportOrientation((current) => {
+        const nextOrientation = getFloatingSearchViewportOrientation();
+        return current === nextOrientation ? current : nextOrientation;
+      });
+      const heroRightGutter = getFloatingSearchHeroRightGutter(heroElement);
+      if (sectionElement && heroRightGutter) {
+        sectionElement.style.setProperty("--library-hero-right-gutter", heroRightGutter);
+      }
+    }
+
+    updateFloatingSearchAlignment();
+    const resizeObserver = typeof ResizeObserver !== "undefined" && heroElement
+      ? new ResizeObserver(updateFloatingSearchAlignment)
+      : null;
+    resizeObserver?.observe(heroElement);
+    window.addEventListener("resize", updateFloatingSearchAlignment);
+    window.addEventListener("orientationchange", updateFloatingSearchAlignment);
+    visualViewport?.addEventListener("resize", updateFloatingSearchAlignment);
+    visualViewport?.addEventListener("scroll", updateFloatingSearchAlignment);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateFloatingSearchAlignment);
+      window.removeEventListener("orientationchange", updateFloatingSearchAlignment);
+      visualViewport?.removeEventListener("resize", updateFloatingSearchAlignment);
+      visualViewport?.removeEventListener("scroll", updateFloatingSearchAlignment);
+    };
+  }, [clientDeviceClass]);
 
   useEffect(() => {
     if (loading || deferredQuery.trim() || !activeLibraryArrange.genre) {
@@ -1425,10 +1513,12 @@ export function LibraryPage() {
   return (
     <section
       className="page-section page-section--library"
+      data-floating-search-align={heroAlignedFloatingSearch ? "hero-right" : undefined}
       data-device-class={libraryDeviceClass}
       data-library-device={libraryDevice}
+      ref={librarySectionRef}
     >
-      <div className="topbar library-desktop-hero" aria-label="Library overview">
+      <div className="topbar library-desktop-hero" aria-label="Library overview" ref={libraryHeroRef}>
         <p className="eyebrow library-desktop-hero__eyebrow">Private Media Library</p>
         <div className="library-desktop-hero__row">
           <div className="library-desktop-hero__brand">
@@ -1465,7 +1555,8 @@ export function LibraryPage() {
           <LibraryArrangeControl
             arrange={activeLibraryArrange}
             availableGenres={library.available_genres || []}
-            mobile={clientDeviceClass === "phone"}
+            panelMode={arrangePanelMode}
+            panelSize={arrangePanelSize}
             onChange={handleArrangeChange}
           />
         </div>

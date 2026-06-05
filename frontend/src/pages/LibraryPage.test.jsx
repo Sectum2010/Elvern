@@ -178,6 +178,20 @@ function rect(left, right) {
 }
 
 
+function setViewportSize(width, height) {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    writable: true,
+    value: width,
+  });
+  Object.defineProperty(window, "innerHeight", {
+    configurable: true,
+    writable: true,
+    value: height,
+  });
+}
+
+
 function mockCategorySwitchRects() {
   return vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function getRect() {
     if (this.classList?.contains("library-category-switch")) {
@@ -219,6 +233,7 @@ describe("LibraryPage category switching", () => {
       writable: true,
       value: MouseEvent,
     });
+    setViewportSize(1024, 768);
     window.scrollTo = vi.fn();
     window.sessionStorage.clear();
   });
@@ -556,7 +571,7 @@ describe("LibraryPage category switching", () => {
     expect(within(panel).getByRole("button", { name: "Cloud" })).toBeInTheDocument();
   });
 
-  test("phone arrange panel uses the mobile panel class and keeps controls available", async () => {
+  test("phone arrange panel uses the scrollable phone panel and keeps controls available", async () => {
     mockPlatformState.deviceClass = "phone";
     mockPlatformState.platform = "iphone";
     const user = userEvent.setup();
@@ -565,12 +580,78 @@ describe("LibraryPage category switching", () => {
     await user.click(await screen.findByRole("button", { name: "Arrange library" }));
 
     const panel = screen.getByRole("dialog", { name: "Arrange library" });
-    expect(panel).toHaveClass("library-arrange__panel--mobile");
+    expect(panel).toHaveClass("library-arrange__panel--scrollable");
+    expect(panel).toHaveClass("library-arrange__panel--phone");
+    expect(panel).not.toHaveClass("library-arrange__panel--desktop");
+    expect(panel.querySelector(".library-arrange__mobile-handle")).not.toBeNull();
     expect(screen.getByRole("tablist", { name: "Library category" })).toBeInTheDocument();
     expect(within(panel).getByText("Source")).toBeInTheDocument();
     expect(within(panel).getByText("Genre")).toBeInTheDocument();
     expect(within(panel).getByText("Quality")).toBeInTheDocument();
     expect(within(panel).getByText("Sort")).toBeInTheDocument();
+  });
+
+  test("tablet arrange panel uses the taller scrollable tablet panel", async () => {
+    mockPlatformState.deviceClass = "tablet";
+    mockPlatformState.platform = "ipad";
+    const user = userEvent.setup();
+    renderLibrary("/library");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    expect(panel).toHaveClass("library-arrange__panel--scrollable");
+    expect(panel).toHaveClass("library-arrange__panel--tablet");
+    expect(panel).not.toHaveClass("library-arrange__panel--desktop");
+    expect(panel.querySelector(".library-arrange__mobile-handle")).not.toBeNull();
+  });
+
+  test("desktop arrange panel keeps the desktop dropdown", async () => {
+    const user = userEvent.setup();
+    renderLibrary("/library");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    expect(panel).toHaveClass("library-arrange__panel--desktop");
+    expect(panel).not.toHaveClass("library-arrange__panel--scrollable");
+    expect(panel.querySelector(".library-arrange__mobile-handle")).toBeNull();
+  });
+
+  test("phone portrait aligns floating search to the hero right edge", async () => {
+    mockPlatformState.deviceClass = "phone";
+    mockPlatformState.platform = "iphone";
+    setViewportSize(390, 844);
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function getRect() {
+      if (this.classList?.contains("library-desktop-hero")) {
+        return rect(12, 360);
+      }
+      return rect(0, 100);
+    });
+    renderLibrary("/library");
+
+    await screen.findByRole("button", { name: "Arrange library" });
+    const section = document.querySelector(".page-section--library");
+
+    expect(section).toHaveAttribute("data-device-class", "phone");
+    expect(section).toHaveAttribute("data-floating-search-align", "hero-right");
+    await waitFor(() => {
+      expect(section.style.getPropertyValue("--library-hero-right-gutter")).toBe("30px");
+    });
+    rectSpy.mockRestore();
+  });
+
+  test("phone landscape leaves the floating search on the normal offset path", async () => {
+    mockPlatformState.deviceClass = "phone";
+    mockPlatformState.platform = "iphone";
+    setViewportSize(844, 390);
+    renderLibrary("/library");
+
+    await screen.findByRole("button", { name: "Arrange library" });
+    const section = document.querySelector(".page-section--library");
+
+    expect(section).toHaveAttribute("data-device-class", "phone");
+    expect(section).not.toHaveAttribute("data-floating-search-align");
   });
 
   test("detail return target preserves the category query", async () => {
@@ -626,19 +707,23 @@ describe("LibraryPage category switching", () => {
 describe("LibraryPage CSS guards", () => {
   const styles = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
 
-  test("phone arrange dropdown opens downward at one third of the old mobile max height", () => {
-    expect(styles).toMatch(/\.library-arrange__panel--mobile\s*\{[^}]*position:\s*absolute;[^}]*inset-block-start:\s*calc\(100% \+ 0\.45rem\);[^}]*max-height:\s*min\(26vh,\s*11\.333rem\);[^}]*overflow-y:\s*auto;/s);
+  test("phone and tablet arrange dropdowns open downward as scrollable panels", () => {
+    expect(styles).toMatch(/\.library-arrange__panel--scrollable\s*\{[^}]*position:\s*absolute;[^}]*inset-block-start:\s*calc\(100% \+ 0\.45rem\);[^}]*overflow-y:\s*auto;/s);
+    expect(styles).toMatch(/\.library-arrange__panel--phone\s*\{[^}]*max-height:\s*min\(26vh,\s*11\.333rem\);/s);
+    expect(styles).toMatch(/\.library-arrange__panel--tablet\s*\{[^}]*max-height:\s*min\(33\.8vh,\s*14\.733rem\);/s);
+    expect(styles).toMatch(/\.library-arrange__mobile-handle\s*\{[^}]*background:\s*rgba\(255,\s*255,\s*255,\s*0\.86\);/s);
   });
 
-  test("phone category row has a stable two-column layout for switch and arrange icon", () => {
-    expect(styles).toMatch(/\.page-section--library\[data-device-class="phone"\] \.library-desktop-hero__category-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto;[^}]*gap:\s*0\.5rem;/s);
-    expect(styles).toMatch(/\.page-section--library\[data-device-class="phone"\] \.library-category-switch\s*\{[^}]*max-width:\s*none;[^}]*min-width:\s*0;/s);
+  test("phone and tablet category rows have a stable two-column layout for switch and arrange icon", () => {
+    expect(styles).toMatch(/\.page-section--library\[data-device-class="phone"\] \.library-desktop-hero__category-row,\s*\.page-section--library\[data-device-class="tablet"\] \.library-desktop-hero__category-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto;[^}]*gap:\s*0\.5rem;/s);
+    expect(styles).toMatch(/\.page-section--library\[data-device-class="phone"\] \.library-category-switch,\s*\.page-section--library\[data-device-class="tablet"\] \.library-category-switch\s*\{[^}]*max-width:\s*none;[^}]*min-width:\s*0;/s);
   });
 
-  test("floating search offset remains platform aware without raising above the hero", () => {
+  test("floating search aligns to the measured hero edge without raising above the hero", () => {
     expect(styles).toMatch(/\.library-desktop-hero\s*\{[^}]*z-index:\s*80;/s);
     expect(styles).toMatch(/\.floating-library-search\s*\{[^}]*z-index:\s*17;/s);
-    expect(styles).toMatch(/@media \(max-width:\s*859px\) and \(orientation:\s*portrait\)[\s\S]*\.app-shell--library-root:has\(\.page-section--library\[data-device-class="phone"\]\) \.floating-library-search\s*\{[^}]*right:/s);
-    expect(styles).toMatch(/@media \(min-width:\s*740px\) and \(max-width:\s*1400px\) and \(any-pointer:\s*coarse\)[\s\S]*\.app-shell--library-root:not\(:has\(\.page-section--library\[data-device-class="phone"\]\)\) \.floating-library-search\s*\{[^}]*right:/s);
+    expect(styles).toMatch(/\.page-section--library\[data-floating-search-align="hero-right"\] \.floating-library-search\s*\{[^}]*right:\s*var\(--library-hero-right-gutter,/s);
+    expect(styles).not.toMatch(/max\(4\.1rem/);
+    expect(styles).not.toMatch(/max\(3\.4rem/);
   });
 });

@@ -762,17 +762,36 @@ button {
   inset-inline-end: 0;
 }
 
-.library-arrange__panel--mobile {
+.library-arrange__panel--scrollable {
   position: absolute;
   inset-block-start: calc(100% + 0.45rem);
   inset-inline-end: 0;
   inline-size: min(20rem, calc(100vw - 1.5rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
-  max-height: min(26vh, 11.333rem);
+  padding-block-start: 1rem;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
-.page-section--library[data-device-class="phone"] .library-desktop-hero {
+.library-arrange__panel--phone {
+  max-height: min(26vh, 11.333rem);
+}
+
+.library-arrange__panel--tablet {
+  max-height: min(33.8vh, 14.733rem);
+}
+
+.library-arrange__mobile-handle {
+  justify-self: center;
+  width: 2.2rem;
+  height: 0.22rem;
+  margin-block: -0.44rem 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 0.12rem 0.5rem rgba(255, 255, 255, 0.18);
+}
+
+.page-section--library[data-device-class="phone"] .library-desktop-hero,
+.page-section--library[data-device-class="tablet"] .library-desktop-hero {
   overflow: visible;
   align-items: stretch;
   gap: 0.72rem;
@@ -781,7 +800,8 @@ button {
     max(0.95rem, env(safe-area-inset-right, 0px));
 }
 
-.page-section--library[data-device-class="phone"] .library-desktop-hero__category-row {
+.page-section--library[data-device-class="phone"] .library-desktop-hero__category-row,
+.page-section--library[data-device-class="tablet"] .library-desktop-hero__category-row {
   width: 100%;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -789,13 +809,15 @@ button {
   gap: 0.5rem;
 }
 
-.page-section--library[data-device-class="phone"] .library-category-switch {
+.page-section--library[data-device-class="phone"] .library-category-switch,
+.page-section--library[data-device-class="tablet"] .library-category-switch {
   width: 100%;
   max-width: none;
   min-width: 0;
 }
 
-.page-section--library[data-device-class="phone"] .library-arrange {
+.page-section--library[data-device-class="phone"] .library-arrange,
+.page-section--library[data-device-class="tablet"] .library-arrange {
   align-self: end;
   justify-self: end;
   min-width: 0;
@@ -6518,6 +6540,10 @@ html[data-device-shell="iphone"] .admin-recovery-card {
     width: min(22rem, calc(100vw - 1.5rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
   }
 
+  .page-section--library[data-floating-search-align="hero-right"] .floating-library-search {
+    right: var(--library-hero-right-gutter, calc(max(0.75rem, env(safe-area-inset-right, 0px)) + var(--app-viewport-offset-right, 0px)));
+  }
+
   .account-badge,
   .ghost-button--floating {
     min-height: 2.45rem;
@@ -6532,16 +6558,8 @@ html[data-device-shell="iphone"] .admin-recovery-card {
   }
 }
 
-@media (max-width: 859px) and (orientation: portrait) {
-  .app-shell--library-root:has(.page-section--library[data-device-class="phone"]) .floating-library-search {
-    right: calc(max(4.1rem, calc(env(safe-area-inset-right, 0px) + 3.2rem)) + var(--app-viewport-offset-right, 0px));
-  }
-}
-
-@media (min-width: 740px) and (max-width: 1400px) and (any-pointer: coarse) {
-  .app-shell--library-root:not(:has(.page-section--library[data-device-class="phone"])) .floating-library-search {
-    right: calc(max(3.4rem, calc(env(safe-area-inset-right, 0px) + 2.75rem)) + var(--app-viewport-offset-right, 0px));
-  }
+.page-section--library[data-floating-search-align="hero-right"] .floating-library-search {
+  right: var(--library-hero-right-gutter, calc(max(0.85rem, env(safe-area-inset-right, 0px)) + var(--app-viewport-offset-right, 0px)));
 }
 
 .floating-island--bottom {
