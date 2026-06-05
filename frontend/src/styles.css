@@ -601,6 +601,8 @@ button {
 }
 
 .library-desktop-hero {
+  position: relative;
+  z-index: 80;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   justify-items: stretch;
@@ -716,6 +718,7 @@ button {
 
 .library-arrange {
   position: relative;
+  z-index: 90;
   justify-self: end;
 }
 
@@ -769,7 +772,7 @@ button {
   border-radius: 0.85rem;
   background: rgba(8, 12, 24, 0.98);
   box-shadow: 0 24px 52px rgba(0, 0, 0, 0.34);
-  z-index: 40;
+  z-index: 100;
 }
 
 .library-arrange__panel--desktop {
@@ -784,6 +787,7 @@ button {
   inset-block-end: max(0.75rem, env(safe-area-inset-bottom, 0px));
   max-height: min(78vh, 34rem);
   overflow: auto;
+  z-index: 9000;
 }
 
 .library-arrange__section {

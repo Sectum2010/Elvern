@@ -73,11 +73,11 @@ const LIBRARY_SOURCE_OPTIONS = [
 const LIBRARY_QUALITY_OPTIONS = [
   { key: "all", label: "All quality", activeLabel: "" },
   { key: "diamond", label: "Diamond", activeLabel: "Diamond" },
-  { key: "gold", label: "Gold", activeLabel: "Gold+" },
-  { key: "silver", label: "Silver", activeLabel: "Silver+" },
-  { key: "iron", label: "Iron", activeLabel: "Iron+" },
-  { key: "bronze", label: "Bronze", activeLabel: "Bronze+" },
-  { key: "wood", label: "Wood", activeLabel: "Wood+" },
+  { key: "gold", label: "Gold", activeLabel: "Gold" },
+  { key: "silver", label: "Silver", activeLabel: "Silver" },
+  { key: "iron", label: "Iron", activeLabel: "Iron" },
+  { key: "bronze", label: "Bronze", activeLabel: "Bronze" },
+  { key: "wood", label: "Wood", activeLabel: "Wood" },
 ];
 const LIBRARY_SORT_OPTIONS = [
   { key: "smart", label: "Smart Default", activeLabel: "" },
@@ -1439,6 +1439,7 @@ export function LibraryPage() {
   }
 
   const isSearching = deferredQuery.trim().length > 0;
+  const isFlatSortedView = activeLibraryArrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort;
 
   return (
     <section
@@ -1574,7 +1575,25 @@ export function LibraryPage() {
         )
       ) : null}
 
-      {!loading && !isSearching ? (
+      {!loading && !isSearching && isFlatSortedView ? (
+        library.items.length > 0 ? (
+          <div className="content-stack">
+            <MediaGrid
+              activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
+              items={library.items}
+              sectionKey="sorted-library"
+              smartPosterLoadingEnabled
+            />
+          </div>
+        ) : (
+          <EmptyState
+            title="No media indexed yet"
+            description="Point ELVERN_MEDIA_ROOT at your movies folder, then run a rescan."
+          />
+        )
+      ) : null}
+
+      {!loading && !isSearching && !isFlatSortedView ? (
         <div className="content-stack">
           {showContinueWatchingSection ? (
             <section className="content-section">

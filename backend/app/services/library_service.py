@@ -42,7 +42,12 @@ from .library_presentation_service import (
     _serialize_media_item,
 )
 from .media_age_access_service import resolve_media_age_requirement
-from .media_genre_service import _decode_genres_json, get_media_genre_metadata, resolve_genre_movie_group
+from .media_genre_service import (
+    COMMON_MOVIE_GENRES,
+    _decode_genres_json,
+    get_media_genre_metadata,
+    resolve_genre_movie_group,
+)
 from .title_normalization import (
     build_search_index,
     match_search_query,
@@ -59,14 +64,6 @@ LIBRARY_CATEGORY_VALUES = ("movies", "tv", "anime", "cartoon")
 LIBRARY_CATEGORY_VALUE_SET = set(LIBRARY_CATEGORY_VALUES)
 LIBRARY_SOURCE_FILTER_VALUES = ("all", "local", "cloud")
 LIBRARY_QUALITY_FILTER_VALUES = ("all", *QUALITY_TIER_VALUES)
-LIBRARY_QUALITY_FILTER_RANKS = {
-    "wood": 0,
-    "bronze": 1,
-    "iron": 2,
-    "silver": 3,
-    "gold": 4,
-    "diamond": 5,
-}
 LIBRARY_SORT_VALUES = (
     "smart",
     "az",
@@ -199,24 +196,28 @@ def _apply_library_arrange_filters(rows: list, arrange: dict[str, str | None]) -
             continue
         if genre_key and genre_key not in _row_genre_keys(row):
             continue
-        if quality_filter != "all" and LIBRARY_QUALITY_FILTER_RANKS.get(
-            str(_row_value(row, "quality_tier", "") or ""),
-            -1,
-        ) < LIBRARY_QUALITY_FILTER_RANKS[quality_filter]:
+        if quality_filter != "all" and str(_row_value(row, "quality_tier", "") or "") != quality_filter:
             continue
         filtered_rows.append(row)
     return filtered_rows
 
 
 def _available_genres_for_rows(rows: list) -> list[str]:
-    labels_by_key: dict[str, str] = {}
+    preset_labels_by_key = {label.casefold(): label for label in COMMON_MOVIE_GENRES}
+    custom_labels_by_key: dict[str, str] = {}
     for row in rows:
         for genre in _row_value(row, "genres", []) or []:
             label = " ".join(str(genre or "").strip().split())
             if not label:
                 continue
-            labels_by_key.setdefault(label.casefold(), label)
-    return sorted(labels_by_key.values(), key=lambda label: label.casefold())
+            key = label.casefold()
+            if key in preset_labels_by_key:
+                continue
+            custom_labels_by_key.setdefault(key, label)
+    return [
+        *COMMON_MOVIE_GENRES,
+        *sorted(custom_labels_by_key.values(), key=lambda label: label.casefold()),
+    ]
 
 
 def _coerce_int(value: object, fallback: int = 0) -> int:

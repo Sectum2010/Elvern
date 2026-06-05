@@ -8,7 +8,7 @@ import pytest
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.media_scan import scan_media_library
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
-from backend.app.services.media_genre_service import resolve_genre_movie_group
+from backend.app.services.media_genre_service import COMMON_MOVIE_GENRES, resolve_genre_movie_group
 
 
 def _login(client, *, username: str, password: str) -> None:
@@ -643,12 +643,41 @@ def test_library_genre_filter_matches_membership_without_folder_inference(
     adventure_payload = adventure_response.json()
     assert {item["id"] for item in adventure_payload["items"]} == {adventure_id}
     assert folder_named_id not in {item["id"] for item in adventure_payload["items"]}
-    assert set(adventure_payload["available_genres"]) == {"Adventure", "Drama", "Family"}
+    assert adventure_payload["available_genres"] == COMMON_MOVIE_GENRES
     assert family_response.status_code == 200
     assert {item["id"] for item in family_response.json()["items"]} == {adventure_id}
 
 
-def test_library_quality_filter_uses_existing_tier_inputs(client, initialized_settings, admin_credentials) -> None:
+def test_library_available_genres_include_presets_and_append_custom_genres(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    custom_id = _insert_media_item(
+        initialized_settings,
+        title="City Lights",
+        original_filename="City.Lights.2024.mkv",
+        category="movies",
+    )
+
+    no_metadata_response = client.get("/api/library", params={"category": "movies"})
+    preset_zero_match_response = client.get("/api/library", params={"category": "movies", "genre": "Action"})
+    _set_genres(initialized_settings, media_item_id=custom_id, genres=["Neo Noir"])
+    custom_response = client.get("/api/library", params={"category": "movies"})
+
+    assert no_metadata_response.status_code == 200
+    assert no_metadata_response.json()["available_genres"] == COMMON_MOVIE_GENRES
+    assert preset_zero_match_response.status_code == 200
+    preset_zero_match_payload = preset_zero_match_response.json()
+    assert preset_zero_match_payload["arrange"]["genre"] == "Action"
+    assert preset_zero_match_payload["items"] == []
+    assert preset_zero_match_payload["available_genres"] == COMMON_MOVIE_GENRES
+    assert custom_response.status_code == 200
+    assert custom_response.json()["available_genres"] == [*COMMON_MOVIE_GENRES, "Neo Noir"]
+
+
+def test_library_quality_filter_uses_exact_existing_tier_inputs(client, initialized_settings, admin_credentials) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     diamond_id = _insert_media_item(
         initialized_settings,
@@ -672,17 +701,36 @@ def test_library_quality_filter_uses_existing_tier_inputs(client, initialized_se
         video_codec="hevc",
         audio_codec="dts",
     )
+    wood_id = _insert_media_item(
+        initialized_settings,
+        title="Tiny Copy",
+        original_filename="Tiny.Copy.2024.mkv",
+        category="movies",
+        file_size=256 * 1024**2,
+        width=640,
+        height=360,
+        video_codec="h264",
+        audio_codec="aac",
+    )
 
     response = client.get("/api/library", params={"category": "movies", "quality": "diamond"})
-    gold_plus_response = client.get("/api/library", params={"category": "movies", "quality": "gold"})
+    gold_response = client.get("/api/library", params={"category": "movies", "quality": "gold"})
+    wood_response = client.get("/api/library", params={"category": "movies", "quality": "wood"})
+    all_quality_response = client.get("/api/library", params={"category": "movies", "quality": "all"})
 
     assert response.status_code == 200
     payload = response.json()
     assert {item["id"] for item in payload["items"]} == {diamond_id}
     assert payload["items"][0]["quality_tier"] == "diamond"
     assert gold_id not in {item["id"] for item in payload["items"]}
-    assert gold_plus_response.status_code == 200
-    assert {item["id"] for item in gold_plus_response.json()["items"]} == {diamond_id, gold_id}
+    assert gold_response.status_code == 200
+    assert {item["id"] for item in gold_response.json()["items"]} == {gold_id}
+    assert gold_response.json()["items"][0]["quality_tier"] == "gold"
+    assert wood_response.status_code == 200
+    assert {item["id"] for item in wood_response.json()["items"]} == {wood_id}
+    assert wood_response.json()["items"][0]["quality_tier"] == "wood"
+    assert all_quality_response.status_code == 200
+    assert {item["id"] for item in all_quality_response.json()["items"]} == {diamond_id, gold_id, wood_id}
 
 
 def test_library_sort_modes(client, initialized_settings, admin_credentials) -> None:
@@ -730,6 +778,101 @@ def test_library_sort_modes(client, initialized_settings, admin_credentials) -> 
 
         assert response.status_code == 200
         assert [item["id"] for item in response.json()["items"]] == expected_ids
+
+
+def test_library_arrange_filters_compose_before_sorting(client, initialized_settings, admin_credentials) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    cloud_source_id = _insert_cloud_source(initialized_settings)
+    beta_id = _insert_media_item(
+        initialized_settings,
+        title="Beta Match",
+        original_filename="Beta.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=25 * 1024**3,
+        width=1920,
+        height=1080,
+        video_codec="hevc",
+        audio_codec="dts",
+    )
+    alpha_id = _insert_media_item(
+        initialized_settings,
+        title="Alpha Match",
+        original_filename="Alpha.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=25 * 1024**3,
+        width=1920,
+        height=1080,
+        video_codec="hevc",
+        audio_codec="dts",
+    )
+    local_id = _insert_media_item(
+        initialized_settings,
+        title="Local Match",
+        original_filename="Local.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category="movies",
+        source_kind="local",
+        file_size=25 * 1024**3,
+        width=1920,
+        height=1080,
+        video_codec="hevc",
+        audio_codec="dts",
+    )
+    wood_id = _insert_media_item(
+        initialized_settings,
+        title="Wood Match",
+        original_filename="Wood.Match.2024.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=256 * 1024**2,
+        width=640,
+        height=360,
+        video_codec="h264",
+        audio_codec="aac",
+    )
+    drama_id = _insert_media_item(
+        initialized_settings,
+        title="Drama Match",
+        original_filename="Drama.Match.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=25 * 1024**3,
+        width=1920,
+        height=1080,
+        video_codec="hevc",
+        audio_codec="dts",
+    )
+    _set_genres(initialized_settings, media_item_id=beta_id, genres=["Action"])
+    _set_genres(initialized_settings, media_item_id=alpha_id, genres=["Action"])
+    _set_genres(initialized_settings, media_item_id=local_id, genres=["Action"])
+    _set_genres(initialized_settings, media_item_id=wood_id, genres=["Action"])
+    _set_genres(initialized_settings, media_item_id=drama_id, genres=["Drama"])
+
+    response = client.get(
+        "/api/library",
+        params={
+            "category": "movies",
+            "source": "cloud",
+            "genre": "Action",
+            "quality": "gold",
+            "sort": "az",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload["items"]] == [alpha_id, beta_id]
+    assert payload["arrange"] == {
+        "source": "cloud",
+        "genre": "Action",
+        "quality": "gold",
+        "sort": "az",
+    }
 
 
 @pytest.mark.parametrize(

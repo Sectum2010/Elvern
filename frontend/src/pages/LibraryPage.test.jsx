@@ -70,6 +70,63 @@ const emptyLibraryPayload = {
 };
 
 
+function libraryItem(overrides = {}) {
+  const id = overrides.id ?? 1;
+  const title = overrides.title ?? `Movie ${id}`;
+  return {
+    id,
+    title,
+    parsed_title: {
+      display_title: title,
+      base_title: title,
+      edition_identity: "standard",
+      parsed_year: overrides.year ?? 2024,
+      title_source: "fallback",
+      parse_confidence: "high",
+      warnings: [],
+      parser_version: "",
+      suspicious_output: false,
+    },
+    original_filename: overrides.original_filename ?? `${title.replace(/\s+/g, ".")}.2024.mkv`,
+    source_kind: overrides.source_kind ?? "local",
+    source_label: overrides.source_label ?? "DGX",
+    poster_url: null,
+    file_size: overrides.file_size ?? 1024,
+    duration_seconds: overrides.duration_seconds ?? 1200,
+    width: overrides.width ?? 1920,
+    height: overrides.height ?? 1080,
+    video_codec: overrides.video_codec ?? "h264",
+    audio_codec: overrides.audio_codec ?? "aac",
+    container: overrides.container ?? "mkv",
+    year: overrides.year ?? 2024,
+    created_at: overrides.created_at ?? "2026-06-01T00:00:00+00:00",
+    updated_at: overrides.updated_at ?? "2026-06-01T00:00:00+00:00",
+    last_scanned_at: overrides.last_scanned_at ?? "2026-06-01T00:00:00+00:00",
+    completed: overrides.completed ?? false,
+    progress_seconds: overrides.progress_seconds ?? 0,
+    progress_duration_seconds: overrides.progress_duration_seconds ?? 0,
+    ...overrides,
+  };
+}
+
+
+function libraryPayload(overrides = {}) {
+  return {
+    ...emptyLibraryPayload,
+    ...overrides,
+  };
+}
+
+
+function visibleTitleLinkNames(...names) {
+  const expectedNames = new Set(names);
+  return screen
+    .getAllByRole("link")
+    .map((link) => link.textContent.trim())
+    .filter((name) => expectedNames.has(name));
+}
+
+
 function mockApi(payload = emptyLibraryPayload) {
   apiRequest.mockImplementation((requestPath) => {
     if (requestPath === "/api/user-settings") {
@@ -327,6 +384,22 @@ describe("LibraryPage category switching", () => {
     expect(screen.getByRole("button", { name: "Arrange library" })).toHaveTextContent("A → Z");
   });
 
+  test("quality option uses an exact compact active label", async () => {
+    const user = userEvent.setup();
+    const { locations } = renderLibrary("/library?category=movies");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    await user.click(within(panel).getByRole("button", { name: "Gold" }));
+
+    await waitFor(() => {
+      expect(locations).toContain("/library?category=movies&quality=gold");
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies&quality=gold", expect.any(Object));
+    });
+    expect(screen.getByRole("button", { name: "Arrange library" })).toHaveTextContent("Gold");
+    expect(screen.getByRole("button", { name: "Arrange library" })).not.toHaveTextContent("Gold+");
+  });
+
   test("search request includes active category and arrange filters", async () => {
     renderLibrary(
       "/library?category=anime&source=local&genre=Adventure&quality=gold&sort=az",
@@ -347,6 +420,109 @@ describe("LibraryPage category switching", () => {
         expect.any(Object),
       );
     });
+  });
+
+  test("smart default keeps continue watching, rails, recently added, and other sections", async () => {
+    const alpha = libraryItem({ id: 1, title: "Alpha" });
+    const beta = libraryItem({ id: 2, title: "Beta", progress_seconds: 120, progress_duration_seconds: 1200 });
+    renderLibrary(
+      "/library?category=movies",
+      libraryPayload({
+        items: [alpha, beta],
+        continue_watching: [beta],
+        series_rails: [
+          {
+            key: "saga",
+            title: "Saga",
+            film_count: 1,
+            items: [alpha],
+          },
+        ],
+        recently_added: [alpha, beta],
+        total_items: 2,
+      }),
+    );
+
+    expect(await screen.findByRole("heading", { name: "Continue watching" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Saga" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Recently added" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Other Movies" })).toBeInTheDocument();
+  });
+
+  test("A to Z sort renders one flat grid and hides smart default sections", async () => {
+    renderLibrary(
+      "/library?category=movies&sort=az",
+      libraryPayload({
+        items: [
+          libraryItem({ id: 1, title: "Alpha" }),
+          libraryItem({ id: 2, title: "Beta", progress_seconds: 120, progress_duration_seconds: 1200 }),
+        ],
+        continue_watching: [libraryItem({ id: 2, title: "Beta", progress_seconds: 120, progress_duration_seconds: 1200 })],
+        series_rails: [
+          {
+            key: "saga",
+            title: "Saga",
+            film_count: 1,
+            items: [libraryItem({ id: 1, title: "Alpha" })],
+          },
+        ],
+        recently_added: [libraryItem({ id: 2, title: "Beta" }), libraryItem({ id: 1, title: "Alpha" })],
+        arrange: {
+          source: "all",
+          genre: null,
+          quality: "all",
+          sort: "az",
+        },
+        total_items: 2,
+      }),
+    );
+
+    await screen.findByRole("link", { name: "Alpha" });
+
+    expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies&sort=az", expect.any(Object));
+    expect(screen.queryByRole("heading", { name: "Continue watching" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Saga" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Recently added" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Other Movies" })).not.toBeInTheDocument();
+    expect(visibleTitleLinkNames("Alpha", "Beta")).toEqual(["Alpha", "Beta"]);
+  });
+
+  test("file size sort also renders the flat sorted grid", async () => {
+    renderLibrary(
+      "/library?category=movies&sort=size_desc",
+      libraryPayload({
+        items: [
+          libraryItem({ id: 2, title: "Large Copy", file_size: 2000 }),
+          libraryItem({ id: 1, title: "Small Copy", file_size: 1000 }),
+        ],
+        continue_watching: [libraryItem({ id: 1, title: "Small Copy", progress_seconds: 120, progress_duration_seconds: 1200 })],
+        series_rails: [
+          {
+            key: "copies",
+            title: "Copies",
+            film_count: 1,
+            items: [libraryItem({ id: 2, title: "Large Copy" })],
+          },
+        ],
+        recently_added: [libraryItem({ id: 1, title: "Small Copy" })],
+        arrange: {
+          source: "all",
+          genre: null,
+          quality: "all",
+          sort: "size_desc",
+        },
+        total_items: 2,
+      }),
+    );
+
+    await screen.findByRole("link", { name: "Large Copy" });
+
+    expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies&sort=size_desc", expect.any(Object));
+    expect(screen.queryByRole("heading", { name: "Continue watching" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Copies" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Recently added" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Other Movies" })).not.toBeInTheDocument();
+    expect(visibleTitleLinkNames("Large Copy", "Small Copy")).toEqual(["Large Copy", "Small Copy"]);
   });
 
   test("existing Local and Cloud cards still render", async () => {
