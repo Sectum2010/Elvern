@@ -2063,23 +2063,33 @@ def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_
 ) -> None:
     selected_dir = tmp_path / "picked-host-directory"
     selected_dir.mkdir()
+    same_host_explicit_values: list[bool] = []
+    picker_calls: list[dict[str, object]] = []
 
-    monkeypatch.setattr(
-        "backend.app.routes.admin.resolve_same_host_request",
-        lambda settings, *, platform, client_ip, request_host, explicit_same_host: {
+    def _same_host_context(settings, *, platform, client_ip, request_host, explicit_same_host):
+        same_host_explicit_values.append(bool(explicit_same_host))
+        return {
             "same_host": True,
             "detection_source": "test",
             "reason": "test",
-        },
-    )
-    monkeypatch.setattr(
-        "backend.app.routes.admin.try_pick_local_directory",
-        lambda settings, *, path, title: {
+        }
+
+    def _pick_directory(settings, *, path, purpose):
+        picker_calls.append({"path": path, "purpose": purpose})
+        return {
             "status": "selected",
             "selected_path": str(selected_dir.resolve()),
             "reason": None,
             "picker_backend": "zenity",
-        },
+        }
+
+    monkeypatch.setattr(
+        "backend.app.routes.admin.resolve_same_host_request",
+        _same_host_context,
+    )
+    monkeypatch.setattr(
+        "backend.app.routes.admin.try_pick_local_directory",
+        _pick_directory,
     )
 
     _login(
@@ -2092,7 +2102,8 @@ def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_
         "/api/admin/local-directory-picker",
         json={
             "path": str(tmp_path),
-            "title": "Select poster directory",
+            "purpose": "poster_reference",
+            "title": "; touch /tmp/pwned",
             "platform": "linux",
             "same_host_hint": True,
         },
@@ -2104,6 +2115,8 @@ def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_
         "reason": None,
         "picker_backend": "zenity",
     }
+    assert picker_calls == [{"path": str(tmp_path), "purpose": "poster_reference"}]
+    assert same_host_explicit_values == [False]
 
     _create_standard_user_via_admin(client, username="picker-user", password="picker-password")
     _logout(client)
@@ -2113,7 +2126,8 @@ def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_
         "/api/admin/local-directory-picker",
         json={
             "path": str(tmp_path),
-            "title": "Select poster directory",
+            "purpose": "poster_reference",
+            "title": "; touch /tmp/pwned",
             "platform": "linux",
             "same_host_hint": True,
         },
@@ -2126,13 +2140,19 @@ def test_admin_local_directory_picker_capability_is_admin_only_and_reports_same_
     admin_credentials,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        "backend.app.routes.admin.resolve_same_host_request",
-        lambda settings, *, platform, client_ip, request_host, explicit_same_host: {
+    same_host_explicit_values: list[bool] = []
+
+    def _same_host_context(settings, *, platform, client_ip, request_host, explicit_same_host):
+        same_host_explicit_values.append(bool(explicit_same_host))
+        return {
             "same_host": platform == "linux",
             "detection_source": "local_server_ip_match",
             "reason": "Client IP matched a resolved local server address.",
-        },
+        }
+
+    monkeypatch.setattr(
+        "backend.app.routes.admin.resolve_same_host_request",
+        _same_host_context,
     )
     monkeypatch.setattr(
         "backend.app.routes.admin.get_native_local_directory_picker_capability",
@@ -2156,7 +2176,7 @@ def test_admin_local_directory_picker_capability_is_admin_only_and_reports_same_
 
     response = client.get(
         "/api/admin/local-directory-picker/capability",
-        params={"platform": "linux"},
+        params={"platform": "linux", "same_host_hint": True},
     )
     assert response.status_code == 200
     assert response.json() == {
@@ -2172,6 +2192,7 @@ def test_admin_local_directory_picker_capability_is_admin_only_and_reports_same_
         "missing_dependency": None,
         "reason": None,
     }
+    assert same_host_explicit_values == [False]
 
     _create_standard_user_via_admin(client, username="picker-cap-user", password="picker-cap-password")
     _logout(client)
@@ -2182,6 +2203,60 @@ def test_admin_local_directory_picker_capability_is_admin_only_and_reports_same_
         params={"platform": "linux"},
     )
     assert forbidden.status_code == 403
+
+
+def test_admin_local_directory_picker_does_not_trust_same_host_hint(
+    client,
+    admin_credentials,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    same_host_explicit_values: list[bool] = []
+
+    def _same_host_context(settings, *, platform, client_ip, request_host, explicit_same_host):
+        same_host_explicit_values.append(bool(explicit_same_host))
+        return {
+            "same_host": bool(explicit_same_host),
+            "detection_source": "test",
+            "reason": "test same-host check failed",
+        }
+
+    def _pick_directory(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("native directory picker should not run without server-confirmed same-host access")
+
+    monkeypatch.setattr(
+        "backend.app.routes.admin.resolve_same_host_request",
+        _same_host_context,
+    )
+    monkeypatch.setattr(
+        "backend.app.routes.admin.try_pick_local_directory",
+        _pick_directory,
+    )
+
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    response = client.post(
+        "/api/admin/local-directory-picker",
+        json={
+            "path": str(tmp_path),
+            "purpose": "generic",
+            "platform": "linux",
+            "same_host_hint": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "unavailable",
+        "selected_path": None,
+        "reason": "Native host picker is only used for same-host Linux admin sessions.",
+        "picker_backend": None,
+    }
+    assert same_host_explicit_values == [False]
 
 
 def test_resolve_same_host_request_uses_request_host_candidates(initialized_settings, monkeypatch) -> None:

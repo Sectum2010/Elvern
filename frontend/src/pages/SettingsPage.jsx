@@ -587,6 +587,17 @@ function isSettingsLocalDevelopmentLoopback(platform) {
 }
 
 
+function directoryPickerPurposeForTarget(target) {
+  if (target === "poster-reference") {
+    return "poster_reference";
+  }
+  if (target === "shared-library") {
+    return "library_reference";
+  }
+  return "generic";
+}
+
+
 function formatCloudTimestamp(value) {
   if (!value) {
     return "Never";
@@ -1914,9 +1925,7 @@ export function SettingsPage() {
         method: "POST",
         data: {
           path: initialPath,
-          title: target === "poster-reference"
-            ? "Select poster directory"
-            : "Select library reference directory",
+          purpose: directoryPickerPurposeForTarget(target),
           platform,
           same_host_hint: sameHostHint,
         },

@@ -929,7 +929,7 @@ def admin_local_directory_picker_capability(
         platform=str(platform or "").strip().lower(),
         client_ip=resolve_client_ip(request),
         request_host=request.url.hostname,
-        explicit_same_host=bool(same_host_hint),
+        explicit_same_host=False,
     )
     same_host_linux = bool(same_host_context["same_host"])
     if not same_host_linux:
@@ -968,7 +968,7 @@ def admin_pick_local_directory(
         platform=str(payload.platform or "").strip().lower(),
         client_ip=resolve_client_ip(request),
         request_host=request.url.hostname,
-        explicit_same_host=bool(payload.same_host_hint),
+        explicit_same_host=False,
     )
     if not same_host_context["same_host"]:
         return LocalDirectoryPickResponse(
@@ -980,7 +980,7 @@ def admin_pick_local_directory(
     result = try_pick_local_directory(
         request.app.state.settings,
         path=payload.path,
-        title=payload.title,
+        purpose=payload.purpose,
     )
     return LocalDirectoryPickResponse(**result)
 

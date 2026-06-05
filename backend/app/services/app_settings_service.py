@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import logging
 import os
 import shutil
 import sqlite3
@@ -31,6 +33,20 @@ POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
 GOOGLE_OAUTH_CLIENT_ID_KEY = "google_oauth_client_id"
 GOOGLE_OAUTH_CLIENT_SECRET_KEY = "google_oauth_client_secret"
 GOOGLE_DRIVE_HTTPS_ORIGIN_KEY = "google_drive_https_origin"
+DIRECTORY_PICKER_TITLES = {
+    "library_reference": "Select library reference directory",
+    "poster_reference": "Select poster reference directory",
+    "generic": "Select directory",
+}
+DIRECTORY_PICKER_FAILURE_MESSAGE = "Failed to open the host directory picker."
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class NativeDirectoryPickerCommand:
+    backend: str
+    argv: list[str]
 
 
 def _poster_reference_default_path(settings: Settings) -> Path:
@@ -478,12 +494,12 @@ def pick_local_directory(
     settings: Settings,
     *,
     path: str | None,
-    title: str | None,
+    purpose: str | None,
 ) -> str | None:
     browse_dir = _resolve_browse_directory(settings, value=path)
     selected_path = _run_native_directory_picker(
         start_directory=browse_dir,
-        title=str(title or "").strip() or "Select directory",
+        purpose=purpose,
     )
     if not selected_path:
         return None
@@ -722,74 +738,109 @@ def get_native_local_directory_picker_capability() -> dict[str, object]:
     }
 
 
+def _trusted_directory_picker_title(purpose: str | None) -> str:
+    return DIRECTORY_PICKER_TITLES.get(str(purpose or "").strip(), DIRECTORY_PICKER_TITLES["generic"])
+
+
+def _native_picker_executable(name: str) -> str | None:
+    executable = shutil.which(name)
+    if not executable:
+        return None
+    return str(Path(executable).resolve())
+
+
 def _native_directory_picker_backend() -> str | None:
-    if shutil.which("zenity"):
+    if _native_picker_executable("zenity"):
         return "zenity"
-    if shutil.which("qarma"):
+    if _native_picker_executable("qarma"):
         return "qarma"
-    if shutil.which("kdialog"):
+    if _native_picker_executable("kdialog"):
         return "kdialog"
     return None
 
 
-def _native_directory_picker_command_candidates(start_directory: Path) -> list[list[str]]:
+def _native_directory_picker_command_candidates(start_directory: Path) -> list[NativeDirectoryPickerCommand]:
     normalized_start = str(start_directory.resolve())
     start_with_trailing_slash = normalized_start if normalized_start.endswith("/") else f"{normalized_start}/"
-    command_candidates: list[list[str]] = []
-    if shutil.which("zenity"):
+    command_candidates: list[NativeDirectoryPickerCommand] = []
+    zenity_path = _native_picker_executable("zenity")
+    if zenity_path:
         command_candidates.append(
-            [
-                "zenity",
-                "--file-selection",
-                "--directory",
-                f"--filename={start_with_trailing_slash}",
-            ]
+            NativeDirectoryPickerCommand(
+                backend="zenity",
+                argv=[
+                    zenity_path,
+                    "--file-selection",
+                    "--directory",
+                    f"--filename={start_with_trailing_slash}",
+                ],
+            )
         )
-    if shutil.which("qarma"):
+    qarma_path = _native_picker_executable("qarma")
+    if qarma_path:
         command_candidates.append(
-            [
-                "qarma",
-                "--file-selection",
-                "--directory",
-                f"--filename={start_with_trailing_slash}",
-            ]
+            NativeDirectoryPickerCommand(
+                backend="qarma",
+                argv=[
+                    qarma_path,
+                    "--file-selection",
+                    "--directory",
+                    f"--filename={start_with_trailing_slash}",
+                ],
+            )
         )
-    if shutil.which("kdialog"):
+    kdialog_path = _native_picker_executable("kdialog")
+    if kdialog_path:
         command_candidates.append(
-            [
-                "kdialog",
-                "--getexistingdirectory",
-                normalized_start,
-            ]
+            NativeDirectoryPickerCommand(
+                backend="kdialog",
+                argv=[
+                    kdialog_path,
+                    "--getexistingdirectory",
+                    normalized_start,
+                ],
+            )
         )
     return command_candidates
 
 
-def _run_native_directory_picker(*, start_directory: Path, title: str) -> str | None:
+def _run_native_directory_picker(*, start_directory: Path, purpose: str | None) -> str | None:
     from .desktop_playback_service import build_linux_gui_launch_environment
 
     capability = get_native_local_directory_picker_capability()
     if not capability["native_picker_supported"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(capability["reason"] or "Failed to open the host directory picker."),
+            detail=str(capability["reason"] or DIRECTORY_PICKER_FAILURE_MESSAGE),
         )
     launch_env, _env_summary, _env_diagnostics = build_linux_gui_launch_environment()
+    title = _trusted_directory_picker_title(purpose)
 
-    command_candidates: list[list[str]] = []
+    command_candidates: list[NativeDirectoryPickerCommand] = []
     for command in _native_directory_picker_command_candidates(start_directory):
-        if command[0] in {"zenity", "qarma"}:
-            command_candidates.append([*command, f"--title={title}"])
-        elif command[0] == "kdialog":
-            command_candidates.append([*command, "--title", title])
+        backend_name = command.backend
+        if backend_name in {"zenity", "qarma"}:
+            command_candidates.append(
+                NativeDirectoryPickerCommand(
+                    backend=command.backend,
+                    argv=[*command.argv, f"--title={title}"],
+                )
+            )
+        elif backend_name == "kdialog":
+            command_candidates.append(
+                NativeDirectoryPickerCommand(
+                    backend=command.backend,
+                    argv=[*command.argv, "--title", title],
+                )
+            )
         else:
             command_candidates.append(command)
 
-    last_error_detail = "Failed to open the host directory picker."
+    last_error_detail = DIRECTORY_PICKER_FAILURE_MESSAGE
     for command in command_candidates:
         try:
             completed = subprocess.run(
-                command,
+                command.argv,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -807,7 +858,12 @@ def _run_native_directory_picker(*, start_directory: Path, title: str) -> str | 
             return None
         stderr = str(completed.stderr or "").strip()
         if stderr:
-            last_error_detail = stderr
+            logger.debug(
+                "Native directory picker backend %s exited with code %s and stderr length %s.",
+                command.backend,
+                completed.returncode,
+                len(stderr),
+            )
 
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -819,7 +875,7 @@ def try_pick_local_directory(
     settings: Settings,
     *,
     path: str | None,
-    title: str | None,
+    purpose: str | None,
 ) -> dict[str, object]:
     capability = get_native_local_directory_picker_capability()
     picker_backend = str(capability.get("picker_backend") or "") or None
@@ -834,10 +890,10 @@ def try_pick_local_directory(
         selected_path = pick_local_directory(
             settings,
             path=path,
-            title=title,
+            purpose=purpose,
         )
     except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else "Failed to open the host directory picker."
+        detail = exc.detail if isinstance(exc.detail, str) else DIRECTORY_PICKER_FAILURE_MESSAGE
         return {
             "status": "unavailable",
             "selected_path": None,

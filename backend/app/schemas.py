@@ -441,9 +441,16 @@ class LocalDirectoryBrowseResponse(BaseModel):
     directories: list[LocalDirectoryBrowseEntryResponse] = Field(default_factory=list)
 
 
+DirectoryPickerPurpose = Literal["library_reference", "poster_reference", "generic"]
+
+
 class LocalDirectoryPickRequest(BaseModel):
     path: str = ""
-    title: str = "Select directory"
+    purpose: DirectoryPickerPurpose = "generic"
+    title: str | None = Field(
+        default=None,
+        description="Deprecated and ignored. Native picker titles are selected server-side by purpose.",
+    )
     platform: str = ""
     same_host_hint: bool = False
 

@@ -144,6 +144,24 @@ function mockApi(initialSettings = defaultSettings, options = {}) {
     if (requestPath === "/api/admin/poster-reference-location") {
       return Promise.resolve({ configured_value: null, effective_value: "", default_value: "" });
     }
+    if (requestPath.startsWith("/api/admin/local-directory-picker/capability")) {
+      return Promise.resolve({
+        native_picker_supported: true,
+        same_host_linux: true,
+        picker_backend: "zenity",
+      });
+    }
+    if (requestPath === "/api/admin/local-directory-picker" && options.method === "POST") {
+      const selectedPath = options.data?.purpose === "poster_reference"
+        ? "/srv/posters/selected"
+        : "/srv/media/selected-library";
+      return Promise.resolve({
+        status: "selected",
+        selected_path: selectedPath,
+        reason: null,
+        picker_backend: "zenity",
+      });
+    }
     if (requestPath === "/api/admin/google-drive-setup") {
       return Promise.resolve({
         https_origin: "",
@@ -452,6 +470,60 @@ describe("SettingsPage Display background controls", () => {
     expect(screen.getByText("/srv/media/Cartoons -C")).toBeInTheDocument();
     expect(screen.getByText("Anime stored under:")).toBeInTheDocument();
     expect(screen.queryByText("Shared local library path")).not.toBeInTheDocument();
+  });
+
+  test("library reference folder button sends native picker library purpose", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=advanced"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Library reference locations");
+    fireEvent.click(screen.getByText("Library reference locations"));
+    fireEvent.click(screen.getByRole("button", { name: "Browse library reference directories on the Elvern host" }));
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/admin/local-directory-picker", {
+        method: "POST",
+        data: expect.objectContaining({
+          purpose: "library_reference",
+          platform: "linux",
+        }),
+      });
+    });
+    const pickerCall = apiRequest.mock.calls.find(([requestPath]) => requestPath === "/api/admin/local-directory-picker");
+    expect(pickerCall?.[1]?.data).not.toHaveProperty("title");
+    expect(await screen.findByLabelText("Reference locations")).toHaveValue("/srv/media/selected-library");
+  });
+
+  test("poster reference folder button sends native picker poster purpose", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=advanced"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Poster reference location");
+    fireEvent.click(screen.getByText("Poster reference location"));
+    fireEvent.click(screen.getByRole("button", { name: "Browse poster directories on the Elvern host" }));
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/admin/local-directory-picker", {
+        method: "POST",
+        data: expect.objectContaining({
+          purpose: "poster_reference",
+          platform: "linux",
+        }),
+      });
+    });
+    const pickerCall = apiRequest.mock.calls.find(([requestPath]) => requestPath === "/api/admin/local-directory-picker");
+    expect(pickerCall?.[1]?.data).not.toHaveProperty("title");
+    expect(await screen.findByLabelText("Poster directory")).toHaveValue("/srv/posters/selected");
   });
 
   test("poster appearance controls still save through the existing settings endpoint", async () => {
