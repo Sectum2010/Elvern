@@ -195,6 +195,10 @@ class LibraryItemSummary(BaseModel):
     library_folder_name: str | None = None
     poster_url: str | None = None
     edition_label: str | None = None
+    quality_tier: Literal["diamond", "gold", "silver", "iron", "bronze", "wood"] | None = None
+    quality_label: str | None = None
+    genres: list[str] = Field(default_factory=list)
+    genre_display: str = "Unknown"
     hidden_for_user: bool = False
     hidden_globally: bool = False
     file_size: int
@@ -228,6 +232,8 @@ class LibraryListResponse(BaseModel):
     continue_watching: list[LibraryItemSummary] = Field(default_factory=list)
     recently_added: list[LibraryItemSummary] = Field(default_factory=list)
     query: str | None = None
+    arrange: dict[str, object] = Field(default_factory=dict)
+    available_genres: list[str] = Field(default_factory=list)
     scan_in_progress: bool = False
     total_items: int = 0
 

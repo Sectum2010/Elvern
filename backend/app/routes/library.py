@@ -19,6 +19,7 @@ from ..services.library_service import (
     get_media_item_detail,
     get_media_item_poster_path,
     list_library,
+    normalize_library_arrange,
     normalize_library_category,
     search_library,
 )
@@ -47,6 +48,22 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 def _validated_library_category(category: str | None) -> str:
     try:
         return normalize_library_category(category)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+
+
+def _validated_library_arrange(
+    *,
+    source: str | None,
+    genre: str | None,
+    quality: str | None,
+    sort: str | None,
+) -> dict[str, str | None]:
+    try:
+        return normalize_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
     except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -108,18 +125,54 @@ def _rescan_message(
 
 
 @router.get("", response_model=LibraryListResponse)
-def get_library(request: Request, category: str | None = None, user=CurrentUser) -> LibraryListResponse:
+def get_library(
+    request: Request,
+    category: str | None = None,
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+    user=CurrentUser,
+) -> LibraryListResponse:
     normalized_category = _validated_library_category(category)
+    arrange = _validated_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
     request.app.state.scan_service.maybe_refresh_local_library(trigger="library")
-    payload = list_library(request.app.state.settings, user_id=user.id, category=normalized_category)
+    payload = list_library(
+        request.app.state.settings,
+        user_id=user.id,
+        category=normalized_category,
+        source=arrange["source"],
+        genre=arrange["genre"],
+        quality=arrange["quality"],
+        sort=arrange["sort"],
+    )
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
     return LibraryListResponse(**payload)
 
 
 @router.get("/search", response_model=LibraryListResponse)
-def search(request: Request, q: str, category: str | None = None, user=CurrentUser) -> LibraryListResponse:
+def search(
+    request: Request,
+    q: str,
+    category: str | None = None,
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+    user=CurrentUser,
+) -> LibraryListResponse:
     normalized_category = _validated_library_category(category)
-    payload = search_library(request.app.state.settings, user_id=user.id, query=q, category=normalized_category)
+    arrange = _validated_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
+    payload = search_library(
+        request.app.state.settings,
+        user_id=user.id,
+        query=q,
+        category=normalized_category,
+        source=arrange["source"],
+        genre=arrange["genre"],
+        quality=arrange["quality"],
+        sort=arrange["sort"],
+    )
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
     return LibraryListResponse(**payload)
 

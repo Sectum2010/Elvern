@@ -27,9 +27,12 @@ from .library_hidden_service import (
 )
 from .status_service import get_scan_job_summary
 from .library_movie_identity_service import (
+    QUALITY_TIER_LABELS,
+    QUALITY_TIER_VALUES,
     _apply_duplicate_filter,
     _dedupe_rows,
     _row_hidden_movie_key,
+    quality_tier_for_row,
 )
 from .library_presentation_service import (
     _poster_directory,
@@ -39,7 +42,7 @@ from .library_presentation_service import (
     _serialize_media_item,
 )
 from .media_age_access_service import resolve_media_age_requirement
-from .media_genre_service import get_media_genre_metadata
+from .media_genre_service import _decode_genres_json, get_media_genre_metadata, resolve_genre_movie_group
 from .title_normalization import (
     build_search_index,
     match_search_query,
@@ -54,6 +57,27 @@ TEXT_SUBTITLE_CODECS = {"ass", "ssa", "subrip", "srt", "text", "webvtt", "vtt", 
 IMAGE_SUBTITLE_CODECS = {"dvd_subtitle", "dvdsub", "dvb_subtitle", "hdmv_pgs_subtitle", "pgs", "xsub"}
 LIBRARY_CATEGORY_VALUES = ("movies", "tv", "anime", "cartoon")
 LIBRARY_CATEGORY_VALUE_SET = set(LIBRARY_CATEGORY_VALUES)
+LIBRARY_SOURCE_FILTER_VALUES = ("all", "local", "cloud")
+LIBRARY_QUALITY_FILTER_VALUES = ("all", *QUALITY_TIER_VALUES)
+LIBRARY_QUALITY_FILTER_RANKS = {
+    "wood": 0,
+    "bronze": 1,
+    "iron": 2,
+    "silver": 3,
+    "gold": 4,
+    "diamond": 5,
+}
+LIBRARY_SORT_VALUES = (
+    "smart",
+    "az",
+    "za",
+    "recent_desc",
+    "recent_asc",
+    "year_desc",
+    "year_asc",
+    "size_desc",
+    "size_asc",
+)
 
 
 def normalize_library_category(category: str | None = None) -> str:
@@ -62,6 +86,59 @@ def normalize_library_category(category: str | None = None) -> str:
         expected = ", ".join(LIBRARY_CATEGORY_VALUES)
         raise ValueError(f"Invalid library category '{category}'. Expected one of: {expected}.")
     return normalized
+
+
+def normalize_library_source_filter(source: str | None = None) -> str:
+    normalized = str(source or "").strip().lower() or "all"
+    if normalized not in LIBRARY_SOURCE_FILTER_VALUES:
+        expected = ", ".join(LIBRARY_SOURCE_FILTER_VALUES)
+        raise ValueError(f"Invalid library source '{source}'. Expected one of: {expected}.")
+    return normalized
+
+
+def normalize_library_quality_filter(quality: str | None = None) -> str:
+    normalized = str(quality or "").strip().lower() or "all"
+    if normalized not in LIBRARY_QUALITY_FILTER_VALUES:
+        expected = ", ".join(LIBRARY_QUALITY_FILTER_VALUES)
+        raise ValueError(f"Invalid library quality '{quality}'. Expected one of: {expected}.")
+    return normalized
+
+
+def normalize_library_sort(sort: str | None = None) -> str:
+    normalized = str(sort or "").strip().lower() or "smart"
+    if normalized not in LIBRARY_SORT_VALUES:
+        expected = ", ".join(LIBRARY_SORT_VALUES)
+        raise ValueError(f"Invalid library sort '{sort}'. Expected one of: {expected}.")
+    return normalized
+
+
+def normalize_library_genre_filter(genre: str | None = None) -> str | None:
+    normalized = " ".join(str(genre or "").strip().split())
+    return normalized or None
+
+
+def normalize_library_arrange(
+    *,
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+) -> dict[str, str | None]:
+    return {
+        "source": normalize_library_source_filter(source),
+        "genre": normalize_library_genre_filter(genre),
+        "quality": normalize_library_quality_filter(quality),
+        "sort": normalize_library_sort(sort),
+    }
+
+
+def _arrange_is_default(arrange: dict[str, str | None]) -> bool:
+    return (
+        arrange["source"] == "all"
+        and arrange["genre"] is None
+        and arrange["quality"] == "all"
+        and arrange["sort"] == "smart"
+    )
 
 
 def _row_library_category(row) -> str:
@@ -77,6 +154,143 @@ def _matches_library_category(row, category: str) -> bool:
 
 def _filter_rows_for_library_category(rows: list, category: str) -> list:
     return [row for row in rows if _matches_library_category(row, category)]
+
+
+def _genre_map_from_connection(connection) -> dict[str, list[str]]:
+    rows = connection.execute(
+        """
+        SELECT genre_group_key, genres_json
+        FROM media_genre_groups
+        """
+    ).fetchall()
+    return {
+        str(row["genre_group_key"]): _decode_genres_json(row["genres_json"])
+        for row in rows
+    }
+
+
+def _decorate_rows_with_arrange_metadata(rows: list, genre_map: dict[str, list[str]]) -> list[dict[str, object]]:
+    decorated_rows: list[dict[str, object]] = []
+    for row in rows:
+        payload = dict(row)
+        genre_group = resolve_genre_movie_group(payload)
+        genres = list(genre_map.get(genre_group.genre_group_key, []))
+        quality_tier = quality_tier_for_row(payload)
+        payload["genres"] = genres
+        payload["genre_display"] = ", ".join(genres) if genres else "Unknown"
+        payload["quality_tier"] = quality_tier
+        payload["quality_label"] = QUALITY_TIER_LABELS.get(quality_tier, quality_tier.title())
+        decorated_rows.append(payload)
+    return decorated_rows
+
+
+def _row_genre_keys(row) -> set[str]:
+    return {str(genre).casefold() for genre in (_row_value(row, "genres", []) or [])}
+
+
+def _apply_library_arrange_filters(rows: list, arrange: dict[str, str | None]) -> list:
+    source_filter = str(arrange["source"] or "all")
+    genre_filter = arrange["genre"]
+    quality_filter = str(arrange["quality"] or "all")
+    genre_key = str(genre_filter).casefold() if genre_filter else None
+    filtered_rows = []
+    for row in rows:
+        if source_filter != "all" and str(_row_value(row, "source_kind", "local") or "local") != source_filter:
+            continue
+        if genre_key and genre_key not in _row_genre_keys(row):
+            continue
+        if quality_filter != "all" and LIBRARY_QUALITY_FILTER_RANKS.get(
+            str(_row_value(row, "quality_tier", "") or ""),
+            -1,
+        ) < LIBRARY_QUALITY_FILTER_RANKS[quality_filter]:
+            continue
+        filtered_rows.append(row)
+    return filtered_rows
+
+
+def _available_genres_for_rows(rows: list) -> list[str]:
+    labels_by_key: dict[str, str] = {}
+    for row in rows:
+        for genre in _row_value(row, "genres", []) or []:
+            label = " ".join(str(genre or "").strip().split())
+            if not label:
+                continue
+            labels_by_key.setdefault(label.casefold(), label)
+    return sorted(labels_by_key.values(), key=lambda label: label.casefold())
+
+
+def _coerce_int(value: object, fallback: int = 0) -> int:
+    if value in {None, ""}:
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _library_title_sort_key(row) -> tuple[str, int]:
+    return (str(_row_value(row, "title", "") or "").casefold(), int(_row_value(row, "id", 0) or 0))
+
+
+def _sort_library_rows(rows: list, sort: str) -> list:
+    if sort == "smart":
+        return list(rows)
+    if sort == "az":
+        return sorted(rows, key=_library_title_sort_key)
+    if sort == "za":
+        return sorted(rows, key=_library_title_sort_key, reverse=True)
+    if sort == "recent_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                str(_row_value(row, "last_scanned_at", "") or ""),
+                int(_row_value(row, "id", 0) or 0),
+            ),
+            reverse=True,
+        )
+    if sort == "recent_asc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                str(_row_value(row, "last_scanned_at", "") or ""),
+                int(_row_value(row, "id", 0) or 0),
+            ),
+        )
+    if sort == "year_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                _coerce_int(_row_value(row, "year"), -1),
+                int(_row_value(row, "id", 0) or 0),
+            ),
+            reverse=True,
+        )
+    if sort == "year_asc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                _coerce_int(_row_value(row, "year"), 999999),
+                int(_row_value(row, "id", 0) or 0),
+            ),
+        )
+    if sort == "size_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                _coerce_int(_row_value(row, "file_size"), 0),
+                int(_row_value(row, "id", 0) or 0),
+            ),
+            reverse=True,
+        )
+    if sort == "size_asc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                _coerce_int(_row_value(row, "file_size"), 0),
+                int(_row_value(row, "id", 0) or 0),
+            ),
+        )
+    return list(rows)
 
 
 def _utc_iso_to_epoch_seconds(value: object) -> int:
@@ -266,8 +480,18 @@ def _base_query() -> str:
     """
 
 
-def list_library(settings: Settings, *, user_id: int, category: str = "movies") -> dict[str, object]:
+def list_library(
+    settings: Settings,
+    *,
+    user_id: int,
+    category: str = "movies",
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+) -> dict[str, object]:
     normalized_category = normalize_library_category(category)
+    arrange = normalize_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
     user_settings = get_user_settings(settings, user_id=user_id)
     with get_connection(settings) as connection:
         shared_local_source_id = ensure_current_shared_local_source_binding(
@@ -275,6 +499,7 @@ def list_library(settings: Settings, *, user_id: int, category: str = "movies") 
             connection=connection,
         )
         poster_dir = _poster_directory(settings, connection=connection)
+        genre_map = _genre_map_from_connection(connection)
         all_rows = connection.execute(
             _base_query() + " ORDER BY lower(m.title) ASC",
             (user_id, user_id, shared_local_source_id, user_id),
@@ -319,6 +544,8 @@ def list_library(settings: Settings, *, user_id: int, category: str = "movies") 
         globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
         hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
         hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
+    all_rows = _decorate_rows_with_arrange_metadata(list(all_rows), genre_map)
+    continue_rows = _decorate_rows_with_arrange_metadata(list(continue_rows), genre_map)
     all_rows = _filter_rows_for_library_category(list(all_rows), normalized_category)
     continue_rows = _filter_rows_for_library_category(list(continue_rows), normalized_category)
     recent_rows = sorted(
@@ -347,28 +574,41 @@ def list_library(settings: Settings, *, user_id: int, category: str = "movies") 
         hidden_movie_keys=set(hidden_movie_key_records),
     )
     visible_all_rows = visible_context["rows"]
+    available_genre_rows = _apply_library_arrange_filters(
+        list(visible_all_rows),
+        {
+            **arrange,
+            "genre": None,
+        },
+    )
+    available_genres = _available_genres_for_rows(available_genre_rows)
+    filtered_all_rows = _apply_library_arrange_filters(list(visible_all_rows), arrange)
+    sorted_visible_all_rows = _sort_library_rows(filtered_all_rows, str(arrange["sort"] or "smart"))
     series_rails = _build_series_rails(
         settings,
-        rows=list(visible_all_rows),
+        rows=list(filtered_all_rows),
         poster_dir=poster_dir,
     )
     cloud_series_rails = _build_series_rails(
         settings,
-        rows=list(visible_all_rows),
+        rows=list(filtered_all_rows),
         poster_dir=poster_dir,
         include_cloud=True,
     )
-    visible_continue_rows = _select_continue_watching_rows(
-        _resolve_continue_watching_rows(
-            continue_rows=_decorate_continue_rows(
-                list(continue_rows),
-                watch_seconds_total_by_media_item_id=watch_seconds_total_by_media_item_id,
-                last_watch_event_epoch_by_media_item_id=last_watch_event_epoch_by_media_item_id,
-                last_tracking_event_epoch_by_media_item_id=last_tracking_event_epoch_by_media_item_id,
+    visible_continue_rows = _apply_library_arrange_filters(
+        _select_continue_watching_rows(
+            _resolve_continue_watching_rows(
+                continue_rows=_decorate_continue_rows(
+                    list(continue_rows),
+                    watch_seconds_total_by_media_item_id=watch_seconds_total_by_media_item_id,
+                    last_watch_event_epoch_by_media_item_id=last_watch_event_epoch_by_media_item_id,
+                    last_tracking_event_epoch_by_media_item_id=last_tracking_event_epoch_by_media_item_id,
+                ),
+                visible_context=visible_context,
             ),
-            visible_context=visible_context,
+            utc_iso_to_epoch_seconds=_utc_iso_to_epoch_seconds,
         ),
-        utc_iso_to_epoch_seconds=_utc_iso_to_epoch_seconds,
+        arrange,
     )
     if user_settings["hide_duplicate_movies"]:
         visible_recent_rows = _apply_manual_hidden_filter(
@@ -390,13 +630,22 @@ def list_library(settings: Settings, *, user_id: int, category: str = "movies") 
             hidden_media_item_ids=hidden_media_item_ids,
             hidden_movie_keys=set(hidden_movie_key_records),
         )
+    has_arrange_filters = arrange["source"] != "all" or arrange["genre"] is not None or arrange["quality"] != "all"
+    if has_arrange_filters:
+        visible_recent_rows = sorted(
+            filtered_all_rows,
+            key=lambda row: str(_row_value(row, "last_scanned_at", "") or ""),
+            reverse=True,
+        )[:12]
     return {
-        "items": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in visible_all_rows],
+        "items": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in sorted_visible_all_rows],
         "series_rails": series_rails,
         "cloud_series_rails": cloud_series_rails,
         "continue_watching": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in visible_continue_rows],
         "recently_added": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in visible_recent_rows],
-        "total_items": len(visible_all_rows),
+        "total_items": len(filtered_all_rows),
+        "arrange": arrange,
+        "available_genres": available_genres,
     }
 
 
@@ -412,8 +661,19 @@ def _search_match_score(row, query: str) -> int:
     return score if matched else 0
 
 
-def search_library(settings: Settings, *, user_id: int, query: str, category: str = "movies") -> dict[str, object]:
+def search_library(
+    settings: Settings,
+    *,
+    user_id: int,
+    query: str,
+    category: str = "movies",
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+) -> dict[str, object]:
     normalized_category = normalize_library_category(category)
+    arrange = normalize_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
     normalized_query = query.strip()
     if not normalized_query:
         return {
@@ -424,6 +684,8 @@ def search_library(settings: Settings, *, user_id: int, query: str, category: st
             "recently_added": [],
             "query": query,
             "total_items": 0,
+            "arrange": arrange,
+            "available_genres": [],
         }
     with get_connection(settings) as connection:
         shared_local_source_id = ensure_current_shared_local_source_binding(
@@ -431,10 +693,12 @@ def search_library(settings: Settings, *, user_id: int, query: str, category: st
             connection=connection,
         )
         poster_dir = _poster_directory(settings, connection=connection)
+        genre_map = _genre_map_from_connection(connection)
         rows = connection.execute(
             _base_query() + " ORDER BY lower(m.title) ASC",
             (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
+    rows = _decorate_rows_with_arrange_metadata(list(rows), genre_map)
     rows = _filter_rows_for_library_category(list(rows), normalized_category)
     scored_rows: list[tuple[int, object]] = []
     for row in rows:
@@ -465,6 +729,17 @@ def search_library(settings: Settings, *, user_id: int, query: str, category: st
         hidden_media_item_ids=hidden_media_item_ids,
         hidden_movie_keys=set(hidden_movie_key_records),
     )
+    available_genre_rows = _apply_library_arrange_filters(
+        list(visible_rows),
+        {
+            **arrange,
+            "genre": None,
+        },
+    )
+    available_genres = _available_genres_for_rows(available_genre_rows)
+    visible_rows = _apply_library_arrange_filters(visible_rows, arrange)
+    if arrange["sort"] != "smart":
+        visible_rows = _sort_library_rows(visible_rows, str(arrange["sort"] or "smart"))
     return {
         "items": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in visible_rows],
         "series_rails": [],
@@ -473,6 +748,8 @@ def search_library(settings: Settings, *, user_id: int, query: str, category: st
         "recently_added": [],
         "query": query,
         "total_items": len(visible_rows),
+        "arrange": arrange,
+        "available_genres": available_genres,
     }
 
 

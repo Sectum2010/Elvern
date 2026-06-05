@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -58,6 +58,13 @@ const emptyLibraryPayload = {
   cloud_series_rails: [],
   continue_watching: [],
   recently_added: [],
+  arrange: {
+    source: "all",
+    genre: null,
+    quality: "all",
+    sort: "smart",
+  },
+  available_genres: [],
   total_items: 0,
   scan_in_progress: false,
 };
@@ -199,7 +206,8 @@ describe("LibraryPage category switching", () => {
 
     fireEvent.pointerDown(moviesTab, { clientX: 50, pointerId: 1 });
     fireEvent.pointerMove(moviesTab, { clientX: 250, pointerId: 1 });
-    expect(switchControl.style.getPropertyValue("--library-category-drag-x")).toBe("");
+    expect(switchControl.style.getPropertyValue("--library-category-index")).toBe("0");
+    expect(switchControl.style.getPropertyValue("--library-category-drag-x")).toBe("200px");
     fireEvent.pointerUp(moviesTab, { clientX: 250, pointerId: 1 });
 
     await waitFor(() => {
@@ -246,6 +254,117 @@ describe("LibraryPage category switching", () => {
         expect.any(Object),
       );
     });
+  });
+
+  test("arrange icon renders in the hero category row and is icon-only by default", async () => {
+    renderLibrary("/library");
+
+    const arrangeButton = await screen.findByRole("button", { name: "Arrange library" });
+
+    expect(arrangeButton.closest(".library-desktop-hero__category-row")).not.toBeNull();
+    expect(arrangeButton).not.toHaveTextContent(/\S/);
+  });
+
+  test("clicking arrange icon opens the arrange panel", async () => {
+    const user = userEvent.setup();
+    renderLibrary("/library");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+
+    expect(screen.getByRole("dialog", { name: "Arrange library" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All genres" })).toBeInTheDocument();
+  });
+
+  test("source option updates the URL and request path", async () => {
+    const user = userEvent.setup();
+    const { locations } = renderLibrary("/library?category=movies");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Arrange library" })).getByRole("button", { name: "Local" }));
+
+    await waitFor(() => {
+      expect(locations).toContain("/library?category=movies&source=local");
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies&source=local", expect.any(Object));
+    });
+    expect(screen.getByRole("button", { name: "Arrange library" })).toHaveTextContent("Local");
+  });
+
+  test("genre option is single-select and updates the request path", async () => {
+    const user = userEvent.setup();
+    const { locations } = renderLibrary(
+      "/library?category=movies",
+      {
+        ...emptyLibraryPayload,
+        available_genres: ["Adventure", "Family"],
+      },
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    await user.click(within(panel).getByRole("button", { name: "Adventure" }));
+    await user.click(within(panel).getByRole("button", { name: "Family" }));
+
+    await waitFor(() => {
+      expect(locations).toContain("/library?category=movies&genre=Family");
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies&genre=Family", expect.any(Object));
+    });
+    expect(screen.getByRole("button", { name: "Arrange library" })).toHaveTextContent("Family");
+  });
+
+  test("quality and sort options update URL and compact active label", async () => {
+    const user = userEvent.setup();
+    const { locations } = renderLibrary("/library?category=movies");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    await user.click(within(panel).getByRole("button", { name: "Gold" }));
+    await user.click(within(panel).getByRole("button", { name: "A → Z" }));
+
+    await waitFor(() => {
+      expect(locations).toContain("/library?category=movies&quality=gold&sort=az");
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies&quality=gold&sort=az", expect.any(Object));
+    });
+    expect(screen.getByRole("button", { name: "Arrange library" })).toHaveTextContent("A → Z");
+  });
+
+  test("search request includes active category and arrange filters", async () => {
+    renderLibrary(
+      "/library?category=anime&source=local&genre=Adventure&quality=gold&sort=az",
+      {
+        ...emptyLibraryPayload,
+        available_genres: ["Adventure"],
+      },
+    );
+
+    await screen.findByRole("tab", { name: "Anime" });
+    fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
+      target: { value: "akira" },
+    });
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library/search?q=akira&category=anime&source=local&genre=Adventure&quality=gold&sort=az",
+        expect.any(Object),
+      );
+    });
+  });
+
+  test("existing Local and Cloud cards still render", async () => {
+    renderLibrary("/library");
+
+    expect(await screen.findByRole("link", { name: /Local/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Cloud/ })).toBeInTheDocument();
+  });
+
+  test("phone arrange panel uses the mobile panel class", async () => {
+    mockPlatformState.deviceClass = "phone";
+    mockPlatformState.platform = "iphone";
+    const user = userEvent.setup();
+    renderLibrary("/library");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+
+    expect(screen.getByRole("dialog", { name: "Arrange library" })).toHaveClass("library-arrange__panel--mobile");
   });
 
   test("detail return target preserves the category query", async () => {

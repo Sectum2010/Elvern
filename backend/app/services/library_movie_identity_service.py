@@ -110,6 +110,110 @@ def _quality_sort_key(row) -> tuple[int, int, int, int, int]:
     )
 
 
+QUALITY_TIER_VALUES = ("diamond", "gold", "silver", "iron", "bronze", "wood")
+QUALITY_TIER_LABELS = {
+    "diamond": "Diamond",
+    "gold": "Gold",
+    "silver": "Silver",
+    "iron": "Iron",
+    "bronze": "Bronze",
+    "wood": "Wood",
+}
+_QUALITY_TIER_THRESHOLDS = (
+    ("diamond", 15),
+    ("gold", 11),
+    ("silver", 7),
+    ("iron", 5),
+    ("bronze", 3),
+    ("wood", float("-inf")),
+)
+
+
+def _quality_rank_source_score(row) -> int:
+    haystack = _quality_haystack(row)
+    if _has_quality_token(haystack, "remux"):
+        return 6
+    if _has_quality_token(haystack, "bluray", "blu-ray", "bdrip", "brrip"):
+        return 5
+    if _has_quality_token(haystack, "web-dl", "webdl"):
+        return 4
+    if _has_quality_token(haystack, "webrip", "web-rip"):
+        return 3
+    if _has_quality_token(haystack, "hdtv", "hdrip", "dvdrip"):
+        return 2
+    return 0
+
+
+def _quality_rank_resolution_score(row) -> int:
+    width = int(row["width"] or 0)
+    height = int(row["height"] or 0)
+    haystack = _quality_haystack(row)
+    if width >= 3800 or height >= 2100 or _has_quality_token(haystack, "2160p", "4k", "uhd"):
+        return 4
+    if width >= 1900 or height >= 1000 or _has_quality_token(haystack, "1080p"):
+        return 3
+    if width >= 1200 or height >= 700 or _has_quality_token(haystack, "720p"):
+        return 2
+    if _has_quality_token(haystack, "480p", "576p"):
+        return 1
+    return 0
+
+
+def _quality_rank_audio_score(row) -> int:
+    haystack = _quality_haystack(row)
+    if _has_quality_token(haystack, "atmos"):
+        return 3
+    if _has_quality_token(haystack, "truehd", "dts-hd", "dtshd", "master audio", "ma "):
+        return 3
+    if _has_quality_token(haystack, "dts"):
+        return 2
+    if _has_quality_token(haystack, "ddp", "eac3", "ac3", "dolby digital"):
+        return 1
+    return 0
+
+
+def _quality_rank_codec_score(row) -> int:
+    haystack = _quality_haystack(row)
+    if _has_quality_token(haystack, "hevc", "x265", "h265"):
+        return 1
+    if _has_quality_token(haystack, "av1"):
+        return 1
+    return 0
+
+
+def _quality_rank_size_score(row) -> float:
+    gib = int(row["file_size"] or 0) / (1024 ** 3)
+    if gib >= 80:
+        return 3
+    if gib >= 50:
+        return 2
+    if gib >= 20:
+        return 1
+    if gib >= 8:
+        return 0.5
+    if 0 < gib < 2:
+        return -1
+    return 0
+
+
+def quality_rank_score(row) -> float:
+    return (
+        _quality_rank_source_score(row)
+        + _quality_rank_resolution_score(row)
+        + _quality_rank_audio_score(row)
+        + _quality_rank_codec_score(row)
+        + _quality_rank_size_score(row)
+    )
+
+
+def quality_tier_for_row(row) -> str:
+    score = quality_rank_score(row)
+    for tier, minimum_score in _QUALITY_TIER_THRESHOLDS:
+        if score >= minimum_score:
+            return tier
+    return "wood"
+
+
 def _row_source_kind(row) -> str:
     if hasattr(row, "keys") and "source_kind" in row.keys():
         return str(row["source_kind"] or "local")

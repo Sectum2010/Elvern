@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.media_scan import scan_media_library
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
+from backend.app.services.media_genre_service import resolve_genre_movie_group
 
 
 def _login(client, *, username: str, password: str) -> None:
@@ -58,6 +60,12 @@ def _insert_media_item(
     series_folder_name: str | None = None,
     year: int | None = 2024,
     scanned_at: str | None = None,
+    file_size: int | None = None,
+    width: int | None = 1920,
+    height: int | None = 1080,
+    video_codec: str | None = "h264",
+    audio_codec: str | None = "aac",
+    container: str | None = "mkv",
 ) -> int:
     now = utcnow_iso()
     scanned_at = scanned_at or now
@@ -68,11 +76,11 @@ def _insert_media_item(
         media_path.parent.mkdir(parents=True, exist_ok=True)
         media_path.write_bytes(b"test media")
         file_path = str(media_path)
-        file_size = media_path.stat().st_size
+        file_size = media_path.stat().st_size if file_size is None else file_size
         file_mtime = media_path.stat().st_mtime
     else:
         file_path = f"gdrive://{library_source_id}/{original_filename}"
-        file_size = 1024
+        file_size = 1024 if file_size is None else file_size
         file_mtime = 1704067200.0
 
     with get_connection(settings) as connection:
@@ -107,7 +115,7 @@ def _insert_media_item(
                 created_at,
                 updated_at,
                 last_scanned_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1200.0, 1920, 1080, 'h264', 'aac', 'mkv', ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1200.0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 title,
@@ -126,6 +134,11 @@ def _insert_media_item(
                 series_folder_name or _category_name(category),
                 file_size,
                 file_mtime,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
                 year,
                 now,
                 now,
@@ -134,6 +147,48 @@ def _insert_media_item(
         )
         connection.commit()
         return int(cursor.lastrowid)
+
+
+def _set_genres(settings, *, media_item_id: int, genres: list[str]) -> None:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id, title, original_filename, year
+            FROM media_items
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (media_item_id,),
+        ).fetchone()
+        assert row is not None
+        group = resolve_genre_movie_group(row)
+        connection.execute(
+            """
+            INSERT INTO media_genre_groups (
+                genre_group_key,
+                display_title,
+                year,
+                genres_json,
+                updated_at,
+                updated_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(genre_group_key) DO UPDATE SET
+                display_title = excluded.display_title,
+                year = excluded.year,
+                genres_json = excluded.genres_json,
+                updated_at = excluded.updated_at,
+                updated_by_user_id = excluded.updated_by_user_id
+            """,
+            (
+                group.genre_group_key,
+                group.display_title,
+                group.year,
+                json.dumps(genres, ensure_ascii=True),
+                now,
+            ),
+        )
+        connection.commit()
 
 
 def _insert_progress(settings, *, media_item_id: int, updated_at: str = "2026-06-01T12:00:00+00:00") -> None:
@@ -483,3 +538,219 @@ def test_category_filter_preserves_hidden_and_duplicate_visibility(
     assert payload["total_items"] == 1
     assert payload["items"][0]["title"] == "Duplicate Toon"
     assert payload["items"][0]["id"] != hidden_id
+
+
+def test_library_source_filter_local_and_cloud(client, initialized_settings, admin_credentials) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    cloud_source_id = _insert_cloud_source(initialized_settings)
+    local_id = _insert_media_item(
+        initialized_settings,
+        title="Local Movie",
+        original_filename="Local.Movie.2024.mkv",
+        category="movies",
+        source_kind="local",
+    )
+    cloud_id = _insert_media_item(
+        initialized_settings,
+        title="Cloud Movie",
+        original_filename="Cloud.Movie.2024.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+    )
+
+    local_response = client.get("/api/library", params={"category": "movies", "source": "local"})
+    cloud_response = client.get("/api/library", params={"category": "movies", "source": "cloud"})
+
+    assert local_response.status_code == 200
+    assert {item["id"] for item in local_response.json()["items"]} == {local_id}
+    assert local_response.json()["arrange"]["source"] == "local"
+    assert cloud_response.status_code == 200
+    assert {item["id"] for item in cloud_response.json()["items"]} == {cloud_id}
+    assert cloud_response.json()["arrange"]["source"] == "cloud"
+
+
+def test_library_search_respects_category_and_source_filter(client, initialized_settings, admin_credentials) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    cloud_source_id = _insert_cloud_source(initialized_settings)
+    anime_local_id = _insert_media_item(
+        initialized_settings,
+        title="One Piece Local",
+        original_filename="One.Piece.Local.2024.mkv",
+        category="anime",
+        source_kind="local",
+    )
+    _insert_media_item(
+        initialized_settings,
+        title="One Piece Cloud",
+        original_filename="One.Piece.Cloud.2024.mkv",
+        category="anime",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+    )
+    _insert_media_item(
+        initialized_settings,
+        title="One Piece Movie",
+        original_filename="One.Piece.Movie.2024.mkv",
+        category="movies",
+        source_kind="local",
+    )
+
+    response = client.get(
+        "/api/library/search",
+        params={"q": "one piece", "category": "anime", "source": "local"},
+    )
+
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()["items"]} == {anime_local_id}
+
+
+def test_library_genre_filter_matches_membership_without_folder_inference(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    adventure_id = _insert_media_item(
+        initialized_settings,
+        title="River Quest",
+        original_filename="River.Quest.2024.mkv",
+        category="movies",
+        series_folder_key="series:river",
+        series_folder_name="River Quest",
+    )
+    drama_id = _insert_media_item(
+        initialized_settings,
+        title="Quiet Room",
+        original_filename="Quiet.Room.2024.mkv",
+        category="movies",
+    )
+    folder_named_id = _insert_media_item(
+        initialized_settings,
+        title="Folder Named Adventure",
+        original_filename="Folder.Named.Adventure.2024.mkv",
+        category="movies",
+        series_folder_key="series:folder-adventure",
+        series_folder_name="Adventure Shelf",
+    )
+    _set_genres(initialized_settings, media_item_id=adventure_id, genres=["Adventure", "Family"])
+    _set_genres(initialized_settings, media_item_id=drama_id, genres=["Drama"])
+
+    adventure_response = client.get("/api/library", params={"category": "movies", "genre": "Adventure"})
+    family_response = client.get("/api/library", params={"category": "movies", "genre": "Family"})
+
+    assert adventure_response.status_code == 200
+    adventure_payload = adventure_response.json()
+    assert {item["id"] for item in adventure_payload["items"]} == {adventure_id}
+    assert folder_named_id not in {item["id"] for item in adventure_payload["items"]}
+    assert set(adventure_payload["available_genres"]) == {"Adventure", "Drama", "Family"}
+    assert family_response.status_code == 200
+    assert {item["id"] for item in family_response.json()["items"]} == {adventure_id}
+
+
+def test_library_quality_filter_uses_existing_tier_inputs(client, initialized_settings, admin_credentials) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    diamond_id = _insert_media_item(
+        initialized_settings,
+        title="Reference Copy",
+        original_filename="Reference.Copy.2024.2160p.UHD.REMUX.x265.TrueHD.Atmos.mkv",
+        category="movies",
+        file_size=90 * 1024**3,
+        width=3840,
+        height=2160,
+        video_codec="hevc",
+        audio_codec="truehd atmos",
+    )
+    gold_id = _insert_media_item(
+        initialized_settings,
+        title="Gold Copy",
+        original_filename="Gold.Copy.2024.1080p.WEB-DL.x265.DTS.mkv",
+        category="movies",
+        file_size=25 * 1024**3,
+        width=1920,
+        height=1080,
+        video_codec="hevc",
+        audio_codec="dts",
+    )
+
+    response = client.get("/api/library", params={"category": "movies", "quality": "diamond"})
+    gold_plus_response = client.get("/api/library", params={"category": "movies", "quality": "gold"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {item["id"] for item in payload["items"]} == {diamond_id}
+    assert payload["items"][0]["quality_tier"] == "diamond"
+    assert gold_id not in {item["id"] for item in payload["items"]}
+    assert gold_plus_response.status_code == 200
+    assert {item["id"] for item in gold_plus_response.json()["items"]} == {diamond_id, gold_id}
+
+
+def test_library_sort_modes(client, initialized_settings, admin_credentials) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    beta_id = _insert_media_item(
+        initialized_settings,
+        title="Beta",
+        original_filename="Beta.2002.mkv",
+        category="movies",
+        year=2002,
+        scanned_at="2026-06-02T00:00:00+00:00",
+        file_size=20,
+    )
+    alpha_id = _insert_media_item(
+        initialized_settings,
+        title="Alpha",
+        original_filename="Alpha.2001.mkv",
+        category="movies",
+        year=2001,
+        scanned_at="2026-06-01T00:00:00+00:00",
+        file_size=10,
+    )
+    gamma_id = _insert_media_item(
+        initialized_settings,
+        title="Gamma",
+        original_filename="Gamma.2003.mkv",
+        category="movies",
+        year=2003,
+        scanned_at="2026-06-03T00:00:00+00:00",
+        file_size=30,
+    )
+
+    expectations = {
+        "az": [alpha_id, beta_id, gamma_id],
+        "za": [gamma_id, beta_id, alpha_id],
+        "recent_desc": [gamma_id, beta_id, alpha_id],
+        "recent_asc": [alpha_id, beta_id, gamma_id],
+        "year_desc": [gamma_id, beta_id, alpha_id],
+        "year_asc": [alpha_id, beta_id, gamma_id],
+        "size_desc": [gamma_id, beta_id, alpha_id],
+        "size_asc": [alpha_id, beta_id, gamma_id],
+    }
+    for sort, expected_ids in expectations.items():
+        response = client.get("/api/library", params={"category": "movies", "sort": sort})
+
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()["items"]] == expected_ids
+
+
+@pytest.mark.parametrize(
+    ("param_name", "param_value", "message"),
+    [
+        ("source", "tape", "Invalid library source"),
+        ("quality", "platinum", "Invalid library quality"),
+        ("sort", "runtime_desc", "Invalid library sort"),
+    ],
+)
+def test_library_arrange_invalid_params_return_400(
+    client,
+    initialized_settings,
+    admin_credentials,
+    param_name: str,
+    param_value: str,
+    message: str,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    response = client.get("/api/library", params={param_name: param_value})
+
+    assert response.status_code == 400
+    assert message in response.json()["detail"]

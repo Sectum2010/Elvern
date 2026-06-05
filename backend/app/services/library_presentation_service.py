@@ -6,7 +6,7 @@ import re
 
 from ..media_scan import infer_title_and_year
 from .app_settings_service import get_poster_reference_location_payload
-from .library_movie_identity_service import _edition_label
+from .library_movie_identity_service import QUALITY_TIER_LABELS, _edition_label, quality_tier_for_row
 from .media_title_parser import parse_media_title
 from .title_normalization import (
     apostrophe_title_variants,
@@ -359,6 +359,7 @@ def _serialize_media_item(
     poster_dir: Path | None = None,
 ) -> dict[str, object]:
     source_kind = str(_row_value(row, "source_kind", "local") or "local")
+    quality_tier = _row_value(row, "quality_tier") or quality_tier_for_row(row)
     parsed_title = _parsed_title_payload(
         title=row["title"],
         year=row["year"],
@@ -388,6 +389,10 @@ def _serialize_media_item(
         "library_folder_name": _row_value(row, "library_folder_name"),
         "poster_url": _poster_url_for_row(settings, row, poster_dir=poster_dir),
         "edition_label": _edition_label(metadata["edition_identity"]),
+        "quality_tier": quality_tier,
+        "quality_label": _row_value(row, "quality_label") or QUALITY_TIER_LABELS.get(str(quality_tier or "")),
+        "genres": list(_row_value(row, "genres", []) or []),
+        "genre_display": _row_value(row, "genre_display") or "Unknown",
         "hidden_for_user": bool(row["hidden_for_user"]) if "hidden_for_user" in row.keys() else False,
         "hidden_globally": bool(row["hidden_globally"]) if "hidden_globally" in row.keys() else False,
         "file_size": row["file_size"],

@@ -1,4 +1,5 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { SlidersHorizontal } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useProviderAuth } from "../auth/ProviderAuthContext";
@@ -64,12 +65,85 @@ export const LIBRARY_CATEGORY_OPTIONS = [
 
 const DEFAULT_LIBRARY_CATEGORY = "movies";
 const LIBRARY_CATEGORY_KEYS = new Set(LIBRARY_CATEGORY_OPTIONS.map((category) => category.key));
+const LIBRARY_SOURCE_OPTIONS = [
+  { key: "all", label: "All" },
+  { key: "local", label: "Local" },
+  { key: "cloud", label: "Cloud" },
+];
+const LIBRARY_QUALITY_OPTIONS = [
+  { key: "all", label: "All quality", activeLabel: "" },
+  { key: "diamond", label: "Diamond", activeLabel: "Diamond" },
+  { key: "gold", label: "Gold", activeLabel: "Gold+" },
+  { key: "silver", label: "Silver", activeLabel: "Silver+" },
+  { key: "iron", label: "Iron", activeLabel: "Iron+" },
+  { key: "bronze", label: "Bronze", activeLabel: "Bronze+" },
+  { key: "wood", label: "Wood", activeLabel: "Wood+" },
+];
+const LIBRARY_SORT_OPTIONS = [
+  { key: "smart", label: "Smart Default", activeLabel: "" },
+  { key: "az", label: "A → Z", activeLabel: "A → Z" },
+  { key: "za", label: "Z → A", activeLabel: "Z → A" },
+  { key: "recent_desc", label: "Recently added: newest first", activeLabel: "Recently added" },
+  { key: "recent_asc", label: "Recently added: oldest first", activeLabel: "Oldest added" },
+  { key: "year_desc", label: "Release year: newest first", activeLabel: "Newest year" },
+  { key: "year_asc", label: "Release year: oldest first", activeLabel: "Oldest year" },
+  { key: "size_desc", label: "File size: largest first", activeLabel: "Largest" },
+  { key: "size_asc", label: "File size: smallest first", activeLabel: "Smallest" },
+];
+const LIBRARY_SOURCE_KEYS = new Set(LIBRARY_SOURCE_OPTIONS.map((option) => option.key));
+const LIBRARY_QUALITY_KEYS = new Set(LIBRARY_QUALITY_OPTIONS.map((option) => option.key));
+const LIBRARY_SORT_KEYS = new Set(LIBRARY_SORT_OPTIONS.map((option) => option.key));
+const DEFAULT_LIBRARY_ARRANGE = {
+  source: "all",
+  genre: "",
+  quality: "all",
+  sort: "smart",
+};
 
 
 export function resolveLibraryCategoryFromSearch(search = "") {
   const params = new URLSearchParams(search);
   const category = String(params.get("category") || "").trim().toLowerCase();
   return LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY;
+}
+
+
+export function resolveLibraryArrangeFromSearch(search = "") {
+  const params = new URLSearchParams(search);
+  const source = String(params.get("source") || "").trim().toLowerCase();
+  const quality = String(params.get("quality") || "").trim().toLowerCase();
+  const sort = String(params.get("sort") || "").trim().toLowerCase();
+  const genre = String(params.get("genre") || "").trim();
+  return {
+    source: LIBRARY_SOURCE_KEYS.has(source) ? source : DEFAULT_LIBRARY_ARRANGE.source,
+    genre,
+    quality: LIBRARY_QUALITY_KEYS.has(quality) ? quality : DEFAULT_LIBRARY_ARRANGE.quality,
+    sort: LIBRARY_SORT_KEYS.has(sort) ? sort : DEFAULT_LIBRARY_ARRANGE.sort,
+  };
+}
+
+
+function applyLibraryArrangeParams(params, arrange = DEFAULT_LIBRARY_ARRANGE) {
+  if (arrange.source && arrange.source !== DEFAULT_LIBRARY_ARRANGE.source) {
+    params.set("source", arrange.source);
+  } else {
+    params.delete("source");
+  }
+  if (arrange.genre) {
+    params.set("genre", arrange.genre);
+  } else {
+    params.delete("genre");
+  }
+  if (arrange.quality && arrange.quality !== DEFAULT_LIBRARY_ARRANGE.quality) {
+    params.set("quality", arrange.quality);
+  } else {
+    params.delete("quality");
+  }
+  if (arrange.sort && arrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort) {
+    params.set("sort", arrange.sort);
+  } else {
+    params.delete("sort");
+  }
 }
 
 
@@ -81,7 +155,15 @@ export function buildLibraryCategorySearch(currentSearch = "", category = DEFAUL
 }
 
 
-export function buildLibraryRequestPath({ category = DEFAULT_LIBRARY_CATEGORY, query = "" } = {}) {
+export function buildLibraryArrangeSearch(currentSearch = "", arrange = DEFAULT_LIBRARY_ARRANGE) {
+  const params = new URLSearchParams(currentSearch);
+  applyLibraryArrangeParams(params, arrange);
+  const nextSearch = params.toString();
+  return nextSearch ? `?${nextSearch}` : "";
+}
+
+
+export function buildLibraryRequestPath({ category = DEFAULT_LIBRARY_CATEGORY, query = "", arrange = DEFAULT_LIBRARY_ARRANGE } = {}) {
   const normalizedCategory = LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY;
   const trimmedQuery = query.trim();
   const params = new URLSearchParams();
@@ -89,6 +171,7 @@ export function buildLibraryRequestPath({ category = DEFAULT_LIBRARY_CATEGORY, q
     params.set("q", trimmedQuery);
   }
   params.set("category", normalizedCategory);
+  applyLibraryArrangeParams(params, arrange);
   return trimmedQuery
     ? `/api/library/search?${params.toString()}`
     : `/api/library?${params.toString()}`;
@@ -99,7 +182,9 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
   const controlRef = useRef(null);
   const draggingRef = useRef(false);
   const ignoreNextClickRef = useRef(false);
+  const dragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
   const [dragging, setDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState(0);
   const [dragPreviewCategory, setDragPreviewCategory] = useState(null);
 
   function getCategoryFromPoint(clientX) {
@@ -118,8 +203,16 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     }
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    const controlRect = controlRef.current?.getBoundingClientRect();
+    const buttonRect = event.currentTarget.getBoundingClientRect();
+    dragBoundsRef.current = {
+      clientX: event.clientX,
+      min: controlRect ? controlRect.left - buttonRect.left : 0,
+      max: controlRect ? controlRect.right - buttonRect.right : 0,
+    };
     draggingRef.current = true;
     ignoreNextClickRef.current = true;
+    setDragOffset(0);
     setDragPreviewCategory(activeCategory);
     setDragging(true);
   }
@@ -128,6 +221,9 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     if (!draggingRef.current) {
       return;
     }
+    const bounds = dragBoundsRef.current;
+    const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
+    setDragOffset(nextOffset);
     setDragPreviewCategory(getCategoryFromPoint(event.clientX));
   }
 
@@ -138,6 +234,7 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     draggingRef.current = false;
     setDragging(false);
+    setDragOffset(0);
     const nextCategory = getCategoryFromPoint(event.clientX);
     setDragPreviewCategory(null);
     onChange(nextCategory);
@@ -151,15 +248,18 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     draggingRef.current = false;
     ignoreNextClickRef.current = false;
     setDragging(false);
+    setDragOffset(0);
     setDragPreviewCategory(null);
   }
 
   const activeIndex = Math.max(0, LIBRARY_CATEGORY_OPTIONS.findIndex((category) => category.key === activeCategory));
   const visualCategory = dragging && dragPreviewCategory ? dragPreviewCategory : activeCategory;
   const visualIndex = Math.max(0, LIBRARY_CATEGORY_OPTIONS.findIndex((category) => category.key === visualCategory));
+  const indicatorIndex = dragging ? activeIndex : visualIndex;
   const controlStyle = {
     "--library-category-count": LIBRARY_CATEGORY_OPTIONS.length,
-    "--library-category-index": visualIndex,
+    "--library-category-index": indicatorIndex,
+    "--library-category-drag-x": dragging ? `${dragOffset}px` : "0px",
   };
 
   return (
@@ -213,6 +313,173 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
           </button>
         );
       })}
+    </div>
+  );
+}
+
+
+function getOptionLabel(options, key, fallback = "") {
+  return options.find((option) => option.key === key)?.label || fallback;
+}
+
+
+function getOptionActiveLabel(options, key, fallback = "") {
+  const option = options.find((entry) => entry.key === key);
+  return option?.activeLabel || option?.label || fallback;
+}
+
+
+function getArrangeActiveLabel(arrange) {
+  if (arrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort) {
+    return getOptionActiveLabel(LIBRARY_SORT_OPTIONS, arrange.sort);
+  }
+  if (arrange.genre) {
+    return arrange.genre;
+  }
+  if (arrange.quality !== DEFAULT_LIBRARY_ARRANGE.quality) {
+    return getOptionActiveLabel(LIBRARY_QUALITY_OPTIONS, arrange.quality);
+  }
+  if (arrange.source !== DEFAULT_LIBRARY_ARRANGE.source) {
+    return getOptionLabel(LIBRARY_SOURCE_OPTIONS, arrange.source);
+  }
+  return "";
+}
+
+
+function ArrangeSection({ title, children }) {
+  return (
+    <section className="library-arrange__section">
+      <h3>{title}</h3>
+      <div className="library-arrange__option-grid">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+
+function ArrangeOption({ active = false, label, onClick }) {
+  return (
+    <button
+      aria-pressed={active}
+      className={[
+        "library-arrange__option",
+        active ? "library-arrange__option--active" : "",
+      ].filter(Boolean).join(" ")}
+      onClick={onClick}
+      type="button"
+    >
+      {label}
+    </button>
+  );
+}
+
+
+function LibraryArrangeControl({ arrange, availableGenres = [], mobile = false, onChange }) {
+  const [open, setOpen] = useState(false);
+  const controlRef = useRef(null);
+  const activeLabel = getArrangeActiveLabel(arrange);
+
+  useEffect(() => {
+    if (!open || typeof document === "undefined") {
+      return undefined;
+    }
+    function handlePointerDown(event) {
+      if (!controlRef.current?.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  function updateArrange(nextValues) {
+    onChange({
+      ...arrange,
+      ...nextValues,
+    });
+  }
+
+  return (
+    <div className="library-arrange" ref={controlRef}>
+      <button
+        aria-expanded={open}
+        aria-label="Arrange library"
+        className={[
+          "library-arrange__trigger",
+          activeLabel ? "library-arrange__trigger--active" : "",
+        ].filter(Boolean).join(" ")}
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <SlidersHorizontal aria-hidden="true" className="library-arrange__icon" />
+        {activeLabel ? <span className="library-arrange__active-label">{activeLabel}</span> : null}
+      </button>
+      {open ? (
+        <div
+          aria-label="Arrange library"
+          className={[
+            "library-arrange__panel",
+            mobile ? "library-arrange__panel--mobile" : "library-arrange__panel--desktop",
+          ].filter(Boolean).join(" ")}
+          role="dialog"
+        >
+          <ArrangeSection title="Source">
+            {LIBRARY_SOURCE_OPTIONS.map((option) => (
+              <ArrangeOption
+                active={arrange.source === option.key}
+                key={option.key}
+                label={option.label}
+                onClick={() => updateArrange({ source: option.key })}
+              />
+            ))}
+          </ArrangeSection>
+          <ArrangeSection title="Genre">
+            <ArrangeOption
+              active={!arrange.genre}
+              label="All genres"
+              onClick={() => updateArrange({ genre: "" })}
+            />
+            {availableGenres.map((genre) => (
+              <ArrangeOption
+                active={arrange.genre.toLowerCase() === genre.toLowerCase()}
+                key={genre}
+                label={genre}
+                onClick={() => updateArrange({ genre })}
+              />
+            ))}
+          </ArrangeSection>
+          <ArrangeSection title="Quality">
+            {LIBRARY_QUALITY_OPTIONS.map((option) => (
+              <ArrangeOption
+                active={arrange.quality === option.key}
+                key={option.key}
+                label={option.label}
+                onClick={() => updateArrange({ quality: option.key })}
+              />
+            ))}
+          </ArrangeSection>
+          <ArrangeSection title="Sort">
+            {LIBRARY_SORT_OPTIONS.map((option) => (
+              <ArrangeOption
+                active={arrange.sort === option.key}
+                key={option.key}
+                label={option.label}
+                onClick={() => updateArrange({ sort: option.key })}
+              />
+            ))}
+          </ArrangeSection>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -286,6 +553,10 @@ export function LibraryPage() {
     () => resolveLibraryCategoryFromSearch(location.search),
     [location.search],
   );
+  const activeLibraryArrange = useMemo(
+    () => resolveLibraryArrangeFromSearch(location.search),
+    [location.search],
+  );
   const activeLibraryCategoryConfig = useMemo(
     () => LIBRARY_CATEGORY_OPTIONS.find((category) => category.key === activeLibraryCategory) || LIBRARY_CATEGORY_OPTIONS[0],
     [activeLibraryCategory],
@@ -312,6 +583,8 @@ export function LibraryPage() {
     cloud_series_rails: [],
     continue_watching: [],
     recently_added: [],
+    arrange: DEFAULT_LIBRARY_ARRANGE,
+    available_genres: [],
     total_items: 0,
     scan_in_progress: false,
   });
@@ -450,6 +723,7 @@ export function LibraryPage() {
       const target = buildLibraryRequestPath({
         category: activeLibraryCategory,
         query: deferredQuery,
+        arrange: activeLibraryArrange,
       });
       const payload = await apiRequest(target, { signal });
       if (!deferredQuery.trim()) {
@@ -516,7 +790,31 @@ export function LibraryPage() {
     return () => {
       controller.abort();
     };
-  }, [activeLibraryCategory, deferredQuery]);
+  }, [activeLibraryArrange, activeLibraryCategory, deferredQuery]);
+
+  useEffect(() => {
+    if (loading || deferredQuery.trim() || !activeLibraryArrange.genre) {
+      return;
+    }
+    const availableGenreKeys = new Set(
+      (library.available_genres || []).map((genre) => String(genre).toLowerCase()),
+    );
+    if (availableGenreKeys.has(activeLibraryArrange.genre.toLowerCase())) {
+      return;
+    }
+    const nextArrange = {
+      ...activeLibraryArrange,
+      genre: "",
+    };
+    navigate(
+      {
+        pathname: location.pathname,
+        search: buildLibraryArrangeSearch(location.search, nextArrange),
+        hash: location.hash,
+      },
+      { replace: true },
+    );
+  }, [activeLibraryArrange, deferredQuery, library.available_genres, loading, location.hash, location.pathname, location.search, navigate]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -556,7 +854,7 @@ export function LibraryPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [activeLibraryCategory, library.scan_in_progress, deferredQuery]);
+  }, [activeLibraryArrange, activeLibraryCategory, library.scan_in_progress, deferredQuery]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") {
@@ -1125,6 +1423,21 @@ export function LibraryPage() {
     );
   }
 
+  function handleArrangeChange(nextArrange) {
+    const params = new URLSearchParams(location.search);
+    params.set("category", activeLibraryCategory);
+    applyLibraryArrangeParams(params, nextArrange);
+    const nextParams = params.toString();
+    navigate(
+      {
+        pathname: location.pathname,
+        search: nextParams ? `?${nextParams}` : "",
+        hash: location.hash,
+      },
+      { replace: false },
+    );
+  }
+
   const isSearching = deferredQuery.trim().length > 0;
 
   return (
@@ -1161,11 +1474,19 @@ export function LibraryPage() {
             {rescanPending ? "Starting scan..." : "Rescan library"}
           </RefreshSweepButton>
         </div>
-        <LibraryCategorySwitch
-          activeCategory={activeLibraryCategory}
-          dragEnabled={categorySwitchDragEnabled}
-          onChange={handleCategoryChange}
-        />
+        <div className="library-desktop-hero__category-row">
+          <LibraryCategorySwitch
+            activeCategory={activeLibraryCategory}
+            dragEnabled={categorySwitchDragEnabled}
+            onChange={handleCategoryChange}
+          />
+          <LibraryArrangeControl
+            arrange={activeLibraryArrange}
+            availableGenres={library.available_genres || []}
+            mobile={clientDeviceClass === "phone"}
+            onChange={handleArrangeChange}
+          />
+        </div>
       </div>
 
       <div className="library-mobile-search-card">
