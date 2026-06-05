@@ -583,7 +583,9 @@ describe("LibraryPage category switching", () => {
     expect(panel).toHaveClass("library-arrange__panel--scrollable");
     expect(panel).toHaveClass("library-arrange__panel--phone");
     expect(panel).not.toHaveClass("library-arrange__panel--desktop");
-    expect(panel.querySelector(".library-arrange__mobile-handle")).not.toBeNull();
+    expect(panel.querySelector(".library-arrange__mobile-handle")).toBeNull();
+    expect(panel.querySelector(".library-arrange__side-scroll-indicator")).toBeNull();
+    expect(panel.querySelector(".library-arrange__panel-body--scrollable")).not.toBeNull();
     expect(screen.getByRole("tablist", { name: "Library category" })).toBeInTheDocument();
     expect(within(panel).getByText("Source")).toBeInTheDocument();
     expect(within(panel).getByText("Genre")).toBeInTheDocument();
@@ -602,8 +604,28 @@ describe("LibraryPage category switching", () => {
     const panel = screen.getByRole("dialog", { name: "Arrange library" });
     expect(panel).toHaveClass("library-arrange__panel--scrollable");
     expect(panel).toHaveClass("library-arrange__panel--tablet");
+    expect(panel).not.toHaveClass("library-arrange__panel--phone");
     expect(panel).not.toHaveClass("library-arrange__panel--desktop");
-    expect(panel.querySelector(".library-arrange__mobile-handle")).not.toBeNull();
+    expect(panel.querySelector(".library-arrange__mobile-handle")).toBeNull();
+    expect(panel.querySelector(".library-arrange__side-scroll-indicator")).toBeNull();
+    expect(panel.querySelector(".library-arrange__panel-body--scrollable")).not.toBeNull();
+  });
+
+  test("ipad platform uses the tablet scrollable arrange path even with a desktop device class", async () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "ipad";
+    const user = userEvent.setup();
+    renderLibrary("/library");
+
+    await user.click(await screen.findByRole("button", { name: "Arrange library" }));
+
+    const panel = screen.getByRole("dialog", { name: "Arrange library" });
+    expect(panel).toHaveClass("library-arrange__panel--scrollable");
+    expect(panel).toHaveClass("library-arrange__panel--tablet");
+    expect(panel).not.toHaveClass("library-arrange__panel--desktop");
+    expect(panel.querySelector(".library-arrange__side-scroll-indicator")).toBeNull();
+    expect(panel.querySelector(".library-arrange__panel-body--scrollable")).not.toBeNull();
+    expect(document.querySelector(".page-section--library")).toHaveAttribute("data-device-class", "tablet");
   });
 
   test("desktop arrange panel keeps the desktop dropdown", async () => {
@@ -616,6 +638,8 @@ describe("LibraryPage category switching", () => {
     expect(panel).toHaveClass("library-arrange__panel--desktop");
     expect(panel).not.toHaveClass("library-arrange__panel--scrollable");
     expect(panel.querySelector(".library-arrange__mobile-handle")).toBeNull();
+    expect(panel.querySelector(".library-arrange__side-scroll-indicator")).toBeNull();
+    expect(panel.querySelector(".library-arrange__panel-body--scrollable")).toBeNull();
   });
 
   test("phone portrait aligns floating search to the hero right edge", async () => {
@@ -708,10 +732,27 @@ describe("LibraryPage CSS guards", () => {
   const styles = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
 
   test("phone and tablet arrange dropdowns open downward as scrollable panels", () => {
-    expect(styles).toMatch(/\.library-arrange__panel--scrollable\s*\{[^}]*position:\s*absolute;[^}]*inset-block-start:\s*calc\(100% \+ 0\.45rem\);[^}]*overflow-y:\s*auto;/s);
-    expect(styles).toMatch(/\.library-arrange__panel--phone\s*\{[^}]*max-height:\s*min\(26vh,\s*11\.333rem\);/s);
-    expect(styles).toMatch(/\.library-arrange__panel--tablet\s*\{[^}]*max-height:\s*min\(33\.8vh,\s*14\.733rem\);/s);
-    expect(styles).toMatch(/\.library-arrange__mobile-handle\s*\{[^}]*background:\s*rgba\(255,\s*255,\s*255,\s*0\.86\);/s);
+    expect(styles).toMatch(/\.library-arrange__panel--scrollable\s*\{[^}]*position:\s*absolute;[^}]*inset-block-start:\s*calc\(100% \+ 0\.45rem\);[^}]*overflow:\s*hidden;/s);
+    expect(styles).toMatch(/\.library-arrange__panel--phone\s*\{[^}]*--library-arrange-scroll-body-height:\s*min\(33\.8vh,\s*14\.733rem\);/s);
+    expect(styles).toMatch(/\.library-arrange__panel--tablet\s*\{[^}]*--library-arrange-scroll-body-height:\s*min\(43\.94vh,\s*19\.153rem\);/s);
+    expect(styles).toMatch(/\.library-arrange__panel-body--scrollable\s*\{[^}]*block-size:\s*var\(--library-arrange-scroll-body-height\);[^}]*max-height:\s*var\(--library-arrange-scroll-body-height\);[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s);
+    expect(styles).not.toContain("library-arrange__mobile-handle");
+  });
+
+  test("scrollable arrange dropdown uses only the native scrollable body indicator", () => {
+    expect(styles).not.toContain(".library-arrange__panel--scrollable::after");
+    expect(styles).not.toContain("library-arrange__side-scroll-indicator");
+    expect(styles).toMatch(/\.library-arrange__panel-body--scrollable\s*\{[^}]*scrollbar-color:\s*rgba\(255,\s*255,\s*255,\s*0\.78\) transparent;[^}]*scrollbar-width:\s*thin;/s);
+    expect(styles).toMatch(/\.library-arrange__panel-body--scrollable::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*rgba\(255,\s*255,\s*255,\s*0\.78\);/s);
+  });
+
+  test("tablet arrange height rule stays after phone height rule", () => {
+    const phoneHeightIndex = styles.indexOf(".library-arrange__panel--phone");
+    const tabletHeightIndex = styles.indexOf(".library-arrange__panel--tablet");
+
+    expect(phoneHeightIndex).toBeGreaterThan(-1);
+    expect(tabletHeightIndex).toBeGreaterThan(phoneHeightIndex);
+    expect(styles.slice(tabletHeightIndex)).not.toMatch(/--library-arrange-scroll-body-height:\s*min\(33\.8vh,\s*14\.733rem\);/);
   });
 
   test("phone and tablet category rows have a stable two-column layout for switch and arrange icon", () => {

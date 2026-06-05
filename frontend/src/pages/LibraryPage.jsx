@@ -472,54 +472,58 @@ function LibraryArrangeControl({
           ].filter(Boolean).join(" ")}
           role="dialog"
         >
-          {scrollablePanel ? (
-            <span aria-hidden="true" className="library-arrange__mobile-handle" />
-          ) : null}
-          <ArrangeSection title="Source">
-            {LIBRARY_SOURCE_OPTIONS.map((option) => (
+          <div
+            className={[
+              "library-arrange__panel-body",
+              scrollablePanel ? "library-arrange__panel-body--scrollable" : "",
+            ].filter(Boolean).join(" ")}
+          >
+            <ArrangeSection title="Source">
+              {LIBRARY_SOURCE_OPTIONS.map((option) => (
+                <ArrangeOption
+                  active={arrange.source === option.key}
+                  key={option.key}
+                  label={option.label}
+                  onClick={() => updateArrange({ source: option.key })}
+                />
+              ))}
+            </ArrangeSection>
+            <ArrangeSection title="Genre">
               <ArrangeOption
-                active={arrange.source === option.key}
-                key={option.key}
-                label={option.label}
-                onClick={() => updateArrange({ source: option.key })}
+                active={!arrange.genre}
+                label="All genres"
+                onClick={() => updateArrange({ genre: "" })}
               />
-            ))}
-          </ArrangeSection>
-          <ArrangeSection title="Genre">
-            <ArrangeOption
-              active={!arrange.genre}
-              label="All genres"
-              onClick={() => updateArrange({ genre: "" })}
-            />
-            {availableGenres.map((genre) => (
-              <ArrangeOption
-                active={arrange.genre.toLowerCase() === genre.toLowerCase()}
-                key={genre}
-                label={genre}
-                onClick={() => updateArrange({ genre })}
-              />
-            ))}
-          </ArrangeSection>
-          <ArrangeSection title="Quality">
-            {LIBRARY_QUALITY_OPTIONS.map((option) => (
-              <ArrangeOption
-                active={arrange.quality === option.key}
-                key={option.key}
-                label={option.label}
-                onClick={() => updateArrange({ quality: option.key })}
-              />
-            ))}
-          </ArrangeSection>
-          <ArrangeSection title="Sort">
-            {LIBRARY_SORT_OPTIONS.map((option) => (
-              <ArrangeOption
-                active={arrange.sort === option.key}
-                key={option.key}
-                label={option.label}
-                onClick={() => updateArrange({ sort: option.key })}
-              />
-            ))}
-          </ArrangeSection>
+              {availableGenres.map((genre) => (
+                <ArrangeOption
+                  active={arrange.genre.toLowerCase() === genre.toLowerCase()}
+                  key={genre}
+                  label={genre}
+                  onClick={() => updateArrange({ genre })}
+                />
+              ))}
+            </ArrangeSection>
+            <ArrangeSection title="Quality">
+              {LIBRARY_QUALITY_OPTIONS.map((option) => (
+                <ArrangeOption
+                  active={arrange.quality === option.key}
+                  key={option.key}
+                  label={option.label}
+                  onClick={() => updateArrange({ quality: option.key })}
+                />
+              ))}
+            </ArrangeSection>
+            <ArrangeSection title="Sort">
+              {LIBRARY_SORT_OPTIONS.map((option) => (
+                <ArrangeOption
+                  active={arrange.sort === option.key}
+                  key={option.key}
+                  label={option.label}
+                  onClick={() => updateArrange({ sort: option.key })}
+                />
+              ))}
+            </ArrangeSection>
+          </div>
         </div>
       ) : null}
     </div>
@@ -658,12 +662,15 @@ export function LibraryPage() {
   const clientPlatform = detectClientPlatform();
   const clientDeviceClass = detectClientDeviceClass();
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
-  const libraryDeviceClass = SCROLLABLE_ARRANGE_DEVICE_CLASSES.has(clientDeviceClass)
-    ? clientDeviceClass
+  const libraryArrangeDeviceClass = clientPlatform === "ipad"
+    ? "tablet"
+    : (SCROLLABLE_ARRANGE_DEVICE_CLASSES.has(clientDeviceClass) ? clientDeviceClass : "");
+  const libraryDeviceClass = libraryArrangeDeviceClass
+    ? libraryArrangeDeviceClass
     : undefined;
-  const arrangePanelMode = SCROLLABLE_ARRANGE_DEVICE_CLASSES.has(clientDeviceClass) ? "scrollable" : "desktop";
-  const arrangePanelSize = SCROLLABLE_ARRANGE_DEVICE_CLASSES.has(clientDeviceClass) ? clientDeviceClass : "";
-  const heroAlignedFloatingSearch = clientDeviceClass === "tablet"
+  const arrangePanelMode = libraryArrangeDeviceClass ? "scrollable" : "desktop";
+  const arrangePanelSize = libraryArrangeDeviceClass;
+  const heroAlignedFloatingSearch = libraryArrangeDeviceClass === "tablet"
     || (clientDeviceClass === "phone" && floatingSearchViewportOrientation === "portrait");
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
   const categorySwitchDragEnabled = clientDeviceClass === "desktop";

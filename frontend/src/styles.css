@@ -745,8 +745,7 @@ button {
 }
 
 .library-arrange__panel {
-  display: grid;
-  gap: 0.8rem;
+  box-sizing: border-box;
   min-width: min(20rem, calc(100vw - 2rem));
   padding: 0.85rem;
   border: 1px solid rgba(152, 176, 201, 0.18);
@@ -756,6 +755,11 @@ button {
   z-index: 100;
 }
 
+.library-arrange__panel-body {
+  display: grid;
+  gap: 0.8rem;
+}
+
 .library-arrange__panel--desktop {
   position: absolute;
   inset-block-start: calc(100% + 0.45rem);
@@ -763,31 +767,47 @@ button {
 }
 
 .library-arrange__panel--scrollable {
+  --library-arrange-scroll-body-height: min(33.8vh, 14.733rem);
   position: absolute;
   inset-block-start: calc(100% + 0.45rem);
   inset-inline-end: 0;
   inline-size: min(20rem, calc(100vw - 1.5rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
-  padding-block-start: 1rem;
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  padding: 0.85rem 0.72rem 0.85rem 0.85rem;
+  overflow: hidden;
 }
 
 .library-arrange__panel--phone {
-  max-height: min(26vh, 11.333rem);
+  --library-arrange-scroll-body-height: min(33.8vh, 14.733rem);
 }
 
 .library-arrange__panel--tablet {
-  max-height: min(33.8vh, 14.733rem);
+  --library-arrange-scroll-body-height: min(43.94vh, 19.153rem);
 }
 
-.library-arrange__mobile-handle {
-  justify-self: center;
-  width: 2.2rem;
-  height: 0.22rem;
-  margin-block: -0.44rem 0;
+.library-arrange__panel-body--scrollable {
+  block-size: var(--library-arrange-scroll-body-height);
+  max-height: var(--library-arrange-scroll-body-height);
+  max-inline-size: 100%;
+  padding-inline-end: 0.58rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(255, 255, 255, 0.78) transparent;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.library-arrange__panel-body--scrollable::-webkit-scrollbar {
+  width: 0.28rem;
+}
+
+.library-arrange__panel-body--scrollable::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.library-arrange__panel-body--scrollable::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.86);
-  box-shadow: 0 0.12rem 0.5rem rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .page-section--library[data-device-class="phone"] .library-desktop-hero,
@@ -841,9 +861,12 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 0.36rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .library-arrange__option {
+  max-width: 100%;
   padding: 0.42rem 0.58rem;
   border: 1px solid rgba(152, 176, 201, 0.14);
   border-radius: 0.6rem;
