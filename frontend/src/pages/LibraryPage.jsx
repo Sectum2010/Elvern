@@ -99,9 +99,7 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
   const controlRef = useRef(null);
   const draggingRef = useRef(false);
   const ignoreNextClickRef = useRef(false);
-  const dragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
   const [dragging, setDragging] = useState(false);
-  const [dragOffset, setDragOffset] = useState(0);
   const [dragPreviewCategory, setDragPreviewCategory] = useState(null);
 
   function getCategoryFromPoint(clientX) {
@@ -120,16 +118,8 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     }
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    const controlRect = controlRef.current?.getBoundingClientRect();
-    const buttonRect = event.currentTarget.getBoundingClientRect();
-    dragBoundsRef.current = {
-      clientX: event.clientX,
-      min: controlRect ? controlRect.left - buttonRect.left : 0,
-      max: controlRect ? controlRect.right - buttonRect.right : 0,
-    };
     draggingRef.current = true;
     ignoreNextClickRef.current = true;
-    setDragOffset(0);
     setDragPreviewCategory(activeCategory);
     setDragging(true);
   }
@@ -138,9 +128,6 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     if (!draggingRef.current) {
       return;
     }
-    const bounds = dragBoundsRef.current;
-    const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
-    setDragOffset(nextOffset);
     setDragPreviewCategory(getCategoryFromPoint(event.clientX));
   }
 
@@ -151,7 +138,6 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     draggingRef.current = false;
     setDragging(false);
-    setDragOffset(0);
     const nextCategory = getCategoryFromPoint(event.clientX);
     setDragPreviewCategory(null);
     onChange(nextCategory);
@@ -165,7 +151,6 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
     draggingRef.current = false;
     ignoreNextClickRef.current = false;
     setDragging(false);
-    setDragOffset(0);
     setDragPreviewCategory(null);
   }
 
@@ -175,7 +160,6 @@ function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }
   const controlStyle = {
     "--library-category-count": LIBRARY_CATEGORY_OPTIONS.length,
     "--library-category-index": visualIndex,
-    "--library-category-drag-x": dragging ? `${dragOffset}px` : "0px",
   };
 
   return (

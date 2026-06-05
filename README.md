@@ -382,6 +382,46 @@ Mount your archive on a NAS *and* keep a working set on Drive — Elvern shows t
 
 > ⚙️ Drive integration requires you to register your own Google OAuth client (free) and set `ELVERN_GOOGLE_OAUTH_CLIENT_ID` / `ELVERN_GOOGLE_OAUTH_CLIENT_SECRET`. Setup walkthrough lives in `docs/setup.md`.
 
+### 📁 Simple library naming system
+
+Elvern keeps video filenames natural and uses tiny folder endings to decide where your library items belong. Add one marker at the end of a folder name, rescan, and Elvern cleans the marker out of the display name.
+
+| Folder ending | Means | Use it for |
+|---|---|---|
+| `-M` | Movies | A parent folder for films and movie collections |
+| `-TV` | TV Shows | A parent folder for shows, seasons, and episodes |
+| `-AN` | Anime | A parent folder for anime movies or series |
+| `-C` | Cartoon | A parent folder for cartoons |
+| `-L` | List / collection | A franchise, saga, show, or grouped series folder |
+| `-S` | Single title | One movie or special in its own folder |
+| `-X` | Exclude | A folder Elvern should ignore completely |
+
+Simple rules:
+
+1. Put the marker at the very end of the folder name: `Movies -M`, `TV Shows -TV`, `Resident Evil -L`.
+2. Use one marker per folder. Elvern reads the final marker only, so `Resident Evil -M -L` becomes a list named `Resident Evil -M`; prefer `Movies -M/Resident Evil -L/`.
+3. Use the spaced form when you can (`Anime -AN`). The compact form also works (`Anime-AN`).
+4. Leave the video files named normally. Elvern's title parser already understands years, quality tags, codecs, release groups, and messy punctuation.
+
+```text
+Media/
+  Movies -M/
+    Resident Evil -L/
+      Resident Evil (2002).mkv
+      Resident Evil Apocalypse (2004).mkv
+    Interstellar -S/
+      Interstellar.2014.2160p.BluRay.mkv
+  TV Shows -TV/
+    Hannibal (SE1~3) [1080p]-L/
+      Hannibal Season 1/
+        Hannibal S01E01.mkv
+  Anime -AN/
+  Cartoon -C/
+  Extras -X/
+```
+
+After renaming folders, open **Library → Rescan** so Elvern refreshes the tabs and grouped rows.
+
 ### 🤖 The Assistant workflow *(beta)*
 
 Family members can submit structured requests right inside Elvern — bug reports, improvement suggestions, account requests, library issues, playback issues, security concerns. The admin gets a triage queue with urgency levels, risk ratings, reversibility-impact tagging, and proposed-action records. Each request supports up to 8 MB of attachments (screenshots, log snippets) with a separate viewer page.

@@ -661,7 +661,7 @@ button {
   background:
     linear-gradient(180deg, rgba(94, 143, 177, 0.84), rgba(45, 76, 104, 0.92));
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
-  transform: translateX(calc((var(--library-category-index, 0) * 100%) + var(--library-category-drag-x, 0px)));
+  transform: translateX(calc(var(--library-category-index, 0) * 100%));
   transition: transform 150ms ease;
   pointer-events: none;
 }

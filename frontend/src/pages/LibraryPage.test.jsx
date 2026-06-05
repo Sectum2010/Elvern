@@ -199,6 +199,7 @@ describe("LibraryPage category switching", () => {
 
     fireEvent.pointerDown(moviesTab, { clientX: 50, pointerId: 1 });
     fireEvent.pointerMove(moviesTab, { clientX: 250, pointerId: 1 });
+    expect(switchControl.style.getPropertyValue("--library-category-drag-x")).toBe("");
     fireEvent.pointerUp(moviesTab, { clientX: 250, pointerId: 1 });
 
     await waitFor(() => {
