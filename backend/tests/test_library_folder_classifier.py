@@ -166,6 +166,39 @@ def test_discovery_inherits_category_and_excludes_x_subtrees(tmp_path: Path) -> 
     assert str(excluded.resolve()) in discovery.excluded_paths
 
 
+def test_discovery_inherits_nested_explicit_list_identity(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    list_folder = root / "TV Shows -TV" / "Hannibal (SE1~3) [1080p]-L"
+    season_one = list_folder / "Hannibal Season 1"
+    season_two = list_folder / "Hannibal Season 2"
+    season_three = list_folder / "Hannibal Season 3"
+    season_one.mkdir(parents=True)
+    season_two.mkdir(parents=True)
+    season_three.mkdir(parents=True)
+    (season_one / "Hannibal S01E01.mkv").write_bytes(b"episode-one")
+    (season_two / "Hannibal S02E01.mkv").write_bytes(b"episode-two")
+    (season_three / "Hannibal S03E01.mkv").write_bytes(b"episode-three")
+
+    discovery = discover_library_folders(
+        [root],
+        allowed_video_extensions=VIDEO_EXTENSIONS,
+    )
+
+    assert sorted(file.path.name for file in discovery.files) == [
+        "Hannibal S01E01.mkv",
+        "Hannibal S02E01.mkv",
+        "Hannibal S03E01.mkv",
+    ]
+    series_keys = {file.metadata.series_folder_key for file in discovery.files}
+    assert len(series_keys) == 1
+    assert next(iter(series_keys), "").startswith("local-folder:")
+    for file in discovery.files:
+        assert file.metadata.category == "tv"
+        assert file.metadata.category_display_name == "TV Shows"
+        assert file.metadata.series_folder_name == "Hannibal (SE1~3) [1080p]"
+        assert file.metadata.folder_display_name.startswith("Hannibal Season")
+
+
 def test_discovery_excludes_configured_poster_reference_path(tmp_path: Path) -> None:
     root = tmp_path / "Library"
     media_folder = root / "Movies -M" / "Movie One -S"
@@ -284,3 +317,131 @@ def test_scan_persists_folder_metadata_and_category_summary(initialized_settings
             "name": "Movies",
         }
     ]
+
+
+def test_scan_persists_nested_explicit_list_identity(initialized_settings, monkeypatch) -> None:
+    media_root = Path(initialized_settings.media_root)
+    list_folder = media_root / "TV Shows -TV" / "Hannibal (SE1~3) [1080p]-L"
+    season_one = list_folder / "Hannibal Season 1"
+    season_two = list_folder / "Hannibal Season 2"
+    season_three = list_folder / "Hannibal Season 3"
+    season_one.mkdir(parents=True)
+    season_two.mkdir(parents=True)
+    season_three.mkdir(parents=True)
+    for path, content in (
+        (season_one / "Hannibal S01E01.mkv", b"episode-one"),
+        (season_two / "Hannibal S02E01.mkv", b"episode-two"),
+        (season_three / "Hannibal S03E01.mkv", b"episode-three"),
+    ):
+        path.write_bytes(content)
+
+    monkeypatch.setattr(
+        "backend.app.media_scan.extract_media_metadata",
+        lambda file_path, settings: {
+            "duration_seconds": None,
+            "width": 1920,
+            "height": 1080,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "container": file_path.suffix.lower().lstrip(".") or None,
+            "subtitles": [],
+        },
+    )
+
+    result = scan_media_library(initialized_settings, reason="nested-list-test")
+
+    assert result["files_seen"] == 3
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                original_filename,
+                library_category,
+                library_folder_role,
+                library_folder_name,
+                series_folder_key,
+                series_folder_name
+            FROM media_items
+            WHERE original_filename LIKE 'Hannibal S0%E01.mkv'
+            ORDER BY original_filename ASC
+            """
+        ).fetchall()
+
+    assert len(rows) == 3
+    assert {row["series_folder_key"] for row in rows} == {rows[0]["series_folder_key"]}
+    assert rows[0]["series_folder_key"].startswith("local-folder:")
+    for row in rows:
+        assert row["library_category"] == "tv"
+        assert row["library_folder_role"] in {"legacy", "smart_single"}
+        assert row["library_folder_name"].startswith("Hannibal Season")
+        assert row["series_folder_name"] == "Hannibal (SE1~3) [1080p]"
+
+
+def test_scan_updates_unchanged_files_after_parent_list_suffix_added(initialized_settings, monkeypatch) -> None:
+    media_root = Path(initialized_settings.media_root)
+    tv_root = media_root / "TV Shows -TV"
+    season_one = tv_root / "Hannibal Season 1"
+    season_two = tv_root / "Hannibal Season 2"
+    season_three = tv_root / "Hannibal Season 3"
+    season_one.mkdir(parents=True)
+    season_two.mkdir(parents=True)
+    season_three.mkdir(parents=True)
+    for path, content in (
+        (season_one / "Hannibal S01E01.mkv", b"episode-one"),
+        (season_two / "Hannibal S02E01.mkv", b"episode-two-has-unique-size"),
+        (season_three / "Hannibal S03E01.mkv", b"episode-three-has-a-unique-size"),
+    ):
+        path.write_bytes(content)
+
+    monkeypatch.setattr(
+        "backend.app.media_scan.extract_media_metadata",
+        lambda file_path, settings: {
+            "duration_seconds": None,
+            "width": 1920,
+            "height": 1080,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "container": file_path.suffix.lower().lstrip(".") or None,
+            "subtitles": [],
+        },
+    )
+
+    first_result = scan_media_library(initialized_settings, reason="before-list-suffix")
+    assert first_result["files_seen"] == 3
+    with get_connection(initialized_settings) as connection:
+        before_rows = connection.execute(
+            """
+            SELECT id, original_filename, series_folder_key, series_folder_name
+            FROM media_items
+            WHERE original_filename LIKE 'Hannibal S0%E01.mkv'
+            ORDER BY original_filename ASC
+            """
+        ).fetchall()
+    assert len(before_rows) == 3
+    assert {row["series_folder_key"] for row in before_rows} == {None}
+    ids_by_name = {row["original_filename"]: int(row["id"]) for row in before_rows}
+
+    list_folder = tv_root / "Hannibal (SE1~3) [1080p]-L"
+    list_folder.mkdir()
+    for season_folder in (season_one, season_two, season_three):
+        season_folder.rename(list_folder / season_folder.name)
+
+    second_result = scan_media_library(initialized_settings, reason="after-list-suffix")
+    assert second_result["files_seen"] == 3
+    with get_connection(initialized_settings) as connection:
+        after_rows = connection.execute(
+            """
+            SELECT id, original_filename, file_path, series_folder_key, series_folder_name
+            FROM media_items
+            WHERE original_filename LIKE 'Hannibal S0%E01.mkv'
+            ORDER BY original_filename ASC
+            """
+        ).fetchall()
+
+    assert len(after_rows) == 3
+    assert {row["series_folder_key"] for row in after_rows} == {after_rows[0]["series_folder_key"]}
+    assert after_rows[0]["series_folder_key"].startswith("local-folder:")
+    for row in after_rows:
+        assert int(row["id"]) == ids_by_name[row["original_filename"]]
+        assert "Hannibal (SE1~3) [1080p]-L" in row["file_path"]
+        assert row["series_folder_name"] == "Hannibal (SE1~3) [1080p]"

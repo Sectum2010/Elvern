@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.db import get_connection, utcnow_iso
+from backend.app.media_scan import scan_media_library
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
 
 
@@ -322,6 +323,115 @@ def test_category_scopes_series_rails_continue_and_recent(
     assert {rail["title"] for rail in movies_payload["series_rails"]} == {"Movie Saga"}
     assert {item["id"] for item in movies_payload["continue_watching"]} == {movie_b}
     assert all(item["id"] not in {anime_a, anime_b} for item in movies_payload["recently_added"])
+
+
+def test_tv_category_scanned_nested_list_outputs_one_hannibal_rail(
+    client,
+    initialized_settings,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    media_root = Path(initialized_settings.media_root)
+    list_folder = media_root / "TV Shows -TV" / "Hannibal (SE1~3) [1080p]-L"
+    season_one = list_folder / "Hannibal Season 1"
+    season_two = list_folder / "Hannibal Season 2"
+    season_three = list_folder / "Hannibal Season 3"
+    season_one.mkdir(parents=True)
+    season_two.mkdir(parents=True)
+    season_three.mkdir(parents=True)
+    for path, content in (
+        (season_one / "Hannibal S01E01.mkv", b"episode-one"),
+        (season_two / "Hannibal S02E01.mkv", b"episode-two"),
+        (season_three / "Hannibal S03E01.mkv", b"episode-three"),
+    ):
+        path.write_bytes(content)
+
+    monkeypatch.setattr(
+        "backend.app.media_scan.extract_media_metadata",
+        lambda file_path, settings: {
+            "duration_seconds": None,
+            "width": 1920,
+            "height": 1080,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "container": file_path.suffix.lower().lstrip(".") or None,
+            "subtitles": [],
+        },
+    )
+    scan_media_library(initialized_settings, reason="nested-list-api-test")
+
+    response = client.get("/api/library", params={"category": "tv"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["series_rails"]) == 1
+    rail = payload["series_rails"][0]
+    assert rail["key"] == "hannibal"
+    assert rail["title"] == "Hannibal"
+    assert rail["film_count"] == 3
+    assert {item["original_filename"] for item in rail["items"]} == {
+        "Hannibal S01E01.mkv",
+        "Hannibal S02E01.mkv",
+        "Hannibal S03E01.mkv",
+    }
+
+
+def test_series_rails_coalesce_duplicate_output_keys_within_category(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    ids = [
+        _insert_media_item(
+            initialized_settings,
+            title="Hannibal S01E01",
+            original_filename="Hannibal.S01E01.mkv",
+            category="tv",
+            series_folder_key="stale-season-one",
+            series_folder_name="Hannibal Season 1",
+            year=2013,
+        ),
+        _insert_media_item(
+            initialized_settings,
+            title="Hannibal S01E02",
+            original_filename="Hannibal.S01E02.mkv",
+            category="tv",
+            series_folder_key="stale-season-one",
+            series_folder_name="Hannibal Season 1",
+            year=2013,
+        ),
+        _insert_media_item(
+            initialized_settings,
+            title="Hannibal S02E01",
+            original_filename="Hannibal.S02E01.mkv",
+            category="tv",
+            series_folder_key="stale-season-two",
+            series_folder_name="Hannibal Season 2",
+            year=2014,
+        ),
+        _insert_media_item(
+            initialized_settings,
+            title="Hannibal S02E02",
+            original_filename="Hannibal.S02E02.mkv",
+            category="tv",
+            series_folder_key="stale-season-two",
+            series_folder_name="Hannibal Season 2",
+            year=2014,
+        ),
+    ]
+
+    response = client.get("/api/library", params={"category": "tv"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["series_rails"]) == 1
+    rail = payload["series_rails"][0]
+    assert rail["key"] == "hannibal"
+    assert rail["title"] == "Hannibal"
+    assert rail["film_count"] == 4
+    assert [item["id"] for item in rail["items"]] == ids
 
 
 def test_category_filter_preserves_hidden_and_duplicate_visibility(

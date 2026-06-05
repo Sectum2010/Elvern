@@ -245,6 +245,14 @@ def _series_heading_matches_titles(heading: str, titles: list[str]) -> bool:
     return True
 
 
+def _series_row_sort_key(row) -> tuple[int, str, int]:
+    return (
+        int(_row_value(row, "year", 0) or 0) if _row_value(row, "year", 0) not in {None, ""} else 0,
+        str(row["title"]).lower(),
+        int(row["id"]),
+    )
+
+
 def _build_series_rails(
     settings: Settings,
     *,
@@ -267,19 +275,10 @@ def _build_series_rails(
         )
         bucket["rows"].append(row)
 
-    rails: list[dict[str, object]] = []
+    rail_buckets: dict[tuple[str, str], dict[str, object]] = {}
     for folder_key, payload in grouped_rows.items():
         group_rows = list(payload["rows"])
-        if len(group_rows) < 2:
-            continue
-        sorted_rows = sorted(
-            group_rows,
-            key=lambda row: (
-                int(_row_value(row, "year", 0) or 0) if _row_value(row, "year", 0) not in {None, ""} else 0,
-                str(row["title"]).lower(),
-                int(row["id"]),
-            ),
-        )
+        sorted_rows = sorted(group_rows, key=_series_row_sort_key)
         candidate_titles = [
             str(
                 _normalize_cloud_title_and_year(
@@ -300,6 +299,24 @@ def _build_series_rails(
             heading = _prettify_series_heading(prefix_heading)
         if not heading:
             continue
+        rail_key = normalize_title_key(heading) or normalize_title_key(str(payload["folder_name"])) or folder_key
+        coalesce_key = (rail_key, normalize_title_key(heading) or heading.lower())
+        rail_bucket = rail_buckets.setdefault(
+            coalesce_key,
+            {
+                "key": rail_key,
+                "title": heading,
+                "rows_by_id": {},
+            },
+        )
+        rows_by_id: dict[int, object] = rail_bucket["rows_by_id"]  # type: ignore[assignment]
+        for row in sorted_rows:
+            rows_by_id.setdefault(int(row["id"]), row)
+
+    rails: list[dict[str, object]] = []
+    for payload in rail_buckets.values():
+        rows_by_id: dict[int, object] = payload["rows_by_id"]  # type: ignore[assignment]
+        sorted_rows = sorted(rows_by_id.values(), key=_series_row_sort_key)
         serialized_items = [
             _serialize_media_item(settings, row, poster_dir=poster_dir)
             for row in sorted_rows
@@ -308,8 +325,8 @@ def _build_series_rails(
             continue
         rails.append(
             {
-                "key": normalize_title_key(heading) or normalize_title_key(str(payload["folder_name"])) or folder_key,
-                "title": heading,
+                "key": payload["key"],
+                "title": payload["title"],
                 "film_count": len(serialized_items),
                 "items": serialized_items,
             }

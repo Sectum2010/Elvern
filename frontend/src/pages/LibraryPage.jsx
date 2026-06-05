@@ -95,6 +95,145 @@ export function buildLibraryRequestPath({ category = DEFAULT_LIBRARY_CATEGORY, q
 }
 
 
+function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }) {
+  const controlRef = useRef(null);
+  const draggingRef = useRef(false);
+  const ignoreNextClickRef = useRef(false);
+  const dragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
+  const [dragging, setDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState(0);
+  const [dragPreviewCategory, setDragPreviewCategory] = useState(null);
+
+  function getCategoryFromPoint(clientX) {
+    const rect = controlRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return activeCategory;
+    }
+    const ratio = Math.max(0, Math.min(0.999, (clientX - rect.left) / (rect.width || 1)));
+    const index = Math.max(0, Math.min(LIBRARY_CATEGORY_OPTIONS.length - 1, Math.floor(ratio * LIBRARY_CATEGORY_OPTIONS.length)));
+    return LIBRARY_CATEGORY_OPTIONS[index]?.key || activeCategory;
+  }
+
+  function handleActivePointerDown(event) {
+    if (!dragEnabled) {
+      return;
+    }
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const controlRect = controlRef.current?.getBoundingClientRect();
+    const buttonRect = event.currentTarget.getBoundingClientRect();
+    dragBoundsRef.current = {
+      clientX: event.clientX,
+      min: controlRect ? controlRect.left - buttonRect.left : 0,
+      max: controlRect ? controlRect.right - buttonRect.right : 0,
+    };
+    draggingRef.current = true;
+    ignoreNextClickRef.current = true;
+    setDragOffset(0);
+    setDragPreviewCategory(activeCategory);
+    setDragging(true);
+  }
+
+  function handleActivePointerMove(event) {
+    if (!draggingRef.current) {
+      return;
+    }
+    const bounds = dragBoundsRef.current;
+    const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
+    setDragOffset(nextOffset);
+    setDragPreviewCategory(getCategoryFromPoint(event.clientX));
+  }
+
+  function handleActivePointerUp(event) {
+    if (!draggingRef.current) {
+      return;
+    }
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    draggingRef.current = false;
+    setDragging(false);
+    setDragOffset(0);
+    const nextCategory = getCategoryFromPoint(event.clientX);
+    setDragPreviewCategory(null);
+    onChange(nextCategory);
+    window.setTimeout(() => {
+      ignoreNextClickRef.current = false;
+    }, 120);
+  }
+
+  function handleActivePointerCancel(event) {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    draggingRef.current = false;
+    ignoreNextClickRef.current = false;
+    setDragging(false);
+    setDragOffset(0);
+    setDragPreviewCategory(null);
+  }
+
+  const activeIndex = Math.max(0, LIBRARY_CATEGORY_OPTIONS.findIndex((category) => category.key === activeCategory));
+  const visualCategory = dragging && dragPreviewCategory ? dragPreviewCategory : activeCategory;
+  const visualIndex = Math.max(0, LIBRARY_CATEGORY_OPTIONS.findIndex((category) => category.key === visualCategory));
+  const controlStyle = {
+    "--library-category-count": LIBRARY_CATEGORY_OPTIONS.length,
+    "--library-category-index": visualIndex,
+    "--library-category-drag-x": dragging ? `${dragOffset}px` : "0px",
+  };
+
+  return (
+    <div
+      aria-label="Library category"
+      className={[
+        "library-category-switch",
+        dragEnabled ? "library-category-switch--drag-enabled" : "",
+        dragging ? "library-category-switch--dragging" : "",
+      ].filter(Boolean).join(" ")}
+      ref={controlRef}
+      role="tablist"
+      style={controlStyle}
+    >
+      <span
+        aria-hidden="true"
+        className={[
+          "library-category-switch__indicator",
+          dragging ? "library-category-switch__indicator--dragging" : "",
+        ].filter(Boolean).join(" ")}
+      />
+      {LIBRARY_CATEGORY_OPTIONS.map((category) => {
+        const active = category.key === activeCategory;
+        const visuallyActive = dragging ? category.key === visualCategory : active;
+        return (
+          <button
+            aria-selected={active}
+            className={[
+              "library-category-switch__button",
+              active ? "library-category-switch__button--current" : "",
+              visuallyActive ? "library-category-switch__button--active" : "",
+              active && dragging ? "library-category-switch__button--dragging" : "",
+            ].filter(Boolean).join(" ")}
+            key={category.key}
+            onClick={(event) => {
+              if (ignoreNextClickRef.current) {
+                event.preventDefault();
+                ignoreNextClickRef.current = false;
+                return;
+              }
+              onChange(category.key);
+            }}
+            onPointerCancel={active && dragEnabled ? handleActivePointerCancel : undefined}
+            onPointerDown={active && dragEnabled ? handleActivePointerDown : undefined}
+            onPointerMove={active && dragEnabled ? handleActivePointerMove : undefined}
+            onPointerUp={active && dragEnabled ? handleActivePointerUp : undefined}
+            role="tab"
+            type="button"
+          >
+            {category.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function MediaGrid({
   items,
   activeBrowserPlaybackItemId = null,
@@ -224,6 +363,7 @@ export function LibraryPage() {
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
+  const categorySwitchDragEnabled = clientDeviceClass === "desktop";
   const floatingSearchScrollRestoreEnabled = ["desktop", "phone", "tablet"].includes(clientDeviceClass);
   const isPhoneClient = useMemo(() => {
     if (typeof navigator === "undefined") {
@@ -987,6 +1127,9 @@ export function LibraryPage() {
   }
 
   function handleCategoryChange(category) {
+    if (category === activeLibraryCategory) {
+      return;
+    }
     const nextSearch = buildLibraryCategorySearch(location.search, category);
     navigate(
       {
@@ -1034,26 +1177,11 @@ export function LibraryPage() {
             {rescanPending ? "Starting scan..." : "Rescan library"}
           </RefreshSweepButton>
         </div>
-        <div className="library-category-switch" role="tablist" aria-label="Library category">
-          {LIBRARY_CATEGORY_OPTIONS.map((category) => {
-            const active = category.key === activeLibraryCategory;
-            return (
-              <button
-                aria-selected={active}
-                className={[
-                  "library-category-switch__button",
-                  active ? "library-category-switch__button--active" : "",
-                ].filter(Boolean).join(" ")}
-                key={category.key}
-                onClick={() => handleCategoryChange(category.key)}
-                role="tab"
-                type="button"
-              >
-                {category.label}
-              </button>
-            );
-          })}
-        </div>
+        <LibraryCategorySwitch
+          activeCategory={activeLibraryCategory}
+          dragEnabled={categorySwitchDragEnabled}
+          onChange={handleCategoryChange}
+        />
       </div>
 
       <div className="library-mobile-search-card">

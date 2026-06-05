@@ -10,6 +10,12 @@ import { readLibraryReturnTarget } from "../lib/libraryNavigation";
 import { LibraryPage } from "./LibraryPage";
 
 
+const mockPlatformState = vi.hoisted(() => ({
+  deviceClass: "desktop",
+  platform: "desktop",
+}));
+
+
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({
     refreshAuth: vi.fn(),
@@ -35,8 +41,8 @@ vi.mock("../lib/browserPlayback", () => ({
 }));
 
 vi.mock("../lib/platformDetection", () => ({
-  detectClientDeviceClass: () => "desktop",
-  detectClientPlatform: () => "desktop",
+  detectClientDeviceClass: () => mockPlatformState.deviceClass,
+  detectClientPlatform: () => mockPlatformState.platform,
 }));
 
 
@@ -92,8 +98,48 @@ function renderLibrary(initialEntry = "/library", payload = emptyLibraryPayload)
 }
 
 
+function rect(left, right) {
+  return {
+    bottom: 40,
+    height: 40,
+    left,
+    right,
+    top: 0,
+    width: right - left,
+    x: left,
+    y: 0,
+    toJSON: () => {},
+  };
+}
+
+
+function mockCategorySwitchRects() {
+  return vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function getRect() {
+    if (this.classList?.contains("library-category-switch")) {
+      return rect(0, 400);
+    }
+    const label = this.textContent?.trim();
+    if (label === "Movies") {
+      return rect(0, 100);
+    }
+    if (label === "TV Shows") {
+      return rect(100, 200);
+    }
+    if (label === "Anime") {
+      return rect(200, 300);
+    }
+    if (label === "Cartoon") {
+      return rect(300, 400);
+    }
+    return rect(0, 100);
+  });
+}
+
+
 describe("LibraryPage category switching", () => {
   beforeEach(() => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "desktop";
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       writable: true,
@@ -102,6 +148,11 @@ describe("LibraryPage category switching", () => {
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
       })),
+    });
+    Object.defineProperty(window, "PointerEvent", {
+      configurable: true,
+      writable: true,
+      value: MouseEvent,
     });
     window.scrollTo = vi.fn();
     window.sessionStorage.clear();
@@ -136,6 +187,48 @@ describe("LibraryPage category switching", () => {
       expect(locations).toContain("/library?category=anime");
       expect(apiRequest).toHaveBeenCalledWith("/api/library?category=anime", expect.any(Object));
     });
+  });
+
+  test("desktop drag changes the active category URL", async () => {
+    const rectSpy = mockCategorySwitchRects();
+    const { locations } = renderLibrary("/library?category=movies");
+    const moviesTab = await screen.findByRole("tab", { name: "Movies" });
+    const switchControl = screen.getByRole("tablist", { name: "Library category" });
+
+    expect(switchControl).toHaveClass("library-category-switch--drag-enabled");
+
+    fireEvent.pointerDown(moviesTab, { clientX: 50, pointerId: 1 });
+    fireEvent.pointerMove(moviesTab, { clientX: 250, pointerId: 1 });
+    fireEvent.pointerUp(moviesTab, { clientX: 250, pointerId: 1 });
+
+    await waitFor(() => {
+      expect(locations).toContain("/library?category=anime");
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=anime", expect.any(Object));
+    });
+    rectSpy.mockRestore();
+  });
+
+  test("phone category switch is click-only and does not use the drag path", async () => {
+    mockPlatformState.deviceClass = "phone";
+    mockPlatformState.platform = "iphone";
+    const rectSpy = mockCategorySwitchRects();
+    const user = userEvent.setup();
+    const { locations } = renderLibrary("/library?category=movies");
+    const moviesTab = await screen.findByRole("tab", { name: "Movies" });
+    const switchControl = screen.getByRole("tablist", { name: "Library category" });
+
+    expect(switchControl).not.toHaveClass("library-category-switch--drag-enabled");
+
+    fireEvent.pointerDown(moviesTab, { clientX: 50, pointerId: 1 });
+    fireEvent.pointerMove(moviesTab, { clientX: 250, pointerId: 1 });
+    fireEvent.pointerUp(moviesTab, { clientX: 250, pointerId: 1 });
+    expect(locations).not.toContain("/library?category=anime");
+
+    await user.click(screen.getByRole("tab", { name: "Anime" }));
+    await waitFor(() => {
+      expect(locations).toContain("/library?category=anime");
+    });
+    rectSpy.mockRestore();
   });
 
   test("search requests include the active category", async () => {
