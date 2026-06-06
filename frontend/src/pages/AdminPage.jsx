@@ -69,6 +69,15 @@ const EXPOSURE_PROVIDER_LABELS = {
   cloudflare_tunnel: "Cloudflare Tunnel",
   manual_other: "Manual/Other",
 };
+const EXPOSURE_MODE_SEGMENTS = [
+  { value: "private", label: "Private" },
+  { value: "public_custom_domain", label: "Public domain" },
+  { value: "public_direct_ip", label: "Direct IP", badge: "Not recommended" },
+];
+const EXPOSURE_MAINTENANCE_SEGMENTS = [
+  { value: "off", label: "Off" },
+  { value: "on", label: "On" },
+];
 const DEFAULT_EXPOSURE_DRAFT = {
   selectedMode: "private",
   publicOrigin: "",
@@ -189,6 +198,43 @@ function InlineFeedback({ feedback }) {
     >
       {feedback.text}
     </p>
+  );
+}
+
+
+function ExposureSegmentedControl({ ariaLabel, className = "", options, value, onChange }) {
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  return (
+    <div
+      aria-label={ariaLabel}
+      className={["settings-segmented-control exposure-segmented-control", className].filter(Boolean).join(" ")}
+      role="radiogroup"
+      style={{
+        "--settings-segmented-count": options.length,
+        "--settings-segmented-index": selectedIndex,
+      }}
+    >
+      <span className="settings-segmented-control__indicator" aria-hidden="true" />
+      {options.map((option) => {
+        const isSelected = option.value === value;
+        return (
+          <button
+            aria-checked={isSelected}
+            className={[
+              "settings-segmented-control__button exposure-segmented-control__button",
+              isSelected ? "settings-segmented-control__button--active exposure-segmented-control__button--active" : "",
+            ].filter(Boolean).join(" ")}
+            key={option.value}
+            onClick={() => onChange(option.value)}
+            role="radio"
+            type="button"
+          >
+            <span>{option.label}</span>
+            {option.badge ? <small className="exposure-segmented-control__badge">{option.badge}</small> : null}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -594,6 +640,7 @@ export function AdminPage() {
   const [exposureDraft, setExposureDraft] = useState(DEFAULT_EXPOSURE_DRAFT);
   const [exposureMaintenanceForm, setExposureMaintenanceForm] = useState(DEFAULT_EXPOSURE_MAINTENANCE_FORM);
   const [exposureMaintenanceFeedback, setExposureMaintenanceFeedback] = useState(null);
+  const [exposureMaintenanceTargetMode, setExposureMaintenanceTargetMode] = useState(null);
   const [exposurePrepareForm, setExposurePrepareForm] = useState(DEFAULT_EXPOSURE_PREPARE_FORM);
   const [exposurePrepareFeedback, setExposurePrepareFeedback] = useState(null);
   const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false);
@@ -955,6 +1002,7 @@ export function AdminPage() {
         },
       });
       updateExposureMaintenanceLockState(payload);
+      setExposureMaintenanceTargetMode(enabled ? "on" : "off");
       setExposureMaintenanceForm(DEFAULT_EXPOSURE_MAINTENANCE_FORM);
       setExposureMaintenanceFeedback({
         tone: "success",
@@ -1043,6 +1091,7 @@ export function AdminPage() {
     setExposurePlannerOpen(true);
     setExposureMaintenanceFeedback(null);
     setExposurePrepareFeedback(null);
+    setExposureMaintenanceTargetMode(null);
     if (!exposureStatus) {
       await loadExposureStatus();
     }
@@ -3543,8 +3592,23 @@ export function AdminPage() {
   const exposureModeStatus = formatExposureModeStatus(exposureActive, exposurePendingDraft);
   const exposureMaintenanceLock = exposureActive.maintenance_lock || {};
   const exposureMaintenanceLockStatus = exposureMaintenanceLock.enabled ? "On" : "Off";
+  const exposureMaintenanceTargetValue = exposureMaintenanceTargetMode || (exposureMaintenanceLock.enabled ? "on" : "off");
+  const exposureMaintenanceTargetEnabled = exposureMaintenanceTargetValue === "on";
+  const exposureMaintenanceTargetMatchesCurrent = exposureMaintenanceTargetEnabled === Boolean(exposureMaintenanceLock.enabled);
+  const exposureMaintenanceActionLabel = exposureMaintenanceTargetEnabled ? "Enable maintenance lock" : "Disable maintenance lock";
   const exposurePreparedSwitch = exposureDisplay.prepared_switch || null;
   const exposurePreparedSwitchStatus = exposurePreparedSwitch ? "Prepared" : "None";
+  const exposureValidationStatus = exposureValidation.status || "ready";
+  const exposureValidationStatusLabel = exposureValidationStatus === "blocked"
+    ? "Blocked"
+    : exposureValidationStatus === "warnings"
+      ? "Warnings"
+      : "Ready";
+  const exposureValidationSummary = exposureValidationStatus === "blocked"
+    ? "Blocking errors must be fixed before saving a pending draft."
+    : exposureValidationStatus === "warnings"
+      ? "Warnings need review before saving a pending draft."
+      : "No blocking errors.";
   const exposureCurrentOriginMatchCheck = exposureChecks.find((entry) => entry.name === "current_origin_match") || null;
   const exposureCurrentOriginMatchStatus = exposureCurrentOriginMatchCheck
     ? formatExposureValue(exposureCurrentOriginMatchCheck.status)
@@ -4239,12 +4303,12 @@ export function AdminPage() {
     <div
       aria-labelledby="admin-exposure-planner-modal-title"
       aria-modal="true"
-      className="browser-resume-modal"
+      className="browser-resume-modal exposure-planner-modal-shell"
       role="dialog"
     >
       <button
         aria-label="Close exposure mode manager"
-        className="browser-resume-modal__backdrop"
+        className="browser-resume-modal__backdrop exposure-planner-modal__backdrop"
         disabled={exposurePending}
         onClick={handleCloseExposurePlanner}
         type="button"
@@ -4309,6 +4373,19 @@ export function AdminPage() {
                 <p className="page-subnote">
                   This does not activate public/private mode. It only prepares the server for a future safe switch.
                 </p>
+                <div className="settings-field exposure-maintenance-target">
+                  <span>
+                    <strong>Target state</strong>
+                    <small>Select the intended maintenance lock state, then confirm with your current admin password.</small>
+                  </span>
+                  <ExposureSegmentedControl
+                    ariaLabel="Maintenance lock target"
+                    className="exposure-maintenance-switch"
+                    onChange={setExposureMaintenanceTargetMode}
+                    options={EXPOSURE_MAINTENANCE_SEGMENTS}
+                    value={exposureMaintenanceTargetValue}
+                  />
+                </div>
                 <label className="settings-toggle settings-toggle--compact">
                   <span>
                     <strong>Maintenance lock acknowledgement</strong>
@@ -4330,36 +4407,33 @@ export function AdminPage() {
                     <strong>Current admin password</strong>
                     <small>Required to enable or disable the maintenance lock.</small>
                   </span>
-                  <NonLoginSecretInput
-                    autoComplete="new-password"
-                    onChange={(event) =>
-                      setExposureMaintenanceForm((current) => ({
-                        ...current,
-                        currentAdminPassword: event.target.value,
-                      }))
-                    }
-                    placeholder="Current admin password"
-                    value={exposureMaintenanceForm.currentAdminPassword}
-                  />
+                  <div className="exposure-secret-field">
+                    <NonLoginSecretInput
+                      autoComplete="new-password"
+                      onChange={(event) =>
+                        setExposureMaintenanceForm((current) => ({
+                          ...current,
+                          currentAdminPassword: event.target.value,
+                        }))
+                      }
+                      placeholder="Current admin password"
+                      value={exposureMaintenanceForm.currentAdminPassword}
+                    />
+                  </div>
                 </label>
                 <InlineFeedback feedback={exposureMaintenanceFeedback} />
-                <div className="admin-list__actions">
+                <div className="admin-list__actions exposure-maintenance-actions">
                   <button
-                    className="primary-button"
-                    disabled={exposurePending || exposureMaintenanceLock.enabled}
-                    onClick={() => handleSetExposureMaintenanceLock(true)}
+                    className="primary-button exposure-maintenance-confirm-button"
+                    disabled={exposurePending || exposureMaintenanceTargetMatchesCurrent}
+                    onClick={() => handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)}
                     type="button"
                   >
-                    Enable maintenance lock
+                    {exposureMaintenanceActionLabel}
                   </button>
-                  <button
-                    className="ghost-button"
-                    disabled={exposurePending || !exposureMaintenanceLock.enabled}
-                    onClick={() => handleSetExposureMaintenanceLock(false)}
-                    type="button"
-                  >
-                    Disable maintenance lock
-                  </button>
+                  <span className="page-subnote exposure-maintenance-actions__hint">
+                    {exposureMaintenanceTargetMatchesCurrent ? "Already matches the current state." : "Password confirmation required."}
+                  </span>
                 </div>
               </section>
               <section className="exposure-planner-modal__section">
@@ -4402,17 +4476,19 @@ export function AdminPage() {
                     <strong>Current admin password</strong>
                     <small>Required to prepare or clear a prepared switch.</small>
                   </span>
-                  <NonLoginSecretInput
-                    autoComplete="new-password"
-                    onChange={(event) =>
-                      setExposurePrepareForm((current) => ({
-                        ...current,
-                        currentAdminPassword: event.target.value,
-                      }))
-                    }
-                    placeholder="Current admin password"
-                    value={exposurePrepareForm.currentAdminPassword}
-                  />
+                  <div className="exposure-secret-field">
+                    <NonLoginSecretInput
+                      autoComplete="new-password"
+                      onChange={(event) =>
+                        setExposurePrepareForm((current) => ({
+                          ...current,
+                          currentAdminPassword: event.target.value,
+                        }))
+                      }
+                      placeholder="Current admin password"
+                      value={exposurePrepareForm.currentAdminPassword}
+                    />
+                  </div>
                 </label>
                 <InlineFeedback feedback={exposurePrepareFeedback} />
                 <div className="admin-list__actions">
@@ -4433,60 +4509,28 @@ export function AdminPage() {
                     Clear prepared switch
                   </button>
                 </div>
-                {exposurePreparedEnvBlock ? (
-                  <div className="exposure-prepared-block">
-                    <div className="settings-inline-header">
-                      <h4>Env suggestions</h4>
-                      <button
-                        className="ghost-button ghost-button--inline"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(exposurePreparedEnvBlock);
-                          setExposurePrepareFeedback({ tone: "success", text: "Env suggestions copied." });
-                        }}
-                        type="button"
-                      >
-                        Copy env suggestions
-                      </button>
-                    </div>
-                    <textarea
-                      className="exposure-prepared-env-block"
-                      readOnly
-                      rows={Math.min(10, Math.max(4, exposurePreparedEnvBlock.split("\n").length))}
-                      value={exposurePreparedEnvBlock}
-                    />
-                  </div>
-                ) : null}
-                {exposurePreparedManualSteps.length > 0 ? (
-                  <div className="exposure-prepared-block">
-                    <h4>Manual restart / reverse proxy checklist</h4>
-                    <ul>
-                      {exposurePreparedManualSteps.map((entry) => <li key={`prepared-step-${entry}`}>{entry}</li>)}
-                    </ul>
-                  </div>
-                ) : null}
               </section>
               <section className="exposure-planner-modal__section">
                 <h3>Desired Mode</h3>
-                <label className="settings-field">
+                <div className="settings-field exposure-mode-selector">
                   <span>
                     <strong>Planner selector</strong>
                     <small>{exposureModeLabel(exposureDraft)}. This selector does not switch runtime exposure.</small>
                   </span>
-                  <select
-                    onChange={(event) =>
+                  <ExposureSegmentedControl
+                    ariaLabel="Exposure planner mode"
+                    className="exposure-mode-segmented"
+                    onChange={(nextMode) =>
                       setExposureDraft((current) => ({
                         ...current,
-                        selectedMode: event.target.value,
-                        reverseProxyProvider: event.target.value === "public_direct_ip" ? "manual_other" : current.reverseProxyProvider,
+                        selectedMode: nextMode,
+                        reverseProxyProvider: nextMode === "public_direct_ip" ? "manual_other" : current.reverseProxyProvider,
                       }))
                     }
+                    options={EXPOSURE_MODE_SEGMENTS}
                     value={exposureDraft.selectedMode}
-                  >
-                    <option value="private">Private Mode</option>
-                    <option value="public_custom_domain">Public Mode - Custom Domain</option>
-                    <option value="public_direct_ip">Public Mode - Direct IP (NOT RECOMMENDED)</option>
-                  </select>
-                </label>
+                  />
+                </div>
                 {exposureDraft.selectedMode === "private" ? (
                   <label className="settings-field">
                     <span>
@@ -4571,12 +4615,14 @@ export function AdminPage() {
                     <strong>Current admin password</strong>
                     <small>Required only to save a pending draft.</small>
                   </span>
-                  <NonLoginSecretInput
-                    autoComplete="new-password"
-                    onChange={(event) => setExposureDraft((current) => ({ ...current, currentAdminPassword: event.target.value }))}
-                    placeholder="Current admin password"
-                    value={exposureDraft.currentAdminPassword}
-                  />
+                  <div className="exposure-secret-field">
+                    <NonLoginSecretInput
+                      autoComplete="new-password"
+                      onChange={(event) => setExposureDraft((current) => ({ ...current, currentAdminPassword: event.target.value }))}
+                      placeholder="Current admin password"
+                      value={exposureDraft.currentAdminPassword}
+                    />
+                  </div>
                 </label>
                 <InlineFeedback feedback={exposureFeedback} />
                 <div className="admin-list__actions">
@@ -4592,12 +4638,27 @@ export function AdminPage() {
                 </div>
               </section>
             </div>
-            <div className="settings-card-stack">
-              <section className={`exposure-validation exposure-validation--${exposureValidation.status || "ready"}`}>
-                <h3>Validation</h3>
-                <StatusRow label="Status" value={formatExposureValue(exposureValidation.status || "ready")} />
-                {exposureErrors.length > 0 ? (
+            <div className="settings-card-stack exposure-results-stack">
+              <section className={`exposure-results-card exposure-validation-summary exposure-validation-summary--${exposureValidationStatus}`}>
+                <div className="settings-inline-header">
                   <div>
+                    <h3>Validation summary</h3>
+                    <p className="page-subnote">{exposureValidationSummary}</p>
+                  </div>
+                  <span className={`status-pill exposure-validation-status-pill exposure-validation-status-pill--${exposureValidationStatus}`}>
+                    {exposureValidationStatusLabel}
+                  </span>
+                </div>
+                <div className="exposure-compact-status">
+                  <StatusRow label="Status" value={formatExposureValue(exposureValidationStatus)} />
+                  <StatusRow label="Current origin match" value={exposureCurrentOriginMatchStatus} />
+                  <StatusRow label="Takes effect" value="No" />
+                </div>
+              </section>
+              <section className="exposure-results-card exposure-validation-messages">
+                <h3>Warnings / errors</h3>
+                {exposureErrors.length > 0 ? (
+                  <div className="exposure-message-group">
                     <strong>Errors</strong>
                     <ul>
                       {exposureErrors.map((entry) => <li key={`exposure-error-${entry}`}>{entry}</li>)}
@@ -4605,30 +4666,83 @@ export function AdminPage() {
                   </div>
                 ) : null}
                 {exposureWarnings.length > 0 ? (
-                  <div>
+                  <div className="exposure-message-group">
                     <strong>Warnings</strong>
                     <ul>
                       {exposureWarnings.map((entry) => <li key={`exposure-warning-${entry}`}>{entry}</li>)}
                     </ul>
                   </div>
                 ) : null}
-                {exposureChecks.length > 0 ? (
+                {exposureErrors.length === 0 && exposureWarnings.length === 0 ? (
+                  <p className="page-subnote">No blocking errors.</p>
+                ) : null}
+              </section>
+              {exposureChecks.length > 0 ? (
+                <section className="exposure-results-card exposure-checks-card">
+                  <h3>Checks</h3>
+                  <div className="exposure-checks-list">
+                    {exposureChecks.map((entry) => (
+                      <div className="exposure-check-row" key={`exposure-check-${entry.name || entry.detail}`}>
+                        <span className={`status-pill exposure-check-pill exposure-check-pill--${entry.status || "info"}`}>
+                          {entry.status || "info"}
+                        </span>
+                        <span>{entry.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+              <section className="exposure-results-card exposure-prepared-switch-card">
+                <div className="settings-inline-header">
                   <div>
-                    <strong>Checks</strong>
+                    <h3>Prepared switch</h3>
+                    <p className="page-subnote">Prepared for manual apply only. No env files are written.</p>
+                  </div>
+                  <span className={`status-pill exposure-prepared-switch-pill${exposurePreparedSwitch ? " exposure-prepared-switch-pill--ready" : ""}`}>
+                    {exposurePreparedSwitch ? "Prepared for manual apply" : "None"}
+                  </span>
+                </div>
+                <div className="exposure-compact-status">
+                  <StatusRow label="URL prefix rotation" value="Manual only" />
+                  <StatusRow label="Env writing" value="Manual only" />
+                  <StatusRow label="Runtime effect" value="None yet" />
+                </div>
+                {exposurePreparedEnvBlock ? (
+                  <div className="exposure-prepared-block">
+                    <div className="settings-inline-header">
+                      <h4>Env suggestions</h4>
+                      <button
+                        className="ghost-button ghost-button--inline"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(exposurePreparedEnvBlock);
+                          setExposurePrepareFeedback({ tone: "success", text: "Env suggestions copied." });
+                        }}
+                        type="button"
+                      >
+                        Copy env suggestions
+                      </button>
+                    </div>
+                    <textarea
+                      className="exposure-prepared-env-block"
+                      readOnly
+                      rows={Math.min(10, Math.max(4, exposurePreparedEnvBlock.split("\n").length))}
+                      value={exposurePreparedEnvBlock}
+                    />
+                  </div>
+                ) : (
+                  <p className="page-subnote">No prepared plan yet.</p>
+                )}
+                {exposurePreparedManualSteps.length > 0 ? (
+                  <div className="exposure-prepared-block">
+                    <h4>Manual restart / reverse proxy checklist</h4>
                     <ul>
-                      {exposureChecks.map((entry) => (
-                        <li key={`exposure-check-${entry.name || entry.detail}`}>
-                          <span className={`status-pill exposure-check-pill exposure-check-pill--${entry.status || "info"}`}>
-                            {entry.status || "info"}
-                          </span>
-                          {entry.detail}
-                        </li>
-                      ))}
+                      {exposurePreparedManualSteps.map((entry) => <li key={`prepared-step-${entry}`}>{entry}</li>)}
                     </ul>
                   </div>
                 ) : null}
               </section>
-              <section className="exposure-plan-notes">
+              <section className="exposure-results-card exposure-plan-notes">
+                <h3>Manual plan</h3>
                 <details open>
                   <summary>Manual Steps</summary>
                   <ul>

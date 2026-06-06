@@ -206,6 +206,8 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("Prepare manual switch");
     expect(modalSource).toContain("Desired Mode");
     expect(modalSource).toContain("Confirmation");
+    expect(modalSource).toContain("exposure-planner-modal-shell");
+    expect(modalSource).toContain("exposure-results-stack");
   });
 
   test("planner modal includes modes, providers, maintenance lock actions, prepare actions, and no activation route", () => {
@@ -221,17 +223,29 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).toContain("apiRequest(\"/api/admin/exposure/prepare-switch\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/prepared-switch\"");
     expect(source).toContain("current_admin_password = draft.currentAdminPassword");
-    expect(modalSource).toContain("Private Mode");
-    expect(modalSource).toContain("Public Mode - Custom Domain");
-    expect(modalSource).toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
+    expect(source).toContain("const EXPOSURE_MODE_SEGMENTS = [");
+    expect(source).toContain("{ value: \"private\", label: \"Private\" }");
+    expect(source).toContain("{ value: \"public_custom_domain\", label: \"Public domain\" }");
+    expect(source).toContain("{ value: \"public_direct_ip\", label: \"Direct IP\", badge: \"Not recommended\" }");
+    expect(modalSource).toContain("className=\"exposure-mode-segmented\"");
+    expect(modalSource).toContain("options={EXPOSURE_MODE_SEGMENTS}");
+    expect(source).toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
     expect(modalSource).toContain("NOT RECOMMENDED");
     expect(modalSource).toContain("I understand direct public IP exposure is not recommended.");
     expect(modalSource).toContain("https://media.example.com");
     expect(modalSource).toContain("http://203.0.113.10:4173");
     expect(modalSource).toContain("Save pending draft");
     expect(modalSource).toContain("Clear pending draft");
-    expect(modalSource).toContain("Enable maintenance lock");
-    expect(modalSource).toContain("Disable maintenance lock");
+    expect(source).toContain("const EXPOSURE_MAINTENANCE_SEGMENTS = [");
+    expect(modalSource).toContain("className=\"exposure-maintenance-switch\"");
+    expect(modalSource).toContain("className=\"primary-button exposure-maintenance-confirm-button\"");
+    expect(modalSource).toContain("handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)");
+    expect(source).toContain("const exposureMaintenanceActionLabel = exposureMaintenanceTargetEnabled ? \"Enable maintenance lock\" : \"Disable maintenance lock\";");
+    expect(modalSource).not.toContain("disabled={exposurePending || exposureMaintenanceLock.enabled}");
+    expect(modalSource).not.toContain("disabled={exposurePending || !exposureMaintenanceLock.enabled}");
+    expect(modalSource).not.toContain("onClick={() => handleSetExposureMaintenanceLock(true)}");
+    expect(modalSource).not.toContain("onClick={() => handleSetExposureMaintenanceLock(false)}");
+    expect(modalSource).toContain("exposure-secret-field");
     expect(modalSource).toContain("Prepared for manual apply");
     expect(modalSource).toContain("Prepare manual switch");
     expect(modalSource).toContain("Clear prepared switch");
@@ -275,10 +289,16 @@ describe("AdminPage exposure mode planner guards", () => {
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
     const modalSource = source.slice(modalStart, modalEnd);
 
-    expect(modalSource).toContain("<h3>Validation</h3>");
+    expect(modalSource).toContain("<h3>Validation summary</h3>");
+    expect(modalSource).toContain("<h3>Warnings / errors</h3>");
     expect(modalSource).toContain("<strong>Errors</strong>");
     expect(modalSource).toContain("<strong>Warnings</strong>");
-    expect(modalSource).toContain("<strong>Checks</strong>");
+    expect(modalSource).toContain("<h3>Checks</h3>");
+    expect(modalSource).toContain("exposure-validation-summary");
+    expect(modalSource).toContain("exposure-check-row");
+    expect(modalSource).toContain("No blocking errors.");
+    expect(modalSource).toContain("<h3>Prepared switch</h3>");
+    expect(modalSource).toContain("<h3>Manual plan</h3>");
     expect(modalSource).toContain("<summary>Manual Steps</summary>");
     expect(modalSource).toContain("<summary>Env Suggestions</summary>");
     expect(modalSource).toContain("<summary>Reverse Proxy Notes</summary>");
