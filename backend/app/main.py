@@ -40,6 +40,21 @@ from .url_prefix_service import resolve_url_prefix
 
 logger = logging.getLogger(__name__)
 
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+}
+
+
+def _apply_security_headers(response):
+    for name, value in SECURITY_HEADERS.items():
+        if name not in response.headers:
+            response.headers[name] = value
+    return response
+
 
 def configure_logging(level: str) -> None:
     logging.basicConfig(
@@ -122,6 +137,12 @@ async def add_totp_setup_header(request: Request, call_next):
     if getattr(request.state, "totp_setup_required", False):
         response.headers["X-Elvern-Totp-Setup-Required"] = "true"
     return response
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    return _apply_security_headers(response)
 
 
 @app.get("/health")

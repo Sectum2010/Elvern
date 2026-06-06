@@ -73,6 +73,14 @@ const downloadSessionTokenPattern = /\/api\/download\/sessions\/[^/?#\s]+/g;
 const neutralRequestTargetOrigin = "http://elvern.local";
 const absoluteRequestTargetPattern = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
+export const securityHeaders = {
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+};
+
 
 class RequestBodyTooLargeError extends Error {
   constructor(limitBytes) {
@@ -82,16 +90,54 @@ class RequestBodyTooLargeError extends Error {
 }
 
 
-function sendError(response, statusCode, message) {
-  response.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
+export function withSecurityHeaders(headers = {}) {
+  const merged = { ...headers };
+  const existingNames = new Set(Object.keys(merged).map((key) => key.toLowerCase()));
+  for (const [name, value] of Object.entries(securityHeaders)) {
+    const normalizedName = name.toLowerCase();
+    if (!existingNames.has(normalizedName)) {
+      merged[name] = value;
+      existingNames.add(normalizedName);
+    }
+  }
+  return merged;
+}
+
+
+export function applySecurityHeadersToResponse(response) {
+  for (const [name, value] of Object.entries(securityHeaders)) {
+    const hasHeader =
+      typeof response.hasHeader === "function"
+        ? response.hasHeader(name)
+        : Object.keys(response.getHeaders?.() || {}).some((key) => key.toLowerCase() === name.toLowerCase());
+    if (!hasHeader) {
+      response.setHeader(name, value);
+    }
+  }
+}
+
+
+export function buildAssetResponseHeaders(contentType, cacheControl) {
+  return withSecurityHeaders({
+    "Content-Type": contentType,
+    "Cache-Control": cacheControl,
+  });
+}
+
+
+export function sendError(response, statusCode, message) {
+  response.writeHead(statusCode, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
   response.end(message);
 }
 
-function sendMethodNotAllowed(response, allowedMethods) {
-  response.writeHead(405, {
-    "Allow": allowedMethods.join(", "),
-    "Content-Type": "text/plain; charset=utf-8",
-  });
+export function sendMethodNotAllowed(response, allowedMethods) {
+  response.writeHead(
+    405,
+    withSecurityHeaders({
+      "Allow": allowedMethods.join(", "),
+      "Content-Type": "text/plain; charset=utf-8",
+    }),
+  );
   response.end("Method Not Allowed");
 }
 
@@ -293,6 +339,7 @@ async function proxyRequest(request, response, targetUrl) {
     }
     response.setHeader(key, value);
   });
+  applySecurityHeadersToResponse(response);
 
   if (request.method === "HEAD") {
     response.end();
@@ -430,10 +477,7 @@ async function serveAsset(request, response) {
 
   if (isIndexHtml) {
     const html = withBaseHref(await fsp.readFile(filePath, "utf-8"), urlPrefix);
-    response.writeHead(200, {
-      "Content-Type": contentType,
-      "Cache-Control": cacheControl,
-    });
+    response.writeHead(200, buildAssetResponseHeaders(contentType, cacheControl));
     if (request.method === "HEAD") {
       response.end();
       return;
@@ -442,10 +486,7 @@ async function serveAsset(request, response) {
     return;
   }
 
-  response.writeHead(200, {
-    "Content-Type": contentType,
-    "Cache-Control": cacheControl,
-  });
+  response.writeHead(200, buildAssetResponseHeaders(contentType, cacheControl));
 
   fs.createReadStream(filePath).pipe(response);
 }

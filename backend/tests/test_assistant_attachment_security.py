@@ -181,17 +181,29 @@ def test_assistant_attachment_response_policy_normalizes_safe_and_active_mime_ty
 
 
 @pytest.mark.parametrize(
-    ("mime_type", "filename", "expected_content_type", "expected_disposition", "expect_csp"),
+    ("mime_type", "filename", "expected_content_type", "expected_disposition", "expected_csp"),
     [
-        ("image/png", "safe.png", "image/png", "inline", False),
-        ("text/plain", "note.txt", "text/plain", "inline", True),
-        ("text/plain; charset=utf-8", "note-params.txt", "text/plain", "inline", True),
-        ("image/svg+xml", "active.svg", "application/octet-stream", "attachment", True),
-        ("text/html", "active.html", "application/octet-stream", "attachment", True),
-        ("text/html; charset=utf-8", "active-params.html", "application/octet-stream", "attachment", True),
-        ("application/pdf", "report.pdf", "application/octet-stream", "attachment", True),
-        ("application/octet-stream", "unknown.bin", "application/octet-stream", "attachment", True),
-        (None, "empty.bin", "application/octet-stream", "attachment", True),
+        ("image/png", "safe.png", "image/png", "inline", "frame-ancestors 'none'"),
+        ("text/plain", "note.txt", "text/plain", "inline", "default-src 'none'; sandbox"),
+        ("text/plain; charset=utf-8", "note-params.txt", "text/plain", "inline", "default-src 'none'; sandbox"),
+        ("image/svg+xml", "active.svg", "application/octet-stream", "attachment", "default-src 'none'; sandbox"),
+        ("text/html", "active.html", "application/octet-stream", "attachment", "default-src 'none'; sandbox"),
+        (
+            "text/html; charset=utf-8",
+            "active-params.html",
+            "application/octet-stream",
+            "attachment",
+            "default-src 'none'; sandbox",
+        ),
+        ("application/pdf", "report.pdf", "application/octet-stream", "attachment", "default-src 'none'; sandbox"),
+        (
+            "application/octet-stream",
+            "unknown.bin",
+            "application/octet-stream",
+            "attachment",
+            "default-src 'none'; sandbox",
+        ),
+        (None, "empty.bin", "application/octet-stream", "attachment", "default-src 'none'; sandbox"),
     ],
 )
 def test_assistant_attachment_view_applies_safe_inline_or_download_policy(
@@ -201,7 +213,7 @@ def test_assistant_attachment_view_applies_safe_inline_or_download_policy(
     filename: str,
     expected_content_type: str,
     expected_disposition: str,
-    expect_csp: bool,
+    expected_csp: str,
 ) -> None:
     owner, password = _create_standard_user(
         initialized_settings,
@@ -221,10 +233,7 @@ def test_assistant_attachment_view_applies_safe_inline_or_download_policy(
     assert response.headers["Content-Type"].startswith(expected_content_type)
     assert response.headers["Content-Disposition"].startswith(expected_disposition)
     _assert_common_attachment_headers(response)
-    if expect_csp:
-        assert response.headers["Content-Security-Policy"] == "default-src 'none'; sandbox"
-    else:
-        assert "Content-Security-Policy" not in response.headers
+    assert response.headers["Content-Security-Policy"] == expected_csp
 
 
 def test_assistant_attachment_view_permissions_remain_unchanged(initialized_settings, client) -> None:

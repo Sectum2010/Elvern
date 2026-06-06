@@ -44,6 +44,11 @@ Use this checklist for security-sensitive Elvern changes, especially after CodeQ
 - Prefer media item IDs, endpoint names, return codes, and exception types over raw paths or exception strings.
 - Do not log ffprobe stdout/stderr, env dumps, request tokens, or filesystem paths that reveal private media names.
 
+## Browser Security Headers
+
+- Baseline global headers should stay low-regression: nosniff, no-referrer, no framing, and narrow permissions policy.
+- Do not add full CSP or HSTS without a dedicated compatibility pass for SPA, media, PWA, download, and handoff behavior.
+
 ## CodeQL Remediation Workflow
 
 - Fix the root cause first.
