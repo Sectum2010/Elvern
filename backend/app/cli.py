@@ -306,6 +306,22 @@ def cmd_admin_disable_totp(args, settings) -> int:
     return 0
 
 
+def _backup_create_cli_summary(payload: dict[str, object]) -> dict[str, object]:
+    safe_fields = (
+        "checkpoint_id",
+        "backup_path",
+        "created_at_utc",
+        "backup_storage",
+        "backup_encrypted",
+        "backup_key_source",
+        "contains_secrets",
+        "total_size_bytes",
+        "file_count",
+        "warning",
+    )
+    return {field: payload[field] for field in safe_fields if field in payload}
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -352,7 +368,7 @@ def main() -> None:
             include_helper_releases=not args.no_helper_releases,
             include_assistant_uploads=not args.no_assistant_uploads,
         )
-        print(json.dumps(payload, indent=2))
+        print(json.dumps(_backup_create_cli_summary(payload), indent=2))
         return
 
     init_db(settings)

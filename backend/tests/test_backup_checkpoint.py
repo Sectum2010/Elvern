@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import inspect
 import json
 from pathlib import Path
 import shutil
@@ -214,6 +215,7 @@ def test_backup_creation_produces_manifest_and_db_snapshot(initialized_settings,
     assert manifest["reason"] is None
     assert manifest["media_root_path"] == str(initialized_settings.media_root.resolve())
     assert manifest["transcode_dir"] == str(initialized_settings.transcode_dir.resolve())
+    assert payload["manifest"] == manifest
 
     file_paths = {entry["relative_path"] for entry in manifest["files"]}
     assert "elvern.db" in file_paths
@@ -1096,6 +1098,116 @@ def test_cli_backup_restore_plan_works_against_temp_checkpoint(
     assert payload["checkpoint_id"] == "checkpoint"
     assert payload["checkpoint_valid"] is True
     assert payload["restore_scope"]["db_snapshot_available"] is True
+
+
+def _backup_payload_with_sensitive_manifest() -> dict[str, object]:
+    return {
+        "checkpoint_id": "elvern-backup-20260606-010203Z.tar.gz.enc",
+        "backup_path": "/safe/backups/elvern-backup-20260606-010203Z.tar.gz.enc",
+        "manifest_path": "/safe/backups/elvern-backup-20260606-010203Z.tar.gz.enc:manifest.json",
+        "created_at_utc": "2026-06-06T01:02:03+00:00",
+        "backup_trigger": "manual_cli",
+        "auto_checkpoint": False,
+        "warning": "Manual backups may contain secrets. Do not share or commit them.",
+        "contains_secrets": True,
+        "backup_storage": "encrypted_archive",
+        "backup_encrypted": True,
+        "backup_key_source": "auto",
+        "total_size_bytes": 123456,
+        "file_count": 1,
+        "manifest": {
+            "source_db_path": "/private/elvern/backend/data/elvern.db",
+            "project_root": "/private/elvern",
+            "media_root_path": "/private/media",
+            "transcode_dir": "/private/elvern/backend/data/transcodes",
+            "public_app_origin": "https://private.example",
+            "backend_origin": "https://backend.private.example",
+            "operation_context": {"token": "secret"},
+            "helper_releases_included": True,
+            "assistant_uploads_included": True,
+            "files": [
+                {
+                    "relative_path": "deploy/env/elvern.env",
+                    "sha256": "abc",
+                    "size_bytes": 42,
+                }
+            ],
+        },
+    }
+
+
+def test_backup_create_cli_summary_excludes_manifest_and_sensitive_metadata() -> None:
+    payload = _backup_payload_with_sensitive_manifest()
+
+    summary = app_cli._backup_create_cli_summary(payload)
+    serialized = json.dumps(summary)
+
+    assert summary == {
+        "checkpoint_id": "elvern-backup-20260606-010203Z.tar.gz.enc",
+        "backup_path": "/safe/backups/elvern-backup-20260606-010203Z.tar.gz.enc",
+        "created_at_utc": "2026-06-06T01:02:03+00:00",
+        "backup_storage": "encrypted_archive",
+        "backup_encrypted": True,
+        "backup_key_source": "auto",
+        "contains_secrets": True,
+        "total_size_bytes": 123456,
+        "file_count": 1,
+        "warning": "Manual backups may contain secrets. Do not share or commit them.",
+    }
+    assert "manifest" not in summary
+    for sensitive_value in (
+        "source_db_path",
+        "project_root",
+        "media_root_path",
+        "transcode_dir",
+        "operation_context",
+        "deploy/env/elvern.env",
+        "private.example",
+    ):
+        assert sensitive_value not in serialized
+
+
+def test_cli_backup_create_prints_safe_summary_only(monkeypatch, capsys) -> None:
+    payload = _backup_payload_with_sensitive_manifest()
+    calls: dict[str, object] = {}
+
+    def _fake_create_backup_checkpoint(settings, **kwargs):
+        calls["settings"] = settings
+        calls["kwargs"] = kwargs
+        return payload
+
+    monkeypatch.setattr(app_cli, "refresh_settings", lambda: object())
+    monkeypatch.setattr(app_cli, "create_backup_checkpoint", _fake_create_backup_checkpoint)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backend.app.cli", "backup-create", "--no-env", "--no-helper-releases", "--no-assistant-uploads"],
+    )
+
+    app_cli.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output == app_cli._backup_create_cli_summary(payload)
+    assert "manifest" not in output
+    assert "manifest_path" not in output
+    assert "backup_trigger" not in output
+    assert "auto_checkpoint" not in output
+    assert calls["kwargs"] == {
+        "output_dir": None,
+        "include_env": False,
+        "include_helper_releases": False,
+        "include_assistant_uploads": False,
+    }
+
+
+def test_cli_backup_create_branch_uses_safe_summary() -> None:
+    source = inspect.getsource(app_cli.main)
+    backup_create_branch = source.split('if args.command == "backup-create":', maxsplit=1)[1].split(
+        "init_db(settings)",
+        maxsplit=1,
+    )[0]
+
+    assert "print(json.dumps(_backup_create_cli_summary(payload), indent=2))" in backup_create_branch
+    assert "print(json.dumps(payload, indent=2))" not in backup_create_branch
 
 
 def test_plan_backup_restore_script_exists_and_is_executable() -> None:
