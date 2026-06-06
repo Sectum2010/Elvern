@@ -67,6 +67,60 @@ ASSISTANT_EXTERNAL_IMAGE_MIME_TYPES = {
     "image/avif",
     "image/bmp",
 }
+ASSISTANT_INLINE_RASTER_IMAGE_MIME_TYPES = frozenset(ASSISTANT_EXTERNAL_IMAGE_MIME_TYPES)
+ASSISTANT_INLINE_TEXT_MIME_TYPES = frozenset({"text/plain"})
+ASSISTANT_ACTIVE_CONTENT_MIME_TYPES = frozenset(
+    {
+        "application/javascript",
+        "application/xhtml+xml",
+        "application/xml",
+        "image/svg+xml",
+        "text/html",
+        "text/javascript",
+        "text/xml",
+    }
+)
+ASSISTANT_ATTACHMENT_CACHE_HEADERS = {
+    "Cache-Control": "private, no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "X-Content-Type-Options": "nosniff",
+}
+ASSISTANT_ATTACHMENT_SANDBOX_CSP = "default-src 'none'; sandbox"
+
+
+def _normalized_attachment_mime_type(value: object) -> str:
+    return str(value or "").split(";", maxsplit=1)[0].strip().lower()
+
+
+def assistant_attachment_response_policy(mime_type: object) -> dict[str, object]:
+    normalized_mime_type = _normalized_attachment_mime_type(mime_type)
+    headers = dict(ASSISTANT_ATTACHMENT_CACHE_HEADERS)
+
+    if normalized_mime_type in ASSISTANT_INLINE_RASTER_IMAGE_MIME_TYPES:
+        return {
+            "media_type": normalized_mime_type,
+            "content_disposition_type": "inline",
+            "headers": headers,
+        }
+
+    if normalized_mime_type in ASSISTANT_INLINE_TEXT_MIME_TYPES:
+        headers["Content-Security-Policy"] = ASSISTANT_ATTACHMENT_SANDBOX_CSP
+        return {
+            "media_type": "text/plain; charset=utf-8",
+            "content_disposition_type": "inline",
+            "headers": headers,
+        }
+
+    # Active content, PDF, octet-stream, unknown, and empty MIME types all use
+    # the same download policy. The explicit active-content set is kept for
+    # auditability and static tests.
+    headers["Content-Security-Policy"] = ASSISTANT_ATTACHMENT_SANDBOX_CSP
+    return {
+        "media_type": "application/octet-stream",
+        "content_disposition_type": "attachment",
+        "headers": headers,
+    }
 
 
 def assistant_beta_enabled_for_user(settings: Settings, *, user_id: int) -> bool:

@@ -11,6 +11,7 @@ from ..schemas import (
 )
 from ..services.assistant_service import (
     MAX_ATTACHMENT_BYTES,
+    assistant_attachment_response_policy,
     assistant_beta_enabled_for_user,
     create_assistant_request,
     get_assistant_attachment_file,
@@ -98,11 +99,13 @@ def assistant_attachment_view(attachment_id: int, request: Request, user=Current
         attachment_id=attachment_id,
         user=user,
     )
+    policy = assistant_attachment_response_policy(payload["mime_type"])
     return FileResponse(
         path=str(payload["path"]),
-        media_type=str(payload["mime_type"]),
+        media_type=str(policy["media_type"]),
         filename=str(payload["filename"]),
-        content_disposition_type="inline",
+        content_disposition_type=str(policy["content_disposition_type"]),
+        headers=dict(policy["headers"]),
     )
 
 
