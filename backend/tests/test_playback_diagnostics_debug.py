@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -103,6 +104,104 @@ def test_admin_can_save_gated_playback_diagnostics(
     assert "token=[redacted]" in saved_payload["diagnostics"]["video"]["currentSrc"]
     assert saved_payload["diagnostics"]["headers"]["cookie"] == "[redacted]"
     assert saved_payload["diagnostics"]["headers"]["authorization"] == "[redacted]"
+
+
+def test_url_token_redaction_uses_linear_scanner() -> None:
+    cases = {
+        "/x.m3u8?token=secret": "/x.m3u8?token=[redacted]",
+        "/x?access_token=secret&quality=hd": "/x?access_token=[redacted]&quality=hd",
+        "/x?quality=hd&sig=secret": "/x?quality=hd&sig=[redacted]",
+        "/x?quality=hd&api_key=secret": "/x?quality=hd&api_key=[redacted]",
+        "/x?quality=hd&authorization=secret": "/x?quality=hd&authorization=[redacted]",
+        "/x?quality=hd&token=abc&name=test&sig=xyz": (
+            "/x?quality=hd&token=[redacted]&name=test&sig=[redacted]"
+        ),
+        "/x?monkey=banana": "/x?monkey=[redacted]",
+        "/x?quality=hd&name=test": "/x?quality=hd&name=test",
+        "/x?sig&key&token": "/x?sig&key&token",
+        "plain string without query": "plain string without query",
+    }
+
+    for value, expected in cases.items():
+        assert debug_routes._redact_url_tokens(value) == expected
+
+
+def test_url_token_redaction_handles_large_malformed_strings() -> None:
+    malicious = "/x?" + "&".join(
+        f"sig{i}keytokenwithoutassignment" for i in range(10_000)
+    )
+
+    redacted = debug_routes._redact_url_tokens(malicious)
+
+    assert redacted == malicious
+
+
+def test_diagnostic_string_truncation_only_applies_above_generous_limit() -> None:
+    exact_limit = "a" * debug_routes.MAX_DIAGNOSTIC_STRING_LENGTH
+    over_limit = f"{exact_limit}b"
+
+    assert debug_routes._redact_diagnostic_payload({"message": exact_limit})["message"] == exact_limit
+    redacted = debug_routes._redact_diagnostic_payload({"message": over_limit})["message"]
+    assert redacted == f"{exact_limit}[truncated]"
+
+
+def test_diagnostic_depth_limit_caps_abnormal_nesting() -> None:
+    nested: object = "leaf"
+    for _ in range(debug_routes.MAX_DIAGNOSTIC_DEPTH + 2):
+        nested = {"child": nested}
+
+    redacted = debug_routes._redact_diagnostic_payload(nested)
+    cursor = redacted
+    for _ in range(debug_routes.MAX_DIAGNOSTIC_DEPTH + 1):
+        assert isinstance(cursor, dict)
+        cursor = cursor["child"]
+
+    assert cursor == "[truncated: max depth exceeded]"
+
+
+def test_large_collections_are_truncated_and_do_not_break_saving(
+    client,
+    admin_credentials,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    diagnostics_dir = tmp_path / "playback-diagnostics"
+    monkeypatch.setattr(debug_routes, "PLAYBACK_DIAGNOSTICS_DIR", diagnostics_dir)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    diagnostics = {
+        **_diagnostics_payload(),
+        "large_list": list(range(debug_routes.MAX_DIAGNOSTIC_LIST_ITEMS + 1)),
+        "large_dict": {
+            f"item_{index}": index
+            for index in range(debug_routes.MAX_DIAGNOSTIC_DICT_ITEMS + 1)
+        },
+    }
+
+    response = client.post(
+        "/api/debug/playback-diagnostics",
+        json={
+            "diagnostic_source": "playback_debug_panel",
+            "label": "large collections",
+            "diagnostics": diagnostics,
+        },
+    )
+
+    assert response.status_code == 200
+    saved_payload = json.loads(Path(response.json()["saved_path"]).read_text(encoding="utf-8"))
+    redacted = saved_payload["diagnostics"]
+
+    assert len(redacted["large_list"]) == debug_routes.MAX_DIAGNOSTIC_LIST_ITEMS + 1
+    assert redacted["large_list"][-1] == "[truncated: 1 additional items omitted]"
+    assert len(redacted["large_dict"]) == debug_routes.MAX_DIAGNOSTIC_DICT_ITEMS + 1
+    assert redacted["large_dict"]["[truncated]"] == "[truncated: 1 additional items omitted]"
+    json.dumps(redacted)
+
+
+def test_debug_route_no_longer_uses_resub_for_url_token_redaction() -> None:
+    source = inspect.getsource(debug_routes._redact_url_tokens)
+
+    assert "re.sub" not in source
+    assert "[^=\\s" not in source
 
 
 def test_playback_diagnostics_requires_debug_panel_gate_and_label(

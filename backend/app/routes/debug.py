@@ -17,7 +17,14 @@ router = APIRouter(prefix="/api/debug", tags=["debug"])
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PLAYBACK_DIAGNOSTICS_DIR = PROJECT_ROOT / "tmp" / "playback-diagnostics"
 SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]+")
-SECRET_KEY_RE = re.compile(r"(token|access_token|auth|authorization|signature|sig|key|secret|cookie)", re.IGNORECASE)
+SENSITIVE_QUERY_KEYWORDS = ("token", "access_token", "auth", "authorization", "signature", "sig", "key", "secret")
+SENSITIVE_DIAGNOSTIC_KEYWORDS = (*SENSITIVE_QUERY_KEYWORDS, "cookie")
+
+# Defensive caps for abnormal diagnostics only; normal playback debug payloads are much smaller.
+MAX_DIAGNOSTIC_STRING_LENGTH = 262_144  # 256 KiB per string.
+MAX_DIAGNOSTIC_DEPTH = 32  # Nested values beyond this depth are replaced with a marker.
+MAX_DIAGNOSTIC_DICT_ITEMS = 2_000  # Additional mapping items are omitted with a marker.
+MAX_DIAGNOSTIC_LIST_ITEMS = 5_000  # Additional list items are omitted with a marker.
 
 
 def _sanitize_filename_part(value: object, *, fallback: str) -> str:
@@ -25,28 +32,103 @@ def _sanitize_filename_part(value: object, *, fallback: str) -> str:
     return normalized[:80] or fallback
 
 
+def _is_sensitive_key(key: object) -> bool:
+    lower_key = str(key).lower()
+    return any(keyword in lower_key for keyword in SENSITIVE_DIAGNOSTIC_KEYWORDS)
+
+
+def _is_sensitive_query_key(key: str) -> bool:
+    lower_key = key.lower()
+    return any(keyword in lower_key for keyword in SENSITIVE_QUERY_KEYWORDS)
+
+
+def _is_query_value_boundary(character: str) -> bool:
+    return character == "&" or character in "\"'" or character.isspace()
+
+
 def _redact_url_tokens(value: str) -> str:
-    return re.sub(
-        r"([?&][^=\s\"']*(?:token|access_token|auth|authorization|signature|sig|key|secret)[^=\s\"']*=)[^&\s\"']+",
-        r"\1[redacted]",
-        value,
-        flags=re.IGNORECASE,
-    )
+    if not value:
+        return value
+
+    redacted: list[str] = []
+    index = 0
+    value_length = len(value)
+    while index < value_length:
+        separator = value[index]
+        if separator not in "?&":
+            redacted.append(separator)
+            index += 1
+            continue
+
+        key_start = index + 1
+        key_end = key_start
+        while key_end < value_length:
+            character = value[key_end]
+            if character in "=&\"'" or character.isspace():
+                break
+            key_end += 1
+
+        if key_end >= value_length or value[key_end] != "=":
+            redacted.append(value[index:key_end])
+            index = key_end
+            continue
+
+        value_start = key_end + 1
+        value_end = value_start
+        while value_end < value_length and not _is_query_value_boundary(value[value_end]):
+            value_end += 1
+
+        if _is_sensitive_query_key(value[key_start:key_end]):
+            redacted.append(value[index:value_start])
+            redacted.append("[redacted]")
+        else:
+            redacted.append(value[index:value_end])
+        index = value_end
+
+    return "".join(redacted)
 
 
-def _redact_diagnostic_payload(value: Any) -> Any:
+def _redact_diagnostic_string(value: str) -> str:
+    if len(value) > MAX_DIAGNOSTIC_STRING_LENGTH:
+        return _redact_url_tokens(value[:MAX_DIAGNOSTIC_STRING_LENGTH]) + "[truncated]"
+    return _redact_url_tokens(value)
+
+
+def _dict_truncation_key(redacted: dict[str, Any]) -> str:
+    marker_key = "[truncated]"
+    suffix = 1
+    while marker_key in redacted:
+        marker_key = f"[truncated-{suffix}]"
+        suffix += 1
+    return marker_key
+
+
+def _redact_diagnostic_payload(value: Any, *, depth: int = 0) -> Any:
+    if depth > MAX_DIAGNOSTIC_DEPTH:
+        return "[truncated: max depth exceeded]"
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            if SECRET_KEY_RE.search(str(key)):
+        for index, (key, item) in enumerate(value.items()):
+            if index >= MAX_DIAGNOSTIC_DICT_ITEMS:
+                omitted_count = len(value) - MAX_DIAGNOSTIC_DICT_ITEMS
+                redacted[_dict_truncation_key(redacted)] = f"[truncated: {omitted_count} additional items omitted]"
+                break
+            if _is_sensitive_key(key):
                 redacted[str(key)] = "[redacted]"
             else:
-                redacted[str(key)] = _redact_diagnostic_payload(item)
+                redacted[str(key)] = _redact_diagnostic_payload(item, depth=depth + 1)
         return redacted
     if isinstance(value, list):
-        return [_redact_diagnostic_payload(item) for item in value]
+        redacted_list = [
+            _redact_diagnostic_payload(item, depth=depth + 1)
+            for item in value[:MAX_DIAGNOSTIC_LIST_ITEMS]
+        ]
+        if len(value) > MAX_DIAGNOSTIC_LIST_ITEMS:
+            omitted_count = len(value) - MAX_DIAGNOSTIC_LIST_ITEMS
+            redacted_list.append(f"[truncated: {omitted_count} additional items omitted]")
+        return redacted_list
     if isinstance(value, str):
-        return _redact_url_tokens(value)
+        return _redact_diagnostic_string(value)
     return value
 
 
