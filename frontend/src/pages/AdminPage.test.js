@@ -165,55 +165,88 @@ describe("AdminPage password help request guards", () => {
 });
 
 describe("AdminPage exposure mode planner guards", () => {
-  test("security planner UI includes the Phase 1 controls and no public Tailscale option", () => {
+  test("security card uses Exposure Mode wording and keeps planner form out of the default layout", () => {
     const source = readAdminPage();
+    const start = source.indexOf("<section className=\"settings-card exposure-summary-card\">");
+    const end = source.indexOf("{urlPrefixStatus?.rotation_reminder_due", start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const securityCardSource = source.slice(start, end);
 
-    expect(source).toContain("Exposure Mode Planner");
-    expect(source).toContain("Phase 1 only: this draft does not change runtime behavior, does not write env files, does not rotate the URL prefix, and does not revoke or disable users.");
-    expect(source).toContain("Private Mode");
-    expect(source).toContain("Public Mode - Custom Domain");
-    expect(source).toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
-    expect(source).toContain("NOT RECOMMENDED");
-    expect(source).toContain("I understand direct public IP exposure is not recommended.");
-    expect(source).toContain("https://media.example.com");
-    expect(source).toContain("http://203.0.113.10:4173");
-    expect(source).not.toContain("tailscale_funnel");
-    expect(source).not.toContain("Tailscale Funnel");
+    expect(securityCardSource).toContain("<StatusRow label=\"Exposure Mode\" value={exposureModeStatus} />");
+    expect(securityCardSource).toContain("<StatusRow label=\"Pending draft\" value={exposurePendingDraft ? \"Exists\" : \"None\"} />");
+    expect(securityCardSource).toContain("<StatusRow label=\"Current request origin\"");
+    expect(securityCardSource).toContain("Manage");
+    expect(securityCardSource).not.toContain("Private-only mode");
+    expect(securityCardSource).not.toContain("Public Mode - Custom Domain");
+    expect(securityCardSource).not.toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
+    expect(securityCardSource).not.toContain("Validate plan");
+    expect(securityCardSource).not.toContain("Save pending draft");
   });
 
-  test("provider selector includes only the supported planner providers", () => {
+  test("manage button opens the planner modal path", () => {
     const source = readAdminPage();
+    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
 
-    expect(source).toContain("caddy: \"Caddy\"");
-    expect(source).toContain("nginx: \"Nginx\"");
-    expect(source).toContain("cloudflare_tunnel: \"Cloudflare Tunnel\"");
-    expect(source).toContain("manual_other: \"Manual/Other\"");
+    expect(source).toContain("const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false)");
+    expect(source).toContain("async function handleOpenExposurePlanner()");
+    expect(source).toContain("setExposurePlannerOpen(true);");
+    expect(source).toContain("onClick={handleOpenExposurePlanner}");
+    expect(modalStart).toBeGreaterThan(0);
+    expect(modalEnd).toBeGreaterThan(modalStart);
+    const modalSource = source.slice(modalStart, modalEnd);
+    expect(modalSource).toContain("Manage Exposure Mode");
+    expect(modalSource).toContain("Draft only");
+    expect(modalSource).toContain("Draft only — this does not change runtime behavior, write env files, rotate the URL prefix, revoke sessions, or disable users.");
+    expect(modalSource).toContain("Current Status");
+    expect(modalSource).toContain("Desired Mode");
+    expect(modalSource).toContain("Confirmation");
   });
 
-  test("planner calls validation and draft APIs without an activation route", () => {
+  test("planner modal includes modes, providers, actions, and no activation route", () => {
     const source = readAdminPage();
+    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
+    const modalSource = source.slice(modalStart, modalEnd);
 
     expect(source).toContain("apiRequest(\"/api/admin/exposure/status\")");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/validate\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/drafts\"");
     expect(source).toContain("current_admin_password = draft.currentAdminPassword");
-    expect(source).toContain("Save pending draft");
-    expect(source).toContain("Clear pending draft");
+    expect(modalSource).toContain("Private Mode");
+    expect(modalSource).toContain("Public Mode - Custom Domain");
+    expect(modalSource).toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
+    expect(modalSource).toContain("NOT RECOMMENDED");
+    expect(modalSource).toContain("I understand direct public IP exposure is not recommended.");
+    expect(modalSource).toContain("https://media.example.com");
+    expect(modalSource).toContain("http://203.0.113.10:4173");
+    expect(modalSource).toContain("Save pending draft");
+    expect(modalSource).toContain("Clear pending draft");
+    expect(source).toContain("caddy: \"Caddy\"");
+    expect(source).toContain("nginx: \"Nginx\"");
+    expect(source).toContain("cloudflare_tunnel: \"Cloudflare Tunnel\"");
+    expect(source).toContain("manual_other: \"Manual/Other\"");
+    expect(source).not.toContain("tailscale_funnel");
+    expect(source).not.toContain("Tailscale Funnel");
     expect(source).not.toContain("/api/admin/exposure/activate");
     expect(source).not.toContain(">Activate<");
     expect(source).not.toContain("Activate plan");
   });
 
-  test("planner renders validation details, manual steps, env suggestions, and activation notes", () => {
+  test("planner modal renders validation details and grouped planning notes", () => {
     const source = readAdminPage();
+    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
+    const modalSource = source.slice(modalStart, modalEnd);
 
-    expect(source).toContain("<h3>Validation</h3>");
-    expect(source).toContain("<strong>Errors</strong>");
-    expect(source).toContain("<strong>Warnings</strong>");
-    expect(source).toContain("<strong>Checks</strong>");
-    expect(source).toContain("<h3>Manual Steps</h3>");
-    expect(source).toContain("<h3>Env Suggestions</h3>");
-    expect(source).toContain("<h3>Reverse Proxy Notes</h3>");
-    expect(source).toContain("<h3>Activation Notes</h3>");
+    expect(modalSource).toContain("<h3>Validation</h3>");
+    expect(modalSource).toContain("<strong>Errors</strong>");
+    expect(modalSource).toContain("<strong>Warnings</strong>");
+    expect(modalSource).toContain("<strong>Checks</strong>");
+    expect(modalSource).toContain("<summary>Manual Steps</summary>");
+    expect(modalSource).toContain("<summary>Env Suggestions</summary>");
+    expect(modalSource).toContain("<summary>Reverse Proxy Notes</summary>");
+    expect(modalSource).toContain("<summary>Activation Notes</summary>");
   });
 });

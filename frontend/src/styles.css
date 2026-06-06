@@ -3068,15 +3068,38 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   justify-content: flex-start;
 }
 
-.exposure-planner-card {
-  align-self: stretch;
-}
-
 .exposure-planner-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
-  margin-top: 1rem;
+}
+
+.exposure-summary-card .settings-inline-header {
+  margin-bottom: 0.35rem;
+}
+
+.browser-resume-modal__card.detail-info-modal__card.exposure-planner-modal {
+  width: min(100%, 62rem);
+  max-height: min(88dvh, 52rem);
+}
+
+.exposure-planner-modal__header {
+  align-items: start;
+}
+
+.exposure-planner-modal__header-actions {
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.exposure-planner-modal__body {
+  display: grid;
+  gap: 1rem;
+  padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+.exposure-planner-modal__banner {
+  margin: 0;
 }
 
 .exposure-planner-status,
@@ -3085,6 +3108,20 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   display: grid;
   gap: 0.75rem;
   min-width: 0;
+}
+
+.exposure-planner-modal__section,
+.exposure-validation,
+.exposure-plan-notes {
+  padding: 0.9rem;
+  border: 1px solid rgba(152, 176, 201, 0.14);
+  border-radius: 0.85rem;
+  background: rgba(8, 14, 22, 0.46);
+}
+
+.exposure-planner-modal__section {
+  display: grid;
+  gap: 0.8rem;
 }
 
 .exposure-validation ul,
@@ -3104,6 +3141,32 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .exposure-plan-notes h3 {
   margin: 0.35rem 0 0;
   font-size: 1rem;
+}
+
+.exposure-planner-modal__section h3,
+.exposure-validation h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.exposure-plan-notes details {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.exposure-plan-notes details + details {
+  padding-top: 0.65rem;
+  border-top: 1px solid rgba(152, 176, 201, 0.12);
+}
+
+.exposure-plan-notes summary {
+  color: var(--accent-strong);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.exposure-plan-notes details[open] summary {
+  margin-bottom: 0.55rem;
 }
 
 .exposure-planner-warning {

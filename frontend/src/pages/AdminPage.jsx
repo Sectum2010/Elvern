@@ -212,6 +212,21 @@ function exposureModeLabel(draft) {
 }
 
 
+function formatExposureModeStatus(active, pendingDraft) {
+  const desiredMode = pendingDraft?.desired?.desired_mode;
+  if (desiredMode === "public") {
+    return "Public draft pending";
+  }
+  if (desiredMode === "private") {
+    return "Private draft pending";
+  }
+  if (typeof active?.private_network_only === "boolean") {
+    return active.private_network_only ? "Private Mode" : "Public planning only";
+  }
+  return "Unknown / Needs review";
+}
+
+
 function formatExposureValue(value) {
   if (Array.isArray(value)) {
     return value.length > 0 ? value.join(", ") : "None";
@@ -565,6 +580,7 @@ export function AdminPage() {
   const [exposureFeedback, setExposureFeedback] = useState(null);
   const [exposurePending, setExposurePending] = useState(false);
   const [exposureDraft, setExposureDraft] = useState(DEFAULT_EXPOSURE_DRAFT);
+  const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false);
   const [totpStatus, setTotpStatus] = useState(null);
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
   const [totpDisableUserModal, setTotpDisableUserModal] = useState({
@@ -868,6 +884,19 @@ export function AdminPage() {
       });
     } finally {
       setExposurePending(false);
+    }
+  }
+
+  async function handleOpenExposurePlanner() {
+    setExposurePlannerOpen(true);
+    if (!exposureStatus) {
+      await loadExposureStatus();
+    }
+  }
+
+  function handleCloseExposurePlanner() {
+    if (!exposurePending) {
+      setExposurePlannerOpen(false);
     }
   }
 
@@ -3357,6 +3386,7 @@ export function AdminPage() {
     : [];
   const exposureErrors = Array.isArray(exposureValidation.errors) ? exposureValidation.errors : [];
   const exposureWarnings = Array.isArray(exposureValidation.warnings) ? exposureValidation.warnings : [];
+  const exposureModeStatus = formatExposureModeStatus(exposureActive, exposurePendingDraft);
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
       <section className="settings-card">
@@ -3371,9 +3401,19 @@ export function AdminPage() {
         <StatusRow label="Removed" value={String(statusPayload.last_scan?.files_removed ?? 0)} />
       </section>
 
-	      <section className="settings-card">
-	        <h2>Security</h2>
-	        <StatusRow label="Private-only mode" value={statusPayload.security.private_network_only ? "Enabled" : "Disabled"} />
+	      <section className="settings-card exposure-summary-card">
+	        <div className="settings-inline-header">
+	          <div>
+	            <h2>Security</h2>
+	            <p className="page-subnote">Compact account and exposure posture.</p>
+	          </div>
+	          <button className="ghost-button ghost-button--inline" onClick={handleOpenExposurePlanner} type="button">
+	            Manage
+	          </button>
+	        </div>
+	        <StatusRow label="Exposure Mode" value={exposureModeStatus} />
+	        <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
+	        <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
 	        <StatusRow label="Multi-user" value={statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"} />
 	        <StatusRow label="Users" value={String(statusPayload.total_users)} />
 	        <StatusRow label="Active auth sessions" value={String(sessionsPayload.length)} />
@@ -3447,207 +3487,6 @@ export function AdminPage() {
           >
             {urlPrefixPending ? "Refreshing..." : "Refresh status"}
           </RefreshSweepButton>
-        </div>
-      </section>
-
-      <section className="settings-card settings-card--wide exposure-planner-card">
-        <div className="settings-inline-header">
-          <div>
-            <h2>Exposure Mode Planner</h2>
-            <p className="page-subnote">
-              Phase 1 only: this draft does not change runtime behavior, does not write env files, does not rotate the URL prefix, and does not revoke or disable users.
-            </p>
-          </div>
-          <span className="status-pill">Draft only</span>
-        </div>
-        <div className="exposure-planner-grid">
-          <div className="settings-card-stack">
-            <div className="exposure-planner-status">
-              <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
-              <StatusRow label="Current public_app_origin" value={formatExposureValue(exposureActive.public_app_origin)} />
-              <StatusRow label="Current backend_origin" value={formatExposureValue(exposureActive.backend_origin)} />
-              <StatusRow label="Private-network flag" value={exposureActive.private_network_only ? "Enabled" : "Disabled"} />
-              <StatusRow label="Trusted proxy CIDRs" value={formatExposureValue(exposureActive.trusted_proxy_cidrs)} />
-              <StatusRow label="Cookie secure" value={formatExposureValue(exposureActive.cookie_secure)} />
-              <StatusRow label="URL prefix present" value={formatExposureValue(exposureActive.url_prefix_present)} />
-              <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
-            </div>
-            <label className="settings-field">
-              <span>
-                <strong>Desired mode</strong>
-                <small>{exposureModeLabel(exposureDraft)}</small>
-              </span>
-              <select
-                onChange={(event) =>
-                  setExposureDraft((current) => ({
-                    ...current,
-                    selectedMode: event.target.value,
-                    reverseProxyProvider: event.target.value === "public_direct_ip" ? "manual_other" : current.reverseProxyProvider,
-                  }))
-                }
-                value={exposureDraft.selectedMode}
-              >
-                <option value="private">Private Mode</option>
-                <option value="public_custom_domain">Public Mode - Custom Domain</option>
-                <option value="public_direct_ip">Public Mode - Direct IP (NOT RECOMMENDED)</option>
-              </select>
-            </label>
-            {exposureDraft.selectedMode === "private" ? (
-              <label className="settings-field">
-                <span>
-                  <strong>Private origin</strong>
-                  <small>Optional tailnet, LAN, or private DNS address.</small>
-                </span>
-                <input
-                  onChange={(event) => setExposureDraft((current) => ({ ...current, privateOrigin: event.target.value }))}
-                  placeholder="https://machine.tailnet-name.ts.net or http://192.168.1.10:4173"
-                  type="text"
-                  value={exposureDraft.privateOrigin}
-                />
-              </label>
-            ) : (
-              <>
-                <label className="settings-field">
-                  <span>
-                    <strong>Public origin</strong>
-                    <small>
-                      {exposureDraft.selectedMode === "public_direct_ip"
-                        ? "Direct public IP is allowed but not recommended."
-                        : "Use a purchased domain with HTTPS. No public Tailscale option is offered."}
-                    </small>
-                  </span>
-                  <input
-                    onChange={(event) => setExposureDraft((current) => ({ ...current, publicOrigin: event.target.value }))}
-                    placeholder={exposureDraft.selectedMode === "public_direct_ip" ? "http://203.0.113.10:4173" : "https://media.example.com"}
-                    type="text"
-                    value={exposureDraft.publicOrigin}
-                  />
-                </label>
-                <label className="settings-field">
-                  <span>
-                    <strong>Provider</strong>
-                    <small>Manual planning notes only; Elvern will not configure the proxy.</small>
-                  </span>
-                  <select
-                    onChange={(event) => setExposureDraft((current) => ({ ...current, reverseProxyProvider: event.target.value }))}
-                    value={exposureDraft.reverseProxyProvider}
-                  >
-                    {Object.entries(EXPOSURE_PROVIDER_LABELS).map(([value, label]) => (
-                      <option key={value} value={value}>{label}</option>
-                    ))}
-                  </select>
-                </label>
-              </>
-            )}
-            {exposureDraft.selectedMode === "public_direct_ip" ? (
-              <label className="settings-toggle settings-toggle--compact exposure-planner-warning">
-                <span>
-                  <strong>NOT RECOMMENDED</strong>
-                  <small>I understand direct public IP exposure is not recommended.</small>
-                </span>
-                <input
-                  checked={exposureDraft.directIpNotRecommendedAcknowledgement}
-                  onChange={(event) =>
-                    setExposureDraft((current) => ({
-                      ...current,
-                      directIpNotRecommendedAcknowledgement: event.target.checked,
-                    }))
-                  }
-                  type="checkbox"
-                />
-              </label>
-            ) : null}
-            <label className="settings-toggle settings-toggle--compact">
-              <span>
-                <strong>Phase 1 acknowledgement</strong>
-                <small>This pending draft does not take effect until a later activation phase.</small>
-              </span>
-              <input
-                checked={exposureDraft.acknowledgement}
-                onChange={(event) => setExposureDraft((current) => ({ ...current, acknowledgement: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="settings-field">
-              <span>
-                <strong>Current admin password</strong>
-                <small>Required only to save a pending draft.</small>
-              </span>
-              <NonLoginSecretInput
-                autoComplete="new-password"
-                onChange={(event) => setExposureDraft((current) => ({ ...current, currentAdminPassword: event.target.value }))}
-                placeholder="Current admin password"
-                value={exposureDraft.currentAdminPassword}
-              />
-            </label>
-            <InlineFeedback feedback={exposureFeedback} />
-            <div className="admin-list__actions">
-              <button className="primary-button" disabled={exposurePending} onClick={handleValidateExposurePlan} type="button">
-                {exposurePending ? "Working..." : "Validate plan"}
-              </button>
-              <button className="ghost-button" disabled={exposurePending} onClick={handleSaveExposureDraft} type="button">
-                Save pending draft
-              </button>
-              <button className="ghost-button" disabled={exposurePending || !exposurePendingDraft} onClick={handleClearExposureDraft} type="button">
-                Clear pending draft
-              </button>
-            </div>
-          </div>
-          <div className="settings-card-stack">
-            <div className={`exposure-validation exposure-validation--${exposureValidation.status || "ready"}`}>
-              <h3>Validation</h3>
-              <StatusRow label="Status" value={formatExposureValue(exposureValidation.status || "ready")} />
-              {exposureErrors.length > 0 ? (
-                <div>
-                  <strong>Errors</strong>
-                  <ul>
-                    {exposureErrors.map((entry) => <li key={`exposure-error-${entry}`}>{entry}</li>)}
-                  </ul>
-                </div>
-              ) : null}
-              {exposureWarnings.length > 0 ? (
-                <div>
-                  <strong>Warnings</strong>
-                  <ul>
-                    {exposureWarnings.map((entry) => <li key={`exposure-warning-${entry}`}>{entry}</li>)}
-                  </ul>
-                </div>
-              ) : null}
-              {exposureChecks.length > 0 ? (
-                <div>
-                  <strong>Checks</strong>
-                  <ul>
-                    {exposureChecks.map((entry) => (
-                      <li key={`exposure-check-${entry.name || entry.detail}`}>
-                        <span className={`status-pill exposure-check-pill exposure-check-pill--${entry.status || "info"}`}>
-                          {entry.status || "info"}
-                        </span>
-                        {entry.detail}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </div>
-            <div className="exposure-plan-notes">
-              <h3>Manual Steps</h3>
-              <ul>
-                {exposureManualSteps.map((entry) => <li key={`exposure-step-${entry}`}>{entry}</li>)}
-              </ul>
-              <h3>Env Suggestions</h3>
-              <ul>
-                {exposureEnvSuggestions.map((entry) => <li key={`exposure-env-${entry.name}`}>{formatExposureSuggestion(entry)}</li>)}
-              </ul>
-              <h3>Reverse Proxy Notes</h3>
-              <ul>
-                {exposureReverseProxyNotes.map((entry) => <li key={`exposure-proxy-${entry}`}>{entry}</li>)}
-              </ul>
-              <h3>Activation Notes</h3>
-              <ul>
-                {exposureActivationNotes.map((entry) => <li key={`exposure-activation-${entry}`}>{entry}</li>)}
-              </ul>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -4226,6 +4065,260 @@ export function AdminPage() {
     </div>
   );
 
+  const exposurePlannerModal = exposurePlannerOpen ? (
+    <div
+      aria-labelledby="admin-exposure-planner-modal-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <button
+        aria-label="Close exposure mode manager"
+        className="browser-resume-modal__backdrop"
+        disabled={exposurePending}
+        onClick={handleCloseExposurePlanner}
+        type="button"
+      />
+      <div className="browser-resume-modal__card detail-info-modal__card exposure-planner-modal">
+        <div className="detail-info-modal__header exposure-planner-modal__header">
+          <div className="detail-info-modal__copy">
+            <p className="detail-info-modal__eyebrow">Security</p>
+            <h2 className="detail-info-modal__title" id="admin-exposure-planner-modal-title">
+              Manage Exposure Mode
+            </h2>
+            <p className="page-subnote">
+              Plan private or public exposure without changing the running server.
+            </p>
+          </div>
+          <div className="admin-list__actions exposure-planner-modal__header-actions">
+            <span className="status-pill">Draft only</span>
+            <button
+              aria-label="Close exposure mode manager"
+              className="detail-info-modal__close"
+              disabled={exposurePending}
+              onClick={handleCloseExposurePlanner}
+              type="button"
+            >
+              X
+            </button>
+          </div>
+        </div>
+        <div className="detail-info-modal__body exposure-planner-modal__body">
+          <p className="form-error exposure-planner-modal__banner">
+            Draft only — this does not change runtime behavior, write env files, rotate the URL prefix, revoke sessions, or disable users.
+          </p>
+          <div className="exposure-planner-grid">
+            <div className="settings-card-stack">
+              <section className="exposure-planner-modal__section">
+                <h3>Current Status</h3>
+                <div className="exposure-planner-status">
+                  <StatusRow label="Exposure Mode" value={exposureModeStatus} />
+                  <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
+                  <StatusRow label="Current public_app_origin" value={formatExposureValue(exposureActive.public_app_origin)} />
+                  <StatusRow label="Current backend_origin" value={formatExposureValue(exposureActive.backend_origin)} />
+                  <StatusRow label="Private-network flag" value={exposureActive.private_network_only ? "Enabled" : "Disabled"} />
+                  <StatusRow label="Trusted proxy CIDRs" value={formatExposureValue(exposureActive.trusted_proxy_cidrs)} />
+                  <StatusRow label="Cookie secure" value={formatExposureValue(exposureActive.cookie_secure)} />
+                  <StatusRow label="URL prefix present" value={formatExposureValue(exposureActive.url_prefix_present)} />
+                  <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
+                </div>
+              </section>
+              <section className="exposure-planner-modal__section">
+                <h3>Desired Mode</h3>
+                <label className="settings-field">
+                  <span>
+                    <strong>Planner selector</strong>
+                    <small>{exposureModeLabel(exposureDraft)}. This selector does not switch runtime exposure.</small>
+                  </span>
+                  <select
+                    onChange={(event) =>
+                      setExposureDraft((current) => ({
+                        ...current,
+                        selectedMode: event.target.value,
+                        reverseProxyProvider: event.target.value === "public_direct_ip" ? "manual_other" : current.reverseProxyProvider,
+                      }))
+                    }
+                    value={exposureDraft.selectedMode}
+                  >
+                    <option value="private">Private Mode</option>
+                    <option value="public_custom_domain">Public Mode - Custom Domain</option>
+                    <option value="public_direct_ip">Public Mode - Direct IP (NOT RECOMMENDED)</option>
+                  </select>
+                </label>
+                {exposureDraft.selectedMode === "private" ? (
+                  <label className="settings-field">
+                    <span>
+                      <strong>Private origin</strong>
+                      <small>Optional tailnet, LAN, or private DNS address.</small>
+                    </span>
+                    <input
+                      onChange={(event) => setExposureDraft((current) => ({ ...current, privateOrigin: event.target.value }))}
+                      placeholder="https://machine.tailnet-name.ts.net or http://192.168.1.10:4173"
+                      type="text"
+                      value={exposureDraft.privateOrigin}
+                    />
+                  </label>
+                ) : (
+                  <>
+                    <label className="settings-field">
+                      <span>
+                        <strong>Public origin</strong>
+                        <small>
+                          {exposureDraft.selectedMode === "public_direct_ip"
+                            ? "Direct public IP is allowed but not recommended."
+                            : "Use a purchased domain with HTTPS. No public Tailscale option is offered."}
+                        </small>
+                      </span>
+                      <input
+                        onChange={(event) => setExposureDraft((current) => ({ ...current, publicOrigin: event.target.value }))}
+                        placeholder={exposureDraft.selectedMode === "public_direct_ip" ? "http://203.0.113.10:4173" : "https://media.example.com"}
+                        type="text"
+                        value={exposureDraft.publicOrigin}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>
+                        <strong>Provider</strong>
+                        <small>Manual planning notes only; Elvern will not configure the proxy.</small>
+                      </span>
+                      <select
+                        onChange={(event) => setExposureDraft((current) => ({ ...current, reverseProxyProvider: event.target.value }))}
+                        value={exposureDraft.reverseProxyProvider}
+                      >
+                        {Object.entries(EXPOSURE_PROVIDER_LABELS).map(([value, label]) => (
+                          <option key={value} value={value}>{label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
+                )}
+              </section>
+              <section className="exposure-planner-modal__section">
+                <h3>Confirmation</h3>
+                {exposureDraft.selectedMode === "public_direct_ip" ? (
+                  <label className="settings-toggle settings-toggle--compact exposure-planner-warning">
+                    <span>
+                      <strong>NOT RECOMMENDED</strong>
+                      <small>I understand direct public IP exposure is not recommended.</small>
+                    </span>
+                    <input
+                      checked={exposureDraft.directIpNotRecommendedAcknowledgement}
+                      onChange={(event) =>
+                        setExposureDraft((current) => ({
+                          ...current,
+                          directIpNotRecommendedAcknowledgement: event.target.checked,
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                  </label>
+                ) : null}
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>Phase 1 acknowledgement</strong>
+                    <small>This pending draft does not take effect until a later activation phase.</small>
+                  </span>
+                  <input
+                    checked={exposureDraft.acknowledgement}
+                    onChange={(event) => setExposureDraft((current) => ({ ...current, acknowledgement: event.target.checked }))}
+                    type="checkbox"
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>
+                    <strong>Current admin password</strong>
+                    <small>Required only to save a pending draft.</small>
+                  </span>
+                  <NonLoginSecretInput
+                    autoComplete="new-password"
+                    onChange={(event) => setExposureDraft((current) => ({ ...current, currentAdminPassword: event.target.value }))}
+                    placeholder="Current admin password"
+                    value={exposureDraft.currentAdminPassword}
+                  />
+                </label>
+                <InlineFeedback feedback={exposureFeedback} />
+                <div className="admin-list__actions">
+                  <button className="primary-button" disabled={exposurePending} onClick={handleValidateExposurePlan} type="button">
+                    {exposurePending ? "Working..." : "Validate plan"}
+                  </button>
+                  <button className="ghost-button" disabled={exposurePending} onClick={handleSaveExposureDraft} type="button">
+                    Save pending draft
+                  </button>
+                  <button className="ghost-button" disabled={exposurePending || !exposurePendingDraft} onClick={handleClearExposureDraft} type="button">
+                    Clear pending draft
+                  </button>
+                </div>
+              </section>
+            </div>
+            <div className="settings-card-stack">
+              <section className={`exposure-validation exposure-validation--${exposureValidation.status || "ready"}`}>
+                <h3>Validation</h3>
+                <StatusRow label="Status" value={formatExposureValue(exposureValidation.status || "ready")} />
+                {exposureErrors.length > 0 ? (
+                  <div>
+                    <strong>Errors</strong>
+                    <ul>
+                      {exposureErrors.map((entry) => <li key={`exposure-error-${entry}`}>{entry}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
+                {exposureWarnings.length > 0 ? (
+                  <div>
+                    <strong>Warnings</strong>
+                    <ul>
+                      {exposureWarnings.map((entry) => <li key={`exposure-warning-${entry}`}>{entry}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
+                {exposureChecks.length > 0 ? (
+                  <div>
+                    <strong>Checks</strong>
+                    <ul>
+                      {exposureChecks.map((entry) => (
+                        <li key={`exposure-check-${entry.name || entry.detail}`}>
+                          <span className={`status-pill exposure-check-pill exposure-check-pill--${entry.status || "info"}`}>
+                            {entry.status || "info"}
+                          </span>
+                          {entry.detail}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </section>
+              <section className="exposure-plan-notes">
+                <details open>
+                  <summary>Manual Steps</summary>
+                  <ul>
+                    {exposureManualSteps.map((entry) => <li key={`exposure-step-${entry}`}>{entry}</li>)}
+                  </ul>
+                </details>
+                <details>
+                  <summary>Env Suggestions</summary>
+                  <ul>
+                    {exposureEnvSuggestions.map((entry) => <li key={`exposure-env-${entry.name}`}>{formatExposureSuggestion(entry)}</li>)}
+                  </ul>
+                </details>
+                <details>
+                  <summary>Reverse Proxy Notes</summary>
+                  <ul>
+                    {exposureReverseProxyNotes.map((entry) => <li key={`exposure-proxy-${entry}`}>{entry}</li>)}
+                  </ul>
+                </details>
+                <details>
+                  <summary>Activation Notes</summary>
+                  <ul>
+                    {exposureActivationNotes.map((entry) => <li key={`exposure-activation-${entry}`}>{entry}</li>)}
+                  </ul>
+                </details>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   const adminConfirmModalConfig = adminConfirmModal.type === "invite-delete"
     ? {
         title: "Delete invite code?",
@@ -4484,6 +4577,7 @@ export function AdminPage() {
         </div>
       ) : null}
       {userActionsModal}
+      {exposurePlannerModal}
       {terminateWorkerConfirmationModal}
       {dismissPlaybackStatusConfirmationModal}
       {diagnosticIdPopup}
