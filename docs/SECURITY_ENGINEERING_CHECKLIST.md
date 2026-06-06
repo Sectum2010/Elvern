@@ -17,6 +17,11 @@ Use this checklist for security-sensitive Elvern changes, especially after CodeQ
 - Use absolute executable paths returned by `shutil.which(...)`; do not rely on PATH lookup during `subprocess.run(...)`.
 - Do not trust client-provided `same_host_hint` for host GUI actions or local process launch decisions.
 
+## Playback Session Revocation
+
+- User logout may preserve decoupled external-player handoff streams by design.
+- Admin auth-session revoke must terminate decoupled native playback sessions created from that login using stored provenance.
+
 ## Proxy And SSRF Safety
 
 - Do not build fetch targets from raw `request.url`.

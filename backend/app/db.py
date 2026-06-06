@@ -466,6 +466,7 @@ TABLE_STATEMENTS = (
         closed_at TEXT,
         revoked_at TEXT,
         auth_session_id INTEGER,
+        created_from_auth_session_id INTEGER,
         client_name TEXT,
         user_agent TEXT,
         source_ip TEXT,
@@ -821,6 +822,7 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_native_playback_expires_at ON native_playback_sessions (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_native_playback_user_item ON native_playback_sessions (user_id, media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_native_playback_auth_session ON native_playback_sessions (auth_session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_native_playback_created_from_auth_session ON native_playback_sessions (created_from_auth_session_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs (user_id)",
     "CREATE INDEX IF NOT EXISTS idx_login_failures_bucket_time ON login_failures (bucket_kind, bucket_key, occurred_at_unix DESC)",
@@ -926,6 +928,7 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
 
     _ensure_column(connection, "native_playback_sessions", "revoked_at", "TEXT")
     _ensure_column(connection, "native_playback_sessions", "auth_session_id", "INTEGER")
+    _ensure_column(connection, "native_playback_sessions", "created_from_auth_session_id", "INTEGER")
     _ensure_column(connection, "native_playback_sessions", "source_ip", "TEXT")
     _ensure_column(connection, "native_playback_sessions", "last_progress_recorded_at", "TEXT")
 

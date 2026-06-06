@@ -418,6 +418,7 @@ def create_native_playback_session(
     user_agent: str | None,
     source_ip: str | None,
     client_name: str | None,
+    created_from_auth_session_id: int | None = None,
 ) -> dict[str, object]:
     if not settings.native_playback_enabled:
         raise HTTPException(
@@ -453,6 +454,7 @@ def create_native_playback_session(
                 user_id,
                 media_item_id,
                 auth_session_id,
+                created_from_auth_session_id,
                 created_at,
                 expires_at,
                 last_seen_at,
@@ -461,7 +463,7 @@ def create_native_playback_session(
                 source_ip,
                 last_position_seconds,
                 last_duration_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -469,6 +471,7 @@ def create_native_playback_session(
                 user_id,
                 int(item_payload["id"]),
                 auth_session_id,
+                created_from_auth_session_id,
                 now_iso,
                 expires_at_iso,
                 now_iso,

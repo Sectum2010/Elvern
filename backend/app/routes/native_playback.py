@@ -331,6 +331,7 @@ def native_playback_session_create(
         user_agent=request.headers.get("user-agent"),
         source_ip=resolve_client_ip(request),
         client_name=session_client_name,
+        created_from_auth_session_id=user.session_id,
     )
     session_payload = _rewrite_external_session_payload_urls(
         session_payload,
@@ -474,6 +475,7 @@ def native_playback_external_launch(
             if normalized_target_app == "infuse"
             else "Elvern iOS VLC Handoff"
         ),
+        created_from_auth_session_id=user.session_id,
     )
     session_payload = _rewrite_external_session_payload_urls(
         session_payload,

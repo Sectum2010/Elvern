@@ -760,6 +760,18 @@ def test_native_external_launch_route_redirects_for_supported_targets(
         lambda file_path, settings, **kwargs: ([], []),
     )
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    with get_connection(initialized_settings) as connection:
+        auth_session_row = connection.execute(
+            """
+            SELECT s.id
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.username = ?
+            ORDER BY s.id DESC
+            LIMIT 1
+            """,
+            (admin_credentials["username"],),
+        ).fetchone()
     item = _create_media_item_record(
         initialized_settings,
         relative_name=f"native-launch/{target_app}.mp4",
@@ -801,7 +813,7 @@ def test_native_external_launch_route_redirects_for_supported_targets(
     with get_connection(initialized_settings) as connection:
         session_row = connection.execute(
             """
-            SELECT auth_session_id, client_name
+            SELECT auth_session_id, created_from_auth_session_id, client_name
             FROM native_playback_sessions
             ORDER BY rowid DESC
             LIMIT 1
@@ -809,7 +821,9 @@ def test_native_external_launch_route_redirects_for_supported_targets(
         ).fetchone()
 
     assert session_row is not None
+    assert auth_session_row is not None
     assert session_row["auth_session_id"] is None
+    assert session_row["created_from_auth_session_id"] == auth_session_row["id"]
     assert str(session_row["client_name"]).lower().startswith(f"elvern ios {target_app} handoff")
 
 
@@ -846,6 +860,18 @@ def test_native_playback_session_route_decouples_ios_external_player_auth_sessio
         lambda file_path, settings, **kwargs: ([], []),
     )
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    with get_connection(initialized_settings) as connection:
+        auth_session_row = connection.execute(
+            """
+            SELECT s.id
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.username = ?
+            ORDER BY s.id DESC
+            LIMIT 1
+            """,
+            (admin_credentials["username"],),
+        ).fetchone()
     item = _create_media_item_record(
         initialized_settings,
         relative_name=f"native-session/{external_player}-external.mp4",
@@ -866,7 +892,7 @@ def test_native_playback_session_route_decouples_ios_external_player_auth_sessio
     with get_connection(initialized_settings) as connection:
         session_row = connection.execute(
             """
-            SELECT auth_session_id, client_name
+            SELECT auth_session_id, created_from_auth_session_id, client_name
             FROM native_playback_sessions
             WHERE session_id = ?
             LIMIT 1
@@ -875,8 +901,11 @@ def test_native_playback_session_route_decouples_ios_external_player_auth_sessio
         ).fetchone()
 
     assert session_row is not None
+    assert auth_session_row is not None
     assert session_row["auth_session_id"] is None
+    assert session_row["created_from_auth_session_id"] == auth_session_row["id"]
     assert str(session_row["client_name"]).lower().startswith(expected_prefix)
+    assert "created_from_auth_session_id" not in created_session
 
 
 def test_native_playback_session_route_uses_shared_progress_for_ios_vlc_resume_seconds(
@@ -2315,6 +2344,18 @@ def test_desktop_playlist_backend_fallback_decouples_vlc_stream_from_browser_aut
     admin_credentials,
 ) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    with get_connection(initialized_settings) as connection:
+        auth_session_row = connection.execute(
+            """
+            SELECT s.id
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.username = ?
+            ORDER BY s.id DESC
+            LIMIT 1
+            """,
+            (admin_credentials["username"],),
+        ).fetchone()
     item = _create_media_item_record(
         initialized_settings,
         relative_name="desktop/windows-playlist-fallback.mp4",
@@ -2336,7 +2377,7 @@ def test_desktop_playlist_backend_fallback_decouples_vlc_stream_from_browser_aut
     with get_connection(initialized_settings) as connection:
         session_row = connection.execute(
             """
-            SELECT auth_session_id, client_name, created_at, expires_at
+            SELECT auth_session_id, created_from_auth_session_id, client_name, created_at, expires_at
             FROM native_playback_sessions
             WHERE session_id = ?
             """,
@@ -2344,7 +2385,9 @@ def test_desktop_playlist_backend_fallback_decouples_vlc_stream_from_browser_aut
         ).fetchone()
 
     assert session_row is not None
+    assert auth_session_row is not None
     assert session_row["auth_session_id"] is None
+    assert session_row["created_from_auth_session_id"] == auth_session_row["id"]
     assert str(session_row["client_name"]).lower().startswith("vlc playlist fallback (windows)")
     created_at = datetime.fromisoformat(str(session_row["created_at"]))
     expires_at = datetime.fromisoformat(str(session_row["expires_at"]))

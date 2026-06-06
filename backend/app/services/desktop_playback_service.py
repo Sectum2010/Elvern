@@ -521,6 +521,7 @@ def launch_vlc_for_item(
             user_agent=user_agent,
             source_ip=source_ip,
             client_name="Linux Same-Host VLC Direct",
+            created_from_auth_session_id=auth_session_id,
         )
     else:
         tracked_progress_session = create_native_playback_session(
@@ -533,6 +534,7 @@ def launch_vlc_for_item(
             user_agent=user_agent,
             source_ip=source_ip,
             client_name="Linux Same-Host VLC",
+            created_from_auth_session_id=auth_session_id,
         )
         launch_target = _rewrite_stream_url_for_linux_same_host(
             settings,
@@ -699,6 +701,7 @@ def create_desktop_vlc_handoff(
             user_agent=user_agent,
             source_ip=source_ip,
             client_name=f"VLC Helper Fallback ({platform})",
+            created_from_auth_session_id=auth_session_id,
         )
         strategy = "backend_url"
         resolved_target = str(session_payload["stream_url"])
@@ -1053,6 +1056,7 @@ def build_vlc_playlist_response(
             user_agent=user_agent,
             source_ip=source_ip,
             client_name=f"VLC Playlist Fallback ({platform})",
+            created_from_auth_session_id=auth_session_id,
         )
         location = str(session_payload["stream_url"])
         logger.info(

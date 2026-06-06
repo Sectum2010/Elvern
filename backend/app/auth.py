@@ -841,6 +841,29 @@ def revoke_sessions_for_user_in_connection(
     return len(session_ids)
 
 
+def revoke_native_playback_sessions_created_from_auth_sessions(
+    connection,
+    *,
+    session_ids: list[int],
+    now: str,
+) -> None:
+    if not session_ids:
+        return
+    placeholders = ",".join("?" for _ in session_ids)
+    revoke_native_sql = f"""
+        UPDATE native_playback_sessions
+        SET revoked_at = ?
+        WHERE created_from_auth_session_id IN ({placeholders})
+          AND auth_session_id IS NULL
+          AND revoked_at IS NULL
+          AND closed_at IS NULL
+        """  # nosec B608 - placeholders generated from trusted session_ids length
+    connection.execute(
+        revoke_native_sql,
+        (now, *session_ids),
+    )
+
+
 def _revoke_session_ids(
     connection,
     *,
@@ -879,6 +902,12 @@ def _revoke_session_ids(
         revoke_native_sql,
         (now, *session_ids),
     )
+    if reason == "admin_revoked":
+        revoke_native_playback_sessions_created_from_auth_sessions(
+            connection,
+            session_ids=session_ids,
+            now=now,
+        )
     revoke_desktop_sql = f"""
         UPDATE desktop_vlc_handoffs
         SET revoked_at = ?

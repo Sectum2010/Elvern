@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, Response
 
+import backend.app.auth as auth_module
 from backend.app.auth import (
     authenticate_user,
     create_session,
@@ -14,7 +16,8 @@ from backend.app.auth import (
     get_session_access_failure_reason,
     get_user_by_session_token,
 )
-from backend.app.db import get_connection, utcnow_iso
+from backend.app.db import get_connection, init_db, utcnow_iso
+from backend.app.schemas import NativePlaybackSessionResponse
 from backend.app.security import hash_session_token
 from backend.app.services.account_access_service import (
     create_user_with_invite,
@@ -223,11 +226,41 @@ def _mark_native_stream_activity(settings, *, session_id: str, at: datetime | No
         connection.commit()
 
 
+def _stub_mobile_auth_session_invalidation(client) -> None:
+    client.app.state.mobile_playback_manager.invalidate_auth_session = (
+        lambda auth_session_id, *, reason: 0
+    )
+
+
 def _login_headers(*, ip_address: str = "203.0.113.10", user_agent: str = "Pytest Browser 1.0") -> dict[str, str]:
     return {
         "x-forwarded-for": ip_address,
         "user-agent": user_agent,
     }
+
+
+def test_native_playback_schema_includes_auth_session_provenance(initialized_settings) -> None:
+    init_db(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(native_playback_sessions)").fetchall()
+        }
+        indexes = {
+            row["name"]
+            for row in connection.execute("PRAGMA index_list(native_playback_sessions)").fetchall()
+        }
+
+    assert "created_from_auth_session_id" in columns
+    assert "idx_native_playback_created_from_auth_session" in indexes
+
+
+def test_native_playback_session_provenance_static_guards() -> None:
+    assert "created_from_auth_session_id" not in inspect.getsource(auth_module.destroy_session)
+    assert "created_from_auth_session_id" in inspect.getsource(
+        auth_module.revoke_native_playback_sessions_created_from_auth_sessions
+    )
+    assert "created_from_auth_session_id" not in NativePlaybackSessionResponse.model_fields
 
 
 def _recent_auth_login_details(settings, *, limit: int = 20) -> list[dict[str, object] | None]:
@@ -446,9 +479,30 @@ def test_external_player_native_playback_survives_parent_session_revoke(initiali
         user_agent="pytest",
         source_ip="127.0.0.1",
         client_name="Elvern iOS VLC Handoff",
+        created_from_auth_session_id=session_user.session_id,
     )
 
     destroy_session(initialized_settings, token)
+
+    with get_connection(initialized_settings) as connection:
+        auth_row = connection.execute(
+            "SELECT revoked_at FROM sessions WHERE id = ?",
+            (session_user.session_id,),
+        ).fetchone()
+        native_row = connection.execute(
+            """
+            SELECT auth_session_id, created_from_auth_session_id, revoked_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (str(native_session["session_id"]),),
+        ).fetchone()
+
+    assert auth_row["revoked_at"] is not None
+    assert native_row["auth_session_id"] is None
+    assert native_row["created_from_auth_session_id"] == session_user.session_id
+    assert native_row["revoked_at"] is None
 
     access_state = inspect_native_playback_access(
         initialized_settings,
@@ -464,6 +518,185 @@ def test_external_player_native_playback_survives_parent_session_revoke(initiali
         access_token=str(native_session["access_token"]),
     )
     assert payload["session_id"] == native_session["session_id"]
+
+
+def test_admin_revoke_auth_session_revokes_decoupled_external_native_playback_created_from_login(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="native-admin-revoke")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="native-admin-revoke.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS Infuse Handoff",
+        created_from_auth_session_id=session_user.session_id,
+    )
+
+    admin_login = client.post("/api/auth/login", json=admin_credentials)
+    assert admin_login.status_code == 200
+    _stub_mobile_auth_session_invalidation(client)
+    revoke_response = client.post(f"/api/admin/sessions/{session_user.session_id}/revoke")
+
+    assert revoke_response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT auth_session_id, created_from_auth_session_id, revoked_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (str(native_session["session_id"]),),
+        ).fetchone()
+
+    assert row["auth_session_id"] is None
+    assert row["created_from_auth_session_id"] == session_user.session_id
+    assert row["revoked_at"] is not None
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is False
+    assert access_state["reason"] == "native_session_revoked"
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_native_playback_session_payload(
+            initialized_settings,
+            session_id=str(native_session["session_id"]),
+            access_token=str(native_session["access_token"]),
+        )
+    assert exc_info.value.status_code == 401
+
+
+def test_admin_revoke_auth_session_leaves_old_provenance_less_decoupled_native_playback(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="native-old-row")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="native-old-row.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS VLC Handoff",
+    )
+
+    admin_login = client.post("/api/auth/login", json=admin_credentials)
+    assert admin_login.status_code == 200
+    _stub_mobile_auth_session_invalidation(client)
+    revoke_response = client.post(f"/api/admin/sessions/{session_user.session_id}/revoke")
+
+    assert revoke_response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT auth_session_id, created_from_auth_session_id, revoked_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (str(native_session["session_id"]),),
+        ).fetchone()
+
+    assert row["auth_session_id"] is None
+    assert row["created_from_auth_session_id"] is None
+    assert row["revoked_at"] is None
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is True
+    assert access_state["reason"] == "allowed"
+
+
+def test_admin_revoke_auth_session_still_revokes_coupled_native_playback(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="native-coupled-revoke")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="native-coupled-revoke.mp4")
+
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=session_user.session_id,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Linux Same-Host VLC",
+        created_from_auth_session_id=session_user.session_id,
+    )
+
+    admin_login = client.post("/api/auth/login", json=admin_credentials)
+    assert admin_login.status_code == 200
+    _stub_mobile_auth_session_invalidation(client)
+    revoke_response = client.post(f"/api/admin/sessions/{session_user.session_id}/revoke")
+
+    assert revoke_response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT auth_session_id, created_from_auth_session_id, revoked_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (str(native_session["session_id"]),),
+        ).fetchone()
+
+    assert row["auth_session_id"] == session_user.session_id
+    assert row["created_from_auth_session_id"] == session_user.session_id
+    assert row["revoked_at"] is not None
 
 
 @pytest.mark.parametrize(
