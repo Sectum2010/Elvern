@@ -8,7 +8,7 @@ import sqlite3
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import Request
+from fastapi import HTTPException, Request, status
 
 from ..auth import _client_host_from_request, _is_trusted_proxy_peer
 from ..config import Settings
@@ -21,6 +21,7 @@ from .exposure_maintenance_service import (
 
 
 EXPOSURE_MODE_PENDING_DRAFT_KEY = "exposure_mode_pending_draft_json"
+EXPOSURE_MODE_PREPARED_SWITCH_KEY = "exposure_mode_prepared_switch_json"
 DIRECT_PUBLIC_IP_WARNING = (
     "Direct public IP exposure is not recommended. A purchased domain with HTTPS is safer and easier to maintain."
 )
@@ -145,6 +146,7 @@ def build_current_exposure_status(settings: Settings, request: Request) -> dict[
         },
         "plan": _build_plan(settings, desired={}, normalized_public=None, normalized_private=None),
         "pending_draft": pending_draft,
+        "prepared_switch": get_prepared_exposure_switch(settings),
         "provider_choices": list(PROVIDER_CHOICES),
         "public_entry_kinds": list(PUBLIC_ENTRY_KINDS),
         "takes_effect": False,
@@ -243,6 +245,7 @@ def validate_exposure_plan(settings: Settings, request: Request, payload: Any) -
             normalized_private=normalized_private,
         ),
         "pending_draft": get_pending_exposure_draft(settings),
+        "prepared_switch": get_prepared_exposure_switch(settings),
         "provider_choices": list(PROVIDER_CHOICES),
         "public_entry_kinds": list(PUBLIC_ENTRY_KINDS),
         "takes_effect": False,
@@ -266,6 +269,9 @@ def save_pending_exposure_draft(
         "created_at": now,
         "updated_at": now,
         "takes_effect": False,
+        "direct_ip_not_recommended_acknowledgement": bool(
+            _payload_value(payload, "direct_ip_not_recommended_acknowledgement", False)
+        ),
     }
     existing = get_pending_exposure_draft(settings)
     if existing and existing.get("created_at"):
@@ -305,6 +311,149 @@ def clear_pending_exposure_draft(settings: Settings, actor: Any) -> dict[str, An
         "pending_draft": None,
         "takes_effect": False,
     }
+
+
+def get_prepared_exposure_switch(settings: Settings) -> dict[str, Any] | None:
+    try:
+        raw_value = get_global_app_setting(settings, key=EXPOSURE_MODE_PREPARED_SWITCH_KEY)
+    except sqlite3.OperationalError:
+        return None
+    if not raw_value:
+        return None
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("status") != "prepared_for_manual_apply":
+        return None
+    parsed["takes_effect"] = False
+    parsed["activation_not_implemented"] = True
+    return parsed
+
+
+def prepare_exposure_manual_switch(
+    settings: Settings,
+    request: Request,
+    actor: Any,
+    *,
+    acknowledgement: bool,
+) -> dict[str, Any]:
+    if not acknowledgement:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Acknowledge that this only prepares a manual switch plan and does not "
+                "write env files or activate exposure mode."
+            ),
+        )
+
+    pending_draft = get_pending_exposure_draft(settings)
+    if pending_draft is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Save a pending exposure draft before preparing a manual switch.",
+        )
+
+    maintenance_lock = get_exposure_maintenance_lock(settings)
+    if not maintenance_lock.get("enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enable the temporary maintenance lock before preparing a manual switch.",
+        )
+
+    desired = pending_draft.get("desired")
+    if not isinstance(desired, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prepared switch cannot be created while validation has blocking errors.",
+        )
+
+    validation_snapshot = validate_exposure_plan(settings, request, desired)
+    validation = validation_snapshot.get("validation", {})
+    blocking_errors = validation.get("errors", [])
+    if validation.get("status") == "blocked" or blocking_errors:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prepared switch cannot be created while validation has blocking errors.",
+        )
+
+    validated_desired = validation_snapshot.get("desired", {})
+    if validated_desired.get("desired_mode") == "public":
+        if not _current_origin_match_passed(validation):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Open this admin page through the proposed public address and validate again before preparing.",
+            )
+        if validated_desired.get("public_entry_kind") == "direct_ip":
+            if not bool(pending_draft.get("direct_ip_not_recommended_acknowledgement")):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=DIRECT_PUBLIC_IP_WARNING,
+                )
+
+    prepared_at = utcnow_iso()
+    prepared_switch = {
+        "status": "prepared_for_manual_apply",
+        "prepared_at": prepared_at,
+        "prepared_by_user_id": getattr(actor, "id", None),
+        "prepared_by_username": getattr(actor, "username", None),
+        "takes_effect": False,
+        "desired": validated_desired,
+        "validation": validation,
+        "plan": validation_snapshot.get("plan", {}),
+        "env_block": build_copyable_env_block(validation_snapshot.get("plan", {})),
+        "manual_steps": _prepared_manual_steps(validation_snapshot.get("plan", {})),
+        "restart_required": True,
+        "maintenance_lock_required": True,
+        "url_prefix_rotation": "manual_only",
+        "env_writing": "manual_only",
+        "activation_not_implemented": True,
+    }
+    set_global_app_setting(
+        settings,
+        key=EXPOSURE_MODE_PREPARED_SWITCH_KEY,
+        value=json.dumps(prepared_switch, sort_keys=True),
+    )
+    return {
+        "prepared_switch": prepared_switch,
+        "takes_effect": False,
+    }
+
+
+def clear_prepared_exposure_switch(settings: Settings, actor: Any) -> dict[str, Any]:
+    del actor
+    set_global_app_setting(settings, key=EXPOSURE_MODE_PREPARED_SWITCH_KEY, value=None)
+    return {
+        "prepared_switch": None,
+        "takes_effect": False,
+    }
+
+
+def build_copyable_env_block(plan: dict[str, Any] | None) -> str:
+    safe_names = {
+        "ELVERN_PRIVATE_NETWORK_ONLY",
+        "ELVERN_PUBLIC_APP_ORIGIN",
+        "ELVERN_BACKEND_ORIGIN",
+        "ELVERN_COOKIE_SECURE",
+    }
+    lines = [
+        "# Elvern prepared manual switch suggestion",
+        "# Review and apply manually outside Elvern; this block is not written by the app.",
+    ]
+    suggestions = plan.get("env_suggestions", []) if isinstance(plan, dict) else []
+    if not isinstance(suggestions, list):
+        suggestions = []
+    for suggestion in suggestions:
+        if not isinstance(suggestion, dict):
+            continue
+        name = str(suggestion.get("name") or "").strip()
+        if name not in safe_names:
+            continue
+        value = str(suggestion.get("value") if suggestion.get("value") is not None else "").strip()
+        lines.append(f"{name}={value}")
+    return "\n".join(lines)
 
 
 def _looks_like_dns_name(host: str) -> bool:
@@ -463,6 +612,18 @@ def _add_all_mode_checks(
             _add_check(checks, "trusted_proxy_cidrs", "pass", "Trusted proxy CIDRs are not broad catch-all networks.")
 
 
+def _current_origin_match_passed(validation: dict[str, Any]) -> bool:
+    checks = validation.get("checks", [])
+    if not isinstance(checks, list):
+        return False
+    return any(
+        isinstance(check, dict)
+        and check.get("name") == "current_origin_match"
+        and check.get("status") == "pass"
+        for check in checks
+    )
+
+
 def _active_settings_payload(settings: Settings, request: Request) -> dict[str, Any]:
     url_prefix = getattr(getattr(request.app, "state", None), "url_prefix", None) or settings.url_prefix
     return {
@@ -559,6 +720,25 @@ def _manual_steps(mode: str | None) -> list[str]:
         "Keep public DNS and public reverse proxy routes disabled for private mode.",
         "Do not write env files from this planner; apply changes manually in a later activation phase.",
     ]
+
+
+def _prepared_manual_steps(plan: dict[str, Any] | None) -> list[str]:
+    steps: list[str] = []
+    if isinstance(plan, dict):
+        manual_steps = plan.get("manual_steps")
+        if isinstance(manual_steps, list):
+            steps.extend(str(step) for step in manual_steps)
+        reverse_proxy_notes = plan.get("reverse_proxy_notes")
+        if isinstance(reverse_proxy_notes, list):
+            steps.extend(str(note) for note in reverse_proxy_notes)
+    steps.extend(
+        [
+            "Manually apply the reviewed env and reverse-proxy changes outside Elvern.",
+            "Restart Elvern manually after applying env or reverse-proxy changes.",
+            "After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in a later phase.",
+        ]
+    )
+    return steps
 
 
 def _activation_notes() -> list[str]:

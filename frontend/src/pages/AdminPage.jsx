@@ -84,6 +84,12 @@ const DEFAULT_EXPOSURE_MAINTENANCE_FORM = {
 };
 const EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT =
   "I understand this temporarily blocks non-admin users but does not disable their accounts.";
+const DEFAULT_EXPOSURE_PREPARE_FORM = {
+  currentAdminPassword: "",
+  acknowledgement: false,
+};
+const EXPOSURE_PREPARE_ACKNOWLEDGEMENT =
+  "I understand this only prepares a manual switch plan. It does not write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate public/private mode.";
 
 function formatAgeCredential(value) {
   const age = Number(value);
@@ -588,6 +594,8 @@ export function AdminPage() {
   const [exposureDraft, setExposureDraft] = useState(DEFAULT_EXPOSURE_DRAFT);
   const [exposureMaintenanceForm, setExposureMaintenanceForm] = useState(DEFAULT_EXPOSURE_MAINTENANCE_FORM);
   const [exposureMaintenanceFeedback, setExposureMaintenanceFeedback] = useState(null);
+  const [exposurePrepareForm, setExposurePrepareForm] = useState(DEFAULT_EXPOSURE_PREPARE_FORM);
+  const [exposurePrepareFeedback, setExposurePrepareFeedback] = useState(null);
   const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false);
   const [totpStatus, setTotpStatus] = useState(null);
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
@@ -908,6 +916,19 @@ export function AdminPage() {
     ));
   }
 
+  function updateExposurePreparedSwitchState(preparedSwitch) {
+    setExposureStatus((current) => (
+      current
+        ? { ...current, prepared_switch: preparedSwitch || null, takes_effect: false }
+        : current
+    ));
+    setExposurePlan((current) => (
+      current
+        ? { ...current, prepared_switch: preparedSwitch || null, takes_effect: false }
+        : current
+    ));
+  }
+
   async function handleSetExposureMaintenanceLock(enabled) {
     if (!exposureMaintenanceForm.currentAdminPassword.trim()) {
       setExposureMaintenanceFeedback({
@@ -949,9 +970,79 @@ export function AdminPage() {
     }
   }
 
+  async function handlePrepareExposureManualSwitch() {
+    if (!exposurePrepareForm.currentAdminPassword.trim()) {
+      setExposurePrepareFeedback({
+        tone: "error",
+        text: "Enter your current admin password to prepare a manual switch.",
+      });
+      return;
+    }
+    if (!exposurePrepareForm.acknowledgement) {
+      setExposurePrepareFeedback({
+        tone: "error",
+        text: "Acknowledge that this only prepares a manual switch plan before continuing.",
+      });
+      return;
+    }
+    setExposurePending(true);
+    setExposurePrepareFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/prepare-switch", {
+        method: "POST",
+        data: {
+          current_admin_password: exposurePrepareForm.currentAdminPassword,
+          acknowledgement: exposurePrepareForm.acknowledgement,
+        },
+      });
+      updateExposurePreparedSwitchState(payload.prepared_switch || null);
+      setExposurePrepareForm(DEFAULT_EXPOSURE_PREPARE_FORM);
+      setExposurePrepareFeedback({ tone: "success", text: "Prepared for manual apply." });
+    } catch (requestError) {
+      setExposurePrepareFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to prepare manual switch.",
+      });
+    } finally {
+      setExposurePending(false);
+    }
+  }
+
+  async function handleClearExposurePreparedSwitch() {
+    if (!exposurePrepareForm.currentAdminPassword.trim()) {
+      setExposurePrepareFeedback({
+        tone: "error",
+        text: "Enter your current admin password to clear the prepared switch.",
+      });
+      return;
+    }
+    setExposurePending(true);
+    setExposurePrepareFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/prepared-switch", {
+        method: "DELETE",
+        data: {
+          current_admin_password: exposurePrepareForm.currentAdminPassword,
+          acknowledgement: false,
+        },
+      });
+      updateExposurePreparedSwitchState(payload.prepared_switch || null);
+      setExposurePrepareForm(DEFAULT_EXPOSURE_PREPARE_FORM);
+      setExposurePrepareFeedback({ tone: "success", text: "Prepared switch cleared." });
+    } catch (requestError) {
+      setExposurePrepareFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to clear prepared switch.",
+      });
+    } finally {
+      setExposurePending(false);
+    }
+  }
+
   async function handleOpenExposurePlanner() {
     setExposurePlannerOpen(true);
     setExposureMaintenanceFeedback(null);
+    setExposurePrepareFeedback(null);
     if (!exposureStatus) {
       await loadExposureStatus();
     }
@@ -3452,6 +3543,18 @@ export function AdminPage() {
   const exposureModeStatus = formatExposureModeStatus(exposureActive, exposurePendingDraft);
   const exposureMaintenanceLock = exposureActive.maintenance_lock || {};
   const exposureMaintenanceLockStatus = exposureMaintenanceLock.enabled ? "On" : "Off";
+  const exposurePreparedSwitch = exposureDisplay.prepared_switch || null;
+  const exposurePreparedSwitchStatus = exposurePreparedSwitch ? "Prepared" : "None";
+  const exposureCurrentOriginMatchCheck = exposureChecks.find((entry) => entry.name === "current_origin_match") || null;
+  const exposureCurrentOriginMatchStatus = exposureCurrentOriginMatchCheck
+    ? formatExposureValue(exposureCurrentOriginMatchCheck.status)
+    : exposurePendingDraft?.desired?.desired_mode === "public"
+      ? "Required"
+      : "Not required";
+  const exposurePreparedManualSteps = Array.isArray(exposurePreparedSwitch?.manual_steps)
+    ? exposurePreparedSwitch.manual_steps
+    : [];
+  const exposurePreparedEnvBlock = exposurePreparedSwitch?.env_block || "";
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
       <section className="settings-card">
@@ -3479,6 +3582,7 @@ export function AdminPage() {
 	        <StatusRow label="Exposure Mode" value={exposureModeStatus} />
 	        <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
 	        <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
+	        <StatusRow label="Prepared switch" value={exposurePreparedSwitchStatus} />
 	        <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
 	        <StatusRow label="Multi-user" value={statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"} />
 	        <StatusRow label="Users" value={String(statusPayload.total_users)} />
@@ -4188,6 +4292,7 @@ export function AdminPage() {
                   <StatusRow label="URL prefix present" value={formatExposureValue(exposureActive.url_prefix_present)} />
                   <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
                   <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
+                  <StatusRow label="Prepared switch" value={exposurePreparedSwitchStatus} />
                 </div>
               </section>
               <section className="exposure-planner-modal__section">
@@ -4256,6 +4361,109 @@ export function AdminPage() {
                     Disable maintenance lock
                   </button>
                 </div>
+              </section>
+              <section className="exposure-planner-modal__section">
+                <h3>Prepare manual switch</h3>
+                <div className="exposure-planner-status">
+                  <StatusRow label="Prepared status" value={exposurePreparedSwitch ? "Prepared for manual apply" : "None"} />
+                  <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "Missing"} />
+                  <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
+                  <StatusRow label="Validation status" value={formatExposureValue(exposureValidation.status || "ready")} />
+                  <StatusRow label="Current origin match" value={exposureCurrentOriginMatchStatus} />
+                  <StatusRow label="URL prefix rotation" value="Manual only" />
+                  <StatusRow label="Env writing" value="Manual only" />
+                  <StatusRow label="Runtime effect" value="None yet" />
+                  <StatusRow label="Takes effect" value="No" />
+                  <StatusRow label="Activation" value="Not implemented" />
+                  <StatusRow label="Prepared by" value={formatExposureValue(exposurePreparedSwitch?.prepared_by_username)} />
+                  <StatusRow label="Prepared at" value={formatExposureValue(exposurePreparedSwitch?.prepared_at)} />
+                </div>
+                <p className="page-subnote">
+                  After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in a later phase.
+                </p>
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>Prepare acknowledgement</strong>
+                    <small>{EXPOSURE_PREPARE_ACKNOWLEDGEMENT}</small>
+                  </span>
+                  <input
+                    checked={exposurePrepareForm.acknowledgement}
+                    onChange={(event) =>
+                      setExposurePrepareForm((current) => ({
+                        ...current,
+                        acknowledgement: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>
+                    <strong>Current admin password</strong>
+                    <small>Required to prepare or clear a prepared switch.</small>
+                  </span>
+                  <NonLoginSecretInput
+                    autoComplete="new-password"
+                    onChange={(event) =>
+                      setExposurePrepareForm((current) => ({
+                        ...current,
+                        currentAdminPassword: event.target.value,
+                      }))
+                    }
+                    placeholder="Current admin password"
+                    value={exposurePrepareForm.currentAdminPassword}
+                  />
+                </label>
+                <InlineFeedback feedback={exposurePrepareFeedback} />
+                <div className="admin-list__actions">
+                  <button
+                    className="primary-button"
+                    disabled={exposurePending}
+                    onClick={handlePrepareExposureManualSwitch}
+                    type="button"
+                  >
+                    Prepare manual switch
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={exposurePending || !exposurePreparedSwitch}
+                    onClick={handleClearExposurePreparedSwitch}
+                    type="button"
+                  >
+                    Clear prepared switch
+                  </button>
+                </div>
+                {exposurePreparedEnvBlock ? (
+                  <div className="exposure-prepared-block">
+                    <div className="settings-inline-header">
+                      <h4>Env suggestions</h4>
+                      <button
+                        className="ghost-button ghost-button--inline"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(exposurePreparedEnvBlock);
+                          setExposurePrepareFeedback({ tone: "success", text: "Env suggestions copied." });
+                        }}
+                        type="button"
+                      >
+                        Copy env suggestions
+                      </button>
+                    </div>
+                    <textarea
+                      className="exposure-prepared-env-block"
+                      readOnly
+                      rows={Math.min(10, Math.max(4, exposurePreparedEnvBlock.split("\n").length))}
+                      value={exposurePreparedEnvBlock}
+                    />
+                  </div>
+                ) : null}
+                {exposurePreparedManualSteps.length > 0 ? (
+                  <div className="exposure-prepared-block">
+                    <h4>Manual restart / reverse proxy checklist</h4>
+                    <ul>
+                      {exposurePreparedManualSteps.map((entry) => <li key={`prepared-step-${entry}`}>{entry}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
               </section>
               <section className="exposure-planner-modal__section">
                 <h3>Desired Mode</h3>

@@ -142,6 +142,7 @@ class ExposureModePlanResponse(BaseModel):
     validation: dict[str, object] = Field(default_factory=dict)
     plan: dict[str, object] = Field(default_factory=dict)
     pending_draft: dict[str, object] | None = None
+    prepared_switch: dict[str, object] | None = None
     provider_choices: list[str] = Field(default_factory=list)
     public_entry_kinds: list[str] = Field(default_factory=list)
     takes_effect: bool = False
@@ -160,6 +161,16 @@ class ExposureMaintenanceLockResponse(BaseModel):
     created_by_username: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class ExposurePrepareSwitchRequest(BaseModel):
+    current_admin_password: str = Field(min_length=1)
+    acknowledgement: bool = False
+
+
+class ExposurePreparedSwitchResponse(BaseModel):
+    prepared_switch: dict[str, object] | None = None
+    takes_effect: bool = False
 
 
 class CloudSyncStatusResponse(BaseModel):

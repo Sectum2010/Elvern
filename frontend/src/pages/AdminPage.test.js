@@ -176,6 +176,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(securityCardSource).toContain("<StatusRow label=\"Exposure Mode\" value={exposureModeStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Pending draft\" value={exposurePendingDraft ? \"Exists\" : \"None\"} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Maintenance lock\" value={exposureMaintenanceLockStatus} />");
+    expect(securityCardSource).toContain("<StatusRow label=\"Prepared switch\" value={exposurePreparedSwitchStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Current request origin\"");
     expect(securityCardSource).toContain("Manage");
     expect(securityCardSource).not.toContain("Private-only mode");
@@ -202,11 +203,12 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("Draft only — this does not change runtime behavior, write env files, rotate the URL prefix, revoke sessions, or disable users.");
     expect(modalSource).toContain("Current Status");
     expect(modalSource).toContain("Temporary maintenance lock");
+    expect(modalSource).toContain("Prepare manual switch");
     expect(modalSource).toContain("Desired Mode");
     expect(modalSource).toContain("Confirmation");
   });
 
-  test("planner modal includes modes, providers, maintenance lock actions, and no activation route", () => {
+  test("planner modal includes modes, providers, maintenance lock actions, prepare actions, and no activation route", () => {
     const source = readAdminPage();
     const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
@@ -216,6 +218,8 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).toContain("apiRequest(\"/api/admin/exposure/validate\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/drafts\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/maintenance-lock\"");
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/prepare-switch\"");
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/prepared-switch\"");
     expect(source).toContain("current_admin_password = draft.currentAdminPassword");
     expect(modalSource).toContain("Private Mode");
     expect(modalSource).toContain("Public Mode - Custom Domain");
@@ -228,10 +232,27 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("Clear pending draft");
     expect(modalSource).toContain("Enable maintenance lock");
     expect(modalSource).toContain("Disable maintenance lock");
+    expect(modalSource).toContain("Prepared for manual apply");
+    expect(modalSource).toContain("Prepare manual switch");
+    expect(modalSource).toContain("Clear prepared switch");
+    expect(modalSource).toContain("Copy env suggestions");
+    expect(modalSource).toContain("Env suggestions");
+    expect(modalSource).toContain("Manual restart / reverse proxy checklist");
+    expect(modalSource).toContain("URL prefix rotation");
+    expect(modalSource).toContain("Manual only");
+    expect(modalSource).toContain("Runtime effect");
+    expect(modalSource).toContain("None yet");
+    expect(modalSource).toContain("Takes effect");
+    expect(modalSource).toContain("Activation");
+    expect(modalSource).toContain("Not implemented");
     expect(source).toContain("I understand this temporarily blocks non-admin users but does not disable their accounts.");
     expect(modalSource).toContain("{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}");
+    expect(source).toContain("I understand this only prepares a manual switch plan. It does not write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate public/private mode.");
+    expect(modalSource).toContain("{EXPOSURE_PREPARE_ACKNOWLEDGEMENT}");
     expect(modalSource).toContain("Required to enable or disable the maintenance lock.");
+    expect(modalSource).toContain("Required to prepare or clear a prepared switch.");
     expect(modalSource).toContain("This does not activate public/private mode. It only prepares the server for a future safe switch.");
+    expect(modalSource).toContain("After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in a later phase.");
     expect(source).toContain("caddy: \"Caddy\"");
     expect(source).toContain("nginx: \"Nginx\"");
     expect(source).toContain("cloudflare_tunnel: \"Cloudflare Tunnel\"");
@@ -239,9 +260,12 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).not.toContain("tailscale_funnel");
     expect(source).not.toContain("Tailscale Funnel");
     expect(source).not.toContain("/api/admin/exposure/activate");
+    expect(source).not.toContain("/api/admin/exposure/switch-now");
     expect(source).not.toContain(">Activate<");
     expect(source).not.toContain("Activate plan");
     expect(source).not.toContain("Apply mode");
+    expect(source).not.toContain(">Apply<");
+    expect(source).not.toContain("Switch now");
     expect(source).not.toContain("Write env");
   });
 

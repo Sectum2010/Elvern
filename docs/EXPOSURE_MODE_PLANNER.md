@@ -1,6 +1,6 @@
 # Exposure Mode Planner
 
-Elvern's exposure mode planner is a planning surface for a future private/public exposure switch. Phase 1 added inert planning drafts. Phase 2 adds a reversible temporary maintenance lock. Neither phase activates public/private switching.
+Elvern's exposure mode planner is a planning surface for a future private/public exposure switch. Phase 1 added inert planning drafts. Phase 2 adds a reversible temporary maintenance lock. Phase 3 adds a prepared manual switch plan. None of these phases activates public/private switching.
 
 ## Product Rules
 
@@ -12,6 +12,7 @@ Elvern's exposure mode planner is a planning surface for a future private/public
 - Saving a pending draft requires admin password re-authentication and acknowledgement.
 - Pending drafts do not change runtime behavior.
 - The temporary maintenance lock blocks enabled non-admin users without changing account enabled state.
+- A prepared manual switch plan still has `takes_effect=false`.
 
 ## Phase 1 Limits
 
@@ -40,6 +41,24 @@ When the lock is on:
 > The server is currently under construction, please try again later
 
 The lock does not activate public/private mode, write environment files, rotate the URL prefix, change token TTLs, revoke sessions, disable users, or mutate pending exposure drafts. Future activation work can use this lock before manual environment and restart verification.
+
+## Phase 3 Prepared Manual Switch Plan
+
+The prepared manual switch plan is stored in `app_settings` as `exposure_mode_prepared_switch_json`. It freezes a revalidated pending draft into a copyable manual plan for an admin. It does not load into runtime `Settings` and does not change the running server.
+
+Preparing a manual switch requires:
+
+- Current admin password re-authentication.
+- Admin acknowledgement that the action only prepares a plan.
+- An existing pending exposure draft.
+- The temporary maintenance lock to be on.
+- Revalidation of the pending draft with no blocking errors.
+- For public custom domain and direct public IP drafts, the current admin request origin must match the proposed public origin.
+- For direct public IP drafts, the direct-IP NOT RECOMMENDED acknowledgement must already be stored in the pending draft.
+
+The prepared plan includes a copyable env suggestion block and manual restart / reverse proxy checklist. The block contains only high-level non-secret settings such as `ELVERN_PRIVATE_NETWORK_ONLY`, `ELVERN_PUBLIC_APP_ORIGIN`, `ELVERN_BACKEND_ORIGIN`, and `ELVERN_COOKIE_SECURE`.
+
+Phase 3 does not write env files, edit deploy files, restart Elvern, activate exposure mode, rotate the URL prefix, revoke sessions, disable users, change `users.enabled`, or change token TTLs. The prepared switch always reports `Prepared for manual apply`, `Activation not implemented`, and `takes_effect=false`.
 
 ## Public Custom Domain
 
@@ -73,13 +92,15 @@ Private Mode may use a private origin such as a tailnet hostname, LAN hostname, 
 
 ## Future Activation Notes
 
-Future activation should be a separate, explicit phase. It should require admin re-authentication and should not automatically rotate the URL prefix or change token TTLs.
+Future activation should be split into later explicit phases. It should require admin re-authentication and should not automatically rotate the URL prefix or change token TTLs.
 
 During a future stable switch, enable the temporary maintenance lock before switch preparation and keep non-admin users blocked until the server is ready. Standard users should see:
 
 > The server is currently under construction, please try again later
 
-Admin should receive a success or next-step message before any later reauth/logout flow. Activation remains outside the planner and maintenance-lock phases.
+Phase 4 should run after manual env/proxy apply and restart. It should verify the active config through the target origin and confirm the server is reachable at the intended address.
+
+Phase 5 should design finalization and user release behavior. Admin should receive a success or next-step message before any later reauth/logout flow. Activation remains outside the planner, maintenance-lock, and prepared-plan phases.
 
 ## Security Checklist
 
@@ -90,3 +111,4 @@ Admin should receive a success or next-step message before any later reauth/logo
 - Keep secure cookies enabled for public HTTPS.
 - Keep global security headers active.
 - Keep URL prefix rotation manual.
+- Keep prepared manual switch plans non-activating and `takes_effect=false`.

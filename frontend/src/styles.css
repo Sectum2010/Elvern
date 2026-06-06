@@ -3173,6 +3173,32 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   color: #ffd9b0;
 }
 
+.exposure-prepared-block {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.exposure-prepared-block h4 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.exposure-prepared-block ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding-inline-start: 1.15rem;
+}
+
+.exposure-prepared-env-block {
+  width: 100%;
+  min-height: 8rem;
+  resize: vertical;
+  overflow-wrap: anywhere;
+  white-space: pre;
+}
+
 .exposure-check-pill {
   display: inline-flex;
   margin-inline-end: 0.45rem;
