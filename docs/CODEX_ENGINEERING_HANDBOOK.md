@@ -4,6 +4,8 @@ This handbook governs future Codex work in Elvern. It is broader than refactor g
 
 For core-path executable checks, also use `docs/CODEX_CORE_GUARDRAILS.md`.
 
+For security-sensitive changes, also use `docs/SECURITY_ENGINEERING_CHECKLIST.md`.
+
 For hard-won playback and platform regressions, also use `docs/PLAYBACK_REGRESSION_NOTES.md`. If a task disproves an early playback hypothesis, depends on live-device evidence, or fixes a high-regression-risk platform path, add or update a note there before calling the slice complete.
 
 Before pushing security, auth, download, TOTP, backup, dependency, or CI changes,

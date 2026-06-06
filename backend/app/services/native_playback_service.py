@@ -20,7 +20,7 @@ from ..progress import record_playback_event, save_progress
 from ..security import generate_session_token, hash_session_token
 from .cloud_library_service import build_cloud_stream_response, refresh_cloud_media_item_metadata
 from .library_service import get_media_item_record
-from .log_identity_service import native_session_log_fingerprint
+from .log_identity_service import local_media_path_log_fingerprint, native_session_log_fingerprint
 from .media_age_access_service import assert_user_can_access_media_by_age
 
 
@@ -1344,6 +1344,7 @@ def _build_session_payload(
         audio_tracks, subtitle_tracks = _probe_tracks(
             Path(str(row["file_path"])),
             settings,
+            media_item_id=row.get("media_item_id"),
         )
     if not subtitle_tracks and row.get("subtitles"):
         subtitle_tracks = [
@@ -1653,7 +1654,12 @@ def _native_api_origin(settings: Settings) -> str:
     return f"http://{settings.bind_host}:{settings.port}"
 
 
-def _probe_tracks(file_path: Path, settings: Settings) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def _probe_tracks(
+    file_path: Path,
+    settings: Settings,
+    *,
+    media_item_id: object | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     if not settings.ffprobe_path:
         return [], []
 
@@ -1679,21 +1685,31 @@ def _probe_tracks(file_path: Path, settings: Settings) -> tuple[list[dict[str, o
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("ffprobe track probe failed for %s: %s", file_path, exc)
+        logger.warning(
+            "ffprobe track probe failed item=%s path_fingerprint=%s error_type=%s",
+            media_item_id or "unknown",
+            local_media_path_log_fingerprint(file_path),
+            type(exc).__name__,
+        )
         return [], []
 
     if completed.returncode != 0:
         logger.warning(
-            "ffprobe track probe exited with %s for %s",
+            "ffprobe track probe exited returncode=%s item=%s path_fingerprint=%s",
             completed.returncode,
-            file_path,
+            media_item_id or "unknown",
+            local_media_path_log_fingerprint(file_path),
         )
         return [], []
 
     try:
         payload = json.loads(completed.stdout or "{}")
     except json.JSONDecodeError:
-        logger.warning("ffprobe track probe returned invalid JSON for %s", file_path)
+        logger.warning(
+            "ffprobe track probe returned invalid JSON item=%s path_fingerprint=%s",
+            media_item_id or "unknown",
+            local_media_path_log_fingerprint(file_path),
+        )
         return [], []
 
     audio_tracks: list[dict[str, object]] = []

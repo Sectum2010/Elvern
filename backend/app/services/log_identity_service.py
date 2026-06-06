@@ -13,3 +13,7 @@ def stable_log_fingerprint(value: object, *, namespace: str, length: int = 12) -
 
 def native_session_log_fingerprint(session_id: object) -> str:
     return stable_log_fingerprint(session_id, namespace="native-session", length=12)
+
+
+def local_media_path_log_fingerprint(path: object) -> str:
+    return stable_log_fingerprint(path, namespace="local-media-path", length=12)

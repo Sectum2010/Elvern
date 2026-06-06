@@ -366,7 +366,7 @@ def test_native_playback_access_is_invalidated_after_parent_session_revoke_or_us
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -435,7 +435,7 @@ def test_external_player_native_playback_survives_parent_session_revoke(initiali
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -489,7 +489,7 @@ def test_external_player_native_playback_still_respects_user_disable_and_native_
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -560,7 +560,7 @@ def test_external_player_native_playback_uses_external_stream_ttl(
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -613,7 +613,7 @@ def test_ios_vlc_external_playback_survives_longer_than_native_session_minutes(
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -687,7 +687,7 @@ def test_desktop_vlc_external_playback_survives_browser_auth_revoke_and_normal_t
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -770,7 +770,7 @@ def test_desktop_vlc_external_playback_still_respects_disable_revoke_and_close(
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -832,7 +832,7 @@ def test_build_native_stream_response_exposes_external_player_debug_context(init
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     native_session = create_native_playback_session(
@@ -892,7 +892,7 @@ def test_admin_native_playback_status_exposes_vlc_and_infuse_without_sensitive_f
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     vlc_session = create_native_playback_session(
@@ -981,7 +981,7 @@ def test_admin_native_playback_status_maps_desktop_and_terminal_states(
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     sessions = {
@@ -1116,7 +1116,7 @@ def test_admin_native_playback_status_hides_long_ttl_idle_sessions_without_delet
 
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
 
     vlc_session = create_native_playback_session(

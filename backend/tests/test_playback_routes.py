@@ -757,7 +757,7 @@ def test_native_external_launch_route_redirects_for_supported_targets(
 ) -> None:
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     item = _create_media_item_record(
@@ -843,7 +843,7 @@ def test_native_playback_session_route_decouples_ios_external_player_auth_sessio
 ) -> None:
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     item = _create_media_item_record(
@@ -887,7 +887,7 @@ def test_native_playback_session_route_uses_shared_progress_for_ios_vlc_resume_s
 ) -> None:
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     item = _create_media_item_record(
@@ -950,7 +950,7 @@ def test_native_playback_close_log_uses_session_fingerprint(
 ) -> None:
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     item = _create_media_item_record(
@@ -999,7 +999,7 @@ def test_native_playback_create_log_omits_tokenized_urls_and_raw_session_id(
 ) -> None:
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
     settings = replace(initialized_settings, backend_origin="https://elvern.example:8443")
     client.app.state.settings = settings
@@ -1054,7 +1054,7 @@ def test_native_playback_session_route_ignores_other_users_progress_for_ios_vlc_
 ) -> None:
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
     created_user = _create_standard_user(initialized_settings, username="ios-vlc-other-user")
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
@@ -2491,7 +2491,7 @@ def test_native_playback_details_route_fails_immediately_after_revoke_or_disable
 ) -> None:
     monkeypatch.setattr(
         "backend.app.services.native_playback_service._probe_tracks",
-        lambda file_path, settings: ([], []),
+        lambda file_path, settings, **kwargs: ([], []),
     )
     created_user = _create_standard_user(
         initialized_settings,

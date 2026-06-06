@@ -21,7 +21,7 @@ from .services.backup_service import (
     prune_backup_checkpoints,
 )
 from .services.desktop_helper_service import import_helper_release_artifacts
-from .services.log_identity_service import native_session_log_fingerprint
+from .services.log_identity_service import local_media_path_log_fingerprint, native_session_log_fingerprint
 from .services.status_service import get_system_status
 
 
@@ -119,6 +119,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "session_id",
         nargs="?",
         help="Native session id. Omit to enter it without echo.",
+    )
+    media_path_fingerprint_parser = subparsers.add_parser(
+        "media-path-fingerprint",
+        help="Compute the log fingerprint for a local media path.",
+    )
+    media_path_fingerprint_parser.add_argument(
+        "path",
+        nargs="?",
+        help="Media path. Omit to enter it without echo.",
     )
     subparsers.add_parser(
         "rotate-url-prefix",
@@ -338,6 +347,11 @@ def main() -> None:
     if args.command == "native-session-fingerprint":
         session_id = args.session_id if args.session_id is not None else getpass.getpass("Native session id: ")
         print(json.dumps({"session_fingerprint": native_session_log_fingerprint(session_id)}, indent=2))
+        return
+
+    if args.command == "media-path-fingerprint":
+        media_path = args.path if args.path is not None else getpass.getpass("Media path: ")
+        print(json.dumps({"path_fingerprint": local_media_path_log_fingerprint(media_path)}, indent=2))
         return
 
     if args.command == "hash-password":
