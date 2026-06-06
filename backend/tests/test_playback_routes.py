@@ -990,6 +990,62 @@ def test_native_playback_close_log_uses_session_fingerprint(
     assert raw_session_id not in close_log_text
 
 
+def test_native_playback_create_log_omits_tokenized_urls_and_raw_session_id(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+    caplog,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+    settings = replace(initialized_settings, backend_origin="https://elvern.example:8443")
+    client.app.state.settings = settings
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        settings,
+        relative_name="native-session/create-log-sanitized.mp4",
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="backend.app.services.native_playback_service"):
+        create_response = client.post(
+            f"/api/native-playback/{item['id']}/session",
+            headers={"user-agent": IOS_SAFARI_USER_AGENT},
+        )
+
+    assert create_response.status_code == 200
+    created_session = create_response.json()
+    raw_session_id = created_session["session_id"]
+    access_token = created_session["access_token"]
+    expected_fingerprint = native_session_log_fingerprint(raw_session_id)
+    url_keys = ("details_url", "stream_url", "heartbeat_url", "progress_url", "event_url", "close_url")
+
+    for key in url_keys:
+        parsed_url = urlsplit(created_session[key])
+        assert parsed_url.path.startswith(f"/api/native-playback/session/{raw_session_id}")
+        assert f"token={access_token}" in created_session[key]
+    assert created_session["stream_url"].endswith(f"/stream?token={access_token}")
+
+    create_log_text = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "backend.app.services.native_playback_service"
+    )
+    assert f"session_fingerprint={expected_fingerprint}" in create_log_text
+    assert f"media={item['id']}" in create_log_text
+    assert "api_origin=https://elvern.example:8443" in create_log_text
+    assert "include_access_token:True" in create_log_text
+    assert "urls=details,stream,heartbeat,progress,event,close" in create_log_text
+    assert raw_session_id not in create_log_text
+    assert access_token not in create_log_text
+    assert "token=" not in create_log_text
+    for key in url_keys:
+        assert created_session[key] not in create_log_text
+
+
 def test_native_playback_session_route_ignores_other_users_progress_for_ios_vlc_resume(
     initialized_settings,
     client,

@@ -28,6 +28,21 @@ def test_native_playback_session_log_fingerprint_is_stable_and_non_reversible() 
     assert stable_log_fingerprint(session_id, namespace="other-namespace") != first
 
 
+def test_safe_origin_log_label_keeps_only_scheme_and_host_port() -> None:
+    assert native_playback_service._safe_origin_log_label(
+        "https://example.com/path?token=secret#fragment"
+    ) == "https://example.com"
+    assert native_playback_service._safe_origin_log_label(
+        "http://127.0.0.1:8000"
+    ) == "http://127.0.0.1:8000"
+    assert native_playback_service._safe_origin_log_label(
+        "http://[::1]:8000/foo?token=secret"
+    ) == "http://[::1]:8000"
+    assert native_playback_service._safe_origin_log_label("not-a-url") == "unknown"
+    assert native_playback_service._safe_origin_log_label("") == "unknown"
+    assert native_playback_service._safe_origin_log_label(None) == "unknown"
+
+
 def test_cli_native_session_fingerprint_prints_json_without_raw_session_or_settings(
     monkeypatch,
     capsys,
@@ -90,3 +105,16 @@ def test_close_native_playback_session_log_uses_fingerprint_static_guard() -> No
     assert "session=%s item=%s" not in logger_block
     assert "native_session_log_fingerprint(session_id)" in logger_block
     assert "logger.info(" in source
+
+
+def test_build_session_payload_log_uses_safe_fields_static_guard() -> None:
+    source = inspect.getsource(native_playback_service._build_session_payload)
+    logger_block = source.split("logger.info(", maxsplit=1)[1]
+
+    assert "session_fingerprint=%s" in logger_block
+    assert "include_access_token:%s" in logger_block
+    assert "_safe_origin_log_label(api_origin)" in logger_block
+    assert "native_session_log_fingerprint(session_id)" in logger_block
+    assert "details_url=%s stream_url=%s" not in logger_block
+    assert "details_url," not in logger_block
+    assert "stream_url," not in logger_block

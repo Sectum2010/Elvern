@@ -1381,14 +1381,21 @@ def _build_session_payload(
         "session_api_version": 1,
     }
     logger.info(
-        "Built native playback session payload session=%s media=%s api_origin=%s details_url=%s stream_url=%s",
-        session_id,
+        "Built native playback session payload session_fingerprint=%s media=%s api_origin=%s include_access_token:%s urls=%s",
+        native_session_log_fingerprint(session_id),
         row["media_item_id"],
-        api_origin,
-        details_url,
-        stream_url,
+        _safe_origin_log_label(api_origin),
+        include_access_token,
+        "details,stream,heartbeat,progress,event,close",
     )
     return payload
+
+
+def _safe_origin_log_label(origin: object) -> str:
+    parsed = urlsplit(str(origin or "").strip())
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return "unknown"
 
 
 def _build_session_urls(
