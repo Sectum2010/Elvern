@@ -42,13 +42,13 @@ def test_startup_scan_skips_when_root_identity_and_top_level_state_match(initial
     assert reason == "Startup scan skipped: local library top-level state matches the last successful scan."
 
 
-def test_startup_scan_allows_when_media_root_identity_changes(initialized_settings, tmp_path) -> None:
+def test_startup_scan_allows_when_media_root_identity_changes(initialized_settings) -> None:
     original_service = ScanService(initialized_settings)
     original_service._store_local_library_freshness_snapshot(
         build_local_library_freshness_snapshot(initialized_settings)
     )
 
-    replacement_root = tmp_path / "other-media"
+    replacement_root = Path(initialized_settings.media_root).parent / "other-media"
     replacement_root.mkdir()
     changed_settings = replace(initialized_settings, media_root=replacement_root.resolve())
     changed_service = ScanService(changed_settings)
