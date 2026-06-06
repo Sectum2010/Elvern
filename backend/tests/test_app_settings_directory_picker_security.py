@@ -63,17 +63,17 @@ def _install_native_picker_mocks(
 def test_native_directory_picker_purpose_uses_server_defined_titles(
     initialized_settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     purpose: str,
     expected_title: str,
 ) -> None:
-    selected_dir = tmp_path / "selected"
+    start_dir = Path(initialized_settings.media_root)
+    selected_dir = start_dir / "selected"
     selected_dir.mkdir()
     captured = _install_native_picker_mocks(monkeypatch, selected_path=selected_dir)
 
     result = service.try_pick_local_directory(
         initialized_settings,
-        path=str(tmp_path),
+        path=str(start_dir),
         purpose=purpose,
     )
 
@@ -116,9 +116,9 @@ def test_native_directory_picker_command_candidates_use_absolute_executables(
 def test_native_directory_picker_stderr_is_not_returned_to_client_reason(
     initialized_settings,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    selected_dir = tmp_path / "selected"
+    start_dir = Path(initialized_settings.media_root)
+    selected_dir = start_dir / "selected"
     selected_dir.mkdir()
     captured = _install_native_picker_mocks(
         monkeypatch,
@@ -129,7 +129,7 @@ def test_native_directory_picker_stderr_is_not_returned_to_client_reason(
 
     result = service.try_pick_local_directory(
         initialized_settings,
-        path=str(tmp_path),
+        path=str(start_dir),
         purpose="generic",
     )
 
@@ -142,3 +142,24 @@ def test_native_directory_picker_stderr_is_not_returned_to_client_reason(
     assert "secret-token" not in str(result["reason"])
     assert "dbus-session" not in str(result["reason"])
     assert captured["argv"][0] == "/usr/bin/zenity"
+
+
+def test_native_directory_picker_rejects_restricted_selected_path(
+    initialized_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_dir = Path(initialized_settings.media_root)
+    _install_native_picker_mocks(monkeypatch, selected_path=Path("/etc"))
+
+    result = service.try_pick_local_directory(
+        initialized_settings,
+        path=str(start_dir),
+        purpose="generic",
+    )
+
+    assert result == {
+        "status": "unavailable",
+        "selected_path": None,
+        "reason": "Directory browse cannot access system directories or Elvern application data.",
+        "picker_backend": "zenity",
+    }

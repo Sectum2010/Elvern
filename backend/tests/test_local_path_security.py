@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+import shutil
 
 import pytest
 from fastapi import HTTPException
 
 from backend.app.config import PROJECT_ROOT
 from backend.app.db import get_connection, utcnow_iso
+from backend.app.services.app_settings_service import (
+    POSTER_REFERENCE_LOCATION_KEY,
+    get_poster_reference_location_payload,
+    validate_poster_reference_location,
+)
 from backend.app.services.local_library_source_service import (
     MEDIA_LIBRARY_REFERENCE_KEY,
     get_effective_library_reference_locations,
@@ -19,6 +26,10 @@ from backend.app.services.local_path_security import (
     LIBRARY_REFERENCE_LOCAL_URI_DETAIL,
     LIBRARY_REFERENCE_PATH_FORMAT_DETAIL,
     LIBRARY_REFERENCE_SYSTEM_PATH_DETAIL,
+    POSTER_REFERENCE_ELVERN_PATH_DETAIL,
+    POSTER_REFERENCE_LOCAL_URI_DETAIL,
+    POSTER_REFERENCE_PATH_FORMAT_DETAIL,
+    POSTER_REFERENCE_SYSTEM_PATH_DETAIL,
     is_restricted_system_path,
 )
 
@@ -95,6 +106,9 @@ def test_system_path_denylist_blocks_broad_paths_and_allows_media_examples() -> 
         "/var",
         "/tmp",
         "/tmp/elvern-media",
+        "/snap",
+        "/nix",
+        "/lost+found",
     ]
     allowed_examples = [
         "/home/sectum/Videos",
@@ -106,6 +120,42 @@ def test_system_path_denylist_blocks_broad_paths_and_allows_media_examples() -> 
 
     assert all(is_restricted_system_path(Path(path)) for path in denied_paths)
     assert not any(is_restricted_system_path(Path(path)) for path in allowed_examples)
+
+
+def test_tmp_denylist_entry_has_narrow_bandit_suppression() -> None:
+    source = (PROJECT_ROOT / "backend" / "app" / "services" / "local_path_security.py").read_text(encoding="utf-8")
+
+    assert "Denylist entry for unsafe media-library roots, not temporary-file creation." in source
+    assert 'Path("/tmp"),  # nosec B108 - /tmp is intentionally denylisted as an unsafe media-library root; no temp file is created.' in source
+
+
+def test_configured_media_root_does_not_bypass_dangerous_roots(initialized_settings) -> None:
+    for unsafe_root in (Path("/"), Path("/etc"), Path("/tmp")):
+        unsafe_settings = replace(initialized_settings, media_root=unsafe_root)
+
+        with pytest.raises(HTTPException) as exc_info:
+            validate_shared_local_library_path(unsafe_settings, value=None)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == LIBRARY_REFERENCE_SYSTEM_PATH_DETAIL
+
+
+def test_configured_home_videos_media_root_is_allowed(initialized_settings, tmp_path) -> None:
+    videos_root = Path.home() / "Videos"
+    videos_existed = videos_root.exists()
+    safe_root = videos_root / f"elvern-test-{tmp_path.name}"
+    safe_root.mkdir(parents=True)
+    try:
+        safe_settings = replace(initialized_settings, media_root=safe_root.resolve())
+
+        assert validate_shared_local_library_path(safe_settings, value=None) == str(safe_root.resolve())
+    finally:
+        shutil.rmtree(safe_root, ignore_errors=True)
+        if not videos_existed:
+            try:
+                videos_root.rmdir()
+            except OSError:
+                pass
 
 
 def test_library_reference_validator_rejects_system_and_elvern_internal_paths(initialized_settings) -> None:
@@ -156,6 +206,83 @@ def test_stored_library_reference_locations_skip_invalid_paths_and_fallback(init
         connection.commit()
 
     assert get_effective_library_reference_locations(initialized_settings) == [media_root.resolve()]
+
+
+def test_poster_reference_validator_accepts_safe_paths_and_local_file_uris(initialized_settings) -> None:
+    poster_root = Path(initialized_settings.media_root) / "Elvern Posters"
+    poster_root.mkdir()
+
+    assert validate_poster_reference_location(initialized_settings, value=str(poster_root)) == str(poster_root.resolve())
+    assert validate_poster_reference_location(initialized_settings, value=poster_root.as_uri()) == str(poster_root.resolve())
+    assert validate_poster_reference_location(
+        initialized_settings,
+        value=f"file://localhost{poster_root.as_posix()}",
+    ) == str(poster_root.resolve())
+
+
+@pytest.mark.parametrize(
+    ("candidate", "detail"),
+    [
+        ("/etc", POSTER_REFERENCE_SYSTEM_PATH_DETAIL),
+        ("/tmp", POSTER_REFERENCE_SYSTEM_PATH_DETAIL),
+        ("/home", POSTER_REFERENCE_SYSTEM_PATH_DETAIL),
+        (str(Path.home()), POSTER_REFERENCE_SYSTEM_PATH_DETAIL),
+        (str(PROJECT_ROOT), POSTER_REFERENCE_ELVERN_PATH_DETAIL),
+        ("file://fileserver/mnt/media/Posters", POSTER_REFERENCE_LOCAL_URI_DETAIL),
+        ("https://example.com/posters", POSTER_REFERENCE_PATH_FORMAT_DETAIL),
+        ("relative/posters", "Poster reference location must be an absolute Linux directory path."),
+        ("file:///mnt/media/Posters?query=1", POSTER_REFERENCE_PATH_FORMAT_DETAIL),
+        ("/mnt/media/Posters\x00suffix", POSTER_REFERENCE_PATH_FORMAT_DETAIL),
+    ],
+)
+def test_poster_reference_validator_rejects_unsafe_paths(
+    initialized_settings,
+    candidate: str,
+    detail: str,
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        validate_poster_reference_location(initialized_settings, value=candidate)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == detail
+
+
+def test_poster_reference_validator_rejects_elvern_data_dirs(initialized_settings) -> None:
+    rejected_dirs = [
+        initialized_settings.data_dir,
+        initialized_settings.transcode_dir,
+        initialized_settings.poster_display_cache_dir,
+        initialized_settings.helper_releases_dir,
+    ]
+    for directory in rejected_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            validate_poster_reference_location(initialized_settings, value=str(directory))
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == POSTER_REFERENCE_ELVERN_PATH_DETAIL
+
+
+def test_stored_unsafe_poster_reference_falls_back_to_default(initialized_settings) -> None:
+    default_payload = get_poster_reference_location_payload(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (POSTER_REFERENCE_LOCATION_KEY, "/etc", utcnow_iso()),
+        )
+        connection.commit()
+
+    payload = get_poster_reference_location_payload(initialized_settings)
+
+    assert payload["configured_value"] == "/etc"
+    assert payload["effective_value"] == default_payload["effective_value"]
 
 
 def test_admin_media_library_reference_route_rejects_system_path(client, admin_credentials) -> None:

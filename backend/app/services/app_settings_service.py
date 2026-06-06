@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-import os
 import shutil
 import sqlite3
 import subprocess
 from ipaddress import ip_address
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, status
 
@@ -28,7 +27,11 @@ from .local_library_source_service import (
 )
 from .local_path_security import (
     LIBRARY_REFERENCE_HELP_TEXT,
+    is_restricted_settings_browse_path,
+    validate_safe_directory_browse_path,
+    validate_safe_existing_local_directory,
     validate_safe_library_reference_path,
+    validate_safe_poster_reference_path,
 )
 
 
@@ -53,7 +56,17 @@ class NativeDirectoryPickerCommand:
 
 
 def _poster_reference_default_path(settings: Settings) -> Path:
-    return (get_effective_shared_local_library_path(settings) / "Posters").resolve()
+    try:
+        shared_root = get_effective_shared_local_library_path(settings)
+    except HTTPException:
+        shared_root = Path(settings.media_root).expanduser().resolve(strict=False)
+    default_path = (shared_root / "Posters").resolve(strict=False)
+    if not is_restricted_settings_browse_path(settings, default_path):
+        return default_path
+    fallback = (Path.home() / "Videos" / "Elvern Posters").expanduser().resolve(strict=False)
+    if not is_restricted_settings_browse_path(settings, fallback):
+        return fallback
+    return Path("/srv/media/Posters")
 
 
 def get_global_app_setting(
@@ -466,7 +479,9 @@ def browse_local_directories(
     path: str | None,
 ) -> dict[str, object]:
     browse_dir = _resolve_browse_directory(settings, value=path)
-    parent_path = None if browse_dir.parent == browse_dir else str(browse_dir.parent)
+    parent_path = None
+    if browse_dir.parent != browse_dir and not is_restricted_settings_browse_path(settings, browse_dir.parent):
+        parent_path = str(browse_dir.parent)
     directories: list[dict[str, str]] = []
     try:
         entries = sorted(browse_dir.iterdir(), key=lambda entry: entry.name.lower())
@@ -479,12 +494,15 @@ def browse_local_directories(
         try:
             if not entry.is_dir():
                 continue
+            resolved_entry = entry.resolve()
         except OSError:
+            continue
+        if is_restricted_settings_browse_path(settings, resolved_entry):
             continue
         directories.append(
             {
                 "name": entry.name or str(entry),
-                "path": str(entry.resolve()),
+                "path": str(resolved_entry),
             }
         )
     return {
@@ -507,7 +525,7 @@ def pick_local_directory(
     )
     if not selected_path:
         return None
-    return _normalize_existing_local_directory(selected_path)
+    return _normalize_existing_local_directory(settings, selected_path)
 
 
 def poster_reference_location_validation_rules(settings: Settings) -> list[str]:
@@ -528,29 +546,7 @@ def poster_reference_default(settings: Settings) -> dict[str, str]:
 
 
 def _normalize_local_poster_directory(value: str, *, settings: Settings) -> str:
-    candidate = value.strip()
-    if not candidate:
-        raise ValueError("empty")
-
-    parsed = urlsplit(candidate)
-    if parsed.scheme:
-        if parsed.scheme.lower() != "file":
-            raise ValueError("unsupported_uri_scheme")
-        if parsed.netloc and parsed.netloc.lower() not in {"", "localhost"}:
-            raise ValueError("unsupported_file_authority")
-        candidate_path = Path(unquote(parsed.path or "")).expanduser()
-    else:
-        candidate_path = Path(candidate).expanduser()
-
-    if not candidate_path.is_absolute():
-        raise ValueError("relative_path")
-
-    normalized_path = candidate_path.resolve()
-    if not normalized_path.exists():
-        raise ValueError("missing_path")
-    if not normalized_path.is_dir():
-        raise ValueError("not_directory")
-    return str(normalized_path)
+    return validate_safe_poster_reference_path(settings, value=value)
 
 
 def validate_poster_reference_location(
@@ -561,19 +557,7 @@ def validate_poster_reference_location(
     trimmed = (value or "").strip()
     if not trimmed:
         return None
-    try:
-        return _normalize_local_poster_directory(trimmed, settings=settings)
-    except ValueError as exc:
-        code = str(exc)
-        detail = {
-            "unsupported_uri_scheme": "Poster reference location must be a local Linux path or file:// URI.",
-            "unsupported_file_authority": "Poster reference location does not support remote file:// authorities. Mount the directory locally and use an absolute Linux path instead.",
-            "relative_path": "Poster reference location must be an absolute Linux path or file:// URI.",
-            "missing_path": "Poster reference location must point to an existing directory.",
-            "not_directory": "Poster reference location must point to a directory.",
-            "empty": "Poster reference location cannot be empty.",
-        }.get(code, "Poster reference location is invalid.")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+    return _normalize_local_poster_directory(trimmed, settings=settings)
 
 
 def get_poster_reference_location_payload(
@@ -591,7 +575,12 @@ def get_poster_reference_location_payload(
     if configured_value:
         try:
             effective_value = _normalize_local_poster_directory(configured_value, settings=settings)
-        except ValueError:
+        except HTTPException as exc:
+            logger.warning(
+                "Skipping unsafe stored poster reference location %s: %s",
+                configured_value,
+                exc.detail,
+            )
             effective_value = default_payload["effective_value"]
     return {
         "configured_value": configured_value,
@@ -611,83 +600,20 @@ def update_poster_reference_location(settings: Settings, *, value: str | None) -
     return get_poster_reference_location_payload(settings)
 
 
-def _parse_local_directory_candidate(candidate: str) -> Path:
-    parsed = urlsplit(candidate)
-    if parsed.scheme:
-        if parsed.scheme.lower() != "file":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Directory browse only supports local Linux paths or file:// URIs.",
-            )
-        if parsed.netloc and parsed.netloc.lower() not in {"", "localhost"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Directory browse only supports local directories on the Elvern host.",
-            )
-        return Path(unquote(parsed.path or "")).expanduser()
-    return Path(candidate).expanduser()
+def _parse_local_directory_candidate(settings: Settings, candidate: str) -> Path:
+    return validate_safe_directory_browse_path(settings, candidate)
 
 
 def _resolve_browse_directory(settings: Settings, *, value: str | None) -> Path:
     candidate = str(value or "").strip()
     if candidate:
-        browse_path = _parse_local_directory_candidate(candidate)
-        if not browse_path.is_absolute():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Directory browse needs an absolute Linux path or file:// URI.",
-            )
-        resolved = browse_path.resolve(strict=False)
+        return _parse_local_directory_candidate(settings, candidate)
     else:
-        resolved = get_effective_shared_local_library_path(settings).resolve()
-
-    current = resolved
-    while True:
-        if current.exists():
-            browse_dir = current if current.is_dir() else current.parent
-            break
-        if current.parent == current:
-            browse_dir = Path("/").resolve()
-            break
-        current = current.parent
-
-    if not browse_dir.exists() or not browse_dir.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Directory browse could not find a readable local directory on this host.",
-        )
-    if not os.access(browse_dir, os.R_OK | os.X_OK):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Directory browse could not read that directory on the Elvern host.",
-        )
-    return browse_dir
+        return validate_safe_directory_browse_path(settings, None)
 
 
-def _normalize_existing_local_directory(value: str | Path) -> str:
-    candidate_path = _parse_local_directory_candidate(str(value))
-    if not candidate_path.is_absolute():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The selected host directory was not an absolute Linux path.",
-        )
-    normalized_path = candidate_path.resolve()
-    if not normalized_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The selected host directory no longer exists.",
-        )
-    if not normalized_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The selected host path is not a directory.",
-        )
-    if not os.access(normalized_path, os.R_OK | os.X_OK):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The selected host directory is not readable.",
-        )
-    return str(normalized_path)
+def _normalize_existing_local_directory(settings: Settings, value: str | Path) -> str:
+    return validate_safe_existing_local_directory(settings, value)
 
 
 def get_native_local_directory_picker_capability() -> dict[str, object]:

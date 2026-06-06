@@ -997,7 +997,6 @@ def test_poster_reference_location_switch_refreshes_poster_without_media_rescan(
     client,
     admin_credentials,
     initialized_settings,
-    tmp_path,
 ) -> None:
     _login(
         client,
@@ -1008,7 +1007,7 @@ def test_poster_reference_location_switch_refreshes_poster_without_media_rescan(
     media_root = Path(initialized_settings.media_root)
     default_poster_dir = media_root / "Posters"
     default_poster_dir.mkdir(parents=True, exist_ok=True)
-    alternate_poster_dir = tmp_path / "alternate-posters"
+    alternate_poster_dir = media_root / "alternate-posters"
     alternate_poster_dir.mkdir()
 
     movie_filename = "Interstellar.2014.UHD.BluRay.2160p.DTS-HD.MA.5.1.HEVC.REMUX-FraMeSToR.mkv"
@@ -2014,9 +2013,8 @@ def test_admin_google_drive_setup_validation_surfaces_specific_error(client, adm
 def test_admin_local_directory_browse_lists_host_directories_and_stays_admin_only(
     client,
     admin_credentials,
-    tmp_path,
 ) -> None:
-    browse_root = tmp_path / "browse-root"
+    browse_root = Path(client.app.state.settings.media_root) / "browse-root"
     browse_root.mkdir()
     alpha_dir = browse_root / "alpha"
     beta_dir = browse_root / "beta"
@@ -2056,13 +2054,62 @@ def test_admin_local_directory_browse_lists_host_directories_and_stays_admin_onl
     assert forbidden.status_code == 403
 
 
+def test_admin_local_directory_browse_restricts_unsafe_paths_and_children(
+    client,
+    admin_credentials,
+    tmp_path,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    for restricted_path in ("/etc", "/tmp", "/home"):
+        response = client.get(
+            "/api/admin/local-directories",
+            params={"path": restricted_path},
+        )
+        assert response.status_code == 400
+
+    browse_root = Path(client.app.state.settings.media_root) / "safe-browse"
+    visible_dir = browse_root / "visible"
+    restricted_link = browse_root / "linked-etc"
+    visible_dir.mkdir(parents=True)
+    restricted_link.symlink_to(Path("/etc"), target_is_directory=True)
+
+    response = client.get(
+        "/api/admin/local-directories",
+        params={"path": str(browse_root)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["directories"] == [
+        {"name": "visible", "path": str(visible_dir.resolve())},
+    ]
+
+    home_child = Path.home() / f"elvern-browse-{tmp_path.name}"
+    home_child.mkdir()
+    try:
+        parent_response = client.get(
+            "/api/admin/local-directories",
+            params={"path": str(home_child)},
+        )
+
+        assert parent_response.status_code == 200
+        assert parent_response.json()["current_path"] == str(home_child.resolve())
+        assert parent_response.json()["parent_path"] is None
+    finally:
+        home_child.rmdir()
+
+
 def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_admin_only(
     client,
     admin_credentials,
     monkeypatch,
-    tmp_path,
 ) -> None:
-    selected_dir = tmp_path / "picked-host-directory"
+    picker_root = Path(client.app.state.settings.media_root)
+    selected_dir = picker_root / "picked-host-directory"
     selected_dir.mkdir()
     same_host_explicit_values: list[bool] = []
     picker_calls: list[dict[str, object]] = []
@@ -2102,7 +2149,7 @@ def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_
     response = client.post(
         "/api/admin/local-directory-picker",
         json={
-            "path": str(tmp_path),
+            "path": str(picker_root),
             "purpose": "poster_reference",
             "title": "; touch /tmp/pwned",
             "platform": "linux",
@@ -2116,7 +2163,7 @@ def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_
         "reason": None,
         "picker_backend": "zenity",
     }
-    assert picker_calls == [{"path": str(tmp_path), "purpose": "poster_reference"}]
+    assert picker_calls == [{"path": str(picker_root), "purpose": "poster_reference"}]
     assert same_host_explicit_values == [False]
 
     _create_standard_user_via_admin(client, username="picker-user", password="picker-password")
@@ -2126,7 +2173,7 @@ def test_admin_local_directory_picker_returns_selected_host_directory_and_stays_
     forbidden = client.post(
         "/api/admin/local-directory-picker",
         json={
-            "path": str(tmp_path),
+            "path": str(picker_root),
             "purpose": "poster_reference",
             "title": "; touch /tmp/pwned",
             "platform": "linux",

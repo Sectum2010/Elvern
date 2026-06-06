@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -95,8 +97,10 @@ def isolated_elvern_env(monkeypatch):
 
 @pytest.fixture()
 def test_settings(tmp_path, monkeypatch):
-    media_root = tmp_path / "media"
-    media_root.mkdir()
+    media_root = Path.home() / ".cache" / "elvern-tests" / tmp_path.name / "media"
+    if media_root.exists():
+        shutil.rmtree(media_root)
+    media_root.mkdir(parents=True)
     db_path = tmp_path / "backend" / "data" / "test.db"
     helper_releases_dir = tmp_path / "backend" / "data" / "helper_releases"
     transcode_dir = tmp_path / "backend" / "data" / "transcodes"
@@ -133,7 +137,10 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("ELVERN_ARGON2_PARALLELISM", "1")
 
     settings = refresh_settings()
-    yield settings
+    try:
+        yield settings
+    finally:
+        shutil.rmtree(media_root.parent, ignore_errors=True)
 
 
 @pytest.fixture()
