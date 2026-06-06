@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 import sqlite3
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from .library_folder_classifier import discover_library_folders
+from .local_path_security import (
+    is_restricted_library_reference_path,
+    validate_safe_library_reference_path,
+)
 
 
 LOCAL_FILESYSTEM_PROVIDER = "local_filesystem"
@@ -19,6 +22,8 @@ SHARED_LOCAL_LIBRARY_RESOURCE_ID = "shared_default"
 SHARED_LOCAL_LIBRARY_DISPLAY_NAME = "Shared Local Library"
 MEDIA_LIBRARY_REFERENCE_KEY = "media_library_reference"
 POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
+
+logger = logging.getLogger(__name__)
 
 LIBRARY_REFERENCE_CATEGORY_ORDER = ("movies", "tv", "cartoon", "anime")
 LIBRARY_REFERENCE_CATEGORY_LABELS = {
@@ -77,7 +82,7 @@ def validate_library_reference_locations(
     raw_lines = str(value or "").splitlines()
     candidate_values = [line.strip() for line in raw_lines if line.strip()]
     if not candidate_values:
-        return [normalize_local_library_path(shared_local_library_bootstrap_path(settings))]
+        return [validate_safe_library_reference_path(settings, value=None)]
 
     normalized: list[str] = []
     seen: set[str] = set()
@@ -95,49 +100,7 @@ def validate_shared_local_library_path(
     *,
     value: str | None,
 ) -> str:
-    candidate = str(value or "").strip()
-    if not candidate:
-        return normalize_local_library_path(shared_local_library_bootstrap_path(settings))
-
-    parsed = urlsplit(candidate)
-    if parsed.scheme:
-        if parsed.scheme.lower() != "file":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Library reference location must be an absolute Linux directory path or file:// URI.",
-            )
-        if parsed.netloc and parsed.netloc.lower() not in {"", "localhost"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Library reference location must resolve to a local directory on this host.",
-            )
-        candidate_path = Path(unquote(parsed.path or "")).expanduser()
-    else:
-        candidate_path = Path(candidate).expanduser()
-
-    if not candidate_path.is_absolute():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Library reference location must be an absolute Linux directory path.",
-        )
-
-    normalized_path = candidate_path.resolve()
-    if not normalized_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Library reference location does not exist on this host.",
-        )
-    if not normalized_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Library reference location must be a directory.",
-        )
-    if not os.access(normalized_path, os.R_OK | os.X_OK):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Library reference location must be a readable directory.",
-        )
-    return str(normalized_path)
+    return validate_safe_library_reference_path(settings, value=value)
 
 
 def ensure_shared_local_library_source(
@@ -297,6 +260,17 @@ def _ensure_shared_local_library_source(
         or str(existing["display_name"]) != SHARED_LOCAL_LIBRARY_DISPLAY_NAME
         or not bool(existing["is_shared"])
     ):
+        existing_local_path = str(existing["local_path"] or "").strip()
+        if existing_local_path:
+            try:
+                preserved_local_path = validate_safe_library_reference_path(
+                    settings,
+                    value=existing_local_path,
+                )
+            except HTTPException:
+                preserved_local_path = local_path
+        else:
+            preserved_local_path = local_path
         connection.execute(
             """
             UPDATE library_sources
@@ -310,7 +284,7 @@ def _ensure_shared_local_library_source(
             (
                 owner_user_id,
                 SHARED_LOCAL_LIBRARY_DISPLAY_NAME,
-                normalize_local_library_path(existing["local_path"] or local_path),
+                normalize_local_library_path(preserved_local_path),
                 now,
                 int(existing["id"]),
             ),
@@ -354,11 +328,22 @@ def _get_effective_shared_local_library_path(
     ).fetchone()
     local_path = str(existing["local_path"] or "").strip() if existing is not None else ""
     if local_path:
-        return Path(local_path).expanduser().resolve()
-    return shared_local_library_bootstrap_path(settings)
+        try:
+            return Path(validate_safe_library_reference_path(settings, value=local_path))
+        except HTTPException as exc:
+            logger.warning(
+                "Skipping unsafe stored shared local library path %s: %s",
+                local_path,
+                exc.detail,
+            )
+    return Path(validate_safe_library_reference_path(settings, value=None))
 
 
-def _parse_configured_library_reference_locations(value: object) -> list[str] | None:
+def _parse_configured_library_reference_locations(
+    value: object,
+    *,
+    settings: Settings,
+) -> list[str] | None:
     raw_value = str(value or "").strip()
     if not raw_value:
         return None
@@ -374,7 +359,15 @@ def _parse_configured_library_reference_locations(value: object) -> list[str] | 
         candidate = str(entry or "").strip()
         if not candidate:
             continue
-        resolved = normalize_local_library_path(candidate)
+        try:
+            resolved = validate_safe_library_reference_path(settings, value=candidate)
+        except HTTPException as exc:
+            logger.warning(
+                "Skipping unsafe stored library reference location %s: %s",
+                candidate,
+                exc.detail,
+            )
+            continue
         if resolved in seen:
             continue
         normalized.append(resolved)
@@ -396,7 +389,10 @@ def _get_effective_library_reference_locations(
         """,
         (MEDIA_LIBRARY_REFERENCE_KEY,),
     ).fetchone()
-    configured_locations = _parse_configured_library_reference_locations(row["value"] if row else None)
+    configured_locations = _parse_configured_library_reference_locations(
+        row["value"] if row else None,
+        settings=settings,
+    )
     if configured_locations:
         return [Path(location).expanduser().resolve() for location in configured_locations]
     return [_get_effective_shared_local_library_path(connection, settings=settings)]
@@ -426,6 +422,7 @@ def _get_library_reference_category_summary(
         _get_effective_library_reference_locations(connection, settings=settings),
         allowed_video_extensions=settings.allowed_video_extensions,
         poster_reference_path=_get_effective_poster_reference_path(connection, settings=settings),
+        restricted_path_checker=lambda path: is_restricted_library_reference_path(settings, path),
     )
     for category in LIBRARY_REFERENCE_CATEGORY_ORDER:
         seen_paths: set[str] = set()

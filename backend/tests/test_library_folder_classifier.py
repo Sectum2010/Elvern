@@ -247,6 +247,67 @@ def test_discovery_marks_smart_single_movie_folder_and_warns_for_explicit_s_mult
     ]
 
 
+def test_discovery_skips_restricted_symlink_targets(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    media_folder = root / "Movies -M"
+    restricted_target = tmp_path / "Restricted"
+    media_folder.mkdir(parents=True)
+    restricted_target.mkdir()
+    (restricted_target / "Hidden.Movie.2020.mkv").write_bytes(b"hidden")
+    (media_folder / "Linked Restricted").symlink_to(restricted_target, target_is_directory=True)
+
+    discovery = discover_library_folders(
+        [root],
+        allowed_video_extensions=VIDEO_EXTENSIONS,
+        restricted_path_checker=lambda path: path == restricted_target.resolve(),
+    )
+
+    assert discovery.files == []
+    assert discovery.warnings == [
+        {
+            "code": "library_reference_restricted_path_skipped",
+            "path": str(restricted_target.resolve()),
+        }
+    ]
+    assert str(restricted_target.resolve()) in discovery.excluded_paths
+
+
+def test_discovery_skips_already_visited_symlink_loop(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    media_folder = root / "Movies -M"
+    media_folder.mkdir(parents=True)
+    (media_folder / "Movie.One.2020.mkv").write_bytes(b"movie")
+    (media_folder / "Loop").symlink_to(media_folder, target_is_directory=True)
+
+    discovery = discover_library_folders(
+        [root],
+        allowed_video_extensions=VIDEO_EXTENSIONS,
+    )
+
+    assert [file.path.name for file in discovery.files] == ["Movie.One.2020.mkv"]
+    assert {
+        "code": "library_reference_directory_loop_skipped",
+        "path": str(media_folder.resolve()),
+    } in discovery.warnings
+
+
+def test_discovery_follows_safe_symlink_once(tmp_path: Path) -> None:
+    root = tmp_path / "Library"
+    safe_target = tmp_path / "Safe Target"
+    root.mkdir()
+    safe_target.mkdir()
+    (safe_target / "Linked.Movie.2020.mkv").write_bytes(b"movie")
+    (root / "Linked Media").symlink_to(safe_target, target_is_directory=True)
+
+    discovery = discover_library_folders(
+        [root],
+        allowed_video_extensions=VIDEO_EXTENSIONS,
+    )
+
+    assert [file.path.name for file in discovery.files] == ["Linked.Movie.2020.mkv"]
+    assert discovery.warnings == []
+
+
 def test_scan_persists_folder_metadata_and_category_summary(initialized_settings, monkeypatch) -> None:
     media_root = Path(initialized_settings.media_root)
     franchise = media_root / "Movies -M" / "Resident Evil -L"

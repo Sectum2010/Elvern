@@ -53,16 +53,16 @@ def test_shared_local_library_source_is_created_with_first_class_local_shape(ini
     assert bool(row["is_shared"]) is True
 
 
-def test_shared_local_library_source_preserves_existing_live_path(initialized_settings, tmp_path) -> None:
+def test_shared_local_library_source_preserves_existing_live_path(initialized_settings) -> None:
     initial_source_id = ensure_shared_local_library_source(initialized_settings)
 
-    replacement_root = tmp_path / "replacement-media-root"
+    replacement_root = Path(initialized_settings.media_root) / "replacement-media-root"
     replacement_root.mkdir()
     updated_path = update_shared_local_library_path(
         initialized_settings,
         value=str(replacement_root),
     )
-    replacement_settings = replace(initialized_settings, media_root=(tmp_path / "ignored-bootstrap-root").resolve())
+    replacement_settings = replace(initialized_settings, media_root=Path(initialized_settings.media_root).parent.resolve())
 
     updated_source_id = ensure_shared_local_library_source(replacement_settings)
 

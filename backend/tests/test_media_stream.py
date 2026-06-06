@@ -50,8 +50,8 @@ def test_media_root_blocks_symlink_escape(initialized_settings, tmp_path) -> Non
     assert exc_info.value.detail == "Media path escapes configured media root"
 
 
-def test_media_root_uses_live_shared_local_library_path(initialized_settings, tmp_path) -> None:
-    replacement_root = tmp_path / "shared-library"
+def test_media_root_uses_live_shared_local_library_path(initialized_settings) -> None:
+    replacement_root = initialized_settings.media_root / "shared-library"
     replacement_root.mkdir()
     update_shared_local_library_path(initialized_settings, value=str(replacement_root))
 
@@ -63,8 +63,8 @@ def test_media_root_uses_live_shared_local_library_path(initialized_settings, tm
     assert resolved == media_file.resolve()
 
 
-def test_media_root_allows_files_inside_additional_library_reference_location(initialized_settings, tmp_path) -> None:
-    second_root = tmp_path / "second-reference"
+def test_media_root_allows_files_inside_additional_library_reference_location(initialized_settings) -> None:
+    second_root = initialized_settings.media_root / "second-reference"
     second_root.mkdir()
     with get_connection(initialized_settings) as connection:
         connection.execute(

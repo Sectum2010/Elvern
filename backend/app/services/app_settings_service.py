@@ -23,9 +23,12 @@ from .local_library_source_service import (
     ensure_shared_local_library_source,
     serialize_library_reference_locations,
     purge_shared_local_media_items,
-    shared_local_library_bootstrap_path,
     update_shared_local_library_path,
     validate_library_reference_locations,
+)
+from .local_path_security import (
+    LIBRARY_REFERENCE_HELP_TEXT,
+    validate_safe_library_reference_path,
 )
 
 
@@ -362,7 +365,8 @@ def media_library_reference_validation_rules(settings: Settings) -> list[str]:
     return [
         f"Leave blank to use the default library reference location: {normalize_media_library_reference_default_path(settings=settings)['default_value']}",
         "Choose one or more parent folders where Elvern should look for media folders.",
-        "Use one absolute Linux directory path per line.",
+        "Use one absolute Linux directory path or local file:// URI per line.",
+        f"System folders and Elvern data folders are not accepted. {LIBRARY_REFERENCE_HELP_TEXT}",
         "Elvern auto-discovers folders marked with -M, -TV, -AN, -C, -L, -S, and -X.",
         "Poster reference location stays manually configured below.",
     ]
@@ -371,7 +375,7 @@ def media_library_reference_validation_rules(settings: Settings) -> list[str]:
 def normalize_media_library_reference_default_path(*, settings: Settings | None = None) -> dict[str, str]:
     if settings is None:
         raise ValueError("settings is required")
-    default_path = str(shared_local_library_bootstrap_path(settings))
+    default_path = validate_safe_library_reference_path(settings, value=None)
     return {
         "default_value": default_path,
         "effective_value": default_path,

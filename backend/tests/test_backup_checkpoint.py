@@ -686,13 +686,12 @@ def test_shared_local_path_update_creates_auto_checkpoint_before_purge_and_scan(
     client,
     admin_credentials,
     initialized_settings,
-    tmp_path,
     monkeypatch,
 ) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
 
     current_path = client.get("/api/admin/media-library-reference").json()["effective_value"]
-    replacement_path = tmp_path / "replacement-shared-library"
+    replacement_path = Path(current_path) / "replacement-shared-library"
     replacement_path.mkdir()
 
     order: list[str] = []
@@ -757,13 +756,12 @@ def test_shared_local_path_update_still_proceeds_when_auto_checkpoint_fails(
     client,
     admin_credentials,
     initialized_settings,
-    tmp_path,
     monkeypatch,
 ) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
 
     initial_path = client.get("/api/admin/media-library-reference").json()["effective_value"]
-    replacement_path = tmp_path / "replacement-shared-library"
+    replacement_path = Path(initial_path) / "replacement-shared-library"
     replacement_path.mkdir()
     calls: list[str] = []
 

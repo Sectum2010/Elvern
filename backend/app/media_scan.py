@@ -19,6 +19,7 @@ from .services.library_folder_classifier import (
     discover_library_folders,
     path_is_same_or_inside,
 )
+from .services.local_path_security import is_restricted_library_reference_path
 from .services.media_title_parser import parse_media_title
 
 
@@ -341,6 +342,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
             library_reference_locations,
             allowed_video_extensions=settings.allowed_video_extensions,
             poster_reference_path=poster_reference_path,
+            restricted_path_checker=lambda path: is_restricted_library_reference_path(settings, path),
         )
         folder_warnings = discovery.warnings
         shared_local_source_id = ensure_current_shared_local_source_binding(

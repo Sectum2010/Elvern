@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import hashlib
 import logging
 from pathlib import Path
 import re
+
+from .local_path_security import is_path_same_or_inside as _is_path_same_or_inside
 
 
 logger = logging.getLogger(__name__)
@@ -138,11 +141,7 @@ def parse_folder_suffixes(folder_name: str) -> ParsedFolderSuffixes:
 
 
 def path_is_same_or_inside(candidate: Path, parent: Path) -> bool:
-    try:
-        candidate.resolve().relative_to(parent.resolve())
-        return True
-    except ValueError:
-        return False
+    return _is_path_same_or_inside(candidate, parent)
 
 
 def _folder_key(path: Path) -> str:
@@ -202,10 +201,12 @@ def discover_library_folders(
     *,
     allowed_video_extensions: set[str],
     poster_reference_path: Path | None = None,
+    restricted_path_checker: Callable[[Path], bool] | None = None,
 ) -> LibraryFolderDiscovery:
     discovery = LibraryFolderDiscovery()
     normalized_roots: list[Path] = []
     seen_roots: set[str] = set()
+    visited_folders: set[str] = set()
     for root in reference_roots:
         resolved_root = root.expanduser().resolve()
         root_key = str(resolved_root)
@@ -234,6 +235,8 @@ def discover_library_folders(
             inherited_series_folder_key=None,
             inherited_series_folder_name=None,
             discovery=discovery,
+            restricted_path_checker=restricted_path_checker,
+            visited_folders=visited_folders,
         )
     return discovery
 
@@ -250,8 +253,32 @@ def _walk_library_folder(
     inherited_series_folder_key: str | None,
     inherited_series_folder_name: str | None,
     discovery: LibraryFolderDiscovery,
+    restricted_path_checker: Callable[[Path], bool] | None,
+    visited_folders: set[str],
 ) -> None:
     resolved_folder = folder_path.resolve()
+    resolved_folder_key = str(resolved_folder)
+    if resolved_folder_key in visited_folders:
+        logger.warning("Skipping already visited library folder %s", resolved_folder)
+        discovery.warnings.append(
+            {
+                "code": "library_reference_directory_loop_skipped",
+                "path": resolved_folder_key,
+            }
+        )
+        return
+    if restricted_path_checker is not None and restricted_path_checker(resolved_folder):
+        logger.warning("Skipping restricted library folder %s", resolved_folder)
+        discovery.warnings.append(
+            {
+                "code": "library_reference_restricted_path_skipped",
+                "path": resolved_folder_key,
+            }
+        )
+        discovery.excluded_paths.append(resolved_folder_key)
+        return
+    visited_folders.add(resolved_folder_key)
+
     if poster_reference_path is not None and path_is_same_or_inside(resolved_folder, poster_reference_path):
         discovery.excluded_paths.append(str(resolved_folder))
         return
@@ -341,4 +368,6 @@ def _walk_library_folder(
             inherited_series_folder_key=series_folder_key,
             inherited_series_folder_name=series_folder_name,
             discovery=discovery,
+            restricted_path_checker=restricted_path_checker,
+            visited_folders=visited_folders,
         )

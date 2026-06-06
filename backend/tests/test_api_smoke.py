@@ -1754,12 +1754,13 @@ def test_admin_media_library_reference_smoke(client, admin_credentials) -> None:
     assert initial_payload["validation_rules"] == [
         f"Leave blank to use the default library reference location: {initial_path}",
         "Choose one or more parent folders where Elvern should look for media folders.",
-        "Use one absolute Linux directory path per line.",
+        "Use one absolute Linux directory path or local file:// URI per line.",
+        "System folders and Elvern data folders are not accepted. Choose a media folder such as /home/<user>/Videos, /mnt/media, /media/drive/Movies, or /srv/media.",
         "Elvern auto-discovers folders marked with -M, -TV, -AN, -C, -L, -S, and -X.",
         "Poster reference location stays manually configured below.",
     ]
 
-    replacement_path = initial_path.parent / "shared-library-alt"
+    replacement_path = initial_path / "shared-library-alt"
     replacement_path.mkdir()
 
     update_response = client.put(
@@ -2502,7 +2503,7 @@ def test_standard_user_private_media_library_reference_uses_shared_default_and_s
     _create_standard_user_via_admin(client, username="bob-reference", password=bob_password)
 
     initial_path = Path(client.get("/api/admin/media-library-reference").json()["effective_value"])
-    replacement_path = initial_path.parent / "shared-basement-library"
+    replacement_path = initial_path / "shared-basement-library"
     replacement_path.mkdir()
 
     shared_update = client.put(
@@ -2573,7 +2574,7 @@ def test_standard_user_private_media_library_reference_uses_shared_default_and_s
     assert admin_global.json()["effective_value"] == str(replacement_path)
 
 
-def test_admin_shared_local_library_path_switch_rebuilds_visible_library(client, admin_credentials, tmp_path) -> None:
+def test_admin_shared_local_library_path_switch_rebuilds_visible_library(client, admin_credentials) -> None:
     _login(
         client,
         username=admin_credentials["username"],
@@ -2590,7 +2591,7 @@ def test_admin_shared_local_library_path_switch_rebuilds_visible_library(client,
     assert before_switch.json()["total_items"] == 1
     original_item_id = int(before_switch.json()["items"][0]["id"])
 
-    empty_root = tmp_path / "empty-shared-library"
+    empty_root = original_root / "empty-shared-library"
     empty_root.mkdir()
 
     update_response = client.put(
@@ -2644,7 +2645,7 @@ def test_legacy_unbound_local_rows_do_not_leak_through_shared_library_visibility
         password=admin_credentials["password"],
     )
 
-    empty_root = tmp_path / "empty-shared-library"
+    empty_root = Path(client.app.state.settings.media_root) / "empty-shared-library"
     empty_root.mkdir()
     update_response = client.put(
         "/api/admin/media-library-reference",
