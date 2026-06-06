@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 from html import unescape
+import logging
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import parse_qs, urlsplit
 
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 from backend.app.auth import authenticate_user, destroy_session
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.admin_service import create_user, update_user
+from backend.app.services.log_identity_service import native_session_log_fingerprint
 from backend.app.services.media_age_access_service import set_media_age_requirement
 from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
@@ -937,6 +939,55 @@ def test_native_playback_session_route_uses_shared_progress_for_ios_vlc_resume_s
     assert progress_row is not None
     assert float(progress_row["position_seconds"] or 0.0) == 2640.0
     assert bool(progress_row["completed"]) is False
+
+
+def test_native_playback_close_log_uses_session_fingerprint(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+    caplog,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings: ([], []),
+    )
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="native-session/close-log-fingerprint.mp4",
+    )
+    create_response = client.post(
+        f"/api/native-playback/{item['id']}/session",
+        headers={"user-agent": IOS_SAFARI_USER_AGENT},
+    )
+    assert create_response.status_code == 200
+    created_session = create_response.json()
+    raw_session_id = created_session["session_id"]
+    expected_fingerprint = native_session_log_fingerprint(raw_session_id)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="backend.app.services.native_playback_service"):
+        close_response = client.post(
+            f"/api/native-playback/session/{raw_session_id}/close",
+            params={"token": created_session["access_token"]},
+            json={
+                "position_seconds": 42.0,
+                "duration_seconds": 120.0,
+                "completed": True,
+            },
+        )
+
+    assert close_response.status_code == 200
+    close_log_text = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "backend.app.services.native_playback_service"
+    )
+    assert f"Closed native playback session_fingerprint={expected_fingerprint}" in close_log_text
+    assert f"item={item['id']}" in close_log_text
+    assert "completed=True" in close_log_text
+    assert raw_session_id not in close_log_text
 
 
 def test_native_playback_session_route_ignores_other_users_progress_for_ios_vlc_resume(

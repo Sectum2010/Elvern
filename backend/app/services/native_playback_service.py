@@ -20,6 +20,7 @@ from ..progress import record_playback_event, save_progress
 from ..security import generate_session_token, hash_session_token
 from .cloud_library_service import build_cloud_stream_response, refresh_cloud_media_item_metadata
 from .library_service import get_media_item_record
+from .log_identity_service import native_session_log_fingerprint
 from .media_age_access_service import assert_user_can_access_media_by_age
 
 
@@ -628,8 +629,8 @@ def close_native_playback_session(
         )
         connection.commit()
     logger.info(
-        "Closed native playback session=%s item=%s completed=%s",
-        session_id,
+        "Closed native playback session_fingerprint=%s item=%s completed=%s",
+        native_session_log_fingerprint(session_id),
         row["media_item_id"],
         completed,
     )

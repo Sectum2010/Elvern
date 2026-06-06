@@ -21,6 +21,7 @@ from .services.backup_service import (
     prune_backup_checkpoints,
 )
 from .services.desktop_helper_service import import_helper_release_artifacts
+from .services.log_identity_service import native_session_log_fingerprint
 from .services.status_service import get_system_status
 
 
@@ -110,6 +111,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("rescan", help="Run a synchronous media rescan")
     subparsers.add_parser("status", help="Print current system status")
+    fingerprint_parser = subparsers.add_parser(
+        "native-session-fingerprint",
+        help="Compute the log fingerprint for a native playback session id.",
+    )
+    fingerprint_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Native session id. Omit to enter it without echo.",
+    )
     subparsers.add_parser(
         "rotate-url-prefix",
         help="Rotate the random SPA URL prefix and revoke all sessions",
@@ -325,6 +335,11 @@ def _backup_create_cli_summary(payload: dict[str, object]) -> dict[str, object]:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    if args.command == "native-session-fingerprint":
+        session_id = args.session_id if args.session_id is not None else getpass.getpass("Native session id: ")
+        print(json.dumps({"session_fingerprint": native_session_log_fingerprint(session_id)}, indent=2))
+        return
+
     if args.command == "hash-password":
         settings = _settings_for_argon2_cli()
         print(hash_password(args.password, settings))
