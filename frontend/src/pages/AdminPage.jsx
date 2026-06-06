@@ -63,6 +63,21 @@ const ADMIN_SECTIONS = [
 const ADMIN_SECTION_KEYS = ADMIN_SECTIONS.map((section) => section.key);
 const ADMIN_ACTIVE_SECTION_STORAGE_KEY = "elvern:admin-active-section";
 const AGE_CREDENTIAL_OPTIONS = Array.from({ length: 18 }, (_, index) => index + 1);
+const EXPOSURE_PROVIDER_LABELS = {
+  caddy: "Caddy",
+  nginx: "Nginx",
+  cloudflare_tunnel: "Cloudflare Tunnel",
+  manual_other: "Manual/Other",
+};
+const DEFAULT_EXPOSURE_DRAFT = {
+  selectedMode: "private",
+  publicOrigin: "",
+  privateOrigin: "",
+  reverseProxyProvider: "caddy",
+  acknowledgement: false,
+  directIpNotRecommendedAcknowledgement: false,
+  currentAdminPassword: "",
+};
 
 function formatAgeCredential(value) {
   const age = Number(value);
@@ -163,6 +178,62 @@ function InlineFeedback({ feedback }) {
       {feedback.text}
     </p>
   );
+}
+
+
+function exposurePayloadFromDraft(draft, { includePassword = false } = {}) {
+  const selectedMode = draft.selectedMode || "private";
+  const isPublic = selectedMode !== "private";
+  const isDirectIp = selectedMode === "public_direct_ip";
+  const payload = {
+    desired_mode: isPublic ? "public" : "private",
+    public_entry_kind: isPublic ? (isDirectIp ? "direct_ip" : "custom_domain") : null,
+    public_origin: isPublic ? draft.publicOrigin.trim() : null,
+    private_origin: isPublic ? null : draft.privateOrigin.trim(),
+    reverse_proxy_provider: isPublic ? (draft.reverseProxyProvider || "manual_other") : null,
+    acknowledgement: Boolean(draft.acknowledgement),
+    direct_ip_not_recommended_acknowledgement: Boolean(draft.directIpNotRecommendedAcknowledgement),
+  };
+  if (includePassword) {
+    payload.current_admin_password = draft.currentAdminPassword;
+  }
+  return payload;
+}
+
+
+function exposureModeLabel(draft) {
+  if (draft.selectedMode === "public_custom_domain") {
+    return "Public Mode - Custom Domain";
+  }
+  if (draft.selectedMode === "public_direct_ip") {
+    return "Public Mode - Direct IP (NOT RECOMMENDED)";
+  }
+  return "Private Mode";
+}
+
+
+function formatExposureValue(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(", ") : "None";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  if (value === null || value === undefined || value === "") {
+    return "Not set";
+  }
+  return String(value);
+}
+
+
+function formatExposureSuggestion(suggestion) {
+  if (!suggestion || typeof suggestion !== "object") {
+    return "";
+  }
+  const name = suggestion.name || "Setting";
+  const value = suggestion.value ?? "";
+  const effect = suggestion.effect ? ` - ${suggestion.effect}` : "";
+  return `${name}=${value}${effect}`;
 }
 
 
@@ -489,6 +560,11 @@ export function AdminPage() {
     pending: false,
     error: "",
   });
+  const [exposureStatus, setExposureStatus] = useState(null);
+  const [exposurePlan, setExposurePlan] = useState(null);
+  const [exposureFeedback, setExposureFeedback] = useState(null);
+  const [exposurePending, setExposurePending] = useState(false);
+  const [exposureDraft, setExposureDraft] = useState(DEFAULT_EXPOSURE_DRAFT);
   const [totpStatus, setTotpStatus] = useState(null);
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
   const [totpDisableUserModal, setTotpDisableUserModal] = useState({
@@ -696,6 +772,102 @@ export function AdminPage() {
       });
     } finally {
       setUrlPrefixPending(false);
+    }
+  }
+
+  async function loadExposureStatus() {
+    try {
+      const payload = await apiRequest("/api/admin/exposure/status");
+      setExposureStatus(payload);
+      if (!exposurePlan) {
+        setExposurePlan(payload);
+      }
+    } catch (requestError) {
+      setExposureFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to load exposure planner status.",
+      });
+    }
+  }
+
+  async function handleValidateExposurePlan() {
+    setExposurePending(true);
+    setExposureFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/validate", {
+        method: "POST",
+        data: exposurePayloadFromDraft(exposureDraft),
+      });
+      setExposurePlan(payload);
+      setExposureStatus(payload);
+      setExposureFeedback({
+        tone: payload.validation?.status === "blocked" ? "error" : "success",
+        text: payload.validation?.status === "blocked"
+          ? "Exposure plan has blocking validation errors."
+          : "Exposure plan validated. Review warnings before saving a pending draft.",
+      });
+    } catch (requestError) {
+      setExposureFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to validate exposure plan.",
+      });
+    } finally {
+      setExposurePending(false);
+    }
+  }
+
+  async function handleSaveExposureDraft() {
+    if (!exposureDraft.currentAdminPassword.trim()) {
+      setExposureFeedback({ tone: "error", text: "Enter your current admin password to save a pending draft." });
+      return;
+    }
+    if (!exposureDraft.acknowledgement) {
+      setExposureFeedback({ tone: "error", text: "Acknowledge the Phase 1 limitations before saving." });
+      return;
+    }
+    if (exposureDraft.selectedMode === "public_direct_ip" && !exposureDraft.directIpNotRecommendedAcknowledgement) {
+      setExposureFeedback({
+        tone: "error",
+        text: "Confirm that direct public IP exposure is not recommended before saving.",
+      });
+      return;
+    }
+    setExposurePending(true);
+    setExposureFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/drafts", {
+        method: "POST",
+        data: exposurePayloadFromDraft(exposureDraft, { includePassword: true }),
+      });
+      setExposurePlan(payload);
+      setExposureStatus(payload);
+      setExposureDraft((current) => ({ ...current, currentAdminPassword: "" }));
+      setExposureFeedback({ tone: "success", text: "Pending exposure draft saved. It does not take effect yet." });
+    } catch (requestError) {
+      setExposureFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to save pending exposure draft.",
+      });
+    } finally {
+      setExposurePending(false);
+    }
+  }
+
+  async function handleClearExposureDraft() {
+    setExposurePending(true);
+    setExposureFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/drafts", { method: "DELETE" });
+      setExposurePlan(payload);
+      setExposureStatus(payload);
+      setExposureFeedback({ tone: "success", text: "Pending exposure draft cleared. Runtime behavior was unchanged." });
+    } catch (requestError) {
+      setExposureFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to clear pending exposure draft.",
+      });
+    } finally {
+      setExposurePending(false);
     }
   }
 
@@ -946,6 +1118,7 @@ export function AdminPage() {
     if (user?.role !== "admin" || activeSection !== "security") {
       return;
     }
+    loadExposureStatus();
     loadPasswordHelpRequests();
   }, [activeSection, user?.role]);
 
@@ -3166,6 +3339,24 @@ export function AdminPage() {
     </div>
   ) : null;
 
+  const exposureDisplay = exposurePlan || exposureStatus || {};
+  const exposureActive = exposureDisplay.active || {};
+  const exposureValidation = exposureDisplay.validation || {};
+  const exposureChecks = Array.isArray(exposureValidation.checks) ? exposureValidation.checks : [];
+  const exposurePlanDetails = exposureDisplay.plan || {};
+  const exposurePendingDraft = exposureDisplay.pending_draft || null;
+  const exposureEnvSuggestions = Array.isArray(exposurePlanDetails.env_suggestions)
+    ? exposurePlanDetails.env_suggestions
+    : [];
+  const exposureManualSteps = Array.isArray(exposurePlanDetails.manual_steps) ? exposurePlanDetails.manual_steps : [];
+  const exposureReverseProxyNotes = Array.isArray(exposurePlanDetails.reverse_proxy_notes)
+    ? exposurePlanDetails.reverse_proxy_notes
+    : [];
+  const exposureActivationNotes = Array.isArray(exposurePlanDetails.activation_notes)
+    ? exposurePlanDetails.activation_notes
+    : [];
+  const exposureErrors = Array.isArray(exposureValidation.errors) ? exposureValidation.errors : [];
+  const exposureWarnings = Array.isArray(exposureValidation.warnings) ? exposureValidation.warnings : [];
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
       <section className="settings-card">
@@ -3256,6 +3447,207 @@ export function AdminPage() {
           >
             {urlPrefixPending ? "Refreshing..." : "Refresh status"}
           </RefreshSweepButton>
+        </div>
+      </section>
+
+      <section className="settings-card settings-card--wide exposure-planner-card">
+        <div className="settings-inline-header">
+          <div>
+            <h2>Exposure Mode Planner</h2>
+            <p className="page-subnote">
+              Phase 1 only: this draft does not change runtime behavior, does not write env files, does not rotate the URL prefix, and does not revoke or disable users.
+            </p>
+          </div>
+          <span className="status-pill">Draft only</span>
+        </div>
+        <div className="exposure-planner-grid">
+          <div className="settings-card-stack">
+            <div className="exposure-planner-status">
+              <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
+              <StatusRow label="Current public_app_origin" value={formatExposureValue(exposureActive.public_app_origin)} />
+              <StatusRow label="Current backend_origin" value={formatExposureValue(exposureActive.backend_origin)} />
+              <StatusRow label="Private-network flag" value={exposureActive.private_network_only ? "Enabled" : "Disabled"} />
+              <StatusRow label="Trusted proxy CIDRs" value={formatExposureValue(exposureActive.trusted_proxy_cidrs)} />
+              <StatusRow label="Cookie secure" value={formatExposureValue(exposureActive.cookie_secure)} />
+              <StatusRow label="URL prefix present" value={formatExposureValue(exposureActive.url_prefix_present)} />
+              <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
+            </div>
+            <label className="settings-field">
+              <span>
+                <strong>Desired mode</strong>
+                <small>{exposureModeLabel(exposureDraft)}</small>
+              </span>
+              <select
+                onChange={(event) =>
+                  setExposureDraft((current) => ({
+                    ...current,
+                    selectedMode: event.target.value,
+                    reverseProxyProvider: event.target.value === "public_direct_ip" ? "manual_other" : current.reverseProxyProvider,
+                  }))
+                }
+                value={exposureDraft.selectedMode}
+              >
+                <option value="private">Private Mode</option>
+                <option value="public_custom_domain">Public Mode - Custom Domain</option>
+                <option value="public_direct_ip">Public Mode - Direct IP (NOT RECOMMENDED)</option>
+              </select>
+            </label>
+            {exposureDraft.selectedMode === "private" ? (
+              <label className="settings-field">
+                <span>
+                  <strong>Private origin</strong>
+                  <small>Optional tailnet, LAN, or private DNS address.</small>
+                </span>
+                <input
+                  onChange={(event) => setExposureDraft((current) => ({ ...current, privateOrigin: event.target.value }))}
+                  placeholder="https://machine.tailnet-name.ts.net or http://192.168.1.10:4173"
+                  type="text"
+                  value={exposureDraft.privateOrigin}
+                />
+              </label>
+            ) : (
+              <>
+                <label className="settings-field">
+                  <span>
+                    <strong>Public origin</strong>
+                    <small>
+                      {exposureDraft.selectedMode === "public_direct_ip"
+                        ? "Direct public IP is allowed but not recommended."
+                        : "Use a purchased domain with HTTPS. No public Tailscale option is offered."}
+                    </small>
+                  </span>
+                  <input
+                    onChange={(event) => setExposureDraft((current) => ({ ...current, publicOrigin: event.target.value }))}
+                    placeholder={exposureDraft.selectedMode === "public_direct_ip" ? "http://203.0.113.10:4173" : "https://media.example.com"}
+                    type="text"
+                    value={exposureDraft.publicOrigin}
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>
+                    <strong>Provider</strong>
+                    <small>Manual planning notes only; Elvern will not configure the proxy.</small>
+                  </span>
+                  <select
+                    onChange={(event) => setExposureDraft((current) => ({ ...current, reverseProxyProvider: event.target.value }))}
+                    value={exposureDraft.reverseProxyProvider}
+                  >
+                    {Object.entries(EXPOSURE_PROVIDER_LABELS).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+              </>
+            )}
+            {exposureDraft.selectedMode === "public_direct_ip" ? (
+              <label className="settings-toggle settings-toggle--compact exposure-planner-warning">
+                <span>
+                  <strong>NOT RECOMMENDED</strong>
+                  <small>I understand direct public IP exposure is not recommended.</small>
+                </span>
+                <input
+                  checked={exposureDraft.directIpNotRecommendedAcknowledgement}
+                  onChange={(event) =>
+                    setExposureDraft((current) => ({
+                      ...current,
+                      directIpNotRecommendedAcknowledgement: event.target.checked,
+                    }))
+                  }
+                  type="checkbox"
+                />
+              </label>
+            ) : null}
+            <label className="settings-toggle settings-toggle--compact">
+              <span>
+                <strong>Phase 1 acknowledgement</strong>
+                <small>This pending draft does not take effect until a later activation phase.</small>
+              </span>
+              <input
+                checked={exposureDraft.acknowledgement}
+                onChange={(event) => setExposureDraft((current) => ({ ...current, acknowledgement: event.target.checked }))}
+                type="checkbox"
+              />
+            </label>
+            <label className="settings-field">
+              <span>
+                <strong>Current admin password</strong>
+                <small>Required only to save a pending draft.</small>
+              </span>
+              <NonLoginSecretInput
+                autoComplete="new-password"
+                onChange={(event) => setExposureDraft((current) => ({ ...current, currentAdminPassword: event.target.value }))}
+                placeholder="Current admin password"
+                value={exposureDraft.currentAdminPassword}
+              />
+            </label>
+            <InlineFeedback feedback={exposureFeedback} />
+            <div className="admin-list__actions">
+              <button className="primary-button" disabled={exposurePending} onClick={handleValidateExposurePlan} type="button">
+                {exposurePending ? "Working..." : "Validate plan"}
+              </button>
+              <button className="ghost-button" disabled={exposurePending} onClick={handleSaveExposureDraft} type="button">
+                Save pending draft
+              </button>
+              <button className="ghost-button" disabled={exposurePending || !exposurePendingDraft} onClick={handleClearExposureDraft} type="button">
+                Clear pending draft
+              </button>
+            </div>
+          </div>
+          <div className="settings-card-stack">
+            <div className={`exposure-validation exposure-validation--${exposureValidation.status || "ready"}`}>
+              <h3>Validation</h3>
+              <StatusRow label="Status" value={formatExposureValue(exposureValidation.status || "ready")} />
+              {exposureErrors.length > 0 ? (
+                <div>
+                  <strong>Errors</strong>
+                  <ul>
+                    {exposureErrors.map((entry) => <li key={`exposure-error-${entry}`}>{entry}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+              {exposureWarnings.length > 0 ? (
+                <div>
+                  <strong>Warnings</strong>
+                  <ul>
+                    {exposureWarnings.map((entry) => <li key={`exposure-warning-${entry}`}>{entry}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+              {exposureChecks.length > 0 ? (
+                <div>
+                  <strong>Checks</strong>
+                  <ul>
+                    {exposureChecks.map((entry) => (
+                      <li key={`exposure-check-${entry.name || entry.detail}`}>
+                        <span className={`status-pill exposure-check-pill exposure-check-pill--${entry.status || "info"}`}>
+                          {entry.status || "info"}
+                        </span>
+                        {entry.detail}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+            <div className="exposure-plan-notes">
+              <h3>Manual Steps</h3>
+              <ul>
+                {exposureManualSteps.map((entry) => <li key={`exposure-step-${entry}`}>{entry}</li>)}
+              </ul>
+              <h3>Env Suggestions</h3>
+              <ul>
+                {exposureEnvSuggestions.map((entry) => <li key={`exposure-env-${entry.name}`}>{formatExposureSuggestion(entry)}</li>)}
+              </ul>
+              <h3>Reverse Proxy Notes</h3>
+              <ul>
+                {exposureReverseProxyNotes.map((entry) => <li key={`exposure-proxy-${entry}`}>{entry}</li>)}
+              </ul>
+              <h3>Activation Notes</h3>
+              <ul>
+                {exposureActivationNotes.map((entry) => <li key={`exposure-activation-${entry}`}>{entry}</li>)}
+              </ul>
+            </div>
+          </div>
         </div>
       </section>
 

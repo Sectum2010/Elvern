@@ -163,3 +163,57 @@ describe("AdminPage password help request guards", () => {
     expect(sectionSource).not.toMatch(/\b(?:alert|confirm|prompt)\s*\(/);
   });
 });
+
+describe("AdminPage exposure mode planner guards", () => {
+  test("security planner UI includes the Phase 1 controls and no public Tailscale option", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("Exposure Mode Planner");
+    expect(source).toContain("Phase 1 only: this draft does not change runtime behavior, does not write env files, does not rotate the URL prefix, and does not revoke or disable users.");
+    expect(source).toContain("Private Mode");
+    expect(source).toContain("Public Mode - Custom Domain");
+    expect(source).toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
+    expect(source).toContain("NOT RECOMMENDED");
+    expect(source).toContain("I understand direct public IP exposure is not recommended.");
+    expect(source).toContain("https://media.example.com");
+    expect(source).toContain("http://203.0.113.10:4173");
+    expect(source).not.toContain("tailscale_funnel");
+    expect(source).not.toContain("Tailscale Funnel");
+  });
+
+  test("provider selector includes only the supported planner providers", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("caddy: \"Caddy\"");
+    expect(source).toContain("nginx: \"Nginx\"");
+    expect(source).toContain("cloudflare_tunnel: \"Cloudflare Tunnel\"");
+    expect(source).toContain("manual_other: \"Manual/Other\"");
+  });
+
+  test("planner calls validation and draft APIs without an activation route", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/status\")");
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/validate\"");
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/drafts\"");
+    expect(source).toContain("current_admin_password = draft.currentAdminPassword");
+    expect(source).toContain("Save pending draft");
+    expect(source).toContain("Clear pending draft");
+    expect(source).not.toContain("/api/admin/exposure/activate");
+    expect(source).not.toContain(">Activate<");
+    expect(source).not.toContain("Activate plan");
+  });
+
+  test("planner renders validation details, manual steps, env suggestions, and activation notes", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("<h3>Validation</h3>");
+    expect(source).toContain("<strong>Errors</strong>");
+    expect(source).toContain("<strong>Warnings</strong>");
+    expect(source).toContain("<strong>Checks</strong>");
+    expect(source).toContain("<h3>Manual Steps</h3>");
+    expect(source).toContain("<h3>Env Suggestions</h3>");
+    expect(source).toContain("<h3>Reverse Proxy Notes</h3>");
+    expect(source).toContain("<h3>Activation Notes</h3>");
+  });
+});

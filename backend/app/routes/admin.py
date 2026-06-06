@@ -34,6 +34,8 @@ from ..schemas import (
     BackupCheckpointListResponse,
     BackupCheckpointPassphraseRequest,
     BackupRestorePlanResponse,
+    ExposureModeDraftRequest,
+    ExposureModePlanResponse,
     AdminUserCreateRequest,
     AdminUserListResponse,
     AdminUserResponse,
@@ -105,6 +107,13 @@ from ..services.backup_service import (
     summarize_backup_checkpoint,
 )
 from ..services.desktop_playback_service import resolve_same_host_request
+from ..services.exposure_mode_service import (
+    DIRECT_PUBLIC_IP_WARNING,
+    build_current_exposure_status,
+    clear_pending_exposure_draft,
+    save_pending_exposure_draft,
+    validate_exposure_plan,
+)
 from ..services.library_service import (
     hide_media_item_globally,
     list_globally_hidden_media_items,
@@ -213,6 +222,82 @@ def admin_rotate_url_prefix(
     request.app.state.url_prefix = new_prefix
     mount_spa(request.app, prefix=new_prefix)
     return AdminUrlPrefixRotateResponse(new_prefix=new_prefix, session_revoked=True)
+
+
+@router.get("/exposure/status", response_model=ExposureModePlanResponse)
+def admin_exposure_status(request: Request, user=CurrentAdmin) -> ExposureModePlanResponse:
+    del user
+    return ExposureModePlanResponse(
+        **build_current_exposure_status(request.app.state.settings, request)
+    )
+
+
+@router.post("/exposure/validate", response_model=ExposureModePlanResponse)
+def admin_validate_exposure_plan(
+    payload: ExposureModeDraftRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureModePlanResponse:
+    del user
+    return ExposureModePlanResponse(
+        **validate_exposure_plan(request.app.state.settings, request, payload)
+    )
+
+
+@router.post("/exposure/drafts", response_model=ExposureModePlanResponse)
+def admin_save_exposure_draft(
+    payload: ExposureModeDraftRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureModePlanResponse:
+    settings = request.app.state.settings
+    if not payload.current_admin_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current admin password is required to save an exposure draft.",
+        )
+    if not payload.acknowledgement:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Acknowledge that Phase 1 drafts do not change runtime behavior before saving.",
+        )
+    if payload.desired_mode == "public" and payload.public_entry_kind == "direct_ip":
+        if not payload.direct_ip_not_recommended_acknowledgement:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=DIRECT_PUBLIC_IP_WARNING,
+            )
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    validation_snapshot = validate_exposure_plan(settings, request, payload)
+    blocking_errors = validation_snapshot.get("validation", {}).get("errors", [])
+    if blocking_errors:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Exposure draft has blocking validation errors.",
+                "errors": blocking_errors,
+            },
+        )
+    return ExposureModePlanResponse(
+        **save_pending_exposure_draft(
+            settings,
+            user,
+            payload,
+            validation_snapshot=validation_snapshot,
+        )
+    )
+
+
+@router.delete("/exposure/drafts", response_model=ExposureModePlanResponse)
+def admin_clear_exposure_draft(request: Request, user=CurrentAdmin) -> ExposureModePlanResponse:
+    cleared = clear_pending_exposure_draft(request.app.state.settings, user)
+    status_payload = build_current_exposure_status(request.app.state.settings, request)
+    status_payload.update(cleared)
+    return ExposureModePlanResponse(**status_payload)
 
 
 @router.post("/users", response_model=AdminUserResponse)

@@ -3068,6 +3068,67 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   justify-content: flex-start;
 }
 
+.exposure-planner-card {
+  align-self: stretch;
+}
+
+.exposure-planner-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.exposure-planner-status,
+.exposure-validation,
+.exposure-plan-notes {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.exposure-validation ul,
+.exposure-plan-notes ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding-inline-start: 1.15rem;
+}
+
+.exposure-validation li,
+.exposure-plan-notes li {
+  overflow-wrap: anywhere;
+}
+
+.exposure-validation h3,
+.exposure-plan-notes h3 {
+  margin: 0.35rem 0 0;
+  font-size: 1rem;
+}
+
+.exposure-planner-warning {
+  color: #ffd9b0;
+}
+
+.exposure-check-pill {
+  display: inline-flex;
+  margin-inline-end: 0.45rem;
+  padding: 0.12rem 0.45rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.exposure-check-pill--fail,
+.exposure-check-pill--warn {
+  background: rgba(239, 138, 138, 0.16);
+  color: #ffd0d0;
+}
+
+.exposure-check-pill--pass {
+  background: rgba(124, 196, 160, 0.16);
+  color: #c9f0dc;
+}
+
 .admin-user-row {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
@@ -6067,6 +6128,10 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
 
   .admin-totp-user-row__actions {
     justify-content: flex-end;
+  }
+
+  .exposure-planner-grid {
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
   }
 
   .admin-user-row {

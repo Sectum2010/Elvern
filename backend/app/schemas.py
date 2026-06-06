@@ -120,6 +120,33 @@ class AdminUrlPrefixRotateResponse(BaseModel):
     session_revoked: bool = True
 
 
+ExposureMode = Literal["private", "public"]
+ExposurePublicEntryKind = Literal["custom_domain", "direct_ip"]
+ExposureReverseProxyProvider = Literal["caddy", "nginx", "cloudflare_tunnel", "manual_other"]
+
+
+class ExposureModeDraftRequest(BaseModel):
+    desired_mode: ExposureMode
+    public_entry_kind: ExposurePublicEntryKind | None = None
+    public_origin: str | None = None
+    private_origin: str | None = None
+    reverse_proxy_provider: ExposureReverseProxyProvider | None = None
+    acknowledgement: bool = False
+    direct_ip_not_recommended_acknowledgement: bool = False
+    current_admin_password: str | None = None
+
+
+class ExposureModePlanResponse(BaseModel):
+    active: dict[str, object] = Field(default_factory=dict)
+    desired: dict[str, object] = Field(default_factory=dict)
+    validation: dict[str, object] = Field(default_factory=dict)
+    plan: dict[str, object] = Field(default_factory=dict)
+    pending_draft: dict[str, object] | None = None
+    provider_choices: list[str] = Field(default_factory=list)
+    public_entry_kinds: list[str] = Field(default_factory=list)
+    takes_effect: bool = False
+
+
 class CloudSyncStatusResponse(BaseModel):
     status: Literal["success", "partial_failure", "failed", "disabled"] = "disabled"
     provider_auth_required: bool = False
