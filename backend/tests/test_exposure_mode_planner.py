@@ -7,7 +7,15 @@ from types import SimpleNamespace
 from starlette.requests import Request
 
 from backend.app.db import get_connection
+from backend.app.models import AuthenticatedUser
 from backend.app.services import exposure_mode_service as service
+from backend.app.services import exposure_maintenance_service as maintenance_service
+from backend.app.services.account_access_service import generate_invite_code
+from backend.app.services.admin_service import create_user
+from backend.app.services.app_settings_service import set_global_app_setting
+
+
+MAINTENANCE_MESSAGE = "The server is currently under construction, please try again later"
 
 
 def _request_with_origin(
@@ -39,6 +47,53 @@ def _request_with_origin(
 def _login(client, *, username: str, password: str) -> None:
     response = client.post("/api/auth/login", json={"username": username, "password": password})
     assert response.status_code == 200
+
+
+def _admin_actor(settings) -> AuthenticatedUser:
+    return AuthenticatedUser(
+        id=1,
+        username=settings.admin_username,
+        role="admin",
+        enabled=True,
+        assistant_beta_enabled=False,
+        age_credential=18,
+    )
+
+
+def _create_user(
+    settings,
+    *,
+    username: str,
+    password: str = "standard-user-password",
+    role: str = "standard_user",
+    enabled: bool = True,
+) -> dict[str, object]:
+    return create_user(
+        settings,
+        username=username,
+        password=password,
+        role=role,
+        enabled=enabled,
+        age_credential=18,
+        actor=_admin_actor(settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+
+def _session_row_for_username(settings, username: str):
+    with get_connection(settings) as connection:
+        return connection.execute(
+            """
+            SELECT s.id, s.revoked_at
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.username = ?
+            ORDER BY s.id DESC
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
 
 
 def test_origin_normalization_accepts_origin_and_rejects_path_query_fragment() -> None:
@@ -329,6 +384,280 @@ def test_draft_clear_removes_only_pending_draft(client, initialized_settings, ad
     assert row is None
 
 
+def test_security_exposure_maintenance_lock_defaults_and_storage(initialized_settings) -> None:
+    default_state = maintenance_service.get_exposure_maintenance_lock(initialized_settings)
+    assert default_state["enabled"] is False
+    assert default_state["message"] == MAINTENANCE_MESSAGE
+
+    set_global_app_setting(
+        initialized_settings,
+        key=maintenance_service.EXPOSURE_MODE_MAINTENANCE_LOCK_KEY,
+        value="{not-json",
+    )
+    invalid_state = maintenance_service.get_exposure_maintenance_lock(initialized_settings)
+    assert invalid_state["enabled"] is False
+
+    enabled_state = maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=True,
+    )
+    assert enabled_state["enabled"] is True
+    assert enabled_state["message"] == MAINTENANCE_MESSAGE
+    assert enabled_state["created_by_username"] == initialized_settings.admin_username
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (maintenance_service.EXPOSURE_MODE_MAINTENANCE_LOCK_KEY,),
+        ).fetchone()
+    assert row is not None
+
+    disabled_state = maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=False,
+    )
+    assert disabled_state["enabled"] is False
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (maintenance_service.EXPOSURE_MODE_MAINTENANCE_LOCK_KEY,),
+        ).fetchone()
+    assert row is None
+
+
+def test_security_exposure_maintenance_lock_routes_require_admin_password_and_ack(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    assert client.get("/api/admin/exposure/maintenance-lock").status_code == 401
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    missing_ack = client.post(
+        "/api/admin/exposure/maintenance-lock",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": False},
+    )
+    assert missing_ack.status_code == 400
+
+    wrong_password = client.post(
+        "/api/admin/exposure/maintenance-lock",
+        json={"current_admin_password": "wrong-password", "acknowledgement": True},
+    )
+    assert wrong_password.status_code == 401
+
+    response = client.post(
+        "/api/admin/exposure/maintenance-lock",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+
+    status = client.get("/api/admin/exposure/status")
+    assert status.status_code == 200
+    assert status.json()["active"]["maintenance_lock"]["enabled"] is True
+
+    wrong_disable = client.request(
+        "DELETE",
+        "/api/admin/exposure/maintenance-lock",
+        json={"current_admin_password": "wrong-password", "acknowledgement": False},
+    )
+    assert wrong_disable.status_code == 401
+
+    disabled = client.request(
+        "DELETE",
+        "/api/admin/exposure/maintenance-lock",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert maintenance_service.get_exposure_maintenance_lock(initialized_settings)["enabled"] is False
+
+
+def test_security_exposure_maintenance_lock_does_not_mutate_pending_draft_or_users(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _create_user(initialized_settings, username="draft-standard-user")
+    service.save_pending_exposure_draft(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        {},
+        validation_snapshot={
+            "desired": {"desired_mode": "private"},
+            "validation": {"status": "ready", "errors": [], "warnings": [], "checks": []},
+            "plan": {"env_suggestions": [], "manual_steps": [], "reverse_proxy_notes": [], "activation_notes": []},
+            "takes_effect": False,
+        },
+    )
+    with get_connection(initialized_settings) as connection:
+        before_users = [
+            (row["id"], row["enabled"])
+            for row in connection.execute("SELECT id, enabled FROM users ORDER BY id").fetchall()
+        ]
+
+    response = client.post(
+        "/api/admin/exposure/maintenance-lock",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+
+    assert response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        after_users = [
+            (row["id"], row["enabled"])
+            for row in connection.execute("SELECT id, enabled FROM users ORDER BY id").fetchall()
+        ]
+        draft_row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (service.EXPOSURE_MODE_PENDING_DRAFT_KEY,),
+        ).fetchone()
+    assert after_users == before_users
+    assert draft_row is not None
+
+
+def test_security_exposure_maintenance_lock_blocks_standard_login_without_session(
+    client,
+    initialized_settings,
+) -> None:
+    _create_user(initialized_settings, username="blocked-standard")
+    maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=True,
+    )
+
+    response = client.post(
+        "/api/auth/login",
+        json={"username": "blocked-standard", "password": "standard-user-password"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == MAINTENANCE_MESSAGE
+    assert _session_row_for_username(initialized_settings, "blocked-standard") is None
+
+
+def test_security_exposure_maintenance_lock_keeps_disabled_login_behavior(
+    client,
+    initialized_settings,
+) -> None:
+    _create_user(initialized_settings, username="disabled-standard", enabled=False)
+    maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=True,
+    )
+
+    response = client.post(
+        "/api/auth/login",
+        json={"username": "disabled-standard", "password": "standard-user-password"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "This account has been disabled"
+
+
+def test_security_exposure_maintenance_lock_allows_admin_login_and_admin_routes(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=True,
+    )
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    response = client.get("/api/admin/exposure/status")
+
+    assert response.status_code == 200
+    assert response.json()["active"]["maintenance_lock"]["enabled"] is True
+
+
+def test_security_exposure_maintenance_lock_blocks_existing_standard_session_without_revocation(
+    client,
+    initialized_settings,
+) -> None:
+    _create_user(initialized_settings, username="session-standard")
+    _login(client, username="session-standard", password="standard-user-password")
+    session_row = _session_row_for_username(initialized_settings, "session-standard")
+    assert session_row is not None
+
+    maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=True,
+    )
+
+    response = client.get("/api/auth/me")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == MAINTENANCE_MESSAGE
+    with get_connection(initialized_settings) as connection:
+        fresh_session = connection.execute(
+            "SELECT revoked_at FROM sessions WHERE id = ?",
+            (session_row["id"],),
+        ).fetchone()
+        user_row = connection.execute(
+            "SELECT enabled FROM users WHERE username = ?",
+            ("session-standard",),
+        ).fetchone()
+    assert fresh_session["revoked_at"] is None
+    assert user_row["enabled"] == 1
+
+    logout_response = client.post("/api/auth/logout")
+    assert logout_response.status_code == 200
+    assert logout_response.json()["message"] == "Logged out"
+
+
+def test_security_exposure_maintenance_lock_blocks_signup_but_not_admin_user_create(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    invite_payload = generate_invite_code(
+        initialized_settings,
+        actor=_admin_actor(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=True,
+    )
+
+    signup_response = client.post(
+        "/api/auth/signup",
+        json={
+            "username": "signup-standard",
+            "password": "standard-user-password",
+            "confirm_password": "standard-user-password",
+            "invite_code": invite_payload["code"],
+        },
+    )
+
+    assert signup_response.status_code == 503
+    assert signup_response.json()["detail"] == MAINTENANCE_MESSAGE
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    create_response = client.post(
+        "/api/admin/users",
+        json={
+            "username": "created-by-admin",
+            "password": "standard-user-password",
+            "role": "standard_user",
+            "enabled": True,
+            "age_credential": 18,
+        },
+    )
+    assert create_response.status_code == 200
+    assert create_response.json()["username"] == "created-by-admin"
+
+
 def test_activation_route_and_runtime_side_effects_are_not_implemented(client, admin_credentials) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
 
@@ -336,6 +665,7 @@ def test_activation_route_and_runtime_side_effects_are_not_implemented(client, a
     assert response.status_code == 404
 
     service_source = Path("backend/app/services/exposure_mode_service.py").read_text(encoding="utf-8")
+    maintenance_source = Path("backend/app/services/exposure_maintenance_service.py").read_text(encoding="utf-8")
     route_source = Path("backend/app/routes/admin.py").read_text(encoding="utf-8")
     exposure_route_source = route_source[
         route_source.index('@router.get("/exposure/status"') : route_source.index('@router.post("/users"')
@@ -343,6 +673,10 @@ def test_activation_route_and_runtime_side_effects_are_not_implemented(client, a
     assert "rotate_url_prefix" not in service_source
     assert "revoke_sessions_for_user" not in service_source
     assert "UPDATE users" not in service_source
+    assert "rotate_url_prefix" not in maintenance_source
+    assert "revoke_sessions_for_user" not in maintenance_source
+    assert "UPDATE users" not in maintenance_source
+    assert "os.environ" not in maintenance_source
     assert "rotate_url_prefix" not in exposure_route_source
     assert "revoke_sessions_for_user" not in exposure_route_source
     assert "UPDATE users" not in exposure_route_source

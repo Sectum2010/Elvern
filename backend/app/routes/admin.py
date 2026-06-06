@@ -35,6 +35,8 @@ from ..schemas import (
     BackupCheckpointPassphraseRequest,
     BackupRestorePlanResponse,
     ExposureModeDraftRequest,
+    ExposureMaintenanceLockRequest,
+    ExposureMaintenanceLockResponse,
     ExposureModePlanResponse,
     AdminUserCreateRequest,
     AdminUserListResponse,
@@ -113,6 +115,10 @@ from ..services.exposure_mode_service import (
     clear_pending_exposure_draft,
     save_pending_exposure_draft,
     validate_exposure_plan,
+)
+from ..services.exposure_maintenance_service import (
+    get_exposure_maintenance_lock,
+    set_exposure_maintenance_lock,
 )
 from ..services.library_service import (
     hide_media_item_globally,
@@ -298,6 +304,53 @@ def admin_clear_exposure_draft(request: Request, user=CurrentAdmin) -> ExposureM
     status_payload = build_current_exposure_status(request.app.state.settings, request)
     status_payload.update(cleared)
     return ExposureModePlanResponse(**status_payload)
+
+
+@router.get("/exposure/maintenance-lock", response_model=ExposureMaintenanceLockResponse)
+def admin_get_exposure_maintenance_lock(request: Request, user=CurrentAdmin) -> ExposureMaintenanceLockResponse:
+    del user
+    return ExposureMaintenanceLockResponse(
+        **get_exposure_maintenance_lock(request.app.state.settings)
+    )
+
+
+@router.post("/exposure/maintenance-lock", response_model=ExposureMaintenanceLockResponse)
+def admin_enable_exposure_maintenance_lock(
+    payload: ExposureMaintenanceLockRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureMaintenanceLockResponse:
+    settings = request.app.state.settings
+    if not payload.acknowledgement:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Acknowledge that this temporarily blocks non-admin users without disabling accounts.",
+        )
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    return ExposureMaintenanceLockResponse(
+        **set_exposure_maintenance_lock(settings, user, enabled=True)
+    )
+
+
+@router.delete("/exposure/maintenance-lock", response_model=ExposureMaintenanceLockResponse)
+def admin_disable_exposure_maintenance_lock(
+    payload: ExposureMaintenanceLockRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureMaintenanceLockResponse:
+    settings = request.app.state.settings
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    return ExposureMaintenanceLockResponse(
+        **set_exposure_maintenance_lock(settings, user, enabled=False)
+    )
 
 
 @router.post("/users", response_model=AdminUserResponse)

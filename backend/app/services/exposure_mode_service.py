@@ -14,6 +14,10 @@ from ..auth import _client_host_from_request, _is_trusted_proxy_peer
 from ..config import Settings
 from ..db import utcnow_iso
 from .app_settings_service import get_global_app_setting, set_global_app_setting
+from .exposure_maintenance_service import (
+    EXPOSURE_MAINTENANCE_LOCK_MESSAGE,
+    get_exposure_maintenance_lock,
+)
 
 
 EXPOSURE_MODE_PENDING_DRAFT_KEY = "exposure_mode_pending_draft_json"
@@ -23,7 +27,7 @@ DIRECT_PUBLIC_IP_WARNING = (
 CURRENT_ORIGIN_REVALIDATION_MESSAGE = (
     "Open this admin page through the proposed public address and validate again before activation."
 )
-FUTURE_STANDARD_USER_MESSAGE = "The server is currently under construction, please try again later"
+FUTURE_STANDARD_USER_MESSAGE = EXPOSURE_MAINTENANCE_LOCK_MESSAGE
 PROVIDER_CHOICES = ("caddy", "nginx", "cloudflare_tunnel", "manual_other")
 PUBLIC_ENTRY_KINDS = ("custom_domain", "direct_ip")
 
@@ -470,6 +474,7 @@ def _active_settings_payload(settings: Settings, request: Request) -> dict[str, 
         "current_request_origin": resolve_current_request_origin(settings, request),
         "url_prefix_present": bool(url_prefix),
         "global_security_headers_expected": True,
+        "maintenance_lock": get_exposure_maintenance_lock(settings),
     }
 
 

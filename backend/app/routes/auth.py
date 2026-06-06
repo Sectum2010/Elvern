@@ -12,8 +12,10 @@ from ..auth import (
     clear_session_cookie,
     create_session,
     destroy_session,
+    get_user_by_session_token,
     is_totp_setup_required,
     is_totp_setup_required_for_values,
+    raise_if_exposure_maintenance_locked,
     resolve_client_ip,
     set_session_cookie,
 )
@@ -22,6 +24,10 @@ from ..models import AuthenticatedUser
 from ..services.account_access_service import create_password_help_request, create_user_with_invite
 from ..services.audit_service import log_audit_event
 from ..services.at_rest_encryption import decrypt_at_rest, encrypt_at_rest
+from ..services.exposure_maintenance_service import (
+    is_exposure_maintenance_lock_enabled,
+    maintenance_lock_message,
+)
 from ..services.rate_limiter_service import count_recent_failures
 from ..services.security_event_service import log_security_event
 from ..services.totp_service import (
@@ -388,6 +394,7 @@ def login(payload: AuthLoginRequest, request: Request, response: Response) -> Au
             ip_address=ip_address,
             user_agent=user_agent,
         )
+    raise_if_exposure_maintenance_locked(settings, user)
     totp_row = _get_totp_row(settings, user_id=user.id)
     if totp_row is not None and totp_row["totp_secret"]:
         with get_connection(settings) as connection:
@@ -488,6 +495,11 @@ def login_totp(payload: TotpLoginRequest, request: Request, response: Response) 
         username_retry_after = username_rate_limiter.check(username)
         if ip_retry_after or username_retry_after:
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many login attempts.")
+        if not bool(challenge["enabled"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account has been disabled",
+            )
         totp_secret = challenge["totp_secret"]
         if not totp_secret:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="totp_not_enabled")
@@ -541,6 +553,7 @@ def login_totp(payload: TotpLoginRequest, request: Request, response: Response) 
         enabled=bool(challenge["enabled"]),
         assistant_beta_enabled=bool(challenge["assistant_beta_enabled"]),
     )
+    raise_if_exposure_maintenance_locked(settings, user)
     ip_rate_limiter.clear(ip_address)
     username_rate_limiter.clear(user.username)
     token = create_session(settings, user, ip_address=ip_address, user_agent=user_agent)
@@ -799,6 +812,11 @@ def regenerate_recovery_codes(
 @router.post("/signup", response_model=AuthUserEnvelope)
 def signup(payload: AuthSignupRequest, request: Request, response: Response) -> AuthUserEnvelope:
     settings = request.app.state.settings
+    if is_exposure_maintenance_lock_enabled(settings):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=maintenance_lock_message(),
+        )
     ip_address = resolve_client_ip(request)
     user_agent = request.headers.get("user-agent")
     user = create_user_with_invite(
@@ -842,22 +860,24 @@ def password_help(payload: PasswordHelpRequest, request: Request) -> MessageResp
 
 
 @router.post("/logout", response_model=MessageResponse)
-def logout(request: Request, response: Response, user: AuthenticatedUser = CurrentUser) -> MessageResponse:
+def logout(request: Request, response: Response) -> MessageResponse:
     settings = request.app.state.settings
     token = request.cookies.get(settings.session_cookie_name)
+    user = get_user_by_session_token(settings, token or "", touch_mode="activity")
     destroy_session(settings, token)
     clear_session_cookie(response, settings)
-    log_audit_event(
-        settings,
-        action="auth.logout",
-        outcome="success",
-        user_id=user.id,
-        username=user.username,
-        role=user.role,
-        session_id=user.session_id,
-        ip_address=resolve_client_ip(request),
-        user_agent=request.headers.get("user-agent"),
-    )
+    if user is not None:
+        log_audit_event(
+            settings,
+            action="auth.logout",
+            outcome="success",
+            user_id=user.id,
+            username=user.username,
+            role=user.role,
+            session_id=user.session_id,
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
     return MessageResponse(message="Logged out")
 
 

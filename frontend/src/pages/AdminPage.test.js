@@ -175,6 +175,7 @@ describe("AdminPage exposure mode planner guards", () => {
 
     expect(securityCardSource).toContain("<StatusRow label=\"Exposure Mode\" value={exposureModeStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Pending draft\" value={exposurePendingDraft ? \"Exists\" : \"None\"} />");
+    expect(securityCardSource).toContain("<StatusRow label=\"Maintenance lock\" value={exposureMaintenanceLockStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Current request origin\"");
     expect(securityCardSource).toContain("Manage");
     expect(securityCardSource).not.toContain("Private-only mode");
@@ -200,11 +201,12 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("Draft only");
     expect(modalSource).toContain("Draft only — this does not change runtime behavior, write env files, rotate the URL prefix, revoke sessions, or disable users.");
     expect(modalSource).toContain("Current Status");
+    expect(modalSource).toContain("Temporary maintenance lock");
     expect(modalSource).toContain("Desired Mode");
     expect(modalSource).toContain("Confirmation");
   });
 
-  test("planner modal includes modes, providers, actions, and no activation route", () => {
+  test("planner modal includes modes, providers, maintenance lock actions, and no activation route", () => {
     const source = readAdminPage();
     const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
@@ -213,6 +215,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).toContain("apiRequest(\"/api/admin/exposure/status\")");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/validate\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/drafts\"");
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/maintenance-lock\"");
     expect(source).toContain("current_admin_password = draft.currentAdminPassword");
     expect(modalSource).toContain("Private Mode");
     expect(modalSource).toContain("Public Mode - Custom Domain");
@@ -223,6 +226,12 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("http://203.0.113.10:4173");
     expect(modalSource).toContain("Save pending draft");
     expect(modalSource).toContain("Clear pending draft");
+    expect(modalSource).toContain("Enable maintenance lock");
+    expect(modalSource).toContain("Disable maintenance lock");
+    expect(source).toContain("I understand this temporarily blocks non-admin users but does not disable their accounts.");
+    expect(modalSource).toContain("{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}");
+    expect(modalSource).toContain("Required to enable or disable the maintenance lock.");
+    expect(modalSource).toContain("This does not activate public/private mode. It only prepares the server for a future safe switch.");
     expect(source).toContain("caddy: \"Caddy\"");
     expect(source).toContain("nginx: \"Nginx\"");
     expect(source).toContain("cloudflare_tunnel: \"Cloudflare Tunnel\"");
@@ -232,6 +241,8 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).not.toContain("/api/admin/exposure/activate");
     expect(source).not.toContain(">Activate<");
     expect(source).not.toContain("Activate plan");
+    expect(source).not.toContain("Apply mode");
+    expect(source).not.toContain("Write env");
   });
 
   test("planner modal renders validation details and grouped planning notes", () => {

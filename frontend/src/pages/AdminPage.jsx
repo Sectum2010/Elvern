@@ -78,6 +78,12 @@ const DEFAULT_EXPOSURE_DRAFT = {
   directIpNotRecommendedAcknowledgement: false,
   currentAdminPassword: "",
 };
+const DEFAULT_EXPOSURE_MAINTENANCE_FORM = {
+  currentAdminPassword: "",
+  acknowledgement: false,
+};
+const EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT =
+  "I understand this temporarily blocks non-admin users but does not disable their accounts.";
 
 function formatAgeCredential(value) {
   const age = Number(value);
@@ -580,6 +586,8 @@ export function AdminPage() {
   const [exposureFeedback, setExposureFeedback] = useState(null);
   const [exposurePending, setExposurePending] = useState(false);
   const [exposureDraft, setExposureDraft] = useState(DEFAULT_EXPOSURE_DRAFT);
+  const [exposureMaintenanceForm, setExposureMaintenanceForm] = useState(DEFAULT_EXPOSURE_MAINTENANCE_FORM);
+  const [exposureMaintenanceFeedback, setExposureMaintenanceFeedback] = useState(null);
   const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false);
   const [totpStatus, setTotpStatus] = useState(null);
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
@@ -887,8 +895,63 @@ export function AdminPage() {
     }
   }
 
+  function updateExposureMaintenanceLockState(lockState) {
+    setExposureStatus((current) => (
+      current
+        ? { ...current, active: { ...(current.active || {}), maintenance_lock: lockState } }
+        : current
+    ));
+    setExposurePlan((current) => (
+      current
+        ? { ...current, active: { ...(current.active || {}), maintenance_lock: lockState } }
+        : current
+    ));
+  }
+
+  async function handleSetExposureMaintenanceLock(enabled) {
+    if (!exposureMaintenanceForm.currentAdminPassword.trim()) {
+      setExposureMaintenanceFeedback({
+        tone: "error",
+        text: "Enter your current admin password to update the maintenance lock.",
+      });
+      return;
+    }
+    if (enabled && !exposureMaintenanceForm.acknowledgement) {
+      setExposureMaintenanceFeedback({
+        tone: "error",
+        text: "Acknowledge the maintenance lock impact before enabling it.",
+      });
+      return;
+    }
+    setExposurePending(true);
+    setExposureMaintenanceFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/maintenance-lock", {
+        method: enabled ? "POST" : "DELETE",
+        data: {
+          current_admin_password: exposureMaintenanceForm.currentAdminPassword,
+          acknowledgement: enabled ? exposureMaintenanceForm.acknowledgement : false,
+        },
+      });
+      updateExposureMaintenanceLockState(payload);
+      setExposureMaintenanceForm(DEFAULT_EXPOSURE_MAINTENANCE_FORM);
+      setExposureMaintenanceFeedback({
+        tone: "success",
+        text: enabled ? "Maintenance lock enabled." : "Maintenance lock disabled.",
+      });
+    } catch (requestError) {
+      setExposureMaintenanceFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to update the maintenance lock.",
+      });
+    } finally {
+      setExposurePending(false);
+    }
+  }
+
   async function handleOpenExposurePlanner() {
     setExposurePlannerOpen(true);
+    setExposureMaintenanceFeedback(null);
     if (!exposureStatus) {
       await loadExposureStatus();
     }
@@ -3387,6 +3450,8 @@ export function AdminPage() {
   const exposureErrors = Array.isArray(exposureValidation.errors) ? exposureValidation.errors : [];
   const exposureWarnings = Array.isArray(exposureValidation.warnings) ? exposureValidation.warnings : [];
   const exposureModeStatus = formatExposureModeStatus(exposureActive, exposurePendingDraft);
+  const exposureMaintenanceLock = exposureActive.maintenance_lock || {};
+  const exposureMaintenanceLockStatus = exposureMaintenanceLock.enabled ? "On" : "Off";
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
       <section className="settings-card">
@@ -3413,6 +3478,7 @@ export function AdminPage() {
 	        </div>
 	        <StatusRow label="Exposure Mode" value={exposureModeStatus} />
 	        <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
+	        <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
 	        <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
 	        <StatusRow label="Multi-user" value={statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"} />
 	        <StatusRow label="Users" value={String(statusPayload.total_users)} />
@@ -4121,6 +4187,74 @@ export function AdminPage() {
                   <StatusRow label="Cookie secure" value={formatExposureValue(exposureActive.cookie_secure)} />
                   <StatusRow label="URL prefix present" value={formatExposureValue(exposureActive.url_prefix_present)} />
                   <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
+                  <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
+                </div>
+              </section>
+              <section className="exposure-planner-modal__section">
+                <h3>Temporary maintenance lock</h3>
+                <div className="exposure-planner-status">
+                  <StatusRow label="Status" value={exposureMaintenanceLockStatus} />
+                  <StatusRow
+                    label="Message shown to standard users"
+                    value={formatExposureValue(exposureMaintenanceLock.message)}
+                  />
+                  <StatusRow label="Created by" value={formatExposureValue(exposureMaintenanceLock.created_by_username)} />
+                  <StatusRow label="Created at" value={formatExposureValue(exposureMaintenanceLock.created_at)} />
+                </div>
+                <p className="page-subnote">
+                  This does not activate public/private mode. It only prepares the server for a future safe switch.
+                </p>
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>Maintenance lock acknowledgement</strong>
+                    <small>{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}</small>
+                  </span>
+                  <input
+                    checked={exposureMaintenanceForm.acknowledgement}
+                    onChange={(event) =>
+                      setExposureMaintenanceForm((current) => ({
+                        ...current,
+                        acknowledgement: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>
+                    <strong>Current admin password</strong>
+                    <small>Required to enable or disable the maintenance lock.</small>
+                  </span>
+                  <NonLoginSecretInput
+                    autoComplete="new-password"
+                    onChange={(event) =>
+                      setExposureMaintenanceForm((current) => ({
+                        ...current,
+                        currentAdminPassword: event.target.value,
+                      }))
+                    }
+                    placeholder="Current admin password"
+                    value={exposureMaintenanceForm.currentAdminPassword}
+                  />
+                </label>
+                <InlineFeedback feedback={exposureMaintenanceFeedback} />
+                <div className="admin-list__actions">
+                  <button
+                    className="primary-button"
+                    disabled={exposurePending || exposureMaintenanceLock.enabled}
+                    onClick={() => handleSetExposureMaintenanceLock(true)}
+                    type="button"
+                  >
+                    Enable maintenance lock
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={exposurePending || !exposureMaintenanceLock.enabled}
+                    onClick={() => handleSetExposureMaintenanceLock(false)}
+                    type="button"
+                  >
+                    Disable maintenance lock
+                  </button>
                 </div>
               </section>
               <section className="exposure-planner-modal__section">

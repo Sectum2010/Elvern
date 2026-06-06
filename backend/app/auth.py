@@ -14,6 +14,10 @@ from .services.audit_service import log_audit_event
 from .services.rate_limiter_service import SqliteRateLimiter
 from .services.security_event_service import log_security_event
 from .services.at_rest_encryption import decrypt_at_rest, encrypt_at_rest
+from .services.exposure_maintenance_service import (
+    is_exposure_maintenance_lock_enabled,
+    maintenance_lock_message,
+)
 from .services.totp_service import SKIP_GRACE_DAYS
 from .security import (
     generate_session_token,
@@ -693,6 +697,16 @@ def require_authenticated_user_heartbeat(request: Request) -> AuthenticatedUser:
     return _resolve_authenticated_user(request, touch_mode="heartbeat")
 
 
+def raise_if_exposure_maintenance_locked(settings: Settings, user: AuthenticatedUser) -> None:
+    if user.role == "admin":
+        return
+    if is_exposure_maintenance_lock_enabled(settings):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=maintenance_lock_message(),
+        )
+
+
 def _resolve_authenticated_user(request: Request, *, touch_mode: str) -> AuthenticatedUser:
     settings: Settings = request.app.state.settings
     token = request.cookies.get(settings.session_cookie_name)
@@ -708,6 +722,7 @@ def _resolve_authenticated_user(request: Request, *, touch_mode: str) -> Authent
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
         )
+    raise_if_exposure_maintenance_locked(settings, user)
     request.state.totp_setup_required = is_totp_setup_required(settings, user_id=user.id)
     return user
 

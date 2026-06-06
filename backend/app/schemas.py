@@ -147,6 +147,21 @@ class ExposureModePlanResponse(BaseModel):
     takes_effect: bool = False
 
 
+class ExposureMaintenanceLockRequest(BaseModel):
+    current_admin_password: str = Field(min_length=1)
+    acknowledgement: bool = False
+
+
+class ExposureMaintenanceLockResponse(BaseModel):
+    enabled: bool = False
+    reason: str | None = None
+    message: str
+    created_by_user_id: int | None = None
+    created_by_username: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
 class CloudSyncStatusResponse(BaseModel):
     status: Literal["success", "partial_failure", "failed", "disabled"] = "disabled"
     provider_auth_required: bool = False

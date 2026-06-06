@@ -1,6 +1,6 @@
 # Exposure Mode Planner
 
-Elvern's exposure mode planner is a Phase 1 planning surface for a future private/public exposure switch. Phase 1 is intentionally non-activating and non-destructive.
+Elvern's exposure mode planner is a planning surface for a future private/public exposure switch. Phase 1 added inert planning drafts. Phase 2 adds a reversible temporary maintenance lock. Neither phase activates public/private switching.
 
 ## Product Rules
 
@@ -11,6 +11,7 @@ Elvern's exposure mode planner is a Phase 1 planning surface for a future privat
 - Public custom domains must use HTTPS to be considered ready.
 - Saving a pending draft requires admin password re-authentication and acknowledgement.
 - Pending drafts do not change runtime behavior.
+- The temporary maintenance lock blocks enabled non-admin users without changing account enabled state.
 
 ## Phase 1 Limits
 
@@ -23,6 +24,22 @@ Elvern's exposure mode planner is a Phase 1 planning surface for a future privat
 - Does not probe a candidate origin from the backend.
 
 Validation is limited to strict origin parsing, static safety checks, and comparing the proposed origin with the current admin request origin. If the origins do not match, the admin should open the admin page through the proposed address and validate again.
+
+## Phase 2 Maintenance Lock
+
+The temporary maintenance lock is stored in `app_settings` as `exposure_mode_maintenance_lock_json`. It is admin-controlled from the Manage Exposure Mode UI and requires current admin password re-authentication. Enabling it also requires acknowledgement that it temporarily blocks non-admin users but does not disable their accounts.
+
+When the lock is on:
+
+- Admin users can still log in and manage the server.
+- Enabled standard users cannot log in or use normal authenticated APIs.
+- Existing standard-user sessions are not revoked by the lock.
+- Actual disabled users remain disabled and keep the existing disabled-account behavior.
+- Standard users see exactly:
+
+> The server is currently under construction, please try again later
+
+The lock does not activate public/private mode, write environment files, rotate the URL prefix, change token TTLs, revoke sessions, disable users, or mutate pending exposure drafts. Future activation work can use this lock before manual environment and restart verification.
 
 ## Public Custom Domain
 
@@ -58,11 +75,11 @@ Private Mode may use a private origin such as a tailnet hostname, LAN hostname, 
 
 Future activation should be a separate, explicit phase. It should require admin re-authentication and should not automatically rotate the URL prefix or change token TTLs.
 
-During a future stable switch, non-admin accounts should be temporarily blocked until the server is ready. Standard users should see:
+During a future stable switch, enable the temporary maintenance lock before switch preparation and keep non-admin users blocked until the server is ready. Standard users should see:
 
 > The server is currently under construction, please try again later
 
-Admin should receive a success or next-step message before any later reauth/logout flow. Existing session handling belongs to that future activation phase.
+Admin should receive a success or next-step message before any later reauth/logout flow. Activation remains outside the planner and maintenance-lock phases.
 
 ## Security Checklist
 
