@@ -68,6 +68,11 @@ const hopByHopHeaders = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+const spoofableForwardedHeaders = new Set([
+  "forwarded",
+  "x-forwarded-for",
+  "x-real-ip",
+]);
 
 const downloadSessionTokenPattern = /\/api\/download\/sessions\/[^/?#\s]+/g;
 const neutralRequestTargetOrigin = "http://elvern.local";
@@ -192,6 +197,24 @@ function withBaseHref(html, urlPrefix) {
 }
 
 
+function firstHeaderValue(value) {
+  if (Array.isArray(value)) {
+    return value.find((item) => typeof item === "string" && item.trim()) || "";
+  }
+  return typeof value === "string" ? value : "";
+}
+
+
+function requestRemoteAddress(request) {
+  return request.socket?.remoteAddress || request.connection?.remoteAddress || "";
+}
+
+
+function requestForwardedProto(request) {
+  return request.socket?.encrypted || request.connection?.encrypted ? "https" : "http";
+}
+
+
 async function readBody(request) {
   if (request.method === "GET" || request.method === "HEAD") {
     return undefined;
@@ -312,7 +335,8 @@ async function proxyRequest(request, response, targetUrl) {
   const requestHeaders = new Headers();
 
   for (const [name, value] of Object.entries(request.headers)) {
-    if (!value || hopByHopHeaders.has(name.toLowerCase())) {
+    const normalizedName = name.toLowerCase();
+    if (!value || hopByHopHeaders.has(normalizedName) || spoofableForwardedHeaders.has(normalizedName)) {
       continue;
     }
     if (Array.isArray(value)) {
@@ -323,6 +347,15 @@ async function proxyRequest(request, response, targetUrl) {
     }
     requestHeaders.set(name, value);
   }
+  const remoteAddress = requestRemoteAddress(request).trim();
+  if (remoteAddress) {
+    requestHeaders.set("X-Forwarded-For", remoteAddress);
+  }
+  const forwardedHost = firstHeaderValue(request.headers.host).trim();
+  if (forwardedHost) {
+    requestHeaders.set("X-Forwarded-Host", forwardedHost);
+  }
+  requestHeaders.set("X-Forwarded-Proto", requestForwardedProto(request));
 
   const body = await readBody(request);
   const upstream = await fetch(targetUrl, {

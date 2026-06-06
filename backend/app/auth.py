@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+import ipaddress
 
 from fastapi import Depends, HTTPException, Request, Response, status
 
-from .config import Settings
+from .config import Settings, get_settings
 from .db import get_connection, utcnow_iso
 from .models import AuthenticatedUser
 from .services.admin_events_service import emit_admin_event
@@ -138,13 +139,59 @@ def build_login_rate_limiters(settings: Settings) -> tuple[SqliteRateLimiter, Sq
     )
 
 
-def resolve_client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "").strip()
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+def _normalized_ip(value: str) -> str | None:
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return None
+
+
+def _client_host_from_request(request: Request) -> str:
     if request.client and request.client.host:
-        return request.client.host
+        raw_host = str(request.client.host).strip()
+        if raw_host:
+            return _normalized_ip(raw_host) or raw_host
     return "unknown"
+
+
+def _settings_from_request(request: Request) -> Settings:
+    request_settings = getattr(getattr(request.app, "state", None), "settings", None)
+    if isinstance(request_settings, Settings):
+        return request_settings
+    return get_settings()
+
+
+def _is_trusted_proxy_peer(settings: Settings, peer_host: str) -> bool:
+    peer_ip = _normalized_ip(peer_host)
+    if peer_ip is None:
+        return False
+    parsed_peer = ipaddress.ip_address(peer_ip)
+    for cidr in settings.trusted_proxy_cidrs:
+        try:
+            if parsed_peer in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _first_valid_forwarded_for_ip(header_value: str) -> str | None:
+    first_value = header_value.split(",", 1)[0].strip()
+    if not first_value:
+        return None
+    return _normalized_ip(first_value)
+
+
+def resolve_client_ip(request: Request) -> str:
+    peer_host = _client_host_from_request(request)
+    settings = _settings_from_request(request)
+    if _is_trusted_proxy_peer(settings, peer_host):
+        forwarded_for_ip = _first_valid_forwarded_for_ip(
+            request.headers.get("x-forwarded-for", "")
+        )
+        if forwarded_for_ip is not None:
+            return forwarded_for_ip
+    return peer_host
 
 
 def ensure_admin_user(settings: Settings) -> None:

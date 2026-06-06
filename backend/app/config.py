@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import re
 import shutil
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ DEFAULT_VIDEO_EXTENSIONS = (
     ".webm",
     ".avi",
 )
+DEFAULT_TRUSTED_PROXY_CIDRS = ("127.0.0.1/8", "::1/128")
 URL_PREFIX_PATTERN = re.compile(r"^[a-hjkmnp-z2-9]{8,24}$")
 
 
@@ -112,6 +114,24 @@ def _get_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(parts))
 
 
+def _get_csv_items(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    parts = [item.strip() for item in raw.split(",") if item.strip()]
+    return tuple(dict.fromkeys(parts))
+
+
+def _get_trusted_proxy_cidrs() -> tuple[str, ...]:
+    cidrs = _get_csv_items("ELVERN_TRUSTED_PROXY_CIDRS", DEFAULT_TRUSTED_PROXY_CIDRS)
+    for cidr in cidrs:
+        try:
+            ipaddress.ip_network(cidr, strict=False)
+        except ValueError as exc:
+            raise ConfigError(f"ELVERN_TRUSTED_PROXY_CIDRS contains invalid CIDR: {cidr}") from exc
+    return cidrs
+
+
 def _resolve_binary(*env_names: str, default: str | None = None) -> str | None:
     for name in env_names:
         raw = os.getenv(name, "").strip()
@@ -141,6 +161,7 @@ class Settings:
     cookie_secure: bool
     enable_multiuser: bool
     private_network_only: bool
+    trusted_proxy_cidrs: tuple[str, ...]
     bind_host: str
     port: int
     frontend_host: str
@@ -253,6 +274,7 @@ def load_settings() -> Settings:
         cookie_secure=_get_bool("ELVERN_COOKIE_SECURE", True),
         enable_multiuser=_get_bool("ELVERN_ENABLE_MULTIUSER", True),
         private_network_only=_get_bool("ELVERN_PRIVATE_NETWORK_ONLY", True),
+        trusted_proxy_cidrs=_get_trusted_proxy_cidrs(),
         bind_host=os.getenv("ELVERN_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1",
         port=_get_int("ELVERN_PORT", 8000),
         frontend_host=os.getenv("ELVERN_FRONTEND_HOST", "127.0.0.1").strip()

@@ -23,6 +23,7 @@ Use this checklist for security-sensitive Elvern changes, especially after CodeQ
 - Accept only validated origin-form paths from clients.
 - Keep the final upstream origin fixed or allowlisted, including redirects.
 - Validate proxy body-size and streaming behavior before adding large request paths.
+- Do not trust `X-Forwarded-For` unless the immediate peer is a trusted proxy; `frontend/server.mjs` must overwrite spoofable forwarded IP headers, and trusted proxy CIDRs default to loopback only.
 
 ## Regex And ReDoS Safety
 

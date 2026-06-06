@@ -215,6 +215,79 @@ describe("frontend production server proxy target hardening", () => {
     expectGlobalSecurityHeaders(response);
   });
 
+  test("proxy overwrites spoofable forwarded IP headers before backend fetch", async () => {
+    const originalFetch = globalThis.fetch;
+    const response = createMockResponse();
+    let capturedHeaders;
+    globalThis.fetch = async (_targetUrl, init) => {
+      capturedHeaders = init.headers;
+      return new Response(null, { status: 204 });
+    };
+
+    try {
+      await handleFrontendRequest(
+        {
+          headers: {
+            "forwarded": "for=1.2.3.4;proto=https",
+            "host": "elvern.example.test",
+            "user-agent": "Pytest Browser",
+            "x-forwarded-for": "1.2.3.4",
+            "x-real-ip": "5.6.7.8",
+          },
+          method: "GET",
+          socket: {
+            encrypted: true,
+            remoteAddress: "203.0.113.44",
+          },
+          url: "/api/library",
+        },
+        response,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(response.statusCode).toBe(204);
+    expect(capturedHeaders.get("X-Forwarded-For")).toBe("203.0.113.44");
+    expect(capturedHeaders.get("X-Forwarded-Host")).toBe("elvern.example.test");
+    expect(capturedHeaders.get("X-Forwarded-Proto")).toBe("https");
+    expect(capturedHeaders.get("Forwarded")).toBeNull();
+    expect(capturedHeaders.get("X-Real-IP")).toBeNull();
+    expect(capturedHeaders.get("User-Agent")).toBe("Pytest Browser");
+  });
+
+  test("proxy omits forwarded-for when remote address is unavailable", async () => {
+    const originalFetch = globalThis.fetch;
+    const response = createMockResponse();
+    let capturedHeaders;
+    globalThis.fetch = async (_targetUrl, init) => {
+      capturedHeaders = init.headers;
+      return new Response(null, { status: 204 });
+    };
+
+    try {
+      await handleFrontendRequest(
+        {
+          headers: {
+            "host": "elvern.example.test",
+            "x-forwarded-for": "1.2.3.4",
+          },
+          method: "GET",
+          socket: {},
+          url: "/api/library",
+        },
+        response,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(response.statusCode).toBe(204);
+    expect(capturedHeaders.get("X-Forwarded-For")).toBeNull();
+    expect(capturedHeaders.get("X-Forwarded-Host")).toBe("elvern.example.test");
+    expect(capturedHeaders.get("X-Forwarded-Proto")).toBe("http");
+  });
+
   test("proxied backend response preserves upstream route-specific CSP", async () => {
     const originalFetch = globalThis.fetch;
     const response = createMockResponse();
