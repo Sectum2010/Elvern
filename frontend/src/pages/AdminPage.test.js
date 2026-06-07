@@ -175,9 +175,13 @@ describe("AdminPage exposure mode planner guards", () => {
 
     expect(securityCardSource).toContain("<StatusRow label=\"Exposure Mode\" value={exposureModeStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Pending draft\" value={exposurePendingDraft ? \"Exists\" : \"None\"} />");
-    expect(securityCardSource).toContain("<StatusRow label=\"Maintenance lock\" value={exposureMaintenanceLockStatus} />");
+    expect(securityCardSource).toContain("<StatusRow label=\"Maintenance Mode\" value={exposureMaintenanceLockStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Prepared switch\" value={exposurePreparedSwitchStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Current request origin\"");
+    expect(securityCardSource).toContain("exposure-maintenance-summary-control");
+    expect(securityCardSource).toContain("className=\"exposure-maintenance-switch exposure-maintenance-switch--summary\"");
+    expect(securityCardSource).toContain("Required to enable or disable Maintenance Mode.");
+    expect(securityCardSource).toContain("Standalone server mode. Enabling logs out non-admin users and blocks non-admin logins without disabling accounts.");
     expect(securityCardSource).toContain("Manage");
     expect(securityCardSource).not.toContain("Private-only mode");
     expect(securityCardSource).not.toContain("Public Mode - Custom Domain");
@@ -200,9 +204,9 @@ describe("AdminPage exposure mode planner guards", () => {
     const modalSource = source.slice(modalStart, modalEnd);
     expect(modalSource).toContain("Manage Exposure Mode");
     expect(modalSource).toContain("Draft only");
-    expect(modalSource).toContain("Draft only — this does not change runtime behavior, write env files, rotate the URL prefix, revoke sessions, or disable users.");
+    expect(modalSource).toContain("Draft only — validation and pending drafts do not change runtime behavior, write env files, rotate the URL prefix, or disable users. Prepare only creates a manual plan and enables Maintenance Mode.");
     expect(modalSource).toContain("Current Status");
-    expect(modalSource).toContain("Temporary maintenance lock");
+    expect(modalSource).toContain("Maintenance Mode");
     expect(modalSource).toContain("Prepare manual switch");
     expect(modalSource).toContain("Desired Mode");
     expect(modalSource).toContain("Confirmation");
@@ -210,7 +214,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("exposure-results-stack");
   });
 
-  test("planner modal includes modes, providers, maintenance lock actions, prepare actions, and no activation route", () => {
+  test("planner modal includes modes, providers, Maintenance Mode actions, prepare actions, and no activation route", () => {
     const source = readAdminPage();
     const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
@@ -219,7 +223,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).toContain("apiRequest(\"/api/admin/exposure/status\")");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/validate\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/drafts\"");
-    expect(source).toContain("apiRequest(\"/api/admin/exposure/maintenance-lock\"");
+    expect(source).toContain("apiRequest(\"/api/admin/maintenance-mode\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/prepare-switch\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/prepared-switch\"");
     expect(source).toContain("current_admin_password = draft.currentAdminPassword");
@@ -240,7 +244,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("className=\"exposure-maintenance-switch\"");
     expect(modalSource).toContain("className=\"primary-button exposure-maintenance-confirm-button\"");
     expect(modalSource).toContain("handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)");
-    expect(source).toContain("const exposureMaintenanceActionLabel = exposureMaintenanceTargetEnabled ? \"Enable maintenance lock\" : \"Disable maintenance lock\";");
+    expect(source).toContain("const exposureMaintenanceActionLabel = exposureMaintenanceTargetEnabled ? \"Enable Maintenance Mode\" : \"Disable Maintenance Mode\";");
     expect(modalSource).not.toContain("disabled={exposurePending || exposureMaintenanceLock.enabled}");
     expect(modalSource).not.toContain("disabled={exposurePending || !exposureMaintenanceLock.enabled}");
     expect(modalSource).not.toContain("onClick={() => handleSetExposureMaintenanceLock(true)}");
@@ -259,14 +263,16 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("Takes effect");
     expect(modalSource).toContain("Activation");
     expect(modalSource).toContain("Not implemented");
-    expect(source).toContain("I understand this temporarily blocks non-admin users but does not disable their accounts.");
+    expect(source).toContain("I understand this logs out non-admin users and temporarily blocks non-admin logins without disabling their accounts.");
     expect(modalSource).toContain("{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}");
-    expect(source).toContain("I understand this only prepares a manual switch plan. It does not write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate public/private mode.");
+    expect(source).toContain("I understand this only prepares a manual switch plan. It does not write env files, restart Elvern, rotate the URL prefix, disable users, or activate public/private mode. It will enable Maintenance Mode and log out non-admin users.");
     expect(modalSource).toContain("{EXPOSURE_PREPARE_ACKNOWLEDGEMENT}");
-    expect(modalSource).toContain("Required to enable or disable the maintenance lock.");
+    expect(modalSource).toContain("Required to enable or disable Maintenance Mode.");
     expect(modalSource).toContain("Required to prepare or clear a prepared switch.");
-    expect(modalSource).toContain("This does not activate public/private mode. It only prepares the server for a future safe switch.");
-    expect(modalSource).toContain("After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in a later phase.");
+    expect(modalSource).toContain("This standalone mode logs out non-admin users and blocks non-admin logins without disabling accounts.");
+    expect(modalSource).toContain("Preparing will automatically enable Maintenance Mode and log out non-admin users. After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in Phase 4.");
+    expect(modalSource).toContain("<StatusRow label=\"Maintenance Mode\" value={exposurePrepareMaintenanceStatus} />");
+    expect(modalSource).toContain("<StatusRow label=\"Phase 4 verification\" value={exposurePhase4VerificationStatus} />");
     expect(source).toContain("caddy: \"Caddy\"");
     expect(source).toContain("nginx: \"Nginx\"");
     expect(source).toContain("cloudflare_tunnel: \"Cloudflare Tunnel\"");
@@ -298,6 +304,9 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("exposure-check-row");
     expect(modalSource).toContain("No blocking errors.");
     expect(modalSource).toContain("<h3>Prepared switch</h3>");
+    expect(modalSource).toContain("Maintenance Mode auto-enabled");
+    expect(modalSource).toContain("Verification required after restart");
+    expect(modalSource).toContain("Checked in Phase 4");
     expect(modalSource).toContain("<h3>Manual plan</h3>");
     expect(modalSource).toContain("<summary>Manual Steps</summary>");
     expect(modalSource).toContain("<summary>Env Suggestions</summary>");

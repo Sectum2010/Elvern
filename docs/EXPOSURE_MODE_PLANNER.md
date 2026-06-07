@@ -1,6 +1,6 @@
 # Exposure Mode Planner
 
-Elvern's exposure mode planner is a planning surface for a future private/public exposure switch. Phase 1 added inert planning drafts. Phase 2 adds a reversible temporary maintenance lock. Phase 3 adds a prepared manual switch plan. None of these phases activates public/private switching.
+Elvern's exposure mode planner is a planning surface for a future private/public exposure switch. Phase 1 added inert planning drafts. Phase 2 added Maintenance Mode as a reversible server safety mode. Phase 3 adds a prepared manual switch plan. None of these phases activates public/private switching.
 
 ## Product Rules
 
@@ -11,7 +11,8 @@ Elvern's exposure mode planner is a planning surface for a future private/public
 - Public custom domains must use HTTPS to be considered ready.
 - Saving a pending draft requires admin password re-authentication and acknowledgement.
 - Pending drafts do not change runtime behavior.
-- The temporary maintenance lock blocks enabled non-admin users without changing account enabled state.
+- Maintenance Mode is a standalone security control, not only an exposure-mode sub-control.
+- Maintenance Mode blocks enabled non-admin users, revokes/logs out active non-admin sessions when enabled, and does not change account enabled state.
 - A prepared manual switch plan still has `takes_effect=false`.
 
 ## Phase 1 Limits
@@ -19,28 +20,29 @@ Elvern's exposure mode planner is a planning surface for a future private/public
 - Does not write deploy files or environment files.
 - Does not change `ELVERN_PRIVATE_NETWORK_ONLY`, `ELVERN_PUBLIC_APP_ORIGIN`, or `ELVERN_BACKEND_ORIGIN`.
 - Does not rotate the URL prefix automatically.
-- Does not revoke sessions.
+- Draft validation and pending-draft saving do not revoke sessions.
 - Does not disable non-admin users.
 - Does not change token TTLs.
 - Does not probe a candidate origin from the backend.
 
-Validation is limited to strict origin parsing, static safety checks, and comparing the proposed origin with the current admin request origin. If the origins do not match, the admin should open the admin page through the proposed address and validate again.
+Validation is limited to strict origin parsing, static safety checks, and comparing the proposed origin with the current admin request origin. If the origins do not match, Phase 3 keeps that as a warning; Phase 4 verifies through the target origin after manual env/proxy changes and restart.
 
-## Phase 2 Maintenance Lock
+## Phase 2 Maintenance Mode
 
-The temporary maintenance lock is stored in `app_settings` as `exposure_mode_maintenance_lock_json`. It is admin-controlled from the Manage Exposure Mode UI and requires current admin password re-authentication. Enabling it also requires acknowledgement that it temporarily blocks non-admin users but does not disable their accounts.
+Maintenance Mode is stored in `app_settings` as `exposure_mode_maintenance_lock_json` for compatibility with the earlier Phase 2 implementation. It is admin-controlled from the Security admin area and the Manage Exposure Mode UI, and requires current admin password re-authentication. Enabling it also requires acknowledgement that it logs out non-admin users and temporarily blocks non-admin logins without disabling accounts.
 
-When the lock is on:
+When Maintenance Mode is on:
 
 - Admin users can still log in and manage the server.
 - Enabled standard users cannot log in or use normal authenticated APIs.
-- Existing standard-user sessions are not revoked by the lock.
+- Active non-admin auth sessions are revoked with reason `maintenance_mode`.
+- Auth-session-bound download, native playback, and desktop handoff records for non-admin users are invalidated.
 - Actual disabled users remain disabled and keep the existing disabled-account behavior.
 - Standard users see exactly:
 
 > The server is currently under construction, please try again later
 
-The lock does not activate public/private mode, write environment files, rotate the URL prefix, change token TTLs, revoke sessions, disable users, or mutate pending exposure drafts. Future activation work can use this lock before manual environment and restart verification.
+Maintenance Mode does not activate public/private mode, write environment files, rotate the URL prefix, change token TTLs, disable users, enable disabled users, or mutate pending exposure drafts. Disabling Maintenance Mode does not restore revoked sessions or create new sessions.
 
 ## Phase 3 Prepared Manual Switch Plan
 
@@ -51,14 +53,21 @@ Preparing a manual switch requires:
 - Current admin password re-authentication.
 - Admin acknowledgement that the action only prepares a plan.
 - An existing pending exposure draft.
-- The temporary maintenance lock to be on.
 - Revalidation of the pending draft with no blocking errors.
-- For public custom domain and direct public IP drafts, the current admin request origin must match the proposed public origin.
 - For direct public IP drafts, the direct-IP NOT RECOMMENDED acknowledgement must already be stored in the pending draft.
+
+Preparing a manual switch automatically enables Maintenance Mode if it is not already on, and therefore revokes/logs out active non-admin sessions. Admin sessions remain allowed. The current request origin no longer blocks Phase 3 prepare; current-origin matching is a Phase 4 verification requirement after manual env/proxy changes and restart.
+
+Prepared switch payloads explicitly include:
+
+- `maintenance_mode_auto_enabled: true`
+- `verification_required: true`
+- `current_origin_match_required_in_phase: "phase_4_verification"`
+- `takes_effect: false`
 
 The prepared plan includes a copyable env suggestion block and manual restart / reverse proxy checklist. The block contains only high-level non-secret settings such as `ELVERN_PRIVATE_NETWORK_ONLY`, `ELVERN_PUBLIC_APP_ORIGIN`, `ELVERN_BACKEND_ORIGIN`, and `ELVERN_COOKIE_SECURE`.
 
-Phase 3 does not write env files, edit deploy files, restart Elvern, activate exposure mode, rotate the URL prefix, revoke sessions, disable users, change `users.enabled`, or change token TTLs. The prepared switch always reports `Prepared for manual apply`, `Activation not implemented`, and `takes_effect=false`.
+Phase 3 does not write env files, edit deploy files, restart Elvern, activate exposure mode, rotate the URL prefix, revoke admin sessions, disable users, change `users.enabled`, or change token TTLs. It can revoke non-admin sessions only through Maintenance Mode. The prepared switch always reports `Prepared for manual apply`, `Activation not implemented`, and `takes_effect=false`.
 
 ## Public Custom Domain
 
@@ -94,7 +103,7 @@ Private Mode may use a private origin such as a tailnet hostname, LAN hostname, 
 
 Future activation should be split into later explicit phases. It should require admin re-authentication and should not automatically rotate the URL prefix or change token TTLs.
 
-During a future stable switch, enable the temporary maintenance lock before switch preparation and keep non-admin users blocked until the server is ready. Standard users should see:
+During a future stable switch, keep Maintenance Mode on until the server is ready. Standard users should see:
 
 > The server is currently under construction, please try again later
 

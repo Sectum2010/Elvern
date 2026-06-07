@@ -3079,6 +3079,18 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   margin-bottom: 0.35rem;
 }
 
+.exposure-maintenance-summary-control {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgba(152, 176, 201, 0.12);
+}
+
+.exposure-maintenance-summary-control .settings-toggle {
+  padding-block: 0.35rem;
+}
+
 .exposure-planner-modal-shell {
   overflow: hidden;
   padding: clamp(0.65rem, 2.2vw, 1.25rem);

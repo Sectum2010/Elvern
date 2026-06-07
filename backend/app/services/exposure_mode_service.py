@@ -5,7 +5,7 @@ from ipaddress import ip_address, ip_network
 import json
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, status
@@ -16,6 +16,7 @@ from ..db import utcnow_iso
 from .app_settings_service import get_global_app_setting, set_global_app_setting
 from .exposure_maintenance_service import (
     EXPOSURE_MAINTENANCE_LOCK_MESSAGE,
+    enable_maintenance_mode,
     get_exposure_maintenance_lock,
 )
 
@@ -339,6 +340,7 @@ def prepare_exposure_manual_switch(
     actor: Any,
     *,
     acknowledgement: bool,
+    invalidate_auth_session: Callable[..., object] | None = None,
 ) -> dict[str, Any]:
     if not acknowledgement:
         raise HTTPException(
@@ -354,13 +356,6 @@ def prepare_exposure_manual_switch(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Save a pending exposure draft before preparing a manual switch.",
-        )
-
-    maintenance_lock = get_exposure_maintenance_lock(settings)
-    if not maintenance_lock.get("enabled"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Enable the temporary maintenance lock before preparing a manual switch.",
         )
 
     desired = pending_draft.get("desired")
@@ -381,11 +376,6 @@ def prepare_exposure_manual_switch(
 
     validated_desired = validation_snapshot.get("desired", {})
     if validated_desired.get("desired_mode") == "public":
-        if not _current_origin_match_passed(validation):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Open this admin page through the proposed public address and validate again before preparing.",
-            )
         if validated_desired.get("public_entry_kind") == "direct_ip":
             if not bool(pending_draft.get("direct_ip_not_recommended_acknowledgement")):
                 raise HTTPException(
@@ -393,6 +383,11 @@ def prepare_exposure_manual_switch(
                     detail=DIRECT_PUBLIC_IP_WARNING,
                 )
 
+    maintenance_mode = enable_maintenance_mode(
+        settings,
+        actor,
+        invalidate_auth_session=invalidate_auth_session,
+    )
     prepared_at = utcnow_iso()
     prepared_switch = {
         "status": "prepared_for_manual_apply",
@@ -406,7 +401,13 @@ def prepare_exposure_manual_switch(
         "env_block": build_copyable_env_block(validation_snapshot.get("plan", {})),
         "manual_steps": _prepared_manual_steps(validation_snapshot.get("plan", {})),
         "restart_required": True,
-        "maintenance_lock_required": True,
+        "maintenance_lock_required": False,
+        "maintenance_mode_enabled": True,
+        "maintenance_mode_auto_enabled": True,
+        "maintenance_mode_revoked_non_admin_sessions": maintenance_mode.get("revoked_non_admin_sessions", 0),
+        "maintenance_mode_affected_non_admin_users": maintenance_mode.get("affected_non_admin_users", 0),
+        "verification_required": True,
+        "current_origin_match_required_in_phase": "phase_4_verification",
         "url_prefix_rotation": "manual_only",
         "env_writing": "manual_only",
         "activation_not_implemented": True,
@@ -626,6 +627,7 @@ def _current_origin_match_passed(validation: dict[str, Any]) -> bool:
 
 def _active_settings_payload(settings: Settings, request: Request) -> dict[str, Any]:
     url_prefix = getattr(getattr(request.app, "state", None), "url_prefix", None) or settings.url_prefix
+    maintenance_mode = get_exposure_maintenance_lock(settings)
     return {
         "private_network_only": settings.private_network_only,
         "public_app_origin": settings.public_app_origin,
@@ -635,7 +637,8 @@ def _active_settings_payload(settings: Settings, request: Request) -> dict[str, 
         "current_request_origin": resolve_current_request_origin(settings, request),
         "url_prefix_present": bool(url_prefix),
         "global_security_headers_expected": True,
-        "maintenance_lock": get_exposure_maintenance_lock(settings),
+        "maintenance_lock": maintenance_mode,
+        "maintenance_mode": maintenance_mode,
     }
 
 
@@ -711,7 +714,7 @@ def _reverse_proxy_notes(provider: str | None) -> list[str]:
 def _manual_steps(mode: str | None) -> list[str]:
     if mode == "public":
         return [
-            "Open this admin page through the proposed public address and run validation again.",
+            "After manual env/proxy apply and restart, Phase 4 verification checks the target origin.",
             "Confirm HTTPS, secure cookies, proxy forwarding, and trusted proxy CIDRs before any future activation.",
             "Do not write env files from this planner; apply changes manually in a later activation phase.",
         ]

@@ -599,6 +599,8 @@ def get_session_access_failure_reason(
         return None
     if row["revoked_reason"] == "user_disabled" or row["enabled"] == 0:
         return "disabled"
+    if row["revoked_reason"] == "maintenance_mode" and row["revoked_at"] is not None:
+        return "maintenance_mode"
     if row["revoked_at"] is not None:
         return "revoked"
     return None
@@ -717,6 +719,11 @@ def _resolve_authenticated_user(request: Request, *, touch_mode: str) -> Authent
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This account has been disabled",
+            )
+        if failure_reason == "maintenance_mode":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=maintenance_lock_message(),
             )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

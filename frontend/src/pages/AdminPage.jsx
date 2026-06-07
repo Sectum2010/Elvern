@@ -92,13 +92,13 @@ const DEFAULT_EXPOSURE_MAINTENANCE_FORM = {
   acknowledgement: false,
 };
 const EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT =
-  "I understand this temporarily blocks non-admin users but does not disable their accounts.";
+  "I understand this logs out non-admin users and temporarily blocks non-admin logins without disabling their accounts.";
 const DEFAULT_EXPOSURE_PREPARE_FORM = {
   currentAdminPassword: "",
   acknowledgement: false,
 };
 const EXPOSURE_PREPARE_ACKNOWLEDGEMENT =
-  "I understand this only prepares a manual switch plan. It does not write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate public/private mode.";
+  "I understand this only prepares a manual switch plan. It does not write env files, restart Elvern, rotate the URL prefix, disable users, or activate public/private mode. It will enable Maintenance Mode and log out non-admin users.";
 
 function formatAgeCredential(value) {
   const age = Number(value);
@@ -953,12 +953,12 @@ export function AdminPage() {
   function updateExposureMaintenanceLockState(lockState) {
     setExposureStatus((current) => (
       current
-        ? { ...current, active: { ...(current.active || {}), maintenance_lock: lockState } }
+        ? { ...current, active: { ...(current.active || {}), maintenance_lock: lockState, maintenance_mode: lockState } }
         : current
     ));
     setExposurePlan((current) => (
       current
-        ? { ...current, active: { ...(current.active || {}), maintenance_lock: lockState } }
+        ? { ...current, active: { ...(current.active || {}), maintenance_lock: lockState, maintenance_mode: lockState } }
         : current
     ));
   }
@@ -980,21 +980,21 @@ export function AdminPage() {
     if (!exposureMaintenanceForm.currentAdminPassword.trim()) {
       setExposureMaintenanceFeedback({
         tone: "error",
-        text: "Enter your current admin password to update the maintenance lock.",
+        text: "Enter your current admin password to update Maintenance Mode.",
       });
       return;
     }
     if (enabled && !exposureMaintenanceForm.acknowledgement) {
       setExposureMaintenanceFeedback({
         tone: "error",
-        text: "Acknowledge the maintenance lock impact before enabling it.",
+        text: "Acknowledge the Maintenance Mode impact before enabling it.",
       });
       return;
     }
     setExposurePending(true);
     setExposureMaintenanceFeedback(null);
     try {
-      const payload = await apiRequest("/api/admin/exposure/maintenance-lock", {
+      const payload = await apiRequest("/api/admin/maintenance-mode", {
         method: enabled ? "POST" : "DELETE",
         data: {
           current_admin_password: exposureMaintenanceForm.currentAdminPassword,
@@ -1006,12 +1006,14 @@ export function AdminPage() {
       setExposureMaintenanceForm(DEFAULT_EXPOSURE_MAINTENANCE_FORM);
       setExposureMaintenanceFeedback({
         tone: "success",
-        text: enabled ? "Maintenance lock enabled." : "Maintenance lock disabled.",
+        text: enabled
+          ? `Maintenance Mode enabled. ${payload.revoked_non_admin_sessions || 0} non-admin session(s) logged out.`
+          : "Maintenance Mode disabled.",
       });
     } catch (requestError) {
       setExposureMaintenanceFeedback({
         tone: "error",
-        text: requestError.message || "Failed to update the maintenance lock.",
+        text: requestError.message || "Failed to update Maintenance Mode.",
       });
     } finally {
       setExposurePending(false);
@@ -3590,12 +3592,13 @@ export function AdminPage() {
   const exposureErrors = Array.isArray(exposureValidation.errors) ? exposureValidation.errors : [];
   const exposureWarnings = Array.isArray(exposureValidation.warnings) ? exposureValidation.warnings : [];
   const exposureModeStatus = formatExposureModeStatus(exposureActive, exposurePendingDraft);
-  const exposureMaintenanceLock = exposureActive.maintenance_lock || {};
+  const exposureMaintenanceLock = exposureActive.maintenance_mode || exposureActive.maintenance_lock || {};
   const exposureMaintenanceLockStatus = exposureMaintenanceLock.enabled ? "On" : "Off";
   const exposureMaintenanceTargetValue = exposureMaintenanceTargetMode || (exposureMaintenanceLock.enabled ? "on" : "off");
   const exposureMaintenanceTargetEnabled = exposureMaintenanceTargetValue === "on";
   const exposureMaintenanceTargetMatchesCurrent = exposureMaintenanceTargetEnabled === Boolean(exposureMaintenanceLock.enabled);
-  const exposureMaintenanceActionLabel = exposureMaintenanceTargetEnabled ? "Enable maintenance lock" : "Disable maintenance lock";
+  const exposureMaintenanceActionLabel = exposureMaintenanceTargetEnabled ? "Enable Maintenance Mode" : "Disable Maintenance Mode";
+  const exposurePrepareMaintenanceStatus = exposureMaintenanceLock.enabled ? "Already On" : "Will be enabled automatically on prepare";
   const exposurePreparedSwitch = exposureDisplay.prepared_switch || null;
   const exposurePreparedSwitchStatus = exposurePreparedSwitch ? "Prepared" : "None";
   const exposureValidationStatus = exposureValidation.status || "ready";
@@ -3615,6 +3618,11 @@ export function AdminPage() {
     : exposurePendingDraft?.desired?.desired_mode === "public"
       ? "Required"
       : "Not required";
+  const exposurePhase4VerificationStatus = exposurePreparedSwitch?.verification_required
+    ? "Required after restart"
+    : exposurePendingDraft?.desired?.desired_mode === "public"
+      ? "Required in Phase 4"
+      : "Not required for private draft";
   const exposurePreparedManualSteps = Array.isArray(exposurePreparedSwitch?.manual_steps)
     ? exposurePreparedSwitch.manual_steps
     : [];
@@ -3640,18 +3648,82 @@ export function AdminPage() {
 	            <p className="page-subnote">Compact account and exposure posture.</p>
 	          </div>
 	          <button className="ghost-button ghost-button--inline" onClick={handleOpenExposurePlanner} type="button">
-	            Manage
+	            Manage Exposure Mode
 	          </button>
 	        </div>
 	        <StatusRow label="Exposure Mode" value={exposureModeStatus} />
 	        <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
-	        <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
+	        <StatusRow label="Maintenance Mode" value={exposureMaintenanceLockStatus} />
 	        <StatusRow label="Prepared switch" value={exposurePreparedSwitchStatus} />
 	        <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
 	        <StatusRow label="Multi-user" value={statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"} />
 	        <StatusRow label="Users" value={String(statusPayload.total_users)} />
 	        <StatusRow label="Active auth sessions" value={String(sessionsPayload.length)} />
 	        <StatusRow label="Session TTL" value={`${statusPayload.security.session_ttl_hours} hour(s)`} />
+          <div className="exposure-maintenance-summary-control">
+            <div className="settings-field">
+              <span>
+                <strong>Maintenance Mode</strong>
+                <small>Standalone server mode. Enabling logs out non-admin users and blocks non-admin logins without disabling accounts.</small>
+              </span>
+              <ExposureSegmentedControl
+                ariaLabel="Maintenance Mode target"
+                className="exposure-maintenance-switch exposure-maintenance-switch--summary"
+                onChange={setExposureMaintenanceTargetMode}
+                options={EXPOSURE_MAINTENANCE_SEGMENTS}
+                value={exposureMaintenanceTargetValue}
+              />
+            </div>
+            <label className="settings-toggle settings-toggle--compact">
+              <span>
+                <strong>Maintenance Mode acknowledgement</strong>
+                <small>{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}</small>
+              </span>
+              <input
+                checked={exposureMaintenanceForm.acknowledgement}
+                onChange={(event) =>
+                  setExposureMaintenanceForm((current) => ({
+                    ...current,
+                    acknowledgement: event.target.checked,
+                  }))
+                }
+                type="checkbox"
+              />
+            </label>
+            <label className="settings-field">
+              <span>
+                <strong>Current admin password</strong>
+                <small>Required to enable or disable Maintenance Mode.</small>
+              </span>
+              <div className="exposure-secret-field">
+                <NonLoginSecretInput
+                  autoComplete="new-password"
+                  onChange={(event) =>
+                    setExposureMaintenanceForm((current) => ({
+                      ...current,
+                      currentAdminPassword: event.target.value,
+                    }))
+                  }
+                  placeholder="Current admin password"
+                  value={exposureMaintenanceForm.currentAdminPassword}
+                />
+              </div>
+            </label>
+            <InlineFeedback feedback={exposureMaintenanceFeedback} />
+            <div className="admin-list__actions exposure-maintenance-actions">
+              <button
+                className="primary-button exposure-maintenance-confirm-button"
+                disabled={exposurePending || exposureMaintenanceTargetMatchesCurrent}
+                onClick={() => handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)}
+                type="button"
+              >
+                {exposureMaintenanceActionLabel}
+              </button>
+              <span className="page-subnote exposure-maintenance-actions__hint">
+                {exposureMaintenanceTargetMatchesCurrent ? "Already matches the current state." : "Password confirmation required."}
+              </span>
+            </div>
+          </div>
 	      </section>
 
       {urlPrefixStatus?.rotation_reminder_due && !urlPrefixReminderDismissed ? (
@@ -4339,7 +4411,7 @@ export function AdminPage() {
         </div>
         <div className="detail-info-modal__body exposure-planner-modal__body">
           <p className="form-error exposure-planner-modal__banner">
-            Draft only — this does not change runtime behavior, write env files, rotate the URL prefix, revoke sessions, or disable users.
+            Draft only — validation and pending drafts do not change runtime behavior, write env files, rotate the URL prefix, or disable users. Prepare only creates a manual plan and enables Maintenance Mode.
           </p>
           <div className="exposure-planner-grid">
             <div className="settings-card-stack">
@@ -4355,12 +4427,12 @@ export function AdminPage() {
                   <StatusRow label="Cookie secure" value={formatExposureValue(exposureActive.cookie_secure)} />
                   <StatusRow label="URL prefix present" value={formatExposureValue(exposureActive.url_prefix_present)} />
                   <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
-                  <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
+                  <StatusRow label="Maintenance Mode" value={exposureMaintenanceLockStatus} />
                   <StatusRow label="Prepared switch" value={exposurePreparedSwitchStatus} />
                 </div>
               </section>
               <section className="exposure-planner-modal__section">
-                <h3>Temporary maintenance lock</h3>
+                <h3>Maintenance Mode</h3>
                 <div className="exposure-planner-status">
                   <StatusRow label="Status" value={exposureMaintenanceLockStatus} />
                   <StatusRow
@@ -4371,15 +4443,15 @@ export function AdminPage() {
                   <StatusRow label="Created at" value={formatExposureValue(exposureMaintenanceLock.created_at)} />
                 </div>
                 <p className="page-subnote">
-                  This does not activate public/private mode. It only prepares the server for a future safe switch.
+                  This standalone mode logs out non-admin users and blocks non-admin logins without disabling accounts.
                 </p>
                 <div className="settings-field exposure-maintenance-target">
                   <span>
                     <strong>Target state</strong>
-                    <small>Select the intended maintenance lock state, then confirm with your current admin password.</small>
+                    <small>Select the intended Maintenance Mode state, then confirm with your current admin password.</small>
                   </span>
                   <ExposureSegmentedControl
-                    ariaLabel="Maintenance lock target"
+                    ariaLabel="Maintenance Mode target"
                     className="exposure-maintenance-switch"
                     onChange={setExposureMaintenanceTargetMode}
                     options={EXPOSURE_MAINTENANCE_SEGMENTS}
@@ -4388,7 +4460,7 @@ export function AdminPage() {
                 </div>
                 <label className="settings-toggle settings-toggle--compact">
                   <span>
-                    <strong>Maintenance lock acknowledgement</strong>
+                    <strong>Maintenance Mode acknowledgement</strong>
                     <small>{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}</small>
                   </span>
                   <input
@@ -4405,7 +4477,7 @@ export function AdminPage() {
                 <label className="settings-field">
                   <span>
                     <strong>Current admin password</strong>
-                    <small>Required to enable or disable the maintenance lock.</small>
+                    <small>Required to enable or disable Maintenance Mode.</small>
                   </span>
                   <div className="exposure-secret-field">
                     <NonLoginSecretInput
@@ -4441,9 +4513,9 @@ export function AdminPage() {
                 <div className="exposure-planner-status">
                   <StatusRow label="Prepared status" value={exposurePreparedSwitch ? "Prepared for manual apply" : "None"} />
                   <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "Missing"} />
-                  <StatusRow label="Maintenance lock" value={exposureMaintenanceLockStatus} />
+                  <StatusRow label="Maintenance Mode" value={exposurePrepareMaintenanceStatus} />
                   <StatusRow label="Validation status" value={formatExposureValue(exposureValidation.status || "ready")} />
-                  <StatusRow label="Current origin match" value={exposureCurrentOriginMatchStatus} />
+                  <StatusRow label="Phase 4 verification" value={exposurePhase4VerificationStatus} />
                   <StatusRow label="URL prefix rotation" value="Manual only" />
                   <StatusRow label="Env writing" value="Manual only" />
                   <StatusRow label="Runtime effect" value="None yet" />
@@ -4453,7 +4525,7 @@ export function AdminPage() {
                   <StatusRow label="Prepared at" value={formatExposureValue(exposurePreparedSwitch?.prepared_at)} />
                 </div>
                 <p className="page-subnote">
-                  After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in a later phase.
+                  Preparing will automatically enable Maintenance Mode and log out non-admin users. After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in Phase 4.
                 </p>
                 <label className="settings-toggle settings-toggle--compact">
                   <span>
@@ -4651,7 +4723,7 @@ export function AdminPage() {
                 </div>
                 <div className="exposure-compact-status">
                   <StatusRow label="Status" value={formatExposureValue(exposureValidationStatus)} />
-                  <StatusRow label="Current origin match" value={exposureCurrentOriginMatchStatus} />
+                  <StatusRow label="Phase 4 verification" value={exposurePhase4VerificationStatus} />
                   <StatusRow label="Takes effect" value="No" />
                 </div>
               </section>
@@ -4703,9 +4775,26 @@ export function AdminPage() {
                   </span>
                 </div>
                 <div className="exposure-compact-status">
+                  <StatusRow
+                    label="Maintenance Mode auto-enabled"
+                    value={exposurePreparedSwitch?.maintenance_mode_auto_enabled ? "Yes" : "No"}
+                  />
+                  <StatusRow
+                    label="Verification required after restart"
+                    value={exposurePreparedSwitch?.verification_required ? "Yes" : "No"}
+                  />
+                  <StatusRow
+                    label="Current origin match"
+                    value={
+                      exposurePreparedSwitch?.current_origin_match_required_in_phase === "phase_4_verification"
+                        ? "Checked in Phase 4"
+                        : exposureCurrentOriginMatchStatus
+                    }
+                  />
                   <StatusRow label="URL prefix rotation" value="Manual only" />
                   <StatusRow label="Env writing" value="Manual only" />
                   <StatusRow label="Runtime effect" value="None yet" />
+                  <StatusRow label="Takes effect" value="No" />
                 </div>
                 {exposurePreparedEnvBlock ? (
                   <div className="exposure-prepared-block">

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pyotp
 from starlette.requests import Request
 
 from backend.app.db import get_connection
@@ -86,7 +87,7 @@ def _session_row_for_username(settings, username: str):
     with get_connection(settings) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.revoked_at
+            SELECT s.id, s.revoked_at, s.revoked_reason
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE u.username = ?
@@ -489,53 +490,63 @@ def test_security_exposure_maintenance_lock_defaults_and_storage(initialized_set
     assert row is None
 
 
-def test_security_exposure_maintenance_lock_routes_require_admin_password_and_ack(
+def test_security_maintenance_mode_routes_require_admin_password_and_ack(
     client,
     initialized_settings,
     admin_credentials,
 ) -> None:
-    assert client.get("/api/admin/exposure/maintenance-lock").status_code == 401
+    assert client.get("/api/admin/maintenance-mode").status_code == 401
 
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
 
     missing_ack = client.post(
-        "/api/admin/exposure/maintenance-lock",
+        "/api/admin/maintenance-mode",
         json={"current_admin_password": admin_credentials["password"], "acknowledgement": False},
     )
     assert missing_ack.status_code == 400
 
     wrong_password = client.post(
-        "/api/admin/exposure/maintenance-lock",
+        "/api/admin/maintenance-mode",
         json={"current_admin_password": "wrong-password", "acknowledgement": True},
     )
     assert wrong_password.status_code == 401
 
     response = client.post(
-        "/api/admin/exposure/maintenance-lock",
+        "/api/admin/maintenance-mode",
         json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
     )
     assert response.status_code == 200
     assert response.json()["enabled"] is True
+    assert response.json()["revoked_non_admin_sessions"] == 0
+    assert response.json()["affected_non_admin_users"] == 0
 
     status = client.get("/api/admin/exposure/status")
     assert status.status_code == 200
     assert status.json()["active"]["maintenance_lock"]["enabled"] is True
+    assert status.json()["active"]["maintenance_mode"]["enabled"] is True
 
     wrong_disable = client.request(
         "DELETE",
-        "/api/admin/exposure/maintenance-lock",
+        "/api/admin/maintenance-mode",
         json={"current_admin_password": "wrong-password", "acknowledgement": False},
     )
     assert wrong_disable.status_code == 401
 
     disabled = client.request(
         "DELETE",
-        "/api/admin/exposure/maintenance-lock",
+        "/api/admin/maintenance-mode",
         json={"current_admin_password": admin_credentials["password"], "acknowledgement": False},
     )
     assert disabled.status_code == 200
     assert disabled.json()["enabled"] is False
     assert maintenance_service.get_exposure_maintenance_lock(initialized_settings)["enabled"] is False
+
+    legacy = client.post(
+        "/api/admin/exposure/maintenance-lock",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+    assert legacy.status_code == 200
+    assert legacy.json()["enabled"] is True
 
 
 def test_security_exposure_maintenance_lock_does_not_mutate_pending_draft_or_users(
@@ -563,11 +574,12 @@ def test_security_exposure_maintenance_lock_does_not_mutate_pending_draft_or_use
         ]
 
     response = client.post(
-        "/api/admin/exposure/maintenance-lock",
+        "/api/admin/maintenance-mode",
         json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
     )
 
     assert response.status_code == 200
+    assert response.json()["revoked_non_admin_sessions"] == 0
     with get_connection(initialized_settings) as connection:
         after_users = [
             (row["id"], row["enabled"])
@@ -600,6 +612,47 @@ def test_security_exposure_maintenance_lock_blocks_standard_login_without_sessio
     assert response.status_code == 503
     assert response.json()["detail"] == MAINTENANCE_MESSAGE
     assert _session_row_for_username(initialized_settings, "blocked-standard") is None
+
+
+def test_security_maintenance_mode_blocks_standard_totp_completion_without_session(
+    client,
+    initialized_settings,
+) -> None:
+    _create_user(initialized_settings, username="totp-standard")
+    _login(client, username="totp-standard", password="standard-user-password")
+    setup = client.post("/api/auth/totp/setup")
+    assert setup.status_code == 200
+    secret = setup.json()["secret"]
+    verify = client.post("/api/auth/totp/setup/verify", json={"code": pyotp.TOTP(secret).now()})
+    assert verify.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE users SET totp_last_used_window = NULL WHERE username = ?",
+            ("totp-standard",),
+        )
+        connection.commit()
+    assert client.post("/api/auth/logout").status_code == 200
+
+    challenge = client.post(
+        "/api/auth/login",
+        json={"username": "totp-standard", "password": "standard-user-password"},
+    )
+    assert challenge.status_code == 200
+    assert challenge.json()["session"] == "pending_totp"
+    maintenance_service.set_exposure_maintenance_lock(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        enabled=True,
+    )
+
+    response = client.post(
+        "/api/auth/login/totp",
+        json={"challenge_token": challenge.json()["challenge_token"], "code": pyotp.TOTP(secret).now()},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == MAINTENANCE_MESSAGE
+    assert _session_row_for_username(initialized_settings, "totp-standard")["revoked_reason"] == "logout"
 
 
 def test_security_exposure_maintenance_lock_keeps_disabled_login_behavior(
@@ -640,40 +693,69 @@ def test_security_exposure_maintenance_lock_allows_admin_login_and_admin_routes(
     assert response.json()["active"]["maintenance_lock"]["enabled"] is True
 
 
-def test_security_exposure_maintenance_lock_blocks_existing_standard_session_without_revocation(
+def test_security_maintenance_mode_revokes_existing_standard_sessions_without_disabling_users(
     client,
     initialized_settings,
+    admin_credentials,
 ) -> None:
     _create_user(initialized_settings, username="session-standard")
     _login(client, username="session-standard", password="standard-user-password")
+    standard_token = client.cookies.get(initialized_settings.session_cookie_name)
     session_row = _session_row_for_username(initialized_settings, "session-standard")
     assert session_row is not None
 
-    maintenance_service.set_exposure_maintenance_lock(
-        initialized_settings,
-        _admin_actor(initialized_settings),
-        enabled=True,
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    admin_token = client.cookies.get(initialized_settings.session_cookie_name)
+    admin_session_row = _session_row_for_username(initialized_settings, admin_credentials["username"])
+    response = client.post(
+        "/api/admin/maintenance-mode",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
     )
+    assert response.status_code == 200
+    assert response.json()["revoked_non_admin_sessions"] == 1
+    assert response.json()["affected_non_admin_users"] == 1
 
+    client.cookies.set(initialized_settings.session_cookie_name, standard_token)
     response = client.get("/api/auth/me")
 
     assert response.status_code == 503
     assert response.json()["detail"] == MAINTENANCE_MESSAGE
     with get_connection(initialized_settings) as connection:
         fresh_session = connection.execute(
-            "SELECT revoked_at FROM sessions WHERE id = ?",
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
             (session_row["id"],),
+        ).fetchone()
+        fresh_admin_session = connection.execute(
+            "SELECT revoked_at FROM sessions WHERE id = ?",
+            (admin_session_row["id"],),
         ).fetchone()
         user_row = connection.execute(
             "SELECT enabled FROM users WHERE username = ?",
             ("session-standard",),
         ).fetchone()
-    assert fresh_session["revoked_at"] is None
+    assert fresh_session["revoked_at"] is not None
+    assert fresh_session["revoked_reason"] == "maintenance_mode"
+    assert fresh_admin_session["revoked_at"] is None
     assert user_row["enabled"] == 1
 
     logout_response = client.post("/api/auth/logout")
     assert logout_response.status_code == 200
     assert logout_response.json()["message"] == "Logged out"
+
+    client.cookies.set(initialized_settings.session_cookie_name, admin_token)
+    disable_response = client.request(
+        "DELETE",
+        "/api/admin/maintenance-mode",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": False},
+    )
+    assert disable_response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        still_revoked = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
+            (session_row["id"],),
+        ).fetchone()
+    assert still_revoked["revoked_at"] is not None
+    assert still_revoked["revoked_reason"] == "maintenance_mode"
 
 
 def test_security_exposure_maintenance_lock_blocks_signup_but_not_admin_user_create(
@@ -742,7 +824,7 @@ def test_prepared_switch_default_and_routes_require_admin(client, admin_credenti
     assert status_response.json()["takes_effect"] is False
 
 
-def test_prepare_switch_requires_password_ack_pending_draft_and_maintenance_lock(
+def test_prepare_switch_requires_password_ack_and_pending_draft_then_auto_enables_maintenance_mode(
     client,
     initialized_settings,
     admin_credentials,
@@ -776,21 +858,18 @@ def test_prepare_switch_requires_password_ack_pending_draft_and_maintenance_lock
     assert no_draft.json()["detail"] == "Save a pending exposure draft before preparing a manual switch."
 
     _save_private_pending_draft(client, admin_credentials)
-    lock_off = client.post(
-        "/api/admin/exposure/prepare-switch",
-        json=_prepare_request_payload(admin_credentials),
-    )
-    assert lock_off.status_code == 400
-    assert lock_off.json()["detail"] == "Enable the temporary maintenance lock before preparing a manual switch."
-
-    _enable_maintenance_lock(initialized_settings)
     prepared = client.post(
         "/api/admin/exposure/prepare-switch",
         json=_prepare_request_payload(admin_credentials),
     )
     assert prepared.status_code == 200
     assert prepared.json()["takes_effect"] is False
-    assert prepared.json()["prepared_switch"]["status"] == "prepared_for_manual_apply"
+    prepared_switch = prepared.json()["prepared_switch"]
+    assert prepared_switch["status"] == "prepared_for_manual_apply"
+    assert prepared_switch["maintenance_mode_auto_enabled"] is True
+    assert prepared_switch["verification_required"] is True
+    assert prepared_switch["current_origin_match_required_in_phase"] == "phase_4_verification"
+    assert maintenance_service.get_exposure_maintenance_lock(initialized_settings)["enabled"] is True
 
 
 def test_prepare_switch_revalidates_pending_draft_and_blocks_invalid_origin(
@@ -827,75 +906,59 @@ def test_prepare_switch_revalidates_pending_draft_and_blocks_invalid_origin(
     assert response.json()["detail"] == "Prepared switch cannot be created while validation has blocking errors."
 
 
-def test_prepare_switch_public_custom_domain_requires_and_accepts_current_origin_match(
+def test_prepare_switch_public_custom_domain_defers_current_origin_match_to_phase_4(
     client,
     initialized_settings,
     admin_credentials,
 ) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     _save_public_custom_pending_draft(client, admin_credentials)
-    _enable_maintenance_lock(initialized_settings)
 
-    mismatch = client.post(
+    response = client.post(
         "/api/admin/exposure/prepare-switch",
         json=_prepare_request_payload(admin_credentials),
     )
-    assert mismatch.status_code == 400
-    assert mismatch.json()["detail"] == "Open this admin page through the proposed public address and validate again before preparing."
 
-    matched = client.post(
-        "/api/admin/exposure/prepare-switch",
-        json=_prepare_request_payload(admin_credentials),
-        headers={
-            "Host": "127.0.0.1",
-            "X-Forwarded-Host": "media.example.com",
-            "X-Forwarded-Proto": "https",
-        },
-    )
-
-    assert matched.status_code == 200
-    prepared = matched.json()["prepared_switch"]
+    assert response.status_code == 200
+    prepared = response.json()["prepared_switch"]
     assert prepared["status"] == "prepared_for_manual_apply"
     assert prepared["takes_effect"] is False
+    assert prepared["verification_required"] is True
+    assert prepared["current_origin_match_required_in_phase"] == "phase_4_verification"
+    assert prepared["maintenance_mode_auto_enabled"] is True
     assert prepared["desired"]["public_origin"] == "https://media.example.com"
+    assert any(
+        check["name"] == "current_origin_match" and check["status"] == "warn"
+        for check in prepared["validation"]["checks"]
+    )
+    assert service.CURRENT_ORIGIN_REVALIDATION_MESSAGE in prepared["validation"]["warnings"]
     assert "ELVERN_PRIVATE_NETWORK_ONLY=false" in prepared["env_block"]
     assert "ELVERN_PUBLIC_APP_ORIGIN=https://media.example.com" in prepared["env_block"]
     assert "ELVERN_BACKEND_ORIGIN=https://media.example.com" in prepared["env_block"]
     assert "ELVERN_COOKIE_SECURE=true" in prepared["env_block"]
 
 
-def test_prepare_switch_public_direct_ip_requires_origin_match_and_preserves_warning(
+def test_prepare_switch_public_direct_ip_defers_origin_match_and_preserves_warnings(
     client,
     initialized_settings,
     admin_credentials,
 ) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     _save_public_direct_ip_pending_draft(client, admin_credentials)
-    _enable_maintenance_lock(initialized_settings)
 
-    mismatch = client.post(
+    response = client.post(
         "/api/admin/exposure/prepare-switch",
         json=_prepare_request_payload(admin_credentials),
     )
-    assert mismatch.status_code == 400
-    assert mismatch.json()["detail"] == "Open this admin page through the proposed public address and validate again before preparing."
 
-    matched = client.post(
-        "/api/admin/exposure/prepare-switch",
-        json=_prepare_request_payload(admin_credentials),
-        headers={
-            "Host": "127.0.0.1",
-            "X-Forwarded-Host": "203.0.113.10:4173",
-            "X-Forwarded-Proto": "http",
-        },
-    )
-
-    assert matched.status_code == 200
-    prepared = matched.json()["prepared_switch"]
+    assert response.status_code == 200
+    prepared = response.json()["prepared_switch"]
     assert prepared["desired"]["public_entry_kind"] == "direct_ip"
+    assert prepared["verification_required"] is True
+    assert prepared["current_origin_match_required_in_phase"] == "phase_4_verification"
     assert service.DIRECT_PUBLIC_IP_WARNING in prepared["validation"]["warnings"]
     assert any(
-        check["name"] == "current_origin_match" and check["status"] == "pass"
+        check["name"] == "current_origin_match" and check["status"] == "warn"
         for check in prepared["validation"]["checks"]
     )
 
@@ -965,6 +1028,43 @@ def test_prepare_switch_private_draft_succeeds_without_public_origin_match(
     assert "SECRET" not in prepared["env_block"]
     assert "PASSWORD" not in prepared["env_block"]
     assert "SESSION" not in prepared["env_block"]
+
+
+def test_prepare_switch_auto_enables_maintenance_mode_and_revokes_non_admin_sessions(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _create_user(initialized_settings, username="prepare-standard")
+    _login(client, username="prepare-standard", password="standard-user-password")
+    standard_session = _session_row_for_username(initialized_settings, "prepare-standard")
+    assert standard_session is not None
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _save_private_pending_draft(client, admin_credentials)
+
+    response = client.post(
+        "/api/admin/exposure/prepare-switch",
+        json=_prepare_request_payload(admin_credentials),
+    )
+
+    assert response.status_code == 200
+    prepared = response.json()["prepared_switch"]
+    assert prepared["maintenance_mode_auto_enabled"] is True
+    assert prepared["maintenance_mode_revoked_non_admin_sessions"] == 1
+    assert maintenance_service.get_exposure_maintenance_lock(initialized_settings)["enabled"] is True
+    with get_connection(initialized_settings) as connection:
+        session_row = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
+            (standard_session["id"],),
+        ).fetchone()
+        user_row = connection.execute(
+            "SELECT enabled FROM users WHERE username = ?",
+            ("prepare-standard",),
+        ).fetchone()
+    assert session_row["revoked_at"] is not None
+    assert session_row["revoked_reason"] == "maintenance_mode"
+    assert user_row["enabled"] == 1
 
 
 def test_clear_prepared_switch_requires_password_and_preserves_pending_draft(
@@ -1038,7 +1138,9 @@ def test_prepare_switch_stores_safe_plan_without_runtime_side_effects(
     assert response.status_code == 200
     prepared = response.json()["prepared_switch"]
     assert prepared["restart_required"] is True
-    assert prepared["maintenance_lock_required"] is True
+    assert prepared["maintenance_lock_required"] is False
+    assert prepared["maintenance_mode_auto_enabled"] is True
+    assert prepared["verification_required"] is True
     assert prepared["takes_effect"] is False
     with get_connection(initialized_settings) as connection:
         row = connection.execute(

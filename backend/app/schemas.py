@@ -161,6 +161,8 @@ class ExposureMaintenanceLockResponse(BaseModel):
     created_by_username: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    revoked_non_admin_sessions: int = 0
+    affected_non_admin_users: int = 0
 
 
 class ExposurePrepareSwitchRequest(BaseModel):

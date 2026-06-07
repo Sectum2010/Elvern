@@ -122,8 +122,9 @@ from ..services.exposure_mode_service import (
     validate_exposure_plan,
 )
 from ..services.exposure_maintenance_service import (
+    disable_maintenance_mode,
+    enable_maintenance_mode,
     get_exposure_maintenance_lock,
-    set_exposure_maintenance_lock,
 )
 from ..services.library_service import (
     hide_media_item_globally,
@@ -147,6 +148,12 @@ def _invalidate_user_sessions_if_available(request: Request, user_id: int, *, re
     invalidate = getattr(manager, "invalidate_user_sessions", None)
     if callable(invalidate):
         invalidate(user_id, reason=reason)
+
+
+def _auth_session_invalidator_if_available(request: Request):
+    manager = getattr(request.app.state, "mobile_playback_manager", None)
+    invalidate = getattr(manager, "invalidate_auth_session", None)
+    return invalidate if callable(invalidate) else None
 
 
 def _resolve_admin_checkpoint_path(settings, checkpoint_id: str):
@@ -311,11 +318,42 @@ def admin_clear_exposure_draft(request: Request, user=CurrentAdmin) -> ExposureM
     return ExposureModePlanResponse(**status_payload)
 
 
-@router.get("/exposure/maintenance-lock", response_model=ExposureMaintenanceLockResponse)
-def admin_get_exposure_maintenance_lock(request: Request, user=CurrentAdmin) -> ExposureMaintenanceLockResponse:
+@router.get("/maintenance-mode", response_model=ExposureMaintenanceLockResponse)
+def admin_get_maintenance_mode(request: Request, user=CurrentAdmin) -> ExposureMaintenanceLockResponse:
     del user
     return ExposureMaintenanceLockResponse(
         **get_exposure_maintenance_lock(request.app.state.settings)
+    )
+
+
+@router.get("/exposure/maintenance-lock", response_model=ExposureMaintenanceLockResponse)
+def admin_get_exposure_maintenance_lock(request: Request, user=CurrentAdmin) -> ExposureMaintenanceLockResponse:
+    return admin_get_maintenance_mode(request, user)
+
+
+@router.post("/maintenance-mode", response_model=ExposureMaintenanceLockResponse)
+def admin_enable_maintenance_mode(
+    payload: ExposureMaintenanceLockRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureMaintenanceLockResponse:
+    settings = request.app.state.settings
+    if not payload.acknowledgement:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Acknowledge that Maintenance Mode logs out non-admin users without disabling accounts.",
+        )
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    return ExposureMaintenanceLockResponse(
+        **enable_maintenance_mode(
+            settings,
+            user,
+            invalidate_auth_session=_auth_session_invalidator_if_available(request),
+        )
     )
 
 
@@ -325,24 +363,11 @@ def admin_enable_exposure_maintenance_lock(
     request: Request,
     user=CurrentAdmin,
 ) -> ExposureMaintenanceLockResponse:
-    settings = request.app.state.settings
-    if not payload.acknowledgement:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Acknowledge that this temporarily blocks non-admin users without disabling accounts.",
-        )
-    _verify_current_admin_password_for_route(
-        settings,
-        actor=user,
-        current_admin_password=payload.current_admin_password,
-    )
-    return ExposureMaintenanceLockResponse(
-        **set_exposure_maintenance_lock(settings, user, enabled=True)
-    )
+    return admin_enable_maintenance_mode(payload, request, user)
 
 
-@router.delete("/exposure/maintenance-lock", response_model=ExposureMaintenanceLockResponse)
-def admin_disable_exposure_maintenance_lock(
+@router.delete("/maintenance-mode", response_model=ExposureMaintenanceLockResponse)
+def admin_disable_maintenance_mode(
     payload: ExposureMaintenanceLockRequest,
     request: Request,
     user=CurrentAdmin,
@@ -354,8 +379,17 @@ def admin_disable_exposure_maintenance_lock(
         current_admin_password=payload.current_admin_password,
     )
     return ExposureMaintenanceLockResponse(
-        **set_exposure_maintenance_lock(settings, user, enabled=False)
+        **disable_maintenance_mode(settings, user)
     )
+
+
+@router.delete("/exposure/maintenance-lock", response_model=ExposureMaintenanceLockResponse)
+def admin_disable_exposure_maintenance_lock(
+    payload: ExposureMaintenanceLockRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureMaintenanceLockResponse:
+    return admin_disable_maintenance_mode(payload, request, user)
 
 
 @router.get("/exposure/prepared-switch", response_model=ExposurePreparedSwitchResponse)
@@ -385,6 +419,7 @@ def admin_prepare_exposure_manual_switch(
             request,
             user,
             acknowledgement=payload.acknowledgement,
+            invalidate_auth_session=_auth_session_invalidator_if_available(request),
         )
     )
 
