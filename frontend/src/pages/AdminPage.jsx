@@ -264,7 +264,7 @@ function exposureModeLabel(draft) {
     return "Public Mode - Custom Domain";
   }
   if (draft.selectedMode === "public_direct_ip") {
-    return "Public Mode - Direct IP (NOT RECOMMENDED)";
+    return "Public Mode - Direct IP (Not recommended)";
   }
   return "Private Mode";
 }
@@ -4656,7 +4656,7 @@ export function AdminPage() {
                 {exposureDraft.selectedMode === "public_direct_ip" ? (
                   <label className="settings-toggle settings-toggle--compact exposure-planner-warning">
                     <span>
-                      <strong>NOT RECOMMENDED</strong>
+                      <strong>Not recommended</strong>
                       <small>I understand direct public IP exposure is not recommended.</small>
                     </span>
                     <input

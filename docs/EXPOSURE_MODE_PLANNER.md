@@ -6,7 +6,7 @@ Elvern's exposure mode planner is a planning surface for a future private/public
 
 - Private Mode is for tailnet, Tailscale, LAN, and private DNS access.
 - Public Mode supports a purchased custom domain such as `https://media.example.com`.
-- Public Mode also supports direct public IP exposure such as `http://203.0.113.10:4173`, but this is explicitly NOT RECOMMENDED.
+- Public Mode also supports direct public IP exposure such as `http://203.0.113.10:4173`, and the UI labels it `Not recommended`.
 - Public Mode does not offer Tailscale Funnel.
 - Public custom domains must use HTTPS to be considered ready.
 - Saving a pending draft requires admin password re-authentication and acknowledgement.
@@ -54,7 +54,7 @@ Preparing a manual switch requires:
 - Admin acknowledgement that the action only prepares a plan.
 - An existing pending exposure draft.
 - Revalidation of the pending draft with no blocking errors.
-- For direct public IP drafts, the direct-IP NOT RECOMMENDED acknowledgement must already be stored in the pending draft.
+- For direct public IP drafts, the direct-IP Not recommended acknowledgement must already be stored in the pending draft.
 
 Preparing a manual switch automatically enables Maintenance Mode if it is not already on, and therefore revokes/logs out active non-admin sessions. Admin sessions remain allowed. The current request origin no longer blocks Phase 3 prepare; current-origin matching is a Phase 4 verification requirement after manual env/proxy changes and restart.
 
@@ -78,13 +78,14 @@ Recommended checks before a future activation:
 - DNS A/AAAA or provider hostname reaches the Elvern host or tunnel.
 - HTTPS is working in the browser.
 - `ELVERN_COOKIE_SECURE=true` for public HTTPS.
+- `ELVERN_COOKIE_SECURE=false` for plain HTTP direct IP planning, because Secure cookies require HTTPS.
 - `ELVERN_TRUSTED_PROXY_CIDRS` is restricted to known proxy addresses.
 - Global low-regression security headers are still present.
 - URL prefix rotation remains manual. Consider rotating it after completing public-mode setup if desired.
 
 ## Public Direct IP
 
-Direct public IP mode is allowed for planning, but it is NOT RECOMMENDED. A purchased domain with HTTPS is safer and easier to maintain.
+Direct public IP mode is allowed for planning, and the UI labels it `Not recommended`. A purchased domain with HTTPS is safer and easier to maintain.
 
 The planner rejects loopback, private, link-local, and reserved IP addresses for direct public mode. HTTP direct IP planning is allowed with warnings. HTTPS direct IP planning is also allowed, but certificate setup is usually harder than using a domain.
 
@@ -115,7 +116,7 @@ Phase 5 should design finalization and user release behavior. Admin should recei
 
 - Keep Phase 1 validation free of backend requests to user-provided origins.
 - Require HTTPS for public custom domains.
-- Label direct public IP exposure as NOT RECOMMENDED.
+- Label direct public IP exposure as Not recommended.
 - Keep trusted proxy CIDRs narrow.
 - Keep secure cookies enabled for public HTTPS.
 - Keep global security headers active.

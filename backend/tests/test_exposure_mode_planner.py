@@ -5,16 +5,23 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import pyotp
+from fastapi import HTTPException
 from starlette.requests import Request
 
-from backend.app.db import get_connection
+from backend.app.db import get_connection, utcnow_iso
 from backend.app.models import AuthenticatedUser
 from backend.app.services import exposure_mode_service as service
 from backend.app.services import exposure_maintenance_service as maintenance_service
 from backend.app.services.account_access_service import generate_invite_code
-from backend.app.services.admin_service import create_user
+from backend.app.services.admin_service import create_user, update_user
 from backend.app.services.app_settings_service import set_global_app_setting
+from backend.app.services.native_playback_service import (
+    create_native_playback_session,
+    get_native_playback_session_payload,
+    inspect_native_playback_access,
+)
 
 
 MAINTENANCE_MESSAGE = "The server is currently under construction, please try again later"
@@ -87,7 +94,7 @@ def _session_row_for_username(settings, username: str):
     with get_connection(settings) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.revoked_at, s.revoked_reason
+            SELECT s.id, s.user_id, s.revoked_at, s.revoked_reason
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE u.username = ?
@@ -96,6 +103,67 @@ def _session_row_for_username(settings, username: str):
             """,
             (username,),
         ).fetchone()
+
+
+def _create_media_item(settings, *, relative_name: str = "movie.mp4") -> dict[str, object]:
+    media_file = Path(settings.media_root) / relative_name
+    media_file.write_bytes(b"not a real media file")
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO media_items (
+                title,
+                original_filename,
+                file_path,
+                source_kind,
+                file_size,
+                file_mtime,
+                duration_seconds,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+                year,
+                created_at,
+                updated_at,
+                last_scanned_at
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Maintenance Test Movie",
+                media_file.name,
+                str(media_file),
+                media_file.stat().st_size,
+                media_file.stat().st_mtime,
+                120.0,
+                None,
+                None,
+                "h264",
+                "aac",
+                "mp4",
+                2024,
+                now,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+        item_id = int(cursor.lastrowid)
+    return {
+        "id": item_id,
+        "title": "Maintenance Test Movie",
+        "original_filename": media_file.name,
+        "file_path": str(media_file),
+        "source_kind": "local",
+        "duration_seconds": 120.0,
+        "container": "mp4",
+        "video_codec": "h264",
+        "audio_codec": "aac",
+        "resume_position_seconds": 0,
+        "subtitles": [],
+    }
 
 
 def _prepare_request_payload(admin_credentials) -> dict[str, object]:
@@ -280,6 +348,26 @@ def test_public_direct_ip_accepts_documentation_ip_with_not_recommended_warning(
     assert result["validation"]["errors"] == []
     assert service.DIRECT_PUBLIC_IP_WARNING in result["validation"]["warnings"]
     assert result["desired"]["public_origin"] == "http://203.0.113.10:4173"
+    assert "ELVERN_COOKIE_SECURE=false" in service.build_copyable_env_block(result["plan"])
+
+
+def test_public_direct_ip_https_keeps_secure_cookie_suggestion(test_settings) -> None:
+    request = _request_with_origin(test_settings, origin="https://203.0.113.10")
+
+    result = service.validate_exposure_plan(
+        test_settings,
+        request,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "direct_ip",
+            "public_origin": "https://203.0.113.10",
+            "reverse_proxy_provider": "manual_other",
+        },
+    )
+
+    assert result["validation"]["errors"] == []
+    assert service.DIRECT_PUBLIC_IP_WARNING in result["validation"]["warnings"]
+    assert "ELVERN_COOKIE_SECURE=true" in service.build_copyable_env_block(result["plan"])
 
 
 def test_public_direct_ip_rejects_private_loopback_and_link_local(test_settings) -> None:
@@ -758,6 +846,185 @@ def test_security_maintenance_mode_revokes_existing_standard_sessions_without_di
     assert still_revoked["revoked_reason"] == "maintenance_mode"
 
 
+def test_security_maintenance_mode_preserves_decoupled_external_native_playback(
+    client,
+    initialized_settings,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    created_user = _create_user(initialized_settings, username="maintenance-native-external")
+    _login(client, username="maintenance-native-external", password="standard-user-password")
+    standard_session = _session_row_for_username(initialized_settings, "maintenance-native-external")
+    assert standard_session is not None
+    item = _create_media_item(initialized_settings, relative_name="maintenance-native-external.mp4")
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=int(created_user["id"]),
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS VLC Handoff",
+        created_from_auth_session_id=int(standard_session["id"]),
+    )
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    response = client.post(
+        "/api/admin/maintenance-mode",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["revoked_non_admin_sessions"] == 1
+    with get_connection(initialized_settings) as connection:
+        auth_row = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
+            (standard_session["id"],),
+        ).fetchone()
+        native_row = connection.execute(
+            """
+            SELECT auth_session_id, created_from_auth_session_id, revoked_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (str(native_session["session_id"]),),
+        ).fetchone()
+
+    assert auth_row["revoked_at"] is not None
+    assert auth_row["revoked_reason"] == "maintenance_mode"
+    assert native_row["auth_session_id"] is None
+    assert native_row["created_from_auth_session_id"] == standard_session["id"]
+    assert native_row["revoked_at"] is None
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is True
+    assert access_state["reason"] == "allowed"
+    payload = get_native_playback_session_payload(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert payload["session_id"] == native_session["session_id"]
+
+
+def test_security_maintenance_mode_revokes_auth_session_coupled_native_playback(
+    client,
+    initialized_settings,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    created_user = _create_user(initialized_settings, username="maintenance-native-coupled")
+    _login(client, username="maintenance-native-coupled", password="standard-user-password")
+    standard_session = _session_row_for_username(initialized_settings, "maintenance-native-coupled")
+    assert standard_session is not None
+    item = _create_media_item(initialized_settings, relative_name="maintenance-native-coupled.mp4")
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=int(created_user["id"]),
+        item=item,
+        auth_session_id=int(standard_session["id"]),
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Linux Same-Host VLC",
+        created_from_auth_session_id=int(standard_session["id"]),
+    )
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    response = client.post(
+        "/api/admin/maintenance-mode",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+
+    assert response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        native_row = connection.execute(
+            """
+            SELECT auth_session_id, created_from_auth_session_id, revoked_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (str(native_session["session_id"]),),
+        ).fetchone()
+
+    assert native_row["auth_session_id"] == standard_session["id"]
+    assert native_row["created_from_auth_session_id"] == standard_session["id"]
+    assert native_row["revoked_at"] is not None
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is False
+    assert access_state["reason"] == "native_session_revoked"
+
+
+def test_security_user_disable_still_revokes_decoupled_external_native_playback(
+    client,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    created_user = _create_user(initialized_settings, username="maintenance-native-disable")
+    user_id = int(created_user["id"])
+    _login(client, username="maintenance-native-disable", password="standard-user-password")
+    standard_session = _session_row_for_username(initialized_settings, "maintenance-native-disable")
+    assert standard_session is not None
+    item = _create_media_item(initialized_settings, relative_name="maintenance-native-disable.mp4")
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=user_id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Elvern iOS Infuse Handoff",
+        created_from_auth_session_id=int(standard_session["id"]),
+    )
+
+    update_user(
+        initialized_settings,
+        user_id=user_id,
+        enabled=False,
+        role=None,
+        current_admin_password=None,
+        actor=_admin_actor(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    access_state = inspect_native_playback_access(
+        initialized_settings,
+        session_id=str(native_session["session_id"]),
+        access_token=str(native_session["access_token"]),
+    )
+    assert access_state["allowed"] is False
+    assert access_state["reason"] == "native_session_revoked"
+    with pytest.raises(HTTPException) as exc_info:
+        get_native_playback_session_payload(
+            initialized_settings,
+            session_id=str(native_session["session_id"]),
+            access_token=str(native_session["access_token"]),
+        )
+    assert exc_info.value.status_code == 401
+
+
 def test_security_exposure_maintenance_lock_blocks_signup_but_not_admin_user_create(
     client,
     initialized_settings,
@@ -961,6 +1228,7 @@ def test_prepare_switch_public_direct_ip_defers_origin_match_and_preserves_warni
         check["name"] == "current_origin_match" and check["status"] == "warn"
         for check in prepared["validation"]["checks"]
     )
+    assert "ELVERN_COOKIE_SECURE=false" in prepared["env_block"]
 
 
 def test_prepare_switch_requires_stored_direct_ip_acknowledgement(
@@ -1190,6 +1458,16 @@ def test_activation_route_and_runtime_side_effects_are_not_implemented(client, a
     assert "rotate_url_prefix" not in exposure_route_source
     assert "revoke_sessions_for_user" not in exposure_route_source
     assert "UPDATE users" not in exposure_route_source
+
+
+def test_maintenance_mode_revocation_scope_static_guard() -> None:
+    maintenance_source = Path("backend/app/services/exposure_maintenance_service.py").read_text(encoding="utf-8")
+
+    assert "created_from_auth_session_id" not in maintenance_source
+    assert "revoke_download_sessions_for_user" not in maintenance_source
+    assert "_revoke_native_playback_by_users" not in maintenance_source
+    assert "_revoke_desktop_handoffs_by_users" not in maintenance_source
+    assert "WHERE user_id IN" not in maintenance_source
 
 
 def test_broad_trusted_proxy_cidr_warns(test_settings) -> None:

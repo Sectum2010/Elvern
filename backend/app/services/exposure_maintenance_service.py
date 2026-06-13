@@ -8,7 +8,6 @@ from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from .account_access_service import (
     revoke_download_sessions_for_auth_sessions,
-    revoke_download_sessions_for_user,
 )
 from .app_settings_service import get_global_app_setting, set_global_app_setting
 
@@ -130,16 +129,6 @@ def revoke_non_admin_sessions_for_maintenance_mode(
             _revoke_auth_session_rows(connection, session_ids=session_ids, now=now)
             _revoke_native_playback_by_auth_sessions(connection, session_ids=session_ids, now=now)
             _revoke_desktop_handoffs_by_auth_sessions(connection, session_ids=session_ids, now=now)
-        for user_id in user_ids:
-            revoke_download_sessions_for_user(
-                connection,
-                user_id=user_id,
-                now=now,
-                reason=MAINTENANCE_MODE_REVOKED_REASON,
-            )
-        if user_ids:
-            _revoke_native_playback_by_users(connection, user_ids=user_ids, now=now)
-            _revoke_desktop_handoffs_by_users(connection, user_ids=user_ids, now=now)
         connection.commit()
 
     if callable(invalidate_auth_session):
@@ -194,28 +183,6 @@ def _revoke_native_playback_by_auth_sessions(connection: sqlite3.Connection, *, 
           AND closed_at IS NULL
         """  # nosec B608 - placeholders generated from trusted session_ids length
     connection.execute(by_auth_sql, (now, *session_ids))
-    by_created_sql = f"""
-        UPDATE native_playback_sessions
-        SET revoked_at = ?
-        WHERE created_from_auth_session_id IN ({placeholders})
-          AND revoked_at IS NULL
-          AND closed_at IS NULL
-        """  # nosec B608 - placeholders generated from trusted session_ids length
-    connection.execute(by_created_sql, (now, *session_ids))
-
-
-def _revoke_native_playback_by_users(connection: sqlite3.Connection, *, user_ids: list[int], now: str) -> None:
-    if not user_ids:
-        return
-    placeholders = ",".join("?" for _ in user_ids)
-    sql = f"""
-        UPDATE native_playback_sessions
-        SET revoked_at = ?
-        WHERE user_id IN ({placeholders})
-          AND revoked_at IS NULL
-          AND closed_at IS NULL
-        """  # nosec B608 - placeholders generated from trusted user_ids length
-    connection.execute(sql, (now, *user_ids))
 
 
 def _revoke_desktop_handoffs_by_auth_sessions(connection: sqlite3.Connection, *, session_ids: list[int], now: str) -> None:
@@ -229,19 +196,6 @@ def _revoke_desktop_handoffs_by_auth_sessions(connection: sqlite3.Connection, *,
           AND revoked_at IS NULL
         """  # nosec B608 - placeholders generated from trusted session_ids length
     connection.execute(sql, (now, *session_ids))
-
-
-def _revoke_desktop_handoffs_by_users(connection: sqlite3.Connection, *, user_ids: list[int], now: str) -> None:
-    if not user_ids:
-        return
-    placeholders = ",".join("?" for _ in user_ids)
-    sql = f"""
-        UPDATE desktop_vlc_handoffs
-        SET revoked_at = ?
-        WHERE user_id IN ({placeholders})
-          AND revoked_at IS NULL
-        """  # nosec B608 - placeholders generated from trusted user_ids length
-    connection.execute(sql, (now, *user_ids))
 
 
 def _optional_int(value: object) -> int | None:

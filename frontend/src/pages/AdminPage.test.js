@@ -185,7 +185,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(securityCardSource).toContain("Manage");
     expect(securityCardSource).not.toContain("Private-only mode");
     expect(securityCardSource).not.toContain("Public Mode - Custom Domain");
-    expect(securityCardSource).not.toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
+    expect(securityCardSource).not.toContain("Public Mode - Direct IP (Not recommended)");
     expect(securityCardSource).not.toContain("Validate plan");
     expect(securityCardSource).not.toContain("Save pending draft");
   });
@@ -233,8 +233,9 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).toContain("{ value: \"public_direct_ip\", label: \"Direct IP\", badge: \"Not recommended\" }");
     expect(modalSource).toContain("className=\"exposure-mode-segmented\"");
     expect(modalSource).toContain("options={EXPOSURE_MODE_SEGMENTS}");
-    expect(source).toContain("Public Mode - Direct IP (NOT RECOMMENDED)");
-    expect(modalSource).toContain("NOT RECOMMENDED");
+    expect(source).toContain("Public Mode - Direct IP (Not recommended)");
+    expect(modalSource).toContain("Not recommended");
+    expect(source).not.toContain("NOT RECOMMENDED");
     expect(modalSource).toContain("I understand direct public IP exposure is not recommended.");
     expect(modalSource).toContain("https://media.example.com");
     expect(modalSource).toContain("http://203.0.113.10:4173");

@@ -654,15 +654,29 @@ def _build_plan(
     provider = desired.get("reverse_proxy_provider")
     public_origin = normalized_public["origin"] if normalized_public and normalized_public.get("ok") else desired.get("public_origin", "")
     private_origin = normalized_private["origin"] if normalized_private and normalized_private.get("ok") else desired.get("private_origin", "")
+    public_scheme = str(normalized_public.get("scheme") or "") if normalized_public and normalized_public.get("ok") else ""
     return {
-        "env_suggestions": _env_suggestions(mode, public_origin, private_origin),
+        "env_suggestions": _env_suggestions(
+            mode,
+            public_origin,
+            private_origin,
+            public_entry_kind=desired.get("public_entry_kind"),
+            public_scheme=public_scheme,
+        ),
         "reverse_proxy_notes": _reverse_proxy_notes(provider),
         "manual_steps": _manual_steps(mode),
         "activation_notes": _activation_notes(),
     }
 
 
-def _env_suggestions(mode: str | None, public_origin: str, private_origin: str) -> list[dict[str, str]]:
+def _env_suggestions(
+    mode: str | None,
+    public_origin: str,
+    private_origin: str,
+    *,
+    public_entry_kind: str | None = None,
+    public_scheme: str | None = None,
+) -> list[dict[str, str]]:
     if mode == "public":
         suggestions = [
             {"name": "ELVERN_PRIVATE_NETWORK_ONLY", "value": "false", "effect": "Future public-mode activation only"},
@@ -674,7 +688,13 @@ def _env_suggestions(mode: str | None, public_origin: str, private_origin: str) 
             suggestions.append(
                 {"name": "ELVERN_BACKEND_ORIGIN", "value": public_origin, "effect": "Use only if the backend remains proxied through the app origin"}
             )
-        suggestions.append({"name": "ELVERN_COOKIE_SECURE", "value": "true", "effect": "Recommended for public HTTPS"})
+        cookie_secure = "false" if public_entry_kind == "direct_ip" and public_scheme == "http" else "true"
+        cookie_effect = (
+            "Required for plain HTTP direct IP planning; Secure cookies require HTTPS"
+            if cookie_secure == "false"
+            else "Recommended for public HTTPS"
+        )
+        suggestions.append({"name": "ELVERN_COOKIE_SECURE", "value": cookie_secure, "effect": cookie_effect})
         return suggestions
     suggestions = [{"name": "ELVERN_PRIVATE_NETWORK_ONLY", "value": "true", "effect": "Keep private/LAN exposure"}]
     if private_origin:
