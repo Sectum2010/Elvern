@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import ast
 import inspect
+import textwrap
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -160,6 +163,46 @@ def _assert_common_attachment_headers(response) -> None:
     assert "no-store" in response.headers["Cache-Control"]
     assert response.headers["Pragma"] == "no-cache"
     assert response.headers["Expires"] == "0"
+
+
+def _assistant_request_form() -> dict[str, str]:
+    return {
+        "request_type": "bug_report",
+        "title": "Attachment upload limit test",
+        "description": "Verifies assistant attachment upload handling.",
+        "urgency": "normal",
+    }
+
+
+def _assistant_table_counts(settings) -> tuple[int, int]:
+    with get_connection(settings) as connection:
+        request_count = int(connection.execute("SELECT COUNT(*) FROM assistant_requests").fetchone()[0])
+        attachment_count = int(
+            connection.execute("SELECT COUNT(*) FROM assistant_request_attachments").fetchone()[0]
+        )
+    return request_count, attachment_count
+
+
+def _assistant_upload_files(settings) -> list[Path]:
+    upload_root = settings.db_path.parent / "assistant_uploads"
+    if not upload_root.exists():
+        return []
+    return sorted(path for path in upload_root.rglob("*") if path.is_file())
+
+
+class _ChunkedFakeUpload:
+    filename = "large.txt"
+    content_type = "text/plain"
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self.read_sizes: list[int] = []
+
+    async def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
 
 
 def test_assistant_attachment_response_policy_normalizes_safe_and_active_mime_types() -> None:
@@ -338,3 +381,124 @@ def test_assistant_attachment_view_static_guard_uses_policy_not_global_inline() 
     assert "ASSISTANT_ACTIVE_CONTENT_MIME_TYPES" in service_source
     assert "image/svg+xml" in service_source
     assert "text/html" in service_source
+
+
+def test_assistant_attachment_upload_static_guard_uses_bounded_reads() -> None:
+    for helper in (
+        assistant_routes._read_limited_attachment_content,
+        assistant_routes._read_attachment,
+    ):
+        source = textwrap.dedent(inspect.getsource(helper))
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Await) or not isinstance(node.value, ast.Call):
+                continue
+            call = node.value
+            if isinstance(call.func, ast.Attribute) and call.func.attr == "read":
+                assert call.args or call.keywords
+
+
+def test_assistant_attachment_upload_exact_limit_succeeds(
+    initialized_settings,
+    client,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(assistant_routes, "MAX_ATTACHMENT_BYTES", 32)
+    username = f"assistant-upload-limit-{uuid4().hex[:8]}"
+    owner, password = _create_standard_user(
+        initialized_settings,
+        username=username,
+    )
+    _login(client, username=username, password=password)
+    before_requests, before_attachments = _assistant_table_counts(initialized_settings)
+    content = b"x" * 32
+
+    response = client.post(
+        "/api/assistant/requests",
+        data=_assistant_request_form(),
+        files={"attachment": ("limit.txt", content, "text/plain")},
+    )
+
+    assert response.status_code == 201
+    request_payload = response.json()["request"]
+    assert request_payload["submitted_by_user_id"] == int(owner["id"])
+    assert len(request_payload["attachments"]) == 1
+    attachment = request_payload["attachments"][0]
+    assert attachment["size_bytes"] == 32
+    assert attachment["attachment_type"] == "text"
+    assert attachment["mime_type"] == "text/plain"
+    stored_path = initialized_settings.db_path.parent / "assistant_uploads" / attachment["storage_path_safe_ref"]
+    assert stored_path.exists()
+    assert stored_path.read_bytes() == content
+    assert _assistant_table_counts(initialized_settings) == (before_requests + 1, before_attachments + 1)
+
+
+def test_assistant_attachment_upload_over_limit_fails_without_db_or_file_residue(
+    initialized_settings,
+    client,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(assistant_routes, "MAX_ATTACHMENT_BYTES", 32)
+    username = f"assistant-upload-too-large-{uuid4().hex[:8]}"
+    _owner, password = _create_standard_user(
+        initialized_settings,
+        username=username,
+    )
+    _login(client, username=username, password=password)
+    before_counts = _assistant_table_counts(initialized_settings)
+    before_files = _assistant_upload_files(initialized_settings)
+
+    response = client.post(
+        "/api/assistant/requests",
+        data=_assistant_request_form(),
+        files={"attachment": ("too-large.txt", b"x" * 33, "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Attachment must be 8 MB or smaller"
+    assert _assistant_table_counts(initialized_settings) == before_counts
+    assert _assistant_upload_files(initialized_settings) == before_files
+
+
+def test_assistant_attachment_bounded_read_stops_after_limit(monkeypatch) -> None:
+    monkeypatch.setattr(assistant_routes, "MAX_ATTACHMENT_BYTES", 16)
+    monkeypatch.setattr(assistant_routes, "ATTACHMENT_READ_CHUNK_BYTES", 8)
+    upload = _ChunkedFakeUpload([b"a" * 8, b"b" * 8, b"c" * 8, b"d" * 8])
+
+    with pytest.raises(assistant_routes.HTTPException) as exc_info:
+        asyncio.run(assistant_routes._read_limited_attachment_content(upload))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Attachment must be 8 MB or smaller"
+    assert upload.read_sizes == [8, 8, 8]
+    assert upload._chunks == [b"d" * 8]
+
+
+def test_assistant_attachment_multiple_uploads_over_limit_cleans_up_all_partial_state(
+    initialized_settings,
+    client,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(assistant_routes, "MAX_ATTACHMENT_BYTES", 32)
+    username = f"assistant-upload-multi-{uuid4().hex[:8]}"
+    _owner, password = _create_standard_user(
+        initialized_settings,
+        username=username,
+    )
+    _login(client, username=username, password=password)
+    before_counts = _assistant_table_counts(initialized_settings)
+    before_files = _assistant_upload_files(initialized_settings)
+
+    response = client.post(
+        "/api/assistant/requests",
+        data=_assistant_request_form(),
+        files=[
+            ("attachments", ("ok.txt", b"safe attachment", "text/plain")),
+            ("attachments", ("too-large.txt", b"x" * 33, "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Attachment must be 8 MB or smaller"
+    assert _assistant_table_counts(initialized_settings) == before_counts
+    assert _assistant_upload_files(initialized_settings) == before_files

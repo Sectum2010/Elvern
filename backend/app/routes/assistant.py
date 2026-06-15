@@ -24,6 +24,7 @@ from ..services.assistant_service import (
 
 router = APIRouter(prefix="/api/assistant", tags=["assistant"])
 raw_router = APIRouter(tags=["assistant"])
+ATTACHMENT_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _require_assistant_access(request: Request, *, user) -> None:
@@ -35,17 +36,29 @@ def _require_assistant_access(request: Request, *, user) -> None:
     )
 
 
+async def _read_limited_attachment_content(upload: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(ATTACHMENT_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachment must be 8 MB or smaller",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def _read_attachment(upload: UploadFile | None) -> dict[str, object] | None:
     if upload is None or not upload.filename:
         return None
-    content = await upload.read()
+    content = await _read_limited_attachment_content(upload)
     if not content:
         return None
-    if len(content) > MAX_ATTACHMENT_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Attachment must be 8 MB or smaller",
-        )
     attachment_type = "other"
     mime_type = (upload.content_type or "").strip().lower()
     if mime_type.startswith("image/"):
