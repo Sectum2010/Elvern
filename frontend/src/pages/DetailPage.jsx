@@ -2838,6 +2838,7 @@ export function DetailPage() {
     ].join(" · ")
     : "";
   const detailSourceLabel = item.source_label || (item.source_kind === "cloud" ? "Cloud" : "DGX");
+  const showSourceFileSection = Boolean(isAdmin && item.original_filename);
   const sourceDescription = item.source_kind === "cloud"
     ? (item.library_source_name
       ? `Google Drive source: ${item.library_source_name}`
@@ -3632,16 +3633,18 @@ export function DetailPage() {
                   ) : null}
                 </div>
 
-                <div className="detail-block">
-                  <h2>Source file</h2>
-                  <div className="detail-source-group">
-                    <div className="detail-list">
-                      <span>{detailSourceLabel}</span>
+                {showSourceFileSection ? (
+                  <div className="detail-block">
+                    <h2>Source file</h2>
+                    <div className="detail-source-group">
+                      <div className="detail-list">
+                        <span>{detailSourceLabel}</span>
+                      </div>
+                      <p className="detail-path">{item.original_filename}</p>
+                      <p className="page-subnote">{sourceDescription}</p>
                     </div>
-                    <p className="detail-path">{item.original_filename}</p>
-                    <p className="page-subnote">{sourceDescription}</p>
                   </div>
-                </div>
+                ) : null}
 
                 <div className="detail-block">
                   <h2>Media Library Reference</h2>

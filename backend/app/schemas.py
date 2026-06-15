@@ -258,7 +258,7 @@ class LibraryItemSummary(BaseModel):
     id: int
     title: str
     parsed_title: ParsedTitleResponse
-    original_filename: str
+    original_filename: str | None = None
     source_kind: Literal["local", "cloud"] = "local"
     source_label: Literal["DGX", "Cloud"] = "DGX"
     library_source_id: int | None = None
@@ -602,7 +602,7 @@ class HiddenMovieListResponse(BaseModel):
 
 
 class MediaItemDetail(LibraryItemSummary):
-    file_path: str
+    file_path: str | None = None
     stream_url: str
     resume_position_seconds: float = 0
     subtitles: list[SubtitleTrackResponse] = Field(default_factory=list)

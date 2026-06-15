@@ -106,7 +106,16 @@ test("destructive or admin password state is not persisted in browser storage", 
 
 
 test("invite code plaintext is not persisted in browser storage", () => {
-  const adminSource = fs.readFileSync(path.join(SRC_DIR, "pages/AdminPage.jsx"), "utf8");
   const inviteStoragePattern = /(?:localStorage|sessionStorage)\s*\.[^\n]*(?:invite|Invite|INVITE)/;
-  assert.doesNotMatch(adminSource, inviteStoragePattern);
+  for (const entry of readFrontendFiles()) {
+    assert.doesNotMatch(entry.source, inviteStoragePattern, `${entry.relativePath} must not persist invite codes`);
+  }
+});
+
+
+test("signup invite code is not URL-prefilled", () => {
+  const newUserSource = fs.readFileSync(path.join(SRC_DIR, "pages/NewUserPage.jsx"), "utf8");
+  assert.doesNotMatch(newUserSource, /URLSearchParams/);
+  assert.doesNotMatch(newUserSource, /location\.search/);
+  assert.doesNotMatch(newUserSource, /useSearchParams/);
 });

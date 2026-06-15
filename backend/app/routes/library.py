@@ -101,6 +101,89 @@ def _local_scan_message(state: dict[str, object]) -> str:
     return str(state.get("message") or "Local scan state updated.")
 
 
+STANDARD_USER_LIBRARY_SUMMARY_REDACTED_FIELDS = (
+    "original_filename",
+    "library_category_path",
+    "library_folder_path",
+)
+STANDARD_USER_LIBRARY_DETAIL_REDACTED_FIELDS = (
+    *STANDARD_USER_LIBRARY_SUMMARY_REDACTED_FIELDS,
+    "file_path",
+    "source_path",
+    "source_file",
+    "resolved_file",
+    "local_path",
+    "poster_file_path",
+)
+
+
+def _redact_track_diagnostics_for_standard_user(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    redacted = dict(value)
+    if "track_scan_error" in redacted:
+        redacted["track_scan_error"] = ""
+    return redacted
+
+
+def _redact_library_item_summary_for_standard_user(item: dict[str, object]) -> dict[str, object]:
+    redacted = dict(item)
+    for field_name in STANDARD_USER_LIBRARY_SUMMARY_REDACTED_FIELDS:
+        if field_name in redacted:
+            redacted[field_name] = None
+    return redacted
+
+
+def _redact_library_item_detail_for_standard_user(item: dict[str, object]) -> dict[str, object]:
+    redacted = dict(item)
+    for field_name in STANDARD_USER_LIBRARY_DETAIL_REDACTED_FIELDS:
+        if field_name in redacted:
+            redacted[field_name] = None
+    redacted["track_scan_error"] = ""
+    redacted["audio_track_diagnostics"] = _redact_track_diagnostics_for_standard_user(
+        redacted.get("audio_track_diagnostics")
+    )
+    redacted["subtitle_track_diagnostics"] = _redact_track_diagnostics_for_standard_user(
+        redacted.get("subtitle_track_diagnostics")
+    )
+    return redacted
+
+
+def _redact_library_rail_for_standard_user(rail: dict[str, object]) -> dict[str, object]:
+    redacted = dict(rail)
+    redacted["items"] = [
+        _redact_library_item_summary_for_standard_user(dict(item))
+        for item in redacted.get("items") or []
+        if isinstance(item, dict)
+    ]
+    return redacted
+
+
+def _redact_library_list_payload_for_role(payload: dict[str, object], *, user) -> dict[str, object]:
+    if getattr(user, "role", "") == "admin":
+        return payload
+    redacted = dict(payload)
+    for collection_name in ("items", "continue_watching", "recently_added"):
+        redacted[collection_name] = [
+            _redact_library_item_summary_for_standard_user(dict(item))
+            for item in redacted.get(collection_name) or []
+            if isinstance(item, dict)
+        ]
+    for rail_collection_name in ("series_rails", "cloud_series_rails"):
+        redacted[rail_collection_name] = [
+            _redact_library_rail_for_standard_user(dict(rail))
+            for rail in redacted.get(rail_collection_name) or []
+            if isinstance(rail, dict)
+        ]
+    return redacted
+
+
+def _redact_media_item_detail_for_role(item: dict[str, object], *, user) -> dict[str, object]:
+    if getattr(user, "role", "") == "admin":
+        return item
+    return _redact_library_item_detail_for_standard_user(item)
+
+
 def _rescan_message(
     refresh_summary: dict[str, object],
     cloud_summary: dict[str, object],
@@ -147,6 +230,7 @@ def get_library(
         sort=arrange["sort"],
     )
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
+    payload = _redact_library_list_payload_for_role(payload, user=user)
     return LibraryListResponse(**payload)
 
 
@@ -174,6 +258,7 @@ def search(
         sort=arrange["sort"],
     )
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
+    payload = _redact_library_list_payload_for_role(payload, user=user)
     return LibraryListResponse(**payload)
 
 
@@ -256,6 +341,7 @@ def get_item(item_id: int, request: Request, user=CurrentUser) -> MediaItemDetai
         user_id=user.id,
         item_id=item_id,
     )
+    item = _redact_media_item_detail_for_role(item, user=user)
     return MediaItemDetail(**item)
 
 
