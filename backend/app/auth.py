@@ -22,7 +22,7 @@ from .services.totp_service import SKIP_GRACE_DAYS
 from .security import (
     generate_session_token,
     hash_password,
-    hash_session_token,
+    hash_token_hmac,
     looks_like_password_hash,
     perform_dummy_verify,
     verify_password,
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 SESSION_LIVENESS_WINDOW_SECONDS = 90
 SESSION_ACTIVITY_WINDOW_SECONDS = 3 * 60 * 60
 SESSION_HISTORY_RETENTION_DAYS = 90
+AUTH_SESSION_TOKEN_HASH_PURPOSE = "auth.session"
 
 
 def session_live_cutoff_iso(*, now: datetime | None = None) -> str:
@@ -44,6 +45,10 @@ def session_live_cutoff_iso(*, now: datetime | None = None) -> str:
 def session_activity_cutoff_iso(*, now: datetime | None = None) -> str:
     current = now or datetime.now(timezone.utc)
     return (current - timedelta(seconds=SESSION_ACTIVITY_WINDOW_SECONDS)).isoformat()
+
+
+def _hash_auth_session_token(settings: Settings, token: str) -> str:
+    return hash_token_hmac(settings, purpose=AUTH_SESSION_TOKEN_HASH_PURPOSE, token=token)
 
 
 def is_totp_setup_required_for_values(
@@ -318,7 +323,7 @@ def create_session(
     user_agent: str | None,
 ) -> str:
     token = generate_session_token()
-    token_hash = hash_session_token(token, settings.session_secret)
+    token_hash = _hash_auth_session_token(settings, token)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=settings.session_ttl_hours)
     with get_connection(settings) as connection:
@@ -364,7 +369,7 @@ def get_user_by_session_token(
 ) -> AuthenticatedUser | None:
     if not token:
         return None
-    token_hash = hash_session_token(token, settings.session_secret)
+    token_hash = _hash_auth_session_token(settings, token)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     live_cutoff = session_live_cutoff_iso(now=now_dt)
@@ -536,7 +541,7 @@ def get_session_access_failure_reason(
 ) -> str | None:
     if not token:
         return None
-    token_hash = hash_session_token(token, settings.session_secret)
+    token_hash = _hash_auth_session_token(settings, token)
     now_iso = utcnow_iso()
     with get_connection(settings) as connection:
         cleanup_expired_sessions(connection)
@@ -609,7 +614,7 @@ def get_session_access_failure_reason(
 def destroy_session(settings: Settings, token: str | None) -> None:
     if not token:
         return
-    token_hash = hash_session_token(token, settings.session_secret)
+    token_hash = _hash_auth_session_token(settings, token)
     with get_connection(settings) as connection:
         now = utcnow_iso()
         row = connection.execute(

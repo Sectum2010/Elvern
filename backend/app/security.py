@@ -17,6 +17,8 @@ PBKDF2_ALGORITHM = "pbkdf2_sha256"
 PBKDF2_ITERATIONS = 600_000
 ARGON2_PREFIX = "$argon2id$"
 DUMMY_PASSWORD_FOR_TIMING = "elvern_dummy_verify_password_v1"
+TOKEN_HASH_PREFIX = "hmac1$"
+TOKEN_HASH_CONTEXT = b"elvern-token-hash-v1"
 
 logger = logging.getLogger(__name__)
 _hasher_cache: dict[int, PasswordHasher] = {}
@@ -151,6 +153,30 @@ def perform_dummy_verify(settings) -> None:
 
 def generate_session_token() -> str:
     return secrets.token_urlsafe(48)
+
+
+def _session_secret_bytes(settings_or_secret) -> bytes:
+    session_secret = getattr(settings_or_secret, "session_secret", settings_or_secret)
+    return str(session_secret).encode("utf-8")
+
+
+def hash_token_hmac(settings_or_secret, *, purpose: str, token: str) -> str:
+    message = b"\0".join(
+        (
+            TOKEN_HASH_CONTEXT,
+            str(purpose).encode("utf-8"),
+            str(token).encode("utf-8"),
+        )
+    )
+    digest = hmac.new(_session_secret_bytes(settings_or_secret), message, hashlib.sha256).hexdigest()
+    return TOKEN_HASH_PREFIX + digest
+
+
+def verify_hmac_token_hash(settings_or_secret, *, purpose: str, token: str, stored_hash: str) -> bool:
+    if not isinstance(stored_hash, str) or not stored_hash.startswith(TOKEN_HASH_PREFIX):
+        return False
+    expected_hash = hash_token_hmac(settings_or_secret, purpose=purpose, token=token)
+    return hmac.compare_digest(expected_hash, stored_hash)
 
 
 def hash_session_token(token: str, session_secret: str) -> str:

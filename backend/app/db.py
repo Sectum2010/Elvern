@@ -16,6 +16,9 @@ from .db_hidden_movie_keys import (
 
 
 logger = logging.getLogger(__name__)
+BROWSER_SESSION_HMAC_MIGRATION_NAME = "browser_session_hmac1_v1"
+TOKEN_HASH_MIGRATION_REVOKE_REASON = "token_hash_migration"
+TOKEN_HASH_PREFIX = "hmac1$"
 
 
 TABLE_STATEMENTS = (
@@ -925,6 +928,7 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "sessions", "last_activity_at", "TEXT")
     _ensure_column(connection, "sessions", "cleanup_confirmed_at", "TEXT")
     _run_session_idle_timeout_migration(connection)
+    _run_browser_session_hmac_migration(connection)
 
     _ensure_column(connection, "native_playback_sessions", "revoked_at", "TEXT")
     _ensure_column(connection, "native_playback_sessions", "auth_session_id", "INTEGER")
@@ -977,6 +981,42 @@ def _run_session_idle_timeout_migration(connection: sqlite3.Connection) -> None:
         (migration_name, utcnow_iso()),
     )
     logger.info("Cleared all sessions for idle-timeout migration. All users must log in again.")
+
+
+def _run_browser_session_hmac_migration(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        """
+        SELECT name
+        FROM schema_migrations
+        WHERE name = ?
+        LIMIT 1
+        """,
+        (BROWSER_SESSION_HMAC_MIGRATION_NAME,),
+    ).fetchone()
+    if row is not None:
+        return
+
+    now = utcnow_iso()
+    cursor = connection.execute(
+        """
+        UPDATE sessions
+        SET revoked_at = ?,
+            revoked_reason = ?,
+            cleanup_confirmed_at = NULL
+        WHERE revoked_at IS NULL
+          AND session_token_hash NOT LIKE ?
+        """,
+        (now, TOKEN_HASH_MIGRATION_REVOKE_REASON, TOKEN_HASH_PREFIX + "%"),
+    )
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (name, applied_at)
+        VALUES (?, ?)
+        """,
+        (BROWSER_SESSION_HMAC_MIGRATION_NAME, now),
+    )
+    if cursor.rowcount:
+        logger.info("Revoked %s legacy browser sessions for HMAC token hash migration.", cursor.rowcount)
 
 
 def _mark_totp_migration(connection: sqlite3.Connection) -> None:

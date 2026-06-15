@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import time
@@ -16,12 +17,15 @@ from backend.app.config import ConfigError, get_settings, refresh_settings
 from backend.app.db import get_connection, init_db, utcnow_iso
 from backend.app.security import (
     ARGON2_PREFIX,
+    TOKEN_HASH_PREFIX,
     _hash_password_pbkdf2,
     generate_session_token,
     hash_password,
     hash_session_token,
+    hash_token_hmac,
     looks_like_password_hash,
     perform_dummy_verify,
+    verify_hmac_token_hash,
     verify_password,
 )
 from backend.app.services.external_redirect_security_service import FORBIDDEN_CUSTOM_APP_SCHEMES
@@ -471,6 +475,33 @@ def test_session_token_generation_and_hashing_are_secret_bound() -> None:
     assert len(digest) == 64
     assert digest == hash_session_token(token_a, "secret-one")
     assert digest != hash_session_token(token_a, "secret-two")
+
+
+def test_hmac_token_hash_is_prefixed_purpose_bound_and_constant_time() -> None:
+    token = "sensitive-browser-token-value"
+    digest = hash_token_hmac("secret-one", purpose="auth.session", token=token)
+
+    assert digest.startswith(TOKEN_HASH_PREFIX)
+    assert token not in digest
+    assert verify_hmac_token_hash(
+        "secret-one",
+        purpose="auth.session",
+        token=token,
+        stored_hash=digest,
+    )
+    assert not verify_hmac_token_hash(
+        "secret-one",
+        purpose="download.session",
+        token=token,
+        stored_hash=digest,
+    )
+    assert not verify_hmac_token_hash(
+        "secret-one",
+        purpose="auth.session",
+        token=token + "x",
+        stored_hash=digest,
+    )
+    assert "compare_digest" in inspect.getsource(security.verify_hmac_token_hash)
 
 
 @pytest.mark.parametrize(

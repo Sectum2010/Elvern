@@ -16,9 +16,15 @@ from backend.app.auth import (
     get_session_access_failure_reason,
     get_user_by_session_token,
 )
-from backend.app.db import get_connection, init_db, utcnow_iso
+from backend.app.db import (
+    BROWSER_SESSION_HMAC_MIGRATION_NAME,
+    TOKEN_HASH_MIGRATION_REVOKE_REASON,
+    get_connection,
+    init_db,
+    utcnow_iso,
+)
 from backend.app.schemas import NativePlaybackSessionResponse
-from backend.app.security import hash_session_token
+from backend.app.security import TOKEN_HASH_PREFIX, hash_session_token, hash_token_hmac
 from backend.app.services.account_access_service import (
     create_user_with_invite,
     generate_invite_code,
@@ -85,6 +91,10 @@ def _issue_user_session(settings, *, username: str, password: str):
     assert session_user is not None
     assert session_user.session_id is not None
     return session_user, token
+
+
+def _auth_session_hash(settings, token: str) -> str:
+    return hash_token_hmac(settings, purpose=auth_module.AUTH_SESSION_TOKEN_HASH_PURPOSE, token=token)
 
 
 def _create_media_item(settings, *, relative_name: str = "movie.mp4") -> dict[str, object]:
@@ -264,6 +274,29 @@ def test_native_playback_session_provenance_static_guards() -> None:
     assert "created_from_auth_session_id" not in NativePlaybackSessionResponse.model_fields
 
 
+def test_f10a_keeps_unmigrated_token_surfaces_on_existing_hash_paths() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    legacy_helper_files = (
+        "backend/app/services/native_playback_service.py",
+        "backend/app/services/desktop_playback_handoff_service.py",
+        "backend/app/services/desktop_helper_service.py",
+        "backend/app/services/assistant_service.py",
+    )
+    for relative_path in legacy_helper_files:
+        source = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert "hash_session_token" in source
+        assert "hash_token_hmac" not in source
+        assert "verify_hmac_token_hash" not in source
+
+    account_access_source = (repo_root / "backend/app/services/account_access_service.py").read_text(
+        encoding="utf-8"
+    )
+    assert "download-session" in account_access_source
+    assert "invite-code" in account_access_source
+    assert "hash_token_hmac" not in account_access_source
+    assert "verify_hmac_token_hash" not in account_access_source
+
+
 def _recent_auth_login_details(settings, *, limit: int = 20) -> list[dict[str, object] | None]:
     with get_connection(settings) as connection:
         rows = connection.execute(
@@ -304,7 +337,8 @@ def test_create_session_stores_only_the_hashed_token(initialized_settings) -> No
         ).fetchone()
 
     assert row is not None
-    assert row["session_token_hash"] == hash_session_token(token, initialized_settings.session_secret)
+    assert row["session_token_hash"] == _auth_session_hash(initialized_settings, token)
+    assert row["session_token_hash"].startswith(TOKEN_HASH_PREFIX)
     assert row["session_token_hash"] != token
     assert row["revoked_at"] is None
 
@@ -336,12 +370,162 @@ def test_destroy_session_revokes_access_without_storing_raw_token(initialized_se
         ).fetchone()
 
     assert row is not None
-    assert row["session_token_hash"] == hash_session_token(token, initialized_settings.session_secret)
+    assert row["session_token_hash"] == _auth_session_hash(initialized_settings, token)
+    assert row["session_token_hash"].startswith(TOKEN_HASH_PREFIX)
     assert row["session_token_hash"] != token
     assert row["revoked_at"] is not None
     assert row["revoked_reason"] == "logout"
     assert get_user_by_session_token(initialized_settings, token) is None
     assert get_session_access_failure_reason(initialized_settings, token) == "revoked"
+
+
+def test_legacy_browser_session_is_revoked_by_hmac_migration(initialized_settings, client) -> None:
+    user = _admin_user(initialized_settings)
+    legacy_token = "legacy-browser-session-token"
+    legacy_hash = hash_session_token(legacy_token, initialized_settings.session_secret)
+    now = datetime.now(timezone.utc)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            (BROWSER_SESSION_HMAC_MIGRATION_NAME,),
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO sessions (
+                user_id,
+                session_token_hash,
+                created_at,
+                expires_at,
+                last_seen_at,
+                last_activity_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user.id,
+                legacy_hash,
+                now.isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        legacy_session_id = int(cursor.lastrowid)
+        connection.commit()
+
+    init_db(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT session_token_hash, revoked_at, revoked_reason
+            FROM sessions
+            WHERE id = ?
+            """,
+            (legacy_session_id,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["session_token_hash"] == legacy_hash
+    assert row["revoked_at"] is not None
+    assert row["revoked_reason"] == TOKEN_HASH_MIGRATION_REVOKE_REASON
+    assert get_user_by_session_token(initialized_settings, legacy_token) is None
+
+    client.cookies.set(initialized_settings.session_cookie_name, legacy_token)
+    response = client.get("/api/auth/me")
+    assert response.status_code == 401
+    destroy_session(initialized_settings, legacy_token)
+
+
+def test_hmac_browser_session_survives_repeated_hmac_migration(initialized_settings) -> None:
+    user = _admin_user(initialized_settings)
+    token = create_session(
+        initialized_settings,
+        user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    token_hash = _auth_session_hash(initialized_settings, token)
+    with get_connection(initialized_settings) as connection:
+        session_id = connection.execute(
+            "SELECT id FROM sessions WHERE session_token_hash = ?",
+            (token_hash,),
+        ).fetchone()["id"]
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            (BROWSER_SESSION_HMAC_MIGRATION_NAME,),
+        )
+        connection.commit()
+
+    init_db(initialized_settings)
+    init_db(initialized_settings)
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        marker_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM schema_migrations WHERE name = ?",
+            (BROWSER_SESSION_HMAC_MIGRATION_NAME,),
+        ).fetchone()["count"]
+
+    assert row is not None
+    assert row["revoked_at"] is None
+    assert row["revoked_reason"] is None
+    assert marker_count == 1
+    assert get_user_by_session_token(initialized_settings, token) is not None
+
+
+def test_browser_session_hmac_migration_is_idempotent_for_legacy_rows(initialized_settings) -> None:
+    user = _admin_user(initialized_settings)
+    legacy_token = "legacy-browser-session-token-idempotent"
+    legacy_hash = hash_session_token(legacy_token, initialized_settings.session_secret)
+    now = datetime.now(timezone.utc)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            (BROWSER_SESSION_HMAC_MIGRATION_NAME,),
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO sessions (
+                user_id,
+                session_token_hash,
+                created_at,
+                expires_at,
+                last_seen_at,
+                last_activity_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user.id,
+                legacy_hash,
+                now.isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        legacy_session_id = int(cursor.lastrowid)
+        connection.commit()
+
+    init_db(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        first = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
+            (legacy_session_id,),
+        ).fetchone()
+
+    init_db(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        second = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
+            (legacy_session_id,),
+        ).fetchone()
+
+    assert first is not None
+    assert second is not None
+    assert second["revoked_at"] == first["revoked_at"]
+    assert second["revoked_reason"] == TOKEN_HASH_MIGRATION_REVOKE_REASON
 
 
 def test_disabled_user_session_loses_access_immediately(initialized_settings, client) -> None:
@@ -1667,7 +1851,7 @@ class TestSessionIdleTimeout:
         with get_connection(initialized_settings) as connection:
             session_id = connection.execute(
                 "SELECT id FROM sessions WHERE session_token_hash = ?",
-                (hash_session_token(token, initialized_settings.session_secret),),
+                (_auth_session_hash(initialized_settings, token),),
             ).fetchone()["id"]
             connection.execute(
                 "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
@@ -1695,7 +1879,7 @@ class TestSessionIdleTimeout:
         with get_connection(initialized_settings) as connection:
             session_id = connection.execute(
                 "SELECT id FROM sessions WHERE session_token_hash = ?",
-                (hash_session_token(token, initialized_settings.session_secret),),
+                (_auth_session_hash(initialized_settings, token),),
             ).fetchone()["id"]
             connection.execute(
                 "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
@@ -1734,7 +1918,7 @@ class TestSessionIdleTimeout:
         with get_connection(initialized_settings) as connection:
             session_id = connection.execute(
                 "SELECT id FROM sessions WHERE session_token_hash = ?",
-                (hash_session_token(token, initialized_settings.session_secret),),
+                (_auth_session_hash(initialized_settings, token),),
             ).fetchone()["id"]
             connection.execute(
                 "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
@@ -1761,7 +1945,7 @@ class TestSessionIdleTimeout:
         with get_connection(initialized_settings) as connection:
             session_id = connection.execute(
                 "SELECT id FROM sessions WHERE session_token_hash = ?",
-                (hash_session_token(token, initialized_settings.session_secret),),
+                (_auth_session_hash(initialized_settings, token),),
             ).fetchone()["id"]
             connection.execute("UPDATE sessions SET last_seen_at = NULL WHERE id = ?", (session_id,))
             connection.commit()
@@ -1786,7 +1970,7 @@ class TestSessionIdleTimeout:
         with get_connection(initialized_settings) as connection:
             session_id = connection.execute(
                 "SELECT id FROM sessions WHERE session_token_hash = ?",
-                (hash_session_token(token, initialized_settings.session_secret),),
+                (_auth_session_hash(initialized_settings, token),),
             ).fetchone()["id"]
             connection.execute(
                 "UPDATE sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?",
