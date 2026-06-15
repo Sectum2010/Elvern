@@ -23,6 +23,13 @@ from .exposure_maintenance_service import (
 
 EXPOSURE_MODE_PENDING_DRAFT_KEY = "exposure_mode_pending_draft_json"
 EXPOSURE_MODE_PREPARED_SWITCH_KEY = "exposure_mode_prepared_switch_json"
+PREPARED_SWITCH_STATUS_PREPARED = "prepared_for_manual_apply"
+PREPARED_SWITCH_STATUS_VERIFIED = "verified_after_restart"
+PREPARED_SWITCH_STATUSES = {PREPARED_SWITCH_STATUS_PREPARED, PREPARED_SWITCH_STATUS_VERIFIED}
+EXPOSURE_VERIFY_PREPARED_SWITCH_ACKNOWLEDGEMENT = (
+    "I understand this only verifies the prepared manual switch. It does not release Maintenance Mode, "
+    "write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate exposure mode."
+)
 DIRECT_PUBLIC_IP_WARNING = (
     "Direct public IP exposure is not recommended. A purchased domain with HTTPS is safer and easier to maintain."
 )
@@ -327,11 +334,108 @@ def get_prepared_exposure_switch(settings: Settings) -> dict[str, Any] | None:
         return None
     if not isinstance(parsed, dict):
         return None
-    if parsed.get("status") != "prepared_for_manual_apply":
+    if parsed.get("status") not in PREPARED_SWITCH_STATUSES:
         return None
     parsed["takes_effect"] = False
     parsed["activation_not_implemented"] = True
     return parsed
+
+
+def get_prepared_exposure_switch_verification_status(settings: Settings) -> dict[str, Any]:
+    prepared_switch = get_prepared_exposure_switch(settings)
+    if prepared_switch is None:
+        verification = {
+            "status": "not_ready",
+            "errors": [],
+            "warnings": ["No prepared manual switch is available to verify."],
+            "checks": [],
+            "takes_effect": False,
+        }
+    else:
+        verification = prepared_switch.get("verification")
+        if not isinstance(verification, dict):
+            verification = {
+                "status": "not_verified",
+                "errors": [],
+                "warnings": [],
+                "checks": [],
+                "takes_effect": False,
+            }
+        else:
+            verification = dict(verification)
+            verification["takes_effect"] = False
+    return {
+        "prepared_switch": prepared_switch,
+        "verification": verification,
+        "takes_effect": False,
+    }
+
+
+def verify_prepared_exposure_switch(
+    settings: Settings,
+    request: Request,
+    actor: Any,
+    *,
+    acknowledgement: bool,
+) -> dict[str, Any]:
+    if not acknowledgement:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=EXPOSURE_VERIFY_PREPARED_SWITCH_ACKNOWLEDGEMENT,
+        )
+
+    prepared_switch = get_prepared_exposure_switch(settings)
+    if prepared_switch is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Save and manually apply a prepared switch before verification.",
+                "verification": {
+                    "status": "blocked",
+                    "errors": ["No prepared manual switch is available to verify."],
+                    "warnings": [],
+                    "checks": [],
+                    "takes_effect": False,
+                },
+                "takes_effect": False,
+            },
+        )
+
+    verification = _build_prepared_exposure_switch_verification(settings, request, prepared_switch)
+    if verification["errors"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Prepared switch verification blocked.",
+                "prepared_switch": prepared_switch,
+                "verification": verification,
+                "takes_effect": False,
+            },
+        )
+
+    verified_switch = dict(prepared_switch)
+    verified_switch.update(
+        {
+            "status": PREPARED_SWITCH_STATUS_VERIFIED,
+            "verified_at": utcnow_iso(),
+            "verified_by_user_id": getattr(actor, "id", None),
+            "verified_by_username": getattr(actor, "username", None),
+            "verification": verification,
+            "takes_effect": False,
+            "activation_not_implemented": True,
+            "maintenance_mode_release": "manual_only",
+        }
+    )
+    set_global_app_setting(
+        settings,
+        key=EXPOSURE_MODE_PREPARED_SWITCH_KEY,
+        value=json.dumps(verified_switch, sort_keys=True),
+    )
+    return {
+        "prepared_switch": verified_switch,
+        "verification": verification,
+        "takes_effect": False,
+    }
 
 
 def prepare_exposure_manual_switch(
@@ -430,6 +534,446 @@ def clear_prepared_exposure_switch(settings: Settings, actor: Any) -> dict[str, 
         "prepared_switch": None,
         "takes_effect": False,
     }
+
+
+def _build_prepared_exposure_switch_verification(
+    settings: Settings,
+    request: Request,
+    prepared_switch: dict[str, Any],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks: list[dict[str, str]] = []
+    current_request_origin = resolve_current_request_origin(settings, request)
+    desired = prepared_switch.get("desired")
+    if not isinstance(desired, dict):
+        desired = {}
+
+    _add_check(
+        checks,
+        "server_side_origin_probe",
+        "pass",
+        "Verification uses the current admin request and runtime settings only; no server-side origin probe is performed.",
+    )
+    _add_prepared_switch_status_check(prepared_switch, errors, checks)
+    _add_maintenance_mode_verification_check(settings, errors, checks)
+    _add_url_prefix_verification_check(settings, request, warnings, checks)
+
+    desired_mode = desired.get("desired_mode")
+    if desired_mode == "public":
+        _add_public_prepared_switch_verification_checks(
+            settings,
+            desired,
+            current_request_origin=current_request_origin,
+            errors=errors,
+            warnings=warnings,
+            checks=checks,
+        )
+    elif desired_mode == "private":
+        _add_private_prepared_switch_verification_checks(
+            settings,
+            desired,
+            current_request_origin=current_request_origin,
+            errors=errors,
+            warnings=warnings,
+            checks=checks,
+        )
+    else:
+        _add_blocking_verification_check(
+            errors,
+            checks,
+            "desired_mode",
+            "Prepared switch desired mode must be private or public.",
+        )
+
+    verification_status = "blocked" if errors else "warnings" if warnings else "passed"
+    return {
+        "status": verification_status,
+        "errors": errors,
+        "warnings": warnings,
+        "checks": checks,
+        "current_request_origin": current_request_origin,
+        "takes_effect": False,
+    }
+
+
+def _add_prepared_switch_status_check(
+    prepared_switch: dict[str, Any],
+    errors: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    prepared_status = str(prepared_switch.get("status") or "")
+    if prepared_status in PREPARED_SWITCH_STATUSES:
+        _add_check(
+            checks,
+            "prepared_switch_status",
+            "pass",
+            f"Prepared switch status is {prepared_status}.",
+        )
+        return
+    _add_blocking_verification_check(
+        errors,
+        checks,
+        "prepared_switch_status",
+        "Prepared switch status must be prepared_for_manual_apply or verified_after_restart.",
+    )
+
+
+def _add_maintenance_mode_verification_check(
+    settings: Settings,
+    errors: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    maintenance_mode = get_exposure_maintenance_lock(settings)
+    if maintenance_mode.get("enabled"):
+        _add_check(checks, "maintenance_mode", "pass", "Maintenance Mode is enabled.")
+        return
+    _add_blocking_verification_check(
+        errors,
+        checks,
+        "maintenance_mode",
+        "Maintenance Mode must remain enabled during prepared switch verification.",
+    )
+
+
+def _add_url_prefix_verification_check(
+    settings: Settings,
+    request: Request,
+    warnings: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    url_prefix = getattr(getattr(request.app, "state", None), "url_prefix", None) or settings.url_prefix
+    if url_prefix:
+        _add_check(checks, "url_prefix_present", "pass", "URL prefix is currently present.")
+        return
+    _add_warning_verification_check(
+        warnings,
+        checks,
+        "url_prefix_present",
+        "URL prefix is not currently present. Public exposure should keep a random URL prefix configured.",
+    )
+
+
+def _add_public_prepared_switch_verification_checks(
+    settings: Settings,
+    desired: dict[str, Any],
+    *,
+    current_request_origin: str,
+    errors: list[str],
+    warnings: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    public_entry_kind = desired.get("public_entry_kind")
+    if public_entry_kind not in PUBLIC_ENTRY_KINDS:
+        _add_blocking_verification_check(
+            errors,
+            checks,
+            "public_entry_kind",
+            "Public prepared switches require a custom_domain or direct_ip entry kind.",
+        )
+        return
+
+    normalized_public = normalize_origin(str(desired.get("public_origin") or ""))
+    if not normalized_public["ok"]:
+        for error in normalized_public.get("errors", []):
+            _add_blocking_verification_check(errors, checks, "public_origin", str(error))
+        return
+
+    expected_origin = str(normalized_public["origin"])
+    expected_scheme = str(normalized_public.get("scheme") or "")
+    _add_current_origin_verification_check(
+        current_request_origin=current_request_origin,
+        expected_origin=expected_origin,
+        errors=errors,
+        checks=checks,
+    )
+
+    if settings.private_network_only:
+        _add_blocking_verification_check(
+            errors,
+            checks,
+            "private_network_only",
+            "Runtime ELVERN_PRIVATE_NETWORK_ONLY must be false for public prepared switch verification.",
+        )
+    else:
+        _add_check(checks, "private_network_only", "pass", "Runtime private-network-only mode is disabled.")
+
+    _add_public_app_origin_verification_check(
+        settings,
+        expected_origin=expected_origin,
+        errors=errors,
+        checks=checks,
+    )
+    _add_public_cookie_secure_verification_check(
+        settings,
+        public_entry_kind=str(public_entry_kind),
+        expected_scheme=expected_scheme,
+        errors=errors,
+        checks=checks,
+    )
+    _add_backend_origin_verification_check(
+        settings,
+        expected_origin=expected_origin,
+        warnings=warnings,
+        checks=checks,
+    )
+    _add_trusted_proxy_verification_check(
+        settings,
+        block_on_broad=True,
+        errors=errors,
+        warnings=warnings,
+        checks=checks,
+    )
+    if public_entry_kind == "direct_ip":
+        _add_warning_verification_check(warnings, checks, "direct_ip_not_recommended", DIRECT_PUBLIC_IP_WARNING)
+
+
+def _add_private_prepared_switch_verification_checks(
+    settings: Settings,
+    desired: dict[str, Any],
+    *,
+    current_request_origin: str,
+    errors: list[str],
+    warnings: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    private_origin = str(desired.get("private_origin") or "").strip()
+    normalized_private: dict[str, Any] | None = None
+    if private_origin:
+        normalized_private = normalize_origin(private_origin)
+        if not normalized_private["ok"]:
+            for error in normalized_private.get("errors", []):
+                _add_blocking_verification_check(errors, checks, "private_origin", str(error))
+            return
+        expected_origin = str(normalized_private["origin"])
+        _add_current_origin_verification_check(
+            current_request_origin=current_request_origin,
+            expected_origin=expected_origin,
+            errors=errors,
+            checks=checks,
+        )
+    else:
+        _add_check(
+            checks,
+            "current_origin_match",
+            "info",
+            "No private origin was set in the prepared switch; current origin matching is skipped.",
+        )
+
+    if not settings.private_network_only:
+        _add_blocking_verification_check(
+            errors,
+            checks,
+            "private_network_only",
+            "Runtime ELVERN_PRIVATE_NETWORK_ONLY must be true for private prepared switch verification.",
+        )
+    else:
+        _add_check(checks, "private_network_only", "pass", "Runtime private-network-only mode is enabled.")
+
+    _add_private_public_app_origin_verification_check(
+        settings,
+        normalized_private=normalized_private,
+        warnings=warnings,
+        checks=checks,
+    )
+    _add_private_cookie_secure_verification_check(
+        settings,
+        normalized_private=normalized_private,
+        warnings=warnings,
+        checks=checks,
+    )
+    _add_trusted_proxy_verification_check(
+        settings,
+        block_on_broad=False,
+        errors=errors,
+        warnings=warnings,
+        checks=checks,
+    )
+
+
+def _add_current_origin_verification_check(
+    *,
+    current_request_origin: str,
+    expected_origin: str,
+    errors: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    if current_request_origin == expected_origin:
+        _add_check(checks, "current_origin_match", "pass", "Current admin request origin matches the expected origin.")
+        return
+    _add_blocking_verification_check(
+        errors,
+        checks,
+        "current_origin_match",
+        f"Current request origin is {current_request_origin}; expected origin is {expected_origin}.",
+    )
+
+
+def _add_public_app_origin_verification_check(
+    settings: Settings,
+    *,
+    expected_origin: str,
+    errors: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    runtime_origin = _normalized_runtime_origin(settings.public_app_origin)
+    if runtime_origin == expected_origin:
+        _add_check(checks, "public_app_origin", "pass", "Runtime public_app_origin matches the expected origin.")
+        return
+    _add_blocking_verification_check(
+        errors,
+        checks,
+        "public_app_origin",
+        f"Runtime public_app_origin must be {expected_origin}.",
+    )
+
+
+def _add_public_cookie_secure_verification_check(
+    settings: Settings,
+    *,
+    public_entry_kind: str,
+    expected_scheme: str,
+    errors: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    secure_required = public_entry_kind != "direct_ip" or expected_scheme == "https"
+    if secure_required and settings.cookie_secure:
+        _add_check(checks, "cookie_secure", "pass", "Runtime cookie_secure is enabled for public HTTPS.")
+        return
+    if not secure_required and not settings.cookie_secure:
+        _add_check(checks, "cookie_secure", "pass", "Runtime cookie_secure is disabled for plain HTTP direct IP.")
+        return
+    if secure_required:
+        message = "Runtime ELVERN_COOKIE_SECURE must be true for public HTTPS exposure."
+    else:
+        message = "Runtime ELVERN_COOKIE_SECURE must be false for plain HTTP direct IP exposure."
+    _add_blocking_verification_check(errors, checks, "cookie_secure", message)
+
+
+def _add_backend_origin_verification_check(
+    settings: Settings,
+    *,
+    expected_origin: str,
+    warnings: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    runtime_origin = _normalized_runtime_origin(settings.backend_origin)
+    if not runtime_origin:
+        _add_check(checks, "backend_origin", "info", "Runtime backend_origin is empty.")
+        return
+    if runtime_origin == expected_origin:
+        _add_check(checks, "backend_origin", "pass", "Runtime backend_origin matches the expected origin.")
+        return
+    _add_warning_verification_check(
+        warnings,
+        checks,
+        "backend_origin",
+        f"Runtime backend_origin is {runtime_origin}; expected {expected_origin} if the backend is proxied through the app origin.",
+    )
+
+
+def _add_private_public_app_origin_verification_check(
+    settings: Settings,
+    *,
+    normalized_private: dict[str, Any] | None,
+    warnings: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    runtime_origin = _normalized_runtime_origin(settings.public_app_origin)
+    if not runtime_origin:
+        _add_check(checks, "public_app_origin", "info", "Runtime public_app_origin is empty for private mode.")
+        return
+    if normalized_private is None:
+        _add_check(checks, "public_app_origin", "info", "Runtime public_app_origin is set; no private origin was set to compare.")
+        return
+    expected_origin = str(normalized_private["origin"])
+    if runtime_origin == expected_origin:
+        _add_check(checks, "public_app_origin", "pass", "Runtime public_app_origin matches the private origin.")
+        return
+    _add_warning_verification_check(
+        warnings,
+        checks,
+        "public_app_origin",
+        f"Runtime public_app_origin is {runtime_origin}; private prepared origin is {expected_origin}.",
+    )
+
+
+def _add_private_cookie_secure_verification_check(
+    settings: Settings,
+    *,
+    normalized_private: dict[str, Any] | None,
+    warnings: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    if normalized_private is None:
+        _add_check(checks, "cookie_secure", "info", "No private origin was set; cookie_secure is not blocked in private mode.")
+        return
+    expected_scheme = str(normalized_private.get("scheme") or "")
+    if expected_scheme == "https" and not settings.cookie_secure:
+        _add_warning_verification_check(
+            warnings,
+            checks,
+            "cookie_secure",
+            "Runtime cookie_secure is false while the private origin uses HTTPS.",
+        )
+        return
+    if expected_scheme == "http" and settings.cookie_secure:
+        _add_warning_verification_check(
+            warnings,
+            checks,
+            "cookie_secure",
+            "Runtime cookie_secure is true while the private origin uses HTTP.",
+        )
+        return
+    _add_check(checks, "cookie_secure", "pass", "Runtime cookie_secure is compatible with the private origin.")
+
+
+def _add_trusted_proxy_verification_check(
+    settings: Settings,
+    *,
+    block_on_broad: bool,
+    errors: list[str],
+    warnings: list[str],
+    checks: list[dict[str, str]],
+) -> None:
+    broad_cidrs = _broad_trusted_proxy_cidrs(settings)
+    if not broad_cidrs:
+        _add_check(checks, "trusted_proxy_cidrs", "pass", "Trusted proxy CIDRs are not broad catch-all networks.")
+        return
+    detail = "Trusted proxy CIDRs include a broad catch-all network."
+    if block_on_broad:
+        _add_blocking_verification_check(errors, checks, "trusted_proxy_cidrs", detail)
+    else:
+        _add_warning_verification_check(warnings, checks, "trusted_proxy_cidrs", detail)
+
+
+def _normalized_runtime_origin(value: str | None) -> str:
+    normalized = normalize_origin(value)
+    return str(normalized["origin"]) if normalized.get("ok") else ""
+
+
+def _broad_trusted_proxy_cidrs(settings: Settings) -> list[str]:
+    return [str(cidr) for cidr in settings.trusted_proxy_cidrs if str(cidr) in {"0.0.0.0/0", "::/0"}]
+
+
+def _add_blocking_verification_check(
+    errors: list[str],
+    checks: list[dict[str, str]],
+    name: str,
+    detail: str,
+) -> None:
+    errors.append(detail)
+    _add_check(checks, name, "block", detail)
+
+
+def _add_warning_verification_check(
+    warnings: list[str],
+    checks: list[dict[str, str]],
+    name: str,
+    detail: str,
+) -> None:
+    warnings.append(detail)
+    _add_check(checks, name, "warn", detail)
 
 
 def build_copyable_env_block(plan: dict[str, Any] | None) -> str:

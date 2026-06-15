@@ -33,6 +33,7 @@ def _request_with_origin(
     origin: str = "http://testserver",
     peer_host: str = "127.0.0.1",
     headers: dict[str, str] | None = None,
+    url_prefix: str | None = "abcdfghj",
 ) -> Request:
     parsed = service.normalize_origin(origin)
     host = parsed.get("origin", origin).split("://", 1)[1]
@@ -48,7 +49,7 @@ def _request_with_origin(
         "client": (peer_host, 50000),
         "server": (host, 80),
         "scheme": scheme,
-        "app": SimpleNamespace(state=SimpleNamespace(settings=settings, url_prefix="abcdfghj")),
+        "app": SimpleNamespace(state=SimpleNamespace(settings=settings, url_prefix=url_prefix)),
     }
     return Request(scope)
 
@@ -226,6 +227,81 @@ def _enable_maintenance_lock(settings) -> None:
         _admin_actor(settings),
         enabled=True,
     )
+
+
+def _store_prepared_switch(settings, desired: dict[str, object], *, status: str = "prepared_for_manual_apply") -> dict:
+    prepared_switch = {
+        "status": status,
+        "prepared_at": utcnow_iso(),
+        "prepared_by_user_id": 1,
+        "prepared_by_username": settings.admin_username,
+        "takes_effect": False,
+        "desired": desired,
+        "validation": {"status": "warnings", "errors": [], "warnings": [], "checks": []},
+        "plan": {},
+        "env_block": "",
+        "manual_steps": [],
+        "restart_required": True,
+        "maintenance_mode_enabled": True,
+        "maintenance_mode_auto_enabled": True,
+        "verification_required": True,
+        "current_origin_match_required_in_phase": "phase_4_verification",
+        "url_prefix_rotation": "manual_only",
+        "env_writing": "manual_only",
+        "activation_not_implemented": True,
+    }
+    set_global_app_setting(
+        settings,
+        key=service.EXPOSURE_MODE_PREPARED_SWITCH_KEY,
+        value=json.dumps(prepared_switch, sort_keys=True),
+    )
+    return prepared_switch
+
+
+def _public_custom_runtime_settings(settings, **overrides):
+    values = {
+        "private_network_only": False,
+        "public_app_origin": "https://media.example.com",
+        "backend_origin": "",
+        "cookie_secure": True,
+        "trusted_proxy_cidrs": ("127.0.0.1/8",),
+    }
+    values.update(overrides)
+    return replace(settings, **values)
+
+
+def _public_direct_ip_runtime_settings(settings, **overrides):
+    values = {
+        "private_network_only": False,
+        "public_app_origin": "http://203.0.113.10:4173",
+        "backend_origin": "",
+        "cookie_secure": False,
+        "trusted_proxy_cidrs": ("127.0.0.1/8",),
+    }
+    values.update(overrides)
+    return replace(settings, **values)
+
+
+def _private_runtime_settings(settings, **overrides):
+    values = {
+        "private_network_only": True,
+        "public_app_origin": "",
+        "backend_origin": "",
+        "cookie_secure": False,
+        "trusted_proxy_cidrs": ("127.0.0.1/8",),
+    }
+    values.update(overrides)
+    return replace(settings, **values)
+
+
+def _check_statuses(verification: dict[str, object]) -> dict[str, str]:
+    checks = verification.get("checks", [])
+    assert isinstance(checks, list)
+    return {
+        str(check["name"]): str(check["status"])
+        for check in checks
+        if isinstance(check, dict) and "name" in check and "status" in check
+    }
 
 
 def test_origin_normalization_accepts_origin_and_rejects_path_query_fragment() -> None:
@@ -1074,21 +1150,492 @@ def test_prepared_switch_default_and_routes_require_admin(client, admin_credenti
     get_response = client.get("/api/admin/exposure/prepared-switch")
     assert get_response.status_code == 401
 
+    verification_get_response = client.get("/api/admin/exposure/verification")
+    assert verification_get_response.status_code == 401
+
     post_response = client.post(
         "/api/admin/exposure/prepare-switch",
         json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
     )
     assert post_response.status_code == 401
 
+    verification_post_response = client.post(
+        "/api/admin/exposure/verify-prepared-switch",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+    assert verification_post_response.status_code == 401
+
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     response = client.get("/api/admin/exposure/prepared-switch")
     assert response.status_code == 200
     assert response.json() == {"prepared_switch": None, "takes_effect": False}
 
+    verification_response = client.get("/api/admin/exposure/verification")
+    assert verification_response.status_code == 200
+    assert verification_response.json() == {
+        "prepared_switch": None,
+        "verification": {
+            "status": "not_ready",
+            "errors": [],
+            "warnings": ["No prepared manual switch is available to verify."],
+            "checks": [],
+            "takes_effect": False,
+        },
+        "takes_effect": False,
+    }
+
     status_response = client.get("/api/admin/exposure/status")
     assert status_response.status_code == 200
     assert status_response.json()["prepared_switch"] is None
     assert status_response.json()["takes_effect"] is False
+
+
+def test_verify_prepared_switch_route_requires_password_ack_prepared_switch_and_maintenance_mode(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    missing_password = client.post(
+        "/api/admin/exposure/verify-prepared-switch",
+        json={"acknowledgement": True},
+    )
+    assert missing_password.status_code == 422
+
+    wrong_password = client.post(
+        "/api/admin/exposure/verify-prepared-switch",
+        json={"current_admin_password": "wrong-password", "acknowledgement": True},
+    )
+    assert wrong_password.status_code == 401
+
+    missing_ack = client.post(
+        "/api/admin/exposure/verify-prepared-switch",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": False},
+    )
+    assert missing_ack.status_code == 400
+    assert missing_ack.json()["detail"] == service.EXPOSURE_VERIFY_PREPARED_SWITCH_ACKNOWLEDGEMENT
+
+    no_prepared_switch = client.post(
+        "/api/admin/exposure/verify-prepared-switch",
+        json=_prepare_request_payload(admin_credentials),
+    )
+    assert no_prepared_switch.status_code == 400
+    assert no_prepared_switch.json()["detail"]["verification"]["status"] == "blocked"
+
+    _store_prepared_switch(
+        initialized_settings,
+        {"desired_mode": "private", "private_origin": ""},
+    )
+    maintenance_off = client.post(
+        "/api/admin/exposure/verify-prepared-switch",
+        json=_prepare_request_payload(admin_credentials),
+    )
+    assert maintenance_off.status_code == 400
+    assert maintenance_off.json()["detail"]["verification"]["status"] == "blocked"
+    assert "Maintenance Mode must remain enabled" in maintenance_off.json()["detail"]["verification"]["errors"][0]
+
+    _enable_maintenance_lock(initialized_settings)
+    verified = client.post(
+        "/api/admin/exposure/verify-prepared-switch",
+        json=_prepare_request_payload(admin_credentials),
+    )
+    assert verified.status_code == 200
+    prepared_switch = verified.json()["prepared_switch"]
+    assert prepared_switch["status"] == service.PREPARED_SWITCH_STATUS_VERIFIED
+    assert prepared_switch["takes_effect"] is False
+    assert prepared_switch["activation_not_implemented"] is True
+    assert prepared_switch["maintenance_mode_release"] == "manual_only"
+    assert prepared_switch["verified_by_username"] == admin_credentials["username"]
+    assert verified.json()["verification"]["status"] == "passed"
+    assert maintenance_service.get_exposure_maintenance_lock(initialized_settings)["enabled"] is True
+
+    status_response = client.get("/api/admin/exposure/status")
+    assert status_response.status_code == 200
+    assert status_response.json()["prepared_switch"]["status"] == service.PREPARED_SWITCH_STATUS_VERIFIED
+
+    verification_response = client.get("/api/admin/exposure/verification")
+    assert verification_response.status_code == 200
+    assert verification_response.json()["prepared_switch"]["status"] == service.PREPARED_SWITCH_STATUS_VERIFIED
+    assert verification_response.json()["verification"]["status"] == "passed"
+    assert verification_response.json()["takes_effect"] is False
+
+
+def test_verify_public_custom_prepared_switch_passes_and_uses_runtime_allowlist(initialized_settings) -> None:
+    settings = _public_custom_runtime_settings(initialized_settings)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+            "reverse_proxy_provider": "caddy",
+        },
+    )
+    request = _request_with_origin(settings, origin="https://media.example.com")
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    verification = result["verification"]
+    checks = _check_statuses(verification)
+    assert verification["status"] == "passed"
+    assert verification["errors"] == []
+    assert result["takes_effect"] is False
+    assert result["prepared_switch"]["status"] == service.PREPARED_SWITCH_STATUS_VERIFIED
+    assert result["prepared_switch"]["verification"] == verification
+    assert checks["current_origin_match"] == "pass"
+    assert checks["private_network_only"] == "pass"
+    assert checks["public_app_origin"] == "pass"
+    assert checks["cookie_secure"] == "pass"
+
+
+def test_verify_public_custom_prepared_switch_blocks_current_origin_mismatch(initialized_settings) -> None:
+    settings = _public_custom_runtime_settings(initialized_settings)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+        },
+    )
+    request = _request_with_origin(settings, origin="https://admin.example.net")
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.verify_prepared_exposure_switch(
+            settings,
+            request,
+            _admin_actor(settings),
+            acknowledgement=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    verification = exc_info.value.detail["verification"]
+    assert verification["status"] == "blocked"
+    assert _check_statuses(verification)["current_origin_match"] == "block"
+    assert service.get_prepared_exposure_switch(settings)["status"] == service.PREPARED_SWITCH_STATUS_PREPARED
+
+
+def test_verify_public_custom_blocks_public_app_origin_mismatch(initialized_settings) -> None:
+    settings = _public_custom_runtime_settings(
+        initialized_settings,
+        public_app_origin="https://wrong.example.com",
+    )
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+        },
+    )
+    request = _request_with_origin(settings, origin="https://media.example.com")
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.verify_prepared_exposure_switch(
+            settings,
+            request,
+            _admin_actor(settings),
+            acknowledgement=True,
+        )
+
+    verification = exc_info.value.detail["verification"]
+    assert verification["status"] == "blocked"
+    assert _check_statuses(verification)["public_app_origin"] == "block"
+
+
+def test_verify_public_custom_backend_origin_mismatch_warns_only(initialized_settings) -> None:
+    settings = _public_custom_runtime_settings(
+        initialized_settings,
+        backend_origin="https://backend.example.net",
+    )
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+        },
+    )
+    request = _request_with_origin(settings, origin="https://media.example.com")
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    verification = result["verification"]
+    assert verification["status"] == "warnings"
+    assert verification["errors"] == []
+    assert _check_statuses(verification)["backend_origin"] == "warn"
+
+
+def test_verify_public_direct_ip_http_allows_cookie_secure_false_and_warns(initialized_settings) -> None:
+    settings = _public_direct_ip_runtime_settings(initialized_settings)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "direct_ip",
+            "public_origin": "http://203.0.113.10:4173",
+            "reverse_proxy_provider": "manual_other",
+        },
+    )
+    request = _request_with_origin(settings, origin="http://203.0.113.10:4173")
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    verification = result["verification"]
+    checks = _check_statuses(verification)
+    assert verification["status"] == "warnings"
+    assert verification["errors"] == []
+    assert checks["cookie_secure"] == "pass"
+    assert checks["direct_ip_not_recommended"] == "warn"
+
+
+def test_verify_public_direct_ip_http_blocks_cookie_secure_true(initialized_settings) -> None:
+    settings = _public_direct_ip_runtime_settings(initialized_settings, cookie_secure=True)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "direct_ip",
+            "public_origin": "http://203.0.113.10:4173",
+        },
+    )
+    request = _request_with_origin(settings, origin="http://203.0.113.10:4173")
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.verify_prepared_exposure_switch(
+            settings,
+            request,
+            _admin_actor(settings),
+            acknowledgement=True,
+        )
+
+    verification = exc_info.value.detail["verification"]
+    assert verification["status"] == "blocked"
+    assert _check_statuses(verification)["cookie_secure"] == "block"
+
+
+def test_verify_public_prepared_switch_blocks_broad_proxy_cidrs(initialized_settings) -> None:
+    settings = _public_custom_runtime_settings(initialized_settings, trusted_proxy_cidrs=("0.0.0.0/0",))
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+        },
+    )
+    request = _request_with_origin(settings, origin="https://media.example.com")
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.verify_prepared_exposure_switch(
+            settings,
+            request,
+            _admin_actor(settings),
+            acknowledgement=True,
+        )
+
+    verification = exc_info.value.detail["verification"]
+    assert verification["status"] == "blocked"
+    assert _check_statuses(verification)["trusted_proxy_cidrs"] == "block"
+
+
+def test_verify_prepared_switch_url_prefix_missing_warns_only(initialized_settings) -> None:
+    settings = _public_custom_runtime_settings(initialized_settings, url_prefix=None)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+        },
+    )
+    request = _request_with_origin(settings, origin="https://media.example.com", url_prefix="")
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    verification = result["verification"]
+    assert verification["status"] == "warnings"
+    assert verification["errors"] == []
+    assert _check_statuses(verification)["url_prefix_present"] == "warn"
+
+
+def test_verify_private_prepared_switch_skips_origin_match_when_private_origin_missing(
+    initialized_settings,
+) -> None:
+    settings = _private_runtime_settings(initialized_settings)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(settings, {"desired_mode": "private", "private_origin": ""})
+    request = _request_with_origin(settings, origin="http://127.0.0.1")
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    verification = result["verification"]
+    assert verification["status"] == "passed"
+    assert _check_statuses(verification)["current_origin_match"] == "info"
+
+
+def test_verify_private_prepared_switch_passes_with_matching_private_origin(initialized_settings) -> None:
+    settings = _private_runtime_settings(initialized_settings)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {"desired_mode": "private", "private_origin": "http://192.168.1.10:4173"},
+    )
+    request = _request_with_origin(settings, origin="http://192.168.1.10:4173")
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    verification = result["verification"]
+    assert verification["status"] == "passed"
+    assert _check_statuses(verification)["current_origin_match"] == "pass"
+
+
+def test_verify_private_prepared_switch_blocks_private_origin_mismatch(initialized_settings) -> None:
+    settings = _private_runtime_settings(initialized_settings)
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {"desired_mode": "private", "private_origin": "http://192.168.1.10:4173"},
+    )
+    request = _request_with_origin(settings, origin="http://192.168.1.20:4173")
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.verify_prepared_exposure_switch(
+            settings,
+            request,
+            _admin_actor(settings),
+            acknowledgement=True,
+        )
+
+    verification = exc_info.value.detail["verification"]
+    assert verification["status"] == "blocked"
+    assert _check_statuses(verification)["current_origin_match"] == "block"
+
+
+def test_verify_private_prepared_switch_warnings_do_not_block(initialized_settings) -> None:
+    settings = _private_runtime_settings(
+        initialized_settings,
+        cookie_secure=True,
+        public_app_origin="http://private.example.test",
+        trusted_proxy_cidrs=("::/0",),
+    )
+    _enable_maintenance_lock(settings)
+    _store_prepared_switch(
+        settings,
+        {"desired_mode": "private", "private_origin": "http://192.168.1.10:4173"},
+    )
+    request = _request_with_origin(settings, origin="http://192.168.1.10:4173")
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    verification = result["verification"]
+    checks = _check_statuses(verification)
+    assert verification["status"] == "warnings"
+    assert verification["errors"] == []
+    assert checks["cookie_secure"] == "warn"
+    assert checks["public_app_origin"] == "warn"
+    assert checks["trusted_proxy_cidrs"] == "warn"
+
+
+def test_verify_prepared_switch_has_no_activation_side_effects(initialized_settings) -> None:
+    settings = _public_custom_runtime_settings(initialized_settings)
+    _enable_maintenance_lock(settings)
+    _create_user(settings, username="verify-standard-user")
+    _store_prepared_switch(
+        settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+        },
+    )
+    request = _request_with_origin(settings, origin="https://media.example.com")
+    before_runtime = (
+        settings.private_network_only,
+        settings.public_app_origin,
+        settings.backend_origin,
+        settings.cookie_secure,
+        settings.session_ttl_hours,
+    )
+    with get_connection(settings) as connection:
+        before_users = [
+            (row["id"], row["enabled"])
+            for row in connection.execute("SELECT id, enabled FROM users ORDER BY id").fetchall()
+        ]
+        before_revoked_sessions = connection.execute(
+            "SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NOT NULL"
+        ).fetchone()["count"]
+
+    result = service.verify_prepared_exposure_switch(
+        settings,
+        request,
+        _admin_actor(settings),
+        acknowledgement=True,
+    )
+
+    with get_connection(settings) as connection:
+        after_users = [
+            (row["id"], row["enabled"])
+            for row in connection.execute("SELECT id, enabled FROM users ORDER BY id").fetchall()
+        ]
+        after_revoked_sessions = connection.execute(
+            "SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NOT NULL"
+        ).fetchone()["count"]
+    assert result["prepared_switch"]["status"] == service.PREPARED_SWITCH_STATUS_VERIFIED
+    assert result["prepared_switch"]["takes_effect"] is False
+    assert (
+        settings.private_network_only,
+        settings.public_app_origin,
+        settings.backend_origin,
+        settings.cookie_secure,
+        settings.session_ttl_hours,
+    ) == before_runtime
+    assert after_users == before_users
+    assert after_revoked_sessions == before_revoked_sessions
 
 
 def test_prepare_switch_requires_password_ack_and_pending_draft_then_auto_enables_maintenance_mode(

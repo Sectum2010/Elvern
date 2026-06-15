@@ -175,6 +175,17 @@ class ExposurePreparedSwitchResponse(BaseModel):
     takes_effect: bool = False
 
 
+class ExposureVerifyPreparedSwitchRequest(BaseModel):
+    current_admin_password: str = Field(min_length=1)
+    acknowledgement: bool = False
+
+
+class ExposurePreparedSwitchVerificationResponse(BaseModel):
+    prepared_switch: dict[str, object] | None = None
+    verification: dict[str, object] = Field(default_factory=dict)
+    takes_effect: bool = False
+
+
 class CloudSyncStatusResponse(BaseModel):
     status: Literal["success", "partial_failure", "failed", "disabled"] = "disabled"
     provider_auth_required: bool = False

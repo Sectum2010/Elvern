@@ -99,6 +99,12 @@ const DEFAULT_EXPOSURE_PREPARE_FORM = {
 };
 const EXPOSURE_PREPARE_ACKNOWLEDGEMENT =
   "I understand this only prepares a manual switch plan. It does not write env files, restart Elvern, rotate the URL prefix, disable users, or activate public/private mode. It will enable Maintenance Mode and log out non-admin users.";
+const DEFAULT_EXPOSURE_VERIFY_FORM = {
+  currentAdminPassword: "",
+  acknowledgement: false,
+};
+const EXPOSURE_VERIFY_ACKNOWLEDGEMENT =
+  "I understand this only verifies the prepared manual switch. It does not release Maintenance Mode, write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate exposure mode.";
 
 function formatAgeCredential(value) {
   const age = Number(value);
@@ -234,6 +240,29 @@ function ExposureSegmentedControl({ ariaLabel, className = "", options, value, o
           </button>
         );
       })}
+    </div>
+  );
+}
+
+
+function ExposureVerificationCheckGroup({ title, checks, emptyText }) {
+  return (
+    <div className="exposure-checklist-group">
+      <h4>{title}</h4>
+      {checks.length > 0 ? (
+        <div className="exposure-checks-list">
+          {checks.map((entry) => (
+            <div className="exposure-check-row" key={`verification-check-${title}-${entry.name || entry.detail}`}>
+              <span className={`status-pill exposure-check-pill exposure-check-pill--${entry.status || "info"}`}>
+                {entry.status || "info"}
+              </span>
+              <span>{entry.detail}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="page-subnote">{emptyText}</p>
+      )}
     </div>
   );
 }
@@ -643,6 +672,9 @@ export function AdminPage() {
   const [exposureMaintenanceTargetMode, setExposureMaintenanceTargetMode] = useState(null);
   const [exposurePrepareForm, setExposurePrepareForm] = useState(DEFAULT_EXPOSURE_PREPARE_FORM);
   const [exposurePrepareFeedback, setExposurePrepareFeedback] = useState(null);
+  const [exposureVerifyForm, setExposureVerifyForm] = useState(DEFAULT_EXPOSURE_VERIFY_FORM);
+  const [exposureVerifyFeedback, setExposureVerifyFeedback] = useState(null);
+  const [exposureVerificationResult, setExposureVerificationResult] = useState(null);
   const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false);
   const [totpStatus, setTotpStatus] = useState(null);
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
@@ -858,6 +890,7 @@ export function AdminPage() {
     try {
       const payload = await apiRequest("/api/admin/exposure/status");
       setExposureStatus(payload);
+      setExposureVerificationResult(payload.prepared_switch?.verification || null);
       if (!exposurePlan) {
         setExposurePlan(payload);
       }
@@ -963,7 +996,7 @@ export function AdminPage() {
     ));
   }
 
-  function updateExposurePreparedSwitchState(preparedSwitch) {
+  function updateExposurePreparedSwitchState(preparedSwitch, verification = undefined) {
     setExposureStatus((current) => (
       current
         ? { ...current, prepared_switch: preparedSwitch || null, takes_effect: false }
@@ -974,6 +1007,13 @@ export function AdminPage() {
         ? { ...current, prepared_switch: preparedSwitch || null, takes_effect: false }
         : current
     ));
+    if (verification !== undefined) {
+      setExposureVerificationResult(verification || null);
+    } else if (preparedSwitch?.verification) {
+      setExposureVerificationResult(preparedSwitch.verification);
+    } else if (!preparedSwitch) {
+      setExposureVerificationResult(null);
+    }
   }
 
   async function handleSetExposureMaintenanceLock(enabled) {
@@ -1045,7 +1085,7 @@ export function AdminPage() {
           acknowledgement: exposurePrepareForm.acknowledgement,
         },
       });
-      updateExposurePreparedSwitchState(payload.prepared_switch || null);
+      updateExposurePreparedSwitchState(payload.prepared_switch || null, null);
       setExposurePrepareForm(DEFAULT_EXPOSURE_PREPARE_FORM);
       setExposurePrepareFeedback({ tone: "success", text: "Prepared for manual apply." });
     } catch (requestError) {
@@ -1076,7 +1116,7 @@ export function AdminPage() {
           acknowledgement: false,
         },
       });
-      updateExposurePreparedSwitchState(payload.prepared_switch || null);
+      updateExposurePreparedSwitchState(payload.prepared_switch || null, null);
       setExposurePrepareForm(DEFAULT_EXPOSURE_PREPARE_FORM);
       setExposurePrepareFeedback({ tone: "success", text: "Prepared switch cleared." });
     } catch (requestError) {
@@ -1089,10 +1129,63 @@ export function AdminPage() {
     }
   }
 
+  async function handleVerifyExposurePreparedSwitch() {
+    if (!exposurePreparedSwitch) {
+      setExposureVerifyFeedback({
+        tone: "error",
+        text: "Prepare and manually apply a switch before verification.",
+      });
+      return;
+    }
+    if (!exposureVerifyForm.currentAdminPassword.trim()) {
+      setExposureVerifyFeedback({
+        tone: "error",
+        text: "Enter your current admin password to verify the prepared switch.",
+      });
+      return;
+    }
+    if (!exposureVerifyForm.acknowledgement) {
+      setExposureVerifyFeedback({
+        tone: "error",
+        text: "Acknowledge that this only verifies the prepared manual switch before continuing.",
+      });
+      return;
+    }
+    setExposurePending(true);
+    setExposureVerifyFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/verify-prepared-switch", {
+        method: "POST",
+        data: {
+          current_admin_password: exposureVerifyForm.currentAdminPassword,
+          acknowledgement: exposureVerifyForm.acknowledgement,
+        },
+      });
+      updateExposurePreparedSwitchState(payload.prepared_switch || null, payload.verification || null);
+      setExposureVerifyForm(DEFAULT_EXPOSURE_VERIFY_FORM);
+      setExposureVerifyFeedback({
+        tone: "success",
+        text: payload.verification?.status === "warnings" ? "Verified with warnings." : "Verified after restart.",
+      });
+    } catch (requestError) {
+      const verification = requestError.detail?.verification;
+      if (verification) {
+        setExposureVerificationResult(verification);
+      }
+      setExposureVerifyFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to verify prepared switch.",
+      });
+    } finally {
+      setExposurePending(false);
+    }
+  }
+
   async function handleOpenExposurePlanner() {
     setExposurePlannerOpen(true);
     setExposureMaintenanceFeedback(null);
     setExposurePrepareFeedback(null);
+    setExposureVerifyFeedback(null);
     setExposureMaintenanceTargetMode(null);
     if (!exposureStatus) {
       await loadExposureStatus();
@@ -3600,7 +3693,16 @@ export function AdminPage() {
   const exposureMaintenanceActionLabel = exposureMaintenanceTargetEnabled ? "Enable Maintenance Mode" : "Disable Maintenance Mode";
   const exposurePrepareMaintenanceStatus = exposureMaintenanceLock.enabled ? "Already On" : "Will be enabled automatically on prepare";
   const exposurePreparedSwitch = exposureDisplay.prepared_switch || null;
-  const exposurePreparedSwitchStatus = exposurePreparedSwitch ? "Prepared" : "None";
+  const exposurePreparedSwitchStatus = !exposurePreparedSwitch
+    ? "None"
+    : exposurePreparedSwitch.status === "verified_after_restart"
+      ? "Verified"
+      : "Prepared";
+  const exposurePreparedSwitchStatusDetail = !exposurePreparedSwitch
+    ? "None"
+    : exposurePreparedSwitch.status === "verified_after_restart"
+      ? "Verified after restart"
+      : "Prepared for manual apply";
   const exposureValidationStatus = exposureValidation.status || "ready";
   const exposureValidationStatusLabel = exposureValidationStatus === "blocked"
     ? "Blocked"
@@ -3619,7 +3721,9 @@ export function AdminPage() {
       ? "Required"
       : "Not required";
   const exposurePhase4VerificationStatus = exposurePreparedSwitch?.verification_required
-    ? "Required after restart"
+    ? exposurePreparedSwitch.status === "verified_after_restart"
+      ? "Verified after restart"
+      : "Required after restart"
     : exposurePendingDraft?.desired?.desired_mode === "public"
       ? "Required in Phase 4"
       : "Not required for private draft";
@@ -3627,6 +3731,36 @@ export function AdminPage() {
     ? exposurePreparedSwitch.manual_steps
     : [];
   const exposurePreparedEnvBlock = exposurePreparedSwitch?.env_block || "";
+  const exposurePreparedDesired = exposurePreparedSwitch?.desired || {};
+  const exposureExpectedOrigin = exposurePreparedDesired.desired_mode === "public"
+    ? exposurePreparedDesired.public_origin
+    : exposurePreparedDesired.private_origin || "Not required";
+  const exposureVerification = exposureVerificationResult || exposurePreparedSwitch?.verification || {};
+  const exposureVerificationStatus = exposureVerification.status || (exposurePreparedSwitch ? "not_verified" : "not_ready");
+  const exposureVerificationStatusLabel = exposureVerificationStatus === "passed"
+    ? "Passed"
+    : exposureVerificationStatus === "warnings"
+      ? "Warnings"
+      : exposureVerificationStatus === "blocked"
+        ? "Blocked"
+        : exposureVerificationStatus === "not_verified"
+          ? "Not verified"
+          : "Not ready";
+  const exposureVerificationErrors = Array.isArray(exposureVerification.errors) ? exposureVerification.errors : [];
+  const exposureVerificationWarnings = Array.isArray(exposureVerification.warnings) ? exposureVerification.warnings : [];
+  const exposureVerificationChecks = Array.isArray(exposureVerification.checks) ? exposureVerification.checks : [];
+  const exposureCurrentAccessChecks = exposureVerificationChecks.filter((entry) => (
+    ["current_origin_match", "server_side_origin_probe"].includes(entry.name)
+  ));
+  const exposureRuntimeSettingChecks = exposureVerificationChecks.filter((entry) => (
+    ["private_network_only", "public_app_origin", "backend_origin", "cookie_secure", "url_prefix_present"].includes(entry.name)
+  ));
+  const exposureSafetyStateChecks = exposureVerificationChecks.filter((entry) => (
+    ["prepared_switch_status", "maintenance_mode", "trusted_proxy_cidrs"].includes(entry.name)
+  ));
+  const exposureWarningChecks = exposureVerificationChecks.filter((entry) => (
+    entry.status === "warn" || entry.status === "block" || entry.name === "direct_ip_not_recommended"
+  ));
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
       <section className="settings-card">
@@ -4580,6 +4714,110 @@ export function AdminPage() {
                   >
                     Clear prepared switch
                   </button>
+                </div>
+              </section>
+              <section className="exposure-planner-modal__section">
+                <h3>Verify prepared switch</h3>
+                <div className="exposure-planner-status">
+                  <StatusRow label="Prepared status" value={exposurePreparedSwitchStatusDetail} />
+                  <StatusRow label="Verification required after restart" value={exposurePreparedSwitch?.verification_required ? "Yes" : "No"} />
+                  <StatusRow label="Maintenance Mode" value={exposureMaintenanceLockStatus} />
+                  <StatusRow label="Current request origin" value={formatExposureValue(exposureActive.current_request_origin)} />
+                  <StatusRow label="Expected origin" value={formatExposureValue(exposureExpectedOrigin)} />
+                  <StatusRow label="Verification status" value={exposureVerificationStatusLabel} />
+                  <StatusRow label="Takes effect" value="No" />
+                </div>
+                <p className="page-subnote">
+                  Run this only after manually applying env/proxy/DNS changes, manually restarting Elvern, and returning through the intended target address. Maintenance Mode remains under admin control.
+                </p>
+                <div className="exposure-verification-checklist">
+                  <ExposureVerificationCheckGroup
+                    checks={exposureCurrentAccessChecks}
+                    emptyText="No current-access verification checks have run yet."
+                    title="Current access"
+                  />
+                  <ExposureVerificationCheckGroup
+                    checks={exposureRuntimeSettingChecks}
+                    emptyText="No runtime setting verification checks have run yet."
+                    title="Runtime settings"
+                  />
+                  <ExposureVerificationCheckGroup
+                    checks={exposureSafetyStateChecks}
+                    emptyText="No safety-state verification checks have run yet."
+                    title="Safety state"
+                  />
+                  <ExposureVerificationCheckGroup
+                    checks={exposureWarningChecks}
+                    emptyText="No blocking checks or warnings from the last verification."
+                    title="Warnings"
+                  />
+                </div>
+                {exposureVerificationErrors.length > 0 ? (
+                  <div className="exposure-message-group">
+                    <strong>Verification errors</strong>
+                    <ul>
+                      {exposureVerificationErrors.map((entry) => <li key={`verification-error-${entry}`}>{entry}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
+                {exposureVerificationWarnings.length > 0 ? (
+                  <div className="exposure-message-group">
+                    <strong>Verification warnings</strong>
+                    <ul>
+                      {exposureVerificationWarnings.map((entry) => <li key={`verification-warning-${entry}`}>{entry}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>Verification acknowledgement</strong>
+                    <small>{EXPOSURE_VERIFY_ACKNOWLEDGEMENT}</small>
+                  </span>
+                  <input
+                    checked={exposureVerifyForm.acknowledgement}
+                    disabled={!exposurePreparedSwitch}
+                    onChange={(event) =>
+                      setExposureVerifyForm((current) => ({
+                        ...current,
+                        acknowledgement: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>
+                    <strong>Current admin password</strong>
+                    <small>Required to verify the prepared manual switch.</small>
+                  </span>
+                  <div className="exposure-secret-field">
+                    <NonLoginSecretInput
+                      autoComplete="new-password"
+                      disabled={!exposurePreparedSwitch}
+                      onChange={(event) =>
+                        setExposureVerifyForm((current) => ({
+                          ...current,
+                          currentAdminPassword: event.target.value,
+                        }))
+                      }
+                      placeholder="Current admin password"
+                      value={exposureVerifyForm.currentAdminPassword}
+                    />
+                  </div>
+                </label>
+                <InlineFeedback feedback={exposureVerifyFeedback} />
+                <div className="admin-list__actions">
+                  <button
+                    className="primary-button"
+                    disabled={exposurePending || !exposurePreparedSwitch}
+                    onClick={handleVerifyExposurePreparedSwitch}
+                    type="button"
+                  >
+                    Verify prepared switch
+                  </button>
+                  {!exposurePreparedSwitch ? (
+                    <span className="page-subnote">Prepare a manual switch before verification.</span>
+                  ) : null}
                 </div>
               </section>
               <section className="exposure-planner-modal__section">

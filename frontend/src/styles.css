@@ -3220,6 +3220,25 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   overflow-wrap: anywhere;
 }
 
+.exposure-verification-checklist {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.exposure-checklist-group {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  border: 1px solid rgba(152, 176, 201, 0.1);
+  border-radius: 0.7rem;
+  background: rgba(5, 11, 18, 0.38);
+}
+
+.exposure-checklist-group h4 {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
 .exposure-validation-status-pill,
 .exposure-prepared-switch-pill {
   align-self: start;

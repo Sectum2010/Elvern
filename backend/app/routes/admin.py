@@ -39,7 +39,9 @@ from ..schemas import (
     ExposureMaintenanceLockResponse,
     ExposureModePlanResponse,
     ExposurePreparedSwitchResponse,
+    ExposurePreparedSwitchVerificationResponse,
     ExposurePrepareSwitchRequest,
+    ExposureVerifyPreparedSwitchRequest,
     AdminUserCreateRequest,
     AdminUserListResponse,
     AdminUserResponse,
@@ -116,10 +118,12 @@ from ..services.exposure_mode_service import (
     build_current_exposure_status,
     clear_pending_exposure_draft,
     clear_prepared_exposure_switch,
+    get_prepared_exposure_switch_verification_status,
     get_prepared_exposure_switch,
     prepare_exposure_manual_switch,
     save_pending_exposure_draft,
     validate_exposure_plan,
+    verify_prepared_exposure_switch,
 )
 from ..services.exposure_maintenance_service import (
     disable_maintenance_mode,
@@ -401,6 +405,17 @@ def admin_get_exposure_prepared_switch(request: Request, user=CurrentAdmin) -> E
     )
 
 
+@router.get("/exposure/verification", response_model=ExposurePreparedSwitchVerificationResponse)
+def admin_get_exposure_prepared_switch_verification(
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposurePreparedSwitchVerificationResponse:
+    del user
+    return ExposurePreparedSwitchVerificationResponse(
+        **get_prepared_exposure_switch_verification_status(request.app.state.settings)
+    )
+
+
 @router.post("/exposure/prepare-switch", response_model=ExposurePreparedSwitchResponse)
 def admin_prepare_exposure_manual_switch(
     payload: ExposurePrepareSwitchRequest,
@@ -420,6 +435,28 @@ def admin_prepare_exposure_manual_switch(
             user,
             acknowledgement=payload.acknowledgement,
             invalidate_auth_session=_auth_session_invalidator_if_available(request),
+        )
+    )
+
+
+@router.post("/exposure/verify-prepared-switch", response_model=ExposurePreparedSwitchVerificationResponse)
+def admin_verify_exposure_prepared_switch(
+    payload: ExposureVerifyPreparedSwitchRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposurePreparedSwitchVerificationResponse:
+    settings = request.app.state.settings
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    return ExposurePreparedSwitchVerificationResponse(
+        **verify_prepared_exposure_switch(
+            settings,
+            request,
+            user,
+            acknowledgement=payload.acknowledgement,
         )
     )
 

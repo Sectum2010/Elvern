@@ -69,6 +69,31 @@ The prepared plan includes a copyable env suggestion block and manual restart / 
 
 Phase 3 does not write env files, edit deploy files, restart Elvern, activate exposure mode, rotate the URL prefix, revoke admin sessions, disable users, change `users.enabled`, or change token TTLs. It can revoke non-admin sessions only through Maintenance Mode. The prepared switch always reports `Prepared for manual apply`, `Activation not implemented`, and `takes_effect=false`.
 
+## Phase 4 Prepared Switch Verification
+
+Phase 4 is an admin-only verification step after an admin manually applies the prepared env/proxy/DNS changes, manually restarts Elvern, and opens the admin UI through the intended target address. It verifies the stored prepared switch against the current request origin and current runtime settings. It does not activate exposure mode.
+
+Verification requires:
+
+- Current admin password re-authentication.
+- Admin acknowledgement that verification is non-activating.
+- A stored prepared switch with status `prepared_for_manual_apply` or `verified_after_restart`.
+- Maintenance Mode still enabled.
+
+If verification passes with no blocking errors, the prepared switch is updated to `verified_after_restart` and stores `verified_at`, the verifying admin identity, and the structured verification result. Warnings are allowed. The stored prepared switch continues to include `takes_effect=false`, `activation_not_implemented=true`, and `maintenance_mode_release: "manual_only"`.
+
+Phase 4 checks include:
+
+- Current request origin matches the expected public origin for public custom domain and direct IP plans.
+- Current request origin matches the private origin when a private origin was prepared; if no private origin was prepared, origin matching is skipped.
+- Runtime `ELVERN_PRIVATE_NETWORK_ONLY` matches the prepared mode.
+- Runtime `ELVERN_PUBLIC_APP_ORIGIN` matches public plans, while private-mode mismatches are warnings.
+- Runtime `ELVERN_COOKIE_SECURE` is true for public HTTPS and false for plain HTTP direct IP.
+- Broad trusted proxy CIDRs block public verification and warn in private verification.
+- Missing URL prefix is a warning only.
+
+Phase 4 does not write env files, edit deploy files, restart Elvern, rotate the URL prefix, release Maintenance Mode, revoke sessions, disable users, change token TTLs, fetch or probe user-provided origins from the backend, or change public/private runtime settings. Maintenance Mode remains under admin control.
+
 ## Public Custom Domain
 
 Use this for a purchased DNS name with HTTPS. The planner checks that the input is origin-only, uses a DNS name rather than localhost/private IP/raw IP, and uses HTTPS.
