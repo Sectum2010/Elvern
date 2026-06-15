@@ -1,9 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { apiRequest } from "../lib/api";
-import { DetailPage } from "./DetailPage";
+import { DetailPage, iosExternalAppNavigator } from "./DetailPage";
 
 
 const mockAuthState = vi.hoisted(() => ({
@@ -12,6 +12,9 @@ const mockAuthState = vi.hoisted(() => ({
     username: "viewer",
     role: "standard_user",
   },
+}));
+const mockBrowserState = vi.hoisted(() => ({
+  iosMobile: false,
 }));
 
 vi.mock("../auth/AuthContext", () => ({
@@ -32,7 +35,7 @@ vi.mock("../lib/api", () => ({
 
 vi.mock("../lib/browserPlayback", () => ({
   getSessionModeEstimateSeconds: vi.fn(() => null),
-  isIOSMobileBrowser: vi.fn(() => false),
+  isIOSMobileBrowser: vi.fn(() => mockBrowserState.iosMobile),
   isHlsSessionPayload: vi.fn(() => false),
   resolveBrowserPlaybackSessionRoot: vi.fn(() => null),
 }));
@@ -178,7 +181,19 @@ function detailItem(overrides = {}) {
 }
 
 
-function mockApiForDetail(item) {
+const defaultUserSettings = {
+  media_library_reference_shared_default_value: "",
+  media_library_reference_private_value: "",
+  media_library_reference_effective_value: "",
+  media_library_reference_effective_source: "shared_default",
+  media_library_reference_effective_label: "Shared default",
+};
+
+function mockApiForDetail(item, options = {}) {
+  const userSettings = {
+    ...defaultUserSettings,
+    ...(options.userSettings || {}),
+  };
   apiRequest.mockImplementation((requestPath) => {
     if (requestPath === "/api/library/item/42") {
       return Promise.resolve(item);
@@ -194,11 +209,7 @@ function mockApiForDetail(item) {
       return Promise.resolve({ status: "ready", reason: "", mode: "direct" });
     }
     if (requestPath === "/api/user-settings") {
-      return Promise.resolve({
-        media_library_reference_shared_default_value: "/media/shared",
-        media_library_reference_private_value: "",
-        media_library_reference_effective_value: "/media/shared",
-      });
+      return Promise.resolve(userSettings);
     }
     if (requestPath === "/api/admin/media-library-reference") {
       return Promise.resolve({
@@ -206,13 +217,16 @@ function mockApiForDetail(item) {
         default_value: "/media/shared",
       });
     }
+    if (requestPath === "/api/native-playback/42/session" && options.nativeSession) {
+      return Promise.resolve(options.nativeSession);
+    }
     return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
   });
 }
 
 
-function renderDetailPage(item) {
-  mockApiForDetail(item);
+function renderDetailPage(item, options = {}) {
+  mockApiForDetail(item, options);
   render(
     <MemoryRouter initialEntries={["/library/item/42"]}>
       <Routes>
@@ -235,6 +249,9 @@ describe("DetailPage source metadata privacy", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/");
+    mockBrowserState.iosMobile = false;
     mockAuthState.user = {
       id: 2,
       username: "viewer",
@@ -254,6 +271,48 @@ describe("DetailPage source metadata privacy", () => {
     expect(screen.getByRole("button", { name: "Download movie" })).toBeInTheDocument();
   });
 
+  test("standard users see private reference and safe effective labels without shared default path", async () => {
+    renderDetailPage(detailItem(), {
+      userSettings: {
+        media_library_reference_shared_default_value: "",
+        media_library_reference_private_value: "",
+        media_library_reference_effective_value: "",
+        media_library_reference_effective_source: "shared_default",
+        media_library_reference_effective_label: "Shared default",
+      },
+    });
+
+    await openInfoModal();
+    const dialog = screen.getByRole("dialog", { name: "Privacy Movie" });
+
+    expect(within(dialog).queryByText("Shared default", { selector: ".detail-list span" })).not.toBeInTheDocument();
+    expect(within(dialog).getByText("My private reference")).toBeInTheDocument();
+    expect(within(dialog).getByText("Not set")).toBeInTheDocument();
+    expect(within(dialog).getByText("Using now")).toBeInTheDocument();
+    expect(within(dialog).getByText("Shared default")).toBeInTheDocument();
+    expect(within(dialog).queryByText("/media/shared")).not.toBeInTheDocument();
+  });
+
+  test("standard users see their private reference and a plain effective source label", async () => {
+    renderDetailPage(detailItem(), {
+      userSettings: {
+        media_library_reference_shared_default_value: "",
+        media_library_reference_private_value: "Alice Shelf A",
+        media_library_reference_effective_value: "Alice Shelf A",
+        media_library_reference_effective_source: "private_reference",
+        media_library_reference_effective_label: "My private reference",
+      },
+    });
+
+    await openInfoModal();
+    const dialog = screen.getByRole("dialog", { name: "Privacy Movie" });
+
+    expect(within(dialog).queryByText("Shared default", { selector: ".detail-list span" })).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Alice Shelf A")).toBeInTheDocument();
+    expect(within(dialog).getByText("My private reference", { selector: "p" })).toBeInTheDocument();
+    expect(within(dialog).queryByText("/media/shared")).not.toBeInTheDocument();
+  });
+
   test("admins still see source file metadata in the info modal", async () => {
     mockAuthState.user = {
       id: 1,
@@ -267,5 +326,91 @@ describe("DetailPage source metadata privacy", () => {
     expect(screen.getByText("Source file")).toBeInTheDocument();
     expect(screen.getByText("Privacy.Movie.2026.Source.Release.mkv")).toBeInTheDocument();
     await waitFor(() => expect(apiRequest).toHaveBeenCalledWith("/api/admin/media-library-reference"));
+  });
+
+  test("Infuse callback restores fallback URL into React state and clears sessionStorage", async () => {
+    mockBrowserState.iosMobile = true;
+    const playbackUrl = "https://elvern.test/api/native-playback/session/s1/stream?token=secret";
+    const launchUrl = `infuse://x-callback-url/play?url=${encodeURIComponent(playbackUrl)}`;
+    window.sessionStorage.setItem(
+      "elvern-ios-handoff:42:infuse",
+      JSON.stringify({
+        itemId: "42",
+        app: "infuse",
+        launchUrl,
+        playbackUrl,
+        savedAt: Date.now(),
+      }),
+    );
+    window.history.replaceState({}, "", "/library/item/42?ios_app=infuse&ios_result=error&errorMessage=Nope");
+
+    renderDetailPage(detailItem());
+
+    expect(await screen.findByDisplayValue(playbackUrl)).toBeInTheDocument();
+    expect(screen.getByText("Infuse handoff failed: Nope")).toBeInTheDocument();
+    expect(window.sessionStorage.getItem("elvern-ios-handoff:42:infuse")).toBeNull();
+  });
+
+  test("Infuse launch stores only the guarded fallback handoff state", async () => {
+    const assignSpy = vi.spyOn(iosExternalAppNavigator, "assign").mockImplementation(() => {});
+    mockBrowserState.iosMobile = true;
+    const playbackUrl = "https://elvern.test/api/native-playback/session/s1/stream?token=secret";
+
+    renderDetailPage(detailItem(), {
+      nativeSession: {
+        session_id: "s1",
+        stream_url: playbackUrl,
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open in Infuse (Pro)" }));
+
+    await waitFor(() => {
+      expect(window.sessionStorage.getItem("elvern-ios-handoff:42:infuse")).not.toBeNull();
+    });
+    const saved = JSON.parse(window.sessionStorage.getItem("elvern-ios-handoff:42:infuse"));
+    expect(saved).toMatchObject({
+      itemId: "42",
+      app: "infuse",
+      playbackUrl,
+    });
+    expect(saved.launchUrl).toContain("infuse://x-callback-url/play?");
+    expect(assignSpy).toHaveBeenCalledWith(saved.launchUrl);
+  });
+
+  test("VLC launch does not store an iOS handoff fallback", async () => {
+    const assignSpy = vi.spyOn(iosExternalAppNavigator, "assign").mockImplementation(() => {});
+    mockBrowserState.iosMobile = true;
+    const playbackUrl = "https://elvern.test/api/native-playback/session/s1/stream?token=secret";
+
+    renderDetailPage(detailItem(), {
+      nativeSession: {
+        session_id: "s1",
+        stream_url: playbackUrl,
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open in VLC" }));
+
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/native-playback/42/session",
+      expect.objectContaining({
+        data: expect.objectContaining({ external_player: "vlc" }),
+      }),
+    ));
+    expect(window.sessionStorage.getItem("elvern-ios-handoff:42:infuse")).toBeNull();
+    expect(window.sessionStorage.getItem("elvern-ios-handoff:42:vlc")).toBeNull();
+    expect(assignSpy).toHaveBeenCalledWith(expect.stringContaining("vlc-x-callback://x-callback-url/stream?"));
+  });
+
+  test("VLC callback does not use Infuse sessionStorage fallback", async () => {
+    mockBrowserState.iosMobile = true;
+    window.history.replaceState({}, "", "/library/item/42?ios_app=vlc&ios_result=error");
+
+    renderDetailPage(detailItem());
+
+    await screen.findByText("VLC could not continue this handoff. Try the VLC button again.");
+    expect(window.sessionStorage.getItem("elvern-ios-handoff:42:vlc")).toBeNull();
+    expect(screen.queryByText("Copy short-lived playback URL")).not.toBeInTheDocument();
   });
 });

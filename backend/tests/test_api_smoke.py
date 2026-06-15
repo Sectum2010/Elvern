@@ -2573,8 +2573,11 @@ def test_standard_user_private_media_library_reference_uses_shared_default_and_s
     alice_initial = client.get("/api/user-settings")
     assert alice_initial.status_code == 200
     assert alice_initial.json()["media_library_reference_private_value"] is None
-    assert alice_initial.json()["media_library_reference_shared_default_value"] == str(replacement_path)
-    assert alice_initial.json()["media_library_reference_effective_value"] == str(replacement_path)
+    assert alice_initial.json()["media_library_reference_shared_default_value"] == ""
+    assert alice_initial.json()["media_library_reference_effective_value"] == ""
+    assert alice_initial.json()["media_library_reference_effective_source"] == "shared_default"
+    assert alice_initial.json()["media_library_reference_effective_label"] == "Shared default"
+    assert str(replacement_path) not in alice_initial.text
 
     alice_update = client.patch(
         "/api/user-settings",
@@ -2582,16 +2585,22 @@ def test_standard_user_private_media_library_reference_uses_shared_default_and_s
     )
     assert alice_update.status_code == 200
     assert alice_update.json()["media_library_reference_private_value"] == "Alice Shelf A"
-    assert alice_update.json()["media_library_reference_shared_default_value"] == str(replacement_path)
+    assert alice_update.json()["media_library_reference_shared_default_value"] == ""
     assert alice_update.json()["media_library_reference_effective_value"] == "Alice Shelf A"
+    assert alice_update.json()["media_library_reference_effective_source"] == "private_reference"
+    assert alice_update.json()["media_library_reference_effective_label"] == "My private reference"
+    assert str(replacement_path) not in alice_update.text
     _logout(client)
 
     _login(client, username="bob-reference", password=bob_password)
     bob_initial = client.get("/api/user-settings")
     assert bob_initial.status_code == 200
     assert bob_initial.json()["media_library_reference_private_value"] is None
-    assert bob_initial.json()["media_library_reference_shared_default_value"] == str(replacement_path)
-    assert bob_initial.json()["media_library_reference_effective_value"] == str(replacement_path)
+    assert bob_initial.json()["media_library_reference_shared_default_value"] == ""
+    assert bob_initial.json()["media_library_reference_effective_value"] == ""
+    assert bob_initial.json()["media_library_reference_effective_source"] == "shared_default"
+    assert bob_initial.json()["media_library_reference_effective_label"] == "Shared default"
+    assert str(replacement_path) not in bob_initial.text
     _logout(client)
 
     _login(client, username="alice-reference", password=alice_password)
@@ -2599,6 +2608,9 @@ def test_standard_user_private_media_library_reference_uses_shared_default_and_s
     assert alice_repeat.status_code == 200
     assert alice_repeat.json()["media_library_reference_private_value"] == "Alice Shelf A"
     assert alice_repeat.json()["media_library_reference_effective_value"] == "Alice Shelf A"
+    assert alice_repeat.json()["media_library_reference_effective_source"] == "private_reference"
+    assert alice_repeat.json()["media_library_reference_effective_label"] == "My private reference"
+    assert str(replacement_path) not in alice_repeat.text
 
     alice_clear = client.patch(
         "/api/user-settings",
@@ -2606,8 +2618,11 @@ def test_standard_user_private_media_library_reference_uses_shared_default_and_s
     )
     assert alice_clear.status_code == 200
     assert alice_clear.json()["media_library_reference_private_value"] is None
-    assert alice_clear.json()["media_library_reference_shared_default_value"] == str(replacement_path)
-    assert alice_clear.json()["media_library_reference_effective_value"] == str(replacement_path)
+    assert alice_clear.json()["media_library_reference_shared_default_value"] == ""
+    assert alice_clear.json()["media_library_reference_effective_value"] == ""
+    assert alice_clear.json()["media_library_reference_effective_source"] == "shared_default"
+    assert alice_clear.json()["media_library_reference_effective_label"] == "Shared default"
+    assert str(replacement_path) not in alice_clear.text
     _logout(client)
 
     _login(

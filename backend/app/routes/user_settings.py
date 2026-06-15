@@ -18,7 +18,31 @@ from ..services.user_settings_service import (
 router = APIRouter(prefix="/api/user-settings", tags=["user-settings"])
 
 
-def _to_user_settings_response(payload: dict[str, object]) -> UserSettingsResponse:
+def _media_library_reference_source(payload: dict[str, object]) -> str:
+    if str(payload.get("media_library_reference_private_value") or "").strip():
+        return "private_reference"
+    return "shared_default"
+
+
+def _media_library_reference_label(source: str) -> str:
+    if source == "private_reference":
+        return "My private reference"
+    return "Shared default"
+
+
+def _to_user_settings_response(payload: dict[str, object], *, user_role: str) -> UserSettingsResponse:
+    media_reference_source = _media_library_reference_source(payload)
+    media_reference_private_value = payload["media_library_reference_private_value"]
+    if user_role == "standard_user":
+        media_reference_shared_default_value = ""
+        media_reference_effective_value = (
+            str(media_reference_private_value)
+            if media_reference_source == "private_reference" and media_reference_private_value is not None
+            else ""
+        )
+    else:
+        media_reference_shared_default_value = str(payload["media_library_reference_shared_default_value"])
+        media_reference_effective_value = str(payload["media_library_reference_effective_value"])
     return UserSettingsResponse(
         hide_duplicate_movies=bool(payload["hide_duplicate_movies"]),
         hide_recently_added=bool(payload["hide_recently_added"]),
@@ -33,16 +57,18 @@ def _to_user_settings_response(payload: dict[str, object]) -> UserSettingsRespon
         background_gradient_accent=str(payload["background_gradient_accent"]),
         background_solid_color=str(payload["background_solid_color"]),
         background_photo_url=payload["background_photo_url"],
-        media_library_reference_private_value=payload["media_library_reference_private_value"],
-        media_library_reference_shared_default_value=str(payload["media_library_reference_shared_default_value"]),
-        media_library_reference_effective_value=str(payload["media_library_reference_effective_value"]),
+        media_library_reference_private_value=media_reference_private_value,
+        media_library_reference_shared_default_value=media_reference_shared_default_value,
+        media_library_reference_effective_value=media_reference_effective_value,
+        media_library_reference_effective_source=media_reference_source,
+        media_library_reference_effective_label=_media_library_reference_label(media_reference_source),
     )
 
 
 @router.get("", response_model=UserSettingsResponse)
 def read_user_settings(request: Request, user=CurrentUser) -> UserSettingsResponse:
     payload = get_user_settings(request.app.state.settings, user_id=user.id)
-    return _to_user_settings_response(payload)
+    return _to_user_settings_response(payload, user_role=user.role)
 
 
 @router.patch("", response_model=UserSettingsResponse)
@@ -76,7 +102,7 @@ def patch_user_settings(
         )
     except UserSettingsValidationError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    return _to_user_settings_response(updated)
+    return _to_user_settings_response(updated, user_role=user.role)
 
 
 @router.get("/background-photo")
@@ -107,10 +133,10 @@ async def upload_background_photo(
         )
     except UserSettingsValidationError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    return _to_user_settings_response(updated)
+    return _to_user_settings_response(updated, user_role=user.role)
 
 
 @router.delete("/background-photo", response_model=UserSettingsResponse)
 def remove_background_photo(request: Request, user=CurrentUser) -> UserSettingsResponse:
     updated = delete_user_background_photo(request.app.state.settings, user_id=user.id)
-    return _to_user_settings_response(updated)
+    return _to_user_settings_response(updated, user_role=user.role)

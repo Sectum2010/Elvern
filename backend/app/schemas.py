@@ -342,6 +342,8 @@ class UserSettingsResponse(BaseModel):
     media_library_reference_private_value: str | None = None
     media_library_reference_shared_default_value: str = ""
     media_library_reference_effective_value: str = ""
+    media_library_reference_effective_source: Literal["shared_default", "private_reference"] = "shared_default"
+    media_library_reference_effective_label: str = "Shared default"
 
 
 class UserSettingsUpdateRequest(BaseModel):

@@ -1055,6 +1055,8 @@ export function SettingsPage() {
     media_library_reference_private_value: null,
     media_library_reference_shared_default_value: "",
     media_library_reference_effective_value: "",
+    media_library_reference_effective_source: "shared_default",
+    media_library_reference_effective_label: "Shared default",
   });
   const [backgroundDraft, setBackgroundDraft] = useState(DEFAULT_BACKGROUND_SETTINGS);
   const [backgroundSaving, setBackgroundSaving] = useState(false);

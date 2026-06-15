@@ -51,6 +51,13 @@ Use this checklist for security-sensitive Elvern changes, especially after CodeQ
 - Prefer media item IDs, endpoint names, return codes, and exception types over raw paths or exception strings.
 - Do not log ffprobe stdout/stderr, env dumps, request tokens, or filesystem paths that reveal private media names.
 
+## Media Reference And Token URL Privacy
+
+- Standard-user responses must not include shared default or effective host paths for media library references.
+- Token-bearing native stream URLs are allowed only where external app handoff requires them.
+- The Infuse fallback handoff is the only permitted browser storage exception for token-bearing playback URLs.
+- Download token URL behavior needs a separate audit before any behavior change.
+
 ## Browser Security Headers
 
 - Baseline global headers should stay low-regression: nosniff, no-referrer, no framing, and narrow permissions policy.

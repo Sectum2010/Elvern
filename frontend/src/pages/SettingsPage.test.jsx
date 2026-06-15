@@ -51,6 +51,8 @@ const defaultSettings = {
   media_library_reference_private_value: null,
   media_library_reference_shared_default_value: "",
   media_library_reference_effective_value: "",
+  media_library_reference_effective_source: "shared_default",
+  media_library_reference_effective_label: "Shared default",
 };
 
 function mockApi(initialSettings = defaultSettings, options = {}) {

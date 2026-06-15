@@ -96,6 +96,8 @@ const PROVIDER_ACTION_DESKTOP_VLC = "desktop_vlc_handoff";
 const PROVIDER_ACTION_IOS_VLC = "ios_external_vlc_handoff";
 const PROVIDER_ACTION_IOS_INFUSE = "ios_external_infuse_handoff";
 const PROVIDER_RECONNECT_CONTINUE_LABEL = "Continue anyway";
+const IOS_INFUSE_HANDOFF_STORAGE_PREFIX = "elvern-ios-handoff";
+const IOS_INFUSE_HANDOFF_STORAGE_MAX_AGE_MS = 15 * 60 * 1000;
 const DESKTOP_PLAYBACK_HIDDEN_NOTE_PREFIXES = [
   "No mapped direct source is configured",
   "On the Elvern host, clicking Open in VLC launches the installed VLC app directly",
@@ -300,6 +302,12 @@ function buildIosVlcLaunchUrl(streamUrl) {
   return `vlc-x-callback://x-callback-url/stream?${params.toString()}`;
 }
 
+export const iosExternalAppNavigator = {
+  assign(launchUrl) {
+    window.location.assign(launchUrl);
+  },
+};
+
 function buildIosExternalAppCallbackUrl({ app, result }) {
   if (typeof window === "undefined") {
     return "";
@@ -310,6 +318,19 @@ function buildIosExternalAppCallbackUrl({ app, result }) {
   callbackUrl.searchParams.delete("errorCode");
   callbackUrl.searchParams.delete("errorMessage");
   return callbackUrl.toString();
+}
+
+function readIosExternalAppCallbackFromLocation() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const currentUrl = new URL(window.location.href);
+  const app = currentUrl.searchParams.get("ios_app");
+  const result = currentUrl.searchParams.get("ios_result");
+  if (!result || (app !== "infuse" && app !== "vlc")) {
+    return null;
+  }
+  return { app, result };
 }
 
 function detectIosExternalCallerSurface() {
@@ -458,16 +479,20 @@ function PrewarmPreparedThruObserver({
   return null;
 }
 
-function saveIosExternalAppLaunchState({ itemId, app, launchUrl, playbackUrl }) {
-  if (typeof window === "undefined" || !itemId || !app) {
+function infuseFallbackStorageKey(itemId) {
+  return `${IOS_INFUSE_HANDOFF_STORAGE_PREFIX}:${itemId}:infuse`;
+}
+
+function saveInfuseFallbackHandoffState({ itemId, launchUrl, playbackUrl }) {
+  if (typeof window === "undefined" || !itemId) {
     return;
   }
   try {
     window.sessionStorage.setItem(
-      `elvern-ios-handoff:${itemId}:${app}`,
+      infuseFallbackStorageKey(itemId),
       JSON.stringify({
         itemId,
-        app,
+        app: "infuse",
         launchUrl,
         playbackUrl,
         savedAt: Date.now(),
@@ -478,20 +503,24 @@ function saveIosExternalAppLaunchState({ itemId, app, launchUrl, playbackUrl }) 
   }
 }
 
-function readIosExternalAppLaunchState({ itemId, app, maxAgeMs = 15 * 60 * 1000 }) {
-  if (typeof window === "undefined" || !itemId || !app) {
+function readInfuseFallbackHandoffState({ itemId, maxAgeMs = IOS_INFUSE_HANDOFF_STORAGE_MAX_AGE_MS }) {
+  if (typeof window === "undefined" || !itemId) {
     return null;
   }
   try {
-    const raw = window.sessionStorage.getItem(`elvern-ios-handoff:${itemId}:${app}`);
+    const raw = window.sessionStorage.getItem(infuseFallbackStorageKey(itemId));
     if (!raw) {
       return null;
     }
     const payload = JSON.parse(raw);
-    if (!payload || payload.itemId !== itemId || payload.app !== app) {
+    if (!payload || payload.itemId !== itemId || payload.app !== "infuse") {
       return null;
     }
-    if (Date.now() - Number(payload.savedAt || 0) > maxAgeMs) {
+    const cappedMaxAgeMs = Math.min(
+      Number(maxAgeMs) || IOS_INFUSE_HANDOFF_STORAGE_MAX_AGE_MS,
+      IOS_INFUSE_HANDOFF_STORAGE_MAX_AGE_MS,
+    );
+    if (Date.now() - Number(payload.savedAt || 0) > cappedMaxAgeMs) {
       return null;
     }
     return payload;
@@ -500,12 +529,12 @@ function readIosExternalAppLaunchState({ itemId, app, maxAgeMs = 15 * 60 * 1000 
   }
 }
 
-function clearIosExternalAppLaunchState({ itemId, app }) {
-  if (typeof window === "undefined" || !itemId || !app) {
+function clearInfuseFallbackHandoffState({ itemId }) {
+  if (typeof window === "undefined" || !itemId) {
     return;
   }
   try {
-    window.sessionStorage.removeItem(`elvern-ios-handoff:${itemId}:${app}`);
+    window.sessionStorage.removeItem(infuseFallbackStorageKey(itemId));
   } catch {
     // Ignore sessionStorage cleanup failures.
   }
@@ -617,6 +646,10 @@ export function DetailPage() {
   const showIosTransportDebug = iosTransportDebug && isIosTransportDebugEnabled(location.search);
   const localDevLoopback = isLocalDevelopmentLoopback(desktopPlatform);
   const desktopDeviceId = useMemo(() => getOrCreateDeviceId(), []);
+  const iosExternalAppCallback = useMemo(
+    () => (iosMobile ? readIosExternalAppCallbackFromLocation() : null),
+    [iosMobile, itemId],
+  );
   const isAdmin = user?.role === "admin";
 
   useEffect(() => {
@@ -1116,23 +1149,22 @@ export function DetailPage() {
   }, [activeLibraryReturn]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !iosMobile) {
+    if (typeof window === "undefined" || !iosExternalAppCallback) {
       return;
     }
     const currentUrl = new URL(window.location.href);
-    const app = currentUrl.searchParams.get("ios_app");
-    const result = currentUrl.searchParams.get("ios_result");
-    if (!result || (app !== "infuse" && app !== "vlc")) {
-      return;
-    }
+    const { app, result } = iosExternalAppCallback;
     const savedLaunch = app === "infuse"
-      ? readIosExternalAppLaunchState({ itemId, app: "infuse" })
+      ? readInfuseFallbackHandoffState({ itemId })
       : null;
     if (savedLaunch?.launchUrl) {
       setIosAppLaunchUrl(savedLaunch.launchUrl);
     }
     if (savedLaunch?.playbackUrl) {
       setIosAppPlaybackUrl(savedLaunch.playbackUrl);
+    }
+    if (app === "infuse") {
+      clearInfuseFallbackHandoffState({ itemId });
     }
     const appLabel = app === "infuse" ? "Infuse" : "VLC";
     setIosAppTarget(appLabel);
@@ -1159,7 +1191,7 @@ export function DetailPage() {
     currentUrl.searchParams.delete("errorCode");
     currentUrl.searchParams.delete("errorMessage");
     window.history.replaceState({}, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
-  }, [iosMobile, itemId]);
+  }, [iosExternalAppCallback, itemId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1207,13 +1239,16 @@ export function DetailPage() {
 
         const payload = await apiRequest("/api/user-settings");
         if (!cancelled) {
+          const effectiveSource = payload.media_library_reference_effective_source || (
+            payload.media_library_reference_private_value ? "private_reference" : "shared_default"
+          );
           setMediaLibraryReferenceInfo({
-            sharedDefault: payload.media_library_reference_shared_default_value || "Not set",
+            sharedDefault: null,
             privateValue: payload.media_library_reference_private_value || null,
-            effectiveValue:
-              payload.media_library_reference_effective_value
-              || payload.media_library_reference_shared_default_value
-              || "Not set",
+            effectiveSource,
+            effectiveLabel:
+              payload.media_library_reference_effective_label
+              || (effectiveSource === "private_reference" ? "My private reference" : "Shared default"),
           });
         }
       } catch {
@@ -1304,7 +1339,9 @@ export function DetailPage() {
       prepareControllerForLoad(itemId);
       setLoading(true);
       setError("");
-      resetIosExternalAppState();
+      if (!iosExternalAppCallback) {
+        resetIosExternalAppState();
+      }
       setGlobalHiddenActionMessage("");
       setGlobalHiddenActionError("");
       setDesktopPlayback(null);
@@ -1395,7 +1432,7 @@ export function DetailPage() {
       clearPlaybackResources();
       resetMobilePlaybackState();
     };
-  }, [desktopPlatform, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
+  }, [desktopPlatform, iosExternalAppCallback, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
 
   useEffect(() => {
     if (!item?.id) {
@@ -1821,7 +1858,7 @@ export function DetailPage() {
     if (!iosAppLaunchUrl) {
       return;
     }
-    window.location.assign(iosAppLaunchUrl);
+    iosExternalAppNavigator.assign(iosAppLaunchUrl);
   }
 
   async function handleCopyIosPlaybackUrl() {
@@ -1917,9 +1954,8 @@ export function DetailPage() {
       setIosAppLaunchUrl(launchUrl);
       setIosAppPlaybackUrl(sessionPayload.stream_url);
       if (targetApp === "infuse") {
-        saveIosExternalAppLaunchState({
+        saveInfuseFallbackHandoffState({
           itemId,
-          app: "infuse",
           launchUrl,
           playbackUrl: sessionPayload.stream_url,
         });
@@ -1929,11 +1965,11 @@ export function DetailPage() {
           ? "Trying to open Infuse with a short-lived Elvern playback URL. Infuse may require Infuse Pro for some formats, and if it cannot continue the handoff Elvern will bring you back here with the fallback URL still ready."
           : "Trying to open VLC for original-quality playback with a short-lived Elvern URL. This works best on strong home or local Wi-Fi. For weaker or less stable connections, use Lite Playback or Full Playback in the browser.",
       );
-      window.location.assign(launchUrl);
+      iosExternalAppNavigator.assign(launchUrl);
     } catch (requestError) {
       const providerAuthRequirement = getProviderAuthRequirement(requestError);
       if (targetApp === "infuse") {
-        clearIosExternalAppLaunchState({ itemId, app: "infuse" });
+        clearInfuseFallbackHandoffState({ itemId });
       }
       setIosTransportDebug(null);
       if (providerAuthRequirement) {
@@ -2848,7 +2884,9 @@ export function DetailPage() {
   const myPrivateMediaLibraryReference = mediaLibraryReferenceInfo
     ? (mediaLibraryReferenceInfo.privateValue || "Not set")
     : "Loading...";
-  const effectiveMediaLibraryReference = mediaLibraryReferenceInfo?.effectiveValue || "Loading...";
+  const effectiveMediaLibraryReference = isAdmin
+    ? (mediaLibraryReferenceInfo?.effectiveValue || "Loading...")
+    : (mediaLibraryReferenceInfo?.effectiveLabel || "Loading...");
   const visibleDesktopPlaybackNotes = Array.isArray(desktopPlayback?.notes)
     ? desktopPlayback.notes.filter(
         (note) => !DESKTOP_PLAYBACK_HIDDEN_NOTE_PREFIXES.some((prefix) => note.startsWith(prefix)),
@@ -3664,12 +3702,6 @@ export function DetailPage() {
                     <div className="detail-reference-group">
                       <div className="detail-reference-group__item">
                         <div className="detail-list">
-                          <span>Shared default</span>
-                        </div>
-                        <p className="detail-path">{sharedMediaLibraryReference}</p>
-                      </div>
-                      <div className="detail-reference-group__item">
-                        <div className="detail-list">
                           <span>My private reference</span>
                         </div>
                         <p className="detail-path">{myPrivateMediaLibraryReference}</p>
@@ -3678,7 +3710,7 @@ export function DetailPage() {
                         <div className="detail-list">
                           <span>Using now</span>
                         </div>
-                        <p className="detail-path">{effectiveMediaLibraryReference}</p>
+                        <p>{effectiveMediaLibraryReference}</p>
                       </div>
                     </div>
                   )}
