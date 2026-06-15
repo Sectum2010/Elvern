@@ -17,7 +17,7 @@ from ..db import get_connection, utcnow_iso
 from ..media_stream import build_stream_response, ensure_media_path_within_root
 from ..models import AuthenticatedUser
 from ..progress import record_playback_event, save_progress
-from ..security import generate_session_token, hash_session_token
+from ..security import generate_session_token, hash_session_token, hash_token_hmac
 from .cloud_library_service import build_cloud_stream_response, refresh_cloud_media_item_metadata
 from .library_service import get_media_item_record
 from .log_identity_service import local_media_path_log_fingerprint, native_session_log_fingerprint
@@ -41,6 +41,7 @@ EXTERNAL_PLAYER_ACTIVE_STREAM_TTL_REFRESH_SECONDS = 60.0
 EXTERNAL_PLAYER_LOCAL_FILE_CHUNK_SIZE_BYTES = 2 * 1024 * 1024
 EXTERNAL_PLAYER_CLOUD_PROXY_CHUNK_SIZE_BYTES = 1024 * 1024
 ADMIN_NATIVE_STREAM_ACTIVE_SECONDS = 90.0
+NATIVE_PLAYBACK_ACCESS_HASH_PURPOSE = "native.playback.access"
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,43 @@ class NativePlaybackStreamPolicy:
     validation_interval_seconds: float
     ttl_refresh_interval_seconds: float
     chunk_size_bytes: int
+
+
+def _native_playback_access_token_hash(settings: Settings, access_token: str) -> str:
+    return hash_token_hmac(settings, purpose=NATIVE_PLAYBACK_ACCESS_HASH_PURPOSE, token=access_token)
+
+
+def _legacy_native_playback_access_token_hash(settings: Settings, access_token: str) -> str:
+    return hash_session_token(access_token, settings.session_secret)
+
+
+def _native_playback_access_token_hash_candidates(settings: Settings, access_token: str) -> tuple[str, str]:
+    return (
+        _native_playback_access_token_hash(settings, access_token),
+        _legacy_native_playback_access_token_hash(settings, access_token),
+    )
+
+
+def _maybe_rehash_native_playback_access_token(
+    connection,
+    settings: Settings,
+    *,
+    session_id: str,
+    access_token: str,
+    current_hash: str,
+) -> str:
+    token_hash = _native_playback_access_token_hash(settings, access_token)
+    if current_hash == token_hash:
+        return token_hash
+    connection.execute(
+        """
+        UPDATE native_playback_sessions
+        SET access_token_hash = ?
+        WHERE session_id = ? AND access_token_hash = ?
+        """,
+        (token_hash, session_id, current_hash),
+    )
+    return token_hash
 
 
 def inspect_native_playback_access(
@@ -72,7 +110,7 @@ def inspect_native_playback_access(
         payload["reason"] = "missing_access_token"
         return payload
 
-    token_hash = hash_session_token(access_token, settings.session_secret)
+    token_hash, legacy_token_hash = _native_playback_access_token_hash_candidates(settings, access_token)
     with get_connection(settings) as connection:
         row = connection.execute(
             """
@@ -121,7 +159,7 @@ def inspect_native_playback_access(
         }
     )
 
-    if str(row["access_token_hash"]) != token_hash:
+    if str(row["access_token_hash"]) not in {token_hash, legacy_token_hash}:
         payload["reason"] = "token_mismatch"
         return payload
     if row["closed_at"] is not None:
@@ -149,6 +187,15 @@ def inspect_native_playback_access(
 
     payload["reason"] = "allowed"
     payload["allowed"] = True
+    with get_connection(settings) as connection:
+        _maybe_rehash_native_playback_access_token(
+            connection,
+            settings,
+            session_id=session_id,
+            access_token=access_token,
+            current_hash=str(row["access_token_hash"]),
+        )
+        connection.commit()
     return payload
 
 
@@ -438,7 +485,7 @@ def create_native_playback_session(
 
     session_id = generate_session_token()
     access_token = generate_session_token()
-    access_token_hash = hash_session_token(access_token, settings.session_secret)
+    access_token_hash = _native_playback_access_token_hash(settings, access_token)
     now = datetime.now(timezone.utc)
     expires_at = _session_expiry(settings, now, client_name=client_name)
     now_iso = now.isoformat()
@@ -1069,12 +1116,13 @@ def _require_native_session(
     cleanup_native_playback_sessions(settings)
 
     now = datetime.now(timezone.utc)
-    token_hash = hash_session_token(access_token, settings.session_secret)
+    token_hash, legacy_token_hash = _native_playback_access_token_hash_candidates(settings, access_token)
     with get_connection(settings) as connection:
         row = connection.execute(
             """
             SELECT
                 n.session_id,
+                n.access_token_hash,
                 n.user_id,
                 n.media_item_id,
                 n.created_at,
@@ -1104,7 +1152,7 @@ def _require_native_session(
             LEFT JOIN sessions s ON s.id = n.auth_session_id
             JOIN users u ON u.id = n.user_id
             WHERE n.session_id = ?
-              AND n.access_token_hash = ?
+              AND n.access_token_hash IN (?, ?)
               AND n.closed_at IS NULL
               AND n.revoked_at IS NULL
               AND n.expires_at > ?
@@ -1113,9 +1161,10 @@ def _require_native_session(
                     s.revoked_at IS NULL
                 AND s.expires_at > ?
               ))
+            ORDER BY CASE n.access_token_hash WHEN ? THEN 0 ELSE 1 END
             LIMIT 1
             """,
-            (session_id, token_hash, now.isoformat(), now.isoformat()),
+            (session_id, token_hash, legacy_token_hash, now.isoformat(), now.isoformat(), token_hash),
         ).fetchone()
         if row is None:
             raise HTTPException(
@@ -1123,16 +1172,27 @@ def _require_native_session(
                 detail="Native playback session is invalid or has expired",
             )
 
+        current_hash = str(row["access_token_hash"])
         current_expires = row["expires_at"]
         if extend_ttl:
             current_expires = _session_expiry(settings, now, client_name=row["client_name"]).isoformat()
             connection.execute(
                 """
                 UPDATE native_playback_sessions
-                SET last_seen_at = ?, expires_at = ?
+                SET access_token_hash = ?, last_seen_at = ?, expires_at = ?
                 WHERE session_id = ?
+                  AND access_token_hash = ?
                 """,
-                (now.isoformat(), current_expires, session_id),
+                (token_hash, now.isoformat(), current_expires, session_id, current_hash),
+            )
+            connection.commit()
+        else:
+            _maybe_rehash_native_playback_access_token(
+                connection,
+                settings,
+                session_id=session_id,
+                access_token=access_token,
+                current_hash=current_hash,
             )
             connection.commit()
 
@@ -1202,18 +1262,18 @@ def _native_stream_access_still_valid(
     access_token: str,
     extend_ttl: bool = False,
 ) -> bool:
-    token_hash = hash_session_token(access_token, settings.session_secret)
+    token_hash, legacy_token_hash = _native_playback_access_token_hash_candidates(settings, access_token)
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT n.client_name
+                SELECT n.client_name, n.access_token_hash
             FROM native_playback_sessions n
             LEFT JOIN sessions s ON s.id = n.auth_session_id
             JOIN users u ON u.id = n.user_id
             WHERE n.session_id = ?
-              AND n.access_token_hash = ?
+              AND n.access_token_hash IN (?, ?)
               AND n.closed_at IS NULL
               AND n.revoked_at IS NULL
               AND n.expires_at > ?
@@ -1222,26 +1282,37 @@ def _native_stream_access_still_valid(
                     s.revoked_at IS NULL
                 AND s.expires_at > ?
               ))
+            ORDER BY CASE n.access_token_hash WHEN ? THEN 0 ELSE 1 END
             LIMIT 1
             """,
-            (session_id, token_hash, now_iso, now_iso),
+            (session_id, token_hash, legacy_token_hash, now_iso, now_iso, token_hash),
         ).fetchone()
         if row is not None and extend_ttl:
             connection.execute(
                 """
                 UPDATE native_playback_sessions
-                SET last_seen_at = ?, expires_at = ?
+                SET access_token_hash = ?, last_seen_at = ?, expires_at = ?
                 WHERE session_id = ?
                   AND access_token_hash = ?
                   AND closed_at IS NULL
                   AND revoked_at IS NULL
                 """,
                 (
+                    token_hash,
                     now_iso,
                     _session_expiry(settings, now, client_name=row["client_name"]).isoformat(),
                     session_id,
-                    token_hash,
+                    str(row["access_token_hash"]),
                 ),
+            )
+            connection.commit()
+        elif row is not None:
+            _maybe_rehash_native_playback_access_token(
+                connection,
+                settings,
+                session_id=session_id,
+                access_token=access_token,
+                current_hash=str(row["access_token_hash"]),
             )
             connection.commit()
     return row is not None

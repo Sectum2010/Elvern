@@ -11,7 +11,7 @@ from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..models import AuthenticatedUser
 from ..progress import save_progress
-from ..security import generate_session_token, hash_session_token
+from ..security import generate_session_token, hash_session_token, hash_token_hmac
 from .desktop_helper_service import (
     record_client_device_app_seen,
     record_helper_resolution,
@@ -33,6 +33,7 @@ from .media_age_access_service import assert_user_can_access_media_by_age
 logger = logging.getLogger(__name__)
 
 DIRECT_EXTERNAL_PROGRESS_SECONDS = 1.0
+DESKTOP_VLC_HANDOFF_ACCESS_HASH_PURPOSE = "desktop.vlc.handoff.access"
 
 
 def _desktop_handoff_target_log_details(target: object) -> dict[str, object]:
@@ -50,6 +51,43 @@ def _desktop_handoff_target_log_details(target: object) -> dict[str, object]:
         "target_kind": "path" if value else "unknown",
         "target_path_fingerprint": local_media_path_log_fingerprint(value),
     }
+
+
+def _desktop_vlc_handoff_access_token_hash(settings: Settings, access_token: str) -> str:
+    return hash_token_hmac(settings, purpose=DESKTOP_VLC_HANDOFF_ACCESS_HASH_PURPOSE, token=access_token)
+
+
+def _legacy_desktop_vlc_handoff_access_token_hash(settings: Settings, access_token: str) -> str:
+    return hash_session_token(access_token, settings.session_secret)
+
+
+def _desktop_vlc_handoff_access_token_hash_candidates(settings: Settings, access_token: str) -> tuple[str, str]:
+    return (
+        _desktop_vlc_handoff_access_token_hash(settings, access_token),
+        _legacy_desktop_vlc_handoff_access_token_hash(settings, access_token),
+    )
+
+
+def _maybe_rehash_desktop_vlc_handoff_access_token(
+    settings: Settings,
+    *,
+    handoff_id: str,
+    access_token: str,
+    current_hash: str,
+) -> None:
+    token_hash = _desktop_vlc_handoff_access_token_hash(settings, access_token)
+    if current_hash == token_hash:
+        return
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            UPDATE desktop_vlc_handoffs
+            SET access_token_hash = ?
+            WHERE handoff_id = ? AND access_token_hash = ?
+            """,
+            (token_hash, handoff_id, current_hash),
+        )
+        connection.commit()
 
 
 def cleanup_desktop_vlc_handoffs(settings: Settings) -> None:
@@ -82,7 +120,7 @@ def create_desktop_vlc_handoff(
 ) -> dict[str, object]:
     handoff_id = generate_session_token()
     access_token = generate_session_token()
-    access_token_hash = hash_session_token(access_token, settings.session_secret)
+    access_token_hash = _desktop_vlc_handoff_access_token_hash(settings, access_token)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=settings.playback_token_ttl_seconds)
     now_iso = now.isoformat()
@@ -292,13 +330,15 @@ def _require_desktop_vlc_handoff(
     access_token: str,
 ) -> dict[str, object]:
     cleanup_desktop_vlc_handoffs(settings)
-    token_hash = hash_session_token(access_token, settings.session_secret)
+    token_hash, legacy_token_hash = _desktop_vlc_handoff_access_token_hash_candidates(settings, access_token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
         row = connection.execute(
             """
             SELECT
                 h.handoff_id,
+                h.access_token_hash,
+                h.auth_session_id,
                 h.media_item_id,
                 h.platform,
                 h.strategy,
@@ -317,13 +357,14 @@ def _require_desktop_vlc_handoff(
             JOIN media_items m ON m.id = h.media_item_id
             JOIN users u ON u.id = h.user_id
             WHERE h.handoff_id = ?
-              AND h.access_token_hash = ?
+              AND h.access_token_hash IN (?, ?)
               AND h.expires_at > ?
               AND h.revoked_at IS NULL
               AND u.enabled = 1
+            ORDER BY CASE h.access_token_hash WHEN ? THEN 0 ELSE 1 END
             LIMIT 1
             """,
-            (handoff_id, token_hash, now),
+            (handoff_id, token_hash, legacy_token_hash, now, token_hash),
         ).fetchone()
     if row is None:
         raise HTTPException(
@@ -341,6 +382,12 @@ def _require_desktop_vlc_handoff(
         ),
         item_id=int(row["media_item_id"]),
         purpose="desktop_playback",
+    )
+    _maybe_rehash_desktop_vlc_handoff_access_token(
+        settings,
+        handoff_id=handoff_id,
+        access_token=access_token,
+        current_hash=str(row["access_token_hash"]),
     )
     return dict(row)
 

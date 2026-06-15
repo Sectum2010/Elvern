@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import inspect
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi import HTTPException, Response
@@ -49,6 +51,14 @@ from backend.app.services.account_access_service import (
 from backend.app.services.admin_service import create_user, delete_user, update_user
 from backend.app.services.log_redaction import redact_download_session_urls
 from backend.app.services.media_age_access_service import set_media_age_requirement
+from backend.app.services.desktop_helper_service import (
+    create_desktop_helper_verification,
+    resolve_desktop_helper_verification,
+)
+from backend.app.services.desktop_playback_handoff_service import (
+    create_desktop_vlc_handoff as create_desktop_vlc_handoff_record,
+    resolve_desktop_vlc_handoff as resolve_desktop_vlc_handoff_record,
+)
 from backend.app.services.native_playback_service import (
     _build_native_playback_stream_policy,
     create_native_playback_session,
@@ -105,6 +115,12 @@ def _issue_user_session(settings, *, username: str, password: str):
 
 def _auth_session_hash(settings, token: str) -> str:
     return hash_token_hmac(settings, purpose=auth_module.AUTH_SESSION_TOKEN_HASH_PURPOSE, token=token)
+
+
+def _query_param(url: object, name: str) -> str:
+    values = parse_qs(urlsplit(str(url)).query).get(name)
+    assert values
+    return values[0]
 
 
 def _create_media_item(settings, *, relative_name: str = "movie.mp4") -> dict[str, object]:
@@ -332,18 +348,41 @@ def test_native_playback_session_provenance_static_guards() -> None:
     assert "created_from_auth_session_id" not in NativePlaybackSessionResponse.model_fields
 
 
-def test_f10_keeps_unmigrated_token_surfaces_on_existing_hash_paths() -> None:
+def test_f10d_token_surfaces_use_scoped_hmac_with_legacy_fallbacks() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    phase_d_legacy_helper_files = (
-        "backend/app/services/native_playback_service.py",
-        "backend/app/services/desktop_playback_handoff_service.py",
-        "backend/app/services/desktop_helper_service.py",
-    )
-    for relative_path in phase_d_legacy_helper_files:
+    phase_d_surfaces = {
+        "backend/app/services/native_playback_service.py": {
+            "purpose": 'NATIVE_PLAYBACK_ACCESS_HASH_PURPOSE = "native.playback.access"',
+            "hmac_helper": "_native_playback_access_token_hash",
+            "legacy_helper": "_legacy_native_playback_access_token_hash",
+            "candidates_helper": "_native_playback_access_token_hash_candidates",
+            "rehash_helper": "_maybe_rehash_native_playback_access_token",
+        },
+        "backend/app/services/desktop_playback_handoff_service.py": {
+            "purpose": 'DESKTOP_VLC_HANDOFF_ACCESS_HASH_PURPOSE = "desktop.vlc.handoff.access"',
+            "hmac_helper": "_desktop_vlc_handoff_access_token_hash",
+            "legacy_helper": "_legacy_desktop_vlc_handoff_access_token_hash",
+            "candidates_helper": "_desktop_vlc_handoff_access_token_hash_candidates",
+            "rehash_helper": "_maybe_rehash_desktop_vlc_handoff_access_token",
+        },
+        "backend/app/services/desktop_helper_service.py": {
+            "purpose": 'DESKTOP_HELPER_VERIFICATION_ACCESS_HASH_PURPOSE = "desktop.helper.verification.access"',
+            "hmac_helper": "_desktop_helper_verification_access_token_hash",
+            "legacy_helper": "_legacy_desktop_helper_verification_access_token_hash",
+            "candidates_helper": "_desktop_helper_verification_access_token_hash_candidates",
+        },
+    }
+    for relative_path, expected in phase_d_surfaces.items():
         source = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert expected["purpose"] in source
+        assert expected["hmac_helper"] in source
+        assert expected["legacy_helper"] in source
+        assert expected["candidates_helper"] in source
         assert "hash_session_token" in source
-        assert "hash_token_hmac" not in source
+        assert "hash_token_hmac" in source
         assert "verify_hmac_token_hash" not in source
+        if "rehash_helper" in expected:
+            assert expected["rehash_helper"] in source
 
     account_access_source = (repo_root / "backend/app/services/account_access_service.py").read_text(
         encoding="utf-8"
@@ -878,6 +917,515 @@ def test_external_player_native_playback_survives_parent_session_revoke(initiali
         access_token=str(native_session["access_token"]),
     )
     assert payload["session_id"] == native_session["session_id"]
+
+
+def test_f10d_native_playback_uses_hmac_and_lazy_rehashes_legacy_access_token(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="native-f10d-hmac")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="native-f10d-hmac.mp4")
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=session_user.session_id,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Pytest Native Handoff",
+    )
+    access_token = str(native_session["access_token"])
+    session_id = str(native_session["session_id"])
+    hmac_hash = hash_token_hmac(
+        initialized_settings,
+        purpose="native.playback.access",
+        token=access_token,
+    )
+    legacy_hash = hash_session_token(access_token, initialized_settings.session_secret)
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT access_token_hash, auth_session_id, created_at, expires_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["access_token_hash"] == hmac_hash
+    assert str(row["access_token_hash"]).startswith(TOKEN_HASH_PREFIX)
+    assert row["access_token_hash"] != legacy_hash
+    assert access_token not in str(row["access_token_hash"])
+    assert str(native_session["stream_url"]).endswith(
+        f"/api/native-playback/session/{session_id}/stream?token={access_token}"
+    )
+    assert str(native_session["details_url"]).endswith(
+        f"/api/native-playback/session/{session_id}?token={access_token}"
+    )
+
+    original_auth_session_id = row["auth_session_id"]
+    original_created_at = row["created_at"]
+    original_expires_at = row["expires_at"]
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE native_playback_sessions
+            SET access_token_hash = ?
+            WHERE session_id = ?
+            """,
+            (legacy_hash, session_id),
+        )
+        connection.commit()
+
+    payload = get_native_playback_session_payload(
+        initialized_settings,
+        session_id=session_id,
+        access_token=access_token,
+    )
+    assert payload["session_id"] == session_id
+
+    with get_connection(initialized_settings) as connection:
+        rehashed = connection.execute(
+            """
+            SELECT access_token_hash, auth_session_id, created_at, expires_at
+            FROM native_playback_sessions
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    assert rehashed is not None
+    assert rehashed["access_token_hash"] == hmac_hash
+    assert rehashed["auth_session_id"] == original_auth_session_id
+    assert rehashed["created_at"] == original_created_at
+    assert rehashed["expires_at"] == original_expires_at
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "token_suffix", "expected_present"),
+    [
+        ("wrong_token", "-wrong", True),
+        ("expired", "", False),
+        ("revoked", "", False),
+        ("closed", "", False),
+        ("disabled_user", "", True),
+    ],
+)
+def test_f10d_native_playback_legacy_failure_paths_do_not_rehash(
+    initialized_settings,
+    monkeypatch,
+    failure_mode: str,
+    token_suffix: str,
+    expected_present: bool,
+) -> None:
+    created = _create_standard_user(initialized_settings, username=f"native-f10d-{failure_mode}")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name=f"native-f10d-{failure_mode}.mp4")
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+    native_session = create_native_playback_session(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=None,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Pytest Native Handoff",
+    )
+    session_id = str(native_session["session_id"])
+    access_token = str(native_session["access_token"])
+    legacy_hash = hash_session_token(access_token, initialized_settings.session_secret)
+    now = datetime.now(timezone.utc)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE native_playback_sessions SET access_token_hash = ? WHERE session_id = ?",
+            (legacy_hash, session_id),
+        )
+        if failure_mode == "expired":
+            connection.execute(
+                "UPDATE native_playback_sessions SET expires_at = ? WHERE session_id = ?",
+                ((now - timedelta(seconds=5)).isoformat(), session_id),
+            )
+        elif failure_mode == "revoked":
+            connection.execute(
+                "UPDATE native_playback_sessions SET revoked_at = ? WHERE session_id = ?",
+                (now.isoformat(), session_id),
+            )
+        elif failure_mode == "closed":
+            connection.execute(
+                "UPDATE native_playback_sessions SET closed_at = ? WHERE session_id = ?",
+                (now.isoformat(), session_id),
+            )
+        elif failure_mode == "disabled_user":
+            connection.execute("UPDATE users SET enabled = 0 WHERE id = ?", (session_user.id,))
+        connection.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_native_playback_session_payload(
+            initialized_settings,
+            session_id=session_id,
+            access_token=access_token + token_suffix,
+        )
+    assert exc_info.value.status_code == 401
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT access_token_hash FROM native_playback_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if expected_present:
+        assert row is not None
+        assert row["access_token_hash"] == legacy_hash
+    else:
+        assert row is None
+
+
+def test_f10d_desktop_vlc_handoff_uses_hmac_and_lazy_rehashes_legacy_access_token(
+    initialized_settings,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="desktop-handoff-f10d-hmac")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name="desktop-handoff-f10d-hmac.mp4")
+
+    handoff = create_desktop_vlc_handoff_record(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        platform="windows",
+        device_id="desktop-handoff-f10d",
+        auth_session_id=session_user.session_id,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        strategy="backend_url",
+        resolved_target="http://testserver/api/native-playback/session/example/stream?token=existing",
+        backend_origin="http://testserver",
+    )
+    handoff_id = str(handoff["handoff_id"])
+    access_token = _query_param(handoff["protocol_url"], "token")
+    assert _query_param(handoff["protocol_url"], "handoff") == handoff_id
+    assert urlsplit(str(handoff["protocol_url"])).scheme == initialized_settings.vlc_helper_protocol
+    hmac_hash = hash_token_hmac(
+        initialized_settings,
+        purpose="desktop.vlc.handoff.access",
+        token=access_token,
+    )
+    legacy_hash = hash_session_token(access_token, initialized_settings.session_secret)
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT access_token_hash, auth_session_id, strategy, expires_at
+            FROM desktop_vlc_handoffs
+            WHERE handoff_id = ?
+            """,
+            (handoff_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["access_token_hash"] == hmac_hash
+    assert str(row["access_token_hash"]).startswith(TOKEN_HASH_PREFIX)
+    assert row["access_token_hash"] != legacy_hash
+    assert access_token not in str(row["access_token_hash"])
+
+    original_auth_session_id = row["auth_session_id"]
+    original_strategy = row["strategy"]
+    original_expires_at = row["expires_at"]
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE desktop_vlc_handoffs SET access_token_hash = ? WHERE handoff_id = ?",
+            (legacy_hash, handoff_id),
+        )
+        connection.commit()
+
+    resolved = resolve_desktop_vlc_handoff_record(
+        initialized_settings,
+        handoff_id=handoff_id,
+        access_token=access_token,
+        helper_version="1.0.0",
+        helper_platform="windows",
+        helper_arch="x64",
+        helper_vlc_detection_state="installed",
+        helper_vlc_detection_path="C:/Program Files/VideoLAN/VLC/vlc.exe",
+        source_ip="127.0.0.1",
+        backend_origin="http://testserver",
+    )
+    assert resolved["handoff_id"] == handoff_id
+
+    with get_connection(initialized_settings) as connection:
+        rehashed = connection.execute(
+            """
+            SELECT access_token_hash, auth_session_id, strategy, expires_at
+            FROM desktop_vlc_handoffs
+            WHERE handoff_id = ?
+            """,
+            (handoff_id,),
+        ).fetchone()
+    assert rehashed is not None
+    assert rehashed["access_token_hash"] == hmac_hash
+    assert rehashed["auth_session_id"] == original_auth_session_id
+    assert rehashed["strategy"] == original_strategy
+    assert rehashed["expires_at"] == original_expires_at
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "token_suffix", "expected_present"),
+    [
+        ("wrong_token", "-wrong", True),
+        ("expired", "", False),
+        ("revoked", "", False),
+        ("disabled_user", "", True),
+    ],
+)
+def test_f10d_desktop_vlc_handoff_legacy_failure_paths_do_not_rehash(
+    initialized_settings,
+    failure_mode: str,
+    token_suffix: str,
+    expected_present: bool,
+) -> None:
+    created = _create_standard_user(initialized_settings, username=f"desktop-handoff-f10d-{failure_mode}")
+    session_user, _token = _issue_user_session(
+        initialized_settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    item = _create_media_item(initialized_settings, relative_name=f"desktop-handoff-f10d-{failure_mode}.mp4")
+    handoff = create_desktop_vlc_handoff_record(
+        initialized_settings,
+        user_id=session_user.id,
+        item=item,
+        platform="windows",
+        device_id=f"desktop-handoff-f10d-{failure_mode}",
+        auth_session_id=session_user.session_id,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        strategy="backend_url",
+        resolved_target="http://testserver/api/native-playback/session/example/stream?token=existing",
+        backend_origin="http://testserver",
+    )
+    handoff_id = str(handoff["handoff_id"])
+    access_token = _query_param(handoff["protocol_url"], "token")
+    legacy_hash = hash_session_token(access_token, initialized_settings.session_secret)
+    now = datetime.now(timezone.utc)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE desktop_vlc_handoffs SET access_token_hash = ? WHERE handoff_id = ?",
+            (legacy_hash, handoff_id),
+        )
+        if failure_mode == "expired":
+            connection.execute(
+                "UPDATE desktop_vlc_handoffs SET expires_at = ? WHERE handoff_id = ?",
+                ((now - timedelta(seconds=5)).isoformat(), handoff_id),
+            )
+        elif failure_mode == "revoked":
+            connection.execute(
+                "UPDATE desktop_vlc_handoffs SET revoked_at = ? WHERE handoff_id = ?",
+                (now.isoformat(), handoff_id),
+            )
+        elif failure_mode == "disabled_user":
+            connection.execute("UPDATE users SET enabled = 0 WHERE id = ?", (session_user.id,))
+        connection.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_desktop_vlc_handoff_record(
+            initialized_settings,
+            handoff_id=handoff_id,
+            access_token=access_token + token_suffix,
+            backend_origin="http://testserver",
+        )
+    assert exc_info.value.status_code == 401
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT access_token_hash FROM desktop_vlc_handoffs WHERE handoff_id = ?",
+            (handoff_id,),
+        ).fetchone()
+    if expected_present:
+        assert row is not None
+        assert row["access_token_hash"] == legacy_hash
+    else:
+        assert row is None
+
+
+def test_f10d_desktop_helper_verification_uses_hmac_and_lazy_rehashes_legacy_access_token(
+    initialized_settings,
+) -> None:
+    settings = replace(initialized_settings, backend_origin="http://testserver")
+    created = _create_standard_user(settings, username="desktop-helper-f10d-hmac")
+    session_user, _token = _issue_user_session(
+        settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+
+    verification = create_desktop_helper_verification(
+        settings,
+        user_id=session_user.id,
+        platform="windows",
+        device_id="desktop-helper-f10d",
+        browser_user_agent="pytest",
+        source_ip="127.0.0.1",
+    )
+    verification_id = _query_param(verification["protocol_url"], "verification")
+    access_token = _query_param(verification["protocol_url"], "token")
+    assert urlsplit(str(verification["protocol_url"])).scheme == settings.vlc_helper_protocol
+    hmac_hash = hash_token_hmac(
+        settings,
+        purpose="desktop.helper.verification.access",
+        token=access_token,
+    )
+    legacy_hash = hash_session_token(access_token, settings.session_secret)
+
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT access_token_hash, user_id, platform, device_id, expires_at, resolved_at
+            FROM desktop_helper_verifications
+            WHERE verification_id = ?
+            """,
+            (verification_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["access_token_hash"] == hmac_hash
+    assert str(row["access_token_hash"]).startswith(TOKEN_HASH_PREFIX)
+    assert row["access_token_hash"] != legacy_hash
+    assert access_token not in str(row["access_token_hash"])
+
+    original_user_id = row["user_id"]
+    original_platform = row["platform"]
+    original_device_id = row["device_id"]
+    original_expires_at = row["expires_at"]
+    with get_connection(settings) as connection:
+        connection.execute(
+            "UPDATE desktop_helper_verifications SET access_token_hash = ? WHERE verification_id = ?",
+            (legacy_hash, verification_id),
+        )
+        connection.commit()
+
+    result = resolve_desktop_helper_verification(
+        settings,
+        verification_id=verification_id,
+        access_token=access_token,
+        helper_version="1.0.0",
+        helper_platform="windows",
+        helper_arch="x64",
+        helper_vlc_detection_state="installed",
+        helper_vlc_detection_path="C:/Program Files/VideoLAN/VLC/vlc.exe",
+        source_ip="127.0.0.1",
+    )
+    assert result["message"] == "Desktop helper verification recorded."
+
+    with get_connection(settings) as connection:
+        rehashed = connection.execute(
+            """
+            SELECT access_token_hash, user_id, platform, device_id, expires_at, resolved_at
+            FROM desktop_helper_verifications
+            WHERE verification_id = ?
+            """,
+            (verification_id,),
+        ).fetchone()
+    assert rehashed is not None
+    assert rehashed["access_token_hash"] == hmac_hash
+    assert rehashed["user_id"] == original_user_id
+    assert rehashed["platform"] == original_platform
+    assert rehashed["device_id"] == original_device_id
+    assert rehashed["expires_at"] == original_expires_at
+    assert rehashed["resolved_at"] is not None
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "token_suffix", "expected_present"),
+    [
+        ("wrong_token", "-wrong", True),
+        ("expired", "", False),
+        ("resolved", "", False),
+        ("disabled_user", "", True),
+    ],
+)
+def test_f10d_desktop_helper_verification_legacy_failure_paths_do_not_rehash(
+    initialized_settings,
+    failure_mode: str,
+    token_suffix: str,
+    expected_present: bool,
+) -> None:
+    settings = replace(initialized_settings, backend_origin="http://testserver")
+    created = _create_standard_user(settings, username=f"desktop-helper-f10d-{failure_mode}")
+    session_user, _token = _issue_user_session(
+        settings,
+        username=str(created["username"]),
+        password="family-password",
+    )
+    verification = create_desktop_helper_verification(
+        settings,
+        user_id=session_user.id,
+        platform="windows",
+        device_id=f"desktop-helper-f10d-{failure_mode}",
+        browser_user_agent="pytest",
+        source_ip="127.0.0.1",
+    )
+    verification_id = _query_param(verification["protocol_url"], "verification")
+    access_token = _query_param(verification["protocol_url"], "token")
+    legacy_hash = hash_session_token(access_token, settings.session_secret)
+    now = datetime.now(timezone.utc)
+    with get_connection(settings) as connection:
+        connection.execute(
+            "UPDATE desktop_helper_verifications SET access_token_hash = ? WHERE verification_id = ?",
+            (legacy_hash, verification_id),
+        )
+        if failure_mode == "expired":
+            connection.execute(
+                "UPDATE desktop_helper_verifications SET expires_at = ? WHERE verification_id = ?",
+                ((now - timedelta(seconds=5)).isoformat(), verification_id),
+            )
+        elif failure_mode == "resolved":
+            connection.execute(
+                "UPDATE desktop_helper_verifications SET resolved_at = ? WHERE verification_id = ?",
+                (now.isoformat(), verification_id),
+            )
+        elif failure_mode == "disabled_user":
+            connection.execute("UPDATE users SET enabled = 0 WHERE id = ?", (session_user.id,))
+        connection.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_desktop_helper_verification(
+            settings,
+            verification_id=verification_id,
+            access_token=access_token + token_suffix,
+            helper_version="1.0.0",
+            helper_platform="windows",
+            helper_arch="x64",
+            source_ip="127.0.0.1",
+        )
+    assert exc_info.value.status_code == 404
+
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            "SELECT access_token_hash FROM desktop_helper_verifications WHERE verification_id = ?",
+            (verification_id,),
+        ).fetchone()
+    if expected_present:
+        assert row is not None
+        assert row["access_token_hash"] == legacy_hash
+    else:
+        assert row is None
 
 
 def test_admin_revoke_auth_session_revokes_decoupled_external_native_playback_created_from_login(

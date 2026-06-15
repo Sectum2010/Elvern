@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
-from ..security import generate_session_token, hash_session_token
+from ..security import generate_session_token, hash_session_token, hash_token_hmac
 from .desktop_helper_manifest_service import (
     DesktopHelperManifestError,
     get_desktop_helper_manifest_record_by_id,
@@ -38,6 +38,22 @@ RELEASE_NAME_PATTERN = re.compile(
     r"^elvern-vlc-opener-(?P<version>.+)-(?P<runtime>win-x64|osx-arm64|osx-x64)(?:\.zip)?$"
 )
 logger = logging.getLogger(__name__)
+DESKTOP_HELPER_VERIFICATION_ACCESS_HASH_PURPOSE = "desktop.helper.verification.access"
+
+
+def _desktop_helper_verification_access_token_hash(settings: Settings, access_token: str) -> str:
+    return hash_token_hmac(settings, purpose=DESKTOP_HELPER_VERIFICATION_ACCESS_HASH_PURPOSE, token=access_token)
+
+
+def _legacy_desktop_helper_verification_access_token_hash(settings: Settings, access_token: str) -> str:
+    return hash_session_token(access_token, settings.session_secret)
+
+
+def _desktop_helper_verification_access_token_hash_candidates(settings: Settings, access_token: str) -> tuple[str, str]:
+    return (
+        _desktop_helper_verification_access_token_hash(settings, access_token),
+        _legacy_desktop_helper_verification_access_token_hash(settings, access_token),
+    )
 
 
 def normalize_desktop_helper_platform(platform: str | None) -> str:
@@ -584,7 +600,7 @@ def create_desktop_helper_verification(
     cleanup_desktop_helper_verifications(settings)
     verification_id = generate_session_token()
     access_token = generate_session_token()
-    access_token_hash = hash_session_token(access_token, settings.session_secret)
+    access_token_hash = _desktop_helper_verification_access_token_hash(settings, access_token)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=settings.playback_token_ttl_seconds)
     now_iso = now.isoformat()
@@ -662,7 +678,8 @@ def resolve_desktop_helper_verification(
         connection.execute(
             """
             UPDATE desktop_helper_verifications
-            SET helper_version = ?,
+            SET access_token_hash = ?,
+                helper_version = ?,
                 helper_platform = ?,
                 helper_arch = ?,
                 helper_vlc_detection_state = ?,
@@ -670,8 +687,10 @@ def resolve_desktop_helper_verification(
                 helper_vlc_detection_checked_at = ?,
                 resolved_at = ?
             WHERE verification_id = ?
+              AND access_token_hash = ?
             """,
             (
+                _desktop_helper_verification_access_token_hash(settings, access_token),
                 normalized_helper_version,
                 normalized_helper_platform,
                 normalized_helper_arch,
@@ -680,6 +699,7 @@ def resolve_desktop_helper_verification(
                 now if normalized_helper_vlc_detection_state else None,
                 now,
                 verification_id,
+                str(verification["access_token_hash"]),
             ),
         )
         connection.commit()
@@ -1145,25 +1165,29 @@ def _require_desktop_helper_verification(
     access_token: str,
 ) -> dict[str, object]:
     cleanup_desktop_helper_verifications(settings)
-    token_hash = hash_session_token(access_token, settings.session_secret)
+    token_hash, legacy_token_hash = _desktop_helper_verification_access_token_hash_candidates(settings, access_token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
         row = connection.execute(
             """
             SELECT
                 verification_id,
+                access_token_hash,
                 user_id,
                 platform,
                 device_id,
                 expires_at,
                 resolved_at
-            FROM desktop_helper_verifications
-            WHERE verification_id = ?
-              AND access_token_hash = ?
-              AND expires_at > ?
+            FROM desktop_helper_verifications v
+            JOIN users u ON u.id = v.user_id
+            WHERE v.verification_id = ?
+              AND v.access_token_hash IN (?, ?)
+              AND v.expires_at > ?
+              AND u.enabled = 1
+            ORDER BY CASE v.access_token_hash WHEN ? THEN 0 ELSE 1 END
             LIMIT 1
             """,
-            (verification_id, token_hash, now),
+            (verification_id, token_hash, legacy_token_hash, now, token_hash),
         ).fetchone()
     if row is None:
         raise HTTPException(

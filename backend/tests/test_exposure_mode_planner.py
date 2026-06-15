@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import pyotp
@@ -21,6 +22,10 @@ from backend.app.services.native_playback_service import (
     create_native_playback_session,
     get_native_playback_session_payload,
     inspect_native_playback_access,
+)
+from backend.app.services.desktop_playback_handoff_service import (
+    create_desktop_vlc_handoff as create_desktop_vlc_handoff_record,
+    resolve_desktop_vlc_handoff as resolve_desktop_vlc_handoff_record,
 )
 
 
@@ -165,6 +170,12 @@ def _create_media_item(settings, *, relative_name: str = "movie.mp4") -> dict[st
         "resume_position_seconds": 0,
         "subtitles": [],
     }
+
+
+def _query_param(url: object, name: str) -> str:
+    values = parse_qs(urlsplit(str(url)).query).get(name)
+    assert values
+    return values[0]
 
 
 def _prepare_request_payload(admin_credentials) -> dict[str, object]:
@@ -1003,6 +1014,75 @@ def test_security_maintenance_mode_preserves_decoupled_external_native_playback(
         access_token=str(native_session["access_token"]),
     )
     assert payload["session_id"] == native_session["session_id"]
+
+
+def test_security_maintenance_mode_preserves_issued_desktop_vlc_handoff(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    created_user = _create_user(initialized_settings, username="maintenance-desktop-handoff")
+    _login(client, username="maintenance-desktop-handoff", password="standard-user-password")
+    standard_session = _session_row_for_username(initialized_settings, "maintenance-desktop-handoff")
+    assert standard_session is not None
+    item = _create_media_item(initialized_settings, relative_name="maintenance-desktop-handoff.mp4")
+    handoff = create_desktop_vlc_handoff_record(
+        initialized_settings,
+        user_id=int(created_user["id"]),
+        item=item,
+        platform="windows",
+        device_id="maintenance-desktop-handoff-device",
+        auth_session_id=int(standard_session["id"]),
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        strategy="backend_url",
+        resolved_target="http://testserver/api/native-playback/session/example/stream?token=existing",
+        backend_origin="http://testserver",
+    )
+    handoff_id = str(handoff["handoff_id"])
+    access_token = _query_param(handoff["protocol_url"], "token")
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    response = client.post(
+        "/api/admin/maintenance-mode",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["revoked_non_admin_sessions"] == 1
+    with get_connection(initialized_settings) as connection:
+        auth_row = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE id = ?",
+            (standard_session["id"],),
+        ).fetchone()
+        handoff_row = connection.execute(
+            """
+            SELECT auth_session_id, revoked_at
+            FROM desktop_vlc_handoffs
+            WHERE handoff_id = ?
+            LIMIT 1
+            """,
+            (handoff_id,),
+        ).fetchone()
+
+    assert auth_row["revoked_at"] is not None
+    assert auth_row["revoked_reason"] == "maintenance_mode"
+    assert handoff_row["auth_session_id"] == standard_session["id"]
+    assert handoff_row["revoked_at"] is None
+
+    resolved = resolve_desktop_vlc_handoff_record(
+        initialized_settings,
+        handoff_id=handoff_id,
+        access_token=access_token,
+        helper_version="1.0.0",
+        helper_platform="windows",
+        helper_arch="x64",
+        helper_vlc_detection_state="installed",
+        helper_vlc_detection_path="C:/Program Files/VideoLAN/VLC/vlc.exe",
+        source_ip="127.0.0.1",
+        backend_origin="http://testserver",
+    )
+    assert resolved["handoff_id"] == handoff_id
 
 
 def test_security_maintenance_mode_revokes_auth_session_coupled_native_playback(
@@ -2243,6 +2323,8 @@ def test_maintenance_mode_revocation_scope_static_guard() -> None:
     assert "revoke_download_sessions_for_user" not in maintenance_source
     assert "_revoke_native_playback_by_users" not in maintenance_source
     assert "_revoke_desktop_handoffs_by_users" not in maintenance_source
+    assert "_revoke_desktop_handoffs_by_auth_sessions" not in maintenance_source
+    assert "UPDATE desktop_vlc_handoffs" not in maintenance_source
     assert "WHERE user_id IN" not in maintenance_source
 
 
