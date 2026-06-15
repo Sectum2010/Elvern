@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
-from ..security import generate_session_token
+from ..security import generate_session_token, hash_token_hmac
 from .at_rest_encryption import decrypt_at_rest, encrypt_at_rest
 from .app_settings_service import get_effective_google_drive_https_origin
 from .google_drive_service import (
@@ -25,6 +25,11 @@ from .security_event_service import log_security_event
 
 
 GOOGLE_STATE_TTL_MINUTES = 15
+GOOGLE_OAUTH_STATE_TOKEN_HASH_PURPOSE = "google.oauth_state"
+
+
+def _hash_google_oauth_state_token(settings: Settings, state_token: str) -> str:
+    return hash_token_hmac(settings, purpose=GOOGLE_OAUTH_STATE_TOKEN_HASH_PURPOSE, token=state_token)
 
 
 def _provider_auth_required_for_corrupted_token() -> None:
@@ -130,6 +135,7 @@ def build_google_drive_connect_response(
 ) -> dict[str, str]:
     require_google_drive_enabled(settings)
     state_token = generate_session_token()
+    state_token_hash = _hash_google_oauth_state_token(settings, state_token)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=GOOGLE_STATE_TTL_MINUTES)
     with get_connection(settings) as connection:
@@ -138,7 +144,7 @@ def build_google_drive_connect_response(
             INSERT INTO google_oauth_states (state_token, user_id, created_at, expires_at)
             VALUES (?, ?, ?, ?)
             """,
-            (state_token, user_id, now.isoformat(), expires_at.isoformat()),
+            (state_token_hash, user_id, now.isoformat(), expires_at.isoformat()),
         )
         connection.commit()
     return {
@@ -162,6 +168,7 @@ def complete_google_drive_connect(
     now_iso = utcnow_iso()
     state_context = resolve_google_connect_state(state_token)
     resolved_state_token = str(state_context["state_token"] or "").strip()
+    resolved_state_token_hash = _hash_google_oauth_state_token(settings, resolved_state_token)
     with get_connection(settings) as connection:
         row = connection.execute(
             """
@@ -170,7 +177,7 @@ def complete_google_drive_connect(
             WHERE state_token = ? AND expires_at > ?
             LIMIT 1
             """,
-            (resolved_state_token, now_iso),
+            (resolved_state_token_hash, now_iso),
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google Drive sign-in state expired.")
@@ -254,7 +261,7 @@ def complete_google_drive_connect(
                 now,
             ),
         )
-        connection.execute("DELETE FROM google_oauth_states WHERE state_token = ?", (resolved_state_token,))
+        connection.execute("DELETE FROM google_oauth_states WHERE state_token = ?", (resolved_state_token_hash,))
         connection.commit()
         if upgraded_columns and existing_account_id is not None:
             _log_oauth_token_encryption_upgrade(

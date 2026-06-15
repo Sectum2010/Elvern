@@ -9,6 +9,8 @@ import pytest
 from fastapi import HTTPException, Response
 
 import backend.app.auth as auth_module
+import backend.app.db as db_module
+from backend.app.services import account_access_service
 from backend.app.auth import (
     authenticate_user,
     create_session,
@@ -17,6 +19,7 @@ from backend.app.auth import (
     get_user_by_session_token,
 )
 from backend.app.db import (
+    ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME,
     BROWSER_SESSION_HMAC_MIGRATION_NAME,
     TOKEN_HASH_MIGRATION_REVOKE_REASON,
     get_connection,
@@ -26,6 +29,10 @@ from backend.app.db import (
 from backend.app.schemas import NativePlaybackSessionResponse
 from backend.app.security import TOKEN_HASH_PREFIX, hash_session_token, hash_token_hmac
 from backend.app.services.account_access_service import (
+    _legacy_requester_bucket_hash,
+    _requester_bucket_hash,
+    _secret_hash,
+    create_password_help_request,
     create_user_with_invite,
     generate_invite_code,
     revoke_invite_code,
@@ -274,7 +281,7 @@ def test_native_playback_session_provenance_static_guards() -> None:
     assert "created_from_auth_session_id" not in NativePlaybackSessionResponse.model_fields
 
 
-def test_f10a_keeps_unmigrated_token_surfaces_on_existing_hash_paths() -> None:
+def test_f10_keeps_unmigrated_token_surfaces_on_existing_hash_paths() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     legacy_helper_files = (
         "backend/app/services/native_playback_service.py",
@@ -293,8 +300,35 @@ def test_f10a_keeps_unmigrated_token_surfaces_on_existing_hash_paths() -> None:
     )
     assert "download-session" in account_access_source
     assert "invite-code" in account_access_source
-    assert "hash_token_hmac" not in account_access_source
+    assert 'token_hash = _secret_hash(settings, "download-session", token)' in account_access_source
+    assert 'hash_token_hmac(settings, purpose="download.session"' not in account_access_source
     assert "verify_hmac_token_hash" not in account_access_source
+    download_source = account_access_source.split("def create_download_session", 1)[1]
+    assert "hash_token_hmac" not in download_source
+    assert download_source.count('_secret_hash(settings, "download-session"') >= 5
+    assert inspect.getsource(account_access_service._secret_hash) == (
+        "def _secret_hash(settings: Settings, namespace: str, value: str) -> str:\n"
+        "    return hashlib.sha256(\n"
+        '        f"{namespace}\\n{settings.session_secret}\\n{value}".encode("utf-8")\n'
+        "    ).hexdigest()\n"
+    )
+
+
+def test_f10b_account_short_token_migration_scope_static_guard() -> None:
+    source = inspect.getsource(db_module._run_account_short_token_hmac_migration)
+    assert "DELETE FROM login_challenges" in source
+    assert "DELETE FROM google_oauth_states" in source
+    for forbidden_table in (
+        "sessions",
+        "invite_codes",
+        "password_help_requests",
+        "download_sessions",
+        "native_playback_sessions",
+        "desktop_vlc_handoffs",
+        "desktop_helper_verifications",
+        "assistant_attachment_external_open_tickets",
+    ):
+        assert forbidden_table not in source
 
 
 def _recent_auth_login_details(settings, *, limit: int = 20) -> list[dict[str, object] | None]:
@@ -526,6 +560,86 @@ def test_browser_session_hmac_migration_is_idempotent_for_legacy_rows(initialize
     assert second is not None
     assert second["revoked_at"] == first["revoked_at"]
     assert second["revoked_reason"] == TOKEN_HASH_MIGRATION_REVOKE_REASON
+
+
+def test_account_short_token_hmac_migration_deletes_only_short_state_tables(initialized_settings) -> None:
+    user = _admin_user(initialized_settings)
+    session_token = create_session(
+        initialized_settings,
+        user,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    session_hash = _auth_session_hash(initialized_settings, session_token)
+    now = utcnow_iso()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+    expires_at_unix = datetime.now(timezone.utc).timestamp() + 300
+    with get_connection(initialized_settings) as connection:
+        session_id = connection.execute(
+            "SELECT id FROM sessions WHERE session_token_hash = ?",
+            (session_hash,),
+        ).fetchone()["id"]
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            (ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME,),
+        )
+        connection.execute(
+            """
+            INSERT INTO login_challenges (
+                challenge_token_hash, user_id, created_at, expires_at_unix, ip_address, user_agent
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("legacy-login-challenge", user.id, now, expires_at_unix, "127.0.0.1", "pytest"),
+        )
+        connection.execute(
+            "INSERT INTO google_oauth_states (state_token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            ("legacy-oauth-state", user.id, now, future),
+        )
+        invite_cursor = connection.execute(
+            """
+            INSERT INTO invite_codes (code_hash, created_by_user_id, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("legacy-invite-hash-for-migration-test", user.id, now, future),
+        )
+        help_cursor = connection.execute(
+            """
+            INSERT INTO password_help_requests (
+                username_snapshot,
+                user_id,
+                requester_bucket_hash,
+                status,
+                created_at,
+                updated_at,
+                expires_at
+            ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            ("migration-help-user", user.id, "legacy-help-bucket-for-migration-test", now, now, future),
+        )
+        connection.commit()
+        invite_id = int(invite_cursor.lastrowid)
+        help_id = int(help_cursor.lastrowid)
+
+    init_db(initialized_settings)
+    init_db(initialized_settings)
+
+    with get_connection(initialized_settings) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM login_challenges").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM google_oauth_states").fetchone()[0] == 0
+        assert connection.execute("SELECT id FROM invite_codes WHERE id = ?", (invite_id,)).fetchone() is not None
+        assert connection.execute("SELECT id FROM password_help_requests WHERE id = ?", (help_id,)).fetchone() is not None
+        session_row = connection.execute(
+            "SELECT revoked_at FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        marker_count = connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE name = ?",
+            (ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME,),
+        ).fetchone()[0]
+
+    assert session_row is not None
+    assert session_row["revoked_at"] is None
+    assert marker_count == 1
 
 
 def test_disabled_user_session_loses_access_immediately(initialized_settings, client) -> None:
@@ -2137,6 +2251,7 @@ def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> No
         row = connection.execute("SELECT code_hash FROM invite_codes WHERE id = ?", (invite_payload["id"],)).fetchone()
     assert row is not None
     assert row["code_hash"] != invite_code
+    assert row["code_hash"].startswith(TOKEN_HASH_PREFIX)
 
     created_user = create_user_with_invite(
         initialized_settings,
@@ -2173,6 +2288,99 @@ def test_invite_code_is_hashed_one_time_and_required(initialized_settings) -> No
             user_agent="pytest",
         )
     assert invalid_exc.value.status_code == 400
+
+
+def _insert_legacy_invite_code(
+    settings,
+    *,
+    code: str,
+    assigned_age: int = 18,
+    expires_at: str | None = None,
+    used_at: str | None = None,
+    revoked_at: str | None = None,
+) -> int:
+    now = utcnow_iso()
+    resolved_expires_at = expires_at or (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO invite_codes (
+                code_hash,
+                created_by_user_id,
+                created_at,
+                expires_at,
+                assigned_age,
+                used_at,
+                used_by_user_id,
+                revoked_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _secret_hash(settings, "invite-code", code),
+                1,
+                now,
+                resolved_expires_at,
+                assigned_age,
+                used_at,
+                1 if used_at else None,
+                revoked_at,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+
+
+def test_legacy_invite_code_compatibility_respects_lifecycle(initialized_settings) -> None:
+    valid_code = "LEGACY-INVITE!234"
+    _insert_legacy_invite_code(initialized_settings, code=valid_code, assigned_age=13)
+
+    created_user = create_user_with_invite(
+        initialized_settings,
+        username="legacy-invited-user",
+        password="family-password",
+        confirm_password="family-password",
+        invite_code=valid_code,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    assert created_user.username == "legacy-invited-user"
+    assert created_user.age_credential == 13
+    with get_connection(initialized_settings) as connection:
+        used_row = connection.execute(
+            "SELECT used_at FROM invite_codes WHERE code_hash = ?",
+            (_secret_hash(initialized_settings, "invite-code", valid_code),),
+        ).fetchone()
+    assert used_row is not None
+    assert used_row["used_at"] is not None
+
+    expired_code = "LEGACY-EXPIRED!234"
+    _insert_legacy_invite_code(
+        initialized_settings,
+        code=expired_code,
+        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+    )
+    revoked_code = "LEGACY-REVOKED!234"
+    _insert_legacy_invite_code(initialized_settings, code=revoked_code, revoked_at=utcnow_iso())
+    used_code = "LEGACY-USED!234"
+    _insert_legacy_invite_code(initialized_settings, code=used_code, used_at=utcnow_iso())
+
+    for username, invite_code in (
+        ("expired-legacy-user", expired_code),
+        ("revoked-legacy-user", revoked_code),
+        ("used-legacy-user", used_code),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            create_user_with_invite(
+                initialized_settings,
+                username=username,
+                password="family-password",
+                confirm_password="family-password",
+                invite_code=invite_code,
+                ip_address="127.0.0.1",
+                user_agent="pytest",
+            )
+        assert exc_info.value.status_code == 400
 
 
 def test_invite_code_defaults_assigned_age_to_adult(initialized_settings) -> None:
@@ -2309,6 +2517,19 @@ def test_password_help_request_admin_details_include_request_metadata(
         headers={"x-forwarded-for": "198.51.100.22", "user-agent": user_agent},
     )
     assert help_response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        stored_request = connection.execute(
+            """
+            SELECT requester_bucket_hash
+            FROM password_help_requests
+            WHERE username_snapshot = ?
+            """,
+            ("password-help-user",),
+        ).fetchone()
+    assert stored_request is not None
+    assert stored_request["requester_bucket_hash"].startswith(TOKEN_HASH_PREFIX)
+    assert "198.51.100.22" not in stored_request["requester_bucket_hash"]
+    assert user_agent not in stored_request["requester_bucket_hash"]
 
     login_response = client.post("/api/auth/login", json=admin_credentials)
     assert login_response.status_code == 200
@@ -2320,6 +2541,13 @@ def test_password_help_request_admin_details_include_request_metadata(
 
     assert entry["requester_ip_address"] == "198.51.100.22"
     assert entry["requester_user_agent"] == user_agent
+
+    dismiss_response = client.post(
+        f"/api/admin/password-help-requests/{entry['id']}/dismiss",
+        json={"confirm": True},
+    )
+    assert dismiss_response.status_code == 200
+    assert dismiss_response.json()["message"] == "Password help request dismissed"
 
 
 def test_legacy_password_help_request_admin_details_allow_unknown_metadata(
@@ -2357,6 +2585,114 @@ def test_legacy_password_help_request_admin_details_allow_unknown_metadata(
 
     assert entry["requester_ip_address"] is None
     assert entry["requester_user_agent"] is None
+
+
+def test_password_help_hmac_bucket_enforces_same_device_cooldown(initialized_settings) -> None:
+    _create_standard_user(initialized_settings, username="help-device-user-a")
+    _create_standard_user(initialized_settings, username="help-device-user-b")
+    ip_address = "198.51.100.31"
+    user_agent = "Pytest Password Help"
+
+    create_password_help_request(
+        initialized_settings,
+        username="help-device-user-a",
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    create_password_help_request(
+        initialized_settings,
+        username="help-device-user-b",
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT requester_bucket_hash
+            FROM password_help_requests
+            WHERE username_snapshot IN (?, ?)
+            ORDER BY id
+            """,
+            ("help-device-user-a", "help-device-user-b"),
+        ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0]["requester_bucket_hash"] == _requester_bucket_hash(
+        initialized_settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    assert rows[0]["requester_bucket_hash"].startswith(TOKEN_HASH_PREFIX)
+
+
+def test_legacy_password_help_bucket_enforces_cooldown_and_lazy_rehashes(initialized_settings) -> None:
+    created = _create_standard_user(initialized_settings, username="legacy-help-device-user")
+    _create_standard_user(initialized_settings, username="legacy-help-cooldown-user")
+    ip_address = "198.51.100.44"
+    user_agent = "Legacy Password Help"
+    legacy_bucket_hash = _legacy_requester_bucket_hash(
+        initialized_settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    now = utcnow_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO password_help_requests (
+                username_snapshot,
+                user_id,
+                requester_bucket_hash,
+                requester_ip_address,
+                requester_user_agent,
+                status,
+                created_at,
+                updated_at,
+                expires_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            (
+                "legacy-help-device-user",
+                created["id"],
+                legacy_bucket_hash,
+                ip_address,
+                user_agent,
+                now,
+                now,
+                expires_at,
+            ),
+        )
+        connection.commit()
+
+    create_password_help_request(
+        initialized_settings,
+        username="legacy-help-cooldown-user",
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT username_snapshot, requester_bucket_hash, requester_ip_address, requester_user_agent
+            FROM password_help_requests
+            WHERE username_snapshot IN (?, ?)
+            ORDER BY id
+            """,
+            ("legacy-help-device-user", "legacy-help-cooldown-user"),
+        ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0]["username_snapshot"] == "legacy-help-device-user"
+    assert rows[0]["requester_bucket_hash"] == _requester_bucket_hash(
+        initialized_settings,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    assert rows[0]["requester_ip_address"] == ip_address
+    assert rows[0]["requester_user_agent"] == user_agent
 
 
 def test_download_access_selected_movie_gate_and_revoke(initialized_settings) -> None:

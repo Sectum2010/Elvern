@@ -11,7 +11,7 @@ from fastapi import HTTPException, status
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..models import AuthenticatedUser
-from ..security import generate_session_token, hash_password
+from ..security import generate_session_token, hash_password, hash_token_hmac
 from .audit_service import log_audit_event
 from .library_service import get_media_item_detail
 from .media_age_access_service import (
@@ -36,6 +36,8 @@ DOWNLOAD_ACCESS_ALL = "all"
 DOWNLOAD_ACCESS_SELECTED = "selected"
 DOWNLOAD_ACCESS_MODES = {DOWNLOAD_ACCESS_NONE, DOWNLOAD_ACCESS_ALL, DOWNLOAD_ACCESS_SELECTED}
 DOWNLOAD_SESSION_TTL_MINUTES = 10
+INVITE_CODE_HASH_PURPOSE = "invite.code"
+PASSWORD_HELP_REQUESTER_BUCKET_HASH_PURPOSE = "password_help.requester_bucket"
 SENSITIVE_DOWNLOAD_AUDIT_MARKERS = (
     "token",
     "access_token",
@@ -55,6 +57,14 @@ def _secret_hash(settings: Settings, namespace: str, value: str) -> str:
     ).hexdigest()
 
 
+def _invite_code_hash(settings: Settings, code: str) -> str:
+    return hash_token_hmac(settings, purpose=INVITE_CODE_HASH_PURPOSE, token=code)
+
+
+def _legacy_invite_code_hash(settings: Settings, code: str) -> str:
+    return _secret_hash(settings, "invite-code", code)
+
+
 def _safe_download_audit_message(message: str | None) -> str:
     value = str(message or "download_failed").strip() or "download_failed"
     lowered = value.lower()
@@ -64,9 +74,25 @@ def _safe_download_audit_message(message: str | None) -> str:
 
 
 def _requester_bucket_hash(settings: Settings, *, ip_address: str | None, user_agent: str | None) -> str:
+    return hash_token_hmac(
+        settings,
+        purpose=PASSWORD_HELP_REQUESTER_BUCKET_HASH_PURPOSE,
+        token=_requester_bucket_value(ip_address=ip_address, user_agent=user_agent),
+    )
+
+
+def _legacy_requester_bucket_hash(settings: Settings, *, ip_address: str | None, user_agent: str | None) -> str:
+    return _secret_hash(
+        settings,
+        "password-help-device",
+        _requester_bucket_value(ip_address=ip_address, user_agent=user_agent),
+    )
+
+
+def _requester_bucket_value(*, ip_address: str | None, user_agent: str | None) -> str:
     normalized_ip = (ip_address or "unknown").strip().lower() or "unknown"
     normalized_agent = " ".join((user_agent or "unknown").strip().lower().split()) or "unknown"
-    return _secret_hash(settings, "password-help-device", f"{normalized_ip}\n{normalized_agent}")
+    return f"{normalized_ip}\n{normalized_agent}"
 
 
 def _generate_invite_code() -> str:
@@ -110,7 +136,7 @@ def generate_invite_code(
 ) -> dict[str, object]:
     normalized_assigned_age = validate_age_credential(assigned_age)
     code = _generate_invite_code()
-    code_hash = _secret_hash(settings, "invite-code", code)
+    code_hash = _invite_code_hash(settings, code)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     expires_at = (now_dt + timedelta(minutes=INVITE_CODE_TTL_MINUTES)).isoformat()
@@ -275,7 +301,8 @@ def create_user_with_invite(
     if password != confirm_password:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unable to create account with these details")
 
-    code_hash = _secret_hash(settings, "invite-code", normalized_invite_code)
+    code_hash = _invite_code_hash(settings, normalized_invite_code)
+    legacy_code_hash = _legacy_invite_code_hash(settings, normalized_invite_code)
     with get_connection(settings) as connection:
         invite_row = connection.execute(
             """
@@ -286,6 +313,16 @@ def create_user_with_invite(
             """,
             (code_hash,),
         ).fetchone()
+        if invite_row is None:
+            invite_row = connection.execute(
+                """
+                SELECT id, expires_at, assigned_age, used_at, revoked_at
+                FROM invite_codes
+                WHERE code_hash = ?
+                LIMIT 1
+                """,
+                (legacy_code_hash,),
+            ).fetchone()
         if (
             invite_row is None
             or invite_row["used_at"] is not None
@@ -361,6 +398,7 @@ def create_password_help_request(
     now = now_dt.isoformat()
     expires_at = (now_dt + timedelta(days=PASSWORD_HELP_RETENTION_DAYS)).isoformat()
     bucket_hash = _requester_bucket_hash(settings, ip_address=ip_address, user_agent=user_agent)
+    legacy_bucket_hash = _legacy_requester_bucket_hash(settings, ip_address=ip_address, user_agent=user_agent)
     user_cooldown_cutoff = (now_dt - timedelta(seconds=PASSWORD_HELP_USER_COOLDOWN_SECONDS)).isoformat()
     bucket_cooldown_cutoff = (now_dt - timedelta(seconds=PASSWORD_HELP_DEVICE_COOLDOWN_SECONDS)).isoformat()
     with get_connection(settings) as connection:
@@ -388,14 +426,24 @@ def create_password_help_request(
         ).fetchone()
         recent_bucket_request = connection.execute(
             """
-            SELECT id
+            SELECT id, requester_bucket_hash
             FROM password_help_requests
-            WHERE requester_bucket_hash = ?
+            WHERE requester_bucket_hash IN (?, ?)
               AND created_at >= ?
             LIMIT 1
             """,
-            (bucket_hash, bucket_cooldown_cutoff),
+            (bucket_hash, legacy_bucket_hash, bucket_cooldown_cutoff),
         ).fetchone()
+        if recent_bucket_request is not None and recent_bucket_request["requester_bucket_hash"] == legacy_bucket_hash:
+            connection.execute(
+                """
+                UPDATE password_help_requests
+                SET requester_bucket_hash = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (bucket_hash, now, recent_bucket_request["id"]),
+            )
         if recent_user_request is None and recent_bucket_request is None:
             connection.execute(
                 """

@@ -501,6 +501,20 @@ def test_hmac_token_hash_is_prefixed_purpose_bound_and_constant_time() -> None:
         token=token + "x",
         stored_hash=digest,
     )
+    legacy_digest = hash_session_token(token, "secret-one")
+    assert not verify_hmac_token_hash(
+        "secret-one",
+        purpose="auth.session",
+        token=token,
+        stored_hash=legacy_digest,
+    )
+    for malformed_hash in ("", "sha256$bad", "hmac2$bad", "hmac1", "not-a-token-hash", None):
+        assert not verify_hmac_token_hash(
+            "secret-one",
+            purpose="auth.session",
+            token=token,
+            stored_hash=malformed_hash,  # type: ignore[arg-type]
+        )
     assert "compare_digest" in inspect.getsource(security.verify_hmac_token_hash)
 
 

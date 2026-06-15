@@ -10,6 +10,8 @@ from io import BytesIO
 import pyotp
 import qrcode
 
+from ..security import hash_token_hmac
+
 
 TOTP_ISSUER = "Elvern"
 RECOVERY_CODE_COUNT = 10
@@ -19,6 +21,7 @@ RECOVERY_CODE_HASH_PREFIX = "hmac1$"
 RECOVERY_CODE_HASH_NAMESPACE = b"elvern-recovery-code-v1"
 CHALLENGE_TOKEN_BYTES = 32
 CHALLENGE_TOKEN_TTL_SECONDS = 300
+LOGIN_CHALLENGE_TOKEN_HASH_PURPOSE = "auth.login_challenge"
 SKIP_GRACE_DAYS = 30
 
 
@@ -110,4 +113,4 @@ def generate_challenge_token() -> str:
 
 
 def hash_challenge_token(token: str, secret: str) -> str:
-    return hashlib.sha256(f"{secret}:{token}".encode("utf-8")).hexdigest()
+    return hash_token_hmac(secret, purpose=LOGIN_CHALLENGE_TOKEN_HASH_PURPOSE, token=token)

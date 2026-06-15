@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import re
 import time
 from datetime import datetime, timedelta, timezone
 
 import pyotp
 
-from backend.app.db import get_connection, utcnow_iso
-from backend.app.security import hash_password
+from backend.app.db import ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME, get_connection, init_db, utcnow_iso
+from backend.app.security import TOKEN_HASH_PREFIX, hash_password
 from backend.app.services.at_rest_encryption import decrypt_at_rest
 from backend.app.services.totp_service import (
     CHALLENGE_TOKEN_TTL_SECONDS,
+    LOGIN_CHALLENGE_TOKEN_HASH_PURPOSE,
     RECOVERY_CODE_COUNT,
     RECOVERY_CODE_HASH_PREFIX,
     build_provisioning_uri,
     generate_recovery_codes,
     generate_totp_secret,
+    hash_challenge_token,
     hash_recovery_code,
     legacy_hash_recovery_code,
     normalize_recovery_input,
@@ -116,6 +120,11 @@ class TestRecoveryCodes:
         assert hashed.startswith(RECOVERY_CODE_HASH_PREFIX)
         assert hashed != legacy_hash_recovery_code("elvn-abcd-efgh-jkmn")
 
+    def test_recovery_code_hash_path_stays_on_existing_policy(self) -> None:
+        source = inspect.getsource(hash_recovery_code)
+        assert "RECOVERY_CODE_HASH_NAMESPACE" in source
+        assert "hash_token_hmac" not in source
+
 
 class TestLoginFlow:
     def test_admin_without_totp_returns_setup_required(self, client) -> None:
@@ -190,8 +199,72 @@ class TestLoginFlow:
         response = _login(client)
         assert response.status_code == 200
         assert response.json()["session"] == "pending_totp"
-        assert response.json()["challenge_token"]
+        challenge_token = response.json()["challenge_token"]
+        assert challenge_token
         assert response.json()["expires_in_seconds"] == CHALLENGE_TOKEN_TTL_SECONDS
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                """
+                SELECT challenge_token_hash
+                FROM login_challenges
+                WHERE user_id = 1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        assert row is not None
+        assert row["challenge_token_hash"].startswith(TOKEN_HASH_PREFIX)
+        assert row["challenge_token_hash"] != challenge_token
+        assert row["challenge_token_hash"] == hash_challenge_token(
+            challenge_token,
+            initialized_settings.session_secret,
+        )
+        assert LOGIN_CHALLENGE_TOKEN_HASH_PURPOSE == "auth.login_challenge"
+
+    def test_legacy_login_challenge_is_deleted_by_hmac_migration(self, client, initialized_settings) -> None:
+        secret, _codes = _enable_totp(client, initialized_settings)
+        del secret
+        _logout(client)
+        legacy_token = "legacy-login-challenge-token"
+        legacy_hash = hashlib.sha256(
+            f"{initialized_settings.session_secret}:{legacy_token}".encode("utf-8")
+        ).hexdigest()
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE name = ?",
+                (ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME,),
+            )
+            connection.execute(
+                """
+                INSERT INTO login_challenges (
+                    challenge_token_hash,
+                    user_id,
+                    created_at,
+                    expires_at_unix,
+                    ip_address,
+                    user_agent
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    legacy_hash,
+                    1,
+                    utcnow_iso(),
+                    time.time() + CHALLENGE_TOKEN_TTL_SECONDS,
+                    "127.0.0.1",
+                    "pytest",
+                ),
+            )
+            connection.commit()
+
+        init_db(initialized_settings)
+
+        with get_connection(initialized_settings) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM login_challenges").fetchone()[0] == 0
+        response = client.post(
+            "/api/auth/login/totp",
+            json={"challenge_token": legacy_token, "code": "000000"},
+        )
+        assert response.status_code == 401
 
     def test_valid_totp_code_completes_login(self, client, initialized_settings) -> None:
         secret, _codes = _enable_totp(client, initialized_settings)
