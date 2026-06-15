@@ -13,7 +13,7 @@ from fastapi import HTTPException, status
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..models import AuthenticatedUser
-from ..security import generate_session_token, hash_session_token
+from ..security import TOKEN_HASH_PREFIX, generate_session_token, hash_session_token, hash_token_hmac
 from .audit_service import log_audit_event
 
 
@@ -80,6 +80,7 @@ ASSISTANT_ACTIVE_CONTENT_MIME_TYPES = frozenset(
         "text/xml",
     }
 )
+ASSISTANT_EXTERNAL_OPEN_ACCESS_HASH_PURPOSE = "assistant.external_open.access"
 ASSISTANT_ATTACHMENT_CACHE_HEADERS = {
     "Cache-Control": "private, no-store, max-age=0",
     "Pragma": "no-cache",
@@ -562,7 +563,7 @@ def issue_assistant_image_external_open_ticket(
     expires_at_iso = expires_at.isoformat()
     ticket_id = generate_session_token()
     access_token = generate_session_token()
-    access_token_hash = hash_session_token(access_token, settings.session_secret)
+    access_token_hash = _assistant_external_open_access_token_hash(settings, access_token)
 
     with get_connection(settings) as connection:
         row = _require_assistant_attachment_access_row(
@@ -638,8 +639,13 @@ def resolve_assistant_image_external_open_ticket(
                 status_code=status.HTTP_410_GONE,
                 detail="Assistant image external-open link has expired",
             )
-        token_hash = hash_session_token(token, settings.session_secret)
-        if str(ticket_row["access_token_hash"]) != token_hash:
+        token_hash = _assistant_external_open_access_token_hash(settings, token)
+        stored_token_hash = str(ticket_row["access_token_hash"])
+        if stored_token_hash.startswith(TOKEN_HASH_PREFIX):
+            token_matches = stored_token_hash == token_hash
+        else:
+            token_matches = stored_token_hash == _legacy_assistant_external_open_access_token_hash(settings, token)
+        if not token_matches:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Assistant image external-open link not found",
@@ -666,10 +672,11 @@ def resolve_assistant_image_external_open_ticket(
         connection.execute(
             """
             UPDATE assistant_attachment_external_open_tickets
-            SET last_opened_at = ?
+            SET access_token_hash = ?,
+                last_opened_at = ?
             WHERE id = ?
             """,
-            (now_iso, int(ticket_row["id"])),
+            (token_hash, now_iso, int(ticket_row["id"])),
         )
         connection.commit()
 
@@ -1299,6 +1306,14 @@ def _require_assistant_attachment_access_row(
     if user.role != "admin" and int(row["submitted_by_user_id"]) != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assistant attachment not found")
     return row
+
+
+def _assistant_external_open_access_token_hash(settings: Settings, token: str) -> str:
+    return hash_token_hmac(settings, purpose=ASSISTANT_EXTERNAL_OPEN_ACCESS_HASH_PURPOSE, token=token)
+
+
+def _legacy_assistant_external_open_access_token_hash(settings: Settings, token: str) -> str:
+    return hash_session_token(token, settings.session_secret)
 
 
 def _validated_external_image_mime(value: object) -> str:

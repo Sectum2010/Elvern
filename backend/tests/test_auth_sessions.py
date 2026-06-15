@@ -39,7 +39,10 @@ from backend.app.services.account_access_service import (
     create_download_session,
     get_download_access_for_user,
     is_item_download_allowed,
+    is_download_session_still_authorized,
+    mark_download_session_completed,
     mark_download_session_failed,
+    mark_download_session_terminated,
     update_download_access_for_user,
     validate_download_session,
 )
@@ -210,6 +213,54 @@ def _create_authorized_download_session(settings, *, username: str):
     return created, media_item, session_user, auth_token, session_payload
 
 
+def _insert_legacy_download_session(
+    settings,
+    *,
+    token: str,
+    user,
+    media_item_id: int,
+    expires_at: str,
+    auth_session_required: int = 1,
+    completed_at: str | None = None,
+    failed_at: str | None = None,
+    revoked_at: str | None = None,
+) -> tuple[int, str]:
+    now = utcnow_iso()
+    legacy_hash = _secret_hash(settings, "download-session", token)
+    auth_session_id = user.session_id if auth_session_required else None
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO download_sessions (
+                session_token_hash,
+                user_id,
+                media_item_id,
+                auth_session_id,
+                auth_session_required,
+                created_at,
+                expires_at,
+                completed_at,
+                failed_at,
+                revoked_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_hash,
+                user.id,
+                media_item_id,
+                auth_session_id,
+                auth_session_required,
+                now,
+                expires_at,
+                completed_at,
+                failed_at,
+                revoked_at,
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid), legacy_hash
+
+
 def _set_media_admin_display_fields(
     settings,
     *,
@@ -283,13 +334,12 @@ def test_native_playback_session_provenance_static_guards() -> None:
 
 def test_f10_keeps_unmigrated_token_surfaces_on_existing_hash_paths() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    legacy_helper_files = (
+    phase_d_legacy_helper_files = (
         "backend/app/services/native_playback_service.py",
         "backend/app/services/desktop_playback_handoff_service.py",
         "backend/app/services/desktop_helper_service.py",
-        "backend/app/services/assistant_service.py",
     )
-    for relative_path in legacy_helper_files:
+    for relative_path in phase_d_legacy_helper_files:
         source = (repo_root / relative_path).read_text(encoding="utf-8")
         assert "hash_session_token" in source
         assert "hash_token_hmac" not in source
@@ -300,12 +350,23 @@ def test_f10_keeps_unmigrated_token_surfaces_on_existing_hash_paths() -> None:
     )
     assert "download-session" in account_access_source
     assert "invite-code" in account_access_source
-    assert 'token_hash = _secret_hash(settings, "download-session", token)' in account_access_source
-    assert 'hash_token_hmac(settings, purpose="download.session"' not in account_access_source
+    assert 'DOWNLOAD_SESSION_HASH_PURPOSE = "download.session"' in account_access_source
+    assert "_download_session_hash_candidates" in account_access_source
+    assert "_maybe_rehash_download_session_token" in account_access_source
+    assert '_secret_hash(settings, "download-session", token)' in account_access_source
+    assert "hash_token_hmac(settings, purpose=DOWNLOAD_SESSION_HASH_PURPOSE, token=token)" in account_access_source
     assert "verify_hmac_token_hash" not in account_access_source
     download_source = account_access_source.split("def create_download_session", 1)[1]
-    assert "hash_token_hmac" not in download_source
-    assert download_source.count('_secret_hash(settings, "download-session"') >= 5
+    assert "_download_session_hash(settings, token)" in download_source
+    assert "_download_session_hash_candidates(settings, token)" in download_source
+
+    assistant_source = (repo_root / "backend/app/services/assistant_service.py").read_text(encoding="utf-8")
+    assert 'ASSISTANT_EXTERNAL_OPEN_ACCESS_HASH_PURPOSE = "assistant.external_open.access"' in assistant_source
+    assert "_assistant_external_open_access_token_hash" in assistant_source
+    assert "_legacy_assistant_external_open_access_token_hash" in assistant_source
+    assert "hash_token_hmac" in assistant_source
+    assert "hash_session_token" in assistant_source
+
     assert inspect.getsource(account_access_service._secret_hash) == (
         "def _secret_hash(settings: Settings, namespace: str, value: str) -> str:\n"
         "    return hashlib.sha256(\n"
@@ -2876,6 +2937,220 @@ def test_download_failure_audit_detail_redacts_token_bearing_urls(initialized_se
     assert raw_token not in details_json
     assert raw_url not in details_json
     assert "/api/download/sessions/" not in details_json
+
+
+def test_download_session_new_token_hash_uses_hmac_and_validates(initialized_settings) -> None:
+    _created, media_item, session_user, _auth_token, session_payload = _create_authorized_download_session(
+        initialized_settings,
+        username="download-hmac-new",
+    )
+    raw_token = str(session_payload["session_token"])
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT session_token_hash FROM download_sessions WHERE id = ?",
+            (session_payload["session_id"],),
+        ).fetchone()
+
+    assert row is not None
+    stored_hash = str(row["session_token_hash"])
+    assert stored_hash.startswith(TOKEN_HASH_PREFIX)
+    assert raw_token not in stored_hash
+    assert stored_hash != _secret_hash(initialized_settings, "download-session", raw_token)
+    assert (
+        validate_download_session(initialized_settings, token=raw_token, user=session_user)
+        == int(media_item["id"])
+    )
+    assert is_download_session_still_authorized(
+        initialized_settings,
+        token=raw_token,
+        user=session_user,
+        session_id=int(session_payload["session_id"]),
+    )
+
+
+def test_legacy_download_session_validates_and_lazy_rehashes(initialized_settings) -> None:
+    created = _create_standard_user(initialized_settings, username="legacy-download-valid")
+    media_item = _create_media_item(initialized_settings, relative_name="legacy-download-valid.mp4")
+    _grant_download_for_item(
+        initialized_settings,
+        user_id=int(created["id"]),
+        media_item_id=int(media_item["id"]),
+    )
+    session_user, _auth_token = _issue_user_session(
+        initialized_settings,
+        username="legacy-download-valid",
+        password="family-password",
+    )
+    raw_token = "legacy-download-token-valid"
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    row_id, legacy_hash = _insert_legacy_download_session(
+        initialized_settings,
+        token=raw_token,
+        user=session_user,
+        media_item_id=int(media_item["id"]),
+        expires_at=expires_at,
+    )
+
+    assert validate_download_session(initialized_settings, token=raw_token, user=session_user) == int(media_item["id"])
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT session_token_hash, expires_at, auth_session_id, auth_session_required,
+                   completed_at, failed_at, revoked_at
+            FROM download_sessions
+            WHERE id = ?
+            """,
+            (row_id,),
+        ).fetchone()
+
+    assert row is not None
+    assert str(row["session_token_hash"]).startswith(TOKEN_HASH_PREFIX)
+    assert row["session_token_hash"] != legacy_hash
+    assert row["expires_at"] == expires_at
+    assert int(row["auth_session_id"]) == int(session_user.session_id)
+    assert int(row["auth_session_required"]) == 1
+    assert row["completed_at"] is None
+    assert row["failed_at"] is None
+    assert row["revoked_at"] is None
+
+
+def test_legacy_download_session_rehash_still_supports_completion_failure_and_termination(
+    initialized_settings,
+) -> None:
+    created = _create_standard_user(initialized_settings, username="legacy-download-ops")
+    media_item = _create_media_item(initialized_settings, relative_name="legacy-download-ops.mp4")
+    _grant_download_for_item(
+        initialized_settings,
+        user_id=int(created["id"]),
+        media_item_id=int(media_item["id"]),
+    )
+    session_user, _auth_token = _issue_user_session(
+        initialized_settings,
+        username="legacy-download-ops",
+        password="family-password",
+    )
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+    operations = (
+        ("complete", mark_download_session_completed, "completed_at", None),
+        ("failed", mark_download_session_failed, "failed_at", "client_failed"),
+        ("terminated", mark_download_session_terminated, "revoked_at", None),
+    )
+    for suffix, operation, timestamp_column, message in operations:
+        raw_token = f"legacy-download-token-{suffix}"
+        row_id, _legacy_hash = _insert_legacy_download_session(
+            initialized_settings,
+            token=raw_token,
+            user=session_user,
+            media_item_id=int(media_item["id"]),
+            expires_at=expires_at,
+        )
+        assert (
+            validate_download_session(initialized_settings, token=raw_token, user=session_user)
+            == int(media_item["id"])
+        )
+        if message is None:
+            operation(initialized_settings, token=raw_token, user=session_user, session_id=row_id)
+        else:
+            operation(
+                initialized_settings,
+                token=raw_token,
+                user=session_user,
+                session_id=row_id,
+                message=message,
+            )
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                f"SELECT session_token_hash, {timestamp_column}, last_error FROM download_sessions WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        assert row is not None
+        assert str(row["session_token_hash"]).startswith(TOKEN_HASH_PREFIX)
+        assert row[timestamp_column] is not None
+        if suffix == "failed":
+            assert row["last_error"] == "client_failed"
+        if suffix == "terminated":
+            assert row["last_error"] == "download_terminated"
+
+
+def test_expired_legacy_download_session_is_rejected_without_rehash(initialized_settings) -> None:
+    created = _create_standard_user(initialized_settings, username="legacy-download-expired")
+    media_item = _create_media_item(initialized_settings, relative_name="legacy-download-expired.mp4")
+    _grant_download_for_item(
+        initialized_settings,
+        user_id=int(created["id"]),
+        media_item_id=int(media_item["id"]),
+    )
+    session_user, _auth_token = _issue_user_session(
+        initialized_settings,
+        username="legacy-download-expired",
+        password="family-password",
+    )
+    raw_token = "legacy-download-token-expired"
+    row_id, legacy_hash = _insert_legacy_download_session(
+        initialized_settings,
+        token=raw_token,
+        user=session_user,
+        media_item_id=int(media_item["id"]),
+        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        validate_download_session(initialized_settings, token=raw_token, user=session_user)
+
+    assert exc.value.status_code == 403
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute("SELECT session_token_hash FROM download_sessions WHERE id = ?", (row_id,)).fetchone()
+    assert row is not None
+    assert row["session_token_hash"] == legacy_hash
+
+
+@pytest.mark.parametrize(
+    ("status_column", "status_value"),
+    (
+        ("completed_at", "2026-01-01T00:00:00+00:00"),
+        ("failed_at", "2026-01-01T00:00:00+00:00"),
+        ("revoked_at", "2026-01-01T00:00:00+00:00"),
+    ),
+)
+def test_inactive_legacy_download_session_is_rejected_without_rehash(
+    initialized_settings,
+    status_column,
+    status_value,
+) -> None:
+    created = _create_standard_user(initialized_settings, username=f"legacy-download-{status_column}")
+    media_item = _create_media_item(initialized_settings, relative_name=f"legacy-download-{status_column}.mp4")
+    _grant_download_for_item(
+        initialized_settings,
+        user_id=int(created["id"]),
+        media_item_id=int(media_item["id"]),
+    )
+    session_user, _auth_token = _issue_user_session(
+        initialized_settings,
+        username=f"legacy-download-{status_column}",
+        password="family-password",
+    )
+    raw_token = f"legacy-download-token-{status_column}"
+    kwargs = {status_column: status_value}
+    row_id, legacy_hash = _insert_legacy_download_session(
+        initialized_settings,
+        token=raw_token,
+        user=session_user,
+        media_item_id=int(media_item["id"]),
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        **kwargs,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        validate_download_session(initialized_settings, token=raw_token, user=session_user)
+
+    assert exc.value.status_code == 403
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute("SELECT session_token_hash FROM download_sessions WHERE id = ?", (row_id,)).fetchone()
+    assert row is not None
+    assert row["session_token_hash"] == legacy_hash
 
 
 def test_download_session_rejects_user_below_movie_age_requirement(initialized_settings, client) -> None:

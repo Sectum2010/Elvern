@@ -38,6 +38,7 @@ DOWNLOAD_ACCESS_MODES = {DOWNLOAD_ACCESS_NONE, DOWNLOAD_ACCESS_ALL, DOWNLOAD_ACC
 DOWNLOAD_SESSION_TTL_MINUTES = 10
 INVITE_CODE_HASH_PURPOSE = "invite.code"
 PASSWORD_HELP_REQUESTER_BUCKET_HASH_PURPOSE = "password_help.requester_bucket"
+DOWNLOAD_SESSION_HASH_PURPOSE = "download.session"
 SENSITIVE_DOWNLOAD_AUDIT_MARKERS = (
     "token",
     "access_token",
@@ -87,6 +88,40 @@ def _legacy_requester_bucket_hash(settings: Settings, *, ip_address: str | None,
         "password-help-device",
         _requester_bucket_value(ip_address=ip_address, user_agent=user_agent),
     )
+
+
+def _download_session_hash(settings: Settings, token: str) -> str:
+    return hash_token_hmac(settings, purpose=DOWNLOAD_SESSION_HASH_PURPOSE, token=token)
+
+
+def _legacy_download_session_hash(settings: Settings, token: str) -> str:
+    return _secret_hash(settings, "download-session", token)
+
+
+def _download_session_hash_candidates(settings: Settings, token: str) -> tuple[str, str]:
+    return (_download_session_hash(settings, token), _legacy_download_session_hash(settings, token))
+
+
+def _maybe_rehash_download_session_token(
+    settings: Settings,
+    *,
+    session_id: int,
+    token: str,
+    current_hash: str,
+) -> None:
+    token_hash = _download_session_hash(settings, token)
+    if current_hash == token_hash:
+        return
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            UPDATE download_sessions
+            SET session_token_hash = ?
+            WHERE id = ? AND session_token_hash = ?
+            """,
+            (token_hash, session_id, current_hash),
+        )
+        connection.commit()
 
 
 def _requester_bucket_value(*, ip_address: str | None, user_agent: str | None) -> str:
@@ -737,7 +772,7 @@ def create_download_session(
 ) -> dict[str, object]:
     detail = _get_download_item_detail(settings, user=user, item_id=item_id)
     token = generate_session_token()
-    token_hash = _secret_hash(settings, "download-session", token)
+    token_hash = _download_session_hash(settings, token)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     expires_at = (now_dt + timedelta(minutes=DOWNLOAD_SESSION_TTL_MINUTES)).isoformat()
@@ -804,11 +839,12 @@ def validate_download_session(
     allow_expired_download_session: bool = False,
 ) -> int:
     now = utcnow_iso()
-    token_hash = _secret_hash(settings, "download-session", token)
+    token_hash, legacy_token_hash = _download_session_hash_candidates(settings, token)
     with get_connection(settings) as connection:
         query = """
             SELECT
                 d.id,
+                d.session_token_hash,
                 d.user_id,
                 d.media_item_id,
                 d.auth_session_id,
@@ -816,18 +852,21 @@ def validate_download_session(
                 d.expires_at,
                 d.revoked_at,
                 d.completed_at,
+                d.failed_at,
                 u.enabled AS user_enabled,
                 s.expires_at AS auth_session_expires_at,
                 s.revoked_at AS auth_session_revoked_at
             FROM download_sessions d
             JOIN users u ON u.id = d.user_id
             LEFT JOIN sessions s ON s.id = d.auth_session_id
-            WHERE d.session_token_hash = ?
+            WHERE d.session_token_hash IN (?, ?)
             """
-        params: list[object] = [token_hash]
+        params: list[object] = [token_hash, legacy_token_hash]
         if session_id is not None:
             query += " AND d.id = ?"
             params.append(int(session_id))
+        query += " ORDER BY CASE d.session_token_hash WHEN ? THEN 0 ELSE 1 END"
+        params.append(token_hash)
         query += " LIMIT 1"
         row = connection.execute(
             query,
@@ -848,8 +887,13 @@ def validate_download_session(
             or str(row["auth_session_expires_at"]) <= now
         ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Auth session is no longer active")
-        if row["revoked_at"] is not None or row["completed_at"] is not None or (
-            not allow_expired_download_session and str(row["expires_at"]) <= now
+        stored_hash = str(row["session_token_hash"])
+        legacy_match = stored_hash != token_hash
+        if (
+            row["revoked_at"] is not None
+            or row["completed_at"] is not None
+            or row["failed_at"] is not None
+            or ((not allow_expired_download_session or legacy_match) and str(row["expires_at"]) <= now)
         ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Download session is no longer active")
         if not bool(row["user_enabled"]):
@@ -875,6 +919,12 @@ def validate_download_session(
             audit_action="download.revoked",
         )
         raise
+    _maybe_rehash_download_session_token(
+        settings,
+        session_id=int(row["id"]),
+        token=token,
+        current_hash=stored_hash,
+    )
     return int(row["media_item_id"])
 
 
@@ -905,18 +955,20 @@ def mark_download_session_completed(
     user: AuthenticatedUser,
     session_id: int | None = None,
 ) -> None:
-    token_hash = _secret_hash(settings, "download-session", token)
+    token_hash, legacy_token_hash = _download_session_hash_candidates(settings, token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
         query = """
             SELECT id, media_item_id
             FROM download_sessions
-            WHERE session_token_hash = ? AND user_id = ?
+            WHERE session_token_hash IN (?, ?) AND user_id = ?
             """
-        params: list[object] = [token_hash, user.id]
+        params: list[object] = [token_hash, legacy_token_hash, user.id]
         if session_id is not None:
             query += " AND id = ?"
             params.append(int(session_id))
+        query += " ORDER BY CASE session_token_hash WHEN ? THEN 0 ELSE 1 END LIMIT 1"
+        params.append(token_hash)
         row = connection.execute(query, params).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download session not found")
@@ -950,18 +1002,20 @@ def mark_download_session_failed(
     audit_action: str = "download.failed",
     session_id: int | None = None,
 ) -> None:
-    token_hash = _secret_hash(settings, "download-session", token)
+    token_hash, legacy_token_hash = _download_session_hash_candidates(settings, token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
         query = """
             SELECT id, media_item_id
             FROM download_sessions
-            WHERE session_token_hash = ? AND user_id = ?
+            WHERE session_token_hash IN (?, ?) AND user_id = ?
             """
-        params: list[object] = [token_hash, user.id]
+        params: list[object] = [token_hash, legacy_token_hash, user.id]
         if session_id is not None:
             query += " AND id = ?"
             params.append(int(session_id))
+        query += " ORDER BY CASE session_token_hash WHEN ? THEN 0 ELSE 1 END LIMIT 1"
+        params.append(token_hash)
         row = connection.execute(query, params).fetchone()
         if row is None:
             return
@@ -997,18 +1051,20 @@ def mark_download_session_terminated(
     user_agent: str | None = None,
     session_id: int | None = None,
 ) -> None:
-    token_hash = _secret_hash(settings, "download-session", token)
+    token_hash, legacy_token_hash = _download_session_hash_candidates(settings, token)
     now = utcnow_iso()
     with get_connection(settings) as connection:
         query = """
             SELECT id, user_id, media_item_id, auth_session_id, auth_session_required
             FROM download_sessions
-            WHERE session_token_hash = ?
+            WHERE session_token_hash IN (?, ?)
             """
-        params: list[object] = [token_hash]
+        params: list[object] = [token_hash, legacy_token_hash]
         if session_id is not None:
             query += " AND id = ?"
             params.append(int(session_id))
+        query += " ORDER BY CASE session_token_hash WHEN ? THEN 0 ELSE 1 END"
+        params.append(token_hash)
         query += " LIMIT 1"
         row = connection.execute(query, params).fetchone()
         if row is None:

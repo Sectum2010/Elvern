@@ -5,6 +5,7 @@ import ast
 import inspect
 import textwrap
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs
@@ -12,10 +13,12 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app.auth import authenticate_user
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.routes import assistant as assistant_routes
+from backend.app.security import TOKEN_HASH_PREFIX, hash_session_token
 from backend.app.services import assistant_service
 from backend.app.services.admin_service import create_user
 from backend.app.services.assistant_service import (
@@ -183,6 +186,15 @@ def _assistant_table_counts(settings) -> tuple[int, int]:
     return request_count, attachment_count
 
 
+def _raw_image_response_for_external_url(settings, external_url: str):
+    parsed = urlsplit(external_url)
+    return assistant_routes.assistant_attachment_raw_image(
+        parsed.path.rsplit("/", maxsplit=1)[-1],
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings))),
+        token=parse_qs(parsed.query)["token"][0],
+    )
+
+
 def _assistant_upload_files(settings) -> list[Path]:
     upload_root = settings.db_path.parent / "assistant_uploads"
     if not upload_root.exists():
@@ -322,6 +334,168 @@ def test_assistant_attachment_view_permissions_remain_unchanged(initialized_sett
     disabled_access_response = client.get(f"/api/assistant/attachments/{attachment_id}")
     assert disabled_access_response.status_code == 403
     assert disabled_access_response.json()["detail"] == "Assistant (Beta) is not enabled for this account"
+
+
+def test_assistant_external_open_new_ticket_stores_hmac_and_opens(
+    initialized_settings,
+    client,
+) -> None:
+    settings = replace(initialized_settings, backend_origin="http://testserver")
+    client.app.state.settings = settings
+    owner, password = _create_standard_user(
+        settings,
+        username=f"assistant-image-hmac-{uuid4().hex[:8]}",
+    )
+    image_attachment_id = _insert_assistant_attachment(
+        settings,
+        user_id=int(owner["id"]),
+        mime_type="image/png",
+        filename="safe.png",
+        content=b"fake-png",
+    )
+    _login(client, username=str(owner["username"]), password=password)
+
+    ticket_response = client.post(f"/api/assistant/attachments/{image_attachment_id}/external-open")
+
+    assert ticket_response.status_code == 200
+    external_url = ticket_response.json()["external_open_url"]
+    parsed = urlsplit(external_url)
+    ticket_id = parsed.path.rsplit("/", maxsplit=1)[-1]
+    raw_token = parse_qs(parsed.query)["token"][0]
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT access_token_hash, attachment_id
+            FROM assistant_attachment_external_open_tickets
+            WHERE ticket_id = ?
+            """,
+            (ticket_id,),
+        ).fetchone()
+    assert row is not None
+    assert str(row["access_token_hash"]).startswith(TOKEN_HASH_PREFIX)
+    assert raw_token not in str(row["access_token_hash"])
+    assert int(row["attachment_id"]) == image_attachment_id
+
+    raw_response = _raw_image_response_for_external_url(settings, external_url)
+    assert raw_response.media_type == "image/png"
+    assert raw_response.headers["Content-Disposition"].startswith("inline")
+    _assert_common_attachment_headers(raw_response)
+
+
+def test_legacy_assistant_external_open_ticket_opens_and_lazy_rehashes(initialized_settings) -> None:
+    settings = replace(initialized_settings, backend_origin="http://testserver")
+    owner, _password = _create_standard_user(
+        settings,
+        username=f"assistant-image-legacy-{uuid4().hex[:8]}",
+    )
+    image_attachment_id = _insert_assistant_attachment(
+        settings,
+        user_id=int(owner["id"]),
+        mime_type="image/png",
+        filename="legacy.png",
+        content=b"legacy-png",
+    )
+    ticket_id = f"legacy-ticket-{uuid4().hex}"
+    raw_token = "legacy-assistant-external-open-token"
+    legacy_hash = hash_session_token(raw_token, settings.session_secret)
+    now = utcnow_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO assistant_attachment_external_open_tickets (
+                ticket_id,
+                access_token_hash,
+                attachment_id,
+                issued_by_user_id,
+                created_at,
+                expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ticket_id, legacy_hash, image_attachment_id, int(owner["id"]), now, expires_at),
+        )
+        row_id = int(cursor.lastrowid)
+        connection.commit()
+
+    raw_response = assistant_routes.assistant_attachment_raw_image(
+        ticket_id,
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings))),
+        token=raw_token,
+    )
+
+    assert raw_response.media_type == "image/png"
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT ticket_id, access_token_hash, attachment_id, issued_by_user_id, expires_at, last_opened_at
+            FROM assistant_attachment_external_open_tickets
+            WHERE id = ?
+            """,
+            (row_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["ticket_id"] == ticket_id
+    assert str(row["access_token_hash"]).startswith(TOKEN_HASH_PREFIX)
+    assert row["access_token_hash"] != legacy_hash
+    assert int(row["attachment_id"]) == image_attachment_id
+    assert int(row["issued_by_user_id"]) == int(owner["id"])
+    assert row["expires_at"] == expires_at
+    assert row["last_opened_at"] is not None
+
+
+def test_expired_legacy_assistant_external_open_ticket_is_rejected_without_rehash(initialized_settings) -> None:
+    settings = replace(initialized_settings, backend_origin="http://testserver")
+    owner, _password = _create_standard_user(
+        settings,
+        username=f"assistant-image-expired-{uuid4().hex[:8]}",
+    )
+    image_attachment_id = _insert_assistant_attachment(
+        settings,
+        user_id=int(owner["id"]),
+        mime_type="image/png",
+        filename="expired.png",
+        content=b"expired-png",
+    )
+    ticket_id = f"expired-legacy-ticket-{uuid4().hex}"
+    raw_token = "expired-legacy-assistant-external-open-token"
+    legacy_hash = hash_session_token(raw_token, settings.session_secret)
+    now = utcnow_iso()
+    expires_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO assistant_attachment_external_open_tickets (
+                ticket_id,
+                access_token_hash,
+                attachment_id,
+                issued_by_user_id,
+                created_at,
+                expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ticket_id, legacy_hash, image_attachment_id, int(owner["id"]), now, expires_at),
+        )
+        connection.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        assistant_service.resolve_assistant_image_external_open_ticket(
+            settings,
+            ticket_id=ticket_id,
+            token=raw_token,
+        )
+
+    assert exc.value.status_code in {404, 410}
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT access_token_hash
+            FROM assistant_attachment_external_open_tickets
+            WHERE ticket_id = ?
+            """,
+            (ticket_id,),
+        ).fetchone()
+    if row is not None:
+        assert row["access_token_hash"] == legacy_hash
 
 
 def test_assistant_attachment_external_open_stays_image_only_with_raw_headers(
