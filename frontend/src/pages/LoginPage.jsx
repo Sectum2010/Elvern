@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PasswordInput } from "../components/PasswordInput";
+import { isMaintenanceModeError, MAINTENANCE_MODE_MESSAGE } from "../lib/api";
 
 const VIEWPORT_SYNC_API_KEY = "__elvernRequestViewportNormalization";
 
@@ -29,6 +30,8 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const maintenanceModeNotice = authNotice === MAINTENANCE_MODE_MESSAGE ? authNotice : "";
+  const inlineAuthNotice = maintenanceModeNotice ? "" : authNotice;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -85,6 +88,10 @@ export function LoginPage() {
         navigate("/setup/totp", { replace: true });
       }
     } catch (requestError) {
+      if (isMaintenanceModeError(requestError)) {
+        setError("");
+        return;
+      }
       setError(requestError.message || "Login failed");
     } finally {
       setPending(false);
@@ -107,7 +114,7 @@ export function LoginPage() {
               autoComplete="username"
               name="username"
               onChange={(event) => {
-                if (authNotice) {
+                if (inlineAuthNotice) {
                   clearAuthNotice();
                 }
                 setUsername(event.target.value);
@@ -125,7 +132,7 @@ export function LoginPage() {
               autoComplete="current-password"
               name="password"
               onChange={(event) => {
-                if (authNotice) {
+                if (inlineAuthNotice) {
                   clearAuthNotice();
                 }
                 setPassword(event.target.value);
@@ -135,7 +142,7 @@ export function LoginPage() {
             />
           </label>
 
-          {authNotice ? <p className="form-error">{authNotice}</p> : null}
+          {inlineAuthNotice ? <p className="form-error">{inlineAuthNotice}</p> : null}
           {error ? <p className="form-error">{error}</p> : null}
 
           <button className="primary-button" disabled={pending} type="submit">
@@ -147,6 +154,9 @@ export function LoginPage() {
           </div>
         </form>
       </div>
+      {maintenanceModeNotice ? (
+        <p className="login-maintenance-notice">{maintenanceModeNotice}</p>
+      ) : null}
     </div>
   );
 }

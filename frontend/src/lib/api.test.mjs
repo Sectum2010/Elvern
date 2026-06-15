@@ -1,7 +1,18 @@
-import { test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import assert from "node:assert/strict";
 
-import { extractApiErrorMessage } from "./api.js";
+import {
+  apiRequest,
+  extractApiErrorMessage,
+  isMaintenanceModeError,
+  MAINTENANCE_MODE_BLOCKED_EVENT,
+  MAINTENANCE_MODE_MESSAGE,
+} from "./api.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 test("extractApiErrorMessage returns string detail directly", () => {
   assert.equal(
@@ -41,4 +52,58 @@ test("extractApiErrorMessage uses object-level message when detail is absent", (
     extractApiErrorMessage({ message: "Cloud libraries could not refresh." }),
     "Cloud libraries could not refresh.",
   );
+});
+
+test("apiRequest dispatches maintenance mode event for the exact maintenance 503", async () => {
+  const events = [];
+  function handleMaintenanceModeBlocked(event) {
+    events.push(event.detail?.message || "");
+  }
+  window.addEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handleMaintenanceModeBlocked);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ detail: MAINTENANCE_MODE_MESSAGE }),
+    { status: 503, headers: { "content-type": "application/json" } },
+  )));
+
+  try {
+    await assert.rejects(
+      () => apiRequest("/api/library"),
+      (error) => {
+        assert.equal(isMaintenanceModeError(error), true);
+        assert.equal(error.message, MAINTENANCE_MODE_MESSAGE);
+        return true;
+      },
+    );
+
+    assert.deepEqual(events, [MAINTENANCE_MODE_MESSAGE]);
+  } finally {
+    window.removeEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handleMaintenanceModeBlocked);
+  }
+});
+
+test("apiRequest does not dispatch maintenance mode event for generic 503 errors", async () => {
+  const events = [];
+  function handleMaintenanceModeBlocked(event) {
+    events.push(event.detail?.message || "");
+  }
+  window.addEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handleMaintenanceModeBlocked);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ detail: "Service unavailable" }),
+    { status: 503, headers: { "content-type": "application/json" } },
+  )));
+
+  try {
+    await assert.rejects(
+      () => apiRequest("/api/library"),
+      (error) => {
+        assert.equal(isMaintenanceModeError(error), false);
+        assert.equal(error.message, "Service unavailable");
+        return true;
+      },
+    );
+
+    assert.deepEqual(events, []);
+  } finally {
+    window.removeEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handleMaintenanceModeBlocked);
+  }
 });

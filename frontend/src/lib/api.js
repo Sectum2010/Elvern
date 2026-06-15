@@ -5,6 +5,9 @@ function joinMessages(values) {
   return messages.length > 0 ? messages.join("; ") : null;
 }
 
+export const MAINTENANCE_MODE_MESSAGE = "The server is currently under construction, please try again later";
+export const MAINTENANCE_MODE_BLOCKED_EVENT = "elvern:maintenance-mode-blocked";
+
 function extractDetailMessage(detail) {
   if (typeof detail === "string") {
     return detail.trim() || null;
@@ -38,6 +41,10 @@ function extractDetailMessage(detail) {
   return null;
 }
 
+function isExactMaintenanceModeMessage(value) {
+  return typeof value === "string" && value.trim() === MAINTENANCE_MODE_MESSAGE;
+}
+
 export function extractApiErrorMessage(payload, fallback = "Request failed") {
   const detail =
     typeof payload === "object" && payload && "detail" in payload
@@ -62,6 +69,35 @@ export function extractApiErrorMessage(payload, fallback = "Request failed") {
     ]) || fallback;
   }
   return fallback;
+}
+
+export function isMaintenanceModeError(error) {
+  if (!error || Number(error.status) !== 503) {
+    return false;
+  }
+  if (isExactMaintenanceModeMessage(error.message)) {
+    return true;
+  }
+  if (isExactMaintenanceModeMessage(extractDetailMessage(error.detail))) {
+    return true;
+  }
+  if (typeof error === "object" && "payload" in error) {
+    return isExactMaintenanceModeMessage(extractApiErrorMessage(error.payload, ""));
+  }
+  return false;
+}
+
+function dispatchMaintenanceModeBlocked(error) {
+  if (
+    typeof window === "undefined"
+    || typeof window.dispatchEvent !== "function"
+    || !isMaintenanceModeError(error)
+  ) {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(MAINTENANCE_MODE_BLOCKED_EVENT, {
+    detail: { message: MAINTENANCE_MODE_MESSAGE },
+  }));
 }
 
 export async function apiRequest(path, options = {}) {
@@ -109,6 +145,7 @@ export async function apiRequest(path, options = {}) {
     error.status = response.status;
     error.payload = payload;
     error.detail = detail;
+    dispatchMaintenanceModeBlocked(error);
     throw error;
   }
 

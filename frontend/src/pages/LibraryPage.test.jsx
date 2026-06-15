@@ -10,6 +10,7 @@ import { apiRequest } from "../lib/api";
 import { readLibraryReturnTarget } from "../lib/libraryNavigation";
 import { LibraryPage } from "./LibraryPage";
 
+const MAINTENANCE_MODE_MESSAGE = "The server is currently under construction, please try again later";
 
 const mockPlatformState = vi.hoisted(() => ({
   deviceClass: "desktop",
@@ -35,6 +36,10 @@ vi.mock("../auth/ProviderAuthContext", () => ({
 
 vi.mock("../lib/api", () => ({
   apiRequest: vi.fn(),
+  isMaintenanceModeError: (error) => (
+    error?.status === 503
+    && error?.message === "The server is currently under construction, please try again later"
+  ),
 }));
 
 vi.mock("../lib/browserPlayback", () => ({
@@ -274,6 +279,31 @@ describe("LibraryPage category switching", () => {
     await screen.findByRole("tab", { name: "Movies" });
 
     expect(screen.queryByText("Maintenance mode is still turned on")).not.toBeInTheDocument();
+  });
+
+  test("does not render the regular-user maintenance block message as a Library error", async () => {
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/admin/maintenance-mode") {
+        return Promise.resolve({ enabled: false });
+      }
+      if (requestPath.startsWith("/api/library")) {
+        return Promise.reject(Object.assign(new Error(MAINTENANCE_MODE_MESSAGE), { status: 503 }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/library"]}>
+        <LibraryPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("tab", { name: "Movies" });
+
+    expect(screen.queryByText(MAINTENANCE_MODE_MESSAGE)).not.toBeInTheDocument();
   });
 
   test("reads active category from URL and updates URL when a category is clicked", async () => {

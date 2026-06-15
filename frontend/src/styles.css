@@ -1925,6 +1925,17 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   border-radius: 1.5rem;
 }
 
+.login-maintenance-notice {
+  width: min(100%, 420px);
+  max-width: 100%;
+  margin: 0.85rem 0 0;
+  color: var(--danger);
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+}
+
 .login-copy {
   margin: 0.8rem 0 1.2rem;
   color: var(--text-muted);

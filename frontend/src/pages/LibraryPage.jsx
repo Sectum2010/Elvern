@@ -9,7 +9,7 @@ import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { SeriesRail } from "../components/SeriesRail";
-import { apiRequest } from "../lib/api";
+import { apiRequest, isMaintenanceModeError } from "../lib/api";
 import {
   getProviderAuthPassiveNoticeMessage,
   shouldUseProviderAuthPassiveNotice,
@@ -797,6 +797,9 @@ export function LibraryPage() {
       if (requestError.name === "AbortError") {
         return;
       }
+      if (isMaintenanceModeError(requestError)) {
+        return;
+      }
       if (requestError.status === 401) {
         await refreshAuth();
         return;
@@ -1471,6 +1474,9 @@ export function LibraryPage() {
       scanRunningRef.current = Boolean(payload.running);
       await loadLibrary({ silent: true });
     } catch (requestError) {
+      if (isMaintenanceModeError(requestError)) {
+        return;
+      }
       setError(requestError.message || "Unable to start scan");
     } finally {
       setRescanPending(false);

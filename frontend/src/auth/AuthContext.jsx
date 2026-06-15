@@ -1,5 +1,10 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
-import { apiRequest } from "../lib/api";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import {
+  apiRequest,
+  isMaintenanceModeError,
+  MAINTENANCE_MODE_BLOCKED_EVENT,
+  MAINTENANCE_MODE_MESSAGE,
+} from "../lib/api";
 
 
 const AuthContext = createContext(null);
@@ -12,6 +17,13 @@ export function AuthProvider({ children }) {
   const [authNotice, setAuthNotice] = useState("");
   const refreshInFlightRef = useRef(false);
   const userRef = useRef(null);
+
+  const endSessionWithNotice = useCallback((message) => {
+    setAuthNotice(message);
+    setUser(null);
+    userRef.current = null;
+    setLoading(false);
+  }, []);
 
   useEffect(() => {
     userRef.current = user;
@@ -31,6 +43,11 @@ export function AuthProvider({ children }) {
       }
       return payload.user;
     } catch (error) {
+      const maintenanceModeBlock = isMaintenanceModeError(error);
+      if (maintenanceModeBlock) {
+        endSessionWithNotice(MAINTENANCE_MODE_MESSAGE);
+        return null;
+      }
       const authFailure = error.status === 401 || error.status === 403;
       if (notifyOnFailure) {
         if (error.status === 403) {
@@ -63,6 +80,11 @@ export function AuthProvider({ children }) {
       }
       return true;
     } catch (error) {
+      const maintenanceModeBlock = isMaintenanceModeError(error);
+      if (maintenanceModeBlock) {
+        endSessionWithNotice(MAINTENANCE_MODE_MESSAGE);
+        return false;
+      }
       const authFailure = error.status === 401 || error.status === 403;
       if (notifyOnFailure) {
         if (error.status === 403) {
@@ -84,10 +106,18 @@ export function AuthProvider({ children }) {
 
   async function login(credentials) {
     setAuthNotice("");
-    const payload = await apiRequest("/api/auth/login", {
-      method: "POST",
-      data: credentials,
-    });
+    let payload;
+    try {
+      payload = await apiRequest("/api/auth/login", {
+        method: "POST",
+        data: credentials,
+      });
+    } catch (error) {
+      if (isMaintenanceModeError(error)) {
+        endSessionWithNotice(MAINTENANCE_MODE_MESSAGE);
+      }
+      throw error;
+    }
     if (payload?.session === "pending_totp") {
       return payload;
     }
@@ -117,6 +147,20 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     refreshAuth();
   }, []);
+
+  useEffect(() => {
+    function handleMaintenanceModeBlocked(event) {
+      const message = typeof event.detail?.message === "string"
+        ? event.detail.message
+        : MAINTENANCE_MODE_MESSAGE;
+      endSessionWithNotice(message === MAINTENANCE_MODE_MESSAGE ? message : MAINTENANCE_MODE_MESSAGE);
+    }
+
+    window.addEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handleMaintenanceModeBlocked);
+    return () => {
+      window.removeEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handleMaintenanceModeBlocked);
+    };
+  }, [endSessionWithNotice]);
 
   useEffect(() => {
     if (!user) {
