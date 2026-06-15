@@ -26,6 +26,7 @@ from backend.app.services.account_access_service import (
     create_download_session,
     get_download_access_for_user,
     is_item_download_allowed,
+    mark_download_session_failed,
     update_download_access_for_user,
     validate_download_session,
 )
@@ -2321,6 +2322,40 @@ def test_download_session_endpoint_authorizes_range_requests(initialized_setting
     assert range_response.headers["accept-ranges"] == "bytes"
     assert range_response.headers["content-disposition"] == "attachment; filename*=UTF-8''family%20movie%3F.mp4"
     assert range_response.content == b"not "
+
+
+def test_download_failure_audit_detail_redacts_token_bearing_urls(initialized_settings) -> None:
+    _created, _media_item, session_user, _auth_token, session_payload = _create_authorized_download_session(
+        initialized_settings,
+        username="download-audit-redaction-user",
+    )
+    raw_token = str(session_payload["session_token"])
+    raw_url = str(session_payload["download_url"])
+    mark_download_session_failed(
+        initialized_settings,
+        token=raw_token,
+        user=session_user,
+        message=f"browser failed while fetching {raw_url}?token={raw_token}",
+    )
+
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT details_json
+            FROM audit_logs
+            WHERE action = 'download.failed'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    details_json = str(row["details_json"])
+    details = json.loads(details_json)
+    assert details == {"message": "redacted_sensitive_download_detail"}
+    assert raw_token not in details_json
+    assert raw_url not in details_json
+    assert "/api/download/sessions/" not in details_json
 
 
 def test_download_session_rejects_user_below_movie_age_requirement(initialized_settings, client) -> None:

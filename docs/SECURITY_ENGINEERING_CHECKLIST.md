@@ -50,6 +50,8 @@ Use this checklist for security-sensitive Elvern changes, especially after CodeQ
 - Log sanitized origins only as scheme plus host/port.
 - Prefer media item IDs, endpoint names, return codes, and exception types over raw paths or exception strings.
 - Do not log ffprobe stdout/stderr, env dumps, request tokens, or filesystem paths that reveal private media names.
+- External player, desktop helper, and download token URLs may exist in required responses, but logs must use fingerprints, origin labels, and endpoint/path-family names.
+- Keep download token flow behavior changes as a separate hardening design; do not change download semantics as part of log cleanup.
 
 ## Media Reference And Token URL Privacy
 

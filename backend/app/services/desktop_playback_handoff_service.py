@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, status
 
@@ -20,12 +21,35 @@ from .desktop_playback_protocol_service import (
     build_vlc_helper_started_url,
     infer_target_kind,
 )
+from .log_identity_service import (
+    local_media_path_log_fingerprint,
+    safe_url_origin_label,
+    safe_url_path_label,
+    token_url_log_fingerprint,
+)
 from .media_age_access_service import assert_user_can_access_media_by_age
 
 
 logger = logging.getLogger(__name__)
 
 DIRECT_EXTERNAL_PROGRESS_SECONDS = 1.0
+
+
+def _desktop_handoff_target_log_details(target: object) -> dict[str, object]:
+    value = str(target or "").strip()
+    kind = infer_target_kind(value) if value else "unknown"
+    if kind == "url":
+        return {
+            "target_kind": "url",
+            "target_origin": safe_url_origin_label(value),
+            "target_path": safe_url_path_label(value),
+            "target_has_query": bool(urlsplit(value).query),
+            "target_fingerprint": token_url_log_fingerprint(value),
+        }
+    return {
+        "target_kind": "path" if value else "unknown",
+        "target_path_fingerprint": local_media_path_log_fingerprint(value),
+    }
 
 
 def cleanup_desktop_vlc_handoffs(settings: Settings) -> None:
@@ -131,8 +155,8 @@ def create_desktop_vlc_handoff(
                 "platform": platform,
                 "strategy": strategy,
                 "helper_protocol": settings.vlc_helper_protocol,
-                "resolved_target": resolved_target,
-                "backend_origin": backend_origin,
+                "backend_origin": safe_url_origin_label(backend_origin),
+                **_desktop_handoff_target_log_details(resolved_target),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -193,13 +217,16 @@ def resolve_desktop_vlc_handoff(
                 "handoff_id": row["handoff_id"],
                 "platform": row["platform"],
                 "strategy": row["strategy"],
-                "target_kind": infer_target_kind(target),
-                "target": target,
+                **_desktop_handoff_target_log_details(target),
                 "helper_version": helper_version,
                 "helper_platform": helper_platform,
                 "helper_arch": helper_arch,
                 "helper_vlc_detection_state": helper_vlc_detection_state,
-                "helper_vlc_detection_path": helper_vlc_detection_path,
+                "helper_vlc_detection_path_fingerprint": (
+                    local_media_path_log_fingerprint(helper_vlc_detection_path)
+                    if helper_vlc_detection_path
+                    else None
+                ),
                 "source_ip": source_ip,
             },
             ensure_ascii=True,

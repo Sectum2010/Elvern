@@ -1167,6 +1167,56 @@ def test_native_playback_create_log_omits_tokenized_urls_and_raw_session_id(
         assert created_session[key] not in create_log_text
 
 
+def test_native_playback_stream_debug_log_omits_query_token_and_raw_session_id(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+    caplog,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="native-session/stream-debug-secret.mp4",
+    )
+    create_response = client.post(
+        f"/api/native-playback/{item['id']}/session",
+        headers={"user-agent": IOS_SAFARI_USER_AGENT},
+    )
+    assert create_response.status_code == 200
+    created_session = create_response.json()
+    raw_session_id = created_session["session_id"]
+    access_token = created_session["access_token"]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="backend.app.routes.native_playback"):
+        stream_response = client.get(
+            f"/api/native-playback/session/{raw_session_id}/stream",
+            params={"token": access_token},
+            headers={"user-agent": "VLC/3.0 pytest"},
+        )
+
+    assert stream_response.status_code == 200
+    log_text = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "backend.app.routes.native_playback"
+    )
+    assert "native_playback_stream_debug" in log_text
+    assert "session_fingerprint" in log_text
+    assert "/api/native-playback/session/{session_id}/stream" in log_text
+    assert "query_contains_token" in log_text
+    assert raw_session_id not in log_text
+    assert access_token not in log_text
+    assert "token=" not in log_text
+    assert "stream-debug-secret.mp4" not in log_text
+    assert created_session["stream_url"] not in log_text
+
+
 def test_native_playback_session_route_ignores_other_users_progress_for_ios_vlc_resume(
     initialized_settings,
     client,
@@ -2434,6 +2484,7 @@ def test_desktop_playlist_backend_fallback_decouples_vlc_stream_from_browser_aut
     initialized_settings,
     client,
     admin_credentials,
+    caplog,
 ) -> None:
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     with get_connection(initialized_settings) as connection:
@@ -2454,17 +2505,32 @@ def test_desktop_playlist_backend_fallback_decouples_vlc_stream_from_browser_aut
     )
     client.app.state.settings = replace(initialized_settings, library_root_windows=None)
 
-    response = client.get(
-        f"/api/desktop-playback/{item['id']}/playlist",
-        params={"platform": "windows"},
-    )
+    with caplog.at_level(logging.INFO, logger="backend.app.services.desktop_playback_service"):
+        response = client.get(
+            f"/api/desktop-playback/{item['id']}/playlist",
+            params={"platform": "windows"},
+        )
 
     assert response.status_code == 200
     location = unescape(response.text.split("<location>", 1)[1].split("</location>", 1)[0])
     parsed_location = urlsplit(location)
     assert parsed_location.path.endswith("/stream")
     session_id = parsed_location.path.rstrip("/").split("/")[-2]
-    assert parse_qs(parsed_location.query).get("token")
+    token = parse_qs(parsed_location.query).get("token")[0]
+
+    log_text = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "backend.app.services.desktop_playback_service"
+    )
+    assert "Building backend-fallback VLC playlist" in log_text
+    assert "url_fingerprint=" in log_text
+    assert "path=/api/native-playback/session/{session_id}/stream" in log_text
+    assert "has_query=True" in log_text
+    assert location not in log_text
+    assert session_id not in log_text
+    assert token not in log_text
+    assert "token=" not in log_text
 
     with get_connection(initialized_settings) as connection:
         session_row = connection.execute(
@@ -2492,6 +2558,7 @@ def test_desktop_helper_handoff_resolves_backend_stream_url_for_remote_desktop(
     client,
     admin_credentials,
     platform,
+    caplog,
 ) -> None:
     settings = replace(
         initialized_settings,
@@ -2517,10 +2584,11 @@ def test_desktop_helper_handoff_resolves_backend_stream_url_for_remote_desktop(
     assert details_payload["open_method"] == "protocol_helper"
     assert details_payload["handoff_supported"] is True
 
-    create_response = client.post(
-        f"/api/desktop-playback/{item['id']}/handoff",
-        json={"platform": platform, "device_id": f"{platform}-pytest"},
-    )
+    with caplog.at_level(logging.INFO, logger="backend.app.services.desktop_playback_handoff_service"):
+        create_response = client.post(
+            f"/api/desktop-playback/{item['id']}/handoff",
+            json={"platform": platform, "device_id": f"{platform}-pytest"},
+        )
     assert create_response.status_code == 200
     create_payload = create_response.json()
     assert create_payload["strategy"] == "backend_url"
@@ -2531,14 +2599,15 @@ def test_desktop_helper_handoff_resolves_backend_stream_url_for_remote_desktop(
     assert protocol_params["api"] == [settings.backend_origin]
     assert protocol_params["handoff"] == [create_payload["handoff_id"]]
 
-    resolve_response = client.get(
-        f"/api/desktop-playback/handoff/{create_payload['handoff_id']}",
-        params={"token": protocol_params["token"][0]},
-        headers={
-            "x-elvern-helper-platform": platform,
-            "x-elvern-vlc-detection-state": "installed",
-        },
-    )
+    with caplog.at_level(logging.INFO, logger="backend.app.services.desktop_playback_handoff_service"):
+        resolve_response = client.get(
+            f"/api/desktop-playback/handoff/{create_payload['handoff_id']}",
+            params={"token": protocol_params["token"][0]},
+            headers={
+                "x-elvern-helper-platform": platform,
+                "x-elvern-vlc-detection-state": "installed",
+            },
+        )
     assert resolve_response.status_code == 200
     resolve_payload = resolve_response.json()
     assert resolve_payload["platform"] == platform
@@ -2548,6 +2617,20 @@ def test_desktop_helper_handoff_resolves_backend_stream_url_for_remote_desktop(
         f"{settings.backend_origin}/api/native-playback/session/",
     )
     assert "token=" in resolve_payload["target"]
+    helper_log_text = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "backend.app.services.desktop_playback_handoff_service"
+    )
+    assert "target_origin" in helper_log_text
+    assert "target_path" in helper_log_text
+    assert "target_fingerprint" in helper_log_text
+    assert "resolved_target" not in helper_log_text
+    assert '"target":' not in helper_log_text
+    assert create_payload["protocol_url"] not in helper_log_text
+    assert protocol_params["token"][0] not in helper_log_text
+    assert resolve_payload["target"] not in helper_log_text
+    assert "token=" not in helper_log_text
     session_id = urlsplit(resolve_payload["target"]).path.rstrip("/").split("/")[-2]
     with get_connection(settings) as connection:
         session_row = connection.execute(

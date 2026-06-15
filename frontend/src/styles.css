@@ -6229,6 +6229,14 @@ button.detail-genre-chip-area:focus-visible,
   margin-top: 0;
 }
 
+.detail-reference-value {
+  margin: 0;
+  color: #e7eff7;
+  font-size: 0.92rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 html[data-device-shell="iphone"] .detail-info-modal__header {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;

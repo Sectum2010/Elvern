@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from time import monotonic
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
@@ -24,6 +24,7 @@ from ..schemas import (
 )
 from ..services.library_service import get_media_item_detail
 from ..services.audit_service import log_audit_event
+from ..services.log_identity_service import native_session_log_fingerprint, safe_url_path_label
 from ..services.media_age_access_service import assert_user_can_access_media_by_age
 from ..services.native_playback_service import (
     build_native_stream_response,
@@ -159,6 +160,25 @@ def _should_log_native_stream_debug(request: Request) -> bool:
     return "vlc" in user_agent or not _is_loopback_host(client_host)
 
 
+def _safe_query_log_summary(query: str) -> dict[str, object]:
+    pairs = parse_qsl(query, keep_blank_values=True)
+    keys = sorted({key for key, _value in pairs})
+    return {
+        "has_query": bool(query),
+        "query_keys": keys,
+        "query_contains_token": any("token" in key.lower() for key in keys),
+    }
+
+
+def _sanitize_native_validation_context(context: dict[str, object] | None) -> dict[str, object]:
+    if not context:
+        return {}
+    sanitized = dict(context)
+    if sanitized.get("session_id"):
+        sanitized["session_fingerprint"] = native_session_log_fingerprint(sanitized.pop("session_id"))
+    return sanitized
+
+
 def _emit_native_stream_debug_log(
     request: Request,
     *,
@@ -182,7 +202,7 @@ def _emit_native_stream_debug_log(
         "event": "native_playback_stream_debug",
         "phase": phase,
         "request_id": request_id,
-        "session_id": session_id,
+        "session_fingerprint": native_session_log_fingerprint(session_id),
         "item_id": (stream_context or {}).get("item_id"),
         "source_kind": (stream_context or {}).get("source_kind"),
         "stream_path_class": (stream_context or {}).get("stream_path_class"),
@@ -198,10 +218,9 @@ def _emit_native_stream_debug_log(
         "audio_codec": (stream_context or {}).get("audio_codec"),
         "file_size": (stream_context or {}).get("file_size"),
         "duration_seconds": (stream_context or {}).get("duration_seconds"),
-        "original_filename": (stream_context or {}).get("original_filename"),
         "method": request.method,
-        "path": request.url.path,
-        "query": request.url.query,
+        "path": safe_url_path_label(str(request.url)),
+        **_safe_query_log_summary(request.url.query),
         "http_version": request.scope.get("http_version"),
         "client_host": request.client.host if request.client else None,
         "user_agent": request.headers.get("user-agent"),
@@ -211,7 +230,7 @@ def _emit_native_stream_debug_log(
         "response_headers": response_headers or {},
         "rejected_by": rejected_by,
         "detail": detail,
-        "validation_context": validation_context or {},
+        "validation_context": _sanitize_native_validation_context(validation_context),
         "elapsed_ms": elapsed_ms,
         "bytes_sent": bytes_sent,
     }
@@ -708,7 +727,7 @@ def native_playback_session_stream(
             token_validation="accepted",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             rejected_by="unexpected_stream_failure",
-            detail=str(exc),
+            detail=type(exc).__name__,
             phase="reject",
             request_id=request_id,
             elapsed_ms=round((monotonic() - started_at) * 1000, 1),

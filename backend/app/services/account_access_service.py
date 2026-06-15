@@ -36,12 +36,31 @@ DOWNLOAD_ACCESS_ALL = "all"
 DOWNLOAD_ACCESS_SELECTED = "selected"
 DOWNLOAD_ACCESS_MODES = {DOWNLOAD_ACCESS_NONE, DOWNLOAD_ACCESS_ALL, DOWNLOAD_ACCESS_SELECTED}
 DOWNLOAD_SESSION_TTL_MINUTES = 10
+SENSITIVE_DOWNLOAD_AUDIT_MARKERS = (
+    "token",
+    "access_token",
+    "session_token",
+    "download_url",
+    "controlled_download_url",
+    "/api/download/sessions/",
+    "/api/download/session-stream/",
+    "http://",
+    "https://",
+)
 
 
 def _secret_hash(settings: Settings, namespace: str, value: str) -> str:
     return hashlib.sha256(
         f"{namespace}\n{settings.session_secret}\n{value}".encode("utf-8")
     ).hexdigest()
+
+
+def _safe_download_audit_message(message: str | None) -> str:
+    value = str(message or "download_failed").strip() or "download_failed"
+    lowered = value.lower()
+    if any(marker in lowered for marker in SENSITIVE_DOWNLOAD_AUDIT_MARKERS):
+        return "redacted_sensitive_download_detail"
+    return value[:200]
 
 
 def _requester_bucket_hash(settings: Settings, *, ip_address: str | None, user_agent: str | None) -> str:
@@ -917,7 +936,7 @@ def mark_download_session_failed(
         role=user.role,
         media_item_id=int(row["media_item_id"]),
         session_id=user.session_id,
-        details={"message": message or "download_failed"},
+        details={"message": _safe_download_audit_message(message)},
     )
 
 

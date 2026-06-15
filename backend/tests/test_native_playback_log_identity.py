@@ -13,7 +13,11 @@ from backend.app.services import native_playback_service
 from backend.app.services.log_identity_service import (
     local_media_path_log_fingerprint,
     native_session_log_fingerprint,
+    redacted_url_log_label,
+    safe_url_origin_label,
+    safe_url_path_label,
     stable_log_fingerprint,
+    token_url_log_fingerprint,
 )
 
 
@@ -62,6 +66,49 @@ def test_safe_origin_log_label_keeps_only_scheme_and_host_port() -> None:
     assert native_playback_service._safe_origin_log_label("not-a-url") == "unknown"
     assert native_playback_service._safe_origin_log_label("") == "unknown"
     assert native_playback_service._safe_origin_log_label(None) == "unknown"
+
+
+def test_safe_token_url_log_helpers_omit_query_tokens_and_dynamic_ids() -> None:
+    raw_url = "https://elvern.example/api/native-playback/session/raw-session-id/stream?token=secret-token"
+
+    assert safe_url_origin_label(raw_url) == "https://elvern.example"
+    assert safe_url_path_label(raw_url) == "/api/native-playback/session/{session_id}/stream"
+    assert token_url_log_fingerprint(raw_url) == token_url_log_fingerprint(raw_url)
+    assert token_url_log_fingerprint(raw_url) != token_url_log_fingerprint(raw_url.replace("secret-token", "other"))
+
+    label = redacted_url_log_label(raw_url)
+    assert "origin=https://elvern.example" in label
+    assert "path=/api/native-playback/session/{session_id}/stream" in label
+    assert "has_query=True" in label
+    assert "secret-token" not in label
+    assert "raw-session-id" not in label
+    assert "token=" not in label
+
+
+def test_safe_custom_protocol_log_helpers_omit_query_tokens() -> None:
+    raw_url = "elvern-vlc://play?api=https%3A%2F%2Felvern.example&handoff=raw-handoff&token=secret-token"
+
+    assert safe_url_origin_label(raw_url) == "elvern-vlc://play"
+    assert safe_url_path_label(raw_url) == "play"
+
+    label = redacted_url_log_label(raw_url)
+    assert "origin=elvern-vlc://play" in label
+    assert "path=play" in label
+    assert "has_query=True" in label
+    assert "secret-token" not in label
+    assert "raw-handoff" not in label
+    assert "api=" not in label
+
+
+def test_safe_download_url_path_labels_omit_tokens() -> None:
+    assert (
+        safe_url_path_label("https://elvern.example/api/download/sessions/raw-token/complete?token=other")
+        == "/api/download/sessions/{token}/complete"
+    )
+    assert (
+        safe_url_path_label("https://elvern.example/api/download/session-stream/42/failed")
+        == "/api/download/session-stream/{session_id}/failed"
+    )
 
 
 def test_cli_native_session_fingerprint_prints_json_without_raw_session_or_settings(

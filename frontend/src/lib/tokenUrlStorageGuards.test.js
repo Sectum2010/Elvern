@@ -85,13 +85,13 @@ test("Infuse fallback storage is explicit, short-lived, and not shared with VLC"
 });
 
 
-test("tokenized full URLs are not logged to the browser console", () => {
-  const sensitiveConsolePattern = /console\s*\.\s*log\s*\([^;\n]*(?:token|stream_url|download_url|protocol_url|access_token)/i;
+test("tokenized URL and token fields are not logged to the browser console", () => {
+  const sensitiveConsolePattern = /console\s*\.\s*(?:log|warn|error|debug|info)\s*\([^;\n]*(?:token|access_token|stream_url|download_url|controlled_download_url|protocol_url|session_token|details_url|heartbeat_url|progress_url|event_url|close_url)/i;
   for (const entry of readFrontendFiles()) {
     assert.doesNotMatch(
       entry.source,
       sensitiveConsolePattern,
-      `${entry.relativePath} must not console.log tokenized URLs`,
+      `${entry.relativePath} must not console.log tokenized URL or token fields`,
     );
   }
 });

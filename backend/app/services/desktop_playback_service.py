@@ -38,6 +38,11 @@ from .desktop_playback_protocol_service import (
     map_media_path_for_platform,
 )
 from .library_service import get_media_item_record
+from .log_identity_service import (
+    local_media_path_log_fingerprint,
+    native_session_log_fingerprint,
+    redacted_url_log_label,
+)
 from .native_playback_service import (
     close_native_playback_session,
     create_native_playback_session,
@@ -86,6 +91,14 @@ def _merge_item_payload(
     merged_item = dict(original_item)
     merged_item.update(updated_item)
     return merged_item
+
+
+def _desktop_target_log_label(target: object) -> str:
+    value = str(target or "").strip()
+    parsed = urlsplit(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return redacted_url_log_label(value)
+    return f"path_fingerprint={local_media_path_log_fingerprint(value)}"
 
 
 def _persist_cloud_duration_seconds(
@@ -574,7 +587,7 @@ def launch_vlc_for_item(
     logger.info(
         "Launching VLC directly for item=%s target=%s env=%s diagnostics=%s",
         item["id"],
-        launch_target,
+        _desktop_target_log_label(launch_target),
         env_summary,
         env_diagnostics,
     )
@@ -613,7 +626,7 @@ def launch_vlc_for_item(
         logger.warning(
             "VLC exited immediately after launch item=%s target=%s return_code=%s env=%s diagnostics=%s",
             item["id"],
-            launch_target,
+            _desktop_target_log_label(launch_target),
             return_code,
             env_summary,
             env_diagnostics,
@@ -1043,7 +1056,7 @@ def build_vlc_playlist_response(
             "Building direct-source VLC playlist item=%s platform=%s target=%s",
             item["id"],
             platform,
-            mapped_target,
+            _desktop_target_log_label(mapped_target),
         )
     else:
         session_payload = create_native_playback_session(
@@ -1063,7 +1076,7 @@ def build_vlc_playlist_response(
             "Building backend-fallback VLC playlist item=%s platform=%s stream_url=%s",
             item["id"],
             platform,
-            location,
+            _desktop_target_log_label(location),
         )
 
     playlist_body = build_xspf_playlist(
@@ -1165,7 +1178,10 @@ def _monitor_linux_vlc_direct_progress(
         if final_position is not None:
             last_position_seconds = max(last_position_seconds, final_position)
     except Exception:
-        logger.exception("Linux VLC progress monitor failed for native session %s", session_id)
+        logger.exception(
+            "Linux VLC progress monitor failed for native session_fingerprint=%s",
+            native_session_log_fingerprint(session_id),
+        )
     finally:
         if connection is not None:
             try:
@@ -1183,7 +1199,10 @@ def _monitor_linux_vlc_direct_progress(
                     completed=False,
                 )
             except Exception:
-                logger.exception("Unable to close Linux VLC direct native session %s", session_id)
+                logger.exception(
+                    "Unable to close Linux VLC direct native session_fingerprint=%s",
+                    native_session_log_fingerprint(session_id),
+                )
 
 
 def _connect_vlc_rc_socket(process: subprocess.Popen, rc_host_port: int) -> socket.socket | None:

@@ -547,7 +547,11 @@ def heartbeat_native_playback_session(
         access_token=access_token,
         extend_ttl=True,
     )
-    logger.debug("Native playback heartbeat session=%s item=%s", session_id, row["media_item_id"])
+    logger.debug(
+        "Native playback heartbeat session_fingerprint=%s item=%s",
+        native_session_log_fingerprint(session_id),
+        row["media_item_id"],
+    )
     return {
         "message": "Native playback session renewed",
         "expires_at": str(row["expires_at"]),
@@ -1182,8 +1186,8 @@ def _build_native_stream_validator(
             next_ttl_refresh_at = now_monotonic + ttl_refresh_interval_seconds
         if not stream_open:
             logger.info(
-                "Stopping native playback stream session=%s client=%s because access is no longer valid",
-                session_id,
+                "Stopping native playback stream session_fingerprint=%s client=%s because access is no longer valid",
+                native_session_log_fingerprint(session_id),
                 client_name or "unknown",
             )
         return stream_open

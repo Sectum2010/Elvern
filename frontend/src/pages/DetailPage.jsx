@@ -3710,7 +3710,7 @@ export function DetailPage() {
                         <div className="detail-list">
                           <span>Using now</span>
                         </div>
-                        <p>{effectiveMediaLibraryReference}</p>
+                        <p className="detail-reference-value">{effectiveMediaLibraryReference}</p>
                       </div>
                     </div>
                   )}
