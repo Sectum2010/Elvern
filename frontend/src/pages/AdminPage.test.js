@@ -174,6 +174,8 @@ describe("AdminPage exposure mode planner guards", () => {
     const securityCardSource = source.slice(start, end);
 
     expect(securityCardSource).toContain("<StatusRow label=\"Exposure Mode\" value={exposureModeStatus} />");
+    expect(securityCardSource).toContain("<StatusRow label=\"Finalized profile\" value={exposureFinalizedProfileStatus} />");
+    expect(securityCardSource).toContain("<StatusRow label=\"Runtime posture\" value={exposureRuntimePostureStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Pending draft\" value={exposurePendingDraft ? \"Exists\" : \"None\"} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Maintenance Mode\" value={exposureMaintenanceLockStatus} />");
     expect(securityCardSource).toContain("<StatusRow label=\"Prepared switch\" value={exposurePreparedSwitchStatus} />");
@@ -209,6 +211,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("Maintenance Mode");
     expect(modalSource).toContain("Prepare manual switch");
     expect(modalSource).toContain("Verify prepared switch");
+    expect(modalSource).toContain("Finalize verified profile");
     expect(modalSource).toContain("Desired Mode");
     expect(modalSource).toContain("Confirmation");
     expect(modalSource).toContain("exposure-planner-modal-shell");
@@ -227,6 +230,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).toContain("apiRequest(\"/api/admin/maintenance-mode\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/prepare-switch\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/verify-prepared-switch\"");
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/finalize-profile\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/prepared-switch\"");
     expect(source).toContain("current_admin_password = draft.currentAdminPassword");
     expect(source).toContain("const EXPOSURE_MODE_SEGMENTS = [");
@@ -256,6 +260,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("Prepared for manual apply");
     expect(modalSource).toContain("Prepare manual switch");
     expect(modalSource).toContain("Verify prepared switch");
+    expect(modalSource).toContain("Finalize verified profile");
     expect(modalSource).toContain("Clear prepared switch");
     expect(modalSource).toContain("Copy env suggestions");
     expect(modalSource).toContain("Env suggestions");
@@ -273,12 +278,16 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("{EXPOSURE_PREPARE_ACKNOWLEDGEMENT}");
     expect(source).toContain("I understand this only verifies the prepared manual switch. It does not release Maintenance Mode, write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate exposure mode.");
     expect(modalSource).toContain("{EXPOSURE_VERIFY_ACKNOWLEDGEMENT}");
+    expect(source).toContain("I understand this records the verified exposure profile, clears the working draft/prepared state, and does not release Maintenance Mode or change runtime settings.");
+    expect(modalSource).toContain("{EXPOSURE_FINALIZE_ACKNOWLEDGEMENT}");
     expect(modalSource).toContain("Required to enable or disable Maintenance Mode.");
     expect(modalSource).toContain("Required to prepare or clear a prepared switch.");
     expect(modalSource).toContain("Required to verify the prepared manual switch.");
+    expect(modalSource).toContain("Required to finalize the verified exposure profile.");
     expect(modalSource).toContain("This standalone mode logs out non-admin users and blocks non-admin logins without disabling accounts.");
     expect(modalSource).toContain("Preparing will automatically enable Maintenance Mode and log out non-admin users. After manually applying env/reverse-proxy changes and restarting Elvern, return through the target address and verify in Phase 4.");
     expect(modalSource).toContain("Maintenance Mode remains under admin control.");
+    expect(modalSource).toContain("Maintenance Mode remains on until an admin turns it off.");
     expect(modalSource).toContain("<StatusRow label=\"Maintenance Mode\" value={exposurePrepareMaintenanceStatus} />");
     expect(modalSource).toContain("<StatusRow label=\"Phase 4 verification\" value={exposurePhase4VerificationStatus} />");
     expect(source).toContain("caddy: \"Caddy\"");
@@ -324,6 +333,28 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).not.toContain("Release Maintenance Mode");
     expect(modalSource).not.toContain("Rotate URL prefix now");
     expect(modalSource).not.toContain("Switch exposure mode");
+  });
+
+  test("planner modal includes finalized profile controls without release actions", () => {
+    const source = readAdminPage();
+    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
+    const modalSource = source.slice(modalStart, modalEnd);
+
+    expect(source).toContain("const DEFAULT_EXPOSURE_FINALIZE_FORM = {");
+    expect(source).toContain("async function handleFinalizeExposureProfile()");
+    expect(source).toContain("apiRequest(\"/api/admin/exposure/finalize-profile\"");
+    expect(source).toContain("updateExposureFinalizedProfileState(payload.finalized_profile || null)");
+    expect(modalSource).toContain("<h3>Finalize verified profile</h3>");
+    expect(modalSource).toContain("<StatusRow label=\"Verified mode\" value={exposureFinalizeProfileLabel} />");
+    expect(modalSource).toContain("<StatusRow label=\"Origin\" value={formatExposureValue(exposureFinalizeOrigin)} />");
+    expect(modalSource).toContain("<StatusRow label=\"Verification status\" value={exposureFinalizeVerificationStatus} />");
+    expect(modalSource).toContain("<StatusRow label=\"Maintenance Mode\" value=\"Remains under admin control\" />");
+    expect(modalSource).toContain("<StatusRow label=\"Takes effect\" value=\"No runtime settings are changed by this record\" />");
+    expect(modalSource).toContain("Verify a prepared switch first.");
+    expect(modalSource).toContain("Finalize verified profile");
+    expect(modalSource).not.toContain("Release users");
+    expect(modalSource).not.toContain("Turn off Maintenance Mode");
   });
 
   test("planner modal renders validation details and grouped planning notes", () => {

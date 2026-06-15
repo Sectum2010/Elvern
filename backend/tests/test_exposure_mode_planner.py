@@ -229,7 +229,13 @@ def _enable_maintenance_lock(settings) -> None:
     )
 
 
-def _store_prepared_switch(settings, desired: dict[str, object], *, status: str = "prepared_for_manual_apply") -> dict:
+def _store_prepared_switch(
+    settings,
+    desired: dict[str, object],
+    *,
+    status: str = "prepared_for_manual_apply",
+    verification: dict[str, object] | None = None,
+) -> dict:
     prepared_switch = {
         "status": status,
         "prepared_at": utcnow_iso(),
@@ -250,6 +256,13 @@ def _store_prepared_switch(settings, desired: dict[str, object], *, status: str 
         "env_writing": "manual_only",
         "activation_not_implemented": True,
     }
+    if verification is not None:
+        prepared_switch["verification"] = verification
+    if status == service.PREPARED_SWITCH_STATUS_VERIFIED:
+        prepared_switch["verified_at"] = utcnow_iso()
+        prepared_switch["verified_by_user_id"] = 1
+        prepared_switch["verified_by_username"] = settings.admin_username
+        prepared_switch["maintenance_mode_release"] = "manual_only"
     set_global_app_setting(
         settings,
         key=service.EXPOSURE_MODE_PREPARED_SWITCH_KEY,
@@ -1153,6 +1166,9 @@ def test_prepared_switch_default_and_routes_require_admin(client, admin_credenti
     verification_get_response = client.get("/api/admin/exposure/verification")
     assert verification_get_response.status_code == 401
 
+    finalized_get_response = client.get("/api/admin/exposure/finalized-profile")
+    assert finalized_get_response.status_code == 401
+
     post_response = client.post(
         "/api/admin/exposure/prepare-switch",
         json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
@@ -1164,6 +1180,12 @@ def test_prepared_switch_default_and_routes_require_admin(client, admin_credenti
         json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
     )
     assert verification_post_response.status_code == 401
+
+    finalized_post_response = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": True},
+    )
+    assert finalized_post_response.status_code == 401
 
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     response = client.get("/api/admin/exposure/prepared-switch")
@@ -1184,9 +1206,14 @@ def test_prepared_switch_default_and_routes_require_admin(client, admin_credenti
         "takes_effect": False,
     }
 
+    finalized_response = client.get("/api/admin/exposure/finalized-profile")
+    assert finalized_response.status_code == 200
+    assert finalized_response.json() == {"finalized_profile": None, "takes_effect": False}
+
     status_response = client.get("/api/admin/exposure/status")
     assert status_response.status_code == 200
     assert status_response.json()["prepared_switch"] is None
+    assert status_response.json()["finalized_profile"] is None
     assert status_response.json()["takes_effect"] is False
 
 
@@ -1636,6 +1663,208 @@ def test_verify_prepared_switch_has_no_activation_side_effects(initialized_setti
     ) == before_runtime
     assert after_users == before_users
     assert after_revoked_sessions == before_revoked_sessions
+
+
+def test_finalize_profile_route_requires_password_ack_and_verified_prepared_switch(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    missing_password = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json={"acknowledgement": True},
+    )
+    assert missing_password.status_code == 422
+
+    wrong_password = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json={"current_admin_password": "wrong-password", "acknowledgement": True},
+    )
+    assert wrong_password.status_code == 401
+
+    missing_ack = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json={"current_admin_password": admin_credentials["password"], "acknowledgement": False},
+    )
+    assert missing_ack.status_code == 400
+    assert missing_ack.json()["detail"] == service.EXPOSURE_FINALIZE_PROFILE_ACKNOWLEDGEMENT
+
+    no_prepared_switch = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json=_prepare_request_payload(admin_credentials),
+    )
+    assert no_prepared_switch.status_code == 400
+    assert no_prepared_switch.json()["detail"] == "Verify a prepared switch before finalizing the exposure profile."
+
+    _store_prepared_switch(
+        initialized_settings,
+        {"desired_mode": "private", "private_origin": ""},
+    )
+    unverified = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json=_prepare_request_payload(admin_credentials),
+    )
+    assert unverified.status_code == 400
+    assert unverified.json()["detail"] == "Prepared switch must be verified after restart before finalization."
+
+
+def test_finalize_verified_profile_stores_official_record_and_clears_working_state(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _save_public_custom_pending_draft(client, admin_credentials)
+    _enable_maintenance_lock(initialized_settings)
+    verification = {
+        "status": "passed",
+        "errors": [],
+        "warnings": [],
+        "checks": [{"name": "current_origin_match", "status": "pass", "detail": "matched"}],
+        "takes_effect": False,
+    }
+    prepared_switch = _store_prepared_switch(
+        initialized_settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "custom_domain",
+            "public_origin": "https://media.example.com",
+            "reverse_proxy_provider": "caddy",
+        },
+        status=service.PREPARED_SWITCH_STATUS_VERIFIED,
+        verification=verification,
+    )
+
+    response = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json=_prepare_request_payload(admin_credentials),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    finalized_profile = payload["finalized_profile"]
+    assert payload["takes_effect"] is False
+    assert finalized_profile["status"] == "finalized"
+    assert finalized_profile["mode"] == "public"
+    assert finalized_profile["public_entry_kind"] == "custom_domain"
+    assert finalized_profile["public_origin"] == "https://media.example.com"
+    assert finalized_profile["private_origin"] == ""
+    assert finalized_profile["reverse_proxy_provider"] == "caddy"
+    assert finalized_profile["verification"] == verification
+    assert finalized_profile["prepared_at"] == prepared_switch["prepared_at"]
+    assert finalized_profile["verified_at"] == prepared_switch["verified_at"]
+    assert finalized_profile["finalized_by_username"] == admin_credentials["username"]
+    assert finalized_profile["finalized_at"]
+    assert finalized_profile["takes_effect"] is False
+    assert finalized_profile["maintenance_mode_release"] == "manual_only"
+    assert finalized_profile["url_prefix_rotation"] == "manual_only"
+    assert finalized_profile["env_writing"] == "manual_only"
+
+    finalized_response = client.get("/api/admin/exposure/finalized-profile")
+    assert finalized_response.status_code == 200
+    assert finalized_response.json()["finalized_profile"] == finalized_profile
+
+    status_response = client.get("/api/admin/exposure/status")
+    assert status_response.status_code == 200
+    status_payload = status_response.json()
+    assert status_payload["finalized_profile"] == finalized_profile
+    assert status_payload["pending_draft"] is None
+    assert status_payload["prepared_switch"] is None
+    assert status_payload["takes_effect"] is False
+    assert maintenance_service.get_exposure_maintenance_lock(initialized_settings)["enabled"] is True
+
+
+def test_finalize_verified_profile_allows_warning_verification(initialized_settings) -> None:
+    verification = {
+        "status": "warnings",
+        "errors": [],
+        "warnings": ["Runtime backend_origin differs from expected origin."],
+        "checks": [{"name": "backend_origin", "status": "warn", "detail": "mismatch"}],
+        "takes_effect": False,
+    }
+    _store_prepared_switch(
+        initialized_settings,
+        {
+            "desired_mode": "public",
+            "public_entry_kind": "direct_ip",
+            "public_origin": "http://203.0.113.10:4173",
+            "reverse_proxy_provider": "manual_other",
+        },
+        status=service.PREPARED_SWITCH_STATUS_VERIFIED,
+        verification=verification,
+    )
+
+    result = service.finalize_verified_exposure_profile(
+        initialized_settings,
+        _admin_actor(initialized_settings),
+        acknowledgement=True,
+    )
+
+    finalized_profile = result["finalized_profile"]
+    assert finalized_profile["status"] == "finalized"
+    assert finalized_profile["public_entry_kind"] == "direct_ip"
+    assert finalized_profile["verification"]["status"] == "warnings"
+    assert result["takes_effect"] is False
+
+
+def test_finalize_verified_profile_has_no_runtime_user_session_or_maintenance_side_effects(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _create_user(initialized_settings, username="finalize-standard-user")
+    _login(client, username="finalize-standard-user", password="standard-user-password")
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _save_private_pending_draft(client, admin_credentials, private_origin="http://192.168.1.10:4173")
+    _enable_maintenance_lock(initialized_settings)
+    _store_prepared_switch(
+        initialized_settings,
+        {"desired_mode": "private", "private_origin": "http://192.168.1.10:4173"},
+        status=service.PREPARED_SWITCH_STATUS_VERIFIED,
+        verification={"status": "passed", "errors": [], "warnings": [], "checks": [], "takes_effect": False},
+    )
+    before_runtime = (
+        initialized_settings.private_network_only,
+        initialized_settings.public_app_origin,
+        initialized_settings.backend_origin,
+        initialized_settings.cookie_secure,
+        initialized_settings.session_ttl_hours,
+    )
+    with get_connection(initialized_settings) as connection:
+        before_users = [
+            (row["id"], row["enabled"])
+            for row in connection.execute("SELECT id, enabled FROM users ORDER BY id").fetchall()
+        ]
+        before_revoked_sessions = connection.execute(
+            "SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NOT NULL"
+        ).fetchone()["count"]
+
+    response = client.post(
+        "/api/admin/exposure/finalize-profile",
+        json=_prepare_request_payload(admin_credentials),
+    )
+
+    assert response.status_code == 200
+    with get_connection(initialized_settings) as connection:
+        after_users = [
+            (row["id"], row["enabled"])
+            for row in connection.execute("SELECT id, enabled FROM users ORDER BY id").fetchall()
+        ]
+        after_revoked_sessions = connection.execute(
+            "SELECT COUNT(*) AS count FROM sessions WHERE revoked_at IS NOT NULL"
+        ).fetchone()["count"]
+    assert (
+        initialized_settings.private_network_only,
+        initialized_settings.public_app_origin,
+        initialized_settings.backend_origin,
+        initialized_settings.cookie_secure,
+        initialized_settings.session_ttl_hours,
+    ) == before_runtime
+    assert after_users == before_users
+    assert after_revoked_sessions == before_revoked_sessions
+    assert maintenance_service.get_exposure_maintenance_lock(initialized_settings)["enabled"] is True
 
 
 def test_prepare_switch_requires_password_ack_and_pending_draft_then_auto_enables_maintenance_mode(

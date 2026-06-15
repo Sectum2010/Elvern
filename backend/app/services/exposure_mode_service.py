@@ -23,12 +23,17 @@ from .exposure_maintenance_service import (
 
 EXPOSURE_MODE_PENDING_DRAFT_KEY = "exposure_mode_pending_draft_json"
 EXPOSURE_MODE_PREPARED_SWITCH_KEY = "exposure_mode_prepared_switch_json"
+EXPOSURE_MODE_FINALIZED_PROFILE_KEY = "exposure_mode_finalized_profile_json"
 PREPARED_SWITCH_STATUS_PREPARED = "prepared_for_manual_apply"
 PREPARED_SWITCH_STATUS_VERIFIED = "verified_after_restart"
 PREPARED_SWITCH_STATUSES = {PREPARED_SWITCH_STATUS_PREPARED, PREPARED_SWITCH_STATUS_VERIFIED}
 EXPOSURE_VERIFY_PREPARED_SWITCH_ACKNOWLEDGEMENT = (
     "I understand this only verifies the prepared manual switch. It does not release Maintenance Mode, "
     "write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate exposure mode."
+)
+EXPOSURE_FINALIZE_PROFILE_ACKNOWLEDGEMENT = (
+    "I understand this records the verified exposure profile, clears the working draft/prepared state, "
+    "and does not release Maintenance Mode or change runtime settings."
 )
 DIRECT_PUBLIC_IP_WARNING = (
     "Direct public IP exposure is not recommended. A purchased domain with HTTPS is safer and easier to maintain."
@@ -155,6 +160,7 @@ def build_current_exposure_status(settings: Settings, request: Request) -> dict[
         "plan": _build_plan(settings, desired={}, normalized_public=None, normalized_private=None),
         "pending_draft": pending_draft,
         "prepared_switch": get_prepared_exposure_switch(settings),
+        "finalized_profile": get_finalized_exposure_profile(settings),
         "provider_choices": list(PROVIDER_CHOICES),
         "public_entry_kinds": list(PUBLIC_ENTRY_KINDS),
         "takes_effect": False,
@@ -254,6 +260,7 @@ def validate_exposure_plan(settings: Settings, request: Request, payload: Any) -
         ),
         "pending_draft": get_pending_exposure_draft(settings),
         "prepared_switch": get_prepared_exposure_switch(settings),
+        "finalized_profile": get_finalized_exposure_profile(settings),
         "provider_choices": list(PROVIDER_CHOICES),
         "public_entry_kinds": list(PUBLIC_ENTRY_KINDS),
         "takes_effect": False,
@@ -338,6 +345,23 @@ def get_prepared_exposure_switch(settings: Settings) -> dict[str, Any] | None:
         return None
     parsed["takes_effect"] = False
     parsed["activation_not_implemented"] = True
+    return parsed
+
+
+def get_finalized_exposure_profile(settings: Settings) -> dict[str, Any] | None:
+    try:
+        raw_value = get_global_app_setting(settings, key=EXPOSURE_MODE_FINALIZED_PROFILE_KEY)
+    except sqlite3.OperationalError:
+        return None
+    if not raw_value:
+        return None
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or parsed.get("status") != "finalized":
+        return None
+    parsed["takes_effect"] = False
     return parsed
 
 
@@ -434,6 +458,88 @@ def verify_prepared_exposure_switch(
     return {
         "prepared_switch": verified_switch,
         "verification": verification,
+        "takes_effect": False,
+    }
+
+
+def finalize_verified_exposure_profile(
+    settings: Settings,
+    actor: Any,
+    *,
+    acknowledgement: bool,
+) -> dict[str, Any]:
+    if not acknowledgement:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=EXPOSURE_FINALIZE_PROFILE_ACKNOWLEDGEMENT,
+        )
+
+    prepared_switch = get_prepared_exposure_switch(settings)
+    if prepared_switch is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verify a prepared switch before finalizing the exposure profile.",
+        )
+    if prepared_switch.get("status") != PREPARED_SWITCH_STATUS_VERIFIED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prepared switch must be verified after restart before finalization.",
+        )
+
+    verification = prepared_switch.get("verification")
+    if not isinstance(verification, dict) or verification.get("status") not in {"passed", "warnings"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prepared switch verification must be passed or warnings before finalization.",
+        )
+
+    desired = prepared_switch.get("desired")
+    if not isinstance(desired, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prepared switch is missing desired exposure profile details.",
+        )
+    mode = desired.get("desired_mode")
+    if mode not in {"public", "private"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prepared switch desired mode must be private or public before finalization.",
+        )
+
+    public_entry_kind = desired.get("public_entry_kind") if mode == "public" else None
+    if public_entry_kind is not None and public_entry_kind not in PUBLIC_ENTRY_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prepared switch public entry kind must be custom_domain or direct_ip before finalization.",
+        )
+
+    finalized_profile = {
+        "status": "finalized",
+        "finalized_at": utcnow_iso(),
+        "finalized_by_user_id": getattr(actor, "id", None),
+        "finalized_by_username": getattr(actor, "username", None),
+        "mode": mode,
+        "public_entry_kind": public_entry_kind,
+        "public_origin": str(desired.get("public_origin") or ""),
+        "private_origin": str(desired.get("private_origin") or ""),
+        "reverse_proxy_provider": desired.get("reverse_proxy_provider") if mode == "public" else None,
+        "verification": dict(verification),
+        "prepared_at": prepared_switch.get("prepared_at"),
+        "verified_at": prepared_switch.get("verified_at"),
+        "takes_effect": False,
+        "maintenance_mode_release": "manual_only",
+        "url_prefix_rotation": "manual_only",
+        "env_writing": "manual_only",
+    }
+    set_global_app_setting(
+        settings,
+        key=EXPOSURE_MODE_FINALIZED_PROFILE_KEY,
+        value=json.dumps(finalized_profile, sort_keys=True),
+    )
+    set_global_app_setting(settings, key=EXPOSURE_MODE_PENDING_DRAFT_KEY, value=None)
+    set_global_app_setting(settings, key=EXPOSURE_MODE_PREPARED_SWITCH_KEY, value=None)
+    return {
+        "finalized_profile": finalized_profile,
         "takes_effect": False,
     }
 

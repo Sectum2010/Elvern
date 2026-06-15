@@ -619,6 +619,7 @@ export function LibraryPage() {
   const [rescanPending, setRescanPending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [maintenanceModeActive, setMaintenanceModeActive] = useState(false);
   const [library, setLibrary] = useState({
     items: [],
     series_rails: [],
@@ -822,9 +823,22 @@ export function LibraryPage() {
     }
   }
 
+  async function loadMaintenanceModeStatus({ signal } = {}) {
+    try {
+      const payload = await apiRequest("/api/admin/maintenance-mode", { signal });
+      setMaintenanceModeActive(Boolean(payload?.enabled || payload?.maintenance_mode?.enabled));
+    } catch (requestError) {
+      if (requestError.name === "AbortError") {
+        return;
+      }
+      setMaintenanceModeActive(false);
+    }
+  }
+
   useEffect(() => {
     const controller = new AbortController();
     loadLibrarySettings({ signal: controller.signal });
+    loadMaintenanceModeStatus({ signal: controller.signal });
     loadLibrary({ signal: controller.signal });
     return () => {
       controller.abort();
@@ -1568,6 +1582,10 @@ export function LibraryPage() {
           />
         </div>
       </div>
+
+      {maintenanceModeActive ? (
+        <p className="library-maintenance-warning-line">Maintenance mode is still turned on</p>
+      ) : null}
 
       <div className="library-mobile-search-card">
         <label className="search-field library-desktop-hero__search library-desktop-hero__search--mobile">

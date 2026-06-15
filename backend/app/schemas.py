@@ -143,6 +143,7 @@ class ExposureModePlanResponse(BaseModel):
     plan: dict[str, object] = Field(default_factory=dict)
     pending_draft: dict[str, object] | None = None
     prepared_switch: dict[str, object] | None = None
+    finalized_profile: dict[str, object] | None = None
     provider_choices: list[str] = Field(default_factory=list)
     public_entry_kinds: list[str] = Field(default_factory=list)
     takes_effect: bool = False
@@ -183,6 +184,16 @@ class ExposureVerifyPreparedSwitchRequest(BaseModel):
 class ExposurePreparedSwitchVerificationResponse(BaseModel):
     prepared_switch: dict[str, object] | None = None
     verification: dict[str, object] = Field(default_factory=dict)
+    takes_effect: bool = False
+
+
+class ExposureFinalizeProfileRequest(BaseModel):
+    current_admin_password: str = Field(min_length=1)
+    acknowledgement: bool = False
+
+
+class ExposureFinalizedProfileResponse(BaseModel):
+    finalized_profile: dict[str, object] | None = None
     takes_effect: bool = False
 
 

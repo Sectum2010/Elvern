@@ -94,6 +94,24 @@ Phase 4 checks include:
 
 Phase 4 does not write env files, edit deploy files, restart Elvern, rotate the URL prefix, release Maintenance Mode, revoke sessions, disable users, change token TTLs, fetch or probe user-provided origins from the backend, or change public/private runtime settings. Maintenance Mode remains under admin control.
 
+## Phase 5 Finalize Verified Profile
+
+Phase 5 records the verified exposure profile as the official current exposure profile. It requires a prepared switch with status `verified_after_restart`, current admin password re-authentication, and acknowledgement that finalization records the profile without changing runtime settings.
+
+The finalized profile is stored in `app_settings` as `exposure_mode_finalized_profile_json`. It records the verified mode, origin, provider, verification snapshot, prepare/verify timestamps, and finalizing admin identity. The record keeps `takes_effect=false`, `maintenance_mode_release: "manual_only"`, `url_prefix_rotation: "manual_only"`, and `env_writing: "manual_only"`.
+
+After finalization, the active pending draft and prepared switch working state are cleared so the UI returns to a clean current-profile view. The finalized profile itself is enough for this phase; detailed history, rollback, and richer profile timeline polish are left for later.
+
+Phase 5 does not write env files, edit deploy files, restart Elvern, rotate the URL prefix, change token TTLs, change runtime `Settings`, revoke sessions, release users, disable users, change `users.enabled`, or turn Maintenance Mode off. Maintenance Mode remains under admin control.
+
+## Phase 6 Library Maintenance Warning
+
+Phase 6 adds a small Library page warning line while Maintenance Mode is on:
+
+> Maintenance mode is still turned on
+
+The warning is intentionally small and appears directly under the Library header. It has no button, modal, or blocking behavior, and disappears once Maintenance Mode is off. No Phase 7 history or rollback polish is implemented now.
+
 ## Public Custom Domain
 
 Use this for a purchased DNS name with HTTPS. The planner checks that the input is origin-only, uses a DNS name rather than localhost/private IP/raw IP, and uses HTTPS.

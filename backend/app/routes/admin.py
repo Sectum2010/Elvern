@@ -37,6 +37,8 @@ from ..schemas import (
     ExposureModeDraftRequest,
     ExposureMaintenanceLockRequest,
     ExposureMaintenanceLockResponse,
+    ExposureFinalizeProfileRequest,
+    ExposureFinalizedProfileResponse,
     ExposureModePlanResponse,
     ExposurePreparedSwitchResponse,
     ExposurePreparedSwitchVerificationResponse,
@@ -118,6 +120,8 @@ from ..services.exposure_mode_service import (
     build_current_exposure_status,
     clear_pending_exposure_draft,
     clear_prepared_exposure_switch,
+    finalize_verified_exposure_profile,
+    get_finalized_exposure_profile,
     get_prepared_exposure_switch_verification_status,
     get_prepared_exposure_switch,
     prepare_exposure_manual_switch,
@@ -416,6 +420,18 @@ def admin_get_exposure_prepared_switch_verification(
     )
 
 
+@router.get("/exposure/finalized-profile", response_model=ExposureFinalizedProfileResponse)
+def admin_get_exposure_finalized_profile(
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureFinalizedProfileResponse:
+    del user
+    return ExposureFinalizedProfileResponse(
+        finalized_profile=get_finalized_exposure_profile(request.app.state.settings),
+        takes_effect=False,
+    )
+
+
 @router.post("/exposure/prepare-switch", response_model=ExposurePreparedSwitchResponse)
 def admin_prepare_exposure_manual_switch(
     payload: ExposurePrepareSwitchRequest,
@@ -455,6 +471,27 @@ def admin_verify_exposure_prepared_switch(
         **verify_prepared_exposure_switch(
             settings,
             request,
+            user,
+            acknowledgement=payload.acknowledgement,
+        )
+    )
+
+
+@router.post("/exposure/finalize-profile", response_model=ExposureFinalizedProfileResponse)
+def admin_finalize_exposure_profile(
+    payload: ExposureFinalizeProfileRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> ExposureFinalizedProfileResponse:
+    settings = request.app.state.settings
+    _verify_current_admin_password_for_route(
+        settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    return ExposureFinalizedProfileResponse(
+        **finalize_verified_exposure_profile(
+            settings,
             user,
             acknowledgement=payload.acknowledgement,
         )

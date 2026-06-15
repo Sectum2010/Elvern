@@ -891,6 +891,14 @@ button {
   color: #ffffff;
 }
 
+.library-maintenance-warning-line {
+  margin: -0.2rem 0 0;
+  color: #ff8f8f;
+  font-size: 0.82rem;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .library-category-switch__indicator,
   .library-category-switch__button,

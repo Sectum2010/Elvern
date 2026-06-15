@@ -128,10 +128,13 @@ function visibleTitleLinkNames(...names) {
 }
 
 
-function mockApi(payload = emptyLibraryPayload) {
+function mockApi(payload = emptyLibraryPayload, { maintenanceModeEnabled = false } = {}) {
   apiRequest.mockImplementation((requestPath) => {
     if (requestPath === "/api/user-settings") {
       return Promise.resolve(defaultSettings);
+    }
+    if (requestPath === "/api/admin/maintenance-mode") {
+      return Promise.resolve({ enabled: maintenanceModeEnabled });
     }
     if (requestPath.startsWith("/api/library")) {
       return Promise.resolve(payload);
@@ -150,9 +153,9 @@ function LocationProbe({ locations }) {
 }
 
 
-function renderLibrary(initialEntry = "/library", payload = emptyLibraryPayload) {
+function renderLibrary(initialEntry = "/library", payload = emptyLibraryPayload, options = {}) {
   const locations = [];
-  mockApi(payload);
+  mockApi(payload, options);
   render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <LocationProbe locations={locations} />
@@ -253,6 +256,24 @@ describe("LibraryPage category switching", () => {
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies", expect.any(Object));
     });
+  });
+
+  test("shows the maintenance mode warning line when Maintenance Mode is on", async () => {
+    renderLibrary("/library", emptyLibraryPayload, { maintenanceModeEnabled: true });
+
+    const warning = await screen.findByText("Maintenance mode is still turned on");
+
+    expect(warning).toHaveClass("library-maintenance-warning-line");
+    const hero = document.querySelector(".library-desktop-hero");
+    expect(hero?.nextElementSibling).toBe(warning);
+  });
+
+  test("hides the maintenance mode warning line when Maintenance Mode is off", async () => {
+    renderLibrary("/library", emptyLibraryPayload, { maintenanceModeEnabled: false });
+
+    await screen.findByRole("tab", { name: "Movies" });
+
+    expect(screen.queryByText("Maintenance mode is still turned on")).not.toBeInTheDocument();
   });
 
   test("reads active category from URL and updates URL when a category is clicked", async () => {

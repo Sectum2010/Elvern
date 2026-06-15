@@ -105,6 +105,12 @@ const DEFAULT_EXPOSURE_VERIFY_FORM = {
 };
 const EXPOSURE_VERIFY_ACKNOWLEDGEMENT =
   "I understand this only verifies the prepared manual switch. It does not release Maintenance Mode, write env files, restart Elvern, rotate the URL prefix, revoke sessions, disable users, or activate exposure mode.";
+const DEFAULT_EXPOSURE_FINALIZE_FORM = {
+  currentAdminPassword: "",
+  acknowledgement: false,
+};
+const EXPOSURE_FINALIZE_ACKNOWLEDGEMENT =
+  "I understand this records the verified exposure profile, clears the working draft/prepared state, and does not release Maintenance Mode or change runtime settings.";
 
 function formatAgeCredential(value) {
   const age = Number(value);
@@ -299,7 +305,26 @@ function exposureModeLabel(draft) {
 }
 
 
-function formatExposureModeStatus(active, pendingDraft) {
+function formatExposureProfileLabel(profile) {
+  if (!profile) {
+    return "None";
+  }
+  const mode = profile.mode || profile.desired_mode;
+  const publicEntryKind = profile.public_entry_kind;
+  if (mode === "public") {
+    return publicEntryKind === "direct_ip" ? "Public direct IP" : "Public custom domain";
+  }
+  if (mode === "private") {
+    return "Private";
+  }
+  return "Needs review";
+}
+
+
+function formatExposureModeStatus(active, pendingDraft, finalizedProfile = null) {
+  if (finalizedProfile) {
+    return formatExposureProfileLabel(finalizedProfile);
+  }
   const desiredMode = pendingDraft?.desired?.desired_mode;
   if (desiredMode === "public") {
     return "Public draft pending";
@@ -675,6 +700,8 @@ export function AdminPage() {
   const [exposureVerifyForm, setExposureVerifyForm] = useState(DEFAULT_EXPOSURE_VERIFY_FORM);
   const [exposureVerifyFeedback, setExposureVerifyFeedback] = useState(null);
   const [exposureVerificationResult, setExposureVerificationResult] = useState(null);
+  const [exposureFinalizeForm, setExposureFinalizeForm] = useState(DEFAULT_EXPOSURE_FINALIZE_FORM);
+  const [exposureFinalizeFeedback, setExposureFinalizeFeedback] = useState(null);
   const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false);
   const [totpStatus, setTotpStatus] = useState(null);
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
@@ -1016,6 +1043,32 @@ export function AdminPage() {
     }
   }
 
+  function updateExposureFinalizedProfileState(finalizedProfile) {
+    setExposureStatus((current) => (
+      current
+        ? {
+            ...current,
+            finalized_profile: finalizedProfile || null,
+            pending_draft: null,
+            prepared_switch: null,
+            takes_effect: false,
+          }
+        : current
+    ));
+    setExposurePlan((current) => (
+      current
+        ? {
+            ...current,
+            finalized_profile: finalizedProfile || null,
+            pending_draft: null,
+            prepared_switch: null,
+            takes_effect: false,
+          }
+        : current
+    ));
+    setExposureVerificationResult(null);
+  }
+
   async function handleSetExposureMaintenanceLock(enabled) {
     if (!exposureMaintenanceForm.currentAdminPassword.trim()) {
       setExposureMaintenanceFeedback({
@@ -1181,11 +1234,60 @@ export function AdminPage() {
     }
   }
 
+  async function handleFinalizeExposureProfile() {
+    if (exposurePreparedSwitch?.status !== "verified_after_restart") {
+      setExposureFinalizeFeedback({
+        tone: "error",
+        text: "Verify a prepared switch first.",
+      });
+      return;
+    }
+    if (!exposureFinalizeForm.currentAdminPassword.trim()) {
+      setExposureFinalizeFeedback({
+        tone: "error",
+        text: "Enter your current admin password to finalize the verified profile.",
+      });
+      return;
+    }
+    if (!exposureFinalizeForm.acknowledgement) {
+      setExposureFinalizeFeedback({
+        tone: "error",
+        text: "Acknowledge what finalization records before continuing.",
+      });
+      return;
+    }
+    setExposurePending(true);
+    setExposureFinalizeFeedback(null);
+    try {
+      const payload = await apiRequest("/api/admin/exposure/finalize-profile", {
+        method: "POST",
+        data: {
+          current_admin_password: exposureFinalizeForm.currentAdminPassword,
+          acknowledgement: exposureFinalizeForm.acknowledgement,
+        },
+      });
+      updateExposureFinalizedProfileState(payload.finalized_profile || null);
+      setExposureFinalizeForm(DEFAULT_EXPOSURE_FINALIZE_FORM);
+      setExposureFinalizeFeedback({
+        tone: "success",
+        text: "Finalized verified profile. Maintenance Mode remains on until an admin turns it off.",
+      });
+    } catch (requestError) {
+      setExposureFinalizeFeedback({
+        tone: "error",
+        text: requestError.message || "Failed to finalize verified profile.",
+      });
+    } finally {
+      setExposurePending(false);
+    }
+  }
+
   async function handleOpenExposurePlanner() {
     setExposurePlannerOpen(true);
     setExposureMaintenanceFeedback(null);
     setExposurePrepareFeedback(null);
     setExposureVerifyFeedback(null);
+    setExposureFinalizeFeedback(null);
     setExposureMaintenanceTargetMode(null);
     if (!exposureStatus) {
       await loadExposureStatus();
@@ -3672,6 +3774,7 @@ export function AdminPage() {
   const exposureChecks = Array.isArray(exposureValidation.checks) ? exposureValidation.checks : [];
   const exposurePlanDetails = exposureDisplay.plan || {};
   const exposurePendingDraft = exposureDisplay.pending_draft || null;
+  const exposureFinalizedProfile = exposureDisplay.finalized_profile || null;
   const exposureEnvSuggestions = Array.isArray(exposurePlanDetails.env_suggestions)
     ? exposurePlanDetails.env_suggestions
     : [];
@@ -3684,7 +3787,7 @@ export function AdminPage() {
     : [];
   const exposureErrors = Array.isArray(exposureValidation.errors) ? exposureValidation.errors : [];
   const exposureWarnings = Array.isArray(exposureValidation.warnings) ? exposureValidation.warnings : [];
-  const exposureModeStatus = formatExposureModeStatus(exposureActive, exposurePendingDraft);
+  const exposureModeStatus = formatExposureModeStatus(exposureActive, exposurePendingDraft, exposureFinalizedProfile);
   const exposureMaintenanceLock = exposureActive.maintenance_mode || exposureActive.maintenance_lock || {};
   const exposureMaintenanceLockStatus = exposureMaintenanceLock.enabled ? "On" : "Off";
   const exposureMaintenanceTargetValue = exposureMaintenanceTargetMode || (exposureMaintenanceLock.enabled ? "on" : "off");
@@ -3761,6 +3864,24 @@ export function AdminPage() {
   const exposureWarningChecks = exposureVerificationChecks.filter((entry) => (
     entry.status === "warn" || entry.status === "block" || entry.name === "direct_ip_not_recommended"
   ));
+  const exposureFinalizedProfileStatus = formatExposureProfileLabel(exposureFinalizedProfile);
+  const exposureFinalizedVerificationStatus = exposureFinalizedProfile?.verification?.status || "";
+  const exposureRuntimePostureStatus = exposureFinalizedVerificationStatus === "passed"
+    ? "Verified"
+    : exposureFinalizedVerificationStatus === "warnings"
+      ? "Verified with warnings"
+      : exposurePreparedSwitch?.status === "verified_after_restart"
+        ? exposureVerificationStatus === "warnings" ? "Verified with warnings" : "Verified"
+        : exposurePendingDraft || exposurePreparedSwitch
+          ? "Needs review"
+          : "None";
+  const exposureCanFinalizeProfile = exposurePreparedSwitch?.status === "verified_after_restart";
+  const exposureFinalizeProfileSource = exposurePreparedDesired.desired_mode ? exposurePreparedDesired : exposureFinalizedProfile;
+  const exposureFinalizeProfileLabel = formatExposureProfileLabel(exposureFinalizeProfileSource);
+  const exposureFinalizeOrigin = exposureFinalizeProfileSource?.desired_mode === "public" || exposureFinalizeProfileSource?.mode === "public"
+    ? exposureFinalizeProfileSource?.public_origin
+    : exposureFinalizeProfileSource?.private_origin || "Not required";
+  const exposureFinalizeVerificationStatus = exposureVerificationStatusLabel;
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
       <section className="settings-card">
@@ -3786,6 +3907,8 @@ export function AdminPage() {
 	          </button>
 	        </div>
 	        <StatusRow label="Exposure Mode" value={exposureModeStatus} />
+	        <StatusRow label="Finalized profile" value={exposureFinalizedProfileStatus} />
+	        <StatusRow label="Runtime posture" value={exposureRuntimePostureStatus} />
 	        <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
 	        <StatusRow label="Maintenance Mode" value={exposureMaintenanceLockStatus} />
 	        <StatusRow label="Prepared switch" value={exposurePreparedSwitchStatus} />
@@ -4560,6 +4683,8 @@ export function AdminPage() {
                   <StatusRow label="Trusted proxy CIDRs" value={formatExposureValue(exposureActive.trusted_proxy_cidrs)} />
                   <StatusRow label="Cookie secure" value={formatExposureValue(exposureActive.cookie_secure)} />
                   <StatusRow label="URL prefix present" value={formatExposureValue(exposureActive.url_prefix_present)} />
+                  <StatusRow label="Finalized profile" value={exposureFinalizedProfileStatus} />
+                  <StatusRow label="Runtime posture" value={exposureRuntimePostureStatus} />
                   <StatusRow label="Pending draft" value={exposurePendingDraft ? "Exists" : "None"} />
                   <StatusRow label="Maintenance Mode" value={exposureMaintenanceLockStatus} />
                   <StatusRow label="Prepared switch" value={exposurePreparedSwitchStatus} />
@@ -4817,6 +4942,68 @@ export function AdminPage() {
                   </button>
                   {!exposurePreparedSwitch ? (
                     <span className="page-subnote">Prepare a manual switch before verification.</span>
+                  ) : null}
+                </div>
+              </section>
+              <section className="exposure-planner-modal__section">
+                <h3>Finalize verified profile</h3>
+                <div className="exposure-planner-status">
+                  <StatusRow label="Verified mode" value={exposureFinalizeProfileLabel} />
+                  <StatusRow label="Origin" value={formatExposureValue(exposureFinalizeOrigin)} />
+                  <StatusRow label="Verification status" value={exposureFinalizeVerificationStatus} />
+                  <StatusRow label="Maintenance Mode" value="Remains under admin control" />
+                  <StatusRow label="Takes effect" value="No runtime settings are changed by this record" />
+                </div>
+                <p className="page-subnote">Maintenance Mode remains on until an admin turns it off.</p>
+                <label className="settings-toggle settings-toggle--compact">
+                  <span>
+                    <strong>Finalize acknowledgement</strong>
+                    <small>{EXPOSURE_FINALIZE_ACKNOWLEDGEMENT}</small>
+                  </span>
+                  <input
+                    checked={exposureFinalizeForm.acknowledgement}
+                    disabled={!exposureCanFinalizeProfile}
+                    onChange={(event) =>
+                      setExposureFinalizeForm((current) => ({
+                        ...current,
+                        acknowledgement: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>
+                    <strong>Current admin password</strong>
+                    <small>Required to finalize the verified exposure profile.</small>
+                  </span>
+                  <div className="exposure-secret-field">
+                    <NonLoginSecretInput
+                      autoComplete="new-password"
+                      disabled={!exposureCanFinalizeProfile}
+                      onChange={(event) =>
+                        setExposureFinalizeForm((current) => ({
+                          ...current,
+                          currentAdminPassword: event.target.value,
+                        }))
+                      }
+                      placeholder="Current admin password"
+                      value={exposureFinalizeForm.currentAdminPassword}
+                    />
+                  </div>
+                </label>
+                <InlineFeedback feedback={exposureFinalizeFeedback} />
+                <div className="admin-list__actions">
+                  <button
+                    className="primary-button"
+                    disabled={exposurePending || !exposureCanFinalizeProfile}
+                    onClick={handleFinalizeExposureProfile}
+                    type="button"
+                  >
+                    Finalize verified profile
+                  </button>
+                  {!exposureCanFinalizeProfile ? (
+                    <span className="page-subnote">Verify a prepared switch first.</span>
                   ) : null}
                 </div>
               </section>
