@@ -52,6 +52,34 @@ run() {
   "$@"
 }
 
+check_node_version() {
+  local required_version="22.12.0"
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Node.js is required for frontend CI. Install Node.js >= ${required_version}." >&2
+    exit 1
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "npm is required for frontend CI. Install Node.js/npm >= ${required_version}." >&2
+    exit 1
+  fi
+  local current_version
+  current_version="$(node -p "process.versions.node")"
+  if ! node -e '
+const current = process.versions.node.split(".").map(Number);
+const required = process.argv[1].split(".").map(Number);
+for (let i = 0; i < required.length; i += 1) {
+  if ((current[i] || 0) > required[i]) process.exit(0);
+  if ((current[i] || 0) < required[i]) process.exit(1);
+}
+' "$required_version"; then
+    echo "Node.js ${current_version} is below Elvern's frontend CI baseline. Install Node.js >= ${required_version}." >&2
+    exit 1
+  fi
+  printf '\n==> Node.js %s satisfies frontend CI baseline >= %s\n' "$current_version" "$required_version"
+}
+
+check_node_version
+
 if [[ "$FRESH" == "1" ]]; then
   TEMP_ROOT="$(mktemp -d)"
   BASE_PYTHON="${PYTHON:-python3}"

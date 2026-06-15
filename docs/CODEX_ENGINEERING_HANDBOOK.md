@@ -15,6 +15,10 @@ run the local CI mirror:
 ./scripts/elvern-ci-local.sh
 ```
 
+Frontend dependency/security and CI work requires Node.js >= 22.12.0. Run
+`node -v` before frontend CI; the local CI mirror fails early when the active
+Node.js version is below that baseline.
+
 That script intentionally mirrors `.github/workflows/ci.yml`: backend tests,
 desktop helper build, frontend install/tests/build, `pip-audit`, `bandit`, and
 `npm audit --audit-level=high`. If the workflow changes, update the script in

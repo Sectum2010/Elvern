@@ -32,6 +32,7 @@ Frontend:
 
 ```bash
 cd frontend
+node -v  # requires Node.js >= 22.12.0 for frontend CI/dependency-security work
 npm ci
 npm test
 npm run build
