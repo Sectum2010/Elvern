@@ -37,6 +37,11 @@ from ..services.native_playback_service import (
     save_native_playback_session_progress,
     should_decouple_external_player_auth_session,
 )
+from ..services.external_redirect_security_service import (
+    ExternalRedirectSafetyError,
+    normalize_safe_elvern_library_return_path,
+    validate_ios_external_launch_redirect,
+)
 from ..services.transport_controller_service import (
     attach_native_session_primary_target,
     build_ios_external_transport_request,
@@ -111,9 +116,7 @@ def _rewrite_external_session_payload_urls(
 
 
 def _resolve_ios_handoff_return_url(request: Request, *, item_id: int, return_path: str | None) -> str:
-    candidate = (return_path or "").strip()
-    if not candidate.startswith("/") or candidate.startswith("//"):
-        candidate = f"/library/{item_id}"
+    candidate = normalize_safe_elvern_library_return_path(return_path, item_id=item_id)
     return f"{str(request.base_url).rstrip('/')}{candidate}"
 
 
@@ -333,9 +336,10 @@ def native_playback_session_create(
         client_name=session_client_name,
         created_from_auth_session_id=user.session_id,
     )
+    external_api_origin = _resolve_external_api_origin(request)
     session_payload = _rewrite_external_session_payload_urls(
         session_payload,
-        api_origin=_resolve_external_api_origin(request),
+        api_origin=external_api_origin,
     )
     if transport_decision is not None:
         transport_decision = attach_native_session_primary_target(
@@ -477,9 +481,10 @@ def native_playback_external_launch(
         ),
         created_from_auth_session_id=user.session_id,
     )
+    external_api_origin = _resolve_external_api_origin(request)
     session_payload = _rewrite_external_session_payload_urls(
         session_payload,
-        api_origin=_resolve_external_api_origin(request),
+        api_origin=external_api_origin,
     )
     if not session_payload.get("stream_url"):
         raise HTTPException(
@@ -494,6 +499,32 @@ def native_playback_external_launch(
         success_url=f"{success_url}{'&' if '?' in success_url else '?'}ios_app={normalized_target_app}&ios_result=success",
         error_url=f"{error_url}{'&' if '?' in error_url else '?'}ios_app={normalized_target_app}&ios_result=error",
     )
+    try:
+        safe_launch_url = validate_ios_external_launch_redirect(
+            launch_url,
+            app=normalized_target_app,
+            expected_stream_origin=external_api_origin,
+            expected_callback_origin=str(request.base_url).rstrip("/"),
+        )
+    except ExternalRedirectSafetyError as exc:
+        logger.warning(
+            "Blocked unsafe external app redirect %s",
+            json.dumps(
+                {
+                    "kind": "ios_external_app",
+                    "route": "native_playback_external_launch",
+                    "target_app": normalized_target_app,
+                    "scheme": exc.scheme,
+                    "reason": exc.reason,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="External app handoff redirect failed safety validation.",
+        ) from exc
     log_audit_event(
         request.app.state.settings,
         action="playback.handoff.create",
@@ -513,7 +544,7 @@ def native_playback_external_launch(
             "target_app": normalized_target_app,
         },
     )
-    return RedirectResponse(url=launch_url, status_code=status.HTTP_302_FOUND)
+    return RedirectResponse(url=safe_launch_url, status_code=status.HTTP_302_FOUND)
 
 
 @router.get("/session/{session_id}", response_model=NativePlaybackSessionResponse)

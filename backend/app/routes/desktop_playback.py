@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
@@ -24,11 +27,17 @@ from ..services.desktop_playback_service import (
     resolve_same_host_request,
     resolve_desktop_vlc_handoff,
 )
+from ..services.desktop_playback_protocol_service import _desktop_backend_origin
+from ..services.external_redirect_security_service import (
+    ExternalRedirectSafetyError,
+    validate_desktop_helper_redirect,
+)
 from ..services.library_service import get_media_item_detail
 from ..services.media_age_access_service import assert_user_can_access_media_by_age
 
 
 router = APIRouter(prefix="/api/desktop-playback", tags=["desktop-playback"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/{item_id}", response_model=DesktopPlaybackResolveResponse)
@@ -213,7 +222,31 @@ def desktop_playback_handoff_launch(
             "mode": "desktop_vlc_helper_launch_redirect",
         },
     )
-    return RedirectResponse(url=str(handoff["protocol_url"]), status_code=status.HTTP_302_FOUND)
+    try:
+        safe_protocol_url = validate_desktop_helper_redirect(
+            str(handoff["protocol_url"]),
+            expected_scheme=request.app.state.settings.vlc_helper_protocol,
+            expected_api_origin=_desktop_backend_origin(request.app.state.settings),
+        )
+    except ExternalRedirectSafetyError as exc:
+        logger.warning(
+            "Blocked unsafe desktop helper redirect %s",
+            json.dumps(
+                {
+                    "kind": "desktop_helper",
+                    "route": "desktop_playback_handoff_launch",
+                    "scheme": exc.scheme,
+                    "reason": exc.reason,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Desktop helper redirect failed safety validation.",
+        ) from exc
+    return RedirectResponse(url=safe_protocol_url, status_code=status.HTTP_302_FOUND)
 
 
 @router.get("/handoff/{handoff_id}", response_model=DesktopPlaybackHandoffResolveResponse)

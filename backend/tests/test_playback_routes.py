@@ -15,6 +15,10 @@ from backend.app.db import get_connection, utcnow_iso
 from backend.app.services.admin_service import create_user, update_user
 from backend.app.services.log_identity_service import native_session_log_fingerprint
 from backend.app.services.media_age_access_service import set_media_age_requirement
+from backend.app.services.external_redirect_security_service import (
+    ExternalRedirectSafetyError,
+    validate_desktop_helper_redirect,
+)
 from backend.app.services.mobile_playback_service import (
     ActivePlaybackWorkerConflictError,
     PlaybackAdmissionError,
@@ -838,6 +842,94 @@ def test_native_external_launch_route_rejects_unsupported_target(client, admin_c
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Unsupported external playback target"
+
+
+@pytest.mark.parametrize(
+    ("return_path", "expected_path", "expected_category"),
+    [
+        ("https://evil.example/path", None, None),
+        ("//evil.example/path", None, None),
+        ("/admin", None, None),
+        ("/library", "/library", None),
+        ("/library?category=movies", "/library", "movies"),
+    ],
+)
+def test_native_external_launch_return_path_is_restricted_to_library_paths(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+    return_path: str,
+    expected_path: str | None,
+    expected_category: str | None,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="native-launch/return-path.mp4",
+    )
+
+    response = client.get(
+        f"/api/native-playback/{item['id']}/launch/infuse",
+        params={"return_path": return_path},
+        headers={"user-agent": IOS_SAFARI_USER_AGENT},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    launch_url = response.headers["location"]
+    assert "evil.example" not in launch_url
+    callback_url = parse_qs(urlsplit(launch_url).query)["x-success"][0]
+    parsed_callback = urlsplit(callback_url)
+    callback_params = parse_qs(parsed_callback.query)
+    assert parsed_callback.scheme == "http"
+    assert parsed_callback.netloc == "testserver"
+    assert parsed_callback.path == (expected_path or f"/library/{item['id']}")
+    assert callback_params["ios_app"] == ["infuse"]
+    assert callback_params["ios_result"] == ["success"]
+    if expected_category is None:
+        assert "category" not in callback_params
+    else:
+        assert callback_params["category"] == [expected_category]
+
+
+def test_native_external_launch_unsafe_generated_redirect_returns_500_without_tokenized_log(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+    caplog,
+) -> None:
+    monkeypatch.setattr(
+        "backend.app.services.native_playback_service._probe_tracks",
+        lambda file_path, settings, **kwargs: ([], []),
+    )
+    monkeypatch.setattr(
+        "backend.app.routes.native_playback._build_ios_external_launch_url",
+        lambda **kwargs: "https://evil.example/launch?token=super-secret-token",
+    )
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="native-launch/unsafe-generated.mp4",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="backend.app.routes.native_playback"):
+        response = client.get(
+            f"/api/native-playback/{item['id']}/launch/vlc",
+            headers={"user-agent": IOS_SAFARI_USER_AGENT},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "External app handoff redirect failed safety validation."
+    assert "super-secret-token" not in caplog.text
+    assert "https://evil.example" not in caplog.text
+    assert '"scheme": "https"' in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -2469,6 +2561,97 @@ def test_desktop_helper_handoff_resolves_backend_stream_url_for_remote_desktop(
     assert session_row is not None
     assert session_row["auth_session_id"] is None
     assert str(session_row["client_name"]).lower().startswith(f"vlc helper fallback ({platform})")
+
+
+@pytest.mark.parametrize("helper_protocol", ["elvern-vlc", "elvern+vlc"])
+def test_desktop_helper_handoff_launch_redirects_with_safe_helper_scheme(
+    initialized_settings,
+    client,
+    admin_credentials,
+    helper_protocol: str,
+) -> None:
+    settings = replace(
+        initialized_settings,
+        public_app_origin="https://elvern.example",
+        backend_origin="http://100.75.83.33:8000",
+        library_root_mac=None,
+        vlc_helper_protocol=helper_protocol,
+    )
+    client.app.state.settings = settings
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        settings,
+        relative_name=f"desktop/{helper_protocol.replace('+', '-')}-helper-launch.mp4",
+    )
+
+    response = client.get(
+        f"/api/desktop-playback/{item['id']}/handoff/launch",
+        params={"platform": "mac", "device_id": "pytest-helper"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    parsed_protocol_url = urlsplit(response.headers["location"])
+    protocol_params = parse_qs(parsed_protocol_url.query)
+    assert parsed_protocol_url.scheme == helper_protocol
+    assert parsed_protocol_url.netloc == "play"
+    assert protocol_params["api"] == [settings.backend_origin]
+    assert protocol_params["handoff"]
+    assert protocol_params["token"]
+
+
+def test_desktop_helper_handoff_launch_unsafe_generated_redirect_returns_500_without_tokenized_log(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+    caplog,
+) -> None:
+    settings = replace(
+        initialized_settings,
+        public_app_origin="https://elvern.example",
+        backend_origin="http://100.75.83.33:8000",
+        library_root_mac=None,
+    )
+    client.app.state.settings = settings
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        settings,
+        relative_name="desktop/unsafe-helper-launch.mp4",
+    )
+
+    def fake_create_desktop_vlc_handoff(*args, **kwargs):
+        return {
+            "protocol_url": "javascript://play?api=http://100.75.83.33:8000&handoff=h1&token=super-secret-token",
+            "strategy": "backend_url",
+        }
+
+    monkeypatch.setattr(
+        "backend.app.routes.desktop_playback.create_desktop_vlc_handoff",
+        fake_create_desktop_vlc_handoff,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="backend.app.routes.desktop_playback"):
+        response = client.get(
+            f"/api/desktop-playback/{item['id']}/handoff/launch",
+            params={"platform": "mac", "device_id": "pytest-helper"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Desktop helper redirect failed safety validation."
+    assert "super-secret-token" not in caplog.text
+    assert "javascript://play" not in caplog.text
+    assert '"scheme": "javascript"' in caplog.text
+
+
+def test_desktop_helper_redirect_validator_rejects_malformed_protocol_url() -> None:
+    with pytest.raises(ExternalRedirectSafetyError, match="desktop helper redirect"):
+        validate_desktop_helper_redirect(
+            "elvern-vlc://play?api=http://100.75.83.33:8000&handoff=h1",
+            expected_scheme="elvern-vlc",
+            expected_api_origin="http://100.75.83.33:8000",
+        )
 
 
 def test_playback_decision_route_returns_direct_for_safe_desktop_browser(

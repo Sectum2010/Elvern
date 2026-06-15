@@ -5,6 +5,7 @@ import re
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +24,7 @@ from backend.app.security import (
     perform_dummy_verify,
     verify_password,
 )
+from backend.app.services.external_redirect_security_service import FORBIDDEN_CUSTOM_APP_SCHEMES
 
 
 @pytest.fixture(autouse=True)
@@ -469,3 +471,68 @@ def test_session_token_generation_and_hashing_are_secret_bound() -> None:
     assert len(digest) == 64
     assert digest == hash_session_token(token_a, "secret-one")
     assert digest != hash_session_token(token_a, "secret-two")
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    ["http", "https", "javascript", "data", "file", "vbscript", "about", "blob"],
+)
+def test_vlc_helper_protocol_forbidden_schemes_fail_settings_load(monkeypatch, tmp_path, scheme: str) -> None:
+    _set_minimal_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ELVERN_VLC_HELPER_PROTOCOL", scheme)
+
+    with pytest.raises(ConfigError, match="ELVERN_VLC_HELPER_PROTOCOL"):
+        refresh_settings()
+
+
+@pytest.mark.parametrize("scheme", ["", "x", "elvern vlc", "elvern_vlc", "1elvern", "elvern://play"])
+def test_vlc_helper_protocol_empty_or_invalid_scheme_fails_settings_load(monkeypatch, tmp_path, scheme: str) -> None:
+    _set_minimal_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ELVERN_VLC_HELPER_PROTOCOL", scheme)
+
+    with pytest.raises(ConfigError, match="ELVERN_VLC_HELPER_PROTOCOL"):
+        refresh_settings()
+
+
+@pytest.mark.parametrize("scheme", ["elvern-vlc-dev", "elvern+vlc"])
+def test_vlc_helper_protocol_safe_custom_scheme_is_allowed(monkeypatch, tmp_path, scheme: str) -> None:
+    _set_minimal_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ELVERN_VLC_HELPER_PROTOCOL", scheme)
+
+    settings = refresh_settings()
+
+    assert settings.vlc_helper_protocol == scheme
+
+
+def test_ci_workflow_uses_minimal_top_level_permissions() -> None:
+    workflow_path = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+    workflow_source = workflow_path.read_text(encoding="utf-8")
+
+    assert re.search(r"(?m)^permissions:\n  contents: read\n", workflow_source)
+    assert not re.search(r"(?m)^  (actions|checks|contents|deployments|id-token|issues|packages|pull-requests): write", workflow_source)
+
+
+def test_external_redirect_static_guards_use_safe_validation_helpers() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    native_source = (project_root / "backend" / "app" / "routes" / "native_playback.py").read_text(encoding="utf-8")
+    desktop_source = (project_root / "backend" / "app" / "routes" / "desktop_playback.py").read_text(encoding="utf-8")
+
+    assert "validate_ios_external_launch_redirect(" in native_source
+    assert "RedirectResponse(url=safe_launch_url" in native_source
+    assert "RedirectResponse(url=launch_url" not in native_source
+    assert "validate_desktop_helper_redirect(" in desktop_source
+    assert "RedirectResponse(url=safe_protocol_url" in desktop_source
+    assert 'RedirectResponse(url=str(handoff["protocol_url"])' not in desktop_source
+
+
+def test_forbidden_helper_protocol_scheme_list_covers_browser_and_file_schemes() -> None:
+    assert {
+        "http",
+        "https",
+        "javascript",
+        "data",
+        "file",
+        "vbscript",
+        "about",
+        "blob",
+    }.issubset(FORBIDDEN_CUSTOM_APP_SCHEMES)

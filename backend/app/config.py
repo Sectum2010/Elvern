@@ -9,6 +9,11 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .services.external_redirect_security_service import (
+    ExternalRedirectSafetyError,
+    validate_safe_custom_app_scheme,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = PROJECT_ROOT / "backend" / "data" / "elvern.db"
@@ -70,6 +75,16 @@ def _get_optional_url_prefix(name: str) -> str | None:
             f"{name} must be 8-24 base32-safe characters using a-h, j-k, m-n, p-z, or 2-9"
         )
     return value
+
+
+def _get_safe_custom_app_scheme(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    try:
+        return validate_safe_custom_app_scheme(raw, setting_name=name)
+    except ExternalRedirectSafetyError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _get_first_int(names: tuple[str, ...], default: int) -> int:
@@ -410,10 +425,7 @@ def load_settings() -> Settings:
             300,
         ),
         desktop_playback_mode=os.getenv("ELVERN_DESKTOP_PLAYBACK_MODE", "vlc_direct").strip().lower() or "vlc_direct",
-        vlc_helper_protocol=(
-            os.getenv("ELVERN_VLC_HELPER_PROTOCOL", "elvern-vlc").strip().lower().rstrip(":")
-            or "elvern-vlc"
-        ),
+        vlc_helper_protocol=_get_safe_custom_app_scheme("ELVERN_VLC_HELPER_PROTOCOL", "elvern-vlc"),
         helper_releases_dir=_get_path(
             "ELVERN_HELPER_RELEASES_DIR",
             PROJECT_ROOT / "backend" / "data" / "helper_releases",
@@ -533,10 +545,10 @@ def validate_settings(settings: Settings) -> None:
         )
     if settings.desktop_playback_mode not in {"vlc_direct"}:
         raise ConfigError("ELVERN_DESKTOP_PLAYBACK_MODE must currently be set to 'vlc_direct'")
-    if not settings.vlc_helper_protocol.replace("-", "").isalnum():
-        raise ConfigError(
-            "ELVERN_VLC_HELPER_PROTOCOL must be alphanumeric and may include hyphens"
-        )
+    try:
+        validate_safe_custom_app_scheme(settings.vlc_helper_protocol, setting_name="ELVERN_VLC_HELPER_PROTOCOL")
+    except ExternalRedirectSafetyError as exc:
+        raise ConfigError(str(exc)) from exc
     if not settings.helper_default_channel.replace("-", "").isalnum():
         raise ConfigError(
             "ELVERN_HELPER_DEFAULT_CHANNEL must be alphanumeric and may include hyphens"
