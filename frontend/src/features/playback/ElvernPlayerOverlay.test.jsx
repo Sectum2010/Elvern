@@ -1536,6 +1536,82 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getAllByText(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE)).toHaveLength(2);
   });
 
+  test("stale local audio switch failure clears after successful attach payload", async () => {
+    const onBackendAudioTrackSelect = vi.fn(() => Promise.resolve({
+      active_audio_stream_index: 5,
+      pending_audio_stream_index: null,
+      selected_audio_stream_index: 5,
+      audio_switch_state: "active",
+      attach_revision: 4,
+      client_attach_revision: 3,
+    }));
+    const { getByRole, queryByText, rerenderOverlay } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendAudioTrackSelect,
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 1,
+        attach_revision: 3,
+        client_attach_revision: 3,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    act(() => {
+      rerenderOverlay({
+        errorMessage: AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE,
+        sessionPayload: {
+          active_audio_stream_index: 5,
+          pending_audio_stream_index: null,
+          selected_audio_stream_index: 5,
+          audio_switch_state: "active",
+          attach_revision: 4,
+          client_attach_revision: 3,
+        },
+      });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getByRole("menuitemradio", { name: /French/ })).toHaveClass("elvern-overlay__track-menu-item--error");
+
+    act(() => {
+      rerenderOverlay({
+        errorMessage: "",
+        sessionPayload: {
+          active_audio_stream_index: 5,
+          pending_audio_stream_index: null,
+          selected_audio_stream_index: 5,
+          audio_switch_state: "active",
+          attach_revision: 4,
+          client_attach_revision: 4,
+        },
+      });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveClass("elvern-overlay__track-menu-item--error");
+    expect(queryByText(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE)).toBeNull();
+  });
+
   test("accepted ambiguous backend audio response keeps pending without fake failure", async () => {
     let resolveSwitch;
     const onBackendAudioTrackSelect = vi.fn(() => new Promise((resolve) => {

@@ -1185,6 +1185,126 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     assert promoted["audio_switch_error"] is None
 
 
+def test_route2_audio_selection_ignores_second_request_while_preparing(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=50221, relative_name="route2/audio/concurrent-preparing.mkv"),
+    )
+    _upsert_route2_audio_probe_metadata(settings, item)
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-concurrent-preparing-session")
+    _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+
+    first = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+    first_replacement_id = session.browser_playback.replacement_epoch_id
+    first_replacement_count = session.browser_playback.replacement_epoch_count
+
+    second = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=1,
+        current_position_seconds=45.0,
+        playing_before_switch=True,
+    )
+
+    assert first["audio_switch_state"] == "preparing"
+    assert second["audio_switch_state"] == "preparing"
+    assert second["pending_audio_stream_index"] == 5
+    assert second["selected_audio_stream_index"] == 5
+    assert second["active_audio_stream_index"] == 1
+    assert session.browser_playback.replacement_epoch_id == first_replacement_id
+    assert session.browser_playback.replacement_epoch_count == first_replacement_count
+    assert session.browser_playback.epochs[first_replacement_id].audio_stream_index == 5
+
+
+def test_route2_audio_selection_ignores_second_request_while_pending_index_exists(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=50222, relative_name="route2/audio/concurrent-pending-index.mkv"),
+    )
+    _upsert_route2_audio_probe_metadata(settings, item)
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-concurrent-pending-index-session")
+    _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+    session.browser_playback.selected_audio_stream_index = 5
+    session.browser_playback.pending_audio_stream_index = 5
+    session.browser_playback.audio_switch_state = "active"
+    session.browser_playback.replacement_epoch_count = 0
+
+    response = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=1,
+        current_position_seconds=45.0,
+        playing_before_switch=True,
+    )
+
+    assert response["audio_switch_state"] == "active"
+    assert response["pending_audio_stream_index"] == 5
+    assert response["selected_audio_stream_index"] == 5
+    assert response["active_audio_stream_index"] == 1
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.browser_playback.replacement_epoch_count == 0
+
+
+def test_route2_audio_selection_ignores_second_request_until_promoted_attach_ack(initialized_settings) -> None:
+    manager, settings = _make_route2_manager(initialized_settings)
+    item = _insert_media_item_record(
+        settings,
+        _make_local_item(settings, item_id=50223, relative_name="route2/audio/concurrent-attach-ack.mkv"),
+    )
+    _upsert_route2_audio_probe_metadata(settings, item)
+    session = _register_route2_test_session(manager, settings, item, session_id="audio-concurrent-attach-ack-session")
+    _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
+
+    manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=5,
+        current_position_seconds=42.0,
+        playing_before_switch=True,
+    )
+    replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
+    manager._promote_route2_replacement_epoch_locked(session, replacement)
+    promoted_attach_revision = session.browser_playback.attach_revision
+    replacement_count = session.browser_playback.replacement_epoch_count
+
+    response = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=1,
+        current_position_seconds=45.0,
+        playing_before_switch=True,
+    )
+
+    assert response["audio_switch_state"] == "active"
+    assert response["active_audio_stream_index"] == 5
+    assert response["pending_audio_stream_index"] is None
+    assert response["attach_revision"] == promoted_attach_revision
+    assert response["client_attach_revision"] < response["attach_revision"]
+    assert session.browser_playback.replacement_epoch_id is None
+    assert session.browser_playback.replacement_epoch_count == replacement_count
+
+    session.browser_playback.client_attach_revision = promoted_attach_revision
+    acknowledged = manager.select_audio_track(
+        session.session_id,
+        user_id=session.user_id,
+        selected_audio_stream_index=1,
+        current_position_seconds=46.0,
+        playing_before_switch=True,
+    )
+
+    assert acknowledged["audio_switch_state"] == "preparing"
+    assert acknowledged["pending_audio_stream_index"] == 1
+    assert session.browser_playback.replacement_epoch_count == replacement_count + 1
+
+
 def test_route2_audio_selection_rejects_untrusted_stream_before_replacement(initialized_settings) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
     item = _insert_media_item_record(

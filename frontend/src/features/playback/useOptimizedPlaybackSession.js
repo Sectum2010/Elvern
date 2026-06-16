@@ -71,6 +71,7 @@ export function buildAudioSwitchAttachDiagnostic(eventName, details = {}) {
     "clientAttachRevision",
     "currentAttachRevision",
     "loadedEventName",
+    "successReason",
   ];
   allowedFields.forEach((field) => {
     if (details[field] !== undefined) {
@@ -714,6 +715,150 @@ export function useOptimizedPlaybackSession({
     );
   }
 
+  function audioSwitchPayloadHasError(payload) {
+    const switchState = String(payload?.audio_switch_state || "").trim().toLowerCase();
+    return Boolean(
+      switchState === "failed"
+      || String(payload?.audio_switch_error || "").trim()
+      || String(payload?.last_error || "").trim()
+      || payload?.state === "failed"
+      || payload?.state === "expired"
+      || payload?.state === "stopped"
+    );
+  }
+
+  function isAudioSwitchTargetActive(pending, payload = mobileSessionRef.current) {
+    if (!pending || !isRoute2SessionPayload(payload) || audioSwitchPayloadHasError(payload)) {
+      return false;
+    }
+    const switchState = String(payload?.audio_switch_state || "").trim().toLowerCase();
+    return Boolean(
+      switchState === "active"
+      && Number(payload?.attach_revision || 0) === Number(pending.expectedAttachRevision || 0)
+      && (payload?.active_epoch_id || null) === pending.expectedActiveEpochId
+      && Number(payload?.active_audio_stream_index) === Number(pending.targetAudioStreamIndex)
+    );
+  }
+
+  function isAudioSwitchExpectedSourceAttached(pending) {
+    return Boolean(
+      pending
+      && attachedOptimizedManifestUrlRef.current === pending.expectedManifestUrl
+      && mobileAttachedEpochRef.current === pending.expectedActiveEpochId
+      && mobileAttachedManifestRevisionRef.current === String(pending.expectedAttachRevision || 0)
+    );
+  }
+
+  function resolveAudioSwitchAttachSuccessReason(pending, payload = mobileSessionRef.current, { playing = null } = {}) {
+    if (!isAudioSwitchTargetActive(pending, payload)) {
+      return "";
+    }
+    const expectedRevision = Number(pending.expectedAttachRevision || 0);
+    if (Number(payload?.client_attach_revision || 0) >= expectedRevision) {
+      return "client_attach_revision";
+    }
+    if (payload?.client_time_advancing === true) {
+      return "session_playback_progress";
+    }
+    if (pending.phase === "failed") {
+      return "";
+    }
+    if (!isAudioSwitchExpectedSourceAttached(pending)) {
+      return "";
+    }
+    const video = videoRef.current;
+    const readyState = Number(video?.readyState || 0);
+    const payloadReadyState = Number(payload?.client_ready_state || 0);
+    const hasReadyMedia = Boolean(
+      mobilePlayerCanPlayRef.current
+      || readyState >= 2
+      || payloadReadyState >= 2
+    );
+    const hasPlaybackEvidence = Boolean(
+      playing === true
+      || (video && !video.paused)
+    );
+    return hasReadyMedia && hasPlaybackEvidence ? "media_playback_observed" : "";
+  }
+
+  function markAudioSwitchAttachSucceeded(
+    pending,
+    {
+      payload = mobileSessionRef.current,
+      successReason = "inferred",
+      playing = null,
+      sendHeartbeat = true,
+    } = {},
+  ) {
+    if (!pending || !isAudioSwitchTargetActive(pending, payload)) {
+      return false;
+    }
+    const expectedRevision = Number(pending.expectedAttachRevision || 0);
+    audioSwitchAttachRef.current = {
+      ...pending,
+      phase: "acked",
+      succeededAtMs: Date.now(),
+      successReason,
+    };
+    mobilePendingAttachRevisionRef.current = Math.max(
+      mobilePendingAttachRevisionRef.current,
+      expectedRevision,
+    );
+    mobilePlayerCanPlayRef.current = true;
+    setMobilePlayerCanPlay(true);
+    clearOptimizedPlaybackPending();
+    setSeekNotice("");
+    setPlaybackError("");
+    setPlaybackStatus(browserStreamLabelTitle);
+    setMobileLifecycleStateValue("attached");
+    debugAudioSwitchAttach("audio_switch_attach_success_inferred", {
+      expectedAttachRevision: pending.expectedAttachRevision,
+      expectedActiveEpochId: pending.expectedActiveEpochId,
+      targetAudioStreamIndex: pending.targetAudioStreamIndex,
+      phase: "acked",
+      retryCount: pending.retryCount || 0,
+      clientAttachRevision: Number(payload?.client_attach_revision || 0),
+      currentAttachRevision: Number(payload?.attach_revision || 0),
+      sourceSetAtMs: pending.sourceSetAtMs,
+      loadedAtMs: pending.loadedAtMs,
+      successReason,
+    });
+    if (sendHeartbeat && Number(payload?.client_attach_revision || 0) < expectedRevision) {
+      const video = videoRef.current;
+      postMobileRuntimeHeartbeat({
+        lifecycleState: "attached",
+        stalled: false,
+        playing: playing != null ? playing : video ? !video.paused : null,
+        clientAttachRevision: expectedRevision,
+        force: true,
+      }).catch(() => {
+        // Subsequent heartbeats will keep carrying the inferred attach revision.
+      });
+    }
+    return true;
+  }
+
+  function maybeInferAudioSwitchAttachSuccess({
+    payload = mobileSessionRef.current,
+    playing = null,
+    sendHeartbeat = true,
+  } = {}) {
+    const pending = audioSwitchAttachRef.current;
+    if (!pending || pending.phase === "acked") {
+      return false;
+    }
+    const successReason = resolveAudioSwitchAttachSuccessReason(pending, payload, { playing });
+    if (!successReason) {
+      return false;
+    }
+    return markAudioSwitchAttachSucceeded(pending, {
+      payload,
+      successReason,
+      playing,
+      sendHeartbeat,
+    });
+  }
+
   function markAudioSwitchAttachSourceSet(payload, sessionManifestUrl) {
     const pending = audioSwitchAttachRef.current;
     if (
@@ -824,6 +969,14 @@ export function useOptimizedPlaybackSession({
     if (elapsedMs < AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS) {
       return;
     }
+    const video = videoRef.current;
+    if (maybeInferAudioSwitchAttachSuccess({
+      payload: mobileSessionRef.current,
+      playing: video ? !video.paused : null,
+      sendHeartbeat: true,
+    })) {
+      return;
+    }
     debugAudioSwitchAttach("audio_switch_attach_timeout", {
       expectedAttachRevision: pending.expectedAttachRevision,
       expectedActiveEpochId: pending.expectedActiveEpochId,
@@ -876,6 +1029,13 @@ export function useOptimizedPlaybackSession({
         forceReattach: true,
         forceVideoRemount: true,
       });
+      return;
+    }
+    if (maybeInferAudioSwitchAttachSuccess({
+      payload: activeSession,
+      playing: video ? !video.paused : null,
+      sendHeartbeat: true,
+    })) {
       return;
     }
     if (!sessionMatchesPending) {
@@ -988,6 +1148,11 @@ export function useOptimizedPlaybackSession({
         });
       }
     }
+    maybeInferAudioSwitchAttachSuccess({
+      payload,
+      playing: payload?.client_is_playing === true ? true : null,
+      sendHeartbeat: false,
+    });
     if (typeof payload.committed_playhead_seconds === "number") {
       committedPlayheadSecondsRef.current = Math.max(payload.committed_playhead_seconds, 0);
       setCommittedPlayheadSeconds(payload.committed_playhead_seconds);
@@ -1783,6 +1948,9 @@ export function useOptimizedPlaybackSession({
     }
     const serverAttachRevision = Number(activeSession.attach_revision || 0);
     if (isFailedAudioSwitchAttachForRevision(serverAttachRevision)) {
+      if (maybeInferAudioSwitchAttachSuccess({ payload: activeSession, playing, sendHeartbeat: true })) {
+        return;
+      }
       if (AUDIO_SWITCH_ATTACH_LOAD_EVENTS.has(String(loadedEventName || ""))) {
         const pendingAudioAttach = audioSwitchAttachRef.current;
         debugAudioSwitchAttach("audio_switch_loaded_late_ignored", {
@@ -1803,6 +1971,9 @@ export function useOptimizedPlaybackSession({
     if (isPendingAudioSwitchAttachForRevision(serverAttachRevision)) {
       if (AUDIO_SWITCH_ATTACH_LOAD_EVENTS.has(String(loadedEventName || ""))) {
         markAudioSwitchAttachLoaded({ eventName: loadedEventName });
+      }
+      if (maybeInferAudioSwitchAttachSuccess({ payload: activeSession, playing, sendHeartbeat: true })) {
+        return;
       }
       if (!isAudioSwitchAttachLoadedForRevision(serverAttachRevision)) {
         mobilePendingAttachRevisionRef.current = Math.max(

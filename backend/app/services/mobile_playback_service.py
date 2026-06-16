@@ -1873,6 +1873,9 @@ class MobilePlaybackManager:
             if selected_audio_stream_index is None:
                 raise ValueError("selected_audio_stream_index is required")
             browser_session = session.browser_playback
+            if self._route2_audio_switch_in_progress_locked(browser_session):
+                self._refresh_route2_session_authority_locked(session)
+                return self._route2_snapshot_locked(session)
             selected_audio_track, audio_validation_error = self._resolve_trusted_audio_track_for_switch(
                 int(session.media_item_id),
                 selected_audio_stream_index,
@@ -1934,6 +1937,23 @@ class MobilePlaybackManager:
                 )
             self._refresh_route2_session_authority_locked(session)
             return self._route2_snapshot_locked(session)
+
+    def _route2_audio_switch_in_progress_locked(self, browser_session: BrowserPlaybackSession) -> bool:
+        switch_state = str(browser_session.audio_switch_state or "").strip().lower()
+        if switch_state == "preparing" or browser_session.pending_audio_stream_index is not None:
+            return True
+        if browser_session.replacement_epoch_id:
+            replacement = browser_session.epochs.get(browser_session.replacement_epoch_id)
+            if replacement is not None and replacement.replacement_reason == "audio_track_switch":
+                return True
+        if (
+            switch_state == "active"
+            and browser_session.active_audio_stream_index is not None
+            and browser_session.attach_revision > 0
+            and browser_session.client_attach_revision < browser_session.attach_revision
+        ):
+            return True
+        return False
 
     def _fail_route2_audio_switch_locked(
         self,

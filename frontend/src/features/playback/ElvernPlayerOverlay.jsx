@@ -989,6 +989,42 @@ export default function ElvernPlayerOverlay({
   }, [audioSwitchVisual, errorMessage]);
 
   useEffect(() => {
+    if (errorMessage !== AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE) {
+      return;
+    }
+    const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
+    const activeStreamIndex = Number.isInteger(sessionPayload?.active_audio_stream_index)
+      ? sessionPayload.active_audio_stream_index
+      : null;
+    const selectedStreamIndex = Number.isInteger(sessionPayload?.selected_audio_stream_index)
+      ? sessionPayload.selected_audio_stream_index
+      : null;
+    const attachRevision = Number(sessionPayload?.attach_revision || 0);
+    const clientAttachRevision = Number(sessionPayload?.client_attach_revision || 0);
+    const backendError = String(sessionPayload?.audio_switch_error || "").trim();
+    if (
+      switchState === "active"
+      && !backendError
+      && activeStreamIndex != null
+      && activeStreamIndex === selectedStreamIndex
+      && attachRevision > 0
+      && clientAttachRevision >= attachRevision
+    ) {
+      setAudioSwitchVisual(null);
+      setAudioTrackError("");
+      setAudioTrackErrorTrackId("");
+    }
+  }, [
+    errorMessage,
+    sessionPayload?.active_audio_stream_index,
+    sessionPayload?.audio_switch_error,
+    sessionPayload?.audio_switch_state,
+    sessionPayload?.attach_revision,
+    sessionPayload?.client_attach_revision,
+    sessionPayload?.selected_audio_stream_index,
+  ]);
+
+  useEffect(() => {
     if (errorMessage === AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE) {
       return;
     }
@@ -1067,9 +1103,21 @@ export default function ElvernPlayerOverlay({
       });
       setAudioTrackError("");
       setAudioTrackErrorTrackId("");
+    } else if (
+      audioTrackError === AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE
+      && switchState === "active"
+      && !String(sessionPayload?.audio_switch_error || "").trim()
+      && activeStreamIndex != null
+      && activeStreamIndex === selectedStreamIndex
+      && attachRevision > 0
+      && clientAttachRevision >= attachRevision
+    ) {
+      setAudioTrackError("");
+      setAudioTrackErrorTrackId("");
     }
   }, [
     audioSwitchVisual,
+    audioTrackError,
     audioTracks,
     errorMessage,
     sessionPayload?.audio_switch_error,

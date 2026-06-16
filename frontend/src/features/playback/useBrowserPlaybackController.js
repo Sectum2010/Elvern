@@ -2565,6 +2565,9 @@ export function useBrowserPlaybackController({
       updatePlayerMetrics();
       clearMobileStallRecoveryTimer();
       sampleNativeClientPlayback();
+      if (mobileSessionRef.current) {
+        maybeAcknowledgeHlsAttachment({ playing: !video.paused, force: true });
+      }
       if (mobileSessionRef.current && mobilePlayerCanPlayRef.current && !mobileSeekPendingRef.current) {
         const absoluteCurrentTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
         noteFirstFramePlaybackProgress(absoluteCurrentTime);
