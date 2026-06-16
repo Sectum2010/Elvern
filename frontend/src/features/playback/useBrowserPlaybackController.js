@@ -484,7 +484,9 @@ export function useBrowserPlaybackController({
     firstFrameReady = null,
     releaseGate = null,
     releaseGateReason = "",
+    recoveryDecision = null,
     session = mobileSessionRef.current,
+    staleNativePlaylistStall = null,
     video = videoRef.current,
     livenessSample = null,
   } = {}) {
@@ -518,6 +520,8 @@ export function useBrowserPlaybackController({
       canPlaySeen: mobileCanPlaySeenRef.current,
       frameReady: mobileFrameReadyRef.current,
       releaseGateReason,
+      recoveryDecision,
+      staleNativePlaylistStall,
     });
     logBrowserPlaybackDiagnostic({
       eventName,
@@ -1810,21 +1814,6 @@ export function useBrowserPlaybackController({
         || stall.midPlaybackStall
         || staleNativePlaylistStall
         || (backendAhead <= 3 && bufferedAhead <= 0.75 && !refillInProgress);
-      if (recoveryCandidate) {
-        const stallReason = staleNativePlaylistStall
-          ? "native_hls_playlist_stale"
-          : (stall.stallReason || "backend_or_client_runway_low");
-        logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_stall_snapshot", {
-          clientPlaybackStallReason: stallReason,
-          eventReason: stallReason,
-          livenessSample: {
-            ...sample,
-            stallReason,
-          },
-          session: currentSession,
-          video,
-        });
-      }
       const recoveryDecision = shouldStartVisibleHlsSupplyRecovery({
         session: {
           ...currentSession,
@@ -1840,8 +1829,25 @@ export function useBrowserPlaybackController({
         mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
         videoPaused: video.paused,
         hlsJsAttached: Boolean(hlsRef.current),
-        stalePlaylistStall,
+        stalePlaylistStall: staleNativePlaylistStall,
       });
+      if (recoveryCandidate) {
+        const stallReason = staleNativePlaylistStall
+          ? "native_hls_playlist_stale"
+          : (stall.stallReason || "backend_or_client_runway_low");
+        logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_stall_snapshot", {
+          clientPlaybackStallReason: stallReason,
+          eventReason: stallReason,
+          livenessSample: {
+            ...sample,
+            stallReason,
+          },
+          recoveryDecision,
+          session: currentSession,
+          staleNativePlaylistStall,
+          video,
+        });
+      }
       if (!recoveryDecision.start) {
         clearMobileStallRecoveryTimer();
         return;
@@ -1878,21 +1884,6 @@ export function useBrowserPlaybackController({
           || latestStall.midPlaybackStall
           || staleNativePlaylistStall
           || (latestBackendAhead <= 3 && latestBufferedAhead <= 0.75 && !latestRefillInProgress);
-        if (latestRecoveryCandidate) {
-          const latestStallReason = staleNativePlaylistStall
-            ? "native_hls_playlist_stale"
-            : (latestStall.stallReason || "backend_or_client_runway_low");
-          logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_stall_snapshot", {
-            clientPlaybackStallReason: latestStallReason,
-            eventReason: latestStallReason,
-            livenessSample: {
-              ...latestSample,
-              stallReason: latestStallReason,
-            },
-            session: latestSession,
-            video,
-          });
-        }
         const latestRecoveryDecision = shouldStartVisibleHlsSupplyRecovery({
           session: {
             ...latestSession,
@@ -1908,8 +1899,25 @@ export function useBrowserPlaybackController({
           mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
           videoPaused: video.paused,
           hlsJsAttached: Boolean(hlsRef.current),
-          stalePlaylistStall,
+          stalePlaylistStall: staleNativePlaylistStall,
         });
+        if (latestRecoveryCandidate) {
+          const latestStallReason = staleNativePlaylistStall
+            ? "native_hls_playlist_stale"
+            : (latestStall.stallReason || "backend_or_client_runway_low");
+          logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_stall_snapshot", {
+            clientPlaybackStallReason: latestStallReason,
+            eventReason: latestStallReason,
+            livenessSample: {
+              ...latestSample,
+              stallReason: latestStallReason,
+            },
+            recoveryDecision: latestRecoveryDecision,
+            session: latestSession,
+            staleNativePlaylistStall,
+            video,
+          });
+        }
         if (!latestRecoveryDecision.start) {
           return;
         }

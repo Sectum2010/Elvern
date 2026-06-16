@@ -114,8 +114,20 @@ describe("Elvern player mobile CSS guards", () => {
     expect(card).toContain("pointer-events: auto");
     expect(cssBlock(styles, ".player-prewarm-card__title")).toContain("font-size: clamp(1.12rem");
     const estimate = cssBlock(styles, ".player-prewarm-card__estimate");
+    expect(estimate).toContain("position: relative");
+    expect(estimate).toContain("left: -7%");
+    expect(estimate).toContain("top: -8%");
     expect(estimate).toContain("font-size: clamp(2.2rem");
     expect(estimate).toContain("font-variant-numeric: tabular-nums");
+  });
+
+  test("prepared-through runtime note uses the requested visual offset", () => {
+    const styles = readStyles();
+    const preparedThrough = cssBlock(styles, ".player-runtime-notes__prepared-through");
+
+    expect(preparedThrough).toContain("position: relative");
+    expect(preparedThrough).toContain("left: -7%");
+    expect(preparedThrough).toContain("top: -8%");
   });
 
   test("phone inline maximize is card-corner anchored above the tap surface", () => {

@@ -1,5 +1,8 @@
 import { cleanup, render } from "@testing-library/react";
 import { createElement } from "react";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { useOptimizedPlaybackSession } from "./useOptimizedPlaybackSession";
@@ -8,6 +11,11 @@ import { useBrowserPlaybackController } from "./useBrowserPlaybackController";
 vi.mock("./useOptimizedPlaybackSession", () => ({
   useOptimizedPlaybackSession: vi.fn(),
 }));
+
+const controllerSourcePath = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "useBrowserPlaybackController.js",
+);
 
 afterEach(() => {
   cleanup();
@@ -121,4 +129,17 @@ test("browser playback controller exposes optimized audio selector callback", ()
   });
 
   expect(latestController.selectBrowserPlaybackAudioTrack).toBe(selectBrowserPlaybackAudioTrack);
+});
+
+test("stall recovery passes stale native playlist flag without undefined shorthand", () => {
+  const source = fs.readFileSync(controllerSourcePath, "utf8");
+  const stalledStart = source.indexOf("function handlePlaybackStalled()");
+  const stalledEnd = source.indexOf("function handleSeeked()", stalledStart);
+  expect(stalledStart).toBeGreaterThan(0);
+  expect(stalledEnd).toBeGreaterThan(stalledStart);
+  const stalledSource = source.slice(stalledStart, stalledEnd);
+
+  expect(stalledSource).toContain("stalePlaylistStall: staleNativePlaylistStall");
+  expect(stalledSource.match(/stalePlaylistStall: staleNativePlaylistStall/g)).toHaveLength(2);
+  expect(stalledSource).not.toMatch(/(?<!:)\bstalePlaylistStall,\s*$/m);
 });

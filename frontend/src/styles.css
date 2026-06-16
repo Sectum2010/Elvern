@@ -2316,6 +2316,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.4rem;
 }
 
+.player-runtime-notes__prepared-through {
+  position: relative;
+  left: -7%;
+  top: -8%;
+}
+
 .playback-pending-est__value {
   margin: 0;
   font-size: clamp(2rem, 7vw, 2.8rem);
@@ -5763,6 +5769,9 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .player-prewarm-card__estimate {
+  position: relative;
+  left: -7%;
+  top: -8%;
   margin: 0;
   font-size: clamp(2.2rem, 9vw, 3.35rem);
   font-weight: 800;

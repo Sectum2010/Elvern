@@ -3033,6 +3033,9 @@ export function DetailPage() {
           ? `Prepared through ${preparedDurationLabel} of ${formatDuration(fullDuration)}.`
           : `Prepared through ${preparedDurationLabel}.`
       : "Full movie is available for direct playback.";
+  const optimizedProgressNoteClassName = optimizedProgressNote.startsWith("Prepared through")
+    ? "page-note player-runtime-notes__prepared-through"
+    : "page-note";
 
   function normalizeDesktopSeekValue(value) {
     const numericValue = Number(value);
@@ -4151,7 +4154,7 @@ export function DetailPage() {
         ) : null}
         {(streamSource || optimizedPlaybackPending || seekNotice) ? (
           <div className="player-runtime-notes">
-            <p className="page-note">{optimizedProgressNote}</p>
+            <p className={optimizedProgressNoteClassName}>{optimizedProgressNote}</p>
             {seekNotice ? <p className="page-note">{seekNotice}</p> : null}
           </div>
         ) : null}

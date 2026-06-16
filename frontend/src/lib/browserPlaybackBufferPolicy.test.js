@@ -327,6 +327,27 @@ describe("visible HLS supply recovery gate", () => {
     assert.equal(decision.start, false);
     assert.equal(decision.reason, "client_time_not_confirmed_stopped");
   });
+
+  test("stale native HLS playlist flag can start visible recovery without backend low-water flag", () => {
+    const decision = shouldStartVisibleHlsSupplyRecovery({
+      session: { stalled_recovery_needed: false },
+      livenessSample: {
+        bufferedAheadSeconds: 0,
+        elapsedMs: 2400,
+        currentTimeDeltaSeconds: 0,
+        timeAdvancing: false,
+        stallReason: "client_buffer_starved",
+      },
+      lifecycleState: "attached",
+      mobilePlayerCanPlay: true,
+      videoPaused: false,
+      hlsJsAttached: false,
+      stalePlaylistStall: true,
+    });
+
+    assert.equal(decision.start, true);
+    assert.equal(decision.reason, "native_hls_playlist_starved");
+  });
 });
 
 describe("buildHlsConfig", () => {

@@ -139,4 +139,54 @@ describe("browser playback diagnostics", () => {
     expect(consoleRef.debug).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(payload)).toBe(snapshotBefore);
   });
+
+  test("captures recovery decision fields without exposing transport or path details", () => {
+    const payload = buildBrowserPlaybackDiagnosticPayload({
+      eventReason: "native_hls_playlist_stale",
+      session: {
+        active_manifest_url: "/api/browser-playback/session/token-value/native.m3u8",
+        ahead_runway_seconds: 18,
+        playback_mode: "lite",
+        session_id: "session-2",
+        source_path: "/private/media/Pacific Rim.mkv",
+      },
+      livenessSample: {
+        bufferedAheadSeconds: 0,
+        currentTimeDeltaSeconds: 0,
+        elapsedMs: 2400,
+        stallReason: "native_hls_playlist_stale",
+        timeAdvancing: false,
+      },
+      recoveryDecision: {
+        start: true,
+        reason: "native_hls_playlist_starved",
+      },
+      staleNativePlaylistStall: true,
+      video: {
+        currentSrc: "/api/browser-playback/session/token-value/native.m3u8",
+        currentTime: 181,
+        networkState: 2,
+        paused: false,
+        readyState: 2,
+      },
+    });
+
+    expect(payload).toMatchObject({
+      active_manifest_url_exists: true,
+      backend_prepared_ahead_seconds: 18,
+      client_buffered_ahead_seconds: 0,
+      client_playback_stall_reason: "native_hls_playlist_stale",
+      client_time_advancing: false,
+      event_reason: "native_hls_playlist_stale",
+      recovery_decision_reason: "native_hls_playlist_starved",
+      recovery_decision_start: true,
+      stale_native_playlist_stall: true,
+      video_current_time_seconds: 181,
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("token-value");
+    expect(serialized).not.toContain("Pacific Rim");
+    expect(serialized).not.toContain("/private/media");
+    expect(serialized).not.toContain("currentSrc");
+  });
 });

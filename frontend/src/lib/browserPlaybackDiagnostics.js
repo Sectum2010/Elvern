@@ -76,6 +76,8 @@ export function buildBrowserPlaybackDiagnosticPayload({
   canPlaySeen = null,
   frameReady = null,
   releaseGateReason: explicitReleaseGateReason = "",
+  recoveryDecision = null,
+  staleNativePlaylistStall = null,
 } = {}) {
   const videoCurrentTimeSeconds = finiteNumber(video?.currentTime);
   const clientBufferedAheadSeconds =
@@ -148,7 +150,12 @@ export function buildBrowserPlaybackDiagnosticPayload({
     release_gate_server_ready: booleanOrNull(releaseGate?.serverReady),
     required_client_buffer_seconds: finiteNumber(releaseGate?.requiredClientBufferSeconds),
     configured_client_buffer_seconds: finiteNumber(releaseGate?.configuredClientBufferSeconds),
-    backend_prepared_ahead_seconds: finiteNumber(releaseGate?.backendPreparedAheadSeconds),
+    backend_prepared_ahead_seconds:
+      finiteNumber(releaseGate?.backendPreparedAheadSeconds)
+      ?? finiteNumber(session?.ahead_runway_seconds),
+    stale_native_playlist_stall: booleanOrNull(staleNativePlaylistStall),
+    recovery_decision_start: booleanOrNull(recoveryDecision?.start),
+    recovery_decision_reason: stringOrNull(recoveryDecision?.reason),
     video_current_time_seconds: videoCurrentTimeSeconds,
     video_ready_state: finiteNumber(video?.readyState),
     video_network_state: finiteNumber(video?.networkState),
