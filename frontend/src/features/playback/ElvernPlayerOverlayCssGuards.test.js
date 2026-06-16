@@ -44,6 +44,19 @@ function numericZIndex(block) {
 }
 
 describe("Elvern player mobile CSS guards", () => {
+  test("app shell text cannot force card content outside its container", () => {
+    const styles = readStyles();
+    const appShellLayoutGuard = cssBlock(styles, ":where(.app-shell, .app-shell *)");
+    const appShellTextGuard = cssBlock(
+      styles,
+      ":where(.app-shell) :where(p, h1, h2, h3, h4, h5, h6, span, strong, small)",
+    );
+
+    expect(appShellLayoutGuard).toContain("min-inline-size: 0");
+    expect(appShellTextGuard).toContain("max-inline-size: 100%");
+    expect(appShellTextGuard).toContain("overflow-wrap: break-word");
+  });
+
   test("phone inline player surface fills the aspect-ratio shell without percentage height", () => {
     const styles = readStyles();
     const block = cssBlock(
@@ -106,28 +119,47 @@ describe("Elvern player mobile CSS guards", () => {
     expect(card).toContain("position: absolute");
     expect(card).toContain("inset: 0");
     expect(card).toContain("z-index: 8");
-    expect(card).toContain("display: flex");
-    expect(card).toContain("align-items: center");
+    expect(card).toContain("display: grid");
+    expect(card).toContain("grid-template-columns: auto minmax(0, max-content)");
+    expect(card).toContain("align-content: center");
+    expect(card).toContain("align-items: start");
     expect(card).toContain("justify-content: center");
     expect(card).not.toContain("align-items: flex-start");
+    expect(card).toContain("clamp(0.35rem, 1.8vw, 0.65rem)");
+    expect(card).toContain("clamp(1rem, 3vh, 1.35rem)");
     expect(card).toContain("background:");
     expect(card).toContain("pointer-events: auto");
-    expect(cssBlock(styles, ".player-prewarm-card__title")).toContain("font-size: clamp(1.12rem");
+    const copy = cssBlock(styles, ".player-prewarm-card__copy");
+    expect(copy).toContain("gap: 0.34rem");
+    expect(copy).toContain("inline-size: max-content");
+    expect(copy).toContain("max-inline-size: min(26rem, 100%)");
+    const title = cssBlock(styles, ".player-prewarm-card__title");
+    expect(title).toContain("font-size: clamp(0.95rem");
+    expect(title).toContain("white-space: nowrap");
     const estimate = cssBlock(styles, ".player-prewarm-card__estimate");
-    expect(estimate).toContain("position: relative");
-    expect(estimate).toContain("left: -7%");
-    expect(estimate).toContain("top: -8%");
-    expect(estimate).toContain("font-size: clamp(2.2rem");
+    expect(estimate).not.toContain("position: relative");
+    expect(estimate).not.toContain("left:");
+    expect(estimate).not.toContain("top:");
+    expect(estimate).toContain("font-size: clamp(1.62rem");
     expect(estimate).toContain("font-variant-numeric: tabular-nums");
+    expect(estimate).toContain("white-space: nowrap");
   });
 
-  test("prepared-through runtime note uses the requested visual offset", () => {
+  test("prepared-through runtime note stays inside the player card width", () => {
     const styles = readStyles();
+    const notes = cssBlock(styles, ".player-runtime-notes");
     const preparedThrough = cssBlock(styles, ".player-runtime-notes__prepared-through");
 
-    expect(preparedThrough).toContain("position: relative");
-    expect(preparedThrough).toContain("left: -7%");
-    expect(preparedThrough).toContain("top: -8%");
+    expect(notes).toContain("inline-size: 100%");
+    expect(notes).toContain("max-inline-size: 100%");
+    expect(notes).toContain("overflow: hidden");
+    expect(preparedThrough).toContain("display: block");
+    expect(preparedThrough).toContain("margin: 0");
+    expect(preparedThrough).toContain("max-inline-size: 100%");
+    expect(preparedThrough).toContain("overflow-wrap: break-word");
+    expect(preparedThrough).not.toContain("position: relative");
+    expect(preparedThrough).not.toContain("left:");
+    expect(preparedThrough).not.toContain("top:");
   });
 
   test("phone inline maximize is card-corner anchored above the tap surface", () => {

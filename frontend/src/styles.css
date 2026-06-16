@@ -99,6 +99,15 @@
   box-sizing: border-box;
 }
 
+:where(.app-shell, .app-shell *) {
+  min-inline-size: 0;
+}
+
+:where(.app-shell) :where(p, h1, h2, h3, h4, h5, h6, span, strong, small) {
+  max-inline-size: 100%;
+  overflow-wrap: break-word;
+}
+
 html,
 body,
 #root {
@@ -2314,12 +2323,16 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 .player-runtime-notes {
   display: grid;
   gap: 0.4rem;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  overflow: hidden;
 }
 
 .player-runtime-notes__prepared-through {
-  position: relative;
-  left: -7%;
-  top: -8%;
+  display: block;
+  margin: 0;
+  max-inline-size: 100%;
+  overflow-wrap: break-word;
 }
 
 .playback-pending-est__value {
@@ -5735,11 +5748,17 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   position: absolute;
   inset: 0;
   z-index: 8;
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: auto minmax(0, max-content);
+  align-content: center;
   justify-content: center;
-  gap: clamp(0.9rem, 3vw, 1.15rem);
-  padding: calc(clamp(1.35rem, 5vw, 2.6rem) + clamp(0.25rem, 2vh, 0.8rem)) clamp(1rem, 4vw, 1.9rem) clamp(1.35rem, 5vw, 2.6rem);
+  align-items: start;
+  column-gap: clamp(0.9rem, 3vw, 1.15rem);
+  padding:
+    calc(clamp(1.35rem, 5vw, 2.6rem) + clamp(0.25rem, 2vh, 0.8rem))
+    calc(clamp(1rem, 4vw, 1.9rem) + clamp(0.35rem, 1.8vw, 0.65rem))
+    calc(clamp(1.35rem, 5vw, 2.6rem) + clamp(1rem, 3vh, 1.35rem))
+    clamp(1rem, 4vw, 1.9rem);
   border-radius: inherit;
   background: linear-gradient(145deg, rgba(8, 10, 16, 0.98), rgba(2, 4, 9, 0.98));
   color: #f8fafc;
@@ -5752,32 +5771,33 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   width: clamp(1.65rem, 4.8vw, 2rem);
   height: clamp(1.65rem, 4.8vw, 2rem);
   flex: 0 0 auto;
-  margin-top: 0.15rem;
+  margin-top: 0.06rem;
 }
 
 .player-prewarm-card__copy {
   display: grid;
-  gap: 0.45rem;
-  max-width: min(26rem, 78%);
+  gap: 0.34rem;
+  inline-size: max-content;
+  max-inline-size: min(26rem, 100%);
+  justify-items: start;
 }
 
 .player-prewarm-card__title {
   margin: 0;
-  font-size: clamp(1.12rem, 3.4vw, 1.5rem);
+  font-size: clamp(0.95rem, 2.9vw, 1.22rem);
   font-weight: 700;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 
 .player-prewarm-card__estimate {
-  position: relative;
-  left: -7%;
-  top: -8%;
   margin: 0;
-  font-size: clamp(2.2rem, 9vw, 3.35rem);
+  font-size: clamp(1.62rem, 6.9vw, 2.45rem);
   font-weight: 800;
   line-height: 1;
   letter-spacing: 0;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .player-frozen-frame {
