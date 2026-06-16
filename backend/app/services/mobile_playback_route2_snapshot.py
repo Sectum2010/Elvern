@@ -67,6 +67,25 @@ def _route2_snapshot_locked(
     lite_undersupply_reason = None
     lite_required_runway_seconds = None
     lite_required_runway_source = None
+    lite_threshold_fields: dict[str, object] = {
+        "lite_threshold_decider_state": None,
+        "lite_threshold_previous_tier": None,
+        "lite_threshold_candidate_tier": None,
+        "lite_threshold_confirmed_tier": None,
+        "lite_threshold_decider_reason": None,
+        "lite_positive_evidence_seconds": None,
+        "lite_negative_evidence_seconds": None,
+        "lite_frontier_sample_count": None,
+        "lite_frontier_growth_rate_x": None,
+        "lite_effective_supply_rate_x": None,
+        "lite_supply_fast_ema_rate_x": None,
+        "lite_supply_slow_ema_rate_x": None,
+        "lite_supply_median_rate_x": None,
+        "lite_hysteresis_hold_reason": None,
+        "lite_cold_start_hold": False,
+        "lite_post_recovery_hold": False,
+        "lite_post_seek_hold": False,
+    }
     full_bad_condition_fields: dict[str, object] = {
         "full_bad_condition_detected": False,
         "full_bad_condition_reason": None,
@@ -154,6 +173,9 @@ def _route2_snapshot_locked(
             lite_undersupply_reason = startup_gate.get("lite_undersupply_reason")
             lite_required_runway_seconds = startup_gate.get("lite_required_runway_seconds")
             lite_required_runway_source = startup_gate.get("lite_required_runway_source")
+            for key in lite_threshold_fields:
+                if key in startup_gate:
+                    lite_threshold_fields[key] = startup_gate[key]
             if (
                 browser_session.playback_mode == "lite"
                 and browser_session.client_attach_revision == 0
@@ -337,6 +359,37 @@ def _route2_snapshot_locked(
         if lite_required_runway_seconds is not None
         else None,
         "lite_required_runway_source": lite_required_runway_source,
+        "lite_threshold_decider_state": lite_threshold_fields["lite_threshold_decider_state"],
+        "lite_threshold_previous_tier": lite_threshold_fields["lite_threshold_previous_tier"],
+        "lite_threshold_candidate_tier": lite_threshold_fields["lite_threshold_candidate_tier"],
+        "lite_threshold_confirmed_tier": lite_threshold_fields["lite_threshold_confirmed_tier"],
+        "lite_threshold_decider_reason": lite_threshold_fields["lite_threshold_decider_reason"],
+        "lite_positive_evidence_seconds": round(float(lite_threshold_fields["lite_positive_evidence_seconds"]), 2)
+        if lite_threshold_fields["lite_positive_evidence_seconds"] is not None
+        else None,
+        "lite_negative_evidence_seconds": round(float(lite_threshold_fields["lite_negative_evidence_seconds"]), 2)
+        if lite_threshold_fields["lite_negative_evidence_seconds"] is not None
+        else None,
+        "lite_frontier_sample_count": lite_threshold_fields["lite_frontier_sample_count"],
+        "lite_frontier_growth_rate_x": round(float(lite_threshold_fields["lite_frontier_growth_rate_x"]), 3)
+        if lite_threshold_fields["lite_frontier_growth_rate_x"] is not None
+        else None,
+        "lite_effective_supply_rate_x": round(float(lite_threshold_fields["lite_effective_supply_rate_x"]), 3)
+        if lite_threshold_fields["lite_effective_supply_rate_x"] is not None
+        else None,
+        "lite_supply_fast_ema_rate_x": round(float(lite_threshold_fields["lite_supply_fast_ema_rate_x"]), 3)
+        if lite_threshold_fields["lite_supply_fast_ema_rate_x"] is not None
+        else None,
+        "lite_supply_slow_ema_rate_x": round(float(lite_threshold_fields["lite_supply_slow_ema_rate_x"]), 3)
+        if lite_threshold_fields["lite_supply_slow_ema_rate_x"] is not None
+        else None,
+        "lite_supply_median_rate_x": round(float(lite_threshold_fields["lite_supply_median_rate_x"]), 3)
+        if lite_threshold_fields["lite_supply_median_rate_x"] is not None
+        else None,
+        "lite_hysteresis_hold_reason": lite_threshold_fields["lite_hysteresis_hold_reason"],
+        "lite_cold_start_hold": bool(lite_threshold_fields["lite_cold_start_hold"]),
+        "lite_post_recovery_hold": bool(lite_threshold_fields["lite_post_recovery_hold"]),
+        "lite_post_seek_hold": bool(lite_threshold_fields["lite_post_seek_hold"]),
         **buffer_contract_fields,
         **active_window_fields,
         "client_buffered_ahead_seconds": round(float(session.client_buffered_ahead_seconds), 2)

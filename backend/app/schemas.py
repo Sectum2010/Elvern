@@ -913,6 +913,23 @@ class MobilePlaybackSessionResponse(BaseModel):
     lite_undersupply_reason: str | None = None
     lite_required_runway_seconds: float | None = Field(default=None, ge=0)
     lite_required_runway_source: str | None = None
+    lite_threshold_decider_state: str | None = None
+    lite_threshold_previous_tier: str | None = None
+    lite_threshold_candidate_tier: str | None = None
+    lite_threshold_confirmed_tier: str | None = None
+    lite_threshold_decider_reason: str | None = None
+    lite_positive_evidence_seconds: float | None = Field(default=None, ge=0)
+    lite_negative_evidence_seconds: float | None = Field(default=None, ge=0)
+    lite_frontier_sample_count: int | None = Field(default=None, ge=0)
+    lite_frontier_growth_rate_x: float | None = Field(default=None, ge=0)
+    lite_effective_supply_rate_x: float | None = Field(default=None, ge=0)
+    lite_supply_fast_ema_rate_x: float | None = Field(default=None, ge=0)
+    lite_supply_slow_ema_rate_x: float | None = Field(default=None, ge=0)
+    lite_supply_median_rate_x: float | None = Field(default=None, ge=0)
+    lite_hysteresis_hold_reason: str | None = None
+    lite_cold_start_hold: bool = False
+    lite_post_recovery_hold: bool = False
+    lite_post_seek_hold: bool = False
     buffer_tier: str | None = None
     server_required_runway_seconds: float | None = Field(default=None, ge=0)
     server_reserve_seconds: float | None = Field(default=None, ge=0)
@@ -1977,6 +1994,23 @@ class AdminPlaybackWorkerItemResponse(BaseModel):
     lite_undersupply_reason: str | None = None
     lite_required_runway_seconds: float | None = Field(default=None, ge=0)
     lite_required_runway_source: str | None = None
+    lite_threshold_decider_state: str | None = None
+    lite_threshold_previous_tier: str | None = None
+    lite_threshold_candidate_tier: str | None = None
+    lite_threshold_confirmed_tier: str | None = None
+    lite_threshold_decider_reason: str | None = None
+    lite_positive_evidence_seconds: float | None = Field(default=None, ge=0)
+    lite_negative_evidence_seconds: float | None = Field(default=None, ge=0)
+    lite_frontier_sample_count: int | None = Field(default=None, ge=0)
+    lite_frontier_growth_rate_x: float | None = Field(default=None, ge=0)
+    lite_effective_supply_rate_x: float | None = Field(default=None, ge=0)
+    lite_supply_fast_ema_rate_x: float | None = Field(default=None, ge=0)
+    lite_supply_slow_ema_rate_x: float | None = Field(default=None, ge=0)
+    lite_supply_median_rate_x: float | None = Field(default=None, ge=0)
+    lite_hysteresis_hold_reason: str | None = None
+    lite_cold_start_hold: bool = False
+    lite_post_recovery_hold: bool = False
+    lite_post_seek_hold: bool = False
     ffmpeg_progress_out_time_seconds: float | None = Field(default=None, ge=0)
     ffmpeg_progress_speed_x: float | None = Field(default=None, ge=0)
     ffmpeg_progress_fps: float | None = Field(default=None, ge=0)

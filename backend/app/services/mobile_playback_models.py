@@ -46,6 +46,12 @@ ROUTE2_SUPPLY_SURPLUS_MIN_OBSERVATION_SECONDS = 6.0
 ROUTE2_SUPPLY_SURPLUS_MIN_RATE_X = 1.05
 ROUTE2_STARTUP_MIN_SUPPLY_RATE_X = 1.05
 ROUTE2_RECOVERY_MIN_SUPPLY_RATE_X = 1.02
+ROUTE2_LITE_DECIDER_FAST_CONFIRM_SECONDS = 15.0
+ROUTE2_LITE_DECIDER_UNDERSUPPLY_CONFIRM_SECONDS = 25.0
+ROUTE2_LITE_DECIDER_COLD_START_GRACE_SECONDS = 20.0
+ROUTE2_LITE_DECIDER_POST_RECOVERY_HOLD_SECONDS = 30.0
+ROUTE2_LITE_DECIDER_POST_SEEK_HOLD_SECONDS = 15.0
+ROUTE2_LITE_DECIDER_MIN_FRONTIER_SAMPLE_COUNT = 6
 ROUTE2_LOW_WATER_SUSTAIN_SECONDS = 6.0
 ROUTE2_DRAIN_IDLE_GRACE_SECONDS = 12.0
 ROUTE2_DRAIN_MAX_SECONDS = 90.0
@@ -497,6 +503,19 @@ class BrowserPlaybackSession:
     full_prepare_started_at_ts: float = 0.0
     full_source_bin_bytes: list[int] = field(default_factory=list, repr=False)
     client_probe_samples: list[tuple[float, int, float]] = field(default_factory=list, repr=False)
+    lite_threshold_decider_started: bool = False
+    lite_threshold_decider_started_at_ts: float = 0.0
+    lite_threshold_decider_last_sample_ts: float = 0.0
+    lite_threshold_decider_state: str = "neutral_45"
+    lite_threshold_confirmed_tier: str = "lite_uncertain"
+    lite_threshold_previous_tier: str | None = None
+    lite_threshold_candidate_tier: str | None = None
+    lite_threshold_decider_reason: str = "cold_start_or_unknown"
+    lite_positive_evidence_seconds: float = 0.0
+    lite_negative_evidence_seconds: float = 0.0
+    lite_hysteresis_hold_reason: str | None = None
+    lite_recovery_hold_until_ts: float = 0.0
+    lite_seek_hold_until_ts: float = 0.0
     selected_audio_stream_index: int | None = None
     active_audio_stream_index: int | None = None
     pending_audio_stream_index: int | None = None

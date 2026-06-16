@@ -46,6 +46,10 @@ from backend.app.services.mobile_playback_models import (
     MobileProfile,
     MobilePlaybackSession,
     PlaybackEpoch,
+    ROUTE2_FULL_FAST_START_RUNWAY_SECONDS,
+    ROUTE2_LITE_FAST_START_RUNWAY_SECONDS,
+    ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS,
+    ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS,
     Route2WorkerRecord,
 )
 from backend.app.services.mobile_playback_buffer_contract import (
@@ -96,6 +100,7 @@ from backend.app.services.mobile_playback_route2_gates import (
     _route2_epoch_startup_attach_gate_locked,
     _route2_epoch_startup_attach_ready_locked,
 )
+from backend.app.services.mobile_playback_route2_snapshot import _route2_snapshot_locked
 from backend.app.services.route2_adaptive_controller import (
     Route2AdaptiveShadowInput,
     classify_route2_adaptive_shadow,
@@ -225,6 +230,38 @@ def _make_route2_epoch() -> PlaybackEpoch:
         init_published=True,
         contiguous_published_through_segment=12,
     )
+
+
+def _set_route2_frontier_samples(
+    epoch: PlaybackEpoch,
+    *,
+    start_ts: float,
+    duration_seconds: float,
+    rate_x: float,
+    step_seconds: float = 3.0,
+    start_end_seconds: float = 5.0,
+) -> None:
+    samples: list[tuple[float, float]] = []
+    sample_count = int(duration_seconds / step_seconds)
+    for index in range(sample_count + 1):
+        elapsed_seconds = min(duration_seconds, index * step_seconds)
+        samples.append((
+            round(start_ts + elapsed_seconds, 3),
+            round(start_end_seconds + (elapsed_seconds * rate_x), 3),
+        ))
+    epoch.frontier_samples = samples
+
+
+def _set_route2_mixed_frontier_samples(epoch: PlaybackEpoch) -> None:
+    epoch.frontier_samples = [
+        (0.0, 5.0),
+        (3.0, 8.6),
+        (6.0, 9.8),
+        (9.0, 13.4),
+        (12.0, 14.6),
+        (15.0, 18.2),
+        (18.0, 19.4),
+    ]
 
 
 def _make_local_item(
@@ -1544,9 +1581,12 @@ def test_external_player_stream_policy_uses_long_ttl_and_large_chunk_profiles(in
     assert browser_policy.chunk_size_bytes == 64 * 1024
 
 
-def test_route2_lite_initial_attach_ready_uses_target_window_instead_of_projected_runway() -> None:
+def test_route2_lite_short_good_sample_stays_on_slow_runway() -> None:
     session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
     epoch = _make_route2_epoch()
+    session.browser_playback.lite_threshold_decider_started = True
+    session.browser_playback.lite_threshold_decider_started_at_ts = 0.0
+    _set_route2_frontier_samples(epoch, start_ts=30.0, duration_seconds=6.0, rate_x=1.2, step_seconds=1.2)
 
     gate = _route2_epoch_startup_attach_gate_locked(
         session,
@@ -1557,13 +1597,48 @@ def test_route2_lite_initial_attach_ready_uses_target_window_instead_of_projecte
         route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 20.0,
     )
 
+    assert gate["ready"] is False
+    assert gate["required_startup_runway_seconds"] == 45.0
+    assert gate["actual_startup_runway_seconds"] == 15.0
+    assert gate["gate_reason"] == "lite_fast_candidate_pending_confirmation"
+    assert gate["lite_undersupply_detected"] is False
+    assert gate["lite_required_runway_source"] == "slow_path_45"
+    assert gate["lite_required_runway_seconds"] == 45.0
+    assert gate["lite_threshold_decider_state"] == "fast_candidate"
+    assert gate["lite_positive_evidence_seconds"] == pytest.approx(6.0)
+
+
+def test_route2_lite_sustained_good_evidence_selects_fast_15() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+    _set_route2_frontier_samples(epoch, start_ts=0.0, duration_seconds=18.0, rate_x=1.2)
+    _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.2, 18.0, 16.8, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 20.0,
+    )
+    _set_route2_frontier_samples(epoch, start_ts=18.0, duration_seconds=18.0, rate_x=1.2)
+
+    gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.2, 18.0, 16.8, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 20.0,
+    )
+
     assert gate["ready"] is True
     assert gate["required_startup_runway_seconds"] == 15.0
     assert gate["actual_startup_runway_seconds"] == 15.0
-    assert gate["gate_reason"] == "lite_fast_supply_surplus"
-    assert gate["lite_undersupply_detected"] is False
+    assert gate["gate_reason"] == "lite_fast_confirmed"
     assert gate["lite_required_runway_source"] == "healthy_fast_start_15"
-    assert gate["lite_required_runway_seconds"] == 15.0
+    assert gate["lite_threshold_decider_state"] == "fast_confirmed_15"
+    assert gate["lite_threshold_confirmed_tier"] == "lite_fast"
+    assert gate["lite_positive_evidence_seconds"] >= 15.0
 
 
 def test_route2_lite_initial_attach_still_waits_for_minimum_target_window() -> None:
@@ -1582,15 +1657,20 @@ def test_route2_lite_initial_attach_still_waits_for_minimum_target_window() -> N
     assert gate["ready"] is False
     assert gate["required_startup_runway_seconds"] == 45.0
     assert gate["actual_startup_runway_seconds"] == 19.0
-    assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
+    assert gate["gate_reason"] == "lite_neutral_insufficient_samples"
     assert gate["lite_undersupply_detected"] is False
     assert gate["lite_undersupply_reason"] is None
     assert gate["lite_required_runway_source"] == "slow_path_45"
+    assert gate["lite_threshold_decider_state"] == "neutral_45"
+    assert gate["lite_hysteresis_hold_reason"] == "insufficient_frontier_samples"
 
 
-def test_route2_lite_mature_supply_below_realtime_requires_180_second_runway() -> None:
+def test_route2_lite_short_bad_sample_stays_on_slow_runway() -> None:
     session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
     epoch = _make_route2_epoch()
+    session.browser_playback.lite_threshold_decider_started = True
+    session.browser_playback.lite_threshold_decider_started_at_ts = 0.0
+    _set_route2_frontier_samples(epoch, start_ts=30.0, duration_seconds=6.0, rate_x=0.8, step_seconds=1.2)
 
     gate = _route2_epoch_startup_attach_gate_locked(
         session,
@@ -1601,39 +1681,144 @@ def test_route2_lite_mature_supply_below_realtime_requires_180_second_runway() -
         route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 50.0,
     )
 
-    assert gate["ready"] is False
-    assert gate["required_startup_runway_seconds"] == 180.0
+    assert gate["ready"] is True
+    assert gate["required_startup_runway_seconds"] == 45.0
     assert gate["actual_startup_runway_seconds"] == 45.0
-    assert gate["gate_reason"] == "lite_undersupply_below_realtime"
-    assert gate["lite_undersupply_detected"] is True
-    assert gate["lite_undersupply_reason"] == "mature_supply_below_1_0"
-    assert gate["lite_required_runway_source"] == "undersupply_180"
-    assert gate["lite_required_runway_seconds"] == 180.0
+    assert gate["gate_reason"] == "lite_undersupply_candidate_pending_confirmation"
+    assert gate["lite_undersupply_detected"] is False
+    assert gate["lite_undersupply_reason"] is None
+    assert gate["lite_required_runway_source"] == "slow_path_45"
+    assert gate["lite_required_runway_seconds"] == 45.0
+    assert gate["lite_threshold_decider_state"] == "undersupply_candidate"
+    assert gate["lite_negative_evidence_seconds"] == pytest.approx(6.0)
 
 
-def test_route2_lite_mature_supply_below_realtime_ready_after_180_second_runway() -> None:
+def test_route2_lite_sustained_bad_evidence_selects_undersupply_180() -> None:
     session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
     epoch = _make_route2_epoch()
+    _set_route2_frontier_samples(epoch, start_ts=0.0, duration_seconds=18.0, rate_x=0.8)
+    _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 138.0, 0.8, 18.0, 45.0, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 50.0,
+    )
+    _set_route2_frontier_samples(epoch, start_ts=18.0, duration_seconds=18.0, rate_x=0.8)
 
     gate = _route2_epoch_startup_attach_gate_locked(
         session,
         epoch,
         route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
         route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
-        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 0.0, 0.99, 6.0, 180.0, True),
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 0.0, 0.8, 18.0, 180.0, True),
         route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 185.0,
     )
 
     assert gate["ready"] is True
     assert gate["required_startup_runway_seconds"] == 180.0
     assert gate["actual_startup_runway_seconds"] == 180.0
+    assert gate["gate_reason"] == "lite_undersupply_confirmed"
     assert gate["lite_undersupply_detected"] is True
     assert gate["lite_required_runway_source"] == "undersupply_180"
+    assert gate["lite_undersupply_reason"] == "sustained_supply_below_1_0"
+    assert gate["lite_threshold_decider_state"] == "undersupply_confirmed_180"
+    assert gate["lite_threshold_confirmed_tier"] == "lite_undersupply"
+    assert gate["lite_negative_evidence_seconds"] >= 25.0
+
+
+def test_route2_lite_recovery_hold_keeps_slow_runway() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    session.stalled_recovery_requested = True
+    epoch = _make_route2_epoch()
+    _set_route2_frontier_samples(epoch, start_ts=0.0, duration_seconds=30.0, rate_x=1.2)
+
+    gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.2, 18.0, 16.8, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 80.0,
+    )
+
+    assert gate["required_startup_runway_seconds"] == 45.0
+    assert gate["lite_required_runway_source"] == "slow_path_45"
+    assert gate["lite_threshold_decider_state"] == "recovery_hold_45"
+    assert gate["lite_post_recovery_hold"] is True
+    assert gate["lite_hysteresis_hold_reason"] == "post_recovery_hold"
+
+
+def test_route2_lite_undersupply_recovery_does_not_jump_directly_to_fast() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+    for start_ts in (0.0, 18.0):
+        _set_route2_frontier_samples(epoch, start_ts=start_ts, duration_seconds=18.0, rate_x=0.8)
+        _route2_epoch_startup_attach_gate_locked(
+            session,
+            epoch,
+            route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+            route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+            route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 0.0, 0.8, 18.0, 180.0, True),
+            route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 185.0,
+        )
+    _set_route2_frontier_samples(epoch, start_ts=36.0, duration_seconds=18.0, rate_x=1.2)
+
+    first_recovery_gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.2, 18.0, 16.8, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 80.0,
+    )
+    _set_route2_frontier_samples(epoch, start_ts=54.0, duration_seconds=18.0, rate_x=1.2)
+    second_recovery_gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.2, 18.0, 16.8, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 80.0,
+    )
+
+    assert first_recovery_gate["required_startup_runway_seconds"] == 45.0
+    assert first_recovery_gate["lite_required_runway_source"] == "slow_path_45"
+    assert first_recovery_gate["lite_hysteresis_hold_reason"] == "undersupply_recovery_requires_neutral"
+    assert first_recovery_gate["lite_threshold_decider_state"] == "neutral_45"
+    assert second_recovery_gate["required_startup_runway_seconds"] == 15.0
+    assert second_recovery_gate["lite_required_runway_source"] == "healthy_fast_start_15"
+    assert second_recovery_gate["lite_threshold_decider_state"] == "fast_confirmed_15"
+
+
+def test_route2_lite_mixed_signals_remain_neutral_45() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    session.browser_playback.lite_threshold_decider_started = True
+    session.browser_playback.lite_threshold_decider_started_at_ts = 0.0
+    epoch = _make_route2_epoch()
+    _set_route2_mixed_frontier_samples(epoch)
+
+    gate = _route2_epoch_startup_attach_gate_locked(
+        session,
+        epoch,
+        route2_full_mode_requires_initial_attach_gate_locked=lambda _session: False,
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.01, 18.0, 45.0, True),
+        route2_epoch_ready_end_seconds_locked=lambda _session, _epoch: 80.0,
+    )
+
+    assert gate["required_startup_runway_seconds"] == 45.0
+    assert gate["lite_required_runway_source"] == "slow_path_45"
+    assert gate["lite_threshold_decider_state"] == "neutral_45"
 
 
 def test_route2_lite_supply_exactly_realtime_keeps_slow_45_second_path() -> None:
     session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
     epoch = _make_route2_epoch()
+    session.browser_playback.lite_threshold_decider_started = True
+    session.browser_playback.lite_threshold_decider_started_at_ts = 0.0
+    _set_route2_frontier_samples(epoch, start_ts=30.0, duration_seconds=18.0, rate_x=1.0)
 
     gate = _route2_epoch_startup_attach_gate_locked(
         session,
@@ -1646,9 +1831,10 @@ def test_route2_lite_supply_exactly_realtime_keeps_slow_45_second_path() -> None
 
     assert gate["ready"] is True
     assert gate["required_startup_runway_seconds"] == 45.0
-    assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
+    assert gate["gate_reason"] == "lite_neutral_uncertain"
     assert gate["lite_undersupply_detected"] is False
     assert gate["lite_required_runway_source"] == "slow_path_45"
+    assert gate["lite_threshold_decider_state"] == "neutral_45"
 
 
 def test_route2_lite_initial_attach_with_insufficient_observation_requires_slow_runway() -> None:
@@ -1666,7 +1852,7 @@ def test_route2_lite_initial_attach_with_insufficient_observation_requires_slow_
 
     assert gate["ready"] is True
     assert gate["required_startup_runway_seconds"] == 45.0
-    assert gate["gate_reason"] == "lite_slow_supply_unknown_or_deficit"
+    assert gate["gate_reason"] == "lite_neutral_insufficient_samples"
     assert gate["lite_undersupply_detected"] is False
     assert gate["lite_required_runway_source"] == "slow_path_45"
 
@@ -1703,6 +1889,80 @@ def test_route2_lite_undersupply_status_fields_survive_response_schemas() -> Non
         assert "lite_undersupply_reason" in fields
         assert "lite_required_runway_seconds" in fields
         assert "lite_required_runway_source" in fields
+        assert "lite_threshold_decider_state" in fields
+        assert "lite_threshold_previous_tier" in fields
+        assert "lite_threshold_candidate_tier" in fields
+        assert "lite_threshold_confirmed_tier" in fields
+        assert "lite_threshold_decider_reason" in fields
+        assert "lite_positive_evidence_seconds" in fields
+        assert "lite_negative_evidence_seconds" in fields
+        assert "lite_frontier_sample_count" in fields
+        assert "lite_frontier_growth_rate_x" in fields
+        assert "lite_effective_supply_rate_x" in fields
+        assert "lite_supply_fast_ema_rate_x" in fields
+        assert "lite_supply_slow_ema_rate_x" in fields
+        assert "lite_supply_median_rate_x" in fields
+        assert "lite_hysteresis_hold_reason" in fields
+        assert "lite_cold_start_hold" in fields
+        assert "lite_post_recovery_hold" in fields
+        assert "lite_post_seek_hold" in fields
+
+
+def test_route2_snapshot_includes_lite_threshold_decider_fields() -> None:
+    session = _make_route2_session(playback_mode="lite", client_attach_revision=0)
+    epoch = _make_route2_epoch()
+    session.browser_playback.active_epoch_id = epoch.epoch_id
+    session.browser_playback.epochs[epoch.epoch_id] = epoch
+    startup_gate = {
+        "ready": False,
+        "estimate_seconds": None,
+        "required_startup_runway_seconds": 45.0,
+        "actual_startup_runway_seconds": 22.0,
+        "gate_reason": "lite_fast_candidate_pending_confirmation",
+        "lite_undersupply_runway_seconds": 180.0,
+        "lite_undersupply_detected": False,
+        "lite_undersupply_reason": None,
+        "lite_required_runway_seconds": 45.0,
+        "lite_required_runway_source": "slow_path_45",
+        "lite_threshold_decider_state": "fast_candidate",
+        "lite_threshold_previous_tier": "lite_uncertain",
+        "lite_threshold_candidate_tier": "lite_fast",
+        "lite_threshold_confirmed_tier": "lite_uncertain",
+        "lite_threshold_decider_reason": "lite_fast_candidate_pending_confirmation",
+        "lite_positive_evidence_seconds": 12.0,
+        "lite_negative_evidence_seconds": 0.0,
+        "lite_frontier_sample_count": 7,
+        "lite_frontier_growth_rate_x": 1.2,
+        "lite_effective_supply_rate_x": 1.08,
+        "lite_supply_fast_ema_rate_x": 1.18,
+        "lite_supply_slow_ema_rate_x": 1.12,
+        "lite_supply_median_rate_x": 1.2,
+        "lite_hysteresis_hold_reason": None,
+        "lite_cold_start_hold": False,
+        "lite_post_recovery_hold": False,
+        "lite_post_seek_hold": False,
+    }
+
+    snapshot = _route2_snapshot_locked(
+        session,
+        route2_attach_gate_state_locked=lambda *_args, **_kwargs: (False, 1.0, 1.08, 18.0, 16.8, True),
+        route2_display_prepare_eta_locked=lambda _epoch, raw_eta, **_kwargs: raw_eta,
+        route2_epoch_recovery_ready_locked=lambda _session, _epoch: False,
+        route2_epoch_startup_attach_gate_locked=lambda _session, _epoch: startup_gate,
+        guard_route2_full_attach_boundary_locked=lambda _session, _epoch, *, attach_eligible, guard_path: attach_eligible,
+        route2_epoch_ready_end_seconds=lambda _session, _epoch: 27.0,
+        route2_low_water_recovery_needed_locked=lambda _session, _epoch: (22.0, 1.08, False, False, False),
+        route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
+        route2_position_in_epoch_locked=lambda _session, _epoch, _position: True,
+        segment_index_for_time=lambda value: int(value // 4),
+    )
+
+    assert snapshot["lite_threshold_decider_state"] == "fast_candidate"
+    assert snapshot["lite_threshold_candidate_tier"] == "lite_fast"
+    assert snapshot["lite_threshold_confirmed_tier"] == "lite_uncertain"
+    assert snapshot["lite_positive_evidence_seconds"] == 12.0
+    assert snapshot["lite_frontier_sample_count"] == 7
+    assert snapshot["lite_effective_supply_rate_x"] == 1.08
 
 
 def test_route2_buffer_contract_status_fields_survive_response_schema() -> None:
@@ -1726,6 +1986,10 @@ def test_route2_buffer_contract_status_fields_survive_response_schema() -> None:
 
 
 def test_route2_buffer_contract_locked_client_values() -> None:
+    assert ROUTE2_LITE_FAST_START_RUNWAY_SECONDS == 15.0
+    assert ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS == 45.0
+    assert ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS == 180.0
+    assert ROUTE2_FULL_FAST_START_RUNWAY_SECONDS == 120.0
     assert ROUTE2_FULL_BAD_CONDITION_BUFFER_SECONDS == 900.0
     assert CLIENT_LITE_REAL_CACHE_SECONDS == 15.0
     assert CLIENT_FULL_REAL_CACHE_SECONDS == 30.0

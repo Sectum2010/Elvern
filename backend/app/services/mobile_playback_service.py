@@ -9860,6 +9860,25 @@ class MobilePlaybackManager:
                     payload["lite_undersupply_reason"] = None
                     payload["lite_required_runway_seconds"] = None
                     payload["lite_required_runway_source"] = None
+                    payload.update({
+                        "lite_threshold_decider_state": None,
+                        "lite_threshold_previous_tier": None,
+                        "lite_threshold_candidate_tier": None,
+                        "lite_threshold_confirmed_tier": None,
+                        "lite_threshold_decider_reason": None,
+                        "lite_positive_evidence_seconds": None,
+                        "lite_negative_evidence_seconds": None,
+                        "lite_frontier_sample_count": None,
+                        "lite_frontier_growth_rate_x": None,
+                        "lite_effective_supply_rate_x": None,
+                        "lite_supply_fast_ema_rate_x": None,
+                        "lite_supply_slow_ema_rate_x": None,
+                        "lite_supply_median_rate_x": None,
+                        "lite_hysteresis_hold_reason": None,
+                        "lite_cold_start_hold": False,
+                        "lite_post_recovery_hold": False,
+                        "lite_post_seek_hold": False,
+                    })
                     payload.update(self._route2_bad_condition_reserve_payload_locked(session, epoch))
                     if record.playback_mode == "lite":
                         lite_gate = self._route2_epoch_startup_attach_gate_locked(session, epoch)
@@ -9880,6 +9899,27 @@ class MobilePlaybackManager:
                             else None
                         )
                         payload["lite_required_runway_source"] = lite_gate.get("lite_required_runway_source")
+                        for key in (
+                            "lite_threshold_decider_state",
+                            "lite_threshold_previous_tier",
+                            "lite_threshold_candidate_tier",
+                            "lite_threshold_confirmed_tier",
+                            "lite_threshold_decider_reason",
+                            "lite_positive_evidence_seconds",
+                            "lite_negative_evidence_seconds",
+                            "lite_frontier_sample_count",
+                            "lite_frontier_growth_rate_x",
+                            "lite_effective_supply_rate_x",
+                            "lite_supply_fast_ema_rate_x",
+                            "lite_supply_slow_ema_rate_x",
+                            "lite_supply_median_rate_x",
+                            "lite_hysteresis_hold_reason",
+                            "lite_cold_start_hold",
+                            "lite_post_recovery_hold",
+                            "lite_post_seek_hold",
+                        ):
+                            if key in lite_gate:
+                                payload[key] = lite_gate[key]
                 else:
                     payload["runtime_playback_health"] = None
                     payload["runtime_playback_health_reason"] = None
@@ -9896,6 +9936,25 @@ class MobilePlaybackManager:
                     payload["lite_undersupply_reason"] = None
                     payload["lite_required_runway_seconds"] = None
                     payload["lite_required_runway_source"] = None
+                    payload.update({
+                        "lite_threshold_decider_state": None,
+                        "lite_threshold_previous_tier": None,
+                        "lite_threshold_candidate_tier": None,
+                        "lite_threshold_confirmed_tier": None,
+                        "lite_threshold_decider_reason": None,
+                        "lite_positive_evidence_seconds": None,
+                        "lite_negative_evidence_seconds": None,
+                        "lite_frontier_sample_count": None,
+                        "lite_frontier_growth_rate_x": None,
+                        "lite_effective_supply_rate_x": None,
+                        "lite_supply_fast_ema_rate_x": None,
+                        "lite_supply_slow_ema_rate_x": None,
+                        "lite_supply_median_rate_x": None,
+                        "lite_hysteresis_hold_reason": None,
+                        "lite_cold_start_hold": False,
+                        "lite_post_recovery_hold": False,
+                        "lite_post_seek_hold": False,
+                    })
                     payload["bad_condition_reserve_required"] = False
                     payload["bad_condition_reason"] = None
                     payload["bad_condition_supply_floor"] = ROUTE2_BAD_CONDITION_SUPPLY_FLOOR_RATE_X
