@@ -3130,6 +3130,12 @@ export function DetailPage() {
     }
   }
 
+  function handlePrewarmViewportToggle(event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    toggleElvernPlayerFullscreen();
+  }
+
   function handleElvernPlayerTouchStart(event) {
     if (!useElvernCustomShell || !(macAppFullscreenActive || elvernCinemaTakeoverActive)) {
       playerFitPinchRef.current = null;
@@ -4077,6 +4083,22 @@ export function DetailPage() {
                     </strong>
                   </div>
                 </div>
+              ) : null}
+              {showMobilePrewarmCard && useElvernCustomShell ? (
+                <button
+                  aria-label={macAppFullscreenActive || elvernCinemaTakeoverActive ? "Minimize player" : "Maximize player"}
+                  className={`player-prewarm-viewport-toggle ${
+                    macAppFullscreenActive || elvernCinemaTakeoverActive
+                      ? "player-prewarm-viewport-toggle--minimize"
+                      : "player-prewarm-viewport-toggle--maximize"
+                  }`}
+                  onClick={handlePrewarmViewportToggle}
+                  type="button"
+                >
+                  <span className="player-prewarm-viewport-toggle__glyph" aria-hidden="true">
+                    {macAppFullscreenActive || elvernCinemaTakeoverActive ? "><" : "<>"}
+                  </span>
+                </button>
               ) : null}
               {useElvernCustomShell && !showMobilePrewarmCard ? (
                 <ElvernPlayerOverlay

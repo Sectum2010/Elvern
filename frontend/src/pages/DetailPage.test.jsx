@@ -493,10 +493,61 @@ describe("DetailPage source metadata privacy", () => {
     renderDetailPage(detailItem());
 
     expect(await screen.findByText("Preparing lite playback")).toBeInTheDocument();
-    expect(document.querySelector(".player-prewarm-card")).not.toBeNull();
-    expect(document.querySelector(".playback-pending-indicator")).toBeNull();
-    expect(screen.getByText("EST --:--")).toBeInTheDocument();
+	    expect(document.querySelector(".player-prewarm-card")).not.toBeNull();
+	    expect(document.querySelector(".playback-pending-indicator")).toBeNull();
+	    expect(mockOverlayState.latestProps).toBeNull();
+	    expect(screen.getByRole("button", { name: "Maximize player" })).toBeInTheDocument();
+	    expect(screen.getByText("EST --:--")).toBeInTheDocument();
+	    expect(screen.getByText("Prepared through 0:00 of 20:00.")).toBeInTheDocument();
+	    expect(screen.queryByText(/client buffer/i)).not.toBeInTheDocument();
+	  });
+
+  test("browser prewarm card escape button toggles between normal and cinema layout without overlay", async () => {
+    mockBrowserPlayerViewState.value = {
+      browserPlaybackPreparing: true,
+      playerClassName: "player",
+      showMobilePreparingPlaceholder: true,
+      showMobilePrewarmCard: true,
+      showPlayerShell: true,
+      videoControlsEnabled: false,
+    };
+    mockBrowserPlaybackControllerState.overrides = {
+      activePlaybackMode: "lite",
+      browserPlaybackLabel: "lite playback",
+      browserPlaybackSessionActive: true,
+      fullDuration: 1200,
+      mobileSession: {
+        attach_ready: true,
+        duration_seconds: 1200,
+        engine_mode: "route2",
+        playback_mode: "lite",
+        ready_end_seconds: 4,
+        target_position_seconds: 0,
+      },
+      optimizedPlaybackPending: true,
+      prepareEstimateObservedAtMs: 0,
+      prepareEstimateNowMs: 0,
+    };
+
+    renderDetailPage(detailItem());
+
+    const maximizeButton = await screen.findByRole("button", { name: "Maximize player" });
+    expect(mockOverlayState.latestProps).toBeNull();
+
+    fireEvent.click(maximizeButton);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Minimize player" })).toBeInTheDocument();
+    });
+    expect(document.querySelector(".player-shell--cinema-takeover")).not.toBeNull();
+    expect(mockOverlayState.latestProps).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Minimize player" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Maximize player" })).toBeInTheDocument();
+    });
+    expect(document.querySelector(".player-shell--cinema-takeover")).toBeNull();
     expect(screen.getByText("Prepared through 0:00 of 20:00.")).toBeInTheDocument();
-    expect(screen.queryByText(/client buffer/i)).not.toBeInTheDocument();
   });
-});
+	});

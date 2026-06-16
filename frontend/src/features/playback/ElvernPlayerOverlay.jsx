@@ -27,6 +27,7 @@ import {
 } from "../../lib/playerFitMode.js";
 
 import ElvernTimeline from "./ElvernTimeline.jsx";
+import { AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE } from "./useOptimizedPlaybackSession.js";
 import { usePlaybackTrackControls } from "./usePlaybackTrackControls.js";
 
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
@@ -270,8 +271,8 @@ function TrackMenuItem({
       aria-busy={pending ? "true" : undefined}
       aria-disabled={disabled || pending ? "true" : undefined}
       aria-invalid={error ? "true" : undefined}
-      className={`elvern-overlay__menu-item elvern-overlay__track-menu-item${pending ? " elvern-overlay__track-menu-item--pending" : ""}${error ? " elvern-overlay__track-menu-item--error" : ""}${disabled && !pending && !error ? " elvern-overlay__menu-item--disabled elvern-overlay__track-menu-item--locked" : ""}`}
-      disabled={pending || disabled}
+      className={`elvern-overlay__menu-item elvern-overlay__track-menu-item${pending ? " elvern-overlay__track-menu-item--pending" : ""}${error ? " elvern-overlay__track-menu-item--error" : ""}${disabled && !pending && !error ? " elvern-overlay__track-menu-item--locked" : ""}`}
+      disabled={pending}
       onClick={() => {
         if (!disabled && !pending) {
           onSelect(track.id);
@@ -462,6 +463,8 @@ export default function ElvernPlayerOverlay({
     || backendAudioPreparing
     || backendAudioAttaching,
   );
+  const subtitleSwitchInProgress = Boolean(pendingSubtitleTrackId);
+  const switchInteractionLocked = audioSwitchInProgress || subtitleSwitchInProgress;
   const closeAllMenus = useCallback(() => {
     setShowSpeedMenu(false);
     setShowCaptionsMenu(false);
@@ -761,6 +764,10 @@ export default function ElvernPlayerOverlay({
   }, [closeAllMenus, refreshControlsTimer, videoRef]);
 
   const handleTextTrackSelect = useCallback(async (trackId) => {
+    if (switchInteractionLocked) {
+      refreshControlsTimer();
+      return;
+    }
     const selectedTrack = textTracks.find((track) => track.id === trackId);
     if (!selectedTrack || isBackendUnsupportedTrack(selectedTrack)) {
       return;
@@ -786,9 +793,13 @@ export default function ElvernPlayerOverlay({
       setSubtitleTrackError("Could not prepare subtitle.");
       refreshControlsTimer();
     }
-  }, [closeAllMenus, refreshControlsTimer, selectSubtitleTrack, textTracks]);
+  }, [closeAllMenus, refreshControlsTimer, selectSubtitleTrack, switchInteractionLocked, textTracks]);
 
   const handleTextTrackOff = useCallback(() => {
+    if (switchInteractionLocked) {
+      refreshControlsTimer();
+      return;
+    }
     subtitlesOff();
     setActiveBackendSubtitle(null);
     setActiveSubtitleCueTexts([]);
@@ -796,7 +807,7 @@ export default function ElvernPlayerOverlay({
     setSubtitleTrackError("");
     closeAllMenus();
     refreshControlsTimer();
-  }, [closeAllMenus, refreshControlsTimer, subtitlesOff]);
+  }, [closeAllMenus, refreshControlsTimer, subtitlesOff, switchInteractionLocked]);
 
   useEffect(() => {
     const video = videoRef?.current || null;
@@ -852,7 +863,8 @@ export default function ElvernPlayerOverlay({
     if (!selectedTrack || isBackendUnsupportedTrack(selectedTrack)) {
       return;
     }
-    if (audioSwitchInProgress) {
+    if (switchInteractionLocked) {
+      refreshControlsTimer();
       return;
     }
     const selectedStreamIndex = Number.isInteger(selectedTrack.index) ? selectedTrack.index : null;
@@ -965,9 +977,21 @@ export default function ElvernPlayerOverlay({
       setAudioTrackErrorTrackId(trackId);
       refreshControlsTimer();
     }
-  }, [audioSwitchInProgress, audioTracks, refreshControlsTimer, selectAudioTrack]);
+  }, [audioTracks, refreshControlsTimer, selectAudioTrack, switchInteractionLocked]);
 
   useEffect(() => {
+    if (errorMessage !== AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE || !audioSwitchVisual) {
+      return;
+    }
+    setAudioTrackError(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
+    setAudioTrackErrorTrackId(audioSwitchVisual.trackId || "");
+    setAudioSwitchVisual(null);
+  }, [audioSwitchVisual, errorMessage]);
+
+  useEffect(() => {
+    if (errorMessage === AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE) {
+      return;
+    }
     const switchState = String(sessionPayload?.audio_switch_state || "").trim().toLowerCase();
     const pendingStreamIndex = Number.isInteger(sessionPayload?.pending_audio_stream_index)
       ? sessionPayload.pending_audio_stream_index
@@ -1047,6 +1071,7 @@ export default function ElvernPlayerOverlay({
   }, [
     audioSwitchVisual,
     audioTracks,
+    errorMessage,
     sessionPayload?.audio_switch_error,
     sessionPayload?.audio_switch_state,
     sessionPayload?.active_audio_stream_index,
@@ -1476,7 +1501,8 @@ export default function ElvernPlayerOverlay({
     <>
       <button
         aria-checked={captionActiveCount === 0}
-        className="elvern-overlay__menu-item elvern-overlay__track-menu-item"
+        aria-disabled={switchInteractionLocked ? "true" : undefined}
+        className={`elvern-overlay__menu-item elvern-overlay__track-menu-item${switchInteractionLocked ? " elvern-overlay__track-menu-item--locked" : ""}`}
         onClick={handleTextTrackOff}
         role="menuitemradio"
         type="button"
@@ -1487,6 +1513,7 @@ export default function ElvernPlayerOverlay({
         textTracks.map((track) => (
           <TrackMenuItem
             checked={track.selected || track.mode === "showing"}
+            disabled={switchInteractionLocked && pendingSubtitleTrackId !== track.id}
             key={track.id}
             kind="subtitle"
             onSelect={handleTextTrackSelect}
@@ -1511,7 +1538,7 @@ export default function ElvernPlayerOverlay({
         audioTracks.map((track) => (
           <TrackMenuItem
             checked={isAudioTrackChecked(track)}
-            disabled={audioSwitchInProgress}
+            disabled={switchInteractionLocked && visualPendingAudioTrackId !== track.id && !track.pending}
             error={audioTrackErrorTrackId === track.id}
             key={track.id}
             kind="audio"
@@ -1891,7 +1918,8 @@ export default function ElvernPlayerOverlay({
                         <span className="elvern-overlay__menu-section-label">Subtitles</span>
                         <button
                           aria-checked={captionActiveCount === 0}
-                          className="elvern-overlay__menu-item elvern-overlay__menu-item--row"
+                          aria-disabled={switchInteractionLocked ? "true" : undefined}
+                          className={`elvern-overlay__menu-item elvern-overlay__menu-item--row elvern-overlay__track-menu-item${switchInteractionLocked ? " elvern-overlay__track-menu-item--locked" : ""}`}
                           onClick={handleTextTrackOff}
                           role="menuitemradio"
                           type="button"
@@ -1901,6 +1929,7 @@ export default function ElvernPlayerOverlay({
                         {textTracks.map((track) => (
                           <TrackMenuItem
                             checked={track.selected || track.mode === "showing"}
+                            disabled={switchInteractionLocked && pendingSubtitleTrackId !== track.id}
                             key={track.id}
                             kind="subtitle"
                             onSelect={handleTextTrackSelect}
@@ -1919,6 +1948,7 @@ export default function ElvernPlayerOverlay({
                         {audioTracks.map((track) => (
                           <TrackMenuItem
                             checked={isAudioTrackChecked(track)}
+                            disabled={switchInteractionLocked && visualPendingAudioTrackId !== track.id && !track.pending}
                             error={audioTrackErrorTrackId === track.id}
                             key={track.id}
                             kind="audio"

@@ -11,7 +11,13 @@ import {
   selectOptimizedPlaybackAudioTrack,
   seekOptimizedPlaybackSession,
 } from "./browserSessionClient";
-import { softResumeRequiresHardReattach, useOptimizedPlaybackSession } from "./useOptimizedPlaybackSession.js";
+import {
+  AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE,
+  AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS,
+  buildAudioSwitchAttachDiagnostic,
+  softResumeRequiresHardReattach,
+  useOptimizedPlaybackSession,
+} from "./useOptimizedPlaybackSession.js";
 
 vi.mock("./browserSessionClient", () => ({
   createOptimizedPlaybackSession: vi.fn(),
@@ -133,6 +139,19 @@ function setVideoBuffered(video, ranges) {
     start: (index) => ranges[index][0],
     end: (index) => ranges[index][1],
   };
+}
+
+async function attachPromotedAudioSwitch(getApi, { initialPayload, pendingPayload, promotedPayload }) {
+  await act(async () => {
+    getApi().syncMobilePlaybackState(initialPayload);
+    getApi().maybeAttachRoute2Authority(initialPayload, { autoplay: true });
+  });
+
+  await act(async () => {
+    getApi().syncMobilePlaybackState(pendingPayload);
+    getApi().syncMobilePlaybackState(promotedPayload);
+    getApi().maybeAttachRoute2Authority(promotedPayload, { autoplay: true });
+  });
 }
 
 test("soft resume ignores manifest revision-only URL changes", () => {
@@ -308,6 +327,227 @@ test("audio switch promotion force-attaches and waits for loaded source before a
       client_attach_revision: 2,
     }),
   }));
+});
+
+test("audio switch attach timeout retries the same source once without another audio request", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  const initialPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-a",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-a/index.m3u8",
+    attach_revision: 1,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 1,
+    active_audio_stream_index: 1,
+  });
+  const pendingPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-a",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-a/index.m3u8",
+    attach_revision: 1,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 1,
+    pending_audio_stream_index: 5,
+    audio_switch_state: "preparing",
+  });
+  const promotedPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-b",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-b/index.m3u8",
+    attach_revision: 2,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 5,
+    pending_audio_stream_index: null,
+    audio_switch_state: "active",
+  });
+
+  const { callbacks, getApi } = renderOptimizedPlaybackHarness();
+  await attachPromotedAudioSwitch(getApi, { initialPayload, pendingPayload, promotedPayload });
+  callbacks.clearPlayerBinding.mockClear();
+  callbacks.setPlaybackError.mockClear();
+  selectOptimizedPlaybackAudioTrack.mockClear();
+
+  await act(async () => {
+    vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS);
+    await Promise.resolve();
+  });
+
+  expect(selectOptimizedPlaybackAudioTrack).not.toHaveBeenCalled();
+  expect(callbacks.clearPlayerBinding).toHaveBeenCalledTimes(1);
+  expect(getApi().audioSwitchAttachRef.current).toMatchObject({
+    expectedAttachRevision: 2,
+    expectedActiveEpochId: "epoch-b",
+    phase: "source_set",
+    retryCount: 1,
+  });
+  expect(callbacks.setPlaybackError).not.toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
+});
+
+test("audio switch attach second timeout clears pending UI and ignores late loaded ack", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  const initialPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-a",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-a/index.m3u8",
+    attach_revision: 1,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 1,
+    active_audio_stream_index: 1,
+  });
+  const pendingPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-a",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-a/index.m3u8",
+    attach_revision: 1,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 1,
+    pending_audio_stream_index: 5,
+    audio_switch_state: "preparing",
+  });
+  const promotedPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-b",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-b/index.m3u8",
+    attach_revision: 2,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 5,
+    pending_audio_stream_index: null,
+    audio_switch_state: "active",
+  });
+
+  const { callbacks, getApi } = renderOptimizedPlaybackHarness();
+  await attachPromotedAudioSwitch(getApi, { initialPayload, pendingPayload, promotedPayload });
+
+  await act(async () => {
+    vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS);
+    await Promise.resolve();
+  });
+  postOptimizedPlaybackHeartbeat.mockClear();
+
+  await act(async () => {
+    vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS);
+    await Promise.resolve();
+  });
+
+  expect(getApi().audioSwitchAttachRef.current).toMatchObject({
+    expectedAttachRevision: 2,
+    phase: "failed",
+    retryCount: 1,
+  });
+  expect(getApi().mobilePlayerCanPlayRef.current).toBe(true);
+  expect(callbacks.clearOptimizedPlaybackPending).toHaveBeenCalled();
+  expect(callbacks.setPlaybackError).toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
+
+  await act(async () => {
+    getApi().maybeAcknowledgeRoute2Attachment({
+      playing: true,
+      force: true,
+      loadedEventName: "loadedmetadata",
+    });
+    await Promise.resolve();
+  });
+
+  expect(postOptimizedPlaybackHeartbeat).not.toHaveBeenCalled();
+  expect(getApi().audioSwitchAttachRef.current.phase).toBe("failed");
+});
+
+test("audio switch attach loaded before timeout keeps the ack path unchanged", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  const initialPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-a",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-a/index.m3u8",
+    attach_revision: 1,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 1,
+    active_audio_stream_index: 1,
+  });
+  const pendingPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-a",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-a/index.m3u8",
+    attach_revision: 1,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 1,
+    pending_audio_stream_index: 5,
+    audio_switch_state: "preparing",
+  });
+  const promotedPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-b",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-b/index.m3u8",
+    attach_revision: 2,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 5,
+    pending_audio_stream_index: null,
+    audio_switch_state: "active",
+  });
+  const acknowledgedPayload = makeRoute2Payload({
+    ...promotedPayload,
+    client_attach_revision: 2,
+  });
+  postOptimizedPlaybackHeartbeat.mockResolvedValue(acknowledgedPayload);
+
+  const { callbacks, getApi } = renderOptimizedPlaybackHarness();
+  await attachPromotedAudioSwitch(getApi, { initialPayload, pendingPayload, promotedPayload });
+
+  await act(async () => {
+    getApi().maybeAcknowledgeRoute2Attachment({
+      playing: true,
+      force: true,
+      loadedEventName: "loadeddata",
+    });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS + 1);
+    await Promise.resolve();
+  });
+
+  expect(postOptimizedPlaybackHeartbeat).toHaveBeenCalledWith(expect.objectContaining({
+    data: expect.objectContaining({
+      client_attach_revision: 2,
+    }),
+  }));
+  expect(callbacks.setPlaybackError).not.toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
+  expect(getApi().audioSwitchAttachRef.current.phase).not.toBe("failed");
+});
+
+test("audio switch attach diagnostics omit manifest URLs tokens and paths", () => {
+  const diagnostic = buildAudioSwitchAttachDiagnostic("audio_switch_attach_timeout", {
+    expectedAttachRevision: 2,
+    expectedActiveEpochId: "epoch-b",
+    expectedManifestUrl: "/api/browser-playback/epochs/epoch-b/index.m3u8?token=secret",
+    manifestUrl: "/media/private/movie.m3u8",
+    targetAudioStreamIndex: 5,
+    phase: "source_set",
+    retryCount: 1,
+    sourceSetAtMs: 123,
+    loadedAtMs: 0,
+    token: "secret",
+    path: "/media/private/movie.mkv",
+  });
+
+  expect(diagnostic).toEqual({
+    event: "audio_switch_attach_timeout",
+    expectedAttachRevision: 2,
+    expectedActiveEpochId: "epoch-b",
+    targetAudioStreamIndex: 5,
+    phase: "source_set",
+    retryCount: 1,
+    sourceSetAtMs: true,
+    loadedAtMs: false,
+  });
+  expect(JSON.stringify(diagnostic)).not.toMatch(/m3u8|token|secret|\/media/);
 });
 
 test("normal Route2 window slide does not trigger audio switch force reattach", async () => {

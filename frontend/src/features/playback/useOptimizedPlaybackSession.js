@@ -46,6 +46,45 @@ import {
 const SESSION_MANIFEST_REFRESH_RUNWAY_SECONDS = 12;
 const BACKGROUND_PREPARATION_PARK_MS = 5 * 60 * 1000;
 const AUDIO_SWITCH_ATTACH_LOAD_EVENTS = new Set(["loadedmetadata", "loadeddata", "canplay"]);
+export const AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS = 15000;
+export const AUDIO_SWITCH_ATTACH_RETRY_LIMIT = 1;
+export const AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE = "Audio switch failed. Previous audio continues if still attached.";
+
+function isAudioSwitchAttachWaiting(pending) {
+  return Boolean(
+    pending
+    && (pending.phase === "pending_attach" || pending.phase === "source_set")
+  );
+}
+
+export function buildAudioSwitchAttachDiagnostic(eventName, details = {}) {
+  const diagnostic = {
+    event: eventName,
+  };
+  const allowedFields = [
+    "expectedAttachRevision",
+    "expectedActiveEpochId",
+    "targetAudioStreamIndex",
+    "phase",
+    "elapsedMs",
+    "retryCount",
+    "clientAttachRevision",
+    "currentAttachRevision",
+    "loadedEventName",
+  ];
+  allowedFields.forEach((field) => {
+    if (details[field] !== undefined) {
+      diagnostic[field] = details[field];
+    }
+  });
+  if (details.sourceSetAtMs !== undefined) {
+    diagnostic.sourceSetAtMs = Boolean(details.sourceSetAtMs);
+  }
+  if (details.loadedAtMs !== undefined) {
+    diagnostic.loadedAtMs = Boolean(details.loadedAtMs);
+  }
+  return diagnostic;
+}
 
 function stripManifestCacheBusters(url) {
   if (typeof url !== "string" || !url.trim()) {
@@ -596,10 +635,7 @@ export function useOptimizedPlaybackSession({
     if (typeof console === "undefined" || typeof console.debug !== "function") {
       return;
     }
-    console.debug("[elvern] audio_switch_attach", {
-      event: eventName,
-      ...details,
-    });
+    console.debug("[elvern] audio_switch_attach", buildAudioSwitchAttachDiagnostic(eventName, details));
   }
 
   function beginAudioSwitchVerifiedAttach(previousPayload, payload) {
@@ -638,12 +674,14 @@ export function useOptimizedPlaybackSession({
       requestedAtMs: Date.now(),
       sourceSetAtMs: 0,
       loadedAtMs: 0,
+      retryCount: 0,
     };
     debugAudioSwitchAttach("audio_switch_attach_started", {
       targetAudioStreamIndex,
       expectedAttachRevision,
       expectedActiveEpochId,
-      expectedManifestUrl,
+      phase: "pending_attach",
+      retryCount: 0,
     });
   }
 
@@ -663,7 +701,16 @@ export function useOptimizedPlaybackSession({
       pending
       && Number(pending.expectedAttachRevision || 0) === Number(revision || 0)
       && pending.phase === "loaded"
-      && pending.loadedAtMs > 0
+      && Number.isFinite(pending.loadedAtMs)
+    );
+  }
+
+  function isFailedAudioSwitchAttachForRevision(revision) {
+    const pending = audioSwitchAttachRef.current;
+    return Boolean(
+      pending
+      && Number(pending.expectedAttachRevision || 0) === Number(revision || 0)
+      && pending.phase === "failed"
     );
   }
 
@@ -671,6 +718,8 @@ export function useOptimizedPlaybackSession({
     const pending = audioSwitchAttachRef.current;
     if (
       !pending
+      || pending.phase === "failed"
+      || pending.phase === "acked"
       || Number(pending.expectedAttachRevision || 0) !== Number(payload?.attach_revision || 0)
       || pending.expectedActiveEpochId !== (payload?.active_epoch_id || null)
     ) {
@@ -686,7 +735,11 @@ export function useOptimizedPlaybackSession({
     debugAudioSwitchAttach("audio_switch_source_set", {
       expectedAttachRevision: pending.expectedAttachRevision,
       expectedActiveEpochId: pending.expectedActiveEpochId,
-      expectedManifestUrl: sessionManifestUrl || pending.expectedManifestUrl,
+      targetAudioStreamIndex: pending.targetAudioStreamIndex,
+      phase: "source_set",
+      retryCount: pending.retryCount || 0,
+      sourceSetAtMs: audioSwitchAttachRef.current.sourceSetAtMs,
+      loadedAtMs: 0,
     });
   }
 
@@ -710,11 +763,136 @@ export function useOptimizedPlaybackSession({
       loadedAtMs: Date.now(),
     };
     debugAudioSwitchAttach("audio_switch_loaded", {
-      eventName,
+      loadedEventName: eventName,
       expectedAttachRevision: pending.expectedAttachRevision,
       expectedActiveEpochId: pending.expectedActiveEpochId,
+      targetAudioStreamIndex: pending.targetAudioStreamIndex,
+      phase: "loaded",
+      retryCount: pending.retryCount || 0,
+      sourceSetAtMs: pending.sourceSetAtMs,
+      loadedAtMs: audioSwitchAttachRef.current.loadedAtMs,
     });
     return true;
+  }
+
+  function failAudioSwitchAttach(pending, elapsedMs = 0) {
+    if (!pending || pending.phase === "failed" || pending.phase === "acked") {
+      return;
+    }
+    audioSwitchAttachRef.current = {
+      ...pending,
+      phase: "failed",
+      failedAtMs: Date.now(),
+    };
+    mobilePendingAttachRevisionRef.current = 0;
+    mobileWarmupProbeActiveRef.current = false;
+    mobileAutoplayPendingRef.current = false;
+    mobileResumeAfterReadyRef.current = false;
+    mobilePlayerCanPlayRef.current = true;
+    setMobilePlayerCanPlay(true);
+    clearOptimizedPlaybackPending();
+    setSeekNotice("");
+    setPlaybackStatus(browserReadyLabelTitle);
+    setMobileLifecycleStateValue("attached");
+    setPlaybackError(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
+    debugAudioSwitchAttach("audio_switch_attach_failed_previous_continues", {
+      expectedAttachRevision: pending.expectedAttachRevision,
+      expectedActiveEpochId: pending.expectedActiveEpochId,
+      targetAudioStreamIndex: pending.targetAudioStreamIndex,
+      phase: "failed",
+      elapsedMs,
+      retryCount: pending.retryCount || 0,
+      clientAttachRevision: mobileClientAttachRevisionRef.current || 0,
+      currentAttachRevision: Number(mobileSessionRef.current?.attach_revision || 0),
+      sourceSetAtMs: pending.sourceSetAtMs,
+      loadedAtMs: pending.loadedAtMs,
+    });
+  }
+
+  function handleAudioSwitchAttachLoadTimeout() {
+    const pending = audioSwitchAttachRef.current;
+    if (!isAudioSwitchAttachWaiting(pending)) {
+      return;
+    }
+    const nowMs = Date.now();
+    const startedAtMs = Number.isFinite(pending.sourceSetAtMs)
+      ? pending.sourceSetAtMs
+      : Number.isFinite(pending.requestedAtMs)
+        ? pending.requestedAtMs
+        : nowMs;
+    const elapsedMs = Math.max(0, nowMs - startedAtMs);
+    if (elapsedMs < AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS) {
+      return;
+    }
+    debugAudioSwitchAttach("audio_switch_attach_timeout", {
+      expectedAttachRevision: pending.expectedAttachRevision,
+      expectedActiveEpochId: pending.expectedActiveEpochId,
+      targetAudioStreamIndex: pending.targetAudioStreamIndex,
+      phase: pending.phase,
+      elapsedMs,
+      retryCount: pending.retryCount || 0,
+      clientAttachRevision: mobileClientAttachRevisionRef.current || 0,
+      currentAttachRevision: Number(mobileSessionRef.current?.attach_revision || 0),
+      sourceSetAtMs: pending.sourceSetAtMs,
+      loadedAtMs: pending.loadedAtMs,
+    });
+    const activeSession = mobileSessionRef.current;
+    const sessionMatchesPending = Boolean(
+      isRoute2AttachReady(activeSession)
+      && Number(activeSession?.attach_revision || 0) === Number(pending.expectedAttachRevision || 0)
+      && (activeSession?.active_epoch_id || null) === pending.expectedActiveEpochId
+      && Number(activeSession?.active_audio_stream_index) === Number(pending.targetAudioStreamIndex)
+    );
+    if ((pending.retryCount || 0) < AUDIO_SWITCH_ATTACH_RETRY_LIMIT && sessionMatchesPending) {
+      const retryCount = (pending.retryCount || 0) + 1;
+      audioSwitchAttachRef.current = {
+        ...pending,
+        phase: "pending_attach",
+        retryCount,
+        sourceSetAtMs: 0,
+        loadedAtMs: 0,
+        retryStartedAtMs: nowMs,
+      };
+      debugAudioSwitchAttach("audio_switch_attach_retry_started", {
+        expectedAttachRevision: pending.expectedAttachRevision,
+        expectedActiveEpochId: pending.expectedActiveEpochId,
+        targetAudioStreamIndex: pending.targetAudioStreamIndex,
+        phase: "pending_attach",
+        elapsedMs,
+        retryCount,
+        clientAttachRevision: mobileClientAttachRevisionRef.current || 0,
+        currentAttachRevision: Number(activeSession?.attach_revision || 0),
+        sourceSetAtMs: 0,
+        loadedAtMs: 0,
+      });
+      armMobileManifestAttachment(activeSession, {
+        autoplay:
+          mobileAutoplayPendingRef.current
+          || mobileResumeAfterReadyRef.current
+          || !videoRef.current?.paused,
+        targetPosition: resolveLivePlaybackRecoveryTarget(activeSession),
+        preserveAuthority: true,
+        resetSeekPreparation: true,
+        forceReattach: true,
+        forceVideoRemount: true,
+      });
+      return;
+    }
+    if (!sessionMatchesPending) {
+      debugAudioSwitchAttach("audio_switch_attach_retry_failed", {
+        expectedAttachRevision: pending.expectedAttachRevision,
+        expectedActiveEpochId: pending.expectedActiveEpochId,
+        targetAudioStreamIndex: pending.targetAudioStreamIndex,
+        phase: pending.phase,
+        elapsedMs,
+        retryCount: pending.retryCount || 0,
+        clientAttachRevision: mobileClientAttachRevisionRef.current || 0,
+        currentAttachRevision: Number(activeSession?.attach_revision || 0),
+        sourceSetAtMs: pending.sourceSetAtMs,
+        loadedAtMs: pending.loadedAtMs,
+      });
+    }
+    failAudioSwitchAttach(pending, elapsedMs);
   }
 
   function isHlsAttachReady(payload = mobileSessionRef.current) {
@@ -952,6 +1130,7 @@ export function useOptimizedPlaybackSession({
       preserveAuthority = false,
       resetSeekPreparation = false,
       forceReattach = false,
+      forceVideoRemount = false,
     } = {},
   ) {
     syncMobilePlaybackState(payload);
@@ -985,7 +1164,8 @@ export function useOptimizedPlaybackSession({
       && forceReattach
       && attachedOptimizedManifestUrlRef.current
       && (
-        mobileLifecycleStateRef.current === "recovering"
+        forceVideoRemount
+        || mobileLifecycleStateRef.current === "recovering"
         || mobileRecoveryInFlightRef.current
         || attachedOptimizedManifestUrlRef.current !== sessionManifestUrl
         || mobileAttachedEpochRef.current !== nextAttachmentIdentity
@@ -1602,6 +1782,24 @@ export function useOptimizedPlaybackSession({
       return;
     }
     const serverAttachRevision = Number(activeSession.attach_revision || 0);
+    if (isFailedAudioSwitchAttachForRevision(serverAttachRevision)) {
+      if (AUDIO_SWITCH_ATTACH_LOAD_EVENTS.has(String(loadedEventName || ""))) {
+        const pendingAudioAttach = audioSwitchAttachRef.current;
+        debugAudioSwitchAttach("audio_switch_loaded_late_ignored", {
+          loadedEventName,
+          expectedAttachRevision: serverAttachRevision,
+          expectedActiveEpochId: pendingAudioAttach?.expectedActiveEpochId || activeSession?.active_epoch_id || null,
+          targetAudioStreamIndex: pendingAudioAttach?.targetAudioStreamIndex ?? activeSession?.active_audio_stream_index ?? null,
+          phase: "failed",
+          retryCount: pendingAudioAttach?.retryCount || 0,
+          clientAttachRevision: mobileClientAttachRevisionRef.current || 0,
+          currentAttachRevision: serverAttachRevision,
+          sourceSetAtMs: pendingAudioAttach?.sourceSetAtMs || 0,
+          loadedAtMs: pendingAudioAttach?.loadedAtMs || 0,
+        });
+      }
+      return;
+    }
     if (isPendingAudioSwitchAttachForRevision(serverAttachRevision)) {
       if (AUDIO_SWITCH_ATTACH_LOAD_EVENTS.has(String(loadedEventName || ""))) {
         markAudioSwitchAttachLoaded({ eventName: loadedEventName });
@@ -2270,6 +2468,38 @@ export function useOptimizedPlaybackSession({
     }
     return undefined;
   }, [mobilePlayerCanPlay, mobileSession, optimizedPlaybackPending]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const pending = audioSwitchAttachRef.current;
+    if (!isAudioSwitchAttachWaiting(pending)) {
+      return undefined;
+    }
+    const nowMs = Date.now();
+    const startedAtMs = Number.isFinite(pending.sourceSetAtMs)
+      ? pending.sourceSetAtMs
+      : Number.isFinite(pending.requestedAtMs)
+        ? pending.requestedAtMs
+        : nowMs;
+    const elapsedMs = Math.max(0, nowMs - startedAtMs);
+    const remainingMs = Math.max(0, AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS - elapsedMs);
+    const timerId = window.setTimeout(() => {
+      handleAudioSwitchAttachLoadTimeout();
+    }, remainingMs);
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [
+    mobilePlayerCanPlay,
+    mobileSession?.active_epoch_id,
+    mobileSession?.active_audio_stream_index,
+    mobileSession?.attach_revision,
+    mobileSession?.client_attach_revision,
+    streamSource,
+    videoElementKey,
+  ]);
 
   useEffect(() => {
     if (

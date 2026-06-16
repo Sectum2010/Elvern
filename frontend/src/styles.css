@@ -5753,7 +5753,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   align-content: center;
   justify-content: center;
   align-items: start;
-  column-gap: clamp(0.9rem, 3vw, 1.15rem);
+  column-gap: clamp(0.72rem, 2.4vw, 1rem);
   padding:
     calc(clamp(1.35rem, 5vw, 2.6rem) + clamp(0.25rem, 2vh, 0.8rem))
     calc(clamp(1rem, 4vw, 1.9rem) + clamp(0.35rem, 1.8vw, 0.65rem))
@@ -5768,8 +5768,8 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 }
 
 .player-prewarm-card__spinner {
-  width: clamp(1.65rem, 4.8vw, 2rem);
-  height: clamp(1.65rem, 4.8vw, 2rem);
+  width: clamp(1.35rem, 4vw, 1.75rem);
+  height: clamp(1.35rem, 4vw, 1.75rem);
   flex: 0 0 auto;
   margin-top: 0.06rem;
 }
@@ -5784,7 +5784,7 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .player-prewarm-card__title {
   margin: 0;
-  font-size: clamp(0.95rem, 2.9vw, 1.22rem);
+  font-size: clamp(0.82rem, 2.45vw, 1rem);
   font-weight: 700;
   letter-spacing: 0;
   white-space: nowrap;
@@ -5792,12 +5792,54 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .player-prewarm-card__estimate {
   margin: 0;
-  font-size: clamp(1.62rem, 6.9vw, 2.45rem);
+  font-size: clamp(1.32rem, 5.6vw, 2rem);
   font-weight: 800;
   line-height: 1;
   letter-spacing: 0;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.player-prewarm-viewport-toggle {
+  position: absolute;
+  top: max(0.55rem, env(safe-area-inset-top));
+  right: max(0.55rem, env(safe-area-inset-right));
+  z-index: 10;
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.76);
+  color: rgba(248, 250, 252, 0.94);
+  cursor: pointer;
+  line-height: 1;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.34);
+  transition: background-color 160ms ease, border-color 160ms ease, transform 120ms ease;
+}
+
+.player-prewarm-viewport-toggle:hover,
+.player-prewarm-viewport-toggle:focus-visible {
+  background: rgba(30, 41, 59, 0.88);
+  border-color: rgba(186, 230, 253, 0.64);
+  outline: none;
+}
+
+.player-prewarm-viewport-toggle:active {
+  transform: scale(0.96);
+}
+
+.player-prewarm-viewport-toggle__glyph {
+  display: block;
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.player-prewarm-viewport-toggle--minimize .player-prewarm-viewport-toggle__glyph {
+  transform: rotate(45deg);
 }
 
 .player-frozen-frame {

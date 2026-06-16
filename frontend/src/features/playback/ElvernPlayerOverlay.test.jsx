@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import ElvernPlayerOverlay from "./ElvernPlayerOverlay.jsx";
+import { AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE } from "./useOptimizedPlaybackSession.js";
 import { ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS } from "../../lib/elvernOverlayLayout.js";
 
 const FAKE_TIMER_APIS = ["setTimeout", "clearTimeout", "setInterval", "clearInterval"];
@@ -1089,7 +1090,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
-    expect(getByRole("menuitemradio", { name: "Japanese" }).disabled).toBe(true);
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveAttribute("aria-disabled", "true");
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveClass("elvern-overlay__track-menu-item--locked");
 
     act(() => {
       fireEvent.click(getByRole("menuitemradio", { name: "Japanese" }));
@@ -1104,7 +1106,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
-    expect(getByRole("menuitemradio", { name: "Japanese" }).disabled).toBe(true);
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveAttribute("aria-disabled", "true");
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveClass("elvern-overlay__track-menu-item--locked");
 
     rerenderOverlay({
       sessionPayload: {
@@ -1158,13 +1161,51 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveClass("elvern-overlay__track-menu-item--pending");
-    expect(getByRole("menuitemradio", { name: "Japanese" }).disabled).toBe(true);
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveAttribute("aria-disabled", "true");
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveClass("elvern-overlay__track-menu-item--locked");
     expect(queryByText("Could not switch audio track.")).toBeNull();
 
     act(() => {
       fireEvent.click(getByRole("menuitemradio", { name: "Japanese" }));
     });
     expect(onBackendAudioTrackSelect).not.toHaveBeenCalled();
+  });
+
+  test("audio switch lock leaves subtitle menu visible and ignores subtitle clicks", () => {
+    const onBackendSubtitleTrackSelect = vi.fn();
+    const { getByRole, queryByText } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+      ],
+      backendSubtitleTracks: [
+        { index: 3, label: "English SRT", codec: "subrip", text_based: true },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendSubtitleTrackSelect,
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        audio_switch_state: "preparing",
+        pending_audio_stream_index: 5,
+        selected_audio_stream_index: 5,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    const subtitleRow = getByRole("menuitemradio", { name: "English SRT" });
+    expect(subtitleRow).toHaveClass("elvern-overlay__track-menu-item--locked");
+
+    act(() => {
+      fireEvent.click(subtitleRow);
+    });
+
+    expect(onBackendSubtitleTrackSelect).not.toHaveBeenCalled();
+    expect(getByRole("menuitemradio", { name: "English SRT" })).toBeTruthy();
+    expect(queryByText("Could not prepare subtitle.")).toBeNull();
   });
 
   test("stale backend audio failure does not clear a new click spinner", () => {
@@ -1396,7 +1437,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
-    expect(getByRole("menuitemradio", { name: "Japanese" }).disabled).toBe(true);
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveAttribute("aria-disabled", "true");
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveClass("elvern-overlay__track-menu-item--locked");
 
     rerenderOverlay({
       sessionPayload: {
@@ -1411,7 +1453,8 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getByRole("menuitemradio", { name: "English" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "false");
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
-    expect(getByRole("menuitemradio", { name: "Japanese" }).disabled).toBe(true);
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveAttribute("aria-disabled", "true");
+    expect(getByRole("menuitemradio", { name: "Japanese" })).toHaveClass("elvern-overlay__track-menu-item--locked");
 
     rerenderOverlay({
       sessionPayload: {
@@ -1425,6 +1468,72 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     });
     expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-checked", "true");
     expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
+  });
+
+  test("local audio attach failure clears pending row and shows the previous-audio message", async () => {
+    let resolveSwitch;
+    const onBackendAudioTrackSelect = vi.fn(() => new Promise((resolve) => {
+      resolveSwitch = () => resolve({
+        active_audio_stream_index: 5,
+        pending_audio_stream_index: null,
+        selected_audio_stream_index: 5,
+        audio_switch_state: "active",
+        attach_revision: 4,
+        client_attach_revision: 3,
+      });
+    }));
+    const { getAllByText, getByRole, rerenderOverlay } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendAudioTrackSelect,
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 1,
+        attach_revision: 3,
+        client_attach_revision: 3,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    act(() => {
+      fireEvent.click(getByRole("menuitemradio", { name: "French" }));
+    });
+    await act(async () => {
+      resolveSwitch();
+      await Promise.resolve();
+    });
+
+    expect(getByRole("menuitemradio", { name: "French" })).toHaveAttribute("aria-busy", "true");
+
+    act(() => {
+      rerenderOverlay({
+        errorMessage: AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE,
+        sessionPayload: {
+          active_audio_stream_index: 5,
+          pending_audio_stream_index: null,
+          selected_audio_stream_index: 5,
+          audio_switch_state: "active",
+          attach_revision: 4,
+          client_attach_revision: 3,
+        },
+      });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(getByRole("menuitemradio", { name: "French" })).not.toHaveAttribute("aria-busy");
+    expect(getByRole("menuitemradio", { name: /French/ })).toHaveClass("elvern-overlay__track-menu-item--error");
+    expect(getAllByText(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE)).toHaveLength(2);
   });
 
   test("accepted ambiguous backend audio response keeps pending without fake failure", async () => {
@@ -1520,6 +1629,53 @@ describe("ElvernPlayerOverlay controls visibility", () => {
       resolvePrepare();
       await Promise.resolve();
     });
+  });
+
+  test("pending subtitle preparation locks audio clicks without closing the audio menu", async () => {
+    const onBackendAudioTrackSelect = vi.fn();
+    const delayedSubtitlePrepare = vi.fn(() => new Promise(() => {}));
+    const { getByRole, queryByText } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, title: "English", codec: "aac", disposition_default: true, track_source: "raw_probe_summary_json" },
+        { index: 5, title: "French", codec: "ac3", track_source: "raw_probe_summary_json" },
+      ],
+      backendSubtitleTracks: [
+        { index: 3, label: "English SRT", codec: "subrip", language: "en", text_based: true },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "phone",
+      onBackendAudioTrackSelect,
+      onBackendSubtitleTrackSelect: delayedSubtitlePrepare,
+      onToggleFullscreen: vi.fn(),
+      sessionPayload: {
+        active_audio_stream_index: 1,
+        audio_switch_state: "active",
+        selected_audio_stream_index: 1,
+      },
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Subtitles" }));
+    });
+    await act(async () => {
+      fireEvent.click(getByRole("menuitemradio", { name: "English SRT" }));
+      await Promise.resolve();
+    });
+    expect(delayedSubtitlePrepare).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+    const lockedAudioRow = getByRole("menuitemradio", { name: "French" });
+    expect(lockedAudioRow).toHaveClass("elvern-overlay__track-menu-item--locked");
+
+    act(() => {
+      fireEvent.click(lockedAudioRow);
+    });
+
+    expect(onBackendAudioTrackSelect).not.toHaveBeenCalled();
+    expect(getByRole("menuitemradio", { name: "French" })).toBeTruthy();
+    expect(queryByText("Could not switch audio track.")).toBeNull();
   });
 
   test("fallback subtitle rows are not shown as confirmed burn-in warnings", () => {

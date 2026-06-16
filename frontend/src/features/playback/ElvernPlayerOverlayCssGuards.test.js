@@ -134,15 +134,31 @@ describe("Elvern player mobile CSS guards", () => {
     expect(copy).toContain("inline-size: max-content");
     expect(copy).toContain("max-inline-size: min(26rem, 100%)");
     const title = cssBlock(styles, ".player-prewarm-card__title");
-    expect(title).toContain("font-size: clamp(0.95rem");
+    expect(title).toContain("font-size: clamp(0.82rem");
     expect(title).toContain("white-space: nowrap");
     const estimate = cssBlock(styles, ".player-prewarm-card__estimate");
     expect(estimate).not.toContain("position: relative");
     expect(estimate).not.toContain("left:");
     expect(estimate).not.toContain("top:");
-    expect(estimate).toContain("font-size: clamp(1.62rem");
+    expect(estimate).toContain("font-size: clamp(1.32rem");
     expect(estimate).toContain("font-variant-numeric: tabular-nums");
     expect(estimate).toContain("white-space: nowrap");
+  });
+
+  test("prewarm card viewport toggle stays accessible above the loading card", () => {
+    const styles = readStyles();
+    const card = cssBlock(styles, ".player-prewarm-card");
+    const toggle = cssBlock(styles, ".player-prewarm-viewport-toggle");
+    const minimizeGlyph = cssBlock(styles, ".player-prewarm-viewport-toggle--minimize .player-prewarm-viewport-toggle__glyph");
+
+    expect(toggle).toContain("position: absolute");
+    expect(toggle).toContain("top: max(0.55rem");
+    expect(toggle).toContain("right: max(0.55rem");
+    expect(toggle).toContain("width: 44px");
+    expect(toggle).toContain("height: 44px");
+    expect(toggle).toContain("place-items: center");
+    expect(numericZIndex(toggle)).toBeGreaterThan(numericZIndex(card));
+    expect(minimizeGlyph).toContain("transform: rotate(45deg)");
   });
 
   test("prepared-through runtime note stays inside the player card width", () => {
