@@ -28,6 +28,10 @@ import {
   shouldStartVisibleHlsSupplyRecovery,
 } from "../../lib/browserPlaybackBufferPolicy";
 import {
+  buildBrowserPlaybackDiagnosticPayload,
+  logBrowserPlaybackDiagnostic,
+} from "../../lib/browserPlaybackDiagnostics";
+import {
   getActivePlaybackWorkerConflict,
   getPlaybackAdmissionError,
   getPlaybackWorkerCooldown,
@@ -128,7 +132,7 @@ export function useBrowserPlaybackController({
   const browserStartPositionRef = useRef(0);
   const playbackModeIntentRef = useRef("lite");
   const mobilePrewarmAudioStateRef = useRef(null);
-  const mobilePrewarmStuckDiagnosticLastAtRef = useRef(0);
+  const browserPlaybackDiagnosticLastLogRef = useRef(new Map());
 
   const [playback, setPlayback] = useState(null);
   const [streamSource, setStreamSource] = useState(null);
@@ -474,6 +478,54 @@ export function useBrowserPlaybackController({
     };
   }
 
+  function logBrowserPlaybackDiagnosticEvent(eventName, {
+    clientPlaybackStallReason = "",
+    eventReason = "",
+    firstFrameReady = null,
+    releaseGate = null,
+    releaseGateReason = "",
+    session = mobileSessionRef.current,
+    video = videoRef.current,
+    livenessSample = null,
+  } = {}) {
+    const activeVideo = video || videoRef.current;
+    const activeSession = session || mobileSessionRef.current;
+    const safeReleaseGate =
+      releaseGate
+      || (
+        activeSession && activeVideo
+          ? evaluateMobileClientReleaseGate(activeSession, activeVideo)
+          : null
+      );
+    const safeLivenessSample =
+      livenessSample
+      || (
+        activeVideo
+          ? readClientPlaybackLiveness(activeVideo, nativeLivenessSampleRef.current)
+          : null
+      );
+    const payload = buildBrowserPlaybackDiagnosticPayload({
+      eventReason,
+      session: activeSession,
+      video: activeVideo,
+      releaseGate: safeReleaseGate,
+      livenessSample: safeLivenessSample,
+      clientPlaybackStallReason,
+      mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
+      mobileLifecycleState: mobileLifecycleStateRef.current,
+      firstFrameReady,
+      loadedDataSeen: mobileLoadedDataSeenRef.current,
+      canPlaySeen: mobileCanPlaySeenRef.current,
+      frameReady: mobileFrameReadyRef.current,
+      releaseGateReason,
+    });
+    logBrowserPlaybackDiagnostic({
+      eventName,
+      payload,
+      lastLogMap: browserPlaybackDiagnosticLastLogRef.current,
+    });
+  }
+
   function prepareControllerForLoad(nextItemId = itemId) {
     playbackFlowRef.current += 1;
     currentItemIdRef.current = nextItemId;
@@ -503,6 +555,7 @@ export function useBrowserPlaybackController({
     firstFrameSuccessfulTimeupdateCountRef.current = 0;
     firstFramePlaybackAdvancingSinceRef.current = 0;
     firstFrameRecoveryAttemptsRef.current = new Map();
+    browserPlaybackDiagnosticLastLogRef.current = new Map();
     clearOptimizedPlaybackPending();
     fallbackAttemptedRef.current = false;
     forceHlsRef.current = false;
@@ -943,6 +996,38 @@ export function useBrowserPlaybackController({
     mobileSession?.server_reserve_seconds,
     mobileSession?.client_recommended_forward_buffer_seconds,
     mobileSession?.full_bad_condition_detected,
+  ]);
+
+  useEffect(() => {
+    const session = mobileSession;
+    const preparingSession = Boolean(
+      session
+      && (
+        optimizedPlaybackPending
+        || !session.attach_ready
+        || !streamSource
+        || !mobilePlayerCanPlay
+      )
+    );
+    if (!preparingSession && !optimizedPlaybackPending) {
+      return;
+    }
+    const eventReason =
+      session?.gate_reason
+      || session?.lite_undersupply_reason
+      || (!session?.attach_ready ? "attach_not_ready" : "")
+      || (!streamSource ? "stream_source_not_attached" : "")
+      || "browser_playback_preparing";
+    logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_prepare_gate", {
+      eventReason,
+      releaseGateReason: eventReason,
+      session,
+    });
+  }, [
+    mobilePlayerCanPlay,
+    mobileSession,
+    optimizedPlaybackPending,
+    streamSource,
   ]);
 
   useEffect(() => {
@@ -1725,6 +1810,21 @@ export function useBrowserPlaybackController({
         || stall.midPlaybackStall
         || staleNativePlaylistStall
         || (backendAhead <= 3 && bufferedAhead <= 0.75 && !refillInProgress);
+      if (recoveryCandidate) {
+        const stallReason = staleNativePlaylistStall
+          ? "native_hls_playlist_stale"
+          : (stall.stallReason || "backend_or_client_runway_low");
+        logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_stall_snapshot", {
+          clientPlaybackStallReason: stallReason,
+          eventReason: stallReason,
+          livenessSample: {
+            ...sample,
+            stallReason,
+          },
+          session: currentSession,
+          video,
+        });
+      }
       const recoveryDecision = shouldStartVisibleHlsSupplyRecovery({
         session: {
           ...currentSession,
@@ -1778,6 +1878,21 @@ export function useBrowserPlaybackController({
           || latestStall.midPlaybackStall
           || staleNativePlaylistStall
           || (latestBackendAhead <= 3 && latestBufferedAhead <= 0.75 && !latestRefillInProgress);
+        if (latestRecoveryCandidate) {
+          const latestStallReason = staleNativePlaylistStall
+            ? "native_hls_playlist_stale"
+            : (latestStall.stallReason || "backend_or_client_runway_low");
+          logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_stall_snapshot", {
+            clientPlaybackStallReason: latestStallReason,
+            eventReason: latestStallReason,
+            livenessSample: {
+              ...latestSample,
+              stallReason: latestStallReason,
+            },
+            session: latestSession,
+            video,
+          });
+        }
         const latestRecoveryDecision = shouldStartVisibleHlsSupplyRecovery({
           session: {
             ...latestSession,
@@ -2022,11 +2137,6 @@ export function useBrowserPlaybackController({
       if (!mobileWarmupProbeActiveRef.current && !browserPlayRequestedRef.current && !mobileAutoplayPendingRef.current) {
         return;
       }
-      const now = Date.now();
-      if (now - mobilePrewarmStuckDiagnosticLastAtRef.current < 10000) {
-        return;
-      }
-      mobilePrewarmStuckDiagnosticLastAtRef.current = now;
       const session = mobileSessionRef.current;
       const gate = clientReleaseGate || evaluateMobileClientReleaseGate(session, video);
       const firstFrameReady = hasVideoFirstFrameForPlaybackRelease(video, {
@@ -2034,31 +2144,13 @@ export function useBrowserPlaybackController({
         canPlaySeen: mobileCanPlaySeenRef.current,
         frameReady: mobileFrameReadyRef.current,
       });
-      console.debug("elvern:prewarm_release_waiting", {
-        reason,
-        sourceAttached: hasAttachedSourceForClientPrewarm(session),
-        streamSourceUrl: streamSource?.url || "",
-        currentSrc: video.currentSrc || video.getAttribute("src") || "",
-        readyState: video.readyState,
-        networkState: video.networkState,
-        videoWidth: video.videoWidth || 0,
-        videoHeight: video.videoHeight || 0,
-        loadedDataSeen: mobileLoadedDataSeenRef.current,
-        canPlaySeen: mobileCanPlaySeenRef.current,
-        frameReady: mobileFrameReadyRef.current,
+      logBrowserPlaybackDiagnosticEvent("elvern:ios_playback_release_blocked", {
+        eventReason: reason,
         firstFrameReady,
-        clientBufferedAheadSeconds: gate.clientBufferedAheadSeconds,
-        requiredClientBufferSeconds: gate.requiredClientBufferSeconds,
-        backendPreparedAheadSeconds: gate.backendPreparedAheadSeconds,
-        releaseGateReady: gate.ready,
-        mobilePlayerCanPlay: mobilePlayerCanPlayRef.current,
-        optimizedPlaybackPending,
-        mobileWarmupProbeActive: mobileWarmupProbeActiveRef.current,
-        pendingSeekPhase: pendingSeekPhaseRef.current,
-        pendingTarget: mobilePendingTargetRef.current,
-        activeEpochId: session.active_epoch_id || session.epoch || null,
-        attachRevision: session.attach_revision ?? null,
-        clientAttachRevision: session.client_attach_revision ?? null,
+        releaseGate: gate,
+        releaseGateReason: reason,
+        session,
+        video,
       });
     }
 

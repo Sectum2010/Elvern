@@ -51,7 +51,7 @@ test("iPhone route2 source keeps the warmup shell until mobile can-play is confi
   assert.equal(state.videoControlsEnabled, false);
 });
 
-test("route2 session without a ready source keeps the preparing placeholder visible", () => {
+test("route2 session without a ready source uses the player prewarm card instead of the outer placeholder", () => {
   const state = resolveBrowserPlaybackPlayerViewState({
     activePlaybackMode: "lite",
     iosMobile: false,
@@ -62,8 +62,26 @@ test("route2 session without a ready source keeps the preparing placeholder visi
     streamSource: null,
   });
 
-  assert.equal(state.showPlayerShell, false);
-  assert.equal(state.showMobilePreparingPlaceholder, true);
+  assert.equal(state.showPlayerShell, true);
+  assert.equal(state.showMobilePrewarmCard, true);
+  assert.equal(state.showMobilePreparingPlaceholder, false);
+  assert.equal(state.browserPlaybackPreparing, true);
+});
+
+test("browser playback pending before a session uses the player prewarm card", () => {
+  const state = resolveBrowserPlaybackPlayerViewState({
+    activePlaybackMode: "lite",
+    iosMobile: false,
+    mobileFrozenFrameUrl: "",
+    mobilePlayerCanPlay: false,
+    mobileSession: null,
+    optimizedPlaybackPending: true,
+    streamSource: null,
+  });
+
+  assert.equal(state.showPlayerShell, true);
+  assert.equal(state.showMobilePrewarmCard, true);
+  assert.equal(state.showMobilePreparingPlaceholder, false);
   assert.equal(state.browserPlaybackPreparing, true);
 });
 

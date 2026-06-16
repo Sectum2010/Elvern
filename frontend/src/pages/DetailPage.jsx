@@ -3906,19 +3906,6 @@ export function DetailPage() {
               </>
             ) : null}
           </div>
-          {showMobilePreparingPlaceholder && !showMobilePrewarmCard ? (
-            <div className="playback-pending-indicator" role="status">
-              <span className="spinner spinner--inline" aria-hidden="true" />
-              <div>
-                <p className="page-note">Preparing {browserPlaybackLabel}</p>
-                <div className="playback-pending-est" aria-live="polite">
-                  <strong className={`playback-pending-est__value playback-pending-est__value--${prepareEstimateDisplay.tone}`}>
-                    {prepareEstimateDisplay.value}
-                  </strong>
-                </div>
-              </div>
-            </div>
-          ) : null}
           {playbackError ? <p className="form-error">{playbackError}</p> : null}
           {globalHiddenActionError ? <p className="form-error">{globalHiddenActionError}</p> : null}
           {globalHiddenActionMessage ? <p className="page-note">{globalHiddenActionMessage}</p> : null}

@@ -28,6 +28,7 @@ const mockBrowserPlayerViewState = vi.hoisted(() => ({
 }));
 const mockBrowserPlaybackControllerState = vi.hoisted(() => ({
   selectBrowserPlaybackAudioTrack: vi.fn(),
+  overrides: {},
 }));
 const mockOverlayState = vi.hoisted(() => ({
   latestProps: null,
@@ -135,6 +136,7 @@ vi.mock("../features/playback/useBrowserPlaybackController", () => ({
     selectBrowserPlaybackAudioTrack: mockBrowserPlaybackControllerState.selectBrowserPlaybackAudioTrack,
     prepareBrowserPlaybackSubtitleTrack: vi.fn(),
     stopCurrentBrowserPlaybackSession: vi.fn(async () => {}),
+    ...mockBrowserPlaybackControllerState.overrides,
   })),
 }));
 
@@ -273,6 +275,7 @@ describe("DetailPage source metadata privacy", () => {
       videoControlsEnabled: true,
     };
     mockBrowserPlaybackControllerState.selectBrowserPlaybackAudioTrack = vi.fn();
+    mockBrowserPlaybackControllerState.overrides = {};
     mockOverlayState.latestProps = null;
     mockAuthState.user = {
       id: 2,
@@ -458,5 +461,42 @@ describe("DetailPage source metadata privacy", () => {
       expect(mockOverlayState.latestProps).not.toBeNull();
     });
     expect(mockOverlayState.latestProps.onBackendAudioTrackSelect).toBe(selectBrowserPlaybackAudioTrack);
+  });
+
+  test("browser preparing state renders only the player prewarm card and keeps Prepared through wording", async () => {
+    mockBrowserPlayerViewState.value = {
+      browserPlaybackPreparing: true,
+      playerClassName: "player",
+      showMobilePreparingPlaceholder: true,
+      showMobilePrewarmCard: true,
+      showPlayerShell: true,
+      videoControlsEnabled: false,
+    };
+    mockBrowserPlaybackControllerState.overrides = {
+      activePlaybackMode: "lite",
+      browserPlaybackLabel: "lite playback",
+      browserPlaybackSessionActive: true,
+      fullDuration: 1200,
+      mobileSession: {
+        attach_ready: true,
+        duration_seconds: 1200,
+        engine_mode: "route2",
+        playback_mode: "lite",
+        ready_end_seconds: 4,
+        target_position_seconds: 0,
+      },
+      optimizedPlaybackPending: true,
+      prepareEstimateObservedAtMs: 0,
+      prepareEstimateNowMs: 0,
+    };
+
+    renderDetailPage(detailItem());
+
+    expect(await screen.findByText("Preparing lite playback")).toBeInTheDocument();
+    expect(document.querySelector(".player-prewarm-card")).not.toBeNull();
+    expect(document.querySelector(".playback-pending-indicator")).toBeNull();
+    expect(screen.getByText("EST --:--")).toBeInTheDocument();
+    expect(screen.getByText("Prepared through 0:00 of 20:00.")).toBeInTheDocument();
+    expect(screen.queryByText(/client buffer/i)).not.toBeInTheDocument();
   });
 });

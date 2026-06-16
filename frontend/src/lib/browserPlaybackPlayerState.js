@@ -14,12 +14,21 @@ export function resolveBrowserPlaybackPlayerViewState({
   const hasMobileSession = Boolean(mobileSession);
   const hasStreamSource = Boolean(streamSource);
   const requiresIosWarmupGate = iosMobile && hasMobileSession;
+  const route2PreparingWithoutSource = isRoute2SessionPayload(mobileSession)
+    && hasMobileSession
+    && !hasStreamSource
+    && !mobilePlayerCanPlay;
+  const browserPreparingBeforeSession = Boolean(optimizedPlaybackPending && !hasMobileSession);
 
   const showInlinePlayer = !hasMobileSession || (hasStreamSource && (!requiresIosWarmupGate || mobilePlayerCanPlay));
   const showMobileWarmupShell =
-    requiresIosWarmupGate
-    && (hasStreamSource || Boolean(mobileFrozenFrameUrl))
-    && !mobilePlayerCanPlay;
+    (
+      requiresIosWarmupGate
+      && (hasStreamSource || Boolean(mobileFrozenFrameUrl))
+      && !mobilePlayerCanPlay
+    )
+    || route2PreparingWithoutSource
+    || browserPreparingBeforeSession;
   const showMobilePrewarmCard = showMobileWarmupShell && !mobileFrozenFrameUrl;
   const showPlayerShell = showInlinePlayer || showMobileWarmupShell;
 
@@ -28,8 +37,12 @@ export function resolveBrowserPlaybackPlayerViewState({
     : optimizedPlaybackPending;
 
   const showMobilePreparingPlaceholder = isRoute2SessionPayload(mobileSession)
-    ? !showPlayerShell && (!mobileSession?.attach_ready || !hasStreamSource)
-    : optimizedPlaybackPending || (requiresIosWarmupGate && hasMobileSession && !mobilePlayerCanPlay);
+    ? false
+    : !showPlayerShell
+      && (
+        optimizedPlaybackPending
+        || (requiresIosWarmupGate && hasMobileSession && !mobilePlayerCanPlay)
+      );
 
   return {
     browserPlaybackPreparing,

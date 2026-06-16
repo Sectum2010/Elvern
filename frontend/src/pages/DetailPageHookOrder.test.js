@@ -55,7 +55,8 @@ describe("DetailPage hook-order guards", () => {
   test("browser prewarm uses the video-card prepare UI instead of a duplicate external EST box", () => {
     const source = readDetailPage();
 
-    expect(source).toContain("showMobilePreparingPlaceholder && !showMobilePrewarmCard");
+    expect(source).not.toContain("playback-pending-indicator");
+    expect(source).not.toContain("className=\"playback-pending-est\"");
     expect(source).toContain("player-prewarm-card__estimate");
     expect(source).not.toContain("Elvern is preparing stable");
     expect(source).toContain("Prepared through");
