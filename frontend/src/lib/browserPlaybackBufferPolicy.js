@@ -7,9 +7,12 @@ export const LITE_CLIENT_REAL_CACHE_SECONDS = 15;
 export const FULL_CLIENT_REAL_CACHE_SECONDS = 30;
 export const AUDIO_SWITCH_FORWARD_BUFFER_SECONDS = 15;
 export const CLIENT_BACK_BUFFER_SECONDS = 120;
+export const AUTOMATIC_RECOVERY_BACKROLL_SECONDS = 2.5;
 export const PHONE_MAX_BUFFER_SIZE_BYTES = 250 * 1024 * 1024;
 export const TABLET_MAX_BUFFER_SIZE_BYTES = 300 * 1024 * 1024;
 export const DESKTOP_MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024 * 1024;
+
+const AUTOMATIC_RECOVERY_CURRENT_TIME_TOLERANCE_SECONDS = 0.5;
 
 const SERVER_PREPARE_TARGETS = {
   lite_fast: LITE_FAST_SERVER_PREPARE_SECONDS,
@@ -40,6 +43,11 @@ function maxBufferSizeForDevice(deviceClass = "unknown") {
 function finitePositiveNumber(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+function finiteNonNegativeNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
 }
 
 function normalizeBufferTier(session = {}) {
@@ -440,6 +448,75 @@ export function resolvePlaybackRecoveryTargetSeconds({
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value >= 0);
   return candidates.length ? Math.max(...candidates) : 0;
+}
+
+export function resolveAutomaticPlaybackRecoveryTarget({
+  currentAbsolutePositionSeconds = null,
+  lastStablePositionSeconds = null,
+  committedPlayheadSeconds = null,
+  actualMediaElementTimeSeconds = null,
+  targetPositionSeconds = null,
+  rollbackSeconds = AUTOMATIC_RECOVERY_BACKROLL_SECONDS,
+  recoveryReason = "",
+} = {}) {
+  const currentAbsolutePosition = finiteNonNegativeNumber(currentAbsolutePositionSeconds);
+  const lastStablePosition = finiteNonNegativeNumber(lastStablePositionSeconds);
+  const committedPlayheadPosition = finiteNonNegativeNumber(committedPlayheadSeconds);
+  const actualMediaElementPosition = finiteNonNegativeNumber(actualMediaElementTimeSeconds);
+  const targetPosition = finiteNonNegativeNumber(targetPositionSeconds);
+  const backrollSeconds = finiteNonNegativeNumber(rollbackSeconds) ?? AUTOMATIC_RECOVERY_BACKROLL_SECONDS;
+  const stableCandidates = [
+    ["last_stable", lastStablePosition],
+    ["committed_playhead", committedPlayheadPosition],
+    ["actual_media_element", actualMediaElementPosition],
+  ];
+  const stableAuthority = stableCandidates.find(([, value]) => value != null && value > 0);
+  let authorityPosition = 0;
+  let authoritySource = "zero_fallback";
+  let avoidedForwardSkip = false;
+
+  if (stableAuthority) {
+    const [source, stablePosition] = stableAuthority;
+    authorityPosition = stablePosition;
+    authoritySource = source;
+    if (currentAbsolutePosition != null) {
+      if (currentAbsolutePosition <= stablePosition) {
+        authorityPosition = currentAbsolutePosition;
+        authoritySource = "current_absolute_not_ahead";
+      } else if (
+        currentAbsolutePosition > stablePosition + AUTOMATIC_RECOVERY_CURRENT_TIME_TOLERANCE_SECONDS
+      ) {
+        avoidedForwardSkip = true;
+      }
+    }
+  } else if (currentAbsolutePosition != null) {
+    authorityPosition = currentAbsolutePosition;
+    authoritySource = "current_absolute_fallback";
+  } else if (targetPosition != null) {
+    authorityPosition = targetPosition;
+    authoritySource = "target_fallback";
+  }
+
+  const targetBeforeBackrollSeconds = Math.max(0, authorityPosition);
+  const targetAfterBackrollSeconds = Math.max(0, targetBeforeBackrollSeconds - backrollSeconds);
+  return {
+    recoveryReason,
+    backrollSeconds,
+    authorityPositionSeconds: targetBeforeBackrollSeconds,
+    authoritySource,
+    targetBeforeBackrollSeconds,
+    targetAfterBackrollSeconds,
+    targetSeconds: targetAfterBackrollSeconds,
+    currentAbsolutePositionSeconds: currentAbsolutePosition,
+    committedPlayheadSeconds: committedPlayheadPosition,
+    actualMediaElementTimeSeconds: actualMediaElementPosition,
+    lastStablePositionSeconds: lastStablePosition,
+    avoidedForwardSkip,
+  };
+}
+
+export function resolveAutomaticPlaybackRecoveryTargetSeconds(options = {}) {
+  return resolveAutomaticPlaybackRecoveryTarget(options).targetAfterBackrollSeconds;
 }
 
 export function shouldRecoverNativeHlsStalePlaylist({

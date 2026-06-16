@@ -22,6 +22,7 @@ import {
   readClientPlaybackLiveness,
   restoreVideoAfterClientPrewarm,
   retuneHlsInstance,
+  resolveAutomaticPlaybackRecoveryTarget,
   shouldStartClientBufferPrewarm,
   shouldRecoverNativeHlsStalePlaylist,
   shouldDisarmFirstFrameStallMonitor,
@@ -389,6 +390,23 @@ export function useBrowserPlaybackController({
       : mediaElementTime;
   }
 
+  function buildAutomaticRecoveryTargetDiagnostic(
+    session = mobileSessionRef.current,
+    recoveryReason = "",
+    video = videoRef.current,
+  ) {
+    return resolveAutomaticPlaybackRecoveryTarget({
+      currentAbsolutePositionSeconds: session && video
+        ? resolveCurrentVideoAbsolutePosition(session, video)
+        : null,
+      lastStablePositionSeconds: mobileLastStablePositionRef.current,
+      committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+      actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+      targetPositionSeconds: resolveMobileReleaseTargetPosition(session, video),
+      recoveryReason,
+    });
+  }
+
   function resolveMediaElementPositionForAbsolute(session, absoluteSeconds) {
     return session
       ? toBrowserPlaybackMediaElementSeconds(session, absoluteSeconds)
@@ -485,6 +503,7 @@ export function useBrowserPlaybackController({
     releaseGate = null,
     releaseGateReason = "",
     recoveryDecision = null,
+    recoveryTarget = null,
     session = mobileSessionRef.current,
     staleNativePlaylistStall = null,
     video = videoRef.current,
@@ -521,12 +540,26 @@ export function useBrowserPlaybackController({
       frameReady: mobileFrameReadyRef.current,
       releaseGateReason,
       recoveryDecision,
+      recoveryTarget,
       staleNativePlaylistStall,
     });
     logBrowserPlaybackDiagnostic({
       eventName,
       payload,
       lastLogMap: browserPlaybackDiagnosticLastLogRef.current,
+    });
+  }
+
+  function logAutomaticRecoveryTarget(recoveryReason, {
+    session = mobileSessionRef.current,
+    video = videoRef.current,
+  } = {}) {
+    logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_recovery_target", {
+      clientPlaybackStallReason: recoveryReason,
+      eventReason: recoveryReason,
+      recoveryTarget: buildAutomaticRecoveryTargetDiagnostic(session, recoveryReason, video),
+      session,
+      video,
     });
   }
 
@@ -1070,6 +1103,7 @@ export function useBrowserPlaybackController({
           setOptimizedPlaybackPending(true);
           setSeekNotice(`Reattaching the current ${browserPlaybackLabel} session.`);
           applyMobileLifecycleStatus("recovering");
+          logAutomaticRecoveryTarget("media-error");
           recoverMobilePlaybackAfterResume("media-error").catch((requestError) => {
             clearOptimizedPlaybackPending();
             setPlaybackError(requestError.message || `${browserPlaybackLabelTitle} failed for this playback session`);
@@ -1268,6 +1302,7 @@ export function useBrowserPlaybackController({
           setOptimizedPlaybackPending(true);
           setSeekNotice(`Reattaching the current ${browserPlaybackLabel} session.`);
           applyMobileLifecycleStatus("recovering");
+          logAutomaticRecoveryTarget("hls-fatal");
           recoverMobilePlaybackAfterResume("hls-fatal").catch((requestError) => {
             clearOptimizedPlaybackPending();
             setPlaybackError(requestError.message || data.details || "HLS playback failed");
@@ -1611,6 +1646,7 @@ export function useBrowserPlaybackController({
       }).catch(() => {
         // Recovery still reattaches locally if this diagnostic heartbeat misses.
       });
+      logAutomaticRecoveryTarget("first-frame-stall");
       recoverMobilePlaybackAfterResume("first-frame-stall").catch((requestError) => {
         clearOptimizedPlaybackPending();
         setPlaybackError(requestError.message || "Network is too weak to keep the browser buffer filled.");
@@ -1735,6 +1771,7 @@ export function useBrowserPlaybackController({
           }).catch(() => {
             // Recovery can still reattach locally if the diagnostic heartbeat misses.
           });
+          logAutomaticRecoveryTarget("manifest-window-exhausted");
           recoverMobilePlaybackAfterResume("manifest-window-exhausted").catch((requestError) => {
             clearOptimizedPlaybackPending();
             setPlaybackError(requestError.message || `Failed to refresh ${browserPlaybackLabel}`);
@@ -1843,6 +1880,7 @@ export function useBrowserPlaybackController({
             stallReason,
           },
           recoveryDecision,
+          recoveryTarget: buildAutomaticRecoveryTargetDiagnostic(currentSession, stallReason, video),
           session: currentSession,
           staleNativePlaylistStall,
           video,
@@ -1901,10 +1939,15 @@ export function useBrowserPlaybackController({
           hlsJsAttached: Boolean(hlsRef.current),
           stalePlaylistStall: staleNativePlaylistStall,
         });
+        const latestStallReason = staleNativePlaylistStall
+          ? "native_hls_playlist_stale"
+          : (latestStall.stallReason || "backend_or_client_runway_low");
+        const latestRecoveryTarget = buildAutomaticRecoveryTargetDiagnostic(
+          latestSession,
+          latestStallReason,
+          video,
+        );
         if (latestRecoveryCandidate) {
-          const latestStallReason = staleNativePlaylistStall
-            ? "native_hls_playlist_stale"
-            : (latestStall.stallReason || "backend_or_client_runway_low");
           logBrowserPlaybackDiagnosticEvent("elvern:browser_playback_stall_snapshot", {
             clientPlaybackStallReason: latestStallReason,
             eventReason: latestStallReason,
@@ -1913,6 +1956,7 @@ export function useBrowserPlaybackController({
               stallReason: latestStallReason,
             },
             recoveryDecision: latestRecoveryDecision,
+            recoveryTarget: latestRecoveryTarget,
             session: latestSession,
             staleNativePlaylistStall,
             video,
@@ -1933,6 +1977,9 @@ export function useBrowserPlaybackController({
                 ? "native_hls_playlist_stale"
                 : (latestStall.stallReason || latestRecoveryDecision.reason || "client_stalled"),
               nativeHlsStallRecoveryPreservedPositionSeconds: resolveCurrentVideoAbsolutePosition(latestSession, video),
+              nativeHlsStallRecoveryBackrollSeconds: latestRecoveryTarget.backrollSeconds,
+              nativeHlsStallRecoveryTargetSeconds: latestRecoveryTarget.targetAfterBackrollSeconds,
+              nativeHlsStallRecoveryAvoidedForwardSkip: latestRecoveryTarget.avoidedForwardSkip,
             }
             : current
         ));

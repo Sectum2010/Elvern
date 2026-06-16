@@ -12,6 +12,7 @@ import {
   classifyManifestWindowState,
   deriveBufferTargetsFromSession,
   readClientPlaybackLiveness,
+  resolveAutomaticPlaybackRecoveryTarget,
   resolvePlaybackRecoveryTargetSeconds,
   shouldStartVisibleHlsSupplyRecovery,
 } from "../../lib/browserPlaybackBufferPolicy";
@@ -1469,6 +1470,24 @@ export function useOptimizedPlaybackSession({
     });
   }
 
+  function resolveAutomaticPlaybackRecoveryTargetDecision(
+    payload = mobileSessionRef.current,
+    recoveryReason = "",
+  ) {
+    const video = videoRef.current;
+    const currentAbsolutePositionSeconds = video && payload
+      ? resolveSessionAbsoluteTime(payload, Math.max(video.currentTime || 0, 0))
+      : null;
+    return resolveAutomaticPlaybackRecoveryTarget({
+      currentAbsolutePositionSeconds,
+      lastStablePositionSeconds: mobileLastStablePositionRef.current,
+      committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+      actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+      targetPositionSeconds: resolveMobileAuthorityPosition(payload),
+      recoveryReason,
+    });
+  }
+
   function preservePlaybackRecoveryTarget(targetPosition) {
     const safeTarget = Math.max(Number(targetPosition || 0), 0);
     committedPlayheadSecondsRef.current = safeTarget;
@@ -1700,7 +1719,9 @@ export function useOptimizedPlaybackSession({
     const backgroundDurationMs = backgroundResumeTrigger && hiddenAt > 0
       ? Math.max(Date.now() - hiddenAt, 0)
       : 0;
-    const capturedRecoveryTarget = resolveLivePlaybackRecoveryTarget(activeSession);
+    const capturedRecoveryTarget = backgroundResumeTrigger
+      ? resolveLivePlaybackRecoveryTarget(activeSession)
+      : resolveAutomaticPlaybackRecoveryTargetDecision(activeSession, trigger).targetAfterBackrollSeconds;
     mobileRecoveryInFlightRef.current = true;
     applyMobileLifecycleStatus("resuming");
     if (!backgroundResumeTrigger) {
@@ -1754,12 +1775,14 @@ export function useOptimizedPlaybackSession({
         }
       }
       if (payload.state === "failed" || payload.state === "expired" || payload.state === "stopped") {
-        const recoveryTarget = resolvePlaybackRecoveryTargetSeconds({
-          currentAbsolutePositionSeconds: capturedRecoveryTarget,
-          committedPlayheadSeconds: committedPlayheadSecondsRef.current,
-          actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
-          targetPositionSeconds: resolveMobileAuthorityPosition(payload),
-        });
+        const recoveryTarget = backgroundResumeTrigger
+          ? resolvePlaybackRecoveryTargetSeconds({
+            currentAbsolutePositionSeconds: capturedRecoveryTarget,
+            committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+            actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+            targetPositionSeconds: resolveMobileAuthorityPosition(payload),
+          })
+          : resolveAutomaticPlaybackRecoveryTargetDecision(payload, trigger).targetAfterBackrollSeconds;
         const recoveryAttempt =
           browserPlaybackLatestAttemptRef.current
           || buildSyntheticBrowserPlaybackAttempt(browserPlaybackCurrentSessionRef.current, payload);
@@ -1828,12 +1851,14 @@ export function useOptimizedPlaybackSession({
         }
         setOptimizedPlaybackPending(true);
       }
-      const recoveryTarget = resolvePlaybackRecoveryTargetSeconds({
-        currentAbsolutePositionSeconds: capturedRecoveryTarget,
-        committedPlayheadSeconds: committedPlayheadSecondsRef.current,
-        actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
-        targetPositionSeconds: resolveMobileAuthorityPosition(payload),
-      });
+      const recoveryTarget = backgroundResumeTrigger
+        ? resolvePlaybackRecoveryTargetSeconds({
+          currentAbsolutePositionSeconds: capturedRecoveryTarget,
+          committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+          actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+          targetPositionSeconds: resolveMobileAuthorityPosition(payload),
+        })
+        : resolveAutomaticPlaybackRecoveryTargetDecision(payload, trigger).targetAfterBackrollSeconds;
       preservePlaybackRecoveryTarget(recoveryTarget);
       if (video && mobilePlayerCanPlayRef.current) {
         const frozenFrameUrl = captureVideoFrameSnapshot(video);

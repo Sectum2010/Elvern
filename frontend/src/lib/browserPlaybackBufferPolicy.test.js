@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "vitest";
 
 import {
+  AUTOMATIC_RECOVERY_BACKROLL_SECONDS,
   buildHlsConfig,
   classifyManifestWindowState,
   classifyPlaybackStall,
@@ -14,6 +15,8 @@ import {
   restoreVideoAfterClientPrewarm,
   resolveClientPlaybackReleaseBufferSeconds,
   resolveClientPlaybackRealCacheSeconds,
+  resolveAutomaticPlaybackRecoveryTarget,
+  resolveAutomaticPlaybackRecoveryTargetSeconds,
   resolveServerPlaybackPrepareRunwaySeconds,
   resolvePlaybackRecoveryTargetSeconds,
   retuneHlsInstance,
@@ -573,6 +576,60 @@ describe("recovery and manifest window helpers", () => {
       actualMediaElementTimeSeconds: 120,
       targetPositionSeconds: 0,
     }), 121);
+  });
+
+  test("automatic recovery rolls back from stable authority instead of advanced currentTime", () => {
+    const decision = resolveAutomaticPlaybackRecoveryTarget({
+      currentAbsolutePositionSeconds: 163,
+      lastStablePositionSeconds: 160,
+      committedPlayheadSeconds: 160,
+      actualMediaElementTimeSeconds: 160,
+      targetPositionSeconds: 160,
+    });
+    assert.equal(decision.backrollSeconds, AUTOMATIC_RECOVERY_BACKROLL_SECONDS);
+    assert.equal(decision.targetBeforeBackrollSeconds, 160);
+    assert.equal(decision.targetAfterBackrollSeconds, 157.5);
+    assert.equal(decision.targetSeconds, 157.5);
+    assert.equal(decision.avoidedForwardSkip, true);
+    assert.equal(resolveAutomaticPlaybackRecoveryTargetSeconds({
+      currentAbsolutePositionSeconds: 163,
+      lastStablePositionSeconds: 160,
+      committedPlayheadSeconds: 160,
+      actualMediaElementTimeSeconds: 160,
+      targetPositionSeconds: 160,
+    }), 157.5);
+  });
+
+  test("automatic recovery clamps rollback at zero", () => {
+    assert.equal(resolveAutomaticPlaybackRecoveryTargetSeconds({
+      lastStablePositionSeconds: 1,
+      rollbackSeconds: 2.5,
+    }), 0);
+  });
+
+  test("automatic recovery falls back safely when no stable position exists", () => {
+    const decision = resolveAutomaticPlaybackRecoveryTarget({
+      currentAbsolutePositionSeconds: 8.2,
+      committedPlayheadSeconds: 0,
+      actualMediaElementTimeSeconds: 0,
+      targetPositionSeconds: 0,
+    });
+    assert.equal(decision.authorityPositionSeconds, 8.2);
+    assert.equal(Math.round(decision.targetAfterBackrollSeconds * 10) / 10, 5.7);
+    assert.equal(Number.isNaN(decision.targetAfterBackrollSeconds), false);
+  });
+
+  test("automatic recovery does not jump ahead when currentTime is behind stable authority", () => {
+    const decision = resolveAutomaticPlaybackRecoveryTarget({
+      currentAbsolutePositionSeconds: 150,
+      lastStablePositionSeconds: 160,
+      committedPlayheadSeconds: 160,
+      actualMediaElementTimeSeconds: 160,
+      targetPositionSeconds: 160,
+    });
+    assert.equal(decision.authorityPositionSeconds, 150);
+    assert.equal(decision.targetAfterBackrollSeconds, 147.5);
+    assert.equal(decision.avoidedForwardSkip, false);
   });
 
   test("native HLS reattach at eight seconds resumes from live playhead instead of zero", () => {

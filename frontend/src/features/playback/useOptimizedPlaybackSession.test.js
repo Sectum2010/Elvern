@@ -395,3 +395,99 @@ test("backend low-water does not start visible recovery while client buffer is p
     vi.useRealTimers();
   }
 });
+
+test("automatic stalled recovery creates replacement from rolled-back stable target", async () => {
+  const activePayload = makeRoute2Payload({
+    session_id: "session-recovery",
+    attach_ready: true,
+    state: "ready",
+    target_position_seconds: 160,
+    committed_playhead_seconds: 160,
+    actual_media_element_time_seconds: 160,
+    ready_start_seconds: 0,
+    ready_end_seconds: 220,
+    active_epoch_id: "epoch-active",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-active/index.m3u8",
+  });
+  const recoveryPayload = makeRoute2Payload({
+    session_id: "session-recovery-new",
+    attach_ready: false,
+    state: "preparing",
+    target_position_seconds: 157.5,
+    committed_playhead_seconds: 157.5,
+    actual_media_element_time_seconds: 157.5,
+    ready_start_seconds: 0,
+    ready_end_seconds: 170,
+    active_epoch_id: "epoch-recovery",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-recovery/index.m3u8",
+  });
+  createOptimizedPlaybackSession
+    .mockResolvedValueOnce(activePayload)
+    .mockResolvedValueOnce(recoveryPayload);
+  fetchOptimizedPlaybackSessionStatus.mockRejectedValueOnce(new Error("network"));
+
+  const { getApi, video } = renderOptimizedPlaybackHarness();
+
+  await act(async () => {
+    await getApi().startMobileOptimizedPlayback({ autoplay: false, playbackMode: "lite" });
+  });
+
+  getApi().mobileLastStablePositionRef.current = 160;
+  getApi().committedPlayheadSecondsRef.current = 160;
+  getApi().actualMediaElementTimeRef.current = 160;
+  getApi().mobilePlayerCanPlayRef.current = false;
+  video.currentTime = 163;
+
+  await act(async () => {
+    await getApi().recoverMobilePlaybackAfterResume("stalled");
+  });
+
+  expect(createOptimizedPlaybackSession).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    clientDeviceClass: "phone",
+    engineMode: "route2",
+    playbackMode: "lite",
+    startPositionSeconds: 157.5,
+  }));
+  expect(getApi().committedPlayheadSecondsRef.current).toBe(157.5);
+  expect(getApi().actualMediaElementTimeRef.current).toBe(157.5);
+  expect(getApi().mobileLastStablePositionRef.current).toBe(157.5);
+});
+
+test("user initiated seek keeps explicit target without automatic recovery rollback", async () => {
+  const activePayload = makeRoute2Payload({
+    session_id: "session-seek",
+    attach_ready: true,
+    state: "ready",
+    target_position_seconds: 160,
+    committed_playhead_seconds: 160,
+    actual_media_element_time_seconds: 160,
+    ready_end_seconds: 220,
+  });
+  const seekingPayload = makeRoute2Payload({
+    ...activePayload,
+    state: "seeking",
+    pending_target_seconds: 200,
+    target_position_seconds: 200,
+  });
+  createOptimizedPlaybackSession.mockResolvedValueOnce(activePayload);
+  seekOptimizedPlaybackSession.mockResolvedValueOnce(seekingPayload);
+
+  const { getApi, video } = renderOptimizedPlaybackHarness();
+
+  await act(async () => {
+    await getApi().startMobileOptimizedPlayback({ autoplay: false, playbackMode: "lite" });
+  });
+
+  getApi().mobileLastStablePositionRef.current = 160;
+  getApi().mobilePlayerCanPlayRef.current = false;
+  video.currentTime = 163;
+
+  await act(async () => {
+    await getApi().retargetMobileOptimizedPlayback(200, { resumeAfterReady: true });
+  });
+
+  expect(seekOptimizedPlaybackSession).toHaveBeenCalledWith(expect.objectContaining({
+    targetPositionSeconds: 200,
+  }));
+  expect(getApi().requestedTargetSecondsRef.current).toBe(200);
+});
