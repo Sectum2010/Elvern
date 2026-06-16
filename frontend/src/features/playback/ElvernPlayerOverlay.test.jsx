@@ -927,6 +927,34 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     }));
   });
 
+  test("desktop track menus render long audio labels as separate rows", () => {
+    const longPrimary = "Dolby TrueHD 5.1 / Dolby Digital Plus";
+    const longSecondary = "English descriptive audio alternate mix";
+    const { container, getByRole } = renderOverlay({
+      backendAudioTracks: [
+        { index: 1, label: longPrimary, codec: "truehd", track_source: "raw_probe_summary_json" },
+        { index: 5, label: longSecondary, codec: "eac3", track_source: "raw_probe_summary_json" },
+      ],
+      cinemaModeActive: true,
+      deviceClass: "desktop",
+      onBackendAudioTrackSelect: vi.fn(),
+      onToggleFullscreen: vi.fn(),
+    });
+
+    act(() => {
+      fireEvent.click(getByRole("button", { name: "Audio track" }));
+    });
+
+    const menu = container.querySelector(".elvern-overlay__menu.elvern-overlay__track-menu");
+    expect(menu).toBeTruthy();
+    const rows = Array.from(menu.querySelectorAll(".elvern-overlay__track-menu-item"));
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelector(".elvern-overlay__track-menu-label").textContent).toBe(longPrimary);
+    expect(rows[1].querySelector(".elvern-overlay__track-menu-label").textContent).toBe(longSecondary);
+    expect(getByRole("menuitemradio", { name: longPrimary })).toBeTruthy();
+    expect(getByRole("menuitemradio", { name: longSecondary })).toBeTruthy();
+  });
+
   test("Route2 does not expose media-row fallback or native Audio 1 as switchable audio", () => {
     const { getByRole, queryByText } = renderOverlay({
       backendAudioTracks: [

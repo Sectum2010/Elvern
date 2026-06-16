@@ -16,6 +16,22 @@ const mockAuthState = vi.hoisted(() => ({
 const mockBrowserState = vi.hoisted(() => ({
   iosMobile: false,
 }));
+const mockBrowserPlayerViewState = vi.hoisted(() => ({
+  value: {
+    browserPlaybackPreparing: false,
+    playerClassName: "player",
+    showMobilePreparingPlaceholder: false,
+    showMobilePrewarmCard: false,
+    showPlayerShell: false,
+    videoControlsEnabled: true,
+  },
+}));
+const mockBrowserPlaybackControllerState = vi.hoisted(() => ({
+  selectBrowserPlaybackAudioTrack: vi.fn(),
+}));
+const mockOverlayState = vi.hoisted(() => ({
+  latestProps: null,
+}));
 
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => mockAuthState,
@@ -41,14 +57,7 @@ vi.mock("../lib/browserPlayback", () => ({
 }));
 
 vi.mock("../lib/browserPlaybackPlayerState", () => ({
-  resolveBrowserPlaybackPlayerViewState: vi.fn(() => ({
-    browserPlaybackPreparing: false,
-    playerClassName: "player",
-    showMobilePreparingPlaceholder: false,
-    showMobilePrewarmCard: false,
-    showPlayerShell: false,
-    videoControlsEnabled: true,
-  })),
+  resolveBrowserPlaybackPlayerViewState: vi.fn(() => mockBrowserPlayerViewState.value),
 }));
 
 vi.mock("../lib/device", () => ({
@@ -68,7 +77,10 @@ vi.mock("../lib/playbackRouting", () => ({
 }));
 
 vi.mock("../features/playback/ElvernPlayerOverlay", () => ({
-  default: () => null,
+  default: (props) => {
+    mockOverlayState.latestProps = props;
+    return null;
+  },
 }));
 
 vi.mock("../features/playback/useBrowserPlaybackController", () => ({
@@ -120,7 +132,7 @@ vi.mock("../features/playback/useBrowserPlaybackController", () => ({
     startBrowserPlaybackFrom: vi.fn(async () => {}),
     playExistingBrowserSource: vi.fn(async () => {}),
     seekBrowserPlaybackTo: vi.fn(async () => {}),
-    selectBrowserPlaybackAudioTrack: vi.fn(),
+    selectBrowserPlaybackAudioTrack: mockBrowserPlaybackControllerState.selectBrowserPlaybackAudioTrack,
     prepareBrowserPlaybackSubtitleTrack: vi.fn(),
     stopCurrentBrowserPlaybackSession: vi.fn(async () => {}),
   })),
@@ -252,6 +264,16 @@ describe("DetailPage source metadata privacy", () => {
     window.sessionStorage.clear();
     window.history.replaceState({}, "", "/");
     mockBrowserState.iosMobile = false;
+    mockBrowserPlayerViewState.value = {
+      browserPlaybackPreparing: false,
+      playerClassName: "player",
+      showMobilePreparingPlaceholder: false,
+      showMobilePrewarmCard: false,
+      showPlayerShell: false,
+      videoControlsEnabled: true,
+    };
+    mockBrowserPlaybackControllerState.selectBrowserPlaybackAudioTrack = vi.fn();
+    mockOverlayState.latestProps = null;
     mockAuthState.user = {
       id: 2,
       username: "viewer",
@@ -412,5 +434,29 @@ describe("DetailPage source metadata privacy", () => {
     await screen.findByText("VLC could not continue this handoff. Try the VLC button again.");
     expect(window.sessionStorage.getItem("elvern-ios-handoff:42:vlc")).toBeNull();
     expect(screen.queryByText("Copy short-lived playback URL")).not.toBeInTheDocument();
+  });
+
+  test("passes browser audio selector from controller into Elvern overlay", async () => {
+    const selectBrowserPlaybackAudioTrack = vi.fn();
+    mockBrowserPlaybackControllerState.selectBrowserPlaybackAudioTrack = selectBrowserPlaybackAudioTrack;
+    mockBrowserPlayerViewState.value = {
+      browserPlaybackPreparing: false,
+      playerClassName: "player",
+      showMobilePreparingPlaceholder: false,
+      showMobilePrewarmCard: false,
+      showPlayerShell: true,
+      videoControlsEnabled: false,
+    };
+
+    renderDetailPage(detailItem({
+      audio_tracks: [
+        { index: 1, label: "English", codec: "aac", track_source: "raw_probe_summary_json" },
+      ],
+    }));
+
+    await waitFor(() => {
+      expect(mockOverlayState.latestProps).not.toBeNull();
+    });
+    expect(mockOverlayState.latestProps.onBackendAudioTrackSelect).toBe(selectBrowserPlaybackAudioTrack);
   });
 });

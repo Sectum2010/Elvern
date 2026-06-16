@@ -281,6 +281,7 @@ export function useBrowserPlaybackController({
     softResumeMobilePlaybackAfterBackground,
     startMobileOptimizedPlayback,
     retargetMobileOptimizedPlayback,
+    selectBrowserPlaybackAudioTrack,
     prepareBrowserPlaybackSubtitleTrack,
     restoreActiveBrowserPlaybackSession: restoreOptimizedPlaybackSession,
     finalizeRetargetVisibility,
@@ -2709,6 +2710,7 @@ export function useBrowserPlaybackController({
     startBrowserPlaybackFrom,
     playExistingBrowserSource,
     seekBrowserPlaybackTo,
+    selectBrowserPlaybackAudioTrack,
     prepareBrowserPlaybackSubtitleTrack,
     stopCurrentBrowserPlaybackSession,
   };

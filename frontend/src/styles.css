@@ -7530,6 +7530,49 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   pointer-events: none;
 }
 
+.elvern-overlay__track-menu {
+  min-width: min(18rem, calc(100vw - 2rem));
+  width: max-content;
+  max-width: min(24rem, calc(100vw - 2rem));
+  max-inline-size: min(24rem, calc(100vw - 2rem));
+  max-height: min(58vh, 24rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  line-height: 1.25;
+}
+
+.elvern-overlay__track-menu-item {
+  display: flex;
+  align-items: center;
+  min-height: 2.45rem;
+  gap: 0.55rem;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding: 0.55rem 0.7rem;
+  text-align: left;
+}
+
+.elvern-overlay__track-menu-label,
+.elvern-overlay__track-menu-note {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  line-height: 1.25;
+}
+
+.elvern-overlay__track-menu-warning,
+.elvern-overlay__track-menu-error-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 1rem;
+  inline-size: 1rem;
+  align-self: center;
+}
+
 /* ─── Elvern Timeline ─────────────────────────────────────────────────── */
 
 .elvern-timeline {
@@ -7860,13 +7903,6 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   text-align: left;
 }
 
-.elvern-overlay__track-menu-label,
-.elvern-overlay__track-menu-note {
-  display: block;
-  width: 100%;
-  min-width: 0;
-}
-
 .elvern-overlay__track-menu-note {
   margin-top: 0.18rem;
   color: rgba(248, 250, 252, 0.58);
@@ -7874,14 +7910,16 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 }
 
 .elvern-overlay__track-menu-warning {
-  flex: 0 0 auto;
+  flex: 0 0 1rem;
+  inline-size: 1rem;
   color: #f87171;
   font-weight: 900;
   line-height: 1;
 }
 
 .elvern-overlay__track-menu-error-mark {
-  flex: 0 0 auto;
+  flex: 0 0 1rem;
+  inline-size: 1rem;
   color: #fecaca;
   font-weight: 900;
   line-height: 1;
@@ -7889,6 +7927,7 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 
 .elvern-overlay__track-menu-spinner {
   flex: 0 0 auto;
+  align-self: center;
   width: 0.78rem;
   height: 0.78rem;
   border-radius: 999px;

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
+import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
 
 import pyotp
 
+from backend.app import db as db_module
+from backend.app import schemas as schemas_module
+from backend.app.routes import admin as admin_routes
+from backend.app.routes import auth as auth_routes
 from backend.app.db import ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME, get_connection, init_db, utcnow_iso
 from backend.app.security import TOKEN_HASH_PREFIX, hash_password
-from backend.app.services.at_rest_encryption import decrypt_at_rest
+from backend.app.services import totp_service as totp_service_module
+from backend.app.services.at_rest_encryption import CIPHERTEXT_PREFIX, decrypt_at_rest, encrypt_at_rest
 from backend.app.services.totp_service import (
     CHALLENGE_TOKEN_TTL_SECONDS,
     LOGIN_CHALLENGE_TOKEN_HASH_PURPOSE,
@@ -53,6 +61,66 @@ def _enable_totp(client, initialized_settings):
         )
         connection.commit()
     return secret, verify.json()["recovery_codes"]
+
+
+def _json_keys(value) -> set[str]:
+    if isinstance(value, dict):
+        keys = set(value)
+        for child in value.values():
+            keys.update(_json_keys(child))
+        return keys
+    if isinstance(value, list):
+        keys: set[str] = set()
+        for child in value:
+            keys.update(_json_keys(child))
+        return keys
+    return set()
+
+
+def _assert_response_has_no_secret_fields(payload) -> None:
+    keys = _json_keys(payload)
+    assert "totp_secret" not in keys
+    assert "secret" not in keys
+    assert "qr_svg" not in keys
+    assert "recovery_codes" not in keys
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "otpauth" not in serialized
+    assert "provisioning_uri" not in serialized
+
+
+def _assert_log_calls_have_no_secret_fields(module) -> None:
+    forbidden = {"secret", "totp_secret", "qr_svg", "provisioning_uri", "otpauth", "recovery_codes"}
+    source = inspect.getsource(module)
+    tree = ast.parse(source)
+    for call in [node for node in ast.walk(tree) if isinstance(node, ast.Call)]:
+        function_name = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+        if function_name not in {"log_security_event", "log_audit_event"}:
+            continue
+        for keyword in call.keywords:
+            if keyword.arg and keyword.arg.lower() in forbidden:
+                raise AssertionError(f"{module.__name__} logs sensitive keyword {keyword.arg}")
+            for node in ast.walk(keyword.value):
+                if not isinstance(node, ast.Dict):
+                    continue
+                for key in node.keys:
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        assert key.value.lower() not in forbidden
+
+
+def _assert_totp_secret_writes_are_encrypted_or_clear(source: str) -> None:
+    for match in re.finditer(r"SET\s+totp_secret\s*=", source, flags=re.IGNORECASE):
+        snippet = source[max(0, match.start() - 160) : match.start() + 700]
+        assert "encrypt_at_rest(" in snippet or "totp_secret = NULL" in snippet
+
+
+def _assert_pending_secret_writes_are_encrypted(source: str) -> None:
+    for marker in (
+        "INSERT OR REPLACE INTO totp_pending_secrets",
+        "UPDATE totp_pending_secrets SET secret",
+    ):
+        for match in re.finditer(marker, source):
+            snippet = source[match.start() : match.start() + 700]
+            assert "encrypt_at_rest(" in snippet
 
 
 class TestTotpSecret:
@@ -124,6 +192,146 @@ class TestRecoveryCodes:
         source = inspect.getsource(hash_recovery_code)
         assert "RECOVERY_CODE_HASH_NAMESPACE" in source
         assert "hash_token_hmac" not in source
+
+
+class TestTotpStartupHardening:
+    def test_init_db_encrypts_legacy_plaintext_user_totp_secret(self, initialized_settings, caplog) -> None:
+        secret = "JBSWY3DPEHPK3PXP"
+        enabled_at = "2026-01-02T03:04:05+00:00"
+        updated_at = "2026-01-02T03:05:06+00:00"
+        recovery_hash = hash_recovery_code("elvn-abcd-efgh-jkmn", initialized_settings)
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                """
+                UPDATE users
+                SET totp_secret = ?, totp_enabled_at = ?, totp_last_used_window = ?,
+                    totp_setup_prompt_enabled = 1, updated_at = ?
+                WHERE id = 1
+                """,
+                (secret, enabled_at, 123, updated_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO user_recovery_codes (user_id, code_hash, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (1, recovery_hash, utcnow_iso()),
+            )
+            connection.commit()
+
+        caplog.set_level(logging.INFO, logger=db_module.logger.name)
+        init_db(initialized_settings)
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                """
+                SELECT totp_secret, totp_enabled_at, totp_last_used_window,
+                       totp_setup_prompt_enabled, updated_at
+                FROM users
+                WHERE id = 1
+                """,
+            ).fetchone()
+            code_count = connection.execute("SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = 1").fetchone()[0]
+        assert row["totp_secret"] != secret
+        assert str(row["totp_secret"]).startswith(CIPHERTEXT_PREFIX)
+        assert decrypt_at_rest(row["totp_secret"], initialized_settings) == (secret, True)
+        assert row["totp_enabled_at"] == enabled_at
+        assert row["totp_last_used_window"] == 123
+        assert row["totp_setup_prompt_enabled"] == 1
+        assert row["updated_at"] == updated_at
+        assert code_count == 1
+        assert secret not in caplog.text
+
+    def test_init_db_leaves_encrypted_user_totp_secret_unchanged(self, initialized_settings) -> None:
+        secret = "JBSWY3DPEHPK3PXP"
+        encrypted = encrypt_at_rest(secret, initialized_settings)
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                "UPDATE users SET totp_secret = ?, totp_enabled_at = ?, totp_last_used_window = ? WHERE id = 1",
+                (encrypted, utcnow_iso(), 456),
+            )
+            connection.commit()
+
+        init_db(initialized_settings)
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                "SELECT totp_secret, totp_last_used_window FROM users WHERE id = 1",
+            ).fetchone()
+        assert row["totp_secret"] == encrypted
+        assert row["totp_last_used_window"] == 456
+
+    def test_init_db_deletes_expired_pending_totp_secret(self, initialized_settings) -> None:
+        old_created_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO totp_pending_secrets (user_id, secret, created_at) VALUES (?, ?, ?)",
+                (1, "JBSWY3DPEHPK3PXP", old_created_at),
+            )
+            connection.commit()
+
+        init_db(initialized_settings)
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute("SELECT secret FROM totp_pending_secrets WHERE user_id = 1").fetchone()
+        assert row is None
+
+    def test_init_db_deletes_malformed_pending_totp_secret_timestamp(self, initialized_settings) -> None:
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO totp_pending_secrets (user_id, secret, created_at) VALUES (?, ?, ?)",
+                (1, "JBSWY3DPEHPK3PXP", "not-a-date"),
+            )
+            connection.commit()
+
+        init_db(initialized_settings)
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute("SELECT secret FROM totp_pending_secrets WHERE user_id = 1").fetchone()
+        assert row is None
+
+    def test_init_db_encrypts_unexpired_legacy_pending_totp_secret(self, initialized_settings) -> None:
+        secret = "JBSWY3DPEHPK3PXP"
+        created_at = datetime.now(timezone.utc).isoformat()
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO totp_pending_secrets (user_id, secret, created_at) VALUES (?, ?, ?)",
+                (1, secret, created_at),
+            )
+            connection.commit()
+
+        init_db(initialized_settings)
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                "SELECT secret, created_at FROM totp_pending_secrets WHERE user_id = 1",
+            ).fetchone()
+        assert row is not None
+        assert row["secret"] != secret
+        assert str(row["secret"]).startswith(CIPHERTEXT_PREFIX)
+        assert decrypt_at_rest(row["secret"], initialized_settings) == (secret, True)
+        assert row["created_at"] == created_at
+
+    def test_init_db_leaves_encrypted_unexpired_pending_secret_unchanged(self, initialized_settings) -> None:
+        secret = "JBSWY3DPEHPK3PXP"
+        encrypted = encrypt_at_rest(secret, initialized_settings)
+        created_at = datetime.now(timezone.utc).isoformat()
+        with get_connection(initialized_settings) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO totp_pending_secrets (user_id, secret, created_at) VALUES (?, ?, ?)",
+                (1, encrypted, created_at),
+            )
+            connection.commit()
+
+        init_db(initialized_settings)
+
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute(
+                "SELECT secret, created_at FROM totp_pending_secrets WHERE user_id = 1",
+            ).fetchone()
+        assert row is not None
+        assert row["secret"] == encrypted
+        assert row["created_at"] == created_at
 
 
 class TestLoginFlow:
@@ -311,6 +519,22 @@ class TestLoginFlow:
         second = client.post("/api/auth/login/totp", json={"challenge_token": second_challenge, "code": legacy_code})
         assert second.status_code == 401
 
+    def test_same_totp_window_cannot_complete_login_twice(self, client, initialized_settings, monkeypatch) -> None:
+        secret, _codes = _enable_totp(client, initialized_settings)
+        fixed_epoch = 1_800_000_000
+        monkeypatch.setattr(totp_service_module.time, "time", lambda: fixed_epoch)
+        code = pyotp.TOTP(secret).at(fixed_epoch)
+
+        _logout(client)
+        challenge = _login(client).json()["challenge_token"]
+        first = client.post("/api/auth/login/totp", json={"challenge_token": challenge, "code": code})
+        assert first.status_code == 200, first.text
+
+        _logout(client)
+        second_challenge = _login(client).json()["challenge_token"]
+        second = client.post("/api/auth/login/totp", json={"challenge_token": second_challenge, "code": code})
+        assert second.status_code == 401
+
 
 class TestSetupFlow:
     def test_setup_initiation_returns_qr_and_secret(self, client) -> None:
@@ -362,6 +586,18 @@ class TestSetupFlow:
         assert stored != secret
         assert str(stored).startswith("fernet1$")
         assert decrypt_at_rest(stored, initialized_settings) == (secret, True)
+
+    def test_recovery_codes_are_stored_as_hmac_hashes_only(self, client, initialized_settings) -> None:
+        _secret, codes = _enable_totp(client, initialized_settings)
+        with get_connection(initialized_settings) as connection:
+            rows = connection.execute(
+                "SELECT code_hash FROM user_recovery_codes WHERE user_id = 1 ORDER BY id",
+            ).fetchall()
+        stored_hashes = [str(row["code_hash"]) for row in rows]
+        assert len(stored_hashes) == RECOVERY_CODE_COUNT
+        assert all(value.startswith(RECOVERY_CODE_HASH_PREFIX) for value in stored_hashes)
+        assert set(codes).isdisjoint(stored_hashes)
+        assert all(code not in "".join(stored_hashes) for code in codes)
 
     def test_legacy_plaintext_totp_secret_migrates_on_login(self, client, initialized_settings) -> None:
         secret = generate_totp_secret()
@@ -415,6 +651,20 @@ class TestSetupFlow:
 
 
 class TestDisableAndAdminReset:
+    def test_user_disable_totp_clears_secret_and_recovery_codes(self, client, initialized_settings) -> None:
+        _secret, codes = _enable_totp(client, initialized_settings)
+        response = client.post(
+            "/api/auth/totp/disable",
+            json={"password": "test-admin-password", "totp_or_recovery": codes[0]},
+        )
+        assert response.status_code == 200, response.text
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute("SELECT totp_secret, totp_setup_prompt_enabled FROM users WHERE id = 1").fetchone()
+            code_count = connection.execute("SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = 1").fetchone()[0]
+        assert row["totp_secret"] is None
+        assert row["totp_setup_prompt_enabled"] == 0
+        assert code_count == 0
+
     def test_admin_disable_other_user_requires_admin_password(self, client, initialized_settings) -> None:
         secret, _codes = _enable_totp(client, initialized_settings)
         response = client.post("/api/admin/users/1/2fa/disable", json={"current_admin_password": "wrong"})
@@ -454,6 +704,26 @@ class TestAdminUiData:
         admin = next(entry for entry in response.json()["users"] if entry["username"] == "admin")
         assert admin["totp_setup_prompt_enabled"] is True
 
+    def test_auth_me_response_does_not_expose_totp_secret_material(self, client, initialized_settings) -> None:
+        _enable_totp(client, initialized_settings)
+        response = client.get("/api/auth/me")
+        assert response.status_code == 200
+        _assert_response_has_no_secret_fields(response.json())
+
+    def test_totp_status_response_does_not_expose_secret_material(self, client, initialized_settings) -> None:
+        _enable_totp(client, initialized_settings)
+        response = client.get("/api/auth/totp/status")
+        assert response.status_code == 200
+        payload = response.json()
+        _assert_response_has_no_secret_fields(payload)
+        assert "recovery_codes_remaining" in payload
+
+    def test_admin_user_list_response_does_not_expose_secret_material(self, client, initialized_settings) -> None:
+        _enable_totp(client, initialized_settings)
+        response = client.get("/api/admin/users")
+        assert response.status_code == 200
+        _assert_response_has_no_secret_fields(response.json())
+
     def test_admin_can_enable_then_disable_user_2fa_requirement(self, client, initialized_settings) -> None:
         now = utcnow_iso()
         with get_connection(initialized_settings) as connection:
@@ -481,3 +751,40 @@ class TestAdminUiData:
         assert refreshed.status_code == 200
         caleb = next(entry for entry in refreshed.json()["users"] if entry["id"] == user_id)
         assert caleb["totp_setup_prompt_enabled"] is False
+
+
+class TestTotpStaticGuards:
+    def test_totp_log_calls_do_not_include_secret_material(self) -> None:
+        _assert_log_calls_have_no_secret_fields(auth_routes)
+        _assert_log_calls_have_no_secret_fields(admin_routes)
+
+    def test_users_totp_secret_writes_use_encryption_or_clear(self) -> None:
+        _assert_totp_secret_writes_are_encrypted_or_clear(inspect.getsource(auth_routes))
+        _assert_totp_secret_writes_are_encrypted_or_clear(inspect.getsource(db_module._harden_totp_at_rest_values))
+
+    def test_pending_totp_secret_writes_use_encryption_or_delete(self) -> None:
+        _assert_pending_secret_writes_are_encrypted(inspect.getsource(auth_routes))
+        _assert_pending_secret_writes_are_encrypted(inspect.getsource(db_module._harden_totp_at_rest_values))
+
+    def test_recovery_code_inserts_hash_codes(self) -> None:
+        source = inspect.getsource(auth_routes._insert_recovery_codes)
+        assert "INSERT INTO user_recovery_codes" in source
+        assert "hash_recovery_code(code, settings)" in source
+
+    def test_totp_response_schemas_do_not_expose_secret_material_outside_intentional_flows(self) -> None:
+        for model in (
+            schemas_module.AuthUserEnvelope,
+            schemas_module.UserResponse,
+            schemas_module.AdminUserResponse,
+            schemas_module.AdminUserListResponse,
+            schemas_module.TotpStatusResponse,
+        ):
+            fields = set(model.model_fields)
+            assert "totp_secret" not in fields
+            assert "secret" not in fields
+            assert "qr_svg" not in fields
+            assert "recovery_codes" not in fields
+
+        assert {"secret", "qr_svg"}.issubset(schemas_module.TotpSetupStartResponse.model_fields)
+        assert "recovery_codes" in schemas_module.TotpSetupVerifyResponse.model_fields
+        assert "recovery_codes" in schemas_module.TotpRecoveryCodesResponse.model_fields

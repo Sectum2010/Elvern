@@ -238,6 +238,37 @@ describe("Elvern player mobile CSS guards", () => {
     expect(lockedBlock).toContain("opacity:");
   });
 
+  test("desktop track menus keep long audio and subtitle labels readable", () => {
+    const styles = readStyles();
+    const menuBlock = cssBlock(styles, ".elvern-overlay__track-menu");
+    const rowBlock = cssBlock(styles, ".elvern-overlay__track-menu-item");
+    const labelBlock = cssBlockForSelectorListItem(styles, ".elvern-overlay__track-menu-label");
+    const warningBlock = cssBlock(styles, ".elvern-overlay__track-menu-warning");
+    const errorBlock = cssBlock(styles, ".elvern-overlay__track-menu-error-mark");
+    const spinnerBlock = cssBlock(styles, ".elvern-overlay__track-menu-spinner");
+
+    expect(menuBlock).toContain("min-width: min(18rem");
+    expect(menuBlock).toContain("max-width: min(24rem");
+    expect(menuBlock).toContain("max-inline-size: min(24rem");
+    expect(menuBlock).toContain("max-height: min(58vh");
+    expect(menuBlock).toContain("overflow-y: auto");
+    expect(menuBlock).toContain("line-height: 1.25");
+    expect(rowBlock).toContain("display: flex");
+    expect(rowBlock).toContain("align-items: center");
+    expect(rowBlock).toContain("min-height: 2.45rem");
+    expect(rowBlock).toContain("line-height: 1.25");
+    expect(rowBlock).toContain("white-space: normal");
+    expect(rowBlock).toContain("overflow-wrap: anywhere");
+    expect(labelBlock).toContain("flex: 1 1 auto");
+    expect(labelBlock).toContain("min-width: 0");
+    expect(labelBlock).toContain("line-height: 1.25");
+    expect(labelBlock).not.toContain("position: absolute");
+    expect(warningBlock).toContain("flex: 0 0 1rem");
+    expect(errorBlock).toContain("flex: 0 0 1rem");
+    expect(spinnerBlock).toContain("width: 0.78rem");
+    expect(rowBlock).not.toContain("line-height: 0");
+  });
+
   test("timeline has no standalone playhead knob styling", () => {
     const styles = readStyles();
 

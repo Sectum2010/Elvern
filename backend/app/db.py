@@ -13,6 +13,7 @@ from .db_hidden_movie_keys import (
     _build_hidden_movie_key,
     preserve_hidden_movie_keys_for_media_item,
 )
+from .services.at_rest_encryption import CIPHERTEXT_PREFIX, encrypt_at_rest
 
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ BROWSER_SESSION_HMAC_MIGRATION_NAME = "browser_session_hmac1_v1"
 ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME = "account_short_token_hmac1_v1"
 TOKEN_HASH_MIGRATION_REVOKE_REASON = "token_hash_migration"
 TOKEN_HASH_PREFIX = "hmac1$"
+TOTP_PENDING_SECRET_TTL_SECONDS = 10 * 60
 
 
 TABLE_STATEMENTS = (
@@ -889,13 +891,13 @@ def init_db(settings: Settings) -> None:
     with get_connection(settings) as connection:
         for statement in TABLE_STATEMENTS:
             connection.execute(statement)
-        _run_schema_migrations(connection)
+        _run_schema_migrations(connection, settings=settings)
         for statement in INDEX_STATEMENTS:
             connection.execute(statement)
         connection.commit()
 
 
-def _run_schema_migrations(connection: sqlite3.Connection) -> None:
+def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings) -> None:
     _ensure_column(connection, "playback_progress", "watch_seconds_total", "REAL NOT NULL DEFAULT 0")
     _ensure_column(connection, "media_items", "source_kind", "TEXT NOT NULL DEFAULT 'local'")
     _ensure_column(connection, "media_items", "library_source_id", "INTEGER")
@@ -922,6 +924,7 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "users", "totp_setup_prompt_enabled", "INTEGER NOT NULL DEFAULT 0")
     _run_totp_prompt_default_migration(connection)
     _mark_totp_migration(connection)
+    _harden_totp_at_rest_values(connection, settings=settings)
 
     _ensure_column(connection, "sessions", "revoked_at", "TEXT")
     _ensure_column(connection, "sessions", "revoked_reason", "TEXT")
@@ -959,6 +962,60 @@ def _run_schema_migrations(connection: sqlite3.Connection) -> None:
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)
     _backfill_hidden_movie_keys(connection)
+
+
+def _harden_totp_at_rest_values(connection: sqlite3.Connection, *, settings: Settings) -> None:
+    encrypted_user_secrets = 0
+    rows = connection.execute(
+        """
+        SELECT id, totp_secret
+        FROM users
+        WHERE totp_secret IS NOT NULL
+          AND totp_secret != ''
+          AND totp_secret NOT LIKE ?
+        """,
+        (CIPHERTEXT_PREFIX + "%",),
+    ).fetchall()
+    for row in rows:
+        connection.execute(
+            "UPDATE users SET totp_secret = ? WHERE id = ?",
+            (encrypt_at_rest(str(row["totp_secret"]), settings), int(row["id"])),
+        )
+        encrypted_user_secrets += 1
+
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+    cutoff_epoch = now_epoch - TOTP_PENDING_SECRET_TTL_SECONDS
+    encrypted_pending_secrets = 0
+    deleted_pending_secrets = 0
+    pending_rows = connection.execute(
+        """
+        SELECT user_id, secret, created_at
+        FROM totp_pending_secrets
+        """
+    ).fetchall()
+    for row in pending_rows:
+        created_epoch = _epoch_seconds_from_iso(row["created_at"])
+        if created_epoch is None or created_epoch < cutoff_epoch:
+            connection.execute(
+                "DELETE FROM totp_pending_secrets WHERE user_id = ?",
+                (int(row["user_id"]),),
+            )
+            deleted_pending_secrets += 1
+            continue
+        secret = str(row["secret"] or "")
+        if secret and not secret.startswith(CIPHERTEXT_PREFIX):
+            connection.execute(
+                "UPDATE totp_pending_secrets SET secret = ? WHERE user_id = ?",
+                (encrypt_at_rest(secret, settings), int(row["user_id"])),
+            )
+            encrypted_pending_secrets += 1
+
+    if encrypted_user_secrets:
+        logger.info("Encrypted %s legacy TOTP secret(s)", encrypted_user_secrets)
+    if encrypted_pending_secrets:
+        logger.info("Encrypted %s legacy pending TOTP secret(s)", encrypted_pending_secrets)
+    if deleted_pending_secrets:
+        logger.info("Deleted %s expired pending TOTP secret(s)", deleted_pending_secrets)
 
 
 def _run_session_idle_timeout_migration(connection: sqlite3.Connection) -> None:
