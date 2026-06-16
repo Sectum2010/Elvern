@@ -38,6 +38,11 @@ That can include:
 
 Do not commit or casually share backup checkpoint directories.
 
+New automatic and Admin-created checkpoints are encrypted `.tar.gz.enc` files. The
+CLI also creates encrypted backups by default. Plaintext checkpoint directories are
+only for explicit developer/manual recovery scenarios and require both
+`--output-dir` and `--allow-plaintext-backup`.
+
 ## Automatic Safety Checkpoints
 
 Elvern creates automatic checkpoints before these dangerous actions:
@@ -94,10 +99,13 @@ It does not:
 
 - restore anything
 - download or export backups through the browser
-- encrypt checkpoints
+- create plaintext checkpoints
 - expose standard-user recovery workflows
 
-Backups stay server-local in this stage. For off-host protection, copy checkpoint folders from `backend/data/backups/` to an external drive, NAS, or other secure storage.
+Backups stay server-local in this stage. For off-host protection, copy encrypted
+checkpoint archives from `backend/data/backups/` to an external drive, NAS, or
+other secure storage. Legacy plaintext checkpoint directories remain inspectable,
+but they should be treated as secret-bearing operational artifacts.
 
 ## Future Direction
 

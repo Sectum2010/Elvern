@@ -266,6 +266,12 @@ Auto encrypted backups are protected by a key derived from
 may not be recoverable. For long-term/off-machine recovery, use a manual
 passphrase backup.
 
+Plaintext backup directories are unsafe. Default backup creation, Admin UI, and
+Admin API flows must stay encrypted-only. CLI plaintext creation requires both
+`--output-dir` and `--allow-plaintext-backup`; direct service calls require
+`allow_plaintext_backup=True`. Preserve legacy plaintext inspect/restore-plan
+support without deleting, moving, or auto-migrating real backup files.
+
 ## 5. Rules For Creating New Files
 
 Create a new file when it gives a real owner a home.

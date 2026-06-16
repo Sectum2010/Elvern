@@ -24,6 +24,17 @@ This repo uses deadchecks for user-visible core paths. They are required before 
 - Inspect Network by the authorized user cannot be prevented; server-side authorization prevents unauthorized replay.
 - Request logs and diagnostics must not expose raw download tokens or token hashes. If a path has to be logged, redact `/api/download/sessions/<anything>` as `/api/download/sessions/[redacted]`.
 
+## Backup Plaintext Safety
+
+- Default, Admin UI, and Admin API backup creation must stay encrypted-only.
+- CLI plaintext checkpoint creation is unsafe and must require both `--output-dir`
+  and `--allow-plaintext-backup`.
+- Service-level plaintext checkpoint creation must require
+  `allow_plaintext_backup=True`.
+- Legacy plaintext backup inspect and restore-plan support may remain, but do not
+  delete, move, or auto-migrate real backup files without explicit operator
+  approval.
+
 ## Core Regression Matrix
 
 - Detail page: the page must render, not blank, and expose the expected playback/handoff actions.

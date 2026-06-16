@@ -31,6 +31,15 @@ BACKUP_WARNING = (
     "Manual backups may contain secrets such as env values, OAuth tokens, "
     "session-related secrets, and database contents. Do not commit or share them."
 )
+PLAINTEXT_BACKUP_DENIED_ERROR = (
+    "Plaintext backup is unsafe. Use explicit allow_plaintext_backup=True only for "
+    "dev/test/manual recovery scenarios."
+)
+PLAINTEXT_BACKUP_WARNING = (
+    BACKUP_WARNING
+    + " This checkpoint is a plaintext backup directory; keep it on trusted storage "
+    "only and encrypt or remove it when finished."
+)
 
 
 def _utc_now() -> datetime:
@@ -367,6 +376,7 @@ def create_backup_checkpoint(
     settings: Settings,
     output_dir: str | Path | None = None,
     *,
+    allow_plaintext_backup: bool = False,
     include_env: bool | None = None,
     include_helper_releases: bool = True,
     include_assistant_uploads: bool = True,
@@ -383,6 +393,8 @@ def create_backup_checkpoint(
     resolved_trigger_kind = trigger_kind or ("auto" if auto_checkpoint else "manual")
     resolved_include_env = (resolved_trigger_kind == "manual") if include_env is None else bool(include_env)
     encrypted_output = output_dir is None
+    if not encrypted_output and not allow_plaintext_backup:
+        raise ValueError(PLAINTEXT_BACKUP_DENIED_ERROR)
     encrypted_backup_path = _allocate_default_encrypted_backup_path(created_at) if encrypted_output else None
     checkpoint_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else (
         _resolve_backups_dir(None) / f".staging-{encrypted_backup_path.name.removesuffix('.tar.gz.enc')}"
@@ -490,7 +502,7 @@ def create_backup_checkpoint(
         "created_at_utc": manifest["created_at_utc"],
         "backup_trigger": backup_trigger,
         "auto_checkpoint": bool(auto_checkpoint),
-        "warning": BACKUP_WARNING,
+        "warning": BACKUP_WARNING if encrypted_output else PLAINTEXT_BACKUP_WARNING,
         "contains_secrets": True,
         "backup_storage": manifest["backup_storage"],
         "backup_encrypted": bool(encrypted_output),

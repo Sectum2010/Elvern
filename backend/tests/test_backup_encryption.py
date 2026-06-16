@@ -206,7 +206,11 @@ class TestBackupTarExtraction:
 class TestLegacyPlaintextBackups:
     def test_old_plaintext_backup_still_inspectable(self, initialized_settings, tmp_path) -> None:
         checkpoint_dir = tmp_path / "legacy-checkpoint"
-        backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+        backup_service.create_backup_checkpoint(
+            initialized_settings,
+            output_dir=checkpoint_dir,
+            allow_plaintext_backup=True,
+        )
 
         inspection = backup_service.inspect_backup_checkpoint(checkpoint_dir)
 

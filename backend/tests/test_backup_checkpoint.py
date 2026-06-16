@@ -189,12 +189,54 @@ def _insert_runtime_fixture_data(initialized_settings) -> None:
         connection.commit()
 
 
+def _create_plaintext_checkpoint(initialized_settings, output_dir: Path, **kwargs):
+    return backup_service.create_backup_checkpoint(
+        initialized_settings,
+        output_dir=output_dir,
+        allow_plaintext_backup=True,
+        **kwargs,
+    )
+
+
+def test_backup_creation_default_output_is_encrypted_archive(initialized_settings, tmp_path, monkeypatch) -> None:
+    fake_root = _prepare_fake_project_root(tmp_path, monkeypatch)
+    _insert_runtime_fixture_data(initialized_settings)
+
+    payload = backup_service.create_backup_checkpoint(initialized_settings)
+    backup_path = Path(payload["backup_path"])
+
+    assert backup_path.is_file()
+    assert backup_path.parent == (fake_root / "backend" / "data" / "backups").resolve()
+    assert backup_path.name.endswith(".tar.gz.enc")
+    assert payload["backup_storage"] == "encrypted_archive"
+    assert payload["backup_encrypted"] is True
+    assert payload["backup_key_source"] == "auto"
+
+    inspect_payload = backup_service.inspect_backup_checkpoint(backup_path, settings=initialized_settings)
+    assert inspect_payload["valid"] is True
+    assert inspect_payload["storage_kind"] == "encrypted_archive"
+
+
+def test_backup_create_with_output_dir_requires_plaintext_allow_flag(
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    checkpoint_dir = tmp_path / "checkpoint"
+
+    with pytest.raises(ValueError, match="Plaintext backup is unsafe"):
+        backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+
+    assert not checkpoint_dir.exists()
+
+
 def test_backup_creation_produces_manifest_and_db_snapshot(initialized_settings, tmp_path, monkeypatch) -> None:
     _prepare_fake_project_root(tmp_path, monkeypatch)
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    payload = backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    payload = _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     manifest_path = checkpoint_dir / "manifest.json"
     db_snapshot_path = checkpoint_dir / "elvern.db"
@@ -212,6 +254,11 @@ def test_backup_creation_produces_manifest_and_db_snapshot(initialized_settings,
     assert manifest["contains_secrets"] is True
     assert manifest["backup_trigger"] == "manual_cli"
     assert manifest["auto_checkpoint"] is False
+    assert manifest["backup_storage"] == "legacy_plaintext_directory"
+    assert manifest["backup_encrypted"] is False
+    assert payload["backup_storage"] == "legacy_plaintext_directory"
+    assert payload["backup_encrypted"] is False
+    assert "plaintext backup directory" in str(payload["warning"]).lower()
     assert manifest["reason"] is None
     assert manifest["media_root_path"] == str(initialized_settings.media_root.resolve())
     assert manifest["transcode_dir"] == str(initialized_settings.transcode_dir.resolve())
@@ -244,7 +291,7 @@ def test_backup_list_returns_created_manual_checkpoint(initialized_settings, tmp
 
     backups_dir = tmp_path / "backups"
     checkpoint_dir = backups_dir / "manual-checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     checkpoints = backup_service.list_backup_checkpoints(initialized_settings, backups_dir=backups_dir)
     assert len(checkpoints) == 1
@@ -267,7 +314,7 @@ def test_backup_creation_ignores_missing_optional_directories(initialized_settin
     shutil.rmtree(initialized_settings.db_path.parent / "assistant_uploads", ignore_errors=True)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    payload = backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    payload = _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     manifest = payload["manifest"]
     assert manifest["helper_releases_included"] is False
@@ -280,7 +327,7 @@ def test_backup_inspect_detects_tampered_file(initialized_settings, tmp_path, mo
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     env_copy = checkpoint_dir / "deploy" / "env" / "elvern.env"
     env_copy.write_text("tampered=true\n", encoding="utf-8")
@@ -296,9 +343,9 @@ def test_backup_create_without_env_excludes_env_file(initialized_settings, tmp_p
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    payload = backup_service.create_backup_checkpoint(
+    payload = _create_plaintext_checkpoint(
         initialized_settings,
-        output_dir=checkpoint_dir,
+        checkpoint_dir,
         include_env=False,
     )
 
@@ -312,8 +359,8 @@ def test_backup_prune_never_deletes_manual_checkpoints(initialized_settings, tmp
     _insert_runtime_fixture_data(initialized_settings)
 
     backups_dir = tmp_path / "backups"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=backups_dir / "manual-a")
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=backups_dir / "manual-b")
+    _create_plaintext_checkpoint(initialized_settings, backups_dir / "manual-a")
+    _create_plaintext_checkpoint(initialized_settings, backups_dir / "manual-b")
 
     summary = backup_service.prune_backup_checkpoints(
         initialized_settings,
@@ -344,28 +391,25 @@ def test_backup_prune_deletes_only_older_auto_checkpoints_beyond_keep_auto(
     monkeypatch.setattr(backup_service, "_utc_now", lambda: timestamps.pop(0))
 
     backups_dir = tmp_path / "backups"
-    backup_service.create_backup_checkpoint(
+    _create_plaintext_checkpoint(
         initialized_settings,
-        output_dir=backups_dir / "auto-1",
+        backups_dir / "auto-1",
         backup_trigger="auto_before_admin_rescan",
         auto_checkpoint=True,
     )
-    backup_service.create_backup_checkpoint(
+    _create_plaintext_checkpoint(
         initialized_settings,
-        output_dir=backups_dir / "auto-2",
+        backups_dir / "auto-2",
         backup_trigger="auto_before_admin_rescan",
         auto_checkpoint=True,
     )
-    newest_auto = backup_service.create_backup_checkpoint(
+    newest_auto = _create_plaintext_checkpoint(
         initialized_settings,
-        output_dir=backups_dir / "auto-3",
+        backups_dir / "auto-3",
         backup_trigger="auto_before_admin_rescan",
         auto_checkpoint=True,
     )
-    backup_service.create_backup_checkpoint(
-        initialized_settings,
-        output_dir=backups_dir / "manual-1",
-    )
+    _create_plaintext_checkpoint(initialized_settings, backups_dir / "manual-1")
 
     summary = backup_service.prune_backup_checkpoints(
         initialized_settings,
@@ -389,9 +433,9 @@ def test_auto_backup_manifest_has_auto_checkpoint_true_and_trigger(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "auto-checkpoint"
-    payload = backup_service.create_backup_checkpoint(
+    payload = _create_plaintext_checkpoint(
         initialized_settings,
-        output_dir=checkpoint_dir,
+        checkpoint_dir,
         backup_trigger="auto_before_admin_rescan",
         auto_checkpoint=True,
         reason="manual",
@@ -813,7 +857,8 @@ def test_admin_backup_endpoints_list_create_inspect_and_restore_plan(
     assert list_response.json()["backups_dir"] == str((fake_root / "backend" / "data" / "backups").resolve())
     assert list_response.json()["checkpoints"] == []
 
-    create_response = client.post("/api/admin/backups")
+    plaintext_probe_dir = tmp_path / "admin-plaintext-probe"
+    create_response = client.post("/api/admin/backups", json={"output_dir": str(plaintext_probe_dir)})
     assert create_response.status_code == 200
     create_payload = create_response.json()
     checkpoint = create_payload["checkpoint"]
@@ -828,6 +873,7 @@ def test_admin_backup_endpoints_list_create_inspect_and_restore_plan(
     assert checkpoint["inspect_valid"] is True
     assert Path(checkpoint["path"]).is_file()
     assert checkpoint["path"].endswith(".tar.gz.enc")
+    assert not plaintext_probe_dir.exists()
 
     listed = client.get("/api/admin/backups").json()["checkpoints"]
     assert [entry["checkpoint_id"] for entry in listed] == [checkpoint_id]
@@ -885,7 +931,7 @@ def test_non_admin_cannot_call_admin_backup_endpoints(
     _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
     _create_standard_user_via_admin(client, username="backup-reader", password="backup-reader-password")
     checkpoint_dir = tmp_path / "manual-checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
     checkpoint_id = checkpoint_dir.name
     _logout(client)
     _login(client, username="backup-reader", password="backup-reader-password")
@@ -909,7 +955,7 @@ def test_backup_restore_plan_returns_valid_plan_for_valid_checkpoint(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     plan = backup_service.build_restore_dry_run_plan(initialized_settings, checkpoint_dir)
 
@@ -944,7 +990,7 @@ def test_backup_restore_plan_verifies_manifest_hashes(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
     env_copy = checkpoint_dir / "deploy" / "env" / "elvern.env"
     env_copy.write_text("tampered=true\n", encoding="utf-8")
 
@@ -965,7 +1011,7 @@ def test_backup_restore_plan_blocks_when_db_snapshot_is_missing(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
     (checkpoint_dir / "elvern.db").unlink()
 
     plan = backup_service.build_restore_dry_run_plan(initialized_settings, checkpoint_dir)
@@ -984,7 +1030,7 @@ def test_backup_restore_plan_blocks_when_db_snapshot_is_corrupt(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
     (checkpoint_dir / "elvern.db").write_bytes(b"not-a-sqlite-database")
 
     plan = backup_service.build_restore_dry_run_plan(initialized_settings, checkpoint_dir)
@@ -1003,7 +1049,7 @@ def test_backup_restore_plan_warns_when_current_media_root_differs(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     different_media_root = tmp_path / "different-media-root"
     different_media_root.mkdir()
@@ -1025,7 +1071,7 @@ def test_backup_restore_plan_states_media_files_are_not_included(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     plan = backup_service.build_restore_dry_run_plan(initialized_settings, checkpoint_dir)
 
@@ -1044,7 +1090,7 @@ def test_backup_restore_plan_does_not_overwrite_live_runtime_state(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     live_env = fake_root / "deploy" / "env" / "elvern.env"
     live_helper = initialized_settings.helper_releases_dir / "stable" / "linux" / "helper.zip"
@@ -1085,7 +1131,7 @@ def test_cli_backup_restore_plan_works_against_temp_checkpoint(
     _insert_runtime_fixture_data(initialized_settings)
 
     checkpoint_dir = tmp_path / "checkpoint"
-    backup_service.create_backup_checkpoint(initialized_settings, output_dir=checkpoint_dir)
+    _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
 
     monkeypatch.setattr(
         "sys.argv",
@@ -1193,9 +1239,88 @@ def test_cli_backup_create_prints_safe_summary_only(monkeypatch, capsys) -> None
     assert "auto_checkpoint" not in output
     assert calls["kwargs"] == {
         "output_dir": None,
+        "allow_plaintext_backup": False,
         "include_env": False,
         "include_helper_releases": False,
         "include_assistant_uploads": False,
+    }
+
+
+def test_cli_backup_create_rejects_output_dir_without_plaintext_allow(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    checkpoint_dir = tmp_path / "plaintext-checkpoint"
+
+    def _unexpected_refresh_settings():
+        raise AssertionError("settings should not load for rejected plaintext backup")
+
+    monkeypatch.setattr(app_cli, "refresh_settings", _unexpected_refresh_settings)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["backend.app.cli", "backup-create", "--output-dir", str(checkpoint_dir)],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        app_cli.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "Plaintext backup requires --allow-plaintext-backup." in captured.err
+    assert "Plaintext backups may contain elvern.db, deploy/env/elvern.env" in captured.err
+    assert "Plaintext backup is unsafe." in captured.err
+    assert not checkpoint_dir.exists()
+
+
+def test_cli_backup_create_output_dir_with_plaintext_allow_succeeds(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    checkpoint_dir = tmp_path / "plaintext-checkpoint"
+    payload = {
+        **_backup_payload_with_sensitive_manifest(),
+        "checkpoint_id": checkpoint_dir.name,
+        "backup_path": str(checkpoint_dir),
+        "backup_storage": "legacy_plaintext_directory",
+        "backup_encrypted": False,
+        "backup_key_source": None,
+        "warning": backup_service.PLAINTEXT_BACKUP_WARNING,
+    }
+    calls: dict[str, object] = {}
+
+    def _fake_create_backup_checkpoint(settings, **kwargs):
+        calls["settings"] = settings
+        calls["kwargs"] = kwargs
+        return payload
+
+    monkeypatch.setattr(app_cli, "refresh_settings", lambda: object())
+    monkeypatch.setattr(app_cli, "create_backup_checkpoint", _fake_create_backup_checkpoint)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "backend.app.cli",
+            "backup-create",
+            "--output-dir",
+            str(checkpoint_dir),
+            "--allow-plaintext-backup",
+            "--no-env",
+        ],
+    )
+
+    app_cli.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["backup_storage"] == "legacy_plaintext_directory"
+    assert output["backup_encrypted"] is False
+    assert output["warning"] == backup_service.PLAINTEXT_BACKUP_WARNING
+    assert calls["kwargs"] == {
+        "output_dir": str(checkpoint_dir),
+        "allow_plaintext_backup": True,
+        "include_env": False,
+        "include_helper_releases": True,
+        "include_assistant_uploads": True,
     }
 
 

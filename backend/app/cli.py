@@ -14,6 +14,7 @@ from .db import get_connection, init_db
 from .media_scan import scan_media_library
 from .security import hash_password, verify_password
 from .services.backup_service import (
+    PLAINTEXT_BACKUP_DENIED_ERROR,
     build_restore_dry_run_plan,
     create_backup_checkpoint,
     inspect_backup_checkpoint,
@@ -29,6 +30,12 @@ ARGON2_PARTIAL_CONFIG_ERROR = (
     "Argon2id parameters must be either all set "
     "(ELVERN_ARGON2_TIME_COST, ELVERN_ARGON2_MEMORY_COST, "
     "ELVERN_ARGON2_PARALLELISM) or all unset for adaptive calibration."
+)
+CLI_PLAINTEXT_BACKUP_DENIED_ERROR = (
+    "Plaintext backup requires --allow-plaintext-backup. "
+    "Plaintext backups may contain elvern.db, deploy/env/elvern.env, OAuth tokens, "
+    "session secrets, assistant uploads. "
+    f"{PLAINTEXT_BACKUP_DENIED_ERROR}"
 )
 
 
@@ -147,7 +154,18 @@ def _build_parser() -> argparse.ArgumentParser:
     backup_create_parser.add_argument(
         "--output-dir",
         default=None,
-        help="Destination checkpoint directory. Defaults to backend/data/backups/elvern-backup-YYYYMMDD-HHMMSSZ.",
+        help=(
+            "Destination plaintext checkpoint directory. Requires --allow-plaintext-backup. "
+            "Omit to create the default encrypted .tar.gz.enc backup."
+        ),
+    )
+    backup_create_parser.add_argument(
+        "--allow-plaintext-backup",
+        action="store_true",
+        help=(
+            "Explicitly allow unsafe plaintext directory backup creation for "
+            "dev/test/manual recovery scenarios."
+        ),
     )
     backup_create_parser.add_argument(
         "--no-env",
@@ -368,6 +386,9 @@ def main() -> None:
         print(json.dumps(payload, indent=2))
         return
 
+    if args.command == "backup-create" and args.output_dir and not args.allow_plaintext_backup:
+        parser.error(CLI_PLAINTEXT_BACKUP_DENIED_ERROR)
+
     settings = refresh_settings()
 
     if args.command == "backup-list":
@@ -393,6 +414,7 @@ def main() -> None:
         payload = create_backup_checkpoint(
             settings,
             output_dir=args.output_dir,
+            allow_plaintext_backup=args.allow_plaintext_backup,
             include_env=not args.no_env,
             include_helper_releases=not args.no_helper_releases,
             include_assistant_uploads=not args.no_assistant_uploads,
