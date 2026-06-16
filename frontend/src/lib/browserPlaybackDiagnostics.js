@@ -148,8 +148,16 @@ export function buildBrowserPlaybackDiagnosticPayload({
     releaseGateReason: releaseGateReason(releaseGate, explicitReleaseGateReason),
     release_gate_client_ready: booleanOrNull(releaseGate?.clientReady),
     release_gate_server_ready: booleanOrNull(releaseGate?.serverReady),
-    required_client_buffer_seconds: finiteNumber(releaseGate?.requiredClientBufferSeconds),
-    configured_client_buffer_seconds: finiteNumber(releaseGate?.configuredClientBufferSeconds),
+    configured_server_prepare_seconds: finiteNumber(releaseGate?.configuredServerPrepareSeconds),
+    required_server_prepare_seconds: finiteNumber(releaseGate?.requiredServerPrepareSeconds),
+    configured_client_cache_seconds: finiteNumber(releaseGate?.configuredClientCacheSeconds),
+    required_client_cache_seconds: finiteNumber(releaseGate?.requiredClientCacheSeconds),
+    required_client_buffer_seconds:
+      finiteNumber(releaseGate?.requiredClientCacheSeconds)
+      ?? finiteNumber(releaseGate?.requiredClientBufferSeconds),
+    configured_client_buffer_seconds:
+      finiteNumber(releaseGate?.configuredClientCacheSeconds)
+      ?? finiteNumber(releaseGate?.configuredClientBufferSeconds),
     backend_prepared_ahead_seconds:
       finiteNumber(releaseGate?.backendPreparedAheadSeconds)
       ?? finiteNumber(session?.ahead_runway_seconds),

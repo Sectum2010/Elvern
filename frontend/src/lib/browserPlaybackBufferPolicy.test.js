@@ -13,6 +13,8 @@ import {
   readClientPlaybackLiveness,
   restoreVideoAfterClientPrewarm,
   resolveClientPlaybackReleaseBufferSeconds,
+  resolveClientPlaybackRealCacheSeconds,
+  resolveServerPlaybackPrepareRunwaySeconds,
   resolvePlaybackRecoveryTargetSeconds,
   retuneHlsInstance,
   shouldStartClientBufferPrewarm,
@@ -37,15 +39,31 @@ function makeBufferedRange(ranges) {
 }
 
 describe("deriveBufferTargetsFromSession", () => {
-  test("maps lite tiers to locked targets", () => {
-    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_fast" }, "phone").forwardBufferSeconds, 15);
-    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_uncertain" }, "phone").forwardBufferSeconds, 45);
-    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_undersupply" }, "phone").forwardBufferSeconds, 180);
+  test("keeps server prepare thresholds for lite tiers", () => {
+    assert.equal(resolveServerPlaybackPrepareRunwaySeconds({ playback_mode: "lite", buffer_tier: "lite_fast" }), 15);
+    assert.equal(resolveServerPlaybackPrepareRunwaySeconds({ playback_mode: "lite", buffer_tier: "lite_uncertain" }), 45);
+    assert.equal(resolveServerPlaybackPrepareRunwaySeconds({ playback_mode: "lite", buffer_tier: "lite_undersupply" }), 180);
   });
 
-  test("maps full tiers to locked targets", () => {
-    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "full", buffer_tier: "full_healthy" }, "desktop").forwardBufferSeconds, 120);
-    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "full", buffer_tier: "full_bad_condition" }, "desktop").forwardBufferSeconds, 900);
+  test("keeps server prepare thresholds for full tiers", () => {
+    assert.equal(resolveServerPlaybackPrepareRunwaySeconds({ playback_mode: "full", buffer_tier: "full_healthy" }), 120);
+    assert.equal(resolveServerPlaybackPrepareRunwaySeconds({
+      playback_mode: "full",
+      buffer_tier: "full_bad_condition",
+      server_required_runway_seconds: 120,
+      server_reserve_seconds: 900,
+    }), 900);
+  });
+
+  test("maps lite tiers to universal real client cache target", () => {
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_fast" }, "phone").forwardBufferSeconds, 15);
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_uncertain" }, "phone").forwardBufferSeconds, 15);
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "lite", buffer_tier: "lite_undersupply" }, "phone").forwardBufferSeconds, 15);
+  });
+
+  test("maps full tiers to universal real client cache target", () => {
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "full", buffer_tier: "full_healthy" }, "desktop").forwardBufferSeconds, 30);
+    assert.equal(deriveBufferTargetsFromSession({ playback_mode: "full", buffer_tier: "full_bad_condition" }, "desktop").forwardBufferSeconds, 30);
   });
 
   test("uses universal back buffer and byte ceilings without device seconds caps", () => {
@@ -53,10 +71,10 @@ describe("deriveBufferTargetsFromSession", () => {
     const tablet = deriveBufferTargetsFromSession({ buffer_tier: "full_bad_condition" }, "tablet");
     const desktop = deriveBufferTargetsFromSession({ buffer_tier: "full_bad_condition" }, "desktop");
     const laptop = deriveBufferTargetsFromSession({ buffer_tier: "full_bad_condition" }, "laptop");
-    assert.equal(phone.forwardBufferSeconds, 900);
-    assert.equal(tablet.forwardBufferSeconds, 900);
-    assert.equal(desktop.forwardBufferSeconds, 900);
-    assert.equal(laptop.forwardBufferSeconds, 900);
+    assert.equal(phone.forwardBufferSeconds, 30);
+    assert.equal(tablet.forwardBufferSeconds, 30);
+    assert.equal(desktop.forwardBufferSeconds, 30);
+    assert.equal(laptop.forwardBufferSeconds, 30);
     assert.equal(phone.backBufferSeconds, 120);
     assert.equal(tablet.backBufferSeconds, 120);
     assert.equal(desktop.backBufferSeconds, 120);
@@ -67,17 +85,18 @@ describe("deriveBufferTargetsFromSession", () => {
     assert.equal(laptop.maxBufferSizeBytes, 3 * GB);
   });
 
-  test("falls back to lite required runway for uncertain lite sessions", () => {
+  test("keeps lite required runway as server prepare, not client cache", () => {
     const targets = deriveBufferTargetsFromSession({
       playback_mode: "lite",
       lite_required_runway_seconds: 45,
     }, "phone");
-    assert.equal(targets.forwardBufferSeconds, 45);
+    assert.equal(targets.forwardBufferSeconds, 15);
+    assert.equal(targets.serverPrepareSeconds, 45);
   });
 });
 
 describe("client playback release gates", () => {
-  test("locked thresholds are client-buffer release thresholds", () => {
+  test("client real-cache thresholds are Lite 15 and Full 30", () => {
     assert.equal(resolveClientPlaybackReleaseBufferSeconds({
       playback_mode: "lite",
       buffer_tier: "lite_fast",
@@ -85,19 +104,23 @@ describe("client playback release gates", () => {
     assert.equal(resolveClientPlaybackReleaseBufferSeconds({
       playback_mode: "lite",
       buffer_tier: "lite_uncertain",
-    }, "phone"), 45);
+    }, "phone"), 15);
     assert.equal(resolveClientPlaybackReleaseBufferSeconds({
       playback_mode: "lite",
       buffer_tier: "lite_undersupply",
-    }, "phone"), 180);
+    }, "phone"), 15);
     assert.equal(resolveClientPlaybackReleaseBufferSeconds({
       playback_mode: "full",
       buffer_tier: "full_healthy",
-    }, "phone"), 120);
+    }, "phone"), 30);
     assert.equal(resolveClientPlaybackReleaseBufferSeconds({
       playback_mode: "full",
       buffer_tier: "full_bad_condition",
-    }, "phone"), 900);
+    }, "phone"), 30);
+    assert.equal(resolveClientPlaybackRealCacheSeconds({
+      playback_mode: "full",
+      buffer_tier: "full_bad_condition",
+    }, "tablet"), 30);
   });
 
   test("server prepared runway alone does not release Lite fast playback", () => {
@@ -126,61 +149,121 @@ describe("client playback release gates", () => {
       backendPreparedAheadSeconds: 60,
       clientBufferedAheadSeconds: 15,
       deviceClass: "phone",
-    }).ready, false);
-    assert.equal(evaluateClientPlaybackReleaseGate({
-      session: { playback_mode: "lite", buffer_tier: "lite_undersupply" },
-      backendPreparedAheadSeconds: 220,
-      clientBufferedAheadSeconds: 45,
-      deviceClass: "phone",
-    }).ready, false);
-  });
-
-  test("Full releases only when client contiguous buffer reaches normal or reserve tier", () => {
-    assert.equal(evaluateClientPlaybackReleaseGate({
-      session: { playback_mode: "full", buffer_tier: "full_healthy" },
-      backendPreparedAheadSeconds: 140,
-      clientBufferedAheadSeconds: 119,
-      deviceClass: "phone",
-    }).ready, false);
-    assert.equal(evaluateClientPlaybackReleaseGate({
-      session: { playback_mode: "full", buffer_tier: "full_healthy" },
-      backendPreparedAheadSeconds: 140,
-      clientBufferedAheadSeconds: 120,
-      deviceClass: "phone",
     }).ready, true);
     assert.equal(evaluateClientPlaybackReleaseGate({
-      session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
-      backendPreparedAheadSeconds: 950,
-      clientBufferedAheadSeconds: 899,
+      session: { playback_mode: "lite", buffer_tier: "lite_undersupply" },
+      backendPreparedAheadSeconds: 180,
+      clientBufferedAheadSeconds: 15,
+      deviceClass: "phone",
+    }).ready, true);
+  });
+
+  test("Lite undersupply release separates server prepare and client real cache", () => {
+    const readyGate = evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_undersupply" },
+      backendPreparedAheadSeconds: 180,
+      clientBufferedAheadSeconds: 15,
+      deviceClass: "phone",
+    });
+    assert.equal(readyGate.ready, true);
+    assert.equal(readyGate.serverReady, true);
+    assert.equal(readyGate.clientReady, true);
+    assert.equal(readyGate.requiredServerPrepareSeconds, 180);
+    assert.equal(readyGate.requiredClientCacheSeconds, 15);
+
+    const serverBlocked = evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_undersupply" },
+      backendPreparedAheadSeconds: 179,
+      clientBufferedAheadSeconds: 15,
+      deviceClass: "phone",
+    });
+    assert.equal(serverBlocked.ready, false);
+    assert.equal(serverBlocked.serverReady, false);
+    assert.equal(serverBlocked.clientReady, true);
+
+    const clientBlocked = evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "lite", buffer_tier: "lite_undersupply" },
+      backendPreparedAheadSeconds: 180,
+      clientBufferedAheadSeconds: 14,
+      deviceClass: "phone",
+    });
+    assert.equal(clientBlocked.ready, false);
+    assert.equal(clientBlocked.serverReady, true);
+    assert.equal(clientBlocked.clientReady, false);
+  });
+
+  test("Full release separates 120/900 server prepare from 30 second client cache", () => {
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_healthy" },
+      backendPreparedAheadSeconds: 119,
+      clientBufferedAheadSeconds: 30,
       deviceClass: "phone",
     }).ready, false);
+    assert.equal(evaluateClientPlaybackReleaseGate({
+      session: { playback_mode: "full", buffer_tier: "full_healthy" },
+      backendPreparedAheadSeconds: 120,
+      clientBufferedAheadSeconds: 30,
+      deviceClass: "phone",
+    }).ready, true);
+    const badReady = evaluateClientPlaybackReleaseGate({
+      session: {
+        playback_mode: "full",
+        buffer_tier: "full_bad_condition",
+        server_reserve_seconds: 900,
+      },
+      backendPreparedAheadSeconds: 900,
+      clientBufferedAheadSeconds: 30,
+      deviceClass: "phone",
+    });
+    assert.equal(badReady.ready, true);
+    assert.equal(badReady.requiredServerPrepareSeconds, 900);
+    assert.equal(badReady.requiredClientCacheSeconds, 30);
+    const badClientBlocked = evaluateClientPlaybackReleaseGate({
+      session: {
+        playback_mode: "full",
+        buffer_tier: "full_bad_condition",
+        server_reserve_seconds: 900,
+      },
+      backendPreparedAheadSeconds: 900,
+      clientBufferedAheadSeconds: 29,
+      deviceClass: "phone",
+    });
+    assert.equal(badClientBlocked.ready, false);
+    assert.equal(badClientBlocked.serverReady, true);
+    assert.equal(badClientBlocked.clientReady, false);
   });
 
   test("caps the effective release gate to the remaining title duration", () => {
     const gate = evaluateClientPlaybackReleaseGate({
-      session: { playback_mode: "full", buffer_tier: "full_healthy" },
+      session: {
+        playback_mode: "full",
+        buffer_tier: "full_bad_condition",
+        server_reserve_seconds: 900,
+      },
       backendPreparedAheadSeconds: 60,
       clientBufferedAheadSeconds: 60,
       remainingPlayableSeconds: 60,
       deviceClass: "phone",
     });
 
-    assert.equal(gate.configuredClientBufferSeconds, 120);
-    assert.equal(gate.requiredClientBufferSeconds, 60);
+    assert.equal(gate.configuredServerPrepareSeconds, 900);
+    assert.equal(gate.requiredServerPrepareSeconds, 60);
+    assert.equal(gate.configuredClientCacheSeconds, 30);
+    assert.equal(gate.requiredClientCacheSeconds, 30);
     assert.equal(gate.ready, true);
   });
 
   test("audio switch release uses the audio-specific client buffer gate", () => {
     assert.equal(evaluateClientPlaybackReleaseGate({
       session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
-      backendPreparedAheadSeconds: 20,
+      backendPreparedAheadSeconds: 900,
       clientBufferedAheadSeconds: 14,
       audioSwitch: true,
       deviceClass: "phone",
     }).ready, false);
     assert.equal(evaluateClientPlaybackReleaseGate({
       session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
-      backendPreparedAheadSeconds: 20,
+      backendPreparedAheadSeconds: 900,
       clientBufferedAheadSeconds: 15,
       audioSwitch: true,
       deviceClass: "phone",
@@ -356,8 +439,8 @@ describe("buildHlsConfig", () => {
       session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
       deviceClass: "phone",
     });
-    assert.equal(config.maxBufferLength, 900);
-    assert.equal(config.maxMaxBufferLength, 900);
+    assert.equal(config.maxBufferLength, 30);
+    assert.equal(config.maxMaxBufferLength, 30);
     assert.equal(config.backBufferLength, 120);
     assert.equal(config.maxBufferSize, 250 * MB);
     assert.equal(config.lowLatencyMode, false);
@@ -375,8 +458,8 @@ describe("buildHlsConfig", () => {
       session: { playback_mode: "full", buffer_tier: "full_bad_condition" },
       deviceClass: "desktop",
     });
-    assert.equal(hls.config.maxBufferLength, 900);
-    assert.equal(hls.config.maxMaxBufferLength, 900);
+    assert.equal(hls.config.maxBufferLength, 30);
+    assert.equal(hls.config.maxMaxBufferLength, 30);
     assert.equal(hls.config.maxBufferSize, 3 * GB);
     assert.equal(hls.config.backBufferLength, 120);
   });
@@ -450,7 +533,7 @@ describe("native HLS helpers", () => {
     });
     assert.equal(starved.stallReason, "client_buffer_starved");
     const waiting = classifyPlaybackStall({
-      session: { playback_mode: "full", buffer_tier: "full_bad_condition", ahead_runway_seconds: 46 },
+      session: { playback_mode: "full", buffer_tier: "full_bad_condition", ahead_runway_seconds: 20 },
       livenessSample: { elapsedMs: 1000, currentTimeDeltaSeconds: 1, paused: false, bufferedAheadSeconds: 2 },
     });
     assert.equal(waiting.stallReason, "backend_supply_waiting");

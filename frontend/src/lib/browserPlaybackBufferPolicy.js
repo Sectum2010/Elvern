@@ -1,20 +1,22 @@
-export const LITE_FAST_FORWARD_BUFFER_SECONDS = 15;
-export const LITE_UNCERTAIN_FORWARD_BUFFER_SECONDS = 45;
-export const LITE_UNDERSUPPLY_FORWARD_BUFFER_SECONDS = 180;
-export const FULL_HEALTHY_FORWARD_BUFFER_SECONDS = 120;
-export const FULL_BAD_CONDITION_FORWARD_BUFFER_SECONDS = 900;
+export const LITE_FAST_SERVER_PREPARE_SECONDS = 15;
+export const LITE_UNCERTAIN_SERVER_PREPARE_SECONDS = 45;
+export const LITE_UNDERSUPPLY_SERVER_PREPARE_SECONDS = 180;
+export const FULL_HEALTHY_SERVER_PREPARE_SECONDS = 120;
+export const FULL_BAD_CONDITION_SERVER_PREPARE_SECONDS = 900;
+export const LITE_CLIENT_REAL_CACHE_SECONDS = 15;
+export const FULL_CLIENT_REAL_CACHE_SECONDS = 30;
 export const AUDIO_SWITCH_FORWARD_BUFFER_SECONDS = 15;
 export const CLIENT_BACK_BUFFER_SECONDS = 120;
 export const PHONE_MAX_BUFFER_SIZE_BYTES = 250 * 1024 * 1024;
 export const TABLET_MAX_BUFFER_SIZE_BYTES = 300 * 1024 * 1024;
 export const DESKTOP_MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024 * 1024;
 
-const BUFFER_TIER_TARGETS = {
-  lite_fast: LITE_FAST_FORWARD_BUFFER_SECONDS,
-  lite_uncertain: LITE_UNCERTAIN_FORWARD_BUFFER_SECONDS,
-  lite_undersupply: LITE_UNDERSUPPLY_FORWARD_BUFFER_SECONDS,
-  full_healthy: FULL_HEALTHY_FORWARD_BUFFER_SECONDS,
-  full_bad_condition: FULL_BAD_CONDITION_FORWARD_BUFFER_SECONDS,
+const SERVER_PREPARE_TARGETS = {
+  lite_fast: LITE_FAST_SERVER_PREPARE_SECONDS,
+  lite_uncertain: LITE_UNCERTAIN_SERVER_PREPARE_SECONDS,
+  lite_undersupply: LITE_UNDERSUPPLY_SERVER_PREPARE_SECONDS,
+  full_healthy: FULL_HEALTHY_SERVER_PREPARE_SECONDS,
+  full_bad_condition: FULL_BAD_CONDITION_SERVER_PREPARE_SECONDS,
 };
 
 function normalizeDeviceClass(deviceClass = "unknown") {
@@ -42,7 +44,7 @@ function finitePositiveNumber(value) {
 
 function normalizeBufferTier(session = {}) {
   const explicitTier = typeof session?.buffer_tier === "string" ? session.buffer_tier : "";
-  if (BUFFER_TIER_TARGETS[explicitTier]) {
+  if (SERVER_PREPARE_TARGETS[explicitTier]) {
     return explicitTier;
   }
   const playbackMode = session?.playback_mode === "full" ? "full" : "lite";
@@ -59,28 +61,63 @@ function normalizeBufferTier(session = {}) {
   return "lite_uncertain";
 }
 
+function playbackModeFromSession(session = {}) {
+  const tier = String(session?.buffer_tier || "").toLowerCase();
+  if (tier.startsWith("full_")) {
+    return "full";
+  }
+  return session?.playback_mode === "full" ? "full" : "lite";
+}
+
+export function resolveServerPlaybackPrepareRunwaySeconds(session = {}) {
+  const bufferTier = normalizeBufferTier(session);
+  if (bufferTier === "full_bad_condition") {
+    return finitePositiveNumber(session?.server_reserve_seconds)
+      || finitePositiveNumber(session?.full_bad_condition_reserve_required_seconds)
+      || SERVER_PREPARE_TARGETS.full_bad_condition;
+  }
+  if (bufferTier.startsWith("lite_")) {
+    return finitePositiveNumber(session?.server_required_runway_seconds)
+      || finitePositiveNumber(session?.lite_required_runway_seconds)
+      || SERVER_PREPARE_TARGETS[bufferTier]
+      || LITE_UNCERTAIN_SERVER_PREPARE_SECONDS;
+  }
+  return finitePositiveNumber(session?.server_required_runway_seconds)
+    || SERVER_PREPARE_TARGETS[bufferTier]
+    || FULL_HEALTHY_SERVER_PREPARE_SECONDS;
+}
+
+export function resolveClientPlaybackRealCacheSeconds(
+  session = {},
+  deviceClass = "unknown",
+  { audioSwitch = false } = {},
+) {
+  normalizeDeviceClass(deviceClass);
+  if (audioSwitch) {
+    return AUDIO_SWITCH_FORWARD_BUFFER_SECONDS;
+  }
+  return playbackModeFromSession(session) === "full"
+    ? FULL_CLIENT_REAL_CACHE_SECONDS
+    : LITE_CLIENT_REAL_CACHE_SECONDS;
+}
+
 export function deriveBufferTargetsFromSession(session = {}, deviceClass = "unknown") {
   const normalizedDeviceClass = normalizeDeviceClass(deviceClass);
   const bufferTier = normalizeBufferTier(session);
-  let forwardBufferSeconds = BUFFER_TIER_TARGETS[bufferTier] || LITE_UNCERTAIN_FORWARD_BUFFER_SECONDS;
-  if (bufferTier === "lite_uncertain") {
-    forwardBufferSeconds = finitePositiveNumber(session?.lite_required_runway_seconds)
-      || finitePositiveNumber(session?.client_recommended_forward_buffer_seconds)
-      || LITE_UNCERTAIN_FORWARD_BUFFER_SECONDS;
-  }
-  if (bufferTier === "full_healthy" || bufferTier === "full_bad_condition") {
-    forwardBufferSeconds = BUFFER_TIER_TARGETS[bufferTier];
-  }
+  const serverPrepareSeconds = resolveServerPlaybackPrepareRunwaySeconds(session);
+  const forwardBufferSeconds = resolveClientPlaybackRealCacheSeconds(session, normalizedDeviceClass);
 
   return {
     forwardBufferSeconds,
     maxForwardBufferSeconds: forwardBufferSeconds,
+    clientCacheSeconds: forwardBufferSeconds,
+    serverPrepareSeconds,
     backBufferSeconds: CLIENT_BACK_BUFFER_SECONDS,
     maxBufferSizeBytes: maxBufferSizeForDevice(normalizedDeviceClass),
     bufferTier,
     memoryCeilingSource: `${normalizedDeviceClass}_fixed_byte_ceiling`,
     limitedByMemory: Boolean(session?.client_buffer_limited_by_memory),
-    policySource: session?.client_buffer_policy_source || `frontend_${bufferTier}`,
+    policySource: session?.client_buffer_policy_source || `frontend_real_cache_${playbackModeFromSession(session)}`,
   };
 }
 
@@ -92,7 +129,7 @@ export function resolveClientPlaybackReleaseBufferSeconds(
   if (audioSwitch) {
     return AUDIO_SWITCH_FORWARD_BUFFER_SECONDS;
   }
-  return deriveBufferTargetsFromSession(session, deviceClass).forwardBufferSeconds;
+  return resolveClientPlaybackRealCacheSeconds(session, deviceClass);
 }
 
 export function evaluateClientPlaybackReleaseGate({
@@ -103,25 +140,33 @@ export function evaluateClientPlaybackReleaseGate({
   deviceClass = "unknown",
   audioSwitch = false,
 } = {}) {
-  const configuredClientBufferSeconds = resolveClientPlaybackReleaseBufferSeconds(
+  const configuredServerPrepareSeconds = resolveServerPlaybackPrepareRunwaySeconds(session);
+  const configuredClientCacheSeconds = resolveClientPlaybackReleaseBufferSeconds(
     session,
     deviceClass,
     { audioSwitch },
   );
   const remainingSeconds = finitePositiveNumber(remainingPlayableSeconds);
-  const requiredClientBufferSeconds = remainingSeconds != null
-    ? Math.min(configuredClientBufferSeconds, remainingSeconds)
-    : configuredClientBufferSeconds;
+  const requiredServerPrepareSeconds = remainingSeconds != null
+    ? Math.min(configuredServerPrepareSeconds, remainingSeconds)
+    : configuredServerPrepareSeconds;
+  const requiredClientCacheSeconds = remainingSeconds != null
+    ? Math.min(configuredClientCacheSeconds, remainingSeconds)
+    : configuredClientCacheSeconds;
   const clientAhead = Math.max(0, Number(clientBufferedAheadSeconds) || 0);
   const backendAhead = Math.max(0, Number(backendPreparedAheadSeconds) || 0);
-  const clientReady = clientAhead + 0.001 >= requiredClientBufferSeconds;
-  const serverReady = backendAhead + 0.001 >= requiredClientBufferSeconds;
+  const clientReady = clientAhead + 0.001 >= requiredClientCacheSeconds;
+  const serverReady = backendAhead + 0.001 >= requiredServerPrepareSeconds;
   return {
     ready: Boolean(clientReady && serverReady),
     clientReady,
     serverReady,
-    requiredClientBufferSeconds,
-    configuredClientBufferSeconds,
+    configuredServerPrepareSeconds,
+    requiredServerPrepareSeconds,
+    configuredClientCacheSeconds,
+    requiredClientCacheSeconds,
+    requiredClientBufferSeconds: requiredClientCacheSeconds,
+    configuredClientBufferSeconds: configuredClientCacheSeconds,
     clientBufferedAheadSeconds: clientAhead,
     backendPreparedAheadSeconds: backendAhead,
   };
@@ -329,9 +374,7 @@ export function classifyPlaybackStall({
   firstFrameEligible = true,
 } = {}) {
   const target = finitePositiveNumber(targetForwardBufferSeconds)
-    || finitePositiveNumber(session?.client_recommended_forward_buffer_seconds)
-    || BUFFER_TIER_TARGETS[normalizeBufferTier(session)]
-    || LITE_UNCERTAIN_FORWARD_BUFFER_SECONDS;
+    || resolveClientPlaybackRealCacheSeconds(session);
   const elapsedMs = Number(livenessSample.elapsedMs || 0);
   const currentTimeDeltaSeconds = Number(livenessSample.currentTimeDeltaSeconds || 0);
   const clientBufferedAheadSeconds = Number(livenessSample.bufferedAheadSeconds || 0);

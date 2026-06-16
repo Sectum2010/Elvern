@@ -51,6 +51,8 @@ from backend.app.services.mobile_playback_models import (
 from backend.app.services.mobile_playback_buffer_contract import (
     CLIENT_BACK_BUFFER_SECONDS,
     CLIENT_DESKTOP_MAX_BUFFER_SIZE_BYTES,
+    CLIENT_FULL_REAL_CACHE_SECONDS,
+    CLIENT_LITE_REAL_CACHE_SECONDS,
     CLIENT_PHONE_MAX_BUFFER_SIZE_BYTES,
     CLIENT_TABLET_MAX_BUFFER_SIZE_BYTES,
     ROUTE2_FULL_BAD_CONDITION_BUFFER_SECONDS,
@@ -1725,6 +1727,8 @@ def test_route2_buffer_contract_status_fields_survive_response_schema() -> None:
 
 def test_route2_buffer_contract_locked_client_values() -> None:
     assert ROUTE2_FULL_BAD_CONDITION_BUFFER_SECONDS == 900.0
+    assert CLIENT_LITE_REAL_CACHE_SECONDS == 15.0
+    assert CLIENT_FULL_REAL_CACHE_SECONDS == 30.0
     assert CLIENT_BACK_BUFFER_SECONDS == 120.0
     assert CLIENT_PHONE_MAX_BUFFER_SIZE_BYTES == 250 * 1024 * 1024
     assert CLIENT_TABLET_MAX_BUFFER_SIZE_BYTES == 300 * 1024 * 1024
@@ -1769,8 +1773,8 @@ def test_route2_buffer_contract_full_bad_condition_reports_900_seconds() -> None
     assert fields["buffer_tier"] == "full_bad_condition"
     assert fields["server_required_runway_seconds"] == 120.0
     assert fields["server_reserve_seconds"] == 900.0
-    assert fields["client_recommended_forward_buffer_seconds"] == 900.0
-    assert fields["client_max_forward_buffer_seconds"] == 900.0
+    assert fields["client_recommended_forward_buffer_seconds"] == 30.0
+    assert fields["client_max_forward_buffer_seconds"] == 30.0
     assert fields["client_back_buffer_seconds"] == 120.0
 
 
@@ -1793,7 +1797,8 @@ def test_route2_buffer_contract_matches_lite_gate_decisions() -> None:
         assert fields["buffer_tier"] == expected_tier
         assert fields["server_required_runway_seconds"] == expected_target
         assert fields["server_reserve_seconds"] == expected_target
-        assert fields["client_recommended_forward_buffer_seconds"] == expected_target
+        assert fields["client_recommended_forward_buffer_seconds"] == 15.0
+        assert fields["client_max_forward_buffer_seconds"] == 15.0
         assert fields["client_back_buffer_seconds"] == 120.0
 
 

@@ -9,6 +9,8 @@ from .mobile_playback_models import (
 
 
 ROUTE2_FULL_BAD_CONDITION_BUFFER_SECONDS = 900.0
+CLIENT_LITE_REAL_CACHE_SECONDS = 15.0
+CLIENT_FULL_REAL_CACHE_SECONDS = 30.0
 CLIENT_BACK_BUFFER_SECONDS = 120.0
 CLIENT_PHONE_MAX_BUFFER_SIZE_BYTES = 250 * 1024 * 1024
 CLIENT_TABLET_MAX_BUFFER_SIZE_BYTES = 300 * 1024 * 1024
@@ -70,6 +72,7 @@ def resolve_buffer_contract_fields(
             target = ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS
         policy_source = f"route2_lite_{source or tier}"
 
+    client_target = CLIENT_FULL_REAL_CACHE_SECONDS if mode == "full" else CLIENT_LITE_REAL_CACHE_SECONDS
     server_required = _coerce_positive_seconds(
         required_startup_runway_seconds,
         target,
@@ -83,8 +86,8 @@ def resolve_buffer_contract_fields(
         "buffer_tier": tier,
         "server_required_runway_seconds": round(server_required, 2),
         "server_reserve_seconds": round(server_reserve, 2),
-        "client_recommended_forward_buffer_seconds": round(target, 2),
-        "client_max_forward_buffer_seconds": round(target, 2),
+        "client_recommended_forward_buffer_seconds": round(client_target, 2),
+        "client_max_forward_buffer_seconds": round(client_target, 2),
         "client_back_buffer_seconds": round(CLIENT_BACK_BUFFER_SECONDS, 2),
         "client_max_buffer_size_bytes": client_max_buffer_size_bytes(client_device_class),
         "client_buffer_policy_source": policy_source,
