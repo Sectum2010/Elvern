@@ -23,10 +23,6 @@ All screenshots live in:
 landing/assets/screenshots/
 ```
 
-The copied local PNGs are ignored by `landing/.gitignore` because some contain
-admin/user/session/origin details. Replace them with blurred, redacted, or
-public-safe assets before publishing the landing page.
-
 The page reads screenshot placement from:
 
 ```text
