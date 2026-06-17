@@ -212,7 +212,8 @@ export default function ElvernTimeline({
       .filter((entry) => entry.style.width !== "0%");
   }, [bufferedAbsoluteRanges, safeDuration]);
 
-  const numericPreparingTarget = Number(preparingTargetSeconds);
+  const hasPreparingTarget = preparingTargetSeconds != null && preparingTargetSeconds !== "";
+  const numericPreparingTarget = hasPreparingTarget ? Number(preparingTargetSeconds) : Number.NaN;
   const preparingPercent =
     safeDuration > 0 && Number.isFinite(numericPreparingTarget)
       ? rangePercent(numericPreparingTarget, safeDuration)

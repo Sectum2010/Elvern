@@ -356,6 +356,7 @@ export default function ElvernPlayerOverlay({
   sessionPayload,
   onSeekCommit,
   preparing = false,
+  preparingTargetActive = false,
   preparingTargetSeconds = null,
   preparingMessage = "",
   errorMessage = "",
@@ -1697,7 +1698,7 @@ export default function ElvernPlayerOverlay({
             onSeekCommit={handleTimelineCommit}
             onSeekPreview={handleTimelinePreview}
             playedNotCachedAbsoluteRanges={playedNotCachedAbsoluteRanges}
-            preparingTargetSeconds={preparingTargetSeconds}
+            preparingTargetSeconds={preparingTargetActive ? preparingTargetSeconds : null}
           />
 
           <div className="elvern-overlay__controls-row">

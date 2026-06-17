@@ -2942,6 +2942,17 @@ export function DetailPage() {
       ? mobilePendingTargetRef.current
       : mobileSession?.target_position_seconds ?? null)
     : null;
+  const elvernOverlayPreparingTargetActive = useElvernCustomShell
+    ? Boolean(elvernOverlayPreparing) && Boolean(
+      mobilePendingTargetRef.current != null
+      || mobileSession?.pending_target_seconds != null
+      || mobileSession?.replacement_epoch_id
+      || ["preparing", "recovering", "retargeting", "seeking", "switching"].includes(
+        String(mobileSession?.state || mobileSession?.session_state || "").trim().toLowerCase(),
+      )
+      || ["recovering", "resuming"].includes(String(mobileSession?.lifecycle_state || "").trim().toLowerCase()),
+    )
+    : false;
   const resolvedPlayerClassName = [
     playerClassName,
     showMacAppFullscreenControl ? "player--app-fullscreen-managed" : "",
@@ -4115,6 +4126,7 @@ export function DetailPage() {
                   onVideoFitModeChange={setElvernVideoFitMode}
                   preparing={elvernOverlayPreparing}
                   preparingMessage={seekNotice || ""}
+                  preparingTargetActive={elvernOverlayPreparingTargetActive}
                   preparingTargetSeconds={elvernOverlayPreparingTargetSeconds}
                   sessionPayload={elvernOverlaySessionPayload}
                   shellRef={playerShellRef}

@@ -22,6 +22,7 @@ function renderOverlay({
   onVideoFitModeChange = null,
   preparing = false,
   preparingMessage = "",
+  preparingTargetActive = false,
   preparingTargetSeconds = null,
   sessionPayload = null,
   setupVideo = null,
@@ -100,6 +101,7 @@ function renderOverlay({
     onVideoFitModeChange,
     preparing,
     preparingMessage,
+    preparingTargetActive,
     preparingTargetSeconds,
     sessionPayload,
     shellRef: { current: shell },
@@ -368,10 +370,21 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(queryByLabelText("Mute")).toBeNull();
   });
 
-  test("timeline target marker can render for reattach even when preparing chrome is inactive", () => {
+  test("timeline target marker stays hidden unless the target is active preparation", () => {
     const { container } = renderOverlay({
       cinemaModeActive: true,
       preparing: false,
+      preparingTargetSeconds: 180,
+    });
+
+    expect(container.querySelector(".elvern-timeline__preparing-marker")).toBeNull();
+  });
+
+  test("timeline target marker can render for active reattach even when preparing chrome is inactive", () => {
+    const { container } = renderOverlay({
+      cinemaModeActive: true,
+      preparing: false,
+      preparingTargetActive: true,
       preparingTargetSeconds: 180,
     });
 

@@ -305,6 +305,16 @@ describe("Elvern player mobile CSS guards", () => {
     expect(lockedBlock).toContain("opacity:");
   });
 
+  test("timeline preparing marker uses red recovery target styling", () => {
+    const styles = readStyles();
+    const markerBlock = cssBlock(styles, ".elvern-timeline__preparing-marker");
+
+    expect(markerBlock).toContain("background: #e11d48");
+    expect(markerBlock).toContain("rgba(225, 29, 72");
+    expect(markerBlock).not.toContain("#7dd3fc");
+    expect(markerBlock).not.toContain("rgba(125, 211, 252");
+  });
+
   test("desktop track menus keep long audio and subtitle labels readable", () => {
     const styles = readStyles();
     const menuBlock = cssBlock(styles, ".elvern-overlay__track-menu");

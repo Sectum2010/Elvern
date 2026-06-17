@@ -14,6 +14,8 @@ import {
 import {
   AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE,
   AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS,
+  AUDIO_SWITCH_ATTACH_RESTART_REQUIRED_MESSAGE,
+  AUDIO_SWITCH_ATTACH_RESTORED_MESSAGE,
   buildAudioSwitchAttachDiagnostic,
   softResumeRequiresHardReattach,
   useOptimizedPlaybackSession,
@@ -366,7 +368,7 @@ test("audio switch attach timeout retries the same source once without another a
     audio_switch_state: "active",
   });
 
-  const { callbacks, getApi, video } = renderOptimizedPlaybackHarness();
+  const { callbacks, getApi, refs, video } = renderOptimizedPlaybackHarness();
   await attachPromotedAudioSwitch(getApi, { initialPayload, pendingPayload, promotedPayload });
   video.paused = true;
   video.readyState = 0;
@@ -390,7 +392,7 @@ test("audio switch attach timeout retries the same source once without another a
   expect(callbacks.setPlaybackError).not.toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
 });
 
-test("audio switch attach second timeout clears pending UI and ignores late loaded ack", async () => {
+test("audio switch attach second timeout restores previous source and ignores late loaded ack", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(0);
   const initialPayload = makeRoute2Payload({
@@ -425,7 +427,7 @@ test("audio switch attach second timeout clears pending UI and ignores late load
     audio_switch_state: "active",
   });
 
-  const { callbacks, getApi, video } = renderOptimizedPlaybackHarness();
+  const { callbacks, getApi, refs, video } = renderOptimizedPlaybackHarness();
   await attachPromotedAudioSwitch(getApi, { initialPayload, pendingPayload, promotedPayload });
   video.paused = true;
   video.readyState = 0;
@@ -444,11 +446,16 @@ test("audio switch attach second timeout clears pending UI and ignores late load
   expect(getApi().audioSwitchAttachRef.current).toMatchObject({
     expectedAttachRevision: 2,
     phase: "failed",
+    restoredPrevious: true,
     retryCount: 1,
   });
   expect(getApi().mobilePlayerCanPlayRef.current).toBe(true);
+  expect(refs.attachedOptimizedManifestUrlRef.current).toBe(
+    "/api/browser-playback/epochs/epoch-a/index.m3u8?attach_revision=1",
+  );
+  expect(callbacks.setStreamSource).toHaveBeenLastCalledWith(expect.any(Function));
   expect(callbacks.clearOptimizedPlaybackPending).toHaveBeenCalled();
-  expect(callbacks.setPlaybackError).toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
+  expect(callbacks.setPlaybackError).toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_RESTORED_MESSAGE);
 
   await act(async () => {
     getApi().maybeAcknowledgeRoute2Attachment({
@@ -461,9 +468,74 @@ test("audio switch attach second timeout clears pending UI and ignores late load
 
   expect(postOptimizedPlaybackHeartbeat).not.toHaveBeenCalled();
   expect(getApi().audioSwitchAttachRef.current.phase).toBe("failed");
+
+  callbacks.setStreamSource.mockClear();
+  await act(async () => {
+    getApi().maybeAttachRoute2Authority(promotedPayload, { autoplay: true });
+  });
+  expect(callbacks.setStreamSource).not.toHaveBeenCalled();
 });
 
-test("audio switch attach infers success from playback evidence without loaded events", async () => {
+test("audio switch attach second timeout requires restart when previous source cannot be restored", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  const initialPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-a",
+    active_manifest_url: "",
+    attach_revision: 1,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 1,
+    active_audio_stream_index: 1,
+  });
+  const pendingPayload = makeRoute2Payload({
+    ...initialPayload,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 1,
+    pending_audio_stream_index: 5,
+    audio_switch_state: "preparing",
+  });
+  const promotedPayload = makeRoute2Payload({
+    attach_ready: true,
+    active_epoch_id: "epoch-b",
+    active_manifest_url: "/api/browser-playback/epochs/epoch-b/index.m3u8",
+    attach_revision: 2,
+    client_attach_revision: 1,
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 5,
+    pending_audio_stream_index: null,
+    audio_switch_state: "active",
+  });
+
+  const { callbacks, getApi, video } = renderOptimizedPlaybackHarness();
+  await act(async () => {
+    getApi().syncMobilePlaybackState(pendingPayload);
+    getApi().syncMobilePlaybackState(promotedPayload);
+    getApi().maybeAttachRoute2Authority(promotedPayload, { autoplay: true });
+  });
+  video.paused = true;
+  video.readyState = 0;
+
+  await act(async () => {
+    vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS);
+    await Promise.resolve();
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS);
+    await Promise.resolve();
+  });
+
+  expect(getApi().audioSwitchAttachRef.current).toMatchObject({
+    expectedAttachRevision: 2,
+    phase: "failed",
+    restoredPrevious: false,
+    retryCount: 1,
+  });
+  expect(getApi().mobilePlayerCanPlayRef.current).toBe(false);
+  expect(callbacks.setPlaybackError).toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_RESTART_REQUIRED_MESSAGE);
+});
+
+test("audio switch attach does not infer success from playback evidence before source load", async () => {
   const initialPayload = makeRoute2Payload({
     attach_ready: true,
     active_epoch_id: "epoch-a",
@@ -495,16 +567,11 @@ test("audio switch attach infers success from playback evidence without loaded e
     pending_audio_stream_index: null,
     audio_switch_state: "active",
   });
-  const acknowledgedPayload = makeRoute2Payload({
-    ...promotedPayload,
-    client_attach_revision: 2,
-  });
-  postOptimizedPlaybackHeartbeat.mockResolvedValue(acknowledgedPayload);
-
   const { callbacks, getApi, video } = renderOptimizedPlaybackHarness();
   video.paused = false;
   video.readyState = 4;
   await attachPromotedAudioSwitch(getApi, { initialPayload, pendingPayload, promotedPayload });
+  callbacks.clearOptimizedPlaybackPending.mockClear();
   callbacks.setPlaybackError.mockClear();
 
   await act(async () => {
@@ -512,24 +579,16 @@ test("audio switch attach infers success from playback evidence without loaded e
     await Promise.resolve();
   });
 
-  expect(postOptimizedPlaybackHeartbeat).toHaveBeenCalledWith(expect.objectContaining({
-    data: expect.objectContaining({
-      client_attach_revision: 2,
-    }),
-  }));
+  expect(postOptimizedPlaybackHeartbeat).not.toHaveBeenCalled();
   expect(getApi().audioSwitchAttachRef.current).toMatchObject({
     expectedAttachRevision: 2,
-    phase: "acked",
-    successReason: "media_playback_observed",
+    phase: "source_set",
   });
-  expect(callbacks.clearOptimizedPlaybackPending).toHaveBeenCalled();
-  expect(callbacks.setPlaybackError).toHaveBeenCalledWith("");
+  expect(callbacks.clearOptimizedPlaybackPending).not.toHaveBeenCalled();
   expect(callbacks.setPlaybackError).not.toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
 });
 
-test("audio switch timeout infers success from session playback progress before false failure", async () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(0);
+test("audio switch infers success from post-source timeupdate evidence", async () => {
   const initialPayload = makeRoute2Payload({
     attach_ready: true,
     active_epoch_id: "epoch-a",
@@ -572,7 +631,11 @@ test("audio switch timeout infers success from session playback progress before 
   callbacks.setPlaybackError.mockClear();
 
   await act(async () => {
-    vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS);
+    getApi().maybeAcknowledgeRoute2Attachment({
+      playing: false,
+      force: true,
+      loadedEventName: "timeupdate",
+    });
     await Promise.resolve();
   });
 
@@ -580,7 +643,7 @@ test("audio switch timeout infers success from session playback progress before 
   expect(getApi().audioSwitchAttachRef.current).toMatchObject({
     expectedAttachRevision: 2,
     phase: "acked",
-    successReason: "session_playback_progress",
+    successReason: "post_source_time_advancing",
   });
   expect(callbacks.setPlaybackError).not.toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
 });
@@ -637,7 +700,7 @@ test("stale audio switch attach failure clears when a later payload proves succe
     vi.advanceTimersByTime(AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS);
     await Promise.resolve();
   });
-  expect(callbacks.setPlaybackError).toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
+  expect(callbacks.setPlaybackError).toHaveBeenCalledWith(AUDIO_SWITCH_ATTACH_RESTORED_MESSAGE);
 
   callbacks.setPlaybackError.mockClear();
   await act(async () => {
@@ -747,7 +810,7 @@ test("audio switch attach diagnostics omit manifest URLs tokens and paths", () =
 });
 
 test("audio switch success inferred diagnostics keep only safe fields", () => {
-  const diagnostic = buildAudioSwitchAttachDiagnostic("audio_switch_attach_success_inferred", {
+  const diagnostic = buildAudioSwitchAttachDiagnostic("audio_switch_success_inferred_post_source", {
     expectedAttachRevision: 2,
     expectedActiveEpochId: "epoch-b",
     targetAudioStreamIndex: 5,
@@ -755,7 +818,7 @@ test("audio switch success inferred diagnostics keep only safe fields", () => {
     retryCount: 1,
     clientAttachRevision: 1,
     currentAttachRevision: 2,
-    successReason: "media_playback_observed",
+    successReason: "post_source_playing_event",
     currentSrc: "/private/tokenized/stream.m3u8",
     streamUrl: "/api/browser-playback/secret-token/route2.m3u8",
     token: "secret",
@@ -763,7 +826,7 @@ test("audio switch success inferred diagnostics keep only safe fields", () => {
   });
 
   expect(diagnostic).toEqual({
-    event: "audio_switch_attach_success_inferred",
+    event: "audio_switch_success_inferred_post_source",
     expectedAttachRevision: 2,
     expectedActiveEpochId: "epoch-b",
     targetAudioStreamIndex: 5,
@@ -771,7 +834,7 @@ test("audio switch success inferred diagnostics keep only safe fields", () => {
     retryCount: 1,
     clientAttachRevision: 1,
     currentAttachRevision: 2,
-    successReason: "media_playback_observed",
+    successReason: "post_source_playing_event",
   });
   expect(JSON.stringify(diagnostic)).not.toMatch(/m3u8|token|secret|\/media|currentSrc/);
 });
@@ -879,9 +942,9 @@ test("automatic stalled recovery creates replacement from rolled-back stable tar
     session_id: "session-recovery-new",
     attach_ready: false,
     state: "preparing",
-    target_position_seconds: 157.5,
-    committed_playhead_seconds: 157.5,
-    actual_media_element_time_seconds: 157.5,
+    target_position_seconds: 158.5,
+    committed_playhead_seconds: 158.5,
+    actual_media_element_time_seconds: 158.5,
     ready_start_seconds: 0,
     ready_end_seconds: 170,
     active_epoch_id: "epoch-recovery",
@@ -912,11 +975,11 @@ test("automatic stalled recovery creates replacement from rolled-back stable tar
     clientDeviceClass: "phone",
     engineMode: "route2",
     playbackMode: "lite",
-    startPositionSeconds: 157.5,
+    startPositionSeconds: 158.5,
   }));
-  expect(getApi().committedPlayheadSecondsRef.current).toBe(157.5);
-  expect(getApi().actualMediaElementTimeRef.current).toBe(157.5);
-  expect(getApi().mobileLastStablePositionRef.current).toBe(157.5);
+  expect(getApi().committedPlayheadSecondsRef.current).toBe(158.5);
+  expect(getApi().actualMediaElementTimeRef.current).toBe(158.5);
+  expect(getApi().mobileLastStablePositionRef.current).toBe(158.5);
 });
 
 test("user initiated seek keeps explicit target without automatic recovery rollback", async () => {

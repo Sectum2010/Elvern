@@ -48,7 +48,9 @@ const BACKGROUND_PREPARATION_PARK_MS = 5 * 60 * 1000;
 const AUDIO_SWITCH_ATTACH_LOAD_EVENTS = new Set(["loadedmetadata", "loadeddata", "canplay"]);
 export const AUDIO_SWITCH_ATTACH_LOAD_TIMEOUT_MS = 15000;
 export const AUDIO_SWITCH_ATTACH_RETRY_LIMIT = 1;
-export const AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE = "Audio switch failed. Previous audio continues if still attached.";
+export const AUDIO_SWITCH_ATTACH_RESTORED_MESSAGE = "Audio switch failed. Restored previous audio.";
+export const AUDIO_SWITCH_ATTACH_RESTART_REQUIRED_MESSAGE = "Audio switch failed. Restart playback to continue.";
+export const AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE = AUDIO_SWITCH_ATTACH_RESTART_REQUIRED_MESSAGE;
 
 function isAudioSwitchAttachWaiting(pending) {
   return Boolean(
@@ -72,6 +74,11 @@ export function buildAudioSwitchAttachDiagnostic(eventName, details = {}) {
     "currentAttachRevision",
     "loadedEventName",
     "successReason",
+    "previousAttachRevision",
+    "previousActiveEpochId",
+    "previousAudioStreamIndex",
+    "failureReason",
+    "sourceGeneration",
   ];
   allowedFields.forEach((field) => {
     if (details[field] !== undefined) {
@@ -83,6 +90,12 @@ export function buildAudioSwitchAttachDiagnostic(eventName, details = {}) {
   }
   if (details.loadedAtMs !== undefined) {
     diagnostic.loadedAtMs = Boolean(details.loadedAtMs);
+  }
+  if (details.evidenceAfterSourceSet !== undefined) {
+    diagnostic.evidenceAfterSourceSet = Boolean(details.evidenceAfterSourceSet);
+  }
+  if (details.restoredPrevious !== undefined) {
+    diagnostic.restoredPrevious = Boolean(details.restoredPrevious);
   }
   return diagnostic;
 }
@@ -141,6 +154,9 @@ function buildSessionManifestUrl(url, manifestRevision) {
 }
 
 function buildAttachRevisionManifestUrl(url, attachRevision) {
+  if (typeof url !== "string" || !url.trim()) {
+    return "";
+  }
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}attach_revision=${encodeURIComponent(String(attachRevision || 0))}`;
 }
@@ -639,6 +655,46 @@ export function useOptimizedPlaybackSession({
     console.debug("[elvern] audio_switch_attach", buildAudioSwitchAttachDiagnostic(eventName, details));
   }
 
+  function captureAudioSwitchPreviousSnapshot(previousPayload) {
+    const attachedManifestUrl = attachedOptimizedManifestUrlRef.current || "";
+    const streamSourceUrl = streamSource?.mode === "hls" ? streamSource.url : "";
+    const restorableUrl = attachedManifestUrl || streamSourceUrl || resolveRoute2AttachManifestUrl(previousPayload);
+    const video = videoRef.current;
+    const playbackPositionSeconds = resolvePlaybackRecoveryTargetSeconds({
+      currentAbsolutePositionSeconds: previousPayload && video
+        ? resolveSessionAbsoluteTime(previousPayload, Math.max(video.currentTime || 0, 0))
+        : null,
+      committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+      actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+      targetPositionSeconds: previousPayload
+        ? resolveMobileAuthorityPosition(previousPayload)
+        : null,
+    });
+    return {
+      streamSource: restorableUrl ? { mode: "hls", url: restorableUrl } : null,
+      attachedOptimizedManifestUrl: attachedManifestUrl || restorableUrl,
+      activeEpochId: previousPayload?.active_epoch_id || mobileAttachedEpochRef.current || null,
+      attachRevision: Number(previousPayload?.attach_revision || mobileAttachedManifestRevisionRef.current || 0),
+      activeAudioStreamIndex: Number.isInteger(previousPayload?.active_audio_stream_index)
+        ? previousPayload.active_audio_stream_index
+        : null,
+      clientAttachRevision: Number(previousPayload?.client_attach_revision || mobileClientAttachRevisionRef.current || 0),
+      mobileAttachedEpoch: mobileAttachedEpochRef.current,
+      mobileAttachedManifestRevision: mobileAttachedManifestRevisionRef.current,
+      mobileAttachedManifestEnd: mobileAttachedManifestEndRef.current,
+      pendingAttachRevision: mobilePendingAttachRevisionRef.current,
+      committedPlayheadSeconds: committedPlayheadSecondsRef.current,
+      actualMediaElementTimeSeconds: actualMediaElementTimeRef.current,
+      requestedTargetSeconds: requestedTargetSecondsRef.current,
+      pendingTargetSeconds: mobilePendingTargetRef.current,
+      playbackPositionSeconds,
+      paused: video ? Boolean(video.paused) : true,
+      lifecycleState: mobileLifecycleStateRef.current || "attached",
+      mobileSession: previousPayload || null,
+      restorable: Boolean(restorableUrl),
+    };
+  }
+
   function beginAudioSwitchVerifiedAttach(previousPayload, payload) {
     const expectedAttachRevision = Number(payload?.attach_revision || 0);
     const expectedActiveEpochId = payload?.active_epoch_id || null;
@@ -671,10 +727,17 @@ export function useOptimizedPlaybackSession({
       expectedManifestUrl,
       previousActiveEpochId: previousPayload?.active_epoch_id || null,
       previousAttachRevision: Number(previousPayload?.attach_revision || 0),
+      previousAudioStreamIndex: Number.isInteger(previousPayload?.active_audio_stream_index)
+        ? previousPayload.active_audio_stream_index
+        : null,
+      previousSnapshot: captureAudioSwitchPreviousSnapshot(previousPayload),
       phase: "pending_attach",
       requestedAtMs: Date.now(),
       sourceSetAtMs: 0,
       loadedAtMs: 0,
+      loadedEventName: "",
+      sourceGeneration: 0,
+      evidenceAfterSourceSet: false,
       retryCount: 0,
     };
     debugAudioSwitchAttach("audio_switch_attach_started", {
@@ -757,28 +820,40 @@ export function useOptimizedPlaybackSession({
     if (Number(payload?.client_attach_revision || 0) >= expectedRevision) {
       return "client_attach_revision";
     }
-    if (payload?.client_time_advancing === true) {
-      return "session_playback_progress";
-    }
     if (pending.phase === "failed") {
       return "";
     }
     if (!isAudioSwitchExpectedSourceAttached(pending)) {
       return "";
     }
-    const video = videoRef.current;
-    const readyState = Number(video?.readyState || 0);
-    const payloadReadyState = Number(payload?.client_ready_state || 0);
-    const hasReadyMedia = Boolean(
-      mobilePlayerCanPlayRef.current
-      || readyState >= 2
-      || payloadReadyState >= 2
+    const sourceSetAtMs = Number(pending.sourceSetAtMs || 0);
+    const loadedAtMs = Number(pending.loadedAtMs || 0);
+    const loadedAfterSourceSet = Boolean(
+      sourceSetAtMs > 0
+      && loadedAtMs >= sourceSetAtMs
+      && pending.evidenceAfterSourceSet
     );
-    const hasPlaybackEvidence = Boolean(
-      playing === true
-      || (video && !video.paused)
+    const playingAfterSourceSet = Boolean(
+      sourceSetAtMs > 0
+      && Number(pending.postSourcePlayingAtMs || 0) >= sourceSetAtMs
     );
-    return hasReadyMedia && hasPlaybackEvidence ? "media_playback_observed" : "";
+    const advancingAfterSourceSet = Boolean(
+      sourceSetAtMs > 0
+      && Number(pending.postSourceTimeAdvancingAtMs || 0) >= sourceSetAtMs
+    );
+    if (loadedAfterSourceSet && pending.loadedEventName) {
+      return "post_source_loaded_event";
+    }
+    if (playingAfterSourceSet) {
+      return "post_source_playing_event";
+    }
+    if (advancingAfterSourceSet) {
+      return "post_source_time_advancing";
+    }
+    if (loadedAfterSourceSet && payload?.client_time_advancing === true) {
+      return "backend_active_plus_client_progress_after_source_set";
+    }
+    return "";
   }
 
   function markAudioSwitchAttachSucceeded(
@@ -811,7 +886,7 @@ export function useOptimizedPlaybackSession({
     setPlaybackError("");
     setPlaybackStatus(browserStreamLabelTitle);
     setMobileLifecycleStateValue("attached");
-    debugAudioSwitchAttach("audio_switch_attach_success_inferred", {
+    debugAudioSwitchAttach("audio_switch_success_inferred_post_source", {
       expectedAttachRevision: pending.expectedAttachRevision,
       expectedActiveEpochId: pending.expectedActiveEpochId,
       targetAudioStreamIndex: pending.targetAudioStreamIndex,
@@ -821,6 +896,7 @@ export function useOptimizedPlaybackSession({
       currentAttachRevision: Number(payload?.attach_revision || 0),
       sourceSetAtMs: pending.sourceSetAtMs,
       loadedAtMs: pending.loadedAtMs,
+      evidenceAfterSourceSet: pending.evidenceAfterSourceSet,
       successReason,
     });
     if (sendHeartbeat && Number(payload?.client_attach_revision || 0) < expectedRevision) {
@@ -876,6 +952,11 @@ export function useOptimizedPlaybackSession({
       phase: "source_set",
       sourceSetAtMs: Date.now(),
       loadedAtMs: 0,
+      loadedEventName: "",
+      sourceGeneration: (pending.sourceGeneration || 0) + 1,
+      evidenceAfterSourceSet: false,
+      postSourcePlayingAtMs: 0,
+      postSourceTimeAdvancingAtMs: 0,
     };
     debugAudioSwitchAttach("audio_switch_source_set", {
       expectedAttachRevision: pending.expectedAttachRevision,
@@ -885,6 +966,7 @@ export function useOptimizedPlaybackSession({
       retryCount: pending.retryCount || 0,
       sourceSetAtMs: audioSwitchAttachRef.current.sourceSetAtMs,
       loadedAtMs: 0,
+      sourceGeneration: audioSwitchAttachRef.current.sourceGeneration,
     });
   }
 
@@ -906,6 +988,8 @@ export function useOptimizedPlaybackSession({
       ...pending,
       phase: "loaded",
       loadedAtMs: Date.now(),
+      loadedEventName: eventName,
+      evidenceAfterSourceSet: true,
     };
     debugAudioSwitchAttach("audio_switch_loaded", {
       loadedEventName: eventName,
@@ -920,30 +1004,102 @@ export function useOptimizedPlaybackSession({
     return true;
   }
 
-  function failAudioSwitchAttach(pending, elapsedMs = 0) {
+  function markAudioSwitchPostSourceEvidence({ eventName = "", playing = null } = {}) {
+    const pending = audioSwitchAttachRef.current;
     if (!pending || pending.phase === "failed" || pending.phase === "acked") {
-      return;
+      return false;
     }
+    if (!isAudioSwitchExpectedSourceAttached(pending) || Number(pending.sourceSetAtMs || 0) <= 0) {
+      return false;
+    }
+    const normalizedEventName = String(eventName || "").trim().toLowerCase();
+    const nextEvidence = {
+      ...pending,
+      evidenceAfterSourceSet: true,
+    };
+    let changed = false;
+    if (normalizedEventName === "playing" && playing === true) {
+      nextEvidence.postSourcePlayingAtMs = Date.now();
+      changed = true;
+    }
+    if (normalizedEventName === "timeupdate") {
+      nextEvidence.postSourceTimeAdvancingAtMs = Date.now();
+      changed = true;
+    }
+    if (!changed) {
+      return false;
+    }
+    audioSwitchAttachRef.current = nextEvidence;
+    return true;
+  }
+
+  function restorePreviousAudioSwitchSource(pending, elapsedMs = 0) {
+    const snapshot = pending?.previousSnapshot || null;
+    if (!snapshot?.restorable || !snapshot?.streamSource?.url) {
+      return false;
+    }
+    const restoredAtMs = Date.now();
+    const video = videoRef.current;
     audioSwitchAttachRef.current = {
       ...pending,
       phase: "failed",
-      failedAtMs: Date.now(),
+      failedAtMs: restoredAtMs,
+      restoredPrevious: true,
+      failureReason: "attach_timeout",
     };
-    mobilePendingAttachRevisionRef.current = 0;
+    attachedOptimizedManifestUrlRef.current = snapshot.attachedOptimizedManifestUrl || snapshot.streamSource.url;
+    mobileAttachedEpochRef.current = snapshot.mobileAttachedEpoch || snapshot.activeEpochId || null;
+    mobileAttachedManifestRevisionRef.current = snapshot.mobileAttachedManifestRevision || String(snapshot.attachRevision || 0);
+    mobileAttachedManifestEndRef.current = snapshot.mobileAttachedManifestEnd || 0;
+    mobilePendingAttachRevisionRef.current = Math.max(
+      Number(snapshot.pendingAttachRevision || 0),
+      Number(snapshot.clientAttachRevision || 0),
+    );
+    mobileClientAttachRevisionRef.current = Math.max(
+      Number(snapshot.clientAttachRevision || 0),
+      Number(snapshot.attachRevision || 0),
+    );
+    if (snapshot.mobileSession) {
+      mobileSessionRef.current = snapshot.mobileSession;
+      setMobileSession(snapshot.mobileSession);
+    }
+    mobilePendingTargetRef.current = snapshot.pendingTargetSeconds ?? null;
+    requestedTargetSecondsRef.current = snapshot.requestedTargetSeconds ?? null;
+    committedPlayheadSecondsRef.current = Math.max(Number(snapshot.committedPlayheadSeconds || 0), 0);
+    actualMediaElementTimeRef.current = Math.max(Number(snapshot.actualMediaElementTimeSeconds || 0), 0);
+    setCommittedPlayheadSeconds(committedPlayheadSecondsRef.current);
+    setActualMediaElementTime(actualMediaElementTimeRef.current);
+    setRequestedTargetSeconds(requestedTargetSecondsRef.current);
+    setPlaybackPosition(Math.max(Number(snapshot.playbackPositionSeconds || 0), 0));
     mobileWarmupProbeActiveRef.current = false;
-    mobileAutoplayPendingRef.current = false;
-    mobileResumeAfterReadyRef.current = false;
+    mobileAutoplayPendingRef.current = !snapshot.paused;
+    mobileResumeAfterReadyRef.current = !snapshot.paused;
     mobilePlayerCanPlayRef.current = true;
     setMobilePlayerCanPlay(true);
     clearOptimizedPlaybackPending();
     setSeekNotice("");
-    setPlaybackStatus(browserReadyLabelTitle);
-    setMobileLifecycleStateValue("attached");
-    setPlaybackError(AUDIO_SWITCH_ATTACH_FAILURE_MESSAGE);
-    debugAudioSwitchAttach("audio_switch_attach_failed_previous_continues", {
+    setPlaybackStatus(browserStreamLabelTitle);
+    setMobileLifecycleStateValue(snapshot.lifecycleState || "attached");
+    setPlaybackError(AUDIO_SWITCH_ATTACH_RESTORED_MESSAGE);
+    clearPlayerBinding();
+    if (video) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+    setVideoElementKey((current) => current + 1);
+    setStreamSource((existing) => (
+      existing?.mode === "hls" && existing.url === snapshot.streamSource.url
+        ? existing
+        : { ...snapshot.streamSource }
+    ));
+    debugAudioSwitchAttach("audio_switch_attach_failed_restored_previous", {
       expectedAttachRevision: pending.expectedAttachRevision,
       expectedActiveEpochId: pending.expectedActiveEpochId,
       targetAudioStreamIndex: pending.targetAudioStreamIndex,
+      previousAttachRevision: pending.previousAttachRevision,
+      previousActiveEpochId: pending.previousActiveEpochId,
+      previousAudioStreamIndex: pending.previousAudioStreamIndex,
       phase: "failed",
       elapsedMs,
       retryCount: pending.retryCount || 0,
@@ -951,6 +1107,51 @@ export function useOptimizedPlaybackSession({
       currentAttachRevision: Number(mobileSessionRef.current?.attach_revision || 0),
       sourceSetAtMs: pending.sourceSetAtMs,
       loadedAtMs: pending.loadedAtMs,
+      restoredPrevious: true,
+    });
+    return true;
+  }
+
+  function failAudioSwitchAttach(pending, elapsedMs = 0) {
+    if (!pending || pending.phase === "failed" || pending.phase === "acked") {
+      return;
+    }
+    if (restorePreviousAudioSwitchSource(pending, elapsedMs)) {
+      return;
+    }
+    audioSwitchAttachRef.current = {
+      ...pending,
+      phase: "failed",
+      failedAtMs: Date.now(),
+      restoredPrevious: false,
+      failureReason: "attach_timeout",
+    };
+    mobilePendingAttachRevisionRef.current = 0;
+    mobileWarmupProbeActiveRef.current = false;
+    mobileAutoplayPendingRef.current = false;
+    mobileResumeAfterReadyRef.current = false;
+    mobilePlayerCanPlayRef.current = false;
+    setMobilePlayerCanPlay(false);
+    clearOptimizedPlaybackPending();
+    setSeekNotice("");
+    setPlaybackStatus(`${browserStreamLabelTitle} failed`);
+    setMobileLifecycleStateValue("fatal");
+    setPlaybackError(AUDIO_SWITCH_ATTACH_RESTART_REQUIRED_MESSAGE);
+    debugAudioSwitchAttach("audio_switch_attach_failed_restart_required", {
+      expectedAttachRevision: pending.expectedAttachRevision,
+      expectedActiveEpochId: pending.expectedActiveEpochId,
+      targetAudioStreamIndex: pending.targetAudioStreamIndex,
+      previousAttachRevision: pending.previousAttachRevision,
+      previousActiveEpochId: pending.previousActiveEpochId,
+      previousAudioStreamIndex: pending.previousAudioStreamIndex,
+      phase: "failed",
+      elapsedMs,
+      retryCount: pending.retryCount || 0,
+      clientAttachRevision: mobileClientAttachRevisionRef.current || 0,
+      currentAttachRevision: Number(mobileSessionRef.current?.attach_revision || 0),
+      sourceSetAtMs: pending.sourceSetAtMs,
+      loadedAtMs: pending.loadedAtMs,
+      restoredPrevious: false,
     });
   }
 
@@ -1004,6 +1205,8 @@ export function useOptimizedPlaybackSession({
         retryCount,
         sourceSetAtMs: 0,
         loadedAtMs: 0,
+        loadedEventName: "",
+        evidenceAfterSourceSet: false,
         retryStartedAtMs: nowMs,
       };
       debugAudioSwitchAttach("audio_switch_attach_retry_started", {
@@ -1138,10 +1341,12 @@ export function useOptimizedPlaybackSession({
         && pendingAudioAttach.phase !== "acked"
         && Number(payload.client_attach_revision || 0) >= pendingAudioAttach.expectedAttachRevision
       ) {
-        audioSwitchAttachRef.current = {
-          ...pendingAudioAttach,
-          phase: "acked",
-        };
+        markAudioSwitchAttachSucceeded(pendingAudioAttach, {
+          payload,
+          successReason: "client_attach_revision",
+          playing: payload?.client_is_playing === true ? true : null,
+          sendHeartbeat: false,
+        });
         debugAudioSwitchAttach("audio_switch_ack_confirmed", {
           expectedAttachRevision: pendingAudioAttach.expectedAttachRevision,
           clientAttachRevision: payload.client_attach_revision,
@@ -1444,6 +1649,18 @@ export function useOptimizedPlaybackSession({
     return hlsAttachmentNeedsReattach(payload);
   }
 
+  function isFailedAudioSwitchAttachPayload(payload) {
+    const pending = audioSwitchAttachRef.current;
+    return Boolean(
+      pending
+      && pending.phase === "failed"
+      && isRoute2SessionPayload(payload)
+      && Number(payload?.attach_revision || 0) === Number(pending.expectedAttachRevision || 0)
+      && (payload?.active_epoch_id || null) === pending.expectedActiveEpochId
+      && Number(payload?.active_audio_stream_index) === Number(pending.targetAudioStreamIndex)
+    );
+  }
+
   async function softResumeMobilePlaybackAfterBackground(trigger) {
     void trigger;
     const activeSession = mobileSessionRef.current;
@@ -1557,6 +1774,16 @@ export function useOptimizedPlaybackSession({
 
   function maybeAttachHlsAuthority(payload, { autoplay = false } = {}) {
     if (!isHlsAttachReady(payload) || !hlsAttachmentNeedsReattach(payload)) {
+      return false;
+    }
+    if (isFailedAudioSwitchAttachPayload(payload)) {
+      debugAudioSwitchAttach("audio_switch_failed_revision_reattach_blocked", {
+        expectedAttachRevision: audioSwitchAttachRef.current?.expectedAttachRevision,
+        expectedActiveEpochId: audioSwitchAttachRef.current?.expectedActiveEpochId,
+        targetAudioStreamIndex: audioSwitchAttachRef.current?.targetAudioStreamIndex,
+        phase: "failed",
+        restoredPrevious: audioSwitchAttachRef.current?.restoredPrevious,
+      });
       return false;
     }
     const reattachingExistingManifest = Boolean(attachedOptimizedManifestUrlRef.current);
@@ -1971,6 +2198,8 @@ export function useOptimizedPlaybackSession({
     if (isPendingAudioSwitchAttachForRevision(serverAttachRevision)) {
       if (AUDIO_SWITCH_ATTACH_LOAD_EVENTS.has(String(loadedEventName || ""))) {
         markAudioSwitchAttachLoaded({ eventName: loadedEventName });
+      } else {
+        markAudioSwitchPostSourceEvidence({ eventName: loadedEventName, playing });
       }
       if (maybeInferAudioSwitchAttachSuccess({ payload: activeSession, playing, sendHeartbeat: true })) {
         return;

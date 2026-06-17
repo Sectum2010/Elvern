@@ -588,8 +588,8 @@ describe("recovery and manifest window helpers", () => {
     });
     assert.equal(decision.backrollSeconds, AUTOMATIC_RECOVERY_BACKROLL_SECONDS);
     assert.equal(decision.targetBeforeBackrollSeconds, 160);
-    assert.equal(decision.targetAfterBackrollSeconds, 157.5);
-    assert.equal(decision.targetSeconds, 157.5);
+    assert.equal(decision.targetAfterBackrollSeconds, 158.5);
+    assert.equal(decision.targetSeconds, 158.5);
     assert.equal(decision.avoidedForwardSkip, true);
     assert.equal(resolveAutomaticPlaybackRecoveryTargetSeconds({
       currentAbsolutePositionSeconds: 163,
@@ -597,7 +597,7 @@ describe("recovery and manifest window helpers", () => {
       committedPlayheadSeconds: 160,
       actualMediaElementTimeSeconds: 160,
       targetPositionSeconds: 160,
-    }), 157.5);
+    }), 158.5);
   });
 
   test("automatic recovery clamps rollback at zero", () => {
@@ -615,7 +615,7 @@ describe("recovery and manifest window helpers", () => {
       targetPositionSeconds: 0,
     });
     assert.equal(decision.authorityPositionSeconds, 8.2);
-    assert.equal(Math.round(decision.targetAfterBackrollSeconds * 10) / 10, 5.7);
+    assert.equal(Math.round(decision.targetAfterBackrollSeconds * 10) / 10, 6.7);
     assert.equal(Number.isNaN(decision.targetAfterBackrollSeconds), false);
   });
 
@@ -628,7 +628,7 @@ describe("recovery and manifest window helpers", () => {
       targetPositionSeconds: 160,
     });
     assert.equal(decision.authorityPositionSeconds, 150);
-    assert.equal(decision.targetAfterBackrollSeconds, 147.5);
+    assert.equal(decision.targetAfterBackrollSeconds, 148.5);
     assert.equal(decision.avoidedForwardSkip, false);
   });
 

@@ -7690,10 +7690,10 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 2px solid rgba(2, 6, 23, 0.92);
-  background: #7dd3fc;
+  background: #e11d48;
   box-shadow:
-    0 0 0 3px rgba(125, 211, 252, 0.22),
-    0 0 12px rgba(125, 211, 252, 0.48);
+    0 0 0 3px rgba(225, 29, 72, 0.22),
+    0 0 12px rgba(225, 29, 72, 0.48);
   pointer-events: none;
 }
 

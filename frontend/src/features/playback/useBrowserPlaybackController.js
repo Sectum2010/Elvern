@@ -2552,6 +2552,9 @@ export function useBrowserPlaybackController({
       clearMobileStallRecoveryTimer();
       sampleNativeClientPlayback();
       armFirstFrameStallMonitor();
+      if (mobileSessionRef.current) {
+        maybeAcknowledgeHlsAttachment({ playing: true, force: true, loadedEventName: "playing" });
+      }
       if (!mobileSessionRef.current || mobilePlayerCanPlayRef.current) {
         return;
       }
@@ -2566,7 +2569,7 @@ export function useBrowserPlaybackController({
       clearMobileStallRecoveryTimer();
       sampleNativeClientPlayback();
       if (mobileSessionRef.current) {
-        maybeAcknowledgeHlsAttachment({ playing: !video.paused, force: true });
+        maybeAcknowledgeHlsAttachment({ playing: !video.paused, force: true, loadedEventName: "timeupdate" });
       }
       if (mobileSessionRef.current && mobilePlayerCanPlayRef.current && !mobileSeekPendingRef.current) {
         const absoluteCurrentTime = resolveCurrentVideoAbsolutePosition(mobileSessionRef.current, video);
