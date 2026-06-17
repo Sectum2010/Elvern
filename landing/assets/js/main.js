@@ -17,7 +17,7 @@ function createImage(shot, className = "") {
   const image = document.createElement("img");
   image.src = screenshotPath(shot.file);
   image.alt = shot.alt;
-  image.loading = "lazy";
+  image.loading = "eager";
   image.decoding = "async";
   if (className) {
     image.className = className;
@@ -47,9 +47,10 @@ function mountGallery(section, limit = Infinity) {
     .filter((shot) => shot.section === section)
     .slice(0, limit);
   gallery.replaceChildren(
-    ...shots.map((shot) => {
+    ...shots.map((shot, index) => {
       const figure = document.createElement("figure");
-      figure.className = "reveal";
+      figure.className = `reveal gallery-card gallery-card--${section}`;
+      figure.dataset.galleryIndex = String(index + 1);
       const slot = document.createElement("div");
       slot.className = "shot-slot";
       slot.append(createImage(shot, "parallax-shot"));
@@ -144,19 +145,20 @@ function initMotion() {
   }
 
   gsap.registerPlugin(ScrollTrigger);
-  gsap.to(".hero-device", {
-    opacity: 1,
-    y: 0,
+  gsap.from(".hero-device", {
+    opacity: 0.86,
+    y: 12,
     duration: 0.75,
     ease: "power3.out",
     delay: 0.08,
   });
   gsap.utils.toArray(".reveal").forEach((node) => {
-    gsap.to(node, {
-      opacity: 1,
-      y: 0,
+    gsap.from(node, {
+      opacity: 0.82,
+      y: 16,
       duration: 0.7,
       ease: "power3.out",
+      immediateRender: false,
       scrollTrigger: {
         trigger: node,
         start: "top 86%",
@@ -168,14 +170,24 @@ function initMotion() {
   if (window.matchMedia("(min-width: 721px)").matches) {
     ScrollTrigger.create({
       trigger: "#lite",
-      start: "top top",
-      end: "+=2800",
-      pin: ".lite-pin",
+      start: "top 38%",
+      end: "bottom 62%",
       scrub: true,
       onUpdate: (self) => {
         const step = Math.min(3, Math.floor(self.progress * 4));
         setLiteStep(step);
         setCountdownFromProgress(self.progress);
+      },
+    });
+
+    gsap.to(".lite-stage", {
+      y: -18,
+      ease: "none",
+      scrollTrigger: {
+        trigger: "#lite",
+        start: "top bottom",
+        end: "bottom top",
+        scrub: true,
       },
     });
   } else {

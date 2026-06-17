@@ -51,9 +51,12 @@ Supported sections are `hero`, `lite`, `features`, `showcase`, `privacy`, and
 
 GitHub Pages:
 
-1. Open repository Settings.
-2. Open Pages.
-3. Deploy from the `/landing` folder.
+1. Publish the contents of `landing/` as the root of a Pages source.
+2. The simplest no-build path is a dedicated `gh-pages` branch whose root
+   contains `index.html` and the `assets/` folder from this directory.
+3. A later GitHub Actions workflow can also publish `landing/` directly without
+   moving files, but that workflow is intentionally not included in this
+   prototype.
 
 Cloudflare Pages:
 
@@ -63,3 +66,16 @@ Output directory: landing
 ```
 
 No npm install or build step is required.
+
+## Custom Domain With GitHub Pages
+
+1. Publish the landing page with GitHub Pages.
+2. In the repository Pages settings, add the purchased domain as the custom
+   domain.
+3. At the domain registrar, point the domain to GitHub Pages:
+   - For `www.example.com`, add a `CNAME` record pointing to
+     `Sectum2010.github.io`.
+   - For an apex domain like `example.com`, add GitHub Pages `A` records.
+4. Add a `CNAME` file in the published Pages source containing only the domain
+   name when the final domain is chosen.
+5. Wait for DNS to propagate, then enable HTTPS in GitHub Pages.
