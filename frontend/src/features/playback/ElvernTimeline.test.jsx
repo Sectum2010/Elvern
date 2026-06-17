@@ -18,6 +18,38 @@ describe("ElvernTimeline", () => {
     expect(container.querySelector(".elvern-timeline__playhead")).toBeNull();
   });
 
+  test("renders a continuous server prepared layer from playhead to prepared frontier", () => {
+    const { container } = render(
+      <ElvernTimeline
+        bufferedAbsoluteRanges={[[0, 40], [70, 80]]}
+        currentTimeSeconds={40}
+        durationSeconds={100}
+        onSeekCommit={() => {}}
+        serverPreparedThroughSeconds={80}
+      />,
+    );
+
+    const serverPrepared = container.querySelector(".elvern-timeline__layer--server-prepared");
+
+    expect(serverPrepared).not.toBeNull();
+    expect(serverPrepared).toHaveStyle({ left: "40%", width: "40%" });
+    expect(container.querySelectorAll(".elvern-timeline__layer--buffered")).toHaveLength(2);
+  });
+
+  test("does not render server prepared width when the frontier matches the playhead", () => {
+    const { container } = render(
+      <ElvernTimeline
+        bufferedAbsoluteRanges={[[0, 60]]}
+        currentTimeSeconds={40}
+        durationSeconds={100}
+        onSeekCommit={() => {}}
+        serverPreparedThroughSeconds={40}
+      />,
+    );
+
+    expect(container.querySelector(".elvern-timeline__layer--server-prepared")).toBeNull();
+  });
+
   test("renders preparing target marker on the timeline track when a target is known", () => {
     const { container } = render(
       <ElvernTimeline

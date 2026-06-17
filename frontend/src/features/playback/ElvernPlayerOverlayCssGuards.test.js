@@ -315,6 +315,15 @@ describe("Elvern player mobile CSS guards", () => {
     expect(markerBlock).not.toContain("rgba(125, 211, 252");
   });
 
+  test("timeline primary pre-cache layer is the server prepared layer", () => {
+    const styles = readStyles();
+    const bufferedBlock = cssBlock(styles, ".elvern-timeline__layer--buffered");
+    const serverPreparedBlock = cssBlock(styles, ".elvern-timeline__layer--server-prepared");
+
+    expect(bufferedBlock).toContain("rgba(255, 255, 255, 0.22");
+    expect(serverPreparedBlock).toContain("rgba(255, 255, 255, 0.72");
+  });
+
   test("desktop track menus keep long audio and subtitle labels readable", () => {
     const styles = readStyles();
     const menuBlock = cssBlock(styles, ".elvern-overlay__track-menu");

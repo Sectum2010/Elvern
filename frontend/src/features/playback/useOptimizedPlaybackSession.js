@@ -82,6 +82,11 @@ export function buildAudioSwitchAttachDiagnostic(eventName, details = {}) {
     "previousAudioStreamIndex",
     "candidateEpochId",
     "candidateAudioStreamIndex",
+    "candidateAttachPositionSeconds",
+    "candidateReadyEndSeconds",
+    "requiredServerPrepareSeconds",
+    "actualCandidateRunwaySeconds",
+    "checkedSegmentCount",
     "activeAudioStreamIndex",
     "validationMethod",
     "timeoutMs",
@@ -89,6 +94,8 @@ export function buildAudioSwitchAttachDiagnostic(eventName, details = {}) {
     "oldStreamRetained",
     "failureReason",
     "sourceGeneration",
+    "paused",
+    "readyState",
   ];
   allowedFields.forEach((field) => {
     if (details[field] !== undefined) {
@@ -216,6 +223,15 @@ function isAudioSwitchPromotionPayload(previousPayload, payload) {
 function isAudioSwitchCandidateReadyPayload(payload) {
   const switchState = String(payload?.audio_switch_state || "").trim().toLowerCase();
   const candidateState = String(payload?.audio_switch_candidate_state || "").trim().toLowerCase();
+  const requiredRunway = Number(payload?.audio_switch_candidate_required_runway_seconds);
+  const actualRunway = Number(payload?.audio_switch_candidate_actual_runway_seconds);
+  const hasRunwayNumbers = Number.isFinite(requiredRunway) && Number.isFinite(actualRunway);
+  if (hasRunwayNumbers && actualRunway + 0.001 < requiredRunway) {
+    return false;
+  }
+  if (hasRunwayNumbers && payload?.audio_switch_candidate_runway_satisfied === false) {
+    return false;
+  }
   return Boolean(
     isSharedHlsSessionPayload(payload)
     && (switchState === "candidate_ready" || candidateState === "ready" || payload?.audio_switch_requires_commit)
@@ -252,6 +268,86 @@ function buildCandidateProbeUrls(manifestUrl) {
   };
 }
 
+function parseCandidateManifestSegments(manifestText) {
+  const lines = String(manifestText || "").split(/\r?\n/u);
+  let mediaSequence = 0;
+  let targetDuration = 2;
+  let pendingDuration = null;
+  const segments = [];
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) {
+      return;
+    }
+    if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+      const parsed = Number(line.slice("#EXT-X-MEDIA-SEQUENCE:".length));
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        mediaSequence = parsed;
+      }
+      return;
+    }
+    if (line.startsWith("#EXT-X-TARGETDURATION:")) {
+      const parsed = Number(line.slice("#EXT-X-TARGETDURATION:".length));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        targetDuration = parsed;
+      }
+      return;
+    }
+    if (line.startsWith("#EXTINF:")) {
+      const parsed = Number(line.slice("#EXTINF:".length).split(",")[0]);
+      pendingDuration = Number.isFinite(parsed) && parsed > 0 ? parsed : targetDuration;
+      return;
+    }
+    if (line.startsWith("#") || !/\.m4s(?:$|[?#])/u.test(line)) {
+      return;
+    }
+    const parsedIndex = line.match(/segments\/(\d+)\.m4s(?:$|[?#])/u);
+    const segmentIndex = parsedIndex
+      ? Number(parsedIndex[1])
+      : mediaSequence + segments.length;
+    const durationSeconds = pendingDuration != null ? pendingDuration : targetDuration;
+    segments.push({
+      line,
+      segmentIndex: Number.isFinite(segmentIndex) ? segmentIndex : mediaSequence + segments.length,
+      durationSeconds,
+      startSeconds: (Number.isFinite(segmentIndex) ? segmentIndex : mediaSequence + segments.length) * targetDuration,
+    });
+    pendingDuration = null;
+  });
+  return {
+    mediaSequence,
+    targetDuration,
+    segments,
+  };
+}
+
+function selectCandidateValidationSegments(payload, manifestText) {
+  const { segments, targetDuration } = parseCandidateManifestSegments(manifestText);
+  if (!segments.length) {
+    return [];
+  }
+  const attach = Number(payload?.audio_switch_candidate_attach_position_seconds);
+  const readyEnd = Number(payload?.audio_switch_candidate_ready_end_seconds);
+  const hasAttach = Number.isFinite(attach) && attach >= 0;
+  const targetSegmentIndex = hasAttach
+    ? Math.max(0, Math.floor(attach / Math.max(0.001, targetDuration)))
+    : null;
+  const attachSegment = targetSegmentIndex != null
+    ? segments.find((segment) => segment.segmentIndex >= targetSegmentIndex)
+      || segments[segments.length - 1]
+    : segments[Math.max(0, Math.floor(segments.length * 0.66))];
+  const selected = [attachSegment];
+  if (Number.isFinite(readyEnd) && readyEnd > (hasAttach ? attach : 0)) {
+    const readySegmentIndex = Math.max(0, Math.floor((readyEnd - Math.max(0.001, targetDuration)) / Math.max(0.001, targetDuration)));
+    const readySegment = segments.find((segment) => segment.segmentIndex >= readySegmentIndex)
+      || segments[segments.length - 1];
+    if (readySegment && readySegment.line !== attachSegment.line) {
+      selected.push(readySegment);
+    }
+  }
+  return selected.filter(Boolean);
+}
+
 async function fetchWithTimeout(url, { signal: parentSignal = null, timeoutMs = 0, ...options } = {}) {
   const controller = new AbortController();
   let timerId = null;
@@ -286,7 +382,7 @@ async function fetchWithTimeout(url, { signal: parentSignal = null, timeoutMs = 
   }
 }
 
-async function validateAudioSwitchCandidatePayload(payload, { timeoutMs = AUDIO_SWITCH_CANDIDATE_VALIDATION_TIMEOUT_MS } = {}) {
+export async function validateAudioSwitchCandidatePayload(payload, { timeoutMs = AUDIO_SWITCH_CANDIDATE_VALIDATION_TIMEOUT_MS } = {}) {
   const manifestUrl = payload?.audio_switch_candidate_manifest_url;
   if (!manifestUrl) {
     throw new Error("candidate_manifest_missing");
@@ -304,11 +400,8 @@ async function validateAudioSwitchCandidatePayload(payload, { timeoutMs = AUDIO_
   if (!manifestText.includes("#EXTM3U")) {
     throw new Error("candidate_manifest_invalid");
   }
-  const segmentLine = manifestText
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .find((line) => line && !line.startsWith("#") && /\.m4s(?:$|[?#])/u.test(line));
-  if (!segmentLine) {
+  const segmentLines = selectCandidateValidationSegments(payload, manifestText);
+  if (!segmentLines.length) {
     throw new Error("candidate_segment_missing");
   }
   const initResponse = await fetchWithTimeout(probeUrls.initUrl, {
@@ -323,22 +416,27 @@ async function validateAudioSwitchCandidatePayload(payload, { timeoutMs = AUDIO_
   if (!initBytes.byteLength) {
     throw new Error("candidate_init_empty");
   }
-  const segmentResponse = await fetchWithTimeout(probeUrls.segmentUrlFromLine(segmentLine), {
-    credentials: "include",
-    cache: "no-store",
-    timeoutMs,
-  });
-  if (!segmentResponse.ok) {
-    throw new Error("candidate_segment_unavailable");
-  }
-  const segmentBytes = await segmentResponse.arrayBuffer();
-  if (!segmentBytes.byteLength) {
-    throw new Error("candidate_segment_empty");
+  let totalSegmentBytes = 0;
+  for (const segment of segmentLines) {
+    const segmentResponse = await fetchWithTimeout(probeUrls.segmentUrlFromLine(segment.line), {
+      credentials: "include",
+      cache: "no-store",
+      timeoutMs,
+    });
+    if (!segmentResponse.ok) {
+      throw new Error("candidate_segment_unavailable");
+    }
+    const segmentBytes = await segmentResponse.arrayBuffer();
+    if (!segmentBytes.byteLength) {
+      throw new Error("candidate_segment_empty");
+    }
+    totalSegmentBytes += segmentBytes.byteLength;
   }
   return {
-    validationMethod: "manifest_init_segment_fetch",
+    validationMethod: "manifest_init_attach_window_segment_fetch",
     initBytes: initBytes.byteLength,
-    segmentBytes: segmentBytes.byteLength,
+    segmentBytes: totalSegmentBytes,
+    checkedSegmentCount: segmentLines.length,
   };
 }
 
@@ -799,16 +897,151 @@ export function useOptimizedPlaybackSession({
     console.debug("[elvern] audio_switch_attach", buildAudioSwitchAttachDiagnostic(eventName, details));
   }
 
+  function audioSwitchStatusHasTargetActive(payload, targetAudioStreamIndex) {
+    const switchState = String(payload?.audio_switch_state || "").trim().toLowerCase();
+    return Boolean(
+      isRoute2SessionPayload(payload)
+      && ["active", "committing"].includes(switchState)
+      && Number(payload?.active_audio_stream_index) === Number(targetAudioStreamIndex)
+    );
+  }
+
+  function audioSwitchStatusConfirmsPreviousActive(payload, targetAudioStreamIndex) {
+    const switchState = String(payload?.audio_switch_state || "").trim().toLowerCase();
+    const candidateState = String(payload?.audio_switch_candidate_state || "").trim().toLowerCase();
+    return Boolean(
+      isRoute2SessionPayload(payload)
+      && Number.isInteger(payload?.active_audio_stream_index)
+      && Number(payload.active_audio_stream_index) !== Number(targetAudioStreamIndex)
+      && (
+        ["failed", "cancelled", "canceled", "active"].includes(switchState)
+        || ["none", "failed", "cancelled", "canceled"].includes(candidateState)
+        || !payload?.audio_switch_candidate_epoch_id
+      )
+    );
+  }
+
+  function waitForAudioSwitchVerificationPoll(delayMs) {
+    const timerHost = typeof window !== "undefined" ? window : globalThis;
+    return new Promise((resolve) => {
+      timerHost.setTimeout(resolve, delayMs);
+    });
+  }
+
+  async function pollAudioSwitchCandidateFailure(payload, candidateIdentity, error) {
+    const targetAudioStreamIndex = payload.audio_switch_candidate_stream_index;
+    if (audioSwitchCandidateValidationRef.current?.identity === candidateIdentity) {
+      audioSwitchCandidateValidationRef.current = {
+        ...audioSwitchCandidateValidationRef.current,
+        state: "checking",
+        checkingAtMs: Date.now(),
+      };
+    }
+    debugAudioSwitchAttach("audio_switch_verification_ambiguous_polling", {
+      candidateEpochId: payload.audio_switch_candidate_epoch_id,
+      candidateAudioStreamIndex: targetAudioStreamIndex,
+      activeAudioStreamIndex: payload.active_audio_stream_index,
+      validationMethod: "manifest_init_attach_window_segment_fetch",
+      reason: error?.message || "validation_failed",
+      oldStreamRetained: true,
+    });
+    setPlaybackError("");
+    setSeekNotice("Audio switch verification timed out. Checking current audio...");
+    let latestPayload = payload;
+    for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
+      if (attemptIndex > 0) {
+        await waitForAudioSwitchVerificationPoll(500);
+      }
+      const statusPayload = await fetchOptimizedPlaybackSessionStatus({
+        browserPlaybackSessionRoot,
+        sessionId: payload.session_id,
+        statusUrl: payload.status_url,
+      });
+      const acceptedPayload = acceptBrowserPlaybackSessionPayload(statusPayload, SESSION_SOURCE_STATUS);
+      if (acceptedPayload.accepted) {
+        latestPayload = statusPayload;
+        syncMobilePlaybackState(statusPayload);
+      }
+      if (audioSwitchStatusHasTargetActive(statusPayload, targetAudioStreamIndex)) {
+        const video = videoRef.current;
+        debugAudioSwitchAttach("audio_switch_false_failure_suppressed", {
+          candidateEpochId: payload.audio_switch_candidate_epoch_id,
+          candidateAudioStreamIndex: targetAudioStreamIndex,
+          activeAudioStreamIndex: statusPayload.active_audio_stream_index,
+          paused: video ? Boolean(video.paused) : true,
+          readyState: video ? Number(video.readyState || 0) : 0,
+          reason: "target_active_after_validation_failure",
+        });
+        audioSwitchCandidateValidationRef.current = {
+          identity: candidateIdentity,
+          state: "committed",
+          startedAtMs: audioSwitchCandidateValidationRef.current?.startedAtMs || Date.now(),
+          committedAtMs: Date.now(),
+        };
+        clearOptimizedPlaybackPending();
+        setPlaybackError("");
+        setSeekNotice(video?.paused ? "Audio switched. Tap play to continue." : "");
+        return;
+      }
+      if (audioSwitchStatusConfirmsPreviousActive(statusPayload, targetAudioStreamIndex)) {
+        latestPayload = statusPayload;
+        break;
+      }
+    }
+    if (!audioSwitchStatusConfirmsPreviousActive(latestPayload, targetAudioStreamIndex)) {
+      try {
+        const cancelled = await cancelOptimizedPlaybackAudioTrackCandidate({
+          browserPlaybackSessionRoot,
+          sessionId: payload.session_id,
+          cancelUrl: payload.audio_switch_cancel_url,
+        });
+        const acceptedPayload = acceptBrowserPlaybackSessionPayload(cancelled, SESSION_SOURCE_STATUS);
+        if (acceptedPayload.accepted) {
+          latestPayload = cancelled;
+          syncMobilePlaybackState(cancelled);
+        }
+      } catch {
+        // Keep the existing playable source if the cancel acknowledgement misses.
+      }
+    }
+    if (audioSwitchStatusConfirmsPreviousActive(latestPayload, targetAudioStreamIndex)) {
+      debugAudioSwitchAttach("audio_switch_failure_confirmed_previous_active", {
+        candidateEpochId: payload.audio_switch_candidate_epoch_id,
+        candidateAudioStreamIndex: targetAudioStreamIndex,
+        activeAudioStreamIndex: latestPayload.active_audio_stream_index,
+        reason: error?.message || "validation_failed",
+        oldStreamRetained: true,
+      });
+      clearOptimizedPlaybackPending();
+      setPlaybackError("");
+      setSeekNotice("Audio switch failed. Previous audio is still playing.");
+      setPlaybackStatus(browserStreamLabelTitle);
+    }
+  }
+
   function maybeStartAudioSwitchCandidateValidation(payload) {
     if (!isAudioSwitchCandidateReadyPayload(payload)) {
+      if (isAudioSwitchPreparingState(payload)) {
+        debugAudioSwitchAttach("audio_switch_candidate_validation_waiting_for_ready", {
+          candidateEpochId: payload?.audio_switch_candidate_epoch_id,
+          candidateAudioStreamIndex: payload?.audio_switch_candidate_stream_index,
+          activeAudioStreamIndex: payload?.active_audio_stream_index,
+          candidateAttachPositionSeconds: payload?.audio_switch_candidate_attach_position_seconds,
+          candidateReadyEndSeconds: payload?.audio_switch_candidate_ready_end_seconds,
+          requiredServerPrepareSeconds: payload?.audio_switch_candidate_required_runway_seconds,
+          actualCandidateRunwaySeconds: payload?.audio_switch_candidate_actual_runway_seconds,
+          reason: "backend_candidate_not_ready",
+          oldStreamRetained: true,
+        });
+      }
       return false;
     }
     const candidateIdentity = resolveAudioSwitchCandidateIdentity(payload);
     const current = audioSwitchCandidateValidationRef.current;
-    if (current?.identity === candidateIdentity && current.state === "running") {
-      return true;
-    }
-    if (current?.identity === candidateIdentity && current.state === "committed") {
+    if (
+      current?.identity === candidateIdentity
+      && ["running", "checking", "committed"].includes(current.state)
+    ) {
       return true;
     }
     audioSwitchCandidateValidationRef.current = {
@@ -820,7 +1053,11 @@ export function useOptimizedPlaybackSession({
       candidateEpochId: payload.audio_switch_candidate_epoch_id,
       candidateAudioStreamIndex: payload.audio_switch_candidate_stream_index,
       activeAudioStreamIndex: payload.active_audio_stream_index,
-      validationMethod: "manifest_init_segment_fetch",
+      candidateAttachPositionSeconds: payload.audio_switch_candidate_attach_position_seconds,
+      candidateReadyEndSeconds: payload.audio_switch_candidate_ready_end_seconds,
+      requiredServerPrepareSeconds: payload.audio_switch_candidate_required_runway_seconds,
+      actualCandidateRunwaySeconds: payload.audio_switch_candidate_actual_runway_seconds,
+      validationMethod: "manifest_init_attach_window_segment_fetch",
       timeoutMs: AUDIO_SWITCH_CANDIDATE_VALIDATION_TIMEOUT_MS,
       oldStreamRetained: true,
     });
@@ -840,6 +1077,7 @@ export function useOptimizedPlaybackSession({
           candidateAudioStreamIndex: payload.audio_switch_candidate_stream_index,
           activeAudioStreamIndex: payload.active_audio_stream_index,
           validationMethod: result.validationMethod,
+          checkedSegmentCount: result.checkedSegmentCount,
           oldStreamRetained: true,
         });
         const committed = await commitOptimizedPlaybackAudioTrackCandidate({
@@ -897,27 +1135,11 @@ export function useOptimizedPlaybackSession({
           candidateEpochId: payload.audio_switch_candidate_epoch_id,
           candidateAudioStreamIndex: payload.audio_switch_candidate_stream_index,
           activeAudioStreamIndex: payload.active_audio_stream_index,
-          validationMethod: "manifest_init_segment_fetch",
+          validationMethod: "manifest_init_attach_window_segment_fetch",
           reason: error?.message || "validation_failed",
           oldStreamRetained: true,
         });
-        try {
-          const cancelled = await cancelOptimizedPlaybackAudioTrackCandidate({
-            browserPlaybackSessionRoot,
-            sessionId: payload.session_id,
-            cancelUrl: payload.audio_switch_cancel_url,
-          });
-          const acceptedPayload = acceptBrowserPlaybackSessionPayload(cancelled, SESSION_SOURCE_STATUS);
-          if (acceptedPayload.accepted) {
-            syncMobilePlaybackState(cancelled);
-          }
-        } catch {
-          // Keep the existing playable source if the cancel acknowledgement misses.
-        }
-        clearOptimizedPlaybackPending();
-        setPlaybackError("");
-        setSeekNotice("Audio switch failed. Previous audio is still playing.");
-        setPlaybackStatus(browserStreamLabelTitle);
+        await pollAudioSwitchCandidateFailure(payload, candidateIdentity, error);
       });
     return true;
   }
@@ -1146,9 +1368,21 @@ export function useOptimizedPlaybackSession({
       mobilePendingAttachRevisionRef.current,
       expectedRevision,
     );
-    setSeekNotice("");
+    const video = videoRef.current;
+    const pausedReady = video ? Boolean(video.paused) : playing === false;
+    setSeekNotice(pausedReady ? "Audio switched. Tap play to continue." : "");
     setPlaybackError("");
     setMobileLifecycleStateValue("attached");
+    if (pausedReady) {
+      debugAudioSwitchAttach("audio_switch_success_ready_paused", {
+        expectedAttachRevision: pending.expectedAttachRevision,
+        expectedActiveEpochId: pending.expectedActiveEpochId,
+        targetAudioStreamIndex: pending.targetAudioStreamIndex,
+        paused: true,
+        readyState: video ? Number(video.readyState || 0) : 0,
+        successReason,
+      });
+    }
     debugAudioSwitchAttach("audio_switch_success_inferred_post_source", {
       expectedAttachRevision: pending.expectedAttachRevision,
       expectedActiveEpochId: pending.expectedActiveEpochId,
@@ -1163,7 +1397,6 @@ export function useOptimizedPlaybackSession({
       successReason,
     });
     if (sendHeartbeat && Number(payload?.client_attach_revision || 0) < expectedRevision) {
-      const video = videoRef.current;
       postMobileRuntimeHeartbeat({
         lifecycleState: "attached",
         stalled: false,

@@ -43,7 +43,10 @@ export function resolveBrowserPlaybackPlayerViewState({
     || route2FinalAttachPreparing
     || route2PreparingWithoutSource
     || browserPreparingBeforeSession;
-  const showMobilePrewarmCard = showMobileWarmupShell && !mobileFrozenFrameUrl;
+  const showMobilePrewarmCard = showMobileWarmupShell && (
+    route2FinalAttachPreparing
+    || !mobileFrozenFrameUrl
+  );
   const showPlayerShell = showInlinePlayer || showMobileWarmupShell;
 
   const browserPlaybackPreparing = hasMobileSession

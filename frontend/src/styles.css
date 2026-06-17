@@ -7674,7 +7674,11 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 }
 
 .elvern-timeline__layer--buffered {
-  background: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.elvern-timeline__layer--server-prepared {
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .elvern-timeline__layer--progress {

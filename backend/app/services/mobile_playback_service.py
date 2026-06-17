@@ -33,7 +33,6 @@ from .mobile_playback_models import (
     MOBILE_PROFILES,
     PLAYBACK_COMMIT_RUNWAY_SECONDS,
     READY_AFTER_TARGET_SECONDS,
-    ROUTE2_AUDIO_SWITCH_READY_RUNWAY_SECONDS,
     ROUTE2_ATTACH_ACK_WARN_SECONDS,
     ROUTE2_ATTACH_READY_SECONDS,
     ROUTE2_DRAIN_IDLE_GRACE_SECONDS,
@@ -1986,6 +1985,34 @@ class MobilePlaybackManager:
             if candidate is None:
                 return self._route2_snapshot_locked(session)
             if browser_session.audio_switch_candidate_state != "ready":
+                self._log_route2_event(
+                    "audio_switch_commit_blocked_candidate_not_ready",
+                    session=session,
+                    epoch=candidate,
+                    candidate_audio_stream_index=browser_session.audio_switch_candidate_stream_index,
+                    candidate_state=browser_session.audio_switch_candidate_state,
+                    switch_state=browser_session.audio_switch_state,
+                )
+                return self._route2_snapshot_locked(session)
+            runway_status = self._route2_audio_switch_candidate_runway_status_locked(
+                session,
+                candidate,
+            )
+            if not bool(runway_status["satisfied"]):
+                browser_session.audio_switch_candidate_state = "preparing"
+                browser_session.audio_switch_state = "candidate_preparing"
+                self._write_route2_epoch_metadata_locked(candidate)
+                self._log_route2_event(
+                    "audio_switch_commit_blocked_runway_short",
+                    session=session,
+                    epoch=candidate,
+                    candidate_audio_stream_index=browser_session.audio_switch_candidate_stream_index,
+                    candidate_attach_position=round(float(runway_status["attach_position_seconds"]), 2),
+                    candidate_ready_end=round(float(runway_status["ready_end_seconds"]), 2),
+                    required_server_prepare_seconds=round(float(runway_status["required_runway_seconds"]), 2),
+                    actual_candidate_runway_seconds=round(float(runway_status["actual_runway_seconds"]), 2),
+                    reason=runway_status["source"],
+                )
                 return self._route2_snapshot_locked(session)
             browser_session.audio_switch_candidate_state = "committing"
             browser_session.audio_switch_state = "committing"
@@ -11510,17 +11537,55 @@ class MobilePlaybackManager:
         )
         if active_epoch is None or active_epoch.state in {"failed", "ended"}:
             return False
-        ready_end_seconds = self._route2_epoch_ready_end_seconds(session, replacement_epoch)
-        remaining_presentation_seconds = max(
-            0.0,
-            float(session.duration_seconds or 0.0) - float(replacement_epoch.attach_position_seconds or 0.0),
+        return bool(
+            self._route2_audio_switch_candidate_runway_status_locked(
+                session,
+                replacement_epoch,
+            )["satisfied"]
         )
-        required_runway = min(ROUTE2_AUDIO_SWITCH_READY_RUNWAY_SECONDS, remaining_presentation_seconds)
-        if required_runway <= 0.0:
-            return True
-        return (
-            ready_end_seconds - float(replacement_epoch.attach_position_seconds or 0.0)
-        ) + 0.001 >= required_runway
+
+    def _route2_audio_switch_candidate_runway_status_locked(
+        self,
+        session: MobilePlaybackSession,
+        replacement_epoch: PlaybackEpoch,
+    ) -> dict[str, object]:
+        attach_position_seconds = max(0.0, float(replacement_epoch.attach_position_seconds or 0.0))
+        ready_end_seconds = self._route2_epoch_ready_end_seconds(session, replacement_epoch)
+        duration_seconds = max(0.0, float(session.duration_seconds or 0.0))
+        remaining_presentation_seconds = max(0.0, duration_seconds - attach_position_seconds)
+        browser_session = session.browser_playback
+        if browser_session.playback_mode == "full":
+            reserve_status = self._route2_bad_condition_reserve_status_locked(session, replacement_epoch)
+            if bool(reserve_status.get("bad_condition_reserve_required")):
+                raw_required = float(
+                    reserve_status.get("reserve_required_seconds")
+                    or ROUTE2_FULL_BAD_CONDITION_RESERVE_SECONDS
+                )
+                source = "full_bad_condition_reserve"
+            else:
+                raw_required = ROUTE2_FULL_FAST_START_RUNWAY_SECONDS
+                source = "full_healthy_120"
+        else:
+            decider_state = str(browser_session.lite_threshold_decider_state or "").strip().lower()
+            if decider_state == "fast_confirmed_15":
+                raw_required = ROUTE2_LITE_FAST_START_RUNWAY_SECONDS
+                source = "lite_fast_confirmed_15"
+            elif decider_state == "undersupply_confirmed_180":
+                raw_required = ROUTE2_LITE_UNDERSUPPLY_START_RUNWAY_SECONDS
+                source = "lite_undersupply_confirmed_180"
+            else:
+                raw_required = ROUTE2_LITE_SLOW_START_RUNWAY_SECONDS
+                source = "lite_slow_path_45"
+        required_runway = min(max(0.0, raw_required), remaining_presentation_seconds)
+        actual_runway = max(0.0, ready_end_seconds - attach_position_seconds)
+        return {
+            "attach_position_seconds": attach_position_seconds,
+            "ready_end_seconds": ready_end_seconds,
+            "required_runway_seconds": required_runway,
+            "actual_runway_seconds": actual_runway,
+            "satisfied": actual_runway + 0.001 >= required_runway,
+            "source": source,
+        }
 
     def _route2_downshift_abort_reason_locked(
         self,
@@ -12764,6 +12829,9 @@ class MobilePlaybackManager:
             route2_epoch_startup_attach_gate_locked=self._route2_epoch_startup_attach_gate_locked,
             guard_route2_full_attach_boundary_locked=self._guard_route2_full_attach_boundary_locked,
             route2_epoch_ready_end_seconds=self._route2_epoch_ready_end_seconds,
+            route2_audio_switch_candidate_runway_status_locked=(
+                self._route2_audio_switch_candidate_runway_status_locked
+            ),
             route2_low_water_recovery_needed_locked=self._route2_low_water_recovery_needed_locked,
             route2_full_mode_gate_locked=self._route2_full_mode_gate_locked,
             route2_position_in_epoch_locked=self._route2_position_in_epoch_locked,
@@ -12992,11 +13060,16 @@ class MobilePlaybackManager:
                 replacement_epoch = None
             if replacement_epoch is not None:
                 if replacement_epoch.replacement_reason == "audio_track_switch":
+                    replacement_runway_status = self._route2_audio_switch_candidate_runway_status_locked(
+                        session,
+                        replacement_epoch,
+                    )
                     replacement_attach_ready = self._route2_audio_switch_replacement_ready_locked(
                         session,
                         replacement_epoch,
                     )
                 else:
+                    replacement_runway_status = None
                     replacement_attach_ready = self._route2_epoch_startup_attach_ready_locked(session, replacement_epoch)
                     replacement_attach_ready = self._guard_route2_full_attach_boundary_locked(
                         session,
@@ -13043,6 +13116,33 @@ class MobilePlaybackManager:
                                     2,
                                 ),
                             )
+                            self._log_route2_event(
+                                "audio_switch_candidate_server_pre_cache_ready",
+                                session=session,
+                                epoch=replacement_epoch,
+                                candidate_audio_stream_index=replacement_epoch.audio_stream_index,
+                                candidate_attach_position=round(
+                                    float(replacement_runway_status["attach_position_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                candidate_ready_end=round(
+                                    float(replacement_runway_status["ready_end_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                required_server_prepare_seconds=round(
+                                    float(replacement_runway_status["required_runway_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                actual_candidate_runway_seconds=round(
+                                    float(replacement_runway_status["actual_runway_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                reason=(
+                                    replacement_runway_status["source"]
+                                    if replacement_runway_status is not None
+                                    else "unknown"
+                                ),
+                            )
                     else:
                         self._promote_route2_replacement_epoch_locked(session, replacement_epoch)
                         active_epoch = replacement_epoch
@@ -13055,6 +13155,34 @@ class MobilePlaybackManager:
                         replacement_epoch.state = "starting"
                     self._write_route2_epoch_metadata_locked(replacement_epoch)
                     if replacement_epoch.replacement_reason == "audio_track_switch":
+                        if browser_session.audio_switch_candidate_state != "preparing":
+                            self._log_route2_event(
+                                "audio_switch_candidate_waiting_for_server_pre_cache",
+                                session=session,
+                                epoch=replacement_epoch,
+                                candidate_audio_stream_index=replacement_epoch.audio_stream_index,
+                                candidate_attach_position=round(
+                                    float(replacement_runway_status["attach_position_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                candidate_ready_end=round(
+                                    float(replacement_runway_status["ready_end_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                required_server_prepare_seconds=round(
+                                    float(replacement_runway_status["required_runway_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                actual_candidate_runway_seconds=round(
+                                    float(replacement_runway_status["actual_runway_seconds"]),
+                                    2,
+                                ) if replacement_runway_status is not None else None,
+                                reason=(
+                                    replacement_runway_status["source"]
+                                    if replacement_runway_status is not None
+                                    else "not_ready"
+                                ),
+                            )
                         browser_session.audio_switch_state = "candidate_preparing"
                         browser_session.audio_switch_candidate_state = "preparing"
                         browser_session.audio_switch_error = None

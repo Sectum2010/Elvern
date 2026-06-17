@@ -52,6 +52,46 @@ test("route2 audio commit waits in the prewarm card instead of a black inline pl
   assert.equal(state.showPlayerShell, true);
 });
 
+test("route2 audio commit keeps the prewarm card stable even with a frozen frame", () => {
+  const state = resolveBrowserPlaybackPlayerViewState({
+    activePlaybackMode: "lite",
+    iosMobile: false,
+    mobileFrozenFrameUrl: "blob:frozen-frame",
+    mobilePlayerCanPlay: false,
+    mobileSession: buildRoute2Session({
+      audio_switch_state: "committing",
+      attach_revision: 2,
+      client_attach_revision: 1,
+    }),
+    optimizedPlaybackPending: true,
+    streamSource: { mode: "hls", url: "blob:next-audio" },
+  });
+
+  assert.equal(state.showInlinePlayer, false);
+  assert.equal(state.showMobileWarmupShell, true);
+  assert.equal(state.showMobilePrewarmCard, true);
+});
+
+test("route2 candidate preparing keeps the old playable stream visible", () => {
+  const state = resolveBrowserPlaybackPlayerViewState({
+    activePlaybackMode: "lite",
+    iosMobile: false,
+    mobileFrozenFrameUrl: "",
+    mobilePlayerCanPlay: true,
+    mobileSession: buildRoute2Session({
+      audio_switch_state: "candidate_preparing",
+      audio_switch_candidate_state: "preparing",
+      pending_audio_stream_index: 5,
+    }),
+    optimizedPlaybackPending: false,
+    streamSource: { mode: "hls", url: "blob:old-audio" },
+  });
+
+  assert.equal(state.showInlinePlayer, true);
+  assert.equal(state.showMobileWarmupShell, false);
+  assert.equal(state.showMobilePrewarmCard, false);
+});
+
 test("iPhone route2 source keeps the warmup shell until mobile can-play is confirmed", () => {
   const state = resolveBrowserPlaybackPlayerViewState({
     activePlaybackMode: "lite",

@@ -1180,7 +1180,7 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
         assert replacement.epoch_id != original_active_epoch_id
         assert session.browser_playback.epochs[original_active_epoch_id].state != "draining"
 
-    _publish_route2_epoch_dummy_range(replacement, through_segment=28)
+    _publish_route2_epoch_dummy_range(replacement, through_segment=50)
     manager._refresh_route2_session_authority_locked(session)
     ready = manager._route2_snapshot_locked(session)
 
@@ -1188,6 +1188,9 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     assert ready["pending_audio_stream_index"] == 5
     assert ready["audio_switch_state"] == "candidate_ready"
     assert ready["audio_switch_requires_commit"] is True
+    assert ready["audio_switch_candidate_required_runway_seconds"] == 45.0
+    assert ready["audio_switch_candidate_actual_runway_seconds"] >= 45.0
+    assert ready["audio_switch_candidate_runway_satisfied"] is True
 
     promoted = manager.commit_audio_track_candidate(session.session_id, user_id=session.user_id)
 
@@ -1385,7 +1388,7 @@ def test_route2_audio_replacement_failure_clears_pending_and_keeps_active_epoch(
     assert replacement.epoch_id not in session.browser_playback.epochs
 
 
-def test_route2_audio_replacement_promotes_after_audio_specific_runway(initialized_settings, monkeypatch) -> None:
+def test_route2_audio_replacement_waits_for_server_prepare_runway_before_commit(initialized_settings, monkeypatch) -> None:
     manager, settings = _make_route2_manager(initialized_settings)
     item = _insert_media_item_record(
         settings,
@@ -1416,11 +1419,32 @@ def test_route2_audio_replacement_promotes_after_audio_specific_runway(initializ
     assert snapshot["active_audio_stream_index"] == 1
     assert snapshot["selected_audio_stream_index"] == 5
     assert snapshot["pending_audio_stream_index"] == 5
-    assert snapshot["audio_switch_state"] == "candidate_ready"
+    assert snapshot["audio_switch_state"] == "candidate_preparing"
+    assert snapshot["audio_switch_requires_commit"] is False
     assert snapshot["audio_switch_error"] is None
+    assert snapshot["audio_switch_candidate_required_runway_seconds"] == 45.0
+    assert snapshot["audio_switch_candidate_actual_runway_seconds"] == 16.0
+    assert snapshot["audio_switch_candidate_runway_satisfied"] is False
     assert session.browser_playback.active_epoch_id == active_epoch.epoch_id
     assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
     assert session.browser_playback.epochs[active_epoch.epoch_id].state not in {"draining", "ended"}
+
+    early_commit = manager.commit_audio_track_candidate(session.session_id, user_id=session.user_id)
+
+    assert early_commit["active_audio_stream_index"] == 1
+    assert early_commit["pending_audio_stream_index"] == 5
+    assert early_commit["audio_switch_state"] == "candidate_preparing"
+    assert session.browser_playback.active_epoch_id == active_epoch.epoch_id
+
+    replacement.contiguous_published_through_segment = 44  # 90s ready end, 48s after the 42s attach point.
+    manager._refresh_route2_session_authority_locked(session)
+    ready = manager._route2_snapshot_locked(session)
+
+    assert ready["audio_switch_state"] == "candidate_ready"
+    assert ready["audio_switch_requires_commit"] is True
+    assert ready["audio_switch_candidate_required_runway_seconds"] == 45.0
+    assert ready["audio_switch_candidate_actual_runway_seconds"] == 48.0
+    assert ready["audio_switch_candidate_runway_satisfied"] is True
 
     committed = manager.commit_audio_track_candidate(session.session_id, user_id=session.user_id)
 
@@ -2093,6 +2117,14 @@ def test_route2_snapshot_includes_lite_threshold_decider_fields() -> None:
         route2_epoch_startup_attach_gate_locked=lambda _session, _epoch: startup_gate,
         guard_route2_full_attach_boundary_locked=lambda _session, _epoch, *, attach_eligible, guard_path: attach_eligible,
         route2_epoch_ready_end_seconds=lambda _session, _epoch: 27.0,
+        route2_audio_switch_candidate_runway_status_locked=lambda _session, _epoch: {
+            "attach_position_seconds": 0.0,
+            "ready_end_seconds": 27.0,
+            "required_runway_seconds": 45.0,
+            "actual_runway_seconds": 27.0,
+            "satisfied": False,
+            "source": "test",
+        },
         route2_low_water_recovery_needed_locked=lambda _session, _epoch: (22.0, 1.08, False, False, False),
         route2_full_mode_gate_locked=lambda _session, _epoch: {"mode_ready": False},
         route2_position_in_epoch_locked=lambda _session, _epoch, _position: True,

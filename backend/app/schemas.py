@@ -1006,6 +1006,9 @@ class MobilePlaybackSessionResponse(BaseModel):
     audio_switch_candidate_manifest_url: str | None = None
     audio_switch_candidate_ready_end_seconds: float | None = Field(default=None, ge=0)
     audio_switch_candidate_attach_position_seconds: float | None = Field(default=None, ge=0)
+    audio_switch_candidate_required_runway_seconds: float | None = Field(default=None, ge=0)
+    audio_switch_candidate_actual_runway_seconds: float | None = Field(default=None, ge=0)
+    audio_switch_candidate_runway_satisfied: bool = False
     audio_switch_candidate_expires_at: float | None = Field(default=None, ge=0)
     audio_switch_requires_commit: bool = False
     audio_switch_commit_url: str | None = None

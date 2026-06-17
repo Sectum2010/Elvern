@@ -31,6 +31,7 @@ export default function ElvernTimeline({
   currentTimeSeconds,
   bufferedAbsoluteRanges,
   playedNotCachedAbsoluteRanges,
+  serverPreparedThroughSeconds = null,
   onSeekPreview,
   onSeekCommit,
   onDragStart,
@@ -212,6 +213,18 @@ export default function ElvernTimeline({
       .filter((entry) => entry.style.width !== "0%");
   }, [bufferedAbsoluteRanges, safeDuration]);
 
+  const serverPreparedLayer = useMemo(() => {
+    const serverPreparedEnd = Number(serverPreparedThroughSeconds);
+    if (!Number.isFinite(serverPreparedEnd) || serverPreparedEnd <= safeCurrent || safeDuration <= 0) {
+      return null;
+    }
+    const end = clamp(serverPreparedEnd, 0, safeDuration);
+    if (end <= safeCurrent) {
+      return null;
+    }
+    return rangeStyle(safeCurrent, end, safeDuration);
+  }, [safeCurrent, safeDuration, serverPreparedThroughSeconds]);
+
   const hasPreparingTarget = preparingTargetSeconds != null && preparingTargetSeconds !== "";
   const numericPreparingTarget = hasPreparingTarget ? Number(preparingTargetSeconds) : Number.NaN;
   const preparingPercent =
@@ -258,6 +271,13 @@ export default function ElvernTimeline({
             style={entry.style}
           />
         ))}
+        {serverPreparedLayer ? (
+          <div
+            aria-hidden="true"
+            className="elvern-timeline__layer elvern-timeline__layer--server-prepared"
+            style={serverPreparedLayer}
+          />
+        ) : null}
         <div
           aria-hidden="true"
           className="elvern-timeline__layer elvern-timeline__layer--progress"

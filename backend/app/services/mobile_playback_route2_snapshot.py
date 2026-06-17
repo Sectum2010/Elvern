@@ -27,6 +27,7 @@ def _route2_snapshot_locked(
     route2_epoch_startup_attach_gate_locked,
     guard_route2_full_attach_boundary_locked,
     route2_epoch_ready_end_seconds,
+    route2_audio_switch_candidate_runway_status_locked,
     route2_low_water_recovery_needed_locked,
     route2_full_mode_gate_locked,
     route2_position_in_epoch_locked,
@@ -310,6 +311,11 @@ def _route2_snapshot_locked(
         if audio_switch_candidate_epoch is not None
         else None
     )
+    audio_switch_candidate_runway_status = (
+        route2_audio_switch_candidate_runway_status_locked(session, audio_switch_candidate_epoch)
+        if audio_switch_candidate_epoch is not None
+        else None
+    )
     audio_switch_candidate_stream_index = (
         browser_session.audio_switch_candidate_stream_index
         if browser_session.audio_switch_candidate_stream_index is not None
@@ -520,6 +526,20 @@ def _route2_snapshot_locked(
             round(float(audio_switch_candidate_epoch.attach_position_seconds), 2)
             if audio_switch_candidate_epoch is not None
             else None
+        ),
+        "audio_switch_candidate_required_runway_seconds": (
+            round(float(audio_switch_candidate_runway_status["required_runway_seconds"]), 2)
+            if audio_switch_candidate_runway_status is not None
+            else None
+        ),
+        "audio_switch_candidate_actual_runway_seconds": (
+            round(float(audio_switch_candidate_runway_status["actual_runway_seconds"]), 2)
+            if audio_switch_candidate_runway_status is not None
+            else None
+        ),
+        "audio_switch_candidate_runway_satisfied": bool(
+            audio_switch_candidate_runway_status is not None
+            and audio_switch_candidate_runway_status["satisfied"]
         ),
         "audio_switch_candidate_expires_at": (
             round(float(browser_session.audio_switch_candidate_expires_at_ts), 3)

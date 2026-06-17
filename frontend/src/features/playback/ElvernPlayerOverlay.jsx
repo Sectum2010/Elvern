@@ -12,7 +12,10 @@ import {
   getContiguousBufferedEndFromPosition,
   readBufferedAbsoluteRanges,
 } from "../../lib/playbackTimelineRanges.js";
-import { toBrowserPlaybackAbsoluteSeconds } from "../../lib/browserPlaybackTimeline.js";
+import {
+  getBrowserPlaybackServerPreparedEndSeconds,
+  toBrowserPlaybackAbsoluteSeconds,
+} from "../../lib/browserPlaybackTimeline.js";
 import {
   ELVERN_OVERLAY_IDLE_HIDE_DELAY_MS,
   formatPlaybackDuration,
@@ -476,6 +479,10 @@ export default function ElvernPlayerOverlay({
   const playedNotCachedAbsoluteRanges = useMemo(() => (
     computePlayedNotCachedRanges(playedAbsoluteRanges, bufferedAbsoluteRanges, safeDuration)
   ), [playedAbsoluteRanges, bufferedAbsoluteRanges, safeDuration]);
+  const serverPreparedThroughSeconds = useMemo(
+    () => getBrowserPlaybackServerPreparedEndSeconds(sessionPayload),
+    [sessionPayload],
+  );
 
   const fullscreenApiAvailable = isFullscreenApiAvailable(shellRef?.current || null);
 
@@ -1701,6 +1708,7 @@ export default function ElvernPlayerOverlay({
             onSeekPreview={handleTimelinePreview}
             playedNotCachedAbsoluteRanges={playedNotCachedAbsoluteRanges}
             preparingTargetSeconds={preparingTargetActive ? preparingTargetSeconds : null}
+            serverPreparedThroughSeconds={serverPreparedThroughSeconds}
           />
 
           <div className="elvern-overlay__controls-row">

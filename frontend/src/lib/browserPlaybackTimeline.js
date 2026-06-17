@@ -92,6 +92,17 @@ export function getBrowserPlaybackAttachedManifestEndSeconds(payload) {
   return getBrowserPlaybackTimelineEndSeconds(payload);
 }
 
+export function getBrowserPlaybackServerPreparedEndSeconds(payload) {
+  if (!isHlsSessionPayload(payload)) {
+    return 0;
+  }
+  const activeWindow = getBrowserPlaybackActiveWindowSeconds(payload);
+  if (activeWindow) {
+    return activeWindow.endSeconds;
+  }
+  return getBrowserPlaybackTimelineEndSeconds(payload);
+}
+
 export function shouldForceReattachForManifestWindowRefresh(payload) {
   if (!isHlsSessionPayload(payload)) {
     return true;

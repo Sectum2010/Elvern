@@ -266,6 +266,11 @@ test("audio switch candidate validation commits only after manifest init and seg
     audio_switch_candidate_state: "ready",
     audio_switch_candidate_stream_index: 5,
     audio_switch_candidate_manifest_url: "/api/browser-playback/epochs/epoch-candidate/index.m3u8",
+    audio_switch_candidate_attach_position_seconds: 24,
+    audio_switch_candidate_ready_end_seconds: 90,
+    audio_switch_candidate_required_runway_seconds: 45,
+    audio_switch_candidate_actual_runway_seconds: 66,
+    audio_switch_candidate_runway_satisfied: true,
     audio_switch_commit_url: "/api/browser-playback/sessions/session-audio/audio/commit",
     audio_switch_cancel_url: "/api/browser-playback/sessions/session-audio/audio/cancel",
     audio_switch_requires_commit: true,
@@ -285,12 +290,24 @@ test("audio switch candidate validation commits only after manifest init and seg
   const fetchMock = vi.fn(async (url) => {
     const value = String(url);
     if (value.endsWith("/index.m3u8")) {
-      return new Response("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\nsegments/000001.m4s\n", { status: 200 });
+      return new Response([
+        "#EXTM3U",
+        "#EXT-X-TARGETDURATION:2",
+        "#EXT-X-MEDIA-SEQUENCE:10",
+        "#EXT-X-MAP:URI=\"init.mp4\"",
+        "#EXTINF:2.000,",
+        "segments/10.m4s",
+        "#EXTINF:2.000,",
+        "segments/12.m4s",
+        "#EXTINF:2.000,",
+        "segments/50.m4s",
+        "",
+      ].join("\n"), { status: 200 });
     }
     if (value.endsWith("/init.mp4")) {
       return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
     }
-    if (value.endsWith("/segments/000001.m4s")) {
+    if (value.endsWith("/segments/12.m4s") || value.endsWith("/segments/50.m4s")) {
       return new Response(new Uint8Array([4, 5, 6]), { status: 200 });
     }
     return new Response("", { status: 404 });
@@ -318,13 +335,49 @@ test("audio switch candidate validation commits only after manifest init and seg
   })));
   await waitFor(() => expect(callbacks.setOptimizedPlaybackPending).toHaveBeenCalledWith(true));
   expect(cancelOptimizedPlaybackAudioTrackCandidate).not.toHaveBeenCalled();
-  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(fetchMock).toHaveBeenCalledTimes(4);
   expect(callbacks.setStreamSource).toHaveBeenCalled();
+  expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/segments/10.m4s"), expect.anything());
 
   vi.unstubAllGlobals();
 });
 
-test("audio switch candidate validation failure cancels candidate and keeps old source", async () => {
+test("audio switch candidate preparing does not run validation or commit", async () => {
+  const preparingPayload = makeRoute2Payload({
+    selected_audio_stream_index: 5,
+    active_audio_stream_index: 1,
+    pending_audio_stream_index: 5,
+    audio_switch_state: "candidate_preparing",
+    audio_switch_candidate_epoch_id: "epoch-candidate",
+    audio_switch_candidate_state: "preparing",
+    audio_switch_candidate_stream_index: 5,
+    audio_switch_candidate_manifest_url: "/api/browser-playback/epochs/epoch-candidate/index.m3u8",
+    audio_switch_candidate_attach_position_seconds: 24,
+    audio_switch_candidate_ready_end_seconds: 26,
+    audio_switch_candidate_required_runway_seconds: 45,
+    audio_switch_candidate_actual_runway_seconds: 2,
+    audio_switch_candidate_runway_satisfied: false,
+    audio_switch_commit_url: "/api/browser-playback/sessions/session-audio/audio/commit",
+    audio_switch_requires_commit: false,
+  });
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { getApi } = renderOptimizedPlaybackHarness();
+
+  await act(async () => {
+    getApi().syncMobilePlaybackState(preparingPayload);
+    await Promise.resolve();
+  });
+
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(commitOptimizedPlaybackAudioTrackCandidate).not.toHaveBeenCalled();
+  expect(cancelOptimizedPlaybackAudioTrackCandidate).not.toHaveBeenCalled();
+
+  vi.unstubAllGlobals();
+});
+
+test("audio switch candidate validation failure polls before confirming old audio", async () => {
   const readyPayload = makeRoute2Payload({
     selected_audio_stream_index: 5,
     active_audio_stream_index: 1,
@@ -334,6 +387,11 @@ test("audio switch candidate validation failure cancels candidate and keeps old 
     audio_switch_candidate_state: "ready",
     audio_switch_candidate_stream_index: 5,
     audio_switch_candidate_manifest_url: "/api/browser-playback/epochs/epoch-candidate/index.m3u8",
+    audio_switch_candidate_attach_position_seconds: 24,
+    audio_switch_candidate_ready_end_seconds: 90,
+    audio_switch_candidate_required_runway_seconds: 45,
+    audio_switch_candidate_actual_runway_seconds: 66,
+    audio_switch_candidate_runway_satisfied: true,
     audio_switch_cancel_url: "/api/browser-playback/sessions/session-audio/audio/cancel",
     audio_switch_requires_commit: true,
   });
@@ -341,11 +399,13 @@ test("audio switch candidate validation failure cancels candidate and keeps old 
   createOptimizedPlaybackSession.mockResolvedValue(makeRoute2Payload({
     attach_ready: true,
   }));
-  cancelOptimizedPlaybackAudioTrackCandidate.mockResolvedValue(makeRoute2Payload({
+  fetchOptimizedPlaybackSessionStatus.mockResolvedValue(makeRoute2Payload({
     selected_audio_stream_index: 1,
     active_audio_stream_index: 1,
     pending_audio_stream_index: null,
     audio_switch_state: "active",
+    audio_switch_candidate_state: "none",
+    audio_switch_candidate_epoch_id: null,
   }));
 
   const { callbacks, getApi } = renderOptimizedPlaybackHarness();
@@ -359,12 +419,13 @@ test("audio switch candidate validation failure cancels candidate and keeps old 
     getApi().syncMobilePlaybackState(readyPayload);
   });
 
-  await waitFor(() => expect(cancelOptimizedPlaybackAudioTrackCandidate).toHaveBeenCalledWith(expect.objectContaining({
-    cancelUrl: "/api/browser-playback/sessions/session-audio/audio/cancel",
+  await waitFor(() => expect(fetchOptimizedPlaybackSessionStatus).toHaveBeenCalledWith(expect.objectContaining({
     sessionId: "session-audio",
   })));
   expect(commitOptimizedPlaybackAudioTrackCandidate).not.toHaveBeenCalled();
+  expect(cancelOptimizedPlaybackAudioTrackCandidate).not.toHaveBeenCalled();
   expect(callbacks.setStreamSource).not.toHaveBeenCalled();
+  expect(callbacks.setSeekNotice).toHaveBeenCalledWith("Audio switch verification timed out. Checking current audio...");
   expect(callbacks.setSeekNotice).toHaveBeenCalledWith("Audio switch failed. Previous audio is still playing.");
 
   vi.unstubAllGlobals();
