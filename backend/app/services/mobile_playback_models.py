@@ -521,6 +521,16 @@ class BrowserPlaybackSession:
     pending_audio_stream_index: int | None = None
     audio_switch_state: str = "active"
     audio_switch_error: str | None = None
+    audio_switch_candidate_epoch_id: str | None = None
+    audio_switch_candidate_stream_index: int | None = None
+    audio_switch_candidate_state: str = "none"
+    audio_switch_candidate_error: str | None = None
+    audio_switch_candidate_created_at_ts: float = 0.0
+    audio_switch_candidate_ready_at_ts: float = 0.0
+    audio_switch_candidate_expires_at_ts: float = 0.0
+    audio_switch_previous_epoch_id: str | None = None
+    audio_switch_previous_audio_stream_index: int | None = None
+    audio_switch_commit_requested_at_ts: float = 0.0
     epochs: dict[str, PlaybackEpoch] = field(default_factory=dict)
     # Phase 2B native-HLS sliding manifest window state. Updated by
     # `_maybe_advance_native_hls_window_locked` and read by both the snapshot

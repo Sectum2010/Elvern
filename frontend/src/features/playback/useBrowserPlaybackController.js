@@ -997,6 +997,19 @@ export function useBrowserPlaybackController({
         sessionId: activeSession.session_id,
       });
     } catch (requestError) {
+      const normalizedMessage = String(requestError?.message || "").toLowerCase();
+      const alreadyStopped = Boolean(
+        requestError?.status === 404
+        || normalizedMessage.includes("session not found")
+        || normalizedMessage.includes("not found")
+        || normalizedMessage.includes("already stopped")
+      );
+      if (alreadyStopped) {
+        setPlaybackError("");
+        setSeekNotice("");
+        setPlaybackStatus(`${browserPlaybackLabelTitle} stopped`);
+        return;
+      }
       setPlaybackError(requestError.message || `Failed to stop ${browserPlaybackLabelTitle}`);
     }
   }
@@ -2817,6 +2830,9 @@ export function useBrowserPlaybackController({
     mobilePendingTargetRef,
     mobileRetargetTransitionRef,
     mobileSeekPendingRef,
+    pendingSeekPhaseRef,
+    mobileRecoveryInFlightRef,
+    audioSwitchAttachRef,
     mobileSession,
     streamSource,
     mobilePlayerCanPlay,

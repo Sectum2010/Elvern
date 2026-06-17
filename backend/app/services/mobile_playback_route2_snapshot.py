@@ -294,6 +294,45 @@ def _route2_snapshot_locked(
         if audio_switch_replacement_audio_stream_index is not None
         else None
     )
+    audio_switch_candidate_epoch = (
+        browser_session.epochs.get(browser_session.audio_switch_candidate_epoch_id)
+        if browser_session.audio_switch_candidate_epoch_id
+        else None
+    )
+    if (
+        audio_switch_candidate_epoch is None
+        and audio_switch_replacement_epoch is not None
+        and browser_session.audio_switch_state in {"candidate_preparing", "candidate_ready", "committing"}
+    ):
+        audio_switch_candidate_epoch = audio_switch_replacement_epoch
+    audio_switch_candidate_ready_end_seconds = (
+        route2_epoch_ready_end_seconds(session, audio_switch_candidate_epoch)
+        if audio_switch_candidate_epoch is not None
+        else None
+    )
+    audio_switch_candidate_stream_index = (
+        browser_session.audio_switch_candidate_stream_index
+        if browser_session.audio_switch_candidate_stream_index is not None
+        else audio_switch_candidate_epoch.audio_stream_index
+        if audio_switch_candidate_epoch is not None
+        else None
+    )
+    audio_switch_candidate_manifest_url = (
+        f"/api/mobile-playback/epochs/{audio_switch_candidate_epoch.epoch_id}/index.m3u8"
+        if audio_switch_candidate_epoch is not None
+        else None
+    )
+    old_epoch_retained = False
+    old_epoch_retention_seconds = None
+    previous_epoch = (
+        browser_session.epochs.get(browser_session.audio_switch_previous_epoch_id)
+        if browser_session.audio_switch_previous_epoch_id
+        else None
+    )
+    if previous_epoch is not None and previous_epoch.state == "draining":
+        old_epoch_retained = True
+        if previous_epoch.drain_started_at_ts:
+            old_epoch_retention_seconds = max(0.0, now_ts - previous_epoch.drain_started_at_ts)
     return {
         "session_id": session.session_id,
         "media_item_id": session.media_item_id,
@@ -463,6 +502,42 @@ def _route2_snapshot_locked(
         "audio_switch_replacement_attach_position_seconds": (
             round(float(audio_switch_replacement_epoch.attach_position_seconds), 2)
             if audio_switch_replacement_epoch is not None
+            else None
+        ),
+        "audio_switch_candidate_epoch_id": (
+            audio_switch_candidate_epoch.epoch_id if audio_switch_candidate_epoch is not None else None
+        ),
+        "audio_switch_candidate_state": browser_session.audio_switch_candidate_state,
+        "audio_switch_candidate_stream_index": audio_switch_candidate_stream_index,
+        "audio_switch_candidate_error": browser_session.audio_switch_candidate_error,
+        "audio_switch_candidate_manifest_url": audio_switch_candidate_manifest_url,
+        "audio_switch_candidate_ready_end_seconds": (
+            round(float(audio_switch_candidate_ready_end_seconds), 2)
+            if audio_switch_candidate_ready_end_seconds is not None
+            else None
+        ),
+        "audio_switch_candidate_attach_position_seconds": (
+            round(float(audio_switch_candidate_epoch.attach_position_seconds), 2)
+            if audio_switch_candidate_epoch is not None
+            else None
+        ),
+        "audio_switch_candidate_expires_at": (
+            round(float(browser_session.audio_switch_candidate_expires_at_ts), 3)
+            if browser_session.audio_switch_candidate_expires_at_ts > 0
+            else None
+        ),
+        "audio_switch_requires_commit": bool(
+            audio_switch_candidate_epoch is not None
+            and browser_session.audio_switch_candidate_state == "ready"
+        ),
+        "audio_switch_commit_url": f"/api/mobile-playback/sessions/{session.session_id}/audio/commit",
+        "audio_switch_cancel_url": f"/api/mobile-playback/sessions/{session.session_id}/audio/cancel",
+        "audio_switch_previous_epoch_id": browser_session.audio_switch_previous_epoch_id,
+        "audio_switch_previous_audio_stream_index": browser_session.audio_switch_previous_audio_stream_index,
+        "old_epoch_retained": old_epoch_retained,
+        "old_epoch_retention_seconds": (
+            round(float(old_epoch_retention_seconds), 3)
+            if old_epoch_retention_seconds is not None
             else None
         ),
         **full_bad_condition_fields,

@@ -21,7 +21,7 @@ import {
   shouldShowMacAppFullscreenControl,
 } from "../lib/playbackRouting";
 import { useBrowserPlaybackController } from "../features/playback/useBrowserPlaybackController";
-import ElvernPlayerOverlay, { InlineExpandIcon } from "../features/playback/ElvernPlayerOverlay";
+import ElvernPlayerOverlay, { FullscreenExitIcon, InlineExpandIcon } from "../features/playback/ElvernPlayerOverlay";
 import {
   extractLibraryReturnState,
   readLibraryReturnTarget,
@@ -815,6 +815,9 @@ export function DetailPage() {
     mobilePendingTargetRef,
     mobileRetargetTransitionRef,
     mobileSeekPendingRef,
+    pendingSeekPhaseRef,
+    mobileRecoveryInFlightRef,
+    audioSwitchAttachRef,
     mobileSession,
     streamSource,
     mobilePlayerCanPlay,
@@ -2942,15 +2945,38 @@ export function DetailPage() {
       ? mobilePendingTargetRef.current
       : mobileSession?.target_position_seconds ?? null)
     : null;
+  const audioSwitchAttachPhase = String(audioSwitchAttachRef.current?.phase || "").trim().toLowerCase();
+  const audioSwitchState = String(mobileSession?.audio_switch_state || "").trim().toLowerCase();
+  const route2SessionState = String(
+    mobileSession?.state || mobileSession?.session_state || mobileSession?.browser_session_state || "",
+  ).trim().toLowerCase();
+  const route2LifecycleState = String(mobileSession?.lifecycle_state || "").trim().toLowerCase();
+  const audioSwitchAttachActive = ["pending_attach", "source_set", "loaded"].includes(audioSwitchAttachPhase);
+  const audioSwitchCommitActive = Boolean(
+    audioSwitchState === "committing"
+    && Number(mobileSession?.attach_revision || 0) > Number(mobileSession?.client_attach_revision || 0),
+  );
+  const audioSwitchRollbackPreparing = Boolean(
+    audioSwitchAttachRef.current?.restoredPrevious
+    && !mobilePlayerCanPlay,
+  );
+  const explicitRetargetPreparing = Boolean(
+    mobilePendingTargetRef.current != null
+    || mobileSession?.pending_target_seconds != null
+    || ["preparing", "committing"].includes(String(pendingSeekPhaseRef.current || "").trim().toLowerCase()),
+  );
+  const route2RecoveryPreparing = Boolean(
+    ["recovering", "resuming"].includes(route2LifecycleState)
+    || route2SessionState === "recovering"
+    || mobileRecoveryInFlightRef.current,
+  );
   const elvernOverlayPreparingTargetActive = useElvernCustomShell
     ? Boolean(elvernOverlayPreparing) && Boolean(
-      mobilePendingTargetRef.current != null
-      || mobileSession?.pending_target_seconds != null
-      || mobileSession?.replacement_epoch_id
-      || ["preparing", "recovering", "retargeting", "seeking", "switching"].includes(
-        String(mobileSession?.state || mobileSession?.session_state || "").trim().toLowerCase(),
-      )
-      || ["recovering", "resuming"].includes(String(mobileSession?.lifecycle_state || "").trim().toLowerCase()),
+      explicitRetargetPreparing
+      || audioSwitchAttachActive
+      || audioSwitchCommitActive
+      || audioSwitchRollbackPreparing
+      || route2RecoveryPreparing
     )
     : false;
   const resolvedPlayerClassName = [
@@ -4104,7 +4130,9 @@ export function DetailPage() {
                   onClick={handlePrewarmViewportToggle}
                   type="button"
                 >
-                  <InlineExpandIcon className="elvern-overlay__inline-maximize-icon" />
+                  {macAppFullscreenActive || elvernCinemaTakeoverActive
+                    ? <FullscreenExitIcon className="elvern-overlay__inline-maximize-icon" />
+                    : <InlineExpandIcon className="elvern-overlay__inline-maximize-icon" />}
                 </button>
               ) : null}
               {useElvernCustomShell && !showMobilePrewarmCard ? (

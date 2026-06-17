@@ -176,6 +176,42 @@ def select_mobile_playback_audio_track(
     return MobilePlaybackSessionResponse(**response)
 
 
+@router.post("/api/mobile-playback/sessions/{session_id}/audio/commit", response_model=MobilePlaybackSessionResponse)
+def commit_mobile_playback_audio_track_candidate(
+    session_id: str,
+    request: Request,
+    user=CurrentUser,
+) -> MobilePlaybackSessionResponse:
+    try:
+        response = _get_mobile_manager(request).commit_audio_track_candidate(
+            session_id,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _coerce_session_error(exc) from exc
+    return MobilePlaybackSessionResponse(**response)
+
+
+@router.post("/api/mobile-playback/sessions/{session_id}/audio/cancel", response_model=MobilePlaybackSessionResponse)
+def cancel_mobile_playback_audio_track_candidate(
+    session_id: str,
+    request: Request,
+    user=CurrentUser,
+) -> MobilePlaybackSessionResponse:
+    try:
+        response = _get_mobile_manager(request).cancel_audio_track_candidate(
+            session_id,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _coerce_session_error(exc) from exc
+    return MobilePlaybackSessionResponse(**response)
+
+
 @router.post("/api/mobile-playback/sessions/{session_id}/heartbeat", response_model=MobilePlaybackSessionResponse)
 def heartbeat_mobile_playback_session(
     session_id: str,

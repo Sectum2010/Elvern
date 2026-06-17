@@ -82,6 +82,7 @@ vi.mock("../features/playback/ElvernPlayerOverlay", () => ({
     mockOverlayState.latestProps = props;
     return null;
   },
+  FullscreenExitIcon: ({ className }) => <svg aria-hidden="true" className={className} viewBox="0 0 24 24" />,
   InlineExpandIcon: ({ className }) => <svg aria-hidden="true" className={className} viewBox="0 0 24 24" />,
 }));
 
@@ -92,6 +93,9 @@ vi.mock("../features/playback/useBrowserPlaybackController", () => ({
     mobilePendingTargetRef: { current: null },
     mobileRetargetTransitionRef: { current: null },
     mobileSeekPendingRef: { current: false },
+    pendingSeekPhaseRef: { current: "" },
+    mobileRecoveryInFlightRef: { current: false },
+    audioSwitchAttachRef: { current: null },
     mobileSession: null,
     streamSource: "",
     mobilePlayerCanPlay: false,

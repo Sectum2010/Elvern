@@ -139,6 +139,26 @@ export function selectOptimizedPlaybackAudioTrack({
   });
 }
 
+export function commitOptimizedPlaybackAudioTrackCandidate({
+  browserPlaybackSessionRoot,
+  sessionId,
+  commitUrl = "",
+}) {
+  return apiRequest(commitUrl || `${browserPlaybackSessionRoot}/sessions/${sessionId}/audio/commit`, {
+    method: "POST",
+  });
+}
+
+export function cancelOptimizedPlaybackAudioTrackCandidate({
+  browserPlaybackSessionRoot,
+  sessionId,
+  cancelUrl = "",
+}) {
+  return apiRequest(cancelUrl || `${browserPlaybackSessionRoot}/sessions/${sessionId}/audio/cancel`, {
+    method: "POST",
+  });
+}
+
 export function prepareOptimizedPlaybackSubtitleTrack({
   browserPlaybackSessionRoot,
   sessionId,

@@ -1148,6 +1148,7 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
     )
     _upsert_route2_audio_probe_metadata(settings, item)
     session = _register_route2_test_session(manager, settings, item, session_id="audio-select-session")
+    _install_route2_active_epoch(session, epoch_id="audio-current-epoch", audio_stream_index=1)
     original_active_epoch_id = session.browser_playback.active_epoch_id
 
     response = manager.select_audio_track(
@@ -1160,13 +1161,17 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
 
     assert response["selected_audio_stream_index"] == 5
     assert response["pending_audio_stream_index"] == 5
-    assert response["active_audio_stream_index"] is None
-    assert response["audio_switch_state"] == "preparing"
+    assert response["active_audio_stream_index"] == 1
+    assert response["audio_switch_state"] == "candidate_preparing"
     assert response["audio_switch_replacement_epoch_id"] == session.browser_playback.replacement_epoch_id
     assert response["audio_switch_replacement_reason"] == "audio_track_switch"
     assert response["audio_switch_replacement_audio_stream_index"] == 5
     assert response["audio_switch_replacement_audio_map"] == "0:5?"
     assert response["audio_switch_replacement_last_error"] is None
+    assert response["audio_switch_candidate_epoch_id"] == session.browser_playback.replacement_epoch_id
+    assert response["audio_switch_candidate_state"] == "preparing"
+    assert response["audio_switch_candidate_stream_index"] == 5
+    assert response["audio_switch_requires_commit"] is False
     assert session.browser_playback.active_epoch_id == original_active_epoch_id
     replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
     assert replacement.audio_stream_index == 5
@@ -1175,13 +1180,21 @@ def test_route2_audio_selection_reports_pending_then_active_stream(initialized_s
         assert replacement.epoch_id != original_active_epoch_id
         assert session.browser_playback.epochs[original_active_epoch_id].state != "draining"
 
-    manager._promote_route2_replacement_epoch_locked(session, replacement)
-    promoted = manager._route2_snapshot_locked(session)
+    _publish_route2_epoch_dummy_range(replacement, through_segment=28)
+    manager._refresh_route2_session_authority_locked(session)
+    ready = manager._route2_snapshot_locked(session)
+
+    assert ready["active_audio_stream_index"] == 1
+    assert ready["pending_audio_stream_index"] == 5
+    assert ready["audio_switch_state"] == "candidate_ready"
+    assert ready["audio_switch_requires_commit"] is True
+
+    promoted = manager.commit_audio_track_candidate(session.session_id, user_id=session.user_id)
 
     assert promoted["selected_audio_stream_index"] == 5
     assert promoted["active_audio_stream_index"] == 5
     assert promoted["pending_audio_stream_index"] is None
-    assert promoted["audio_switch_state"] == "active"
+    assert promoted["audio_switch_state"] == "committing"
     assert promoted["audio_switch_error"] is None
 
 
@@ -1213,8 +1226,8 @@ def test_route2_audio_selection_ignores_second_request_while_preparing(initializ
         playing_before_switch=True,
     )
 
-    assert first["audio_switch_state"] == "preparing"
-    assert second["audio_switch_state"] == "preparing"
+    assert first["audio_switch_state"] == "candidate_preparing"
+    assert second["audio_switch_state"] == "candidate_preparing"
     assert second["pending_audio_stream_index"] == 5
     assert second["selected_audio_stream_index"] == 5
     assert second["active_audio_stream_index"] == 1
@@ -1283,7 +1296,7 @@ def test_route2_audio_selection_ignores_second_request_until_promoted_attach_ack
         playing_before_switch=True,
     )
 
-    assert response["audio_switch_state"] == "active"
+    assert response["audio_switch_state"] == "committing"
     assert response["active_audio_stream_index"] == 5
     assert response["pending_audio_stream_index"] is None
     assert response["attach_revision"] == promoted_attach_revision
@@ -1300,7 +1313,7 @@ def test_route2_audio_selection_ignores_second_request_until_promoted_attach_ack
         playing_before_switch=True,
     )
 
-    assert acknowledged["audio_switch_state"] == "preparing"
+    assert acknowledged["audio_switch_state"] == "candidate_preparing"
     assert acknowledged["pending_audio_stream_index"] == 1
     assert session.browser_playback.replacement_epoch_count == replacement_count + 1
 
@@ -1353,7 +1366,7 @@ def test_route2_audio_replacement_failure_clears_pending_and_keeps_active_epoch(
 
     assert response["active_audio_stream_index"] == 1
     assert response["pending_audio_stream_index"] == 5
-    assert response["audio_switch_state"] == "preparing"
+    assert response["audio_switch_state"] == "candidate_preparing"
     replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
     replacement.state = "failed"
     replacement.last_error = "audio map failed"
@@ -1390,7 +1403,7 @@ def test_route2_audio_replacement_promotes_after_audio_specific_runway(initializ
         playing_before_switch=True,
     )
     replacement = session.browser_playback.epochs[session.browser_playback.replacement_epoch_id]
-    assert response["audio_switch_state"] == "preparing"
+    assert response["audio_switch_state"] == "candidate_preparing"
     assert replacement.attach_position_seconds == 42.0
     replacement.init_published = True
     replacement.epoch_start_seconds = 0.0
@@ -1400,14 +1413,23 @@ def test_route2_audio_replacement_promotes_after_audio_specific_runway(initializ
     manager._refresh_route2_session_authority_locked(session)
     snapshot = manager._route2_snapshot_locked(session)
 
-    assert snapshot["active_audio_stream_index"] == 5
+    assert snapshot["active_audio_stream_index"] == 1
     assert snapshot["selected_audio_stream_index"] == 5
-    assert snapshot["pending_audio_stream_index"] is None
-    assert snapshot["audio_switch_state"] == "active"
+    assert snapshot["pending_audio_stream_index"] == 5
+    assert snapshot["audio_switch_state"] == "candidate_ready"
     assert snapshot["audio_switch_error"] is None
+    assert session.browser_playback.active_epoch_id == active_epoch.epoch_id
+    assert session.browser_playback.replacement_epoch_id == replacement.epoch_id
+    assert session.browser_playback.epochs[active_epoch.epoch_id].state not in {"draining", "ended"}
+
+    committed = manager.commit_audio_track_candidate(session.session_id, user_id=session.user_id)
+
+    assert committed["active_audio_stream_index"] == 5
+    assert committed["selected_audio_stream_index"] == 5
+    assert committed["pending_audio_stream_index"] is None
+    assert committed["audio_switch_state"] == "committing"
     assert session.browser_playback.active_epoch_id == replacement.epoch_id
     assert session.browser_playback.replacement_epoch_id is None
-    assert session.browser_playback.epochs[active_epoch.epoch_id].state in {"draining", "ended"}
 
 
 def test_route2_audio_replacement_ffmpeg_failure_surfaces_selected_stream_reason(initialized_settings) -> None:

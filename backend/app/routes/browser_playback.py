@@ -68,7 +68,17 @@ def _coerce_session_error(exc: Exception) -> HTTPException:
 
 def _rewrite_browser_session_payload(payload: dict[str, object]) -> dict[str, object]:
     normalized = dict(payload)
-    for key in ("manifest_url", "active_manifest_url", "status_url", "seek_url", "heartbeat_url", "stop_url"):
+    for key in (
+        "manifest_url",
+        "active_manifest_url",
+        "audio_switch_candidate_manifest_url",
+        "audio_switch_commit_url",
+        "audio_switch_cancel_url",
+        "status_url",
+        "seek_url",
+        "heartbeat_url",
+        "stop_url",
+    ):
         value = normalized.get(key)
         if isinstance(value, str):
             normalized[key] = value.replace("/api/mobile-playback/", "/api/browser-playback/")
@@ -209,6 +219,42 @@ def select_browser_playback_audio_track(
             selected_audio_stream_index=payload.selected_audio_stream_index,
             current_position_seconds=payload.current_position_seconds,
             playing_before_switch=payload.playing_before_switch,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _coerce_session_error(exc) from exc
+    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+
+
+@router.post("/api/browser-playback/sessions/{session_id}/audio/commit", response_model=MobilePlaybackSessionResponse)
+def commit_browser_playback_audio_track_candidate(
+    session_id: str,
+    request: Request,
+    user=CurrentUser,
+) -> MobilePlaybackSessionResponse:
+    try:
+        response = _get_browser_manager(request).commit_audio_track_candidate(
+            session_id,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _coerce_session_error(exc) from exc
+    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+
+
+@router.post("/api/browser-playback/sessions/{session_id}/audio/cancel", response_model=MobilePlaybackSessionResponse)
+def cancel_browser_playback_audio_track_candidate(
+    session_id: str,
+    request: Request,
+    user=CurrentUser,
+) -> MobilePlaybackSessionResponse:
+    try:
+        response = _get_browser_manager(request).cancel_audio_track_candidate(
+            session_id,
+            user_id=int(user.id),
+            auth_session_id=user.session_id,
+            username=user.username,
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc

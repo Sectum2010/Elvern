@@ -81,6 +81,9 @@ def _prepare_route2_epoch_access_locked(
     if epoch.epoch_id == browser_session.active_epoch_id:
         epoch.last_media_access_at_ts = now_ts
         return
+    if epoch.epoch_id == browser_session.replacement_epoch_id:
+        epoch.last_media_access_at_ts = now_ts
+        return
     if epoch.state == "draining":
         if _route2_epoch_is_draining_expired_locked(session, epoch, now_ts=now_ts):
             log_route2_event(

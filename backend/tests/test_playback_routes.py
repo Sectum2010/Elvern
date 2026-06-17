@@ -47,6 +47,8 @@ class BrowserPlaybackRouteManagerStub:
         self.subtitle_prepare_calls: list[dict[str, object]] = []
         self.subtitle_vtt_path: Path | None = None
         self.audio_track_calls: list[dict[str, object]] = []
+        self.audio_commit_calls: list[dict[str, object]] = []
+        self.audio_cancel_calls: list[dict[str, object]] = []
 
     def start(self) -> None:
         return None
@@ -107,8 +109,56 @@ class BrowserPlaybackRouteManagerStub:
         payload["selected_audio_stream_index"] = selected_audio_stream_index
         payload["pending_audio_stream_index"] = selected_audio_stream_index
         payload["active_audio_stream_index"] = 1
-        payload["audio_switch_state"] = "preparing"
+        payload["audio_switch_state"] = "candidate_preparing"
         payload["audio_switch_error"] = None
+        payload["audio_switch_candidate_epoch_id"] = "candidate-epoch"
+        payload["audio_switch_candidate_state"] = "preparing"
+        payload["audio_switch_candidate_stream_index"] = selected_audio_stream_index
+        payload["audio_switch_candidate_manifest_url"] = "/api/mobile-playback/epochs/candidate-epoch/index.m3u8"
+        payload["audio_switch_commit_url"] = f"/api/mobile-playback/sessions/{session_id}/audio/commit"
+        payload["audio_switch_cancel_url"] = f"/api/mobile-playback/sessions/{session_id}/audio/cancel"
+        return payload
+
+    def commit_audio_track_candidate(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        **kwargs,
+    ) -> dict[str, object]:
+        self.audio_commit_calls.append({
+            "session_id": session_id,
+            "user_id": user_id,
+            **kwargs,
+        })
+        payload = dict(self.payload)
+        payload["session_id"] = session_id
+        payload["active_audio_stream_index"] = 5
+        payload["selected_audio_stream_index"] = 5
+        payload["pending_audio_stream_index"] = None
+        payload["audio_switch_state"] = "committing"
+        payload["audio_switch_requires_commit"] = False
+        return payload
+
+    def cancel_audio_track_candidate(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        **kwargs,
+    ) -> dict[str, object]:
+        self.audio_cancel_calls.append({
+            "session_id": session_id,
+            "user_id": user_id,
+            **kwargs,
+        })
+        payload = dict(self.payload)
+        payload["session_id"] = session_id
+        payload["active_audio_stream_index"] = 1
+        payload["selected_audio_stream_index"] = 1
+        payload["pending_audio_stream_index"] = None
+        payload["audio_switch_state"] = "active"
+        payload["audio_switch_requires_commit"] = False
         return payload
 
     def get_manifest_content(self, session_id: str, *, user_id: int) -> str:
@@ -1837,13 +1887,41 @@ def test_mobile_playback_audio_route_selects_track_with_global_stream_index(
     assert body["selected_audio_stream_index"] == 5
     assert body["pending_audio_stream_index"] == 5
     assert body["active_audio_stream_index"] == 1
-    assert body["audio_switch_state"] == "preparing"
+    assert body["audio_switch_state"] == "candidate_preparing"
+    assert body["audio_switch_candidate_state"] == "preparing"
+    assert body["audio_switch_candidate_stream_index"] == 5
+    assert body["audio_switch_candidate_manifest_url"] == "/api/mobile-playback/epochs/candidate-epoch/index.m3u8"
     assert body["audio_switch_error"] is None
     assert stub.audio_track_calls[-1]["session_id"] == payload["session_id"]
     assert stub.audio_track_calls[-1]["selected_audio_stream_index"] == 5
     assert stub.audio_track_calls[-1]["current_position_seconds"] == 42.5
     assert stub.audio_track_calls[-1]["playing_before_switch"] is True
     assert stub.audio_track_calls[-1]["auth_session_id"] is not None
+
+
+def test_browser_playback_audio_commit_and_cancel_routes_rewrite_urls(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/route-audio-commit.mp4",
+    )
+    payload = _make_browser_playback_route2_payload(item_id=int(item["id"]))
+    stub = BrowserPlaybackRouteManagerStub(payload)
+    client.app.state.mobile_playback_manager = stub
+
+    commit_response = client.post(f"/api/browser-playback/sessions/{payload['session_id']}/audio/commit")
+    cancel_response = client.post(f"/api/browser-playback/sessions/{payload['session_id']}/audio/cancel")
+
+    assert commit_response.status_code == 200
+    assert cancel_response.status_code == 200
+    assert stub.audio_commit_calls[-1]["session_id"] == payload["session_id"]
+    assert stub.audio_cancel_calls[-1]["session_id"] == payload["session_id"]
+    assert commit_response.json()["audio_switch_state"] == "committing"
+    assert cancel_response.json()["audio_switch_state"] == "active"
 
 
 def test_mobile_playback_create_route_returns_structured_server_max_capacity(

@@ -98,7 +98,7 @@ function FullscreenEnterIcon({ className }) {
   );
 }
 
-function FullscreenExitIcon({ className }) {
+export function FullscreenExitIcon({ className }) {
   return (
     <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
       <path d="M9 5v4H5M15 5v4h4M9 19v-4H5M15 19v-4h4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
@@ -1654,7 +1654,9 @@ export default function ElvernPlayerOverlay({
           onPointerUp={handleInlineMaximizePointerUp}
           type="button"
         >
-          <InlineExpandIcon className="elvern-overlay__inline-maximize-icon" />
+          {fullscreenLikeActive
+            ? <FullscreenExitIcon className="elvern-overlay__inline-maximize-icon" />
+            : <InlineExpandIcon className="elvern-overlay__inline-maximize-icon" />}
         </button>
       ) : null}
 

@@ -264,6 +264,7 @@ ROUTE2_ADAPTIVE_RESUPPLY_RETRY_BACKOFF_SECONDS = 30.0
 ROUTE2_ADAPTIVE_RESUPPLY_MAX_ATTEMPTS_PER_DONOR = 3
 ROUTE2_ADAPTIVE_RESUPPLY_STABILIZATION_DEFAULT_SECONDS = 120
 BACKGROUND_PREPARATION_PARK_SECONDS = 300.0
+ROUTE2_AUDIO_SWITCH_CANDIDATE_TTL_SECONDS = 90.0
 ROUTE2_RECLAIM_ACTIVE_STATES = {
     "consumer_waiting_for_reclaim",
     "donor_selected",
@@ -1920,14 +1921,38 @@ class MobilePlaybackManager:
                 session,
                 target_position_seconds=switch_position,
                 reason="audio_track_switch",
+                mutate_session_target=False,
             )
             if replacement is not None:
+                now_ts = time.time()
                 replacement.audio_stream_index = selected_audio_stream_index
                 self._write_route2_epoch_metadata_locked(replacement)
                 browser_session.selected_audio_stream_index = selected_audio_stream_index
                 browser_session.pending_audio_stream_index = selected_audio_stream_index
-                browser_session.audio_switch_state = "preparing"
+                browser_session.audio_switch_state = "candidate_preparing"
                 browser_session.audio_switch_error = None
+                browser_session.audio_switch_candidate_epoch_id = replacement.epoch_id
+                browser_session.audio_switch_candidate_stream_index = selected_audio_stream_index
+                browser_session.audio_switch_candidate_state = "preparing"
+                browser_session.audio_switch_candidate_error = None
+                browser_session.audio_switch_candidate_created_at_ts = now_ts
+                browser_session.audio_switch_candidate_ready_at_ts = 0.0
+                browser_session.audio_switch_candidate_expires_at_ts = (
+                    now_ts + ROUTE2_AUDIO_SWITCH_CANDIDATE_TTL_SECONDS
+                )
+                browser_session.audio_switch_previous_epoch_id = browser_session.active_epoch_id
+                browser_session.audio_switch_previous_audio_stream_index = (
+                    browser_session.active_audio_stream_index
+                )
+                browser_session.audio_switch_commit_requested_at_ts = 0.0
+                self._log_route2_event(
+                    "audio_switch_candidate_prepare_started",
+                    session=session,
+                    epoch=replacement,
+                    active_epoch_id=browser_session.active_epoch_id,
+                    previous_audio_stream_index=browser_session.active_audio_stream_index,
+                    candidate_audio_stream_index=selected_audio_stream_index,
+                )
             else:
                 browser_session.selected_audio_stream_index = browser_session.active_audio_stream_index
                 browser_session.pending_audio_stream_index = None
@@ -1938,9 +1963,75 @@ class MobilePlaybackManager:
             self._refresh_route2_session_authority_locked(session)
             return self._route2_snapshot_locked(session)
 
+    def commit_audio_track_candidate(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+    ) -> dict[str, object]:
+        with self._lock:
+            session = self._get_owned_session_locked(session_id, user_id)
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
+            if session.browser_playback.engine_mode != "route2":
+                raise ValueError("Audio track switching requires Browser Playback Route 2")
+            self._refresh_route2_session_authority_locked(session)
+            browser_session = session.browser_playback
+            candidate = self._route2_audio_switch_candidate_epoch_locked(session)
+            if candidate is None:
+                return self._route2_snapshot_locked(session)
+            if browser_session.audio_switch_candidate_state != "ready":
+                return self._route2_snapshot_locked(session)
+            browser_session.audio_switch_candidate_state = "committing"
+            browser_session.audio_switch_state = "committing"
+            browser_session.audio_switch_commit_requested_at_ts = time.time()
+            self._log_route2_event(
+                "audio_switch_commit_started",
+                session=session,
+                epoch=candidate,
+                previous_epoch_id=browser_session.audio_switch_previous_epoch_id,
+                previous_audio_stream_index=browser_session.audio_switch_previous_audio_stream_index,
+                candidate_audio_stream_index=browser_session.audio_switch_candidate_stream_index,
+            )
+            self._promote_route2_replacement_epoch_locked(session, candidate)
+            return self._route2_snapshot_locked(session)
+
+    def cancel_audio_track_candidate(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+        auth_session_id: int | None = None,
+        username: str | None = None,
+        reason: str = "cancelled",
+    ) -> dict[str, object]:
+        with self._lock:
+            session = self._get_owned_session_locked(session_id, user_id)
+            self._adopt_session_authority_locked(
+                session,
+                auth_session_id=auth_session_id,
+                username=username,
+            )
+            if session.browser_playback.engine_mode != "route2":
+                raise ValueError("Audio track switching requires Browser Playback Route 2")
+            self._cancel_route2_audio_switch_candidate_locked(session, reason=reason)
+            self._refresh_route2_session_authority_locked(session)
+            return self._route2_snapshot_locked(session)
+
     def _route2_audio_switch_in_progress_locked(self, browser_session: BrowserPlaybackSession) -> bool:
         switch_state = str(browser_session.audio_switch_state or "").strip().lower()
-        if switch_state == "preparing" or browser_session.pending_audio_stream_index is not None:
+        if switch_state == "committing":
+            return browser_session.client_attach_revision < browser_session.attach_revision
+        if switch_state in {"preparing", "candidate_preparing", "candidate_ready"}:
+            return True
+        if browser_session.pending_audio_stream_index is not None:
+            return True
+        if browser_session.audio_switch_candidate_epoch_id:
             return True
         if browser_session.replacement_epoch_id:
             replacement = browser_session.epochs.get(browser_session.replacement_epoch_id)
@@ -1954,6 +2045,71 @@ class MobilePlaybackManager:
         ):
             return True
         return False
+
+    def _route2_audio_switch_candidate_epoch_locked(
+        self,
+        session: MobilePlaybackSession,
+    ) -> PlaybackEpoch | None:
+        browser_session = session.browser_playback
+        candidate_epoch_id = (
+            browser_session.audio_switch_candidate_epoch_id
+            or browser_session.replacement_epoch_id
+        )
+        if not candidate_epoch_id:
+            return None
+        candidate = browser_session.epochs.get(candidate_epoch_id)
+        if candidate is None or candidate.replacement_reason != "audio_track_switch":
+            return None
+        if browser_session.replacement_epoch_id != candidate.epoch_id:
+            return None
+        return candidate
+
+    def _clear_route2_audio_switch_candidate_locked(
+        self,
+        browser_session: BrowserPlaybackSession,
+    ) -> None:
+        browser_session.audio_switch_candidate_epoch_id = None
+        browser_session.audio_switch_candidate_stream_index = None
+        browser_session.audio_switch_candidate_state = "none"
+        browser_session.audio_switch_candidate_error = None
+        browser_session.audio_switch_candidate_created_at_ts = 0.0
+        browser_session.audio_switch_candidate_ready_at_ts = 0.0
+        browser_session.audio_switch_candidate_expires_at_ts = 0.0
+        browser_session.audio_switch_commit_requested_at_ts = 0.0
+
+    def _cancel_route2_audio_switch_candidate_locked(
+        self,
+        session: MobilePlaybackSession,
+        *,
+        reason: str,
+        failed: bool = False,
+    ) -> None:
+        browser_session = session.browser_playback
+        candidate_epoch_id = browser_session.audio_switch_candidate_epoch_id
+        candidate = self._route2_audio_switch_candidate_epoch_locked(session)
+        if candidate is not None:
+            self._log_route2_event(
+                "audio_switch_candidate_cancelled" if not failed else "audio_switch_candidate_failed",
+                session=session,
+                epoch=candidate,
+                reason=reason,
+                previous_epoch_id=browser_session.audio_switch_previous_epoch_id,
+                previous_audio_stream_index=browser_session.audio_switch_previous_audio_stream_index,
+                candidate_audio_stream_index=browser_session.audio_switch_candidate_stream_index,
+            )
+            self._discard_route2_epoch_locked(session, candidate.epoch_id)
+        elif candidate_epoch_id:
+            self._discard_route2_epoch_locked(session, candidate_epoch_id)
+        browser_session.replacement_epoch_id = None
+        browser_session.pending_audio_stream_index = None
+        browser_session.selected_audio_stream_index = browser_session.active_audio_stream_index
+        self._clear_route2_audio_switch_candidate_locked(browser_session)
+        if failed:
+            browser_session.audio_switch_state = "failed"
+            browser_session.audio_switch_error = (reason or "Could not switch audio track").strip()
+        else:
+            browser_session.audio_switch_state = "active"
+            browser_session.audio_switch_error = None
 
     def _fail_route2_audio_switch_locked(
         self,
@@ -1982,6 +2138,7 @@ class MobilePlaybackManager:
         reason: str,
     ) -> None:
         browser_session = session.browser_playback
+        self._clear_route2_audio_switch_candidate_locked(browser_session)
         browser_session.pending_audio_stream_index = None
         browser_session.audio_switch_state = "failed"
         browser_session.audio_switch_error = (reason or "Could not switch audio track").strip()
@@ -11191,6 +11348,7 @@ class MobilePlaybackManager:
         *,
         target_position_seconds: float,
         reason: str,
+        mutate_session_target: bool = True,
     ) -> PlaybackEpoch | None:
         browser_session = session.browser_playback
         if browser_session.replacement_epoch_id:
@@ -11222,9 +11380,16 @@ class MobilePlaybackManager:
             )
             return None
         session.epoch += 1
-        session.target_position_seconds = self._clamp_time(target_position_seconds, session.duration_seconds)
-        session.pending_target_seconds = session.target_position_seconds
-        replacement_epoch = self._build_route2_epoch_locked(session)
+        safe_target = self._clamp_time(target_position_seconds, session.duration_seconds)
+        if mutate_session_target:
+            session.target_position_seconds = safe_target
+            session.pending_target_seconds = session.target_position_seconds
+            replacement_epoch = self._build_route2_epoch_locked(session)
+        else:
+            replacement_epoch = self._build_route2_epoch_locked(
+                session,
+                target_position_seconds_override=safe_target,
+            )
         replacement_epoch.replacement_reason = reason
         browser_session.replacement_epoch_id = replacement_epoch.epoch_id
         browser_session.epochs[replacement_epoch.epoch_id] = replacement_epoch
@@ -11236,7 +11401,7 @@ class MobilePlaybackManager:
             session=session,
             epoch=replacement_epoch,
             reason=reason,
-            target_position_seconds=round(session.target_position_seconds, 2),
+            target_position_seconds=round(safe_target, 2),
         )
         return replacement_epoch
 
@@ -11265,11 +11430,16 @@ class MobilePlaybackManager:
         browser_session.active_epoch_id = replacement_epoch.epoch_id
         browser_session.replacement_epoch_id = None
         if replacement_epoch.replacement_reason == "audio_track_switch":
+            browser_session.audio_switch_previous_epoch_id = (
+                previous_active.epoch_id if previous_active is not None else browser_session.audio_switch_previous_epoch_id
+            )
+            browser_session.audio_switch_previous_audio_stream_index = browser_session.active_audio_stream_index
             browser_session.active_audio_stream_index = replacement_epoch.audio_stream_index
             browser_session.selected_audio_stream_index = replacement_epoch.audio_stream_index
             browser_session.pending_audio_stream_index = None
-            browser_session.audio_switch_state = "active"
+            browser_session.audio_switch_state = "committing"
             browser_session.audio_switch_error = None
+            self._clear_route2_audio_switch_candidate_locked(browser_session)
         self._issue_route2_attach_revision_locked(
             session,
             next_revision=next_attach_revision,
@@ -12796,7 +12966,23 @@ class MobilePlaybackManager:
             replacement_epoch is not None
             and replacement_epoch.replacement_reason not in {"maintenance_downshift", "adaptive_resupply_boost"}
         ):
-            if replacement_epoch.replacement_reason == "audio_track_switch" and replacement_epoch.state == "ended":
+            if (
+                replacement_epoch.replacement_reason == "audio_track_switch"
+                and browser_session.audio_switch_candidate_expires_at_ts > 0
+                and now_ts >= browser_session.audio_switch_candidate_expires_at_ts
+                and browser_session.audio_switch_candidate_state != "committing"
+            ):
+                self._cancel_route2_audio_switch_candidate_locked(
+                    session,
+                    reason="Audio switch candidate expired before commit.",
+                    failed=True,
+                )
+                replacement_epoch = None
+            if (
+                replacement_epoch is not None
+                and replacement_epoch.replacement_reason == "audio_track_switch"
+                and replacement_epoch.state == "ended"
+            ):
                 self._fail_route2_audio_switch_locked(
                     session,
                     replacement_epoch,
@@ -12819,18 +13005,62 @@ class MobilePlaybackManager:
                         guard_path="replacement_promotion_check",
                     )
                 if replacement_attach_ready:
-                    self._promote_route2_replacement_epoch_locked(session, replacement_epoch)
-                    active_epoch = replacement_epoch
-                    replacement_epoch = None
-                    self._rebuild_route2_published_frontier_locked(active_epoch)
+                    if replacement_epoch.replacement_reason == "audio_track_switch":
+                        if browser_session.audio_switch_candidate_state == "committing":
+                            self._promote_route2_replacement_epoch_locked(session, replacement_epoch)
+                            active_epoch = replacement_epoch
+                            replacement_epoch = None
+                            self._rebuild_route2_published_frontier_locked(active_epoch)
+                            self._log_route2_event(
+                                "audio_switch_commit_succeeded",
+                                session=session,
+                                epoch=active_epoch,
+                                previous_epoch_id=browser_session.audio_switch_previous_epoch_id,
+                                previous_audio_stream_index=browser_session.audio_switch_previous_audio_stream_index,
+                                candidate_audio_stream_index=browser_session.active_audio_stream_index,
+                            )
+                        else:
+                            replacement_epoch.state = "attach_ready"
+                            browser_session.audio_switch_candidate_epoch_id = replacement_epoch.epoch_id
+                            browser_session.audio_switch_candidate_stream_index = replacement_epoch.audio_stream_index
+                            browser_session.audio_switch_candidate_state = "ready"
+                            browser_session.audio_switch_candidate_error = None
+                            if browser_session.audio_switch_candidate_ready_at_ts <= 0:
+                                browser_session.audio_switch_candidate_ready_at_ts = now_ts
+                            browser_session.audio_switch_state = "candidate_ready"
+                            browser_session.audio_switch_error = None
+                            browser_session.pending_audio_stream_index = replacement_epoch.audio_stream_index
+                            self._write_route2_epoch_metadata_locked(replacement_epoch)
+                            self._log_route2_event(
+                                "audio_switch_candidate_ready",
+                                session=session,
+                                epoch=replacement_epoch,
+                                active_epoch_id=browser_session.active_epoch_id,
+                                previous_audio_stream_index=browser_session.active_audio_stream_index,
+                                candidate_audio_stream_index=replacement_epoch.audio_stream_index,
+                                ready_end_seconds=round(
+                                    self._route2_epoch_ready_end_seconds(session, replacement_epoch),
+                                    2,
+                                ),
+                            )
+                    else:
+                        self._promote_route2_replacement_epoch_locked(session, replacement_epoch)
+                        active_epoch = replacement_epoch
+                        replacement_epoch = None
+                        self._rebuild_route2_published_frontier_locked(active_epoch)
                 else:
                     if replacement_epoch.active_worker_id or (replacement_epoch.process and replacement_epoch.process.poll() is None):
                         replacement_epoch.state = "warming"
                     elif replacement_epoch.state not in {"failed", "ended"}:
                         replacement_epoch.state = "starting"
                     self._write_route2_epoch_metadata_locked(replacement_epoch)
-                    browser_session.state = "recovering" if active_epoch.state == "draining" else "switching"
-                    if replacement_epoch.replacement_reason != "audio_track_switch":
+                    if replacement_epoch.replacement_reason == "audio_track_switch":
+                        browser_session.audio_switch_state = "candidate_preparing"
+                        browser_session.audio_switch_candidate_state = "preparing"
+                        browser_session.audio_switch_error = None
+                        browser_session.audio_switch_candidate_error = None
+                    else:
+                        browser_session.state = "recovering" if active_epoch.state == "draining" else "switching"
                         session.state = "retargeting" if session.pending_target_seconds is not None else "preparing"
         elif active_epoch.state == "draining":
             browser_session.state = "recovering"
@@ -12862,6 +13092,13 @@ class MobilePlaybackManager:
         if session.pending_target_seconds is not None and browser_session.client_attach_revision >= browser_session.attach_revision:
             if abs(session.pending_target_seconds - active_epoch.attach_position_seconds) <= 0.5:
                 session.pending_target_seconds = None
+        if (
+            browser_session.audio_switch_state == "committing"
+            and browser_session.client_attach_revision >= browser_session.attach_revision
+            and browser_session.replacement_epoch_id is None
+        ):
+            browser_session.audio_switch_state = "active"
+            browser_session.audio_switch_error = None
 
         if attach_ready:
             if browser_session.replacement_epoch_id is None:

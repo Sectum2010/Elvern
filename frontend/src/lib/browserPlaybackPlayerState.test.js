@@ -31,6 +31,27 @@ test("non-iPhone route2 source stays renderable even before mobile can-play flip
   assert.equal(state.browserPlaybackPreparing, false);
 });
 
+test("route2 audio commit waits in the prewarm card instead of a black inline player", () => {
+  const state = resolveBrowserPlaybackPlayerViewState({
+    activePlaybackMode: "lite",
+    iosMobile: false,
+    mobileFrozenFrameUrl: "",
+    mobilePlayerCanPlay: false,
+    mobileSession: buildRoute2Session({
+      audio_switch_state: "committing",
+      attach_revision: 2,
+      client_attach_revision: 1,
+    }),
+    optimizedPlaybackPending: true,
+    streamSource: { mode: "hls", url: "blob:next-audio" },
+  });
+
+  assert.equal(state.showInlinePlayer, false);
+  assert.equal(state.showMobileWarmupShell, true);
+  assert.equal(state.showMobilePrewarmCard, true);
+  assert.equal(state.showPlayerShell, true);
+});
+
 test("iPhone route2 source keeps the warmup shell until mobile can-play is confirmed", () => {
   const state = resolveBrowserPlaybackPlayerViewState({
     activePlaybackMode: "lite",

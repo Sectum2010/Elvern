@@ -999,6 +999,21 @@ class MobilePlaybackSessionResponse(BaseModel):
     audio_switch_replacement_last_error: str | None = None
     audio_switch_replacement_ready_end_seconds: float | None = Field(default=None, ge=0)
     audio_switch_replacement_attach_position_seconds: float | None = Field(default=None, ge=0)
+    audio_switch_candidate_epoch_id: str | None = None
+    audio_switch_candidate_state: str | None = None
+    audio_switch_candidate_stream_index: int | None = Field(default=None, ge=0)
+    audio_switch_candidate_error: str | None = None
+    audio_switch_candidate_manifest_url: str | None = None
+    audio_switch_candidate_ready_end_seconds: float | None = Field(default=None, ge=0)
+    audio_switch_candidate_attach_position_seconds: float | None = Field(default=None, ge=0)
+    audio_switch_candidate_expires_at: float | None = Field(default=None, ge=0)
+    audio_switch_requires_commit: bool = False
+    audio_switch_commit_url: str | None = None
+    audio_switch_cancel_url: str | None = None
+    audio_switch_previous_epoch_id: str | None = None
+    audio_switch_previous_audio_stream_index: int | None = Field(default=None, ge=0)
+    old_epoch_retained: bool = False
+    old_epoch_retention_seconds: float | None = Field(default=None, ge=0)
 
 
 class MobilePlaybackStopResponse(BaseModel):
