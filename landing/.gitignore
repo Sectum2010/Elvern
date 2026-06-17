@@ -1,0 +1,7 @@
+# Local prototype screenshots copied from ~/Pictures/Screenshots.
+# Several contain admin/user/session/origin details and must be replaced with
+# blurred, redacted, or public-safe assets before launch.
+assets/screenshots/*.png
+
+# Optional local visual QA captures.
+assets/img/qa-*.png

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Elvern is a private, self-hosted media library built for smooth playback on weak connections."
+    >
+    <title>Elvern — Self-hosted media that keeps playing</title>
+    <link rel="icon" href="./assets/img/favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://api.fontshare.com">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://api.fontshare.com/v2/css?f[]=clash-display@500,600,700&f[]=switzer@400,500,600,700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./assets/css/styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="aurora" aria-hidden="true"></div>
+
+    <header class="site-header" data-header>
+      <nav class="nav" aria-label="Primary">
+        <a class="wordmark" href="#top" aria-label="Elvern home">
+          <span class="wordmark-mark" aria-hidden="true">E</span>
+          <span>Elvern</span>
+        </a>
+        <div class="nav-links">
+          <a href="#features">Features</a>
+          <a href="#why">Why Elvern</a>
+          <a href="#privacy">Privacy</a>
+          <a href="#install">Install</a>
+        </div>
+        <a class="button button--small button--primary" href="https://github.com/Sectum2010/Elvern">View on GitHub</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section id="top" class="hero section">
+        <div class="hero-copy reveal">
+          <p class="eyebrow">SELF-HOSTED MEDIA</p>
+          <h1>Your media keeps playing — even when your connection doesn't.</h1>
+          <p class="hero-subhead">
+            Elvern is a private, self-hosted media library built for real-world networks.
+            Lite Playback adapts to weak connections on the fly, so streams start fast
+            and don't stall.
+          </p>
+          <div class="hero-actions">
+            <a class="button button--primary" href="https://github.com/Sectum2010/Elvern">View on GitHub</a>
+            <a class="button button--secondary" href="#lite">See how it works</a>
+          </div>
+        </div>
+
+        <div class="hero-device reveal" data-tilt-card>
+          <div class="browser-frame">
+            <div class="browser-dots" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <div class="shot-slot hero-shot" data-shot="hero" data-caption="Library poster grid"></div>
+          </div>
+          <div class="metric-card metric-card--left" aria-label="Lite Playback preparation estimate">
+            <span>Lite ETA</span>
+            <strong>0:17</strong>
+          </div>
+          <div class="metric-card metric-card--right" aria-label="Current playback position">
+            <span>Resume</span>
+            <strong>1:08</strong>
+          </div>
+        </div>
+      </section>
+
+      <section id="why" class="section problem-strip reveal">
+        <p class="eyebrow">WHY ELVERN</p>
+        <h2>Most media servers assume a perfect connection.</h2>
+        <p>
+          Hotel wifi, mobile data, a room away from the router — real life doesn't.
+          Elvern is designed for the weak-network case first.
+        </p>
+      </section>
+
+      <section id="lite" class="section lite-story">
+        <div class="lite-pin">
+          <div class="section-heading reveal">
+            <p class="eyebrow">SIGNATURE FLOW</p>
+            <h2>Lite Playback</h2>
+            <p>
+              When the connection is weak, Elvern prepares a lighter stream on the fly and
+              tells you exactly how long it'll take. Choose Lite for instant, smooth playback,
+              or Full for maximum quality — or hand it straight to VLC.
+            </p>
+          </div>
+
+          <div class="lite-grid">
+            <ol class="story-steps" aria-label="Lite Playback sequence">
+              <li class="story-step is-active" data-story-step="0">
+                <span>01</span>
+                <strong>Weak signal</strong>
+                <p>Start with the same player controls you already know.</p>
+              </li>
+              <li class="story-step" data-story-step="1">
+                <span>02</span>
+                <strong>Live ETA</strong>
+                <p>Elvern prepares a lighter stream and counts down in plain sight.</p>
+              </li>
+              <li class="story-step" data-story-step="2">
+                <span>03</span>
+                <strong>Resume point</strong>
+                <p>Choose exactly where playback should continue.</p>
+              </li>
+              <li class="story-step" data-story-step="3">
+                <span>04</span>
+                <strong>Smooth playback</strong>
+                <p>The stream settles into fullscreen playback without the drama.</p>
+              </li>
+            </ol>
+
+            <div class="lite-stage" aria-live="polite">
+              <figure class="lite-frame is-active" data-lite-frame="Player controls">
+                <div class="shot-slot" data-shot="lite" data-caption="Player controls"></div>
+                <figcaption>Open in VLC, Lite Playback, or Full Playback from the same player.</figcaption>
+              </figure>
+              <figure class="lite-frame lite-frame--toast" data-lite-frame="Preparing toast">
+                <div class="shot-slot" data-shot="lite" data-caption="Preparing toast"></div>
+                <figcaption>Preparing lite playback · <span class="mono countdown" data-countdown>EST 0:17</span></figcaption>
+              </figure>
+              <figure class="lite-frame" data-lite-frame="Resume dialog">
+                <div class="shot-slot" data-shot="lite" data-caption="Resume dialog"></div>
+                <figcaption>Choose where to start · Resume at <span class="mono">1:08</span>.</figcaption>
+              </figure>
+              <figure class="lite-frame" data-lite-frame="Fullscreen playback">
+                <div class="shot-slot" data-shot="lite" data-caption="Fullscreen playback"></div>
+                <figcaption>Smooth fullscreen playback after the lighter stream is ready.</figcaption>
+              </figure>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" class="section features">
+        <div class="section-heading reveal">
+          <p class="eyebrow">FEATURES</p>
+          <h2>A private media library built for imperfect networks.</h2>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card reveal">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 15c4-4 12-4 16 0M7 18c2.8-2.4 7.2-2.4 10 0M10 21a3 3 0 0 1 4 0M6 9.5c3.8-2.7 8.2-2.7 12 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            <h3>Smooth on bad networks</h3>
+            <p>Adaptive Lite prep with a live ETA so playback starts fast.</p>
+          </article>
+          <article class="feature-card reveal">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 5v14l11-7-11-7Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <path d="M4 6v12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            <h3>Resume anywhere</h3>
+            <p>Pick up exactly where you left off, on any device.</p>
+          </article>
+          <article class="feature-card feature-card--image reveal">
+            <div class="shot-slot mini-shot" data-shot="features" data-caption="Subtitle track dropdown"></div>
+            <h3>Subtitles, sorted</h3>
+            <p>Multiple tracks including SDH and PGS, switchable mid-stream.</p>
+          </article>
+          <article class="feature-card reveal">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 6.5h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+              <path d="m10 9 5 3-5 3V9Z" fill="currentColor"/>
+            </svg>
+            <h3>Open in VLC</h3>
+            <p>Hand any title to your own player in one click.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section showcase">
+        <div class="section-heading reveal">
+          <p class="eyebrow">THE APP</p>
+          <h2>Quiet, poster-rich, and made for daily use.</h2>
+        </div>
+        <div class="gallery" data-gallery="showcase"></div>
+      </section>
+
+      <section id="privacy" class="section privacy">
+        <div class="privacy-copy reveal">
+          <p class="eyebrow">PRIVACY</p>
+          <h2>It's your server — so it's your rules.</h2>
+          <p>
+            No cloud account, nothing phoning home. Elvern ships real access control:
+            two-factor auth, an audit log, active-session management, invite-only access,
+            and per-user libraries and age groups.
+          </p>
+        </div>
+        <!-- These admin shots contain usernames/timestamps. Replace with blurred or dummy data before launch. -->
+        <div class="privacy-grid" data-gallery="privacy"></div>
+      </section>
+
+      <section id="install" class="section install">
+        <div class="install-copy reveal">
+          <p class="eyebrow">GET STARTED</p>
+          <h2>Self-host Elvern in minutes.</h2>
+          <pre><code># TODO: real install command — provided by maintainer</code></pre>
+          <div class="hero-actions">
+            <a class="button button--secondary" href="https://github.com/Sectum2010/Elvern#readme">Read the docs</a>
+            <a class="button button--primary" href="https://github.com/Sectum2010/Elvern">View on GitHub</a>
+          </div>
+        </div>
+        <div class="install-card reveal">
+          <div class="shot-slot" data-shot="install" data-caption="Install apps for this device"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <a class="wordmark" href="#top" aria-label="Elvern home">
+        <span class="wordmark-mark" aria-hidden="true">E</span>
+        <span>Elvern</span>
+      </a>
+      <p>Self-hosted · privacy-first media.</p>
+      <a href="https://github.com/Sectum2010/Elvern">GitHub</a>
+      <span>License placeholder</span>
+      <span data-year></span>
+    </footer>
+
+    <script defer src="https://cdn.jsdelivr.net/npm/@studio-freight/lenis@1.0.42/dist/lenis.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+    <script type="module" src="./assets/js/main.js"></script>
+  </body>
+</html>
