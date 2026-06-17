@@ -2322,9 +2322,12 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
 
 .player-runtime-notes {
   display: grid;
+  grid-auto-rows: min-content;
+  align-content: start;
   gap: 0.4rem;
   inline-size: 100%;
   max-inline-size: 100%;
+  min-block-size: calc((1.4rem * 2) + 0.4rem);
   overflow: hidden;
 }
 
@@ -5805,41 +5808,21 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   top: max(0.55rem, env(safe-area-inset-top));
   right: max(0.55rem, env(safe-area-inset-right));
   z-index: 10;
-  appearance: none;
-  display: inline-grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  border: 1px solid rgba(148, 163, 184, 0.34);
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.76);
-  color: rgba(248, 250, 252, 0.94);
-  cursor: pointer;
-  line-height: 1;
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.34);
-  transition: background-color 160ms ease, border-color 160ms ease, transform 120ms ease;
 }
 
-.player-prewarm-viewport-toggle:hover,
-.player-prewarm-viewport-toggle:focus-visible {
-  background: rgba(30, 41, 59, 0.88);
-  border-color: rgba(186, 230, 253, 0.64);
-  outline: none;
+.player-prewarm-viewport-toggle.elvern-overlay__inline-maximize {
+  top: max(0.55rem, env(safe-area-inset-top));
+  right: max(0.55rem, env(safe-area-inset-right));
+  z-index: 10;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  opacity: 0.96;
+  transform: scale(1);
 }
 
 .player-prewarm-viewport-toggle:active {
   transform: scale(0.96);
-}
-
-.player-prewarm-viewport-toggle__glyph {
-  display: block;
-  font-size: 1.1rem;
-  font-weight: 800;
-  letter-spacing: 0;
-}
-
-.player-prewarm-viewport-toggle--minimize .player-prewarm-viewport-toggle__glyph {
-  transform: rotate(45deg);
 }
 
 .player-frozen-frame {
@@ -7702,14 +7685,16 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 .elvern-timeline__preparing-marker {
   position: absolute;
   top: 50%;
-  width: 0.5rem;
-  height: 0.5rem;
+  width: 0.68rem;
+  height: 0.68rem;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: rgba(225, 29, 72, 0.85);
-  box-shadow: 0 0 0 4px rgba(225, 29, 72, 0.18);
+  border: 2px solid rgba(2, 6, 23, 0.92);
+  background: #7dd3fc;
+  box-shadow:
+    0 0 0 3px rgba(125, 211, 252, 0.22),
+    0 0 12px rgba(125, 211, 252, 0.48);
   pointer-events: none;
-  animation: elvern-overlay-spin 1.4s linear infinite;
 }
 
 .elvern-timeline__tooltip {

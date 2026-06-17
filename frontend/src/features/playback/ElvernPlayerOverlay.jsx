@@ -106,7 +106,7 @@ function FullscreenExitIcon({ className }) {
   );
 }
 
-function InlineExpandIcon({ className }) {
+export function InlineExpandIcon({ className }) {
   return (
     <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
       <path d="M8.5 15.5 4.5 19.5M4.5 15.5v4h4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.15" />
@@ -1697,7 +1697,7 @@ export default function ElvernPlayerOverlay({
             onSeekCommit={handleTimelineCommit}
             onSeekPreview={handleTimelinePreview}
             playedNotCachedAbsoluteRanges={playedNotCachedAbsoluteRanges}
-            preparingTargetSeconds={preparing ? preparingTargetSeconds : null}
+            preparingTargetSeconds={preparingTargetSeconds}
           />
 
           <div className="elvern-overlay__controls-row">

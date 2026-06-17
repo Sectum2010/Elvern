@@ -212,9 +212,11 @@ export default function ElvernTimeline({
       .filter((entry) => entry.style.width !== "0%");
   }, [bufferedAbsoluteRanges, safeDuration]);
 
-  const preparingPercent = preparingTargetSeconds != null
-    ? rangePercent(preparingTargetSeconds, safeDuration)
-    : null;
+  const numericPreparingTarget = Number(preparingTargetSeconds);
+  const preparingPercent =
+    safeDuration > 0 && Number.isFinite(numericPreparingTarget)
+      ? rangePercent(numericPreparingTarget, safeDuration)
+      : null;
 
   const tooltipPercent = tooltipSeconds != null ? rangePercent(tooltipSeconds, safeDuration) : null;
 
@@ -263,7 +265,7 @@ export default function ElvernTimeline({
         {preparingPercent != null ? (
           <div
             aria-hidden="true"
-            className="elvern-timeline__preparing-marker"
+            className="elvern-timeline__preparing-marker elvern-timeline__preparing-marker--target"
             style={{ left: `${preparingPercent}%` }}
           />
         ) : null}

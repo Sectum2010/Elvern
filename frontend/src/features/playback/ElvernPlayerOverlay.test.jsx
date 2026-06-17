@@ -22,6 +22,7 @@ function renderOverlay({
   onVideoFitModeChange = null,
   preparing = false,
   preparingMessage = "",
+  preparingTargetSeconds = null,
   sessionPayload = null,
   setupVideo = null,
   trackRefreshKey = "",
@@ -99,6 +100,7 @@ function renderOverlay({
     onVideoFitModeChange,
     preparing,
     preparingMessage,
+    preparingTargetSeconds,
     sessionPayload,
     shellRef: { current: shell },
     trackRefreshKey,
@@ -364,6 +366,20 @@ describe("ElvernPlayerOverlay controls visibility", () => {
     expect(getMoreButton()).not.toBeNull();
     expect(queryByLabelText("Volume")).toBeNull();
     expect(queryByLabelText("Mute")).toBeNull();
+  });
+
+  test("timeline target marker can render for reattach even when preparing chrome is inactive", () => {
+    const { container } = renderOverlay({
+      cinemaModeActive: true,
+      preparing: false,
+      preparingTargetSeconds: 180,
+    });
+
+    const marker = container.querySelector(".elvern-timeline__preparing-marker");
+
+    expect(marker).not.toBeNull();
+    expect(container.querySelector(".elvern-timeline__track")).toContainElement(marker);
+    expect(marker).toHaveStyle({ left: "30%" });
   });
 
   test("phone cinema controls auto-hide after three seconds while playing", () => {

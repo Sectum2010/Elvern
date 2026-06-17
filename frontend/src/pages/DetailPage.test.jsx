@@ -82,6 +82,7 @@ vi.mock("../features/playback/ElvernPlayerOverlay", () => ({
     mockOverlayState.latestProps = props;
     return null;
   },
+  InlineExpandIcon: ({ className }) => <svg aria-hidden="true" className={className} viewBox="0 0 24 24" />,
 }));
 
 vi.mock("../features/playback/useBrowserPlaybackController", () => ({
@@ -493,14 +494,18 @@ describe("DetailPage source metadata privacy", () => {
     renderDetailPage(detailItem());
 
     expect(await screen.findByText("Preparing lite playback")).toBeInTheDocument();
-	    expect(document.querySelector(".player-prewarm-card")).not.toBeNull();
-	    expect(document.querySelector(".playback-pending-indicator")).toBeNull();
-	    expect(mockOverlayState.latestProps).toBeNull();
-	    expect(screen.getByRole("button", { name: "Maximize player" })).toBeInTheDocument();
-	    expect(screen.getByText("EST --:--")).toBeInTheDocument();
-	    expect(screen.getByText("Prepared through 0:00 of 20:00.")).toBeInTheDocument();
-	    expect(screen.queryByText(/client buffer/i)).not.toBeInTheDocument();
-	  });
+    expect(document.querySelector(".player-prewarm-card")).not.toBeNull();
+    expect(document.querySelector(".playback-pending-indicator")).toBeNull();
+    expect(mockOverlayState.latestProps).toBeNull();
+    expect(screen.getByRole("button", { name: "Maximize player" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Maximize player" })).toHaveClass("elvern-overlay__inline-maximize");
+    expect(screen.getByRole("button", { name: "Maximize player" }).querySelector(".elvern-overlay__inline-maximize-icon")).not.toBeNull();
+    expect(screen.getByText("EST --:--")).toBeInTheDocument();
+    expect(screen.getByText("Prepared through 0:00 of 20:00.")).toBeInTheDocument();
+    expect(screen.queryByText("Preparing reusable cached media around 0:00.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Preparing 0:00...")).not.toBeInTheDocument();
+    expect(screen.queryByText(/client buffer/i)).not.toBeInTheDocument();
+  });
 
   test("browser prewarm card escape button toggles between normal and cinema layout without overlay", async () => {
     mockBrowserPlayerViewState.value = {

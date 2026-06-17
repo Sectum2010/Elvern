@@ -149,16 +149,17 @@ describe("Elvern player mobile CSS guards", () => {
     const styles = readStyles();
     const card = cssBlock(styles, ".player-prewarm-card");
     const toggle = cssBlock(styles, ".player-prewarm-viewport-toggle");
-    const minimizeGlyph = cssBlock(styles, ".player-prewarm-viewport-toggle--minimize .player-prewarm-viewport-toggle__glyph");
+    const transparentToggle = cssBlock(styles, ".player-prewarm-viewport-toggle.elvern-overlay__inline-maximize");
 
     expect(toggle).toContain("position: absolute");
     expect(toggle).toContain("top: max(0.55rem");
     expect(toggle).toContain("right: max(0.55rem");
-    expect(toggle).toContain("width: 44px");
-    expect(toggle).toContain("height: 44px");
-    expect(toggle).toContain("place-items: center");
     expect(numericZIndex(toggle)).toBeGreaterThan(numericZIndex(card));
-    expect(minimizeGlyph).toContain("transform: rotate(45deg)");
+    expect(transparentToggle).toContain("border: 0");
+    expect(transparentToggle).toContain("background: transparent");
+    expect(transparentToggle).toContain("box-shadow: none");
+    expect(transparentToggle).not.toContain("border-radius");
+    expect(styles).not.toContain("player-prewarm-viewport-toggle__glyph");
   });
 
   test("prepared-through runtime note stays inside the player card width", () => {
@@ -168,6 +169,7 @@ describe("Elvern player mobile CSS guards", () => {
 
     expect(notes).toContain("inline-size: 100%");
     expect(notes).toContain("max-inline-size: 100%");
+    expect(notes).toContain("min-block-size:");
     expect(notes).toContain("overflow: hidden");
     expect(preparedThrough).toContain("display: block");
     expect(preparedThrough).toContain("margin: 0");

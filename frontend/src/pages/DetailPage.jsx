@@ -21,7 +21,7 @@ import {
   shouldShowMacAppFullscreenControl,
 } from "../lib/playbackRouting";
 import { useBrowserPlaybackController } from "../features/playback/useBrowserPlaybackController";
-import ElvernPlayerOverlay from "../features/playback/ElvernPlayerOverlay";
+import ElvernPlayerOverlay, { InlineExpandIcon } from "../features/playback/ElvernPlayerOverlay";
 import {
   extractLibraryReturnState,
   readLibraryReturnTarget,
@@ -3015,15 +3015,9 @@ export function DetailPage() {
     : resumableStartPosition;
   const optimizedProgressNote =
     mobileSession
-      ? mobileSeekPendingRef.current || mobileSession.pending_target_seconds != null
-        ? `Preparing reusable cached media around ${formatDuration(
-            mobilePendingTargetRef.current != null
-              ? mobilePendingTargetRef.current
-              : mobileSession.target_position_seconds,
-          )}.`
-        : fullDuration > 0
-          ? `Prepared through ${clientPreparedThruLabel} of ${formatDuration(fullDuration)}.`
-          : `Prepared through ${clientPreparedThruLabel}.`
+      ? fullDuration > 0
+        ? `Prepared through ${clientPreparedThruLabel} of ${formatDuration(fullDuration)}.`
+        : `Prepared through ${clientPreparedThruLabel}.`
       : playback?.mode === "hls"
       ? playback.manifest_complete
         ? "Full movie is ready for optimized playback."
@@ -3036,6 +3030,10 @@ export function DetailPage() {
   const optimizedProgressNoteClassName = optimizedProgressNote.startsWith("Prepared through")
     ? "page-note player-runtime-notes__prepared-through"
     : "page-note";
+  const runtimeSeekNotice =
+    mobileSession && optimizedProgressNote.startsWith("Prepared through") && /^Preparing\s/.test(seekNotice || "")
+      ? ""
+      : seekNotice;
 
   function normalizeDesktopSeekValue(value) {
     const numericValue = Number(value);
@@ -4087,7 +4085,7 @@ export function DetailPage() {
               {showMobilePrewarmCard && useElvernCustomShell ? (
                 <button
                   aria-label={macAppFullscreenActive || elvernCinemaTakeoverActive ? "Minimize player" : "Maximize player"}
-                  className={`player-prewarm-viewport-toggle ${
+                  className={`player-prewarm-viewport-toggle elvern-overlay__inline-maximize ${
                     macAppFullscreenActive || elvernCinemaTakeoverActive
                       ? "player-prewarm-viewport-toggle--minimize"
                       : "player-prewarm-viewport-toggle--maximize"
@@ -4095,9 +4093,7 @@ export function DetailPage() {
                   onClick={handlePrewarmViewportToggle}
                   type="button"
                 >
-                  <span className="player-prewarm-viewport-toggle__glyph" aria-hidden="true">
-                    {macAppFullscreenActive || elvernCinemaTakeoverActive ? "><" : "<>"}
-                  </span>
+                  <InlineExpandIcon className="elvern-overlay__inline-maximize-icon" />
                 </button>
               ) : null}
               {useElvernCustomShell && !showMobilePrewarmCard ? (
@@ -4174,10 +4170,10 @@ export function DetailPage() {
             />
           </div>
         ) : null}
-        {(streamSource || optimizedPlaybackPending || seekNotice) ? (
+        {(streamSource || optimizedPlaybackPending || runtimeSeekNotice) ? (
           <div className="player-runtime-notes">
             <p className={optimizedProgressNoteClassName}>{optimizedProgressNote}</p>
-            {seekNotice ? <p className="page-note">{seekNotice}</p> : null}
+            {runtimeSeekNotice ? <p className="page-note">{runtimeSeekNotice}</p> : null}
           </div>
         ) : null}
 
