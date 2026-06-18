@@ -624,7 +624,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Title Scrubber v1.0.0 benchmark classifier.")
     parser.add_argument(
         "--input",
-        default=str(TMP_DIR / "Movie Name DB.txt"),
+        default=str(REPO_ROOT / "LLM" / "data" / "75k_obfuscated_file_names.txt"),
         help="Path to the newline-delimited movie title sample file.",
     )
     args = parser.parse_args()

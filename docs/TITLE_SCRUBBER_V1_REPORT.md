@@ -36,7 +36,7 @@ Out of scope:
 
 ## Final Benchmark
 
-Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
+Sample file: `/home/sectum/Projects/Elvern/LLM/data/75k_obfuscated_file_names.txt`
 
 | Run | Sample size | TRUE failures | TRUE pass rate | TRUE overtrim | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -46,7 +46,7 @@ Sample file: `/home/sectum/Projects/Elvern/tmp/Movie Name DB.txt`
 | Phase 1.9 | 75,814 | 2,109 | 97.22% | 205 | Metadata suffix, release group, and genre descriptor hardening. |
 | Phase 2.0 | 75,814 | 1,719 | 97.73% | 199 | Director/year parentheticals and trailing extras hardening. |
 | Phase 2.1 / v1.0.0 initial | 75,814 | 519 | 99.32% | 23 | Stabilized post-year, country-year, title-number, and classifier cleanup. |
-| v1.0.0 expanded DB run | 123,892 | 689 | 99.44% | 27 | Latest run after appending additional source title lists to `tmp/Movie Name DB.txt`. |
+| v1.0.0 expanded DB run | 123,892 | 689 | 99.44% | 27 | Latest run after appending additional source title lists to `LLM/data/75k_obfuscated_file_names.txt`. |
 
 Latest expanded v1.0.0 classification counts:
 
@@ -276,13 +276,13 @@ Rerun the v1.0.0 diagnostic:
 
 ```bash
 cd /home/sectum/Projects/Elvern
-.venv/bin/python scripts/diagnostics/title_scrubber_benchmark.py --input "tmp/Movie Name DB.txt"
+.venv/bin/python scripts/diagnostics/title_scrubber_benchmark.py --input "LLM/data/75k_obfuscated_file_names.txt"
 .venv/bin/python scripts/diagnostics/title_scrubber_probe.py
 ```
 
 Input sample:
 
-- `tmp/Movie Name DB.txt`
+- `LLM/data/75k_obfuscated_file_names.txt`
 
 When rerun, generated outputs are written under project `tmp/`:
 
