@@ -29,7 +29,7 @@ export function normalizeLibraryListPath(pathname = "") {
   const pathOnly = queryIndex >= 0 ? normalizedPath.slice(0, queryIndex) : normalizedPath;
   const search = queryIndex >= 0 ? normalizedPath.slice(queryIndex) : "";
   if (pathOnly === "/library/local" || pathOnly === "/library/cloud") {
-    return pathOnly;
+    return search ? `${pathOnly}${search}` : pathOnly;
   }
   if (pathOnly === "/library") {
     return search ? `/library${search}` : "/library";

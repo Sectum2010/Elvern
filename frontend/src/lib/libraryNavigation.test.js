@@ -108,6 +108,33 @@ test("library return state preserves library query parameters", () => {
   );
 });
 
+test("source-page return state preserves q and relocation fields", () => {
+  assert.deepEqual(
+    normalizeLibraryReturnTarget({
+      listPath: "/library/local?q=akira#ignored",
+      anchorItemId: 42,
+      anchorInstanceKey: "series:akira:42",
+      anchorViewportRatioY: 0.33,
+      anchorViewportRatioX: 0.21,
+      railKey: "akira",
+      railScrollLeft: 288,
+    }),
+    {
+      listPath: "/library/local?q=akira",
+      anchorItemId: 42,
+      anchorInstanceKey: "series:akira:42",
+      scrollY: 0,
+      pendingRestore: false,
+      anchorViewportRatioY: 0.33,
+      anchorViewportRatioX: 0.21,
+      viewportWidth: null,
+      viewportHeight: null,
+      railKey: "akira",
+      railScrollLeft: 288,
+    },
+  );
+});
+
 test("library return state normalizes invalid values safely", () => {
   assert.deepEqual(
     normalizeLibraryReturnTarget({

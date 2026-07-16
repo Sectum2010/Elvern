@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Tag } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
@@ -40,7 +40,8 @@ import {
   normalizeVideoFitMode,
 } from "../lib/playerFitMode";
 import { getMovieCardTitle } from "../lib/movieTitles";
-import { invalidateLibraryQueries } from "../lib/libraryQueries";
+import { invalidateLibraryQueries, patchLibraryProgressCaches } from "../lib/libraryQueries";
+import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
   clearProviderAuthIntent,
@@ -545,6 +546,8 @@ export function DetailPage() {
   const { itemId } = useParams();
   const location = useLocation();
   const { user } = useAuth();
+  const userSettingsQuery = useUserSettingsQuery(user);
+  const userSettings = resolveUserSettings(userSettingsQuery.data);
   const {
     providerAuthRequirement,
     showProviderAuthPrompt,
@@ -556,6 +559,7 @@ export function DetailPage() {
   const detailScrollResetItemRef = useRef(null);
   const [item, setItem] = useState(null);
   const [progress, setProgress] = useState(null);
+  const progressRef = useRef(null);
   const [error, setError] = useState("");
   const [desktopPlayback, setDesktopPlayback] = useState(null);
   const [vlcLaunchPending, setVlcLaunchPending] = useState(false);
@@ -820,6 +824,23 @@ export function DetailPage() {
     };
   }, [macAppFullscreenActive, elvernCinemaModeActive]);
 
+  useEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
+
+  const handleProgressChange = useCallback((payload) => {
+    const wasCompleted = Boolean(progressRef.current?.completed);
+    progressRef.current = payload;
+    setProgress(payload);
+    void patchLibraryProgressCaches(payload, {
+      refetchActiveOnCompletion: Boolean(payload?.completed) && !wasCompleted,
+    });
+  }, []);
+
+  const handleProgressDirty = useCallback((payload) => {
+    void patchLibraryProgressCaches(payload, { refetchActiveOnCompletion: false });
+  }, []);
+
   const {
     hlsRef,
     videoRef,
@@ -879,7 +900,8 @@ export function DetailPage() {
     item,
     progress,
     iosMobile,
-    onProgressChange: setProgress,
+    onProgressChange: handleProgressChange,
+    onProgressDirty: handleProgressDirty,
     onProviderAuthRequired: (requirement, { playbackMode = "lite" } = {}) => {
       if (shouldUseProviderAuthPassiveNotice(requirement)) {
         setError(getProviderAuthPassiveNoticeMessage(requirement));
@@ -1249,17 +1271,23 @@ export function DetailPage() {
           return;
         }
 
-        const payload = await apiRequest("/api/user-settings");
+        if (!userSettingsQuery.data) {
+          if (userSettingsQuery.error && !cancelled) {
+            setMediaLibraryReferenceInfo(null);
+          }
+          return;
+        }
+
         if (!cancelled) {
-          const effectiveSource = payload.media_library_reference_effective_source || (
-            payload.media_library_reference_private_value ? "private_reference" : "shared_default"
+          const effectiveSource = userSettings.media_library_reference_effective_source || (
+            userSettings.media_library_reference_private_value ? "private_reference" : "shared_default"
           );
           setMediaLibraryReferenceInfo({
             sharedDefault: null,
-            privateValue: payload.media_library_reference_private_value || null,
+            privateValue: userSettings.media_library_reference_private_value || null,
             effectiveSource,
             effectiveLabel:
-              payload.media_library_reference_effective_label
+              userSettings.media_library_reference_effective_label
               || (effectiveSource === "private_reference" ? "My private reference" : "Shared default"),
           });
         }
@@ -1274,7 +1302,7 @@ export function DetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, user?.role]);
+  }, [user?.id, user?.role, userSettingsQuery.data, userSettingsQuery.error]);
 
   useEffect(() => {
     if (!item || (item.source_kind || "local") !== "cloud") {

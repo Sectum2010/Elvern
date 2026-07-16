@@ -462,7 +462,10 @@ def get_item_poster(item_id: int, request: Request, user=CurrentUser, variant: s
 
     return FileResponse(
         response_path,
-        headers={"Cache-Control": cache_control},
+        headers={
+            "Cache-Control": cache_control,
+            "Vary": "Cookie",
+        },
     )
 
 

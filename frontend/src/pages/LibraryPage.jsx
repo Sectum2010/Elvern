@@ -62,6 +62,7 @@ import {
   LIBRARY_QUERY_STALE_TIME_MS,
 } from "../lib/libraryQueries";
 import { queryClient } from "../lib/queryClient";
+import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 
 
 export const LIBRARY_CATEGORY_OPTIONS = [
@@ -108,7 +109,6 @@ const DEFAULT_LIBRARY_ARRANGE = {
   sort: "smart",
 };
 const SCROLLABLE_ARRANGE_DEVICE_CLASSES = new Set(["phone", "tablet"]);
-const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 export const LIBRARY_SEARCH_DEBOUNCE_MS = 300;
 const EMPTY_LIBRARY_PAYLOAD = Object.freeze({
   items: [],
@@ -574,6 +574,7 @@ function LibraryArrangeControl({
 function MediaGrid({
   items,
   activeBrowserPlaybackItemId = null,
+  posterDisplayWidth = "1400",
   smartPosterLoadingEnabled = false,
   sectionKey = "library",
 }) {
@@ -585,6 +586,7 @@ function MediaGrid({
           cardInstanceKey={`${sectionKey}:${item.id}`}
           item={item}
           key={item.id}
+          posterDisplayWidth={posterDisplayWidth}
           smartPosterLoadingEnabled={smartPosterLoadingEnabled}
         />
       ))}
@@ -652,12 +654,9 @@ export function LibraryPage() {
     [location.pathname, location.search],
   );
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
+  const userSettingsQuery = useUserSettingsQuery(user);
+  const settings = resolveUserSettings(userSettingsQuery.data);
   const [query, setQuery] = useState(() => activeLibraryQuery);
-  const [settings, setSettings] = useState({
-    hide_duplicate_movies: true,
-    hide_recently_added: false,
-    floating_library_search_enabled: true,
-  });
   const [rescanPending, setRescanPending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -839,20 +838,6 @@ export function LibraryPage() {
     });
   }
 
-  async function loadLibrarySettings({ signal } = {}) {
-    try {
-      const payload = await apiRequest("/api/user-settings", { signal });
-      setSettings(payload);
-    } catch (requestError) {
-      if (requestError.name === "AbortError") {
-        return;
-      }
-      if (requestError.status === 401) {
-        await refreshAuth();
-      }
-    }
-  }
-
   async function loadMaintenanceModeStatus({ signal } = {}) {
     try {
       const payload = await apiRequest("/api/admin/maintenance-mode", { signal });
@@ -888,21 +873,6 @@ export function LibraryPage() {
       window.clearTimeout(timerId);
     };
   }, [activeLibraryQuery, location.hash, location.pathname, location.search, navigate, query]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    loadLibrarySettings({ signal: controller.signal });
-    function handleUserSettingsChanged(event) {
-      if (event?.detail && typeof event.detail === "object") {
-        setSettings((current) => ({ ...current, ...event.detail }));
-      }
-    }
-    window.addEventListener(USER_SETTINGS_CHANGED_EVENT, handleUserSettingsChanged);
-    return () => {
-      controller.abort();
-      window.removeEventListener(USER_SETTINGS_CHANGED_EVENT, handleUserSettingsChanged);
-    };
-  }, [user?.id, user?.role]);
 
   useEffect(() => {
     if (user?.role !== "admin") {
@@ -1754,6 +1724,7 @@ export function LibraryPage() {
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={library.items}
+              posterDisplayWidth={settings.poster_card_display_max_width}
               sectionKey="search-results"
               smartPosterLoadingEnabled
             />
@@ -1772,6 +1743,7 @@ export function LibraryPage() {
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={library.items}
+              posterDisplayWidth={settings.poster_card_display_max_width}
               sectionKey="sorted-library"
               smartPosterLoadingEnabled
             />
@@ -1794,6 +1766,7 @@ export function LibraryPage() {
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                 items={visibleContinueWatchingItems}
+                posterDisplayWidth={settings.poster_card_display_max_width}
                 sectionKey="continue-watching"
                 smartPosterLoadingEnabled
               />
@@ -1819,6 +1792,7 @@ export function LibraryPage() {
                     desktopSlots={block.slots < 6 ? block.slots : null}
                     enableTouchReleaseAssist
                     rail={block.rail}
+                    posterDisplayWidth={settings.poster_card_display_max_width}
                     sectionKey={`series:${block.rail.key}`}
                     smartPosterLoadingEnabled
                   />
@@ -1835,6 +1809,7 @@ export function LibraryPage() {
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                 items={library.recently_added}
+                posterDisplayWidth={settings.poster_card_display_max_width}
                 sectionKey="recently-added"
                 smartPosterLoadingEnabled
               />
@@ -1849,6 +1824,7 @@ export function LibraryPage() {
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={visibleLibraryGridItems}
+              posterDisplayWidth={settings.poster_card_display_max_width}
               sectionKey="other-movies"
               smartPosterLoadingEnabled
             />

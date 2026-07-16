@@ -94,6 +94,7 @@ function getLibraryReturnTargetFromCardClick({
 export function MediaCard({
   item,
   backgroundPlaybackActive = false,
+  posterDisplayWidth = "1400",
   smartPosterLoadingEnabled = false,
   cardInstanceKey = null,
 }) {
@@ -102,7 +103,11 @@ export function MediaCard({
   const displayTitle = getMovieCardTitle(item);
   const progressPercent = getProgressPercent(item);
   const monogram = displayTitle.trim().charAt(0).toUpperCase() || "E";
-  const [posterFailed, setPosterFailed] = useState(false);
+  const [posterLoadState, setPosterLoadState] = useState({
+    url: null,
+    loaded: false,
+    failed: false,
+  });
   const [rankTooltipOpen, setRankTooltipOpen] = useState(false);
   const posterRef = useRef(null);
   const posterInstanceId = useId();
@@ -116,9 +121,12 @@ export function MediaCard({
     && isSmartPosterLoadingSupported()
   );
   const resolvedPosterUrl = useMemo(
-    () => getCardPosterUrl(item.poster_url),
-    [item.poster_url],
+    () => getCardPosterUrl(item.poster_url, posterDisplayWidth),
+    [item.poster_url, posterDisplayWidth],
   );
+  const posterStateMatchesUrl = posterLoadState.url === resolvedPosterUrl;
+  const posterFailed = posterStateMatchesUrl && posterLoadState.failed;
+  const posterLoaded = posterStateMatchesUrl && posterLoadState.loaded;
   const smartPosterSchedulerActive = smartPosterSchedulerEnabled
     && Boolean(resolvedPosterUrl)
     && !posterFailed;
@@ -180,6 +188,14 @@ export function MediaCard({
   }
 
   useEffect(() => {
+    setPosterLoadState((current) => (
+      current.url === resolvedPosterUrl
+        ? current
+        : { url: resolvedPosterUrl, loaded: false, failed: false }
+    ));
+  }, [resolvedPosterUrl]);
+
+  useEffect(() => {
     if (!smartPosterSchedulerActive) {
       setSmartPosterSnapshot(null);
       return undefined;
@@ -223,10 +239,26 @@ export function MediaCard({
               title="Browser Playback active in background"
             />
           ) : null}
+          <div
+            className={[
+              "media-card__poster-fallback",
+              smartPosterSchedulerActive && !posterFailed
+                ? "media-card__poster-fallback--deferred"
+                : "",
+              showPoster && posterLoaded
+                ? "media-card__poster-fallback--hidden"
+                : "",
+            ].filter(Boolean).join(" ")}
+          >
+            <span>{monogram}</span>
+          </div>
           {showPoster ? (
             <img
               alt=""
-              className="media-card__poster-image"
+              className={[
+                "media-card__poster-image",
+                posterLoaded ? "media-card__poster-image--loaded" : "",
+              ].filter(Boolean).join(" ")}
               decoding="async"
               draggable="false"
               loading={smartPosterSchedulerActive ? "eager" : "lazy"}
@@ -234,27 +266,25 @@ export function MediaCard({
                 if (smartPosterSchedulerActive) {
                   markSmartPosterCardError(smartPosterCardId);
                 }
-                setPosterFailed(true);
+                setPosterLoadState({
+                  url: resolvedPosterUrl,
+                  loaded: false,
+                  failed: true,
+                });
               }}
               onLoad={() => {
                 if (smartPosterSchedulerActive) {
                   markSmartPosterCardLoaded(smartPosterCardId);
                 }
+                setPosterLoadState({
+                  url: resolvedPosterUrl,
+                  loaded: true,
+                  failed: false,
+                });
               }}
               src={resolvedPosterUrl}
             />
-          ) : (
-            <div
-              className={[
-                "media-card__poster-fallback",
-                smartPosterSchedulerActive && !posterFailed
-                  ? "media-card__poster-fallback--deferred"
-                  : "",
-              ].filter(Boolean).join(" ")}
-            >
-              <span>{monogram}</span>
-            </div>
-          )}
+          ) : null}
           {progressPercent > 0 ? (
             <div className="media-card__progress">
               <div style={{ width: `${progressPercent}%` }} />

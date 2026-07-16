@@ -102,6 +102,7 @@ export function useBrowserPlaybackController({
   progress,
   iosMobile,
   onProgressChange,
+  onProgressDirty,
   onProviderAuthRequired,
 }) {
   const videoRef = useRef(null);
@@ -1410,6 +1411,12 @@ export function useBrowserPlaybackController({
         duration_seconds: persistedDuration || null,
         completed,
         playback_mode: playbackMode,
+      });
+      onProgressDirty?.({
+        media_item_id: item.id,
+        position_seconds: absolutePositionSeconds,
+        duration_seconds: persistedDuration || null,
+        completed,
       });
       navigator.sendBeacon(
         `/api/progress/${item.id}`,
@@ -2793,6 +2800,7 @@ export function useBrowserPlaybackController({
     streamSource,
     iosMobile,
     onProgressChange,
+    onProgressDirty,
     browserPlaybackLabel,
     browserPlaybackLabelTitle,
     browserReadyLabelTitle,

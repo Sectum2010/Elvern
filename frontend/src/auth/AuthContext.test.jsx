@@ -9,6 +9,7 @@ import { ProtectedRoute } from "../components/ProtectedRoute";
 import { apiRequest, MAINTENANCE_MODE_MESSAGE } from "../lib/api";
 import { buildLibraryQueryKey } from "../lib/libraryQueries";
 import { queryClient } from "../lib/queryClient";
+import { buildUserSettingsQueryKey } from "../lib/userSettingsQueries";
 import { LoginPage } from "../pages/LoginPage";
 
 
@@ -194,12 +195,18 @@ describe("AuthProvider maintenance mode handling", () => {
       category: "movies",
     });
     queryClient.setQueryData(userALibraryKey, { items: [{ id: 42 }] });
+    const userASettingsKey = buildUserSettingsQueryKey({
+      userId: standardUser.id,
+      role: standardUser.role,
+    });
+    queryClient.setQueryData(userASettingsKey, { poster_card_display_max_width: "800" });
     expect(queryClient.getQueryData(userALibraryKey)).toBeDefined();
 
     fireEvent.focus(window);
 
     expect(await screen.findByText("Signed in as second-viewer")).toBeInTheDocument();
     expect(queryClient.getQueryData(userALibraryKey)).toBeUndefined();
+    expect(queryClient.getQueryData(userASettingsKey)).toBeUndefined();
   });
 
   test("a business 403 revalidates the same identity without clearing library cache", async () => {
@@ -223,6 +230,11 @@ describe("AuthProvider maintenance mode handling", () => {
       category: "movies",
     });
     queryClient.setQueryData(libraryKey, { items: [{ id: 42 }] });
+    const settingsKey = buildUserSettingsQueryKey({
+      userId: standardUser.id,
+      role: standardUser.role,
+    });
+    queryClient.setQueryData(settingsKey, { poster_card_display_max_width: "800" });
 
     fireEvent.click(screen.getByRole("button", { name: "Call protected API" }));
 
@@ -230,6 +242,7 @@ describe("AuthProvider maintenance mode handling", () => {
     await waitFor(() => expect(authMeCalls).toBe(2));
     expect(screen.getByText("Signed in as viewer")).toBeInTheDocument();
     expect(queryClient.getQueryData(libraryKey)).toEqual({ items: [{ id: 42 }] });
+    expect(queryClient.getQueryData(settingsKey)).toEqual({ poster_card_display_max_width: "800" });
   });
 
   test("PWA-style visibility and focus revalidation keeps cache for the same identity", async () => {

@@ -11,6 +11,7 @@ import {
 } from "./api.js";
 import { buildLibraryQueryKey } from "./libraryQueries.js";
 import { queryClient } from "./queryClient.js";
+import { buildUserSettingsQueryKey } from "./userSettingsQueries.js";
 
 afterEach(() => {
   queryClient.clear();
@@ -118,7 +119,9 @@ test("apiRequest immediately clears protected library cache on 401", async () =>
     role: "standard_user",
     category: "movies",
   });
+  const settingsKey = buildUserSettingsQueryKey({ userId: 2, role: "standard_user" });
   queryClient.setQueryData(libraryKey, { items: [{ id: 401 }] });
+  queryClient.setQueryData(settingsKey, { poster_card_display_max_width: "800" });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(
     JSON.stringify({ detail: "Authentication required" }),
     { status: 401, headers: { "content-type": "application/json" } },
@@ -127,6 +130,7 @@ test("apiRequest immediately clears protected library cache on 401", async () =>
   await assert.rejects(() => apiRequest("/api/library"));
 
   assert.equal(queryClient.getQueryData(libraryKey), undefined);
+  assert.equal(queryClient.getQueryData(settingsKey), undefined);
 });
 
 test("apiRequest preserves protected cache and requests auth revalidation on a business 403", async () => {
@@ -135,10 +139,12 @@ test("apiRequest preserves protected cache and requests auth revalidation on a b
     role: "standard_user",
     category: "movies",
   });
+  const settingsKey = buildUserSettingsQueryKey({ userId: 2, role: "standard_user" });
   const events = [];
   const handleRevalidation = () => events.push("requested");
   window.addEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);
   queryClient.setQueryData(libraryKey, { items: [{ id: 403 }] });
+  queryClient.setQueryData(settingsKey, { poster_card_display_max_width: "800" });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(
     JSON.stringify({ detail: "This action is not allowed" }),
     { status: 403, headers: { "content-type": "application/json" } },
@@ -147,6 +153,7 @@ test("apiRequest preserves protected cache and requests auth revalidation on a b
   try {
     await assert.rejects(() => apiRequest("/api/assistant/requests"));
     assert.deepEqual(queryClient.getQueryData(libraryKey), { items: [{ id: 403 }] });
+    assert.deepEqual(queryClient.getQueryData(settingsKey), { poster_card_display_max_width: "800" });
     assert.deepEqual(events, ["requested"]);
   } finally {
     window.removeEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);

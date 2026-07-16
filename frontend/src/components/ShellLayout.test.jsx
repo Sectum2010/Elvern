@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 
 import { cleanup, render, waitFor } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { apiRequest } from "../lib/api";
 import { ShellLayout } from "./ShellLayout";
+import { queryClient } from "../lib/queryClient";
 
 
 const mockPlatformState = vi.hoisted(() => ({
@@ -42,21 +44,24 @@ vi.mock("../features/playback/usePlaybackReadyNotice", () => ({
 
 function renderShell() {
   return render(
-    <MemoryRouter initialEntries={["/library"]}>
-      <ShellLayout>
-        <label>
-          Editable value
-          <input aria-label="Editable value" />
-        </label>
-        <p data-allow-text-selection="true">Copy this text</p>
-      </ShellLayout>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/library"]}>
+        <ShellLayout>
+          <label>
+            Editable value
+            <input aria-label="Editable value" />
+          </label>
+          <p data-allow-text-selection="true">Copy this text</p>
+        </ShellLayout>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
 
 describe("ShellLayout fixed island and mobile selection guard", () => {
   beforeEach(() => {
+    queryClient.clear();
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "linux";
     apiRequest.mockReset();
@@ -70,13 +75,17 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
 
   afterEach(() => {
     cleanup();
+    queryClient.clear();
     vi.restoreAllMocks();
   });
 
   test("keeps the floating island at the bottom even for a legacy top setting", async () => {
     renderShell();
 
-    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith("/api/user-settings"));
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/user-settings",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
     expect(document.querySelector(".app-shell")).toHaveClass("app-shell--floating-island-bottom");
     expect(document.querySelector(".floating-island")).toHaveClass("floating-island--bottom");
     expect(document.querySelector(".floating-island")).not.toHaveClass("floating-island--top");

@@ -74,7 +74,7 @@ describe("MediaCard poster loading", () => {
 
       expect(image).toHaveAttribute(
         "src",
-        "/api/library/item/42/poster?v=cache-token&variant=card#poster",
+        "/api/library/item/42/poster?v=cache-token&variant=card&display_width=1400#poster",
       );
       expect(image).toHaveAttribute("loading", "lazy");
       expect(image).toHaveAttribute("decoding", "async");
@@ -87,11 +87,103 @@ describe("MediaCard poster loading", () => {
 
     expect(image).toHaveAttribute(
       "src",
-      "/api/library/item/42/poster?v=cache-token&variant=card#poster",
+      "/api/library/item/42/poster?v=cache-token&variant=card&display_width=1400#poster",
     );
     expect(image).toHaveAttribute("loading", "eager");
     expect(smartPosterMocks.register).toHaveBeenCalledTimes(1);
     expect(smartPosterMocks.subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps the letter fallback visible until the poster loads", () => {
+    const image = renderCard();
+    const fallback = document.querySelector(".media-card__poster-fallback");
+
+    expect(fallback).not.toHaveClass("media-card__poster-fallback--hidden");
+    expect(image).not.toHaveClass("media-card__poster-image--loaded");
+
+    fireEvent.load(image);
+
+    expect(fallback).toHaveClass("media-card__poster-fallback--hidden");
+    expect(image).toHaveClass("media-card__poster-image--loaded");
+  });
+
+  test("keeps fallback after an error and retries only when the resolved URL changes", async () => {
+    const item = {
+      id: 42,
+      title: "Akira",
+      source_kind: "local",
+      poster_url: "/api/library/item/42/poster?v=first",
+    };
+    const rendered = render(
+      <MemoryRouter>
+        <PosterContextMenuProvider enabled={false}>
+          <MediaCard item={item} />
+        </PosterContextMenuProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.error(document.querySelector(".media-card__poster-image"));
+
+    expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
+    expect(document.querySelector(".media-card__poster-fallback")).not.toHaveClass(
+      "media-card__poster-fallback--hidden",
+    );
+
+    rendered.rerender(
+      <MemoryRouter>
+        <PosterContextMenuProvider enabled={false}>
+          <MediaCard item={item} />
+        </PosterContextMenuProvider>
+      </MemoryRouter>,
+    );
+    expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
+
+    rendered.rerender(
+      <MemoryRouter>
+        <PosterContextMenuProvider enabled={false}>
+          <MediaCard item={{ ...item, poster_url: "/api/library/item/42/poster?v=second" }} />
+        </PosterContextMenuProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(document.querySelector(".media-card__poster-image")).toHaveAttribute(
+      "src",
+      "/api/library/item/42/poster?v=second&variant=card&display_width=1400",
+    ));
+  });
+
+  test("changing display width creates a new src and resets loaded state", async () => {
+    const item = {
+      id: 42,
+      title: "Akira",
+      source_kind: "local",
+      poster_url: "/api/library/item/42/poster?v=cache-token",
+    };
+    const rendered = render(
+      <MemoryRouter>
+        <PosterContextMenuProvider enabled={false}>
+          <MediaCard item={item} posterDisplayWidth="800" />
+        </PosterContextMenuProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.load(document.querySelector(".media-card__poster-image"));
+    expect(document.querySelector(".media-card__poster-image")).toHaveClass("media-card__poster-image--loaded");
+
+    rendered.rerender(
+      <MemoryRouter>
+        <PosterContextMenuProvider enabled={false}>
+          <MediaCard item={item} posterDisplayWidth="1400" />
+        </PosterContextMenuProvider>
+      </MemoryRouter>,
+    );
+
+    const nextImage = document.querySelector(".media-card__poster-image");
+    expect(nextImage).toHaveAttribute(
+      "src",
+      "/api/library/item/42/poster?v=cache-token&variant=card&display_width=1400",
+    );
+    expect(nextImage).not.toHaveClass("media-card__poster-image--loaded");
+    expect(document.querySelector(".media-card__poster-fallback")).not.toHaveClass(
+      "media-card__poster-fallback--hidden",
+    );
   });
 });
 

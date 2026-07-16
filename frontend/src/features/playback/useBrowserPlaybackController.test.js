@@ -143,3 +143,17 @@ test("stall recovery passes stale native playlist flag without undefined shortha
   expect(stalledSource.match(/stalePlaylistStall: staleNativePlaylistStall/g)).toHaveLength(2);
   expect(stalledSource).not.toMatch(/(?<!:)\bstalePlaylistStall,\s*$/m);
 });
+
+test("sendBeacon progress reports a narrow dirty payload without changing save cadence", () => {
+  const source = fs.readFileSync(controllerSourcePath, "utf8");
+  const beaconStart = source.indexOf("function beaconProgress(completed = false)");
+  const beaconEnd = source.indexOf("function resolvePlaybackTrackingMode()", beaconStart);
+  const beaconSource = source.slice(beaconStart, beaconEnd);
+
+  expect(beaconStart).toBeGreaterThan(0);
+  expect(beaconEnd).toBeGreaterThan(beaconStart);
+  expect(beaconSource).toContain("onProgressDirty?.({");
+  expect(beaconSource).toContain("media_item_id: item.id");
+  expect(beaconSource).toContain("navigator.sendBeacon(");
+  expect(source).toContain("}, 5000);");
+});

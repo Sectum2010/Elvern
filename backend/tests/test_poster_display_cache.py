@@ -194,6 +194,7 @@ def test_route_variant_card_returns_display_cache(client, admin_credentials, ini
     poster_response = client.get(f"{item['poster_url']}&variant=card")
     assert poster_response.status_code == 200
     assert poster_response.headers["cache-control"] == "private, max-age=604800, immutable"
+    assert poster_response.headers["vary"] == "Cookie"
     assert poster_response.content != poster_path.read_bytes()
     with Image.open(BytesIO(poster_response.content)) as cached_image:
         assert cached_image.width == 1400
@@ -215,8 +216,10 @@ def test_route_variant_card_respects_user_poster_width_setting(client, admin_cre
     library_response = client.get("/api/library")
     item = library_response.json()["items"][0]
 
-    poster_response = client.get(f"{item['poster_url']}&variant=card")
+    poster_response = client.get(f"{item['poster_url']}&variant=card&display_width=2200")
     assert poster_response.status_code == 200
+    assert poster_response.headers["cache-control"] == "private, max-age=604800, immutable"
+    assert poster_response.headers["vary"] == "Cookie"
     with Image.open(BytesIO(poster_response.content)) as cached_image:
         assert cached_image.width == 1000
 

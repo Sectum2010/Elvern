@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PosterContextMenuProvider } from "./PosterContextMenu";
@@ -10,7 +10,6 @@ import {
 } from "../lib/libraryNavigation";
 import { buildLogoutPlaybackWorkerPrompt } from "../lib/playbackWorkerOwnership";
 import {
-  DEFAULT_BACKGROUND_SETTINGS,
   applyUserBackgroundTheme,
   normalizeUserBackgroundSettings,
   resetUserBackgroundTheme,
@@ -18,8 +17,7 @@ import {
 import { detectClientDeviceClass } from "../lib/platformDetection";
 import { detectClientPlatform, isDesktopClientPlatform } from "../lib/platformDetection";
 import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
-
-const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
+import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 
 function normalizePosterCardAppearance(value) {
   if (value === "modern" || value === "clean") {
@@ -32,8 +30,13 @@ export function ShellLayout({ children }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const [posterCardAppearance, setPosterCardAppearance] = useState("classic");
-  const [backgroundSettings, setBackgroundSettings] = useState(DEFAULT_BACKGROUND_SETTINGS);
+  const userSettingsQuery = useUserSettingsQuery(user);
+  const userSettings = resolveUserSettings(userSettingsQuery.data);
+  const posterCardAppearance = normalizePosterCardAppearance(userSettings.poster_card_appearance);
+  const backgroundSettings = useMemo(
+    () => normalizeUserBackgroundSettings(userSettings),
+    [userSettingsQuery.data],
+  );
   const [accountExpanded, setAccountExpanded] = useState(false);
   const [logoutWorkerModal, setLogoutWorkerModal] = useState(null);
   const [logoutWorkerPending, setLogoutWorkerPending] = useState("");
@@ -332,50 +335,6 @@ export function ShellLayout({ children }) {
       return true;
     });
   }
-
-  useEffect(() => {
-    let active = true;
-
-    async function loadUserSettings() {
-      try {
-        const payload = await apiRequest("/api/user-settings");
-        if (active) {
-          setPosterCardAppearance(normalizePosterCardAppearance(payload.poster_card_appearance));
-          setBackgroundSettings(normalizeUserBackgroundSettings(payload));
-        }
-      } catch {
-        if (active) {
-          setPosterCardAppearance("classic");
-          setBackgroundSettings(DEFAULT_BACKGROUND_SETTINGS);
-        }
-      }
-    }
-
-    function handleSettingsChanged(event) {
-      const nextPosterCardAppearance = event?.detail?.poster_card_appearance;
-      if (nextPosterCardAppearance !== undefined) {
-        setPosterCardAppearance(normalizePosterCardAppearance(nextPosterCardAppearance));
-      }
-      if (
-        event?.detail?.background_mode !== undefined
-        || event?.detail?.background_preset !== undefined
-        || event?.detail?.background_gradient_start !== undefined
-        || event?.detail?.background_gradient_end !== undefined
-        || event?.detail?.background_gradient_accent !== undefined
-        || event?.detail?.background_solid_color !== undefined
-        || event?.detail?.background_photo_url !== undefined
-      ) {
-        setBackgroundSettings(normalizeUserBackgroundSettings(event.detail));
-      }
-    }
-
-    loadUserSettings();
-    window.addEventListener(USER_SETTINGS_CHANGED_EVENT, handleSettingsChanged);
-    return () => {
-      active = false;
-      window.removeEventListener(USER_SETTINGS_CHANGED_EVENT, handleSettingsChanged);
-    };
-  }, []);
 
   useEffect(() => {
     applyUserBackgroundTheme(backgroundSettings);

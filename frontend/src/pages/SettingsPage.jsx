@@ -23,6 +23,12 @@ import {
   writePersistedPanelState,
 } from "../lib/persistedPanelState";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
+import { normalizePosterDisplayWidth } from "../lib/posterUrls";
+import {
+  resolveUserSettings,
+  setUserSettingsQueryData,
+  useUserSettingsQuery,
+} from "../lib/userSettingsQueries";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 
@@ -411,14 +417,6 @@ function normalizePosterCardAppearance(value) {
     return value;
   }
   return "classic";
-}
-
-
-function normalizePosterDisplayWidth(value) {
-  const normalized = String(value || "1400").toLowerCase();
-  return POSTER_DISPLAY_WIDTH_OPTIONS.some((option) => option.value === normalized)
-    ? normalized
-    : "1400";
 }
 
 
@@ -1045,6 +1043,8 @@ export function SettingsPage() {
   const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const userSettingsQuery = useUserSettingsQuery(user);
+  const settingsHydratedIdentityRef = useRef("");
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
@@ -1068,7 +1068,7 @@ export function SettingsPage() {
   const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
   const [globalHiddenItems, setGlobalHiddenItems] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [ancillaryLoading, setAncillaryLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [restoringItemId, setRestoringItemId] = useState(null);
   const [restoringGlobalItemId, setRestoringGlobalItemId] = useState(null);
@@ -1210,16 +1210,35 @@ export function SettingsPage() {
   const activeAgeBucket = ageBucketManager.open
     ? restrictedAgeBuckets.find((bucket) => bucket.age === ageBucketManager.age)
     : null;
+  const loading = ancillaryLoading || (!userSettingsQuery.data && userSettingsQuery.isPending);
+
+  useEffect(() => {
+    if (!userSettingsQuery.data) {
+      return;
+    }
+    const identity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
+    const resolvedSettings = resolveUserSettings(userSettingsQuery.data);
+    setSettings(resolvedSettings);
+    if (settingsHydratedIdentityRef.current !== identity) {
+      settingsHydratedIdentityRef.current = identity;
+      setBackgroundDraft(normalizeUserBackgroundSettings(resolvedSettings));
+    }
+  }, [user?.id, user?.role, userSettingsQuery.data]);
+
+  useEffect(() => {
+    if (userSettingsQuery.error && userSettingsQuery.error.name !== "AbortError") {
+      setError(userSettingsQuery.error.message || "Failed to load settings");
+    }
+  }, [userSettingsQuery.error]);
 
   useEffect(() => {
     let active = true;
 
     async function loadSettings() {
-      setLoading(true);
+      setAncillaryLoading(true);
       setError("");
       try {
         const [
-          settingsPayload,
           hiddenPayload,
           globalHiddenPayload,
           mediaLibraryReferencePayload,
@@ -1229,7 +1248,6 @@ export function SettingsPage() {
           totpPayload,
           ageGroupsPayload,
         ] = await Promise.all([
-          apiRequest("/api/user-settings"),
           apiRequest("/api/user-hidden-items"),
           user?.role === "admin"
             ? apiRequest("/api/admin/global-hidden-items")
@@ -1250,8 +1268,6 @@ export function SettingsPage() {
             : Promise.resolve({ items: [], total: 0 }),
         ]);
         if (active) {
-          setSettings(settingsPayload);
-          setBackgroundDraft(normalizeUserBackgroundSettings(settingsPayload));
           setHiddenItems(hiddenPayload.items || []);
           setGlobalHiddenItems(globalHiddenPayload.items || []);
           setCloudLibraries(cloudPayload);
@@ -1282,7 +1298,7 @@ export function SettingsPage() {
         }
       } finally {
         if (active) {
-          setLoading(false);
+          setAncillaryLoading(false);
         }
       }
     }
@@ -1291,7 +1307,7 @@ export function SettingsPage() {
     return () => {
       active = false;
     };
-  }, [user?.role]);
+  }, [user?.id, user?.role]);
 
   useEffect(() => {
     if (user?.role !== "admin") {
@@ -1401,6 +1417,16 @@ export function SettingsPage() {
     window.history.replaceState({}, "", nextUrl);
   }, [location.hash, location.pathname, location.search, user?.role]);
 
+  function applyUserSettingsPayload(payload) {
+    const resolvedSettings = resolveUserSettings(payload);
+    setUserSettingsQueryData(user, resolvedSettings);
+    setSettings(resolvedSettings);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: resolvedSettings }));
+    }
+    return resolvedSettings;
+  }
+
   async function handleDuplicateToggle(event) {
     const nextValue = event.target.checked;
     setSaving(true);
@@ -1411,8 +1437,7 @@ export function SettingsPage() {
         method: "PATCH",
         data: { hide_duplicate_movies: nextValue },
       });
-      setSettings(payload);
-      window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+      applyUserSettingsPayload(payload);
       void invalidateLibraryQueries();
       setMessage(
         nextValue
@@ -1436,8 +1461,7 @@ export function SettingsPage() {
         method: "PATCH",
         data: { hide_recently_added: nextValue },
       });
-      setSettings(payload);
-      window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+      applyUserSettingsPayload(payload);
       void invalidateLibraryQueries();
       setMessage(
         nextValue
@@ -1461,10 +1485,7 @@ export function SettingsPage() {
         method: "PATCH",
         data: { floating_library_search_enabled: nextValue },
       });
-      setSettings(payload);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
-      }
+      applyUserSettingsPayload(payload);
       setMessage(nextValue ? "Dynamic search button is enabled." : "Dynamic search button is disabled.");
     } catch (requestError) {
       setError(requestError.message || "Failed to update floating search setting");
@@ -1486,10 +1507,7 @@ export function SettingsPage() {
         method: "PATCH",
         data: { poster_card_appearance: normalizedValue },
       });
-      setSettings(payload);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
-      }
+      applyUserSettingsPayload(payload);
       setMessage(
         normalizedValue === "modern"
           ? "Poster appearance set to Modern."
@@ -1517,10 +1535,7 @@ export function SettingsPage() {
         method: "PATCH",
         data: { poster_card_display_max_width: normalizedValue },
       });
-      setSettings(payload);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
-      }
+      applyUserSettingsPayload(payload);
       setMessage("Poster display quality saved.");
     } catch (requestError) {
       setError(requestError.message || "Failed to update poster display quality");
@@ -1531,11 +1546,8 @@ export function SettingsPage() {
 
   function applyBackgroundPayload(payload, successMessage) {
     const normalizedBackground = normalizeUserBackgroundSettings(payload);
-    setSettings(payload);
+    applyUserSettingsPayload(payload);
     setBackgroundDraft(normalizedBackground);
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
-    }
     setBackgroundError("");
     if (successMessage) {
       setMessage(successMessage);

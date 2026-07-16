@@ -1,5 +1,6 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState } from "../components/EmptyState";
 import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
@@ -12,6 +13,11 @@ import {
   clearLibraryReturnPending,
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
+import {
+  buildLibraryQueryKey,
+  LIBRARY_QUERY_GC_TIME_MS,
+  LIBRARY_QUERY_STALE_TIME_MS,
+} from "../lib/libraryQueries";
 import { detectClientDeviceClass, detectClientPlatform } from "../lib/platformDetection";
 import {
   packIpadPortraitSeriesRailRows,
@@ -23,11 +29,40 @@ import {
   restoreHorizontalRailPosition,
   selectLibraryReturnRestoreTarget,
 } from "../lib/viewportAnchor";
+import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
+
+
+export const LIBRARY_SOURCE_SEARCH_DEBOUNCE_MS = 300;
+const EMPTY_SOURCE_LIBRARY_PAYLOAD = Object.freeze({
+  items: [],
+  series_rails: [],
+  cloud_series_rails: [],
+  scan_in_progress: false,
+});
+
+
+export function resolveLibrarySourceQueryFromSearch(search = "") {
+  return String(new URLSearchParams(search).get("q") || "").trim();
+}
+
+
+export function buildLibrarySourceQuerySearch(currentSearch = "", query = "") {
+  const params = new URLSearchParams(currentSearch);
+  const normalizedQuery = String(query || "").trim();
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  } else {
+    params.delete("q");
+  }
+  const nextSearch = params.toString();
+  return nextSearch ? `?${nextSearch}` : "";
+}
 
 
 function MediaGrid({
   items,
   activeBrowserPlaybackItemId = null,
+  posterDisplayWidth = "1400",
   smartPosterLoadingEnabled = false,
   sectionKey = "library-source",
 }) {
@@ -39,6 +74,7 @@ function MediaGrid({
           cardInstanceKey={`${sectionKey}:${item.id}`}
           item={item}
           key={item.id}
+          posterDisplayWidth={posterDisplayWidth}
           smartPosterLoadingEnabled={smartPosterLoadingEnabled}
         />
       ))}
@@ -115,30 +151,67 @@ function matchesFocusedLibraryQuery(item, normalizedQuery) {
 
 
 export function LibrarySourcePage({ sourceKind }) {
-  const { refreshAuth } = useAuth();
+  const { refreshAuth, user } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
-  const [query, setQuery] = useState("");
+  const activeSourceQuery = useMemo(
+    () => resolveLibrarySourceQueryFromSearch(location.search),
+    [location.search],
+  );
+  const currentLibraryListPath = useMemo(
+    () => `${location.pathname}${location.search || ""}`,
+    [location.pathname, location.search],
+  );
+  const [query, setQuery] = useState(() => activeSourceQuery);
   const deferredQuery = useDeferredValue(query);
-  const [settings, setSettings] = useState({
-    floating_library_search_enabled: true,
-  });
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [items, setItems] = useState([]);
-  const [seriesRails, setSeriesRails] = useState([]);
+  const userSettingsQuery = useUserSettingsQuery(user);
+  const settings = resolveUserSettings(userSettingsQuery.data);
   const sourceSearchInputRef = useRef(null);
   const floatingSearchScrollYRef = useRef(null);
   const pendingFloatingSearchRestoreYRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
-  const copy = SOURCE_PAGE_COPY[sourceKind] || SOURCE_PAGE_COPY.local;
+  const resolvedSourceKind = sourceKind === "cloud" ? "cloud" : "local";
+  const copy = SOURCE_PAGE_COPY[resolvedSourceKind];
   const clientPlatform = detectClientPlatform();
   const clientDeviceClass = detectClientDeviceClass();
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
   const floatingSearchScrollRestoreEnabled = ["desktop", "phone", "tablet"].includes(clientDeviceClass);
+  const libraryRequestPath = `/api/library?category=movies&source=${resolvedSourceKind}`;
+  const libraryQueryKey = useMemo(
+    () => buildLibraryQueryKey({
+      userId: user?.id,
+      role: user?.role,
+      category: "movies",
+      source: resolvedSourceKind,
+      genre: "",
+      quality: "all",
+      sort: "smart",
+      query: "",
+    }),
+    [resolvedSourceKind, user?.id, user?.role],
+  );
+  const libraryQuery = useQuery({
+    queryKey: libraryQueryKey,
+    queryFn: ({ signal }) => apiRequest(libraryRequestPath, { signal }),
+    enabled: Boolean(user?.id),
+    staleTime: LIBRARY_QUERY_STALE_TIME_MS,
+    gcTime: LIBRARY_QUERY_GC_TIME_MS,
+    retry: false,
+    refetchInterval: (queryState) => (
+      queryState.state.data?.scan_in_progress ? 2500 : false
+    ),
+  });
+  const library = libraryQuery.data || EMPTY_SOURCE_LIBRARY_PAYLOAD;
+  const loading = !libraryQuery.data && libraryQuery.isPending;
+  const items = library.items || [];
+  const seriesRails = resolvedSourceKind === "cloud"
+    ? (library.cloud_series_rails || [])
+    : (library.series_rails || []);
   const normalizedQuery = deferredQuery.trim().toLowerCase();
   const visibleSeriesRails = useMemo(
     () => seriesRails
@@ -181,67 +254,49 @@ export function LibrarySourcePage({ sourceKind }) {
   const hasVisibleContent = visibleSeriesRails.length > 0 || filteredItems.length > 0;
 
   useEffect(() => {
-    const controller = new AbortController();
-
-    async function loadLibrary() {
-      startTransition(() => {
-        setLoading(true);
-      });
-      setError("");
-      try {
-        const payload = await apiRequest("/api/library", { signal: controller.signal });
-        const visibleItems = (payload.items || []).filter(
-          (item) => (item.source_kind || "local") === sourceKind,
-        );
-        const focusedRails = (sourceKind === "cloud"
-          ? (payload.cloud_series_rails || [])
-          : (payload.series_rails || []))
-          .map((rail) => ({
-            ...rail,
-            items: (rail.items || []).filter((item) => (item.source_kind || "local") === sourceKind),
-          }))
-          .filter((rail) => (rail.items || []).length >= 2)
-          .map((rail) => ({
-            ...rail,
-            film_count: rail.items.length,
-          }));
-        setItems(visibleItems);
-        setSeriesRails(focusedRails);
-      } catch (requestError) {
-        if (requestError.name === "AbortError") {
-          return;
-        }
-        if (requestError.status === 401) {
-          await refreshAuth();
-          return;
-        }
-        setError(requestError.message || "Failed to load library section");
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    loadLibrary();
-    return () => {
-      controller.abort();
-    };
-  }, [refreshAuth, sourceKind]);
+    setQuery(activeSourceQuery);
+  }, [activeSourceQuery]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    async function loadSettings() {
-      try {
-        const payload = await apiRequest("/api/user-settings", { signal: controller.signal });
-        setSettings(payload);
-      } catch (requestError) {
-        if (requestError.name !== "AbortError") {
-          setSettings({ floating_library_search_enabled: true });
-        }
-      }
+    const normalizedQuery = query.trim();
+    if (normalizedQuery === activeSourceQuery) {
+      return undefined;
     }
-    loadSettings();
-    return () => controller.abort();
-  }, []);
+    const timerId = window.setTimeout(() => {
+      navigate(
+        {
+          pathname: location.pathname,
+          search: buildLibrarySourceQuerySearch(location.search, normalizedQuery),
+          hash: location.hash,
+        },
+        { replace: true },
+      );
+    }, LIBRARY_SOURCE_SEARCH_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [activeSourceQuery, location.hash, location.pathname, location.search, navigate, query]);
+
+  useEffect(() => {
+    setError("");
+  }, [libraryQueryKey]);
+
+  useEffect(() => {
+    const requestError = libraryQuery.error;
+    if (!requestError || requestError.name === "AbortError") {
+      return;
+    }
+    if (requestError.status === 401) {
+      void refreshAuth();
+      return;
+    }
+    if (requestError.status === 403) {
+      return;
+    }
+    if (!libraryQuery.data) {
+      setError(requestError.message || "Failed to load library section");
+    }
+  }, [libraryQuery.data, libraryQuery.error, refreshAuth]);
 
   useEffect(() => {
     if (
@@ -273,11 +328,11 @@ export function LibrarySourcePage({ sourceKind }) {
     }
     const rememberedTarget = readLibraryReturnTarget();
     const shouldRestore = Boolean(location.state?.restoreLibraryReturn) || Boolean(rememberedTarget?.pendingRestore);
-    if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== location.pathname) {
+    if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== currentLibraryListPath) {
       return undefined;
     }
     const restoreKey = [
-      location.pathname,
+      currentLibraryListPath,
       rememberedTarget.anchorInstanceKey || rememberedTarget.anchorItemId || "none",
       rememberedTarget.anchorViewportRatioY ?? "none",
       rememberedTarget.scrollY,
@@ -318,7 +373,7 @@ export function LibrarySourcePage({ sourceKind }) {
     return () => {
       window.clearTimeout(timerId);
     };
-  }, [items, loading, location.pathname, location.state, seriesRails]);
+  }, [currentLibraryListPath, items, loading, location.state, seriesRails]);
 
   function handleFloatingSearchChange(nextValue, details = {}) {
     const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
@@ -347,27 +402,27 @@ export function LibrarySourcePage({ sourceKind }) {
       data-device-class={libraryDeviceClass}
       data-library-device={libraryDevice}
     >
-      <div className={`library-focus-hero library-focus-hero--${sourceKind}`}>
+      <div className={`library-focus-hero library-focus-hero--${resolvedSourceKind}`}>
         <div className="library-focus-hero__row">
           <div className="library-focus-hero__copy">
             <div className="library-focus-hero__segments" aria-label="Focused library switch">
               <Link
                 className={
-                  sourceKind === "local"
+                  resolvedSourceKind === "local"
                     ? "library-focus-hero__segment library-focus-hero__segment--active"
                     : "library-focus-hero__segment"
                 }
-                to="/library/local"
+                to={{ pathname: "/library/local", search: location.search }}
               >
                 Local
               </Link>
               <Link
                 className={
-                  sourceKind === "cloud"
+                  resolvedSourceKind === "cloud"
                     ? "library-focus-hero__segment library-focus-hero__segment--active"
                     : "library-focus-hero__segment"
                 }
-                to="/library/cloud"
+                to={{ pathname: "/library/cloud", search: location.search }}
               >
                 Cloud
               </Link>
@@ -429,6 +484,7 @@ export function LibrarySourcePage({ sourceKind }) {
                     <SeriesRail
                       activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                       desktopSlots={block.slots < 6 ? block.slots : null}
+                      posterDisplayWidth={settings.poster_card_display_max_width}
                       rail={block.rail}
                       smartPosterLoadingEnabled
                     />
@@ -444,7 +500,8 @@ export function LibrarySourcePage({ sourceKind }) {
                 <MediaGrid
                   activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                   items={filteredItems}
-                  sectionKey={`${sourceKind}:other-movies`}
+                  posterDisplayWidth={settings.poster_card_display_max_width}
+                  sectionKey={`${resolvedSourceKind}:other-movies`}
                   smartPosterLoadingEnabled
                 />
               </section>
