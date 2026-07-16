@@ -7043,10 +7043,6 @@ html[data-device-shell="iphone"] .admin-recovery-card {
   outline: none;
 }
 
-.poster-context-menu__pencil {
-  transform: rotate(-45deg);
-}
-
 html[data-device-shell="iphone"] .floating-island--bottom {
   bottom: calc(0.45rem + env(safe-area-inset-bottom, 0px));
 }

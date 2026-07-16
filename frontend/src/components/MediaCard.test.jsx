@@ -1,4 +1,6 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -131,6 +133,72 @@ describe("MediaCard shared poster context menu", () => {
       viewportWidth: 320,
       viewportHeight: 240,
     })).toEqual({ left: 136, top: 136 });
+  });
+
+  test("pencil keeps the lucide 45 degree slant without a corrective rotation", () => {
+    const styles = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
+
+    expect(styles).not.toMatch(/\.poster-context-menu__pencil\s*\{[^}]*transform:/s);
+  });
+
+  test("menu follows its poster point out of view and returns to the same point", async () => {
+    renderCard({ posterMenuEnabled: true });
+    const poster = document.querySelector(".media-card__poster");
+    let posterTop = 200;
+    vi.spyOn(poster, "getBoundingClientRect").mockImplementation(() => ({
+      left: 50,
+      right: 250,
+      top: posterTop,
+      bottom: posterTop + 300,
+      width: 200,
+      height: 300,
+      x: 50,
+      y: posterTop,
+      toJSON: () => ({}),
+    }));
+
+    fireEvent.contextMenu(poster, { clientX: 100, clientY: 260 });
+    const menu = screen.getByRole("menu", { name: "Poster actions for Akira" });
+    expect(menu.style.top).toBe("260px");
+
+    posterTop = -400;
+    fireEvent.scroll(window);
+    await waitFor(() => expect(menu.style.top).toBe("-340px"));
+    expect(menu).toBeInTheDocument();
+
+    posterTop = 200;
+    fireEvent.scroll(window);
+    await waitFor(() => expect(menu.style.top).toBe("260px"));
+    expect(menu).toBeInTheDocument();
+  });
+
+  test("menu follows its poster through a nested horizontal rail scroll", async () => {
+    renderCard({ posterMenuEnabled: true });
+    const poster = document.querySelector(".media-card__poster");
+    const rail = document.createElement("div");
+    document.body.appendChild(rail);
+    let posterLeft = 200;
+    vi.spyOn(poster, "getBoundingClientRect").mockImplementation(() => ({
+      left: posterLeft,
+      right: posterLeft + 200,
+      top: 100,
+      bottom: 400,
+      width: 200,
+      height: 300,
+      x: posterLeft,
+      y: 100,
+      toJSON: () => ({}),
+    }));
+
+    fireEvent.contextMenu(poster, { clientX: 250, clientY: 160 });
+    const menu = screen.getByRole("menu", { name: "Poster actions for Akira" });
+    expect(menu.style.left).toBe("250px");
+
+    posterLeft = 20;
+    fireEvent.scroll(rail);
+    await waitFor(() => expect(menu.style.left).toBe("70px"));
+    expect(menu).toBeInTheDocument();
+    rail.remove();
   });
 
   test.each([
