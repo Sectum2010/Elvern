@@ -46,7 +46,6 @@ def _to_user_settings_response(payload: dict[str, object], *, user_role: str) ->
     return UserSettingsResponse(
         hide_duplicate_movies=bool(payload["hide_duplicate_movies"]),
         hide_recently_added=bool(payload["hide_recently_added"]),
-        floating_controls_position=str(payload["floating_controls_position"]),
         floating_library_search_enabled=bool(payload["floating_library_search_enabled"]),
         poster_card_appearance=str(payload["poster_card_appearance"]),
         poster_card_display_max_width=str(payload["poster_card_display_max_width"]),
@@ -88,7 +87,6 @@ def patch_user_settings(
             user_id=user.id,
             hide_duplicate_movies=payload.hide_duplicate_movies,
             hide_recently_added=payload.hide_recently_added,
-            floating_controls_position=payload.floating_controls_position,
             floating_library_search_enabled=payload.floating_library_search_enabled,
             poster_card_appearance=payload.poster_card_appearance,
             poster_card_display_max_width=payload.poster_card_display_max_width,

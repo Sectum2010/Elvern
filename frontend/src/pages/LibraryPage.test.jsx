@@ -30,14 +30,18 @@ const mockPlatformState = vi.hoisted(() => ({
   deviceClass: "desktop",
   platform: "desktop",
 }));
+const mockAuthState = vi.hoisted(() => ({
+  id: 2,
+  role: "standard_user",
+}));
 
 
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({
     refreshAuth: vi.fn(),
     user: {
-      id: 2,
-      role: "user",
+      id: mockAuthState.id,
+      role: mockAuthState.role,
     },
   }),
 }));
@@ -281,6 +285,8 @@ describe("LibraryPage category switching", () => {
     apiRequest.mockReset();
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "desktop";
+    mockAuthState.id = 2;
+    mockAuthState.role = "standard_user";
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       writable: true,
@@ -322,6 +328,7 @@ describe("LibraryPage category switching", () => {
   });
 
   test("shows the maintenance mode warning line when Maintenance Mode is on", async () => {
+    mockAuthState.role = "admin";
     renderLibrary("/library", emptyLibraryPayload, { maintenanceModeEnabled: true });
 
     const warning = await screen.findByText("Maintenance mode is still turned on");
@@ -332,10 +339,20 @@ describe("LibraryPage category switching", () => {
   });
 
   test("hides the maintenance mode warning line when Maintenance Mode is off", async () => {
+    mockAuthState.role = "admin";
     renderLibrary("/library", emptyLibraryPayload, { maintenanceModeEnabled: false });
 
     await screen.findByRole("tab", { name: "Movies" });
 
+    expect(screen.queryByText("Maintenance mode is still turned on")).not.toBeInTheDocument();
+  });
+
+  test("standard users never request the admin maintenance endpoint", async () => {
+    renderLibrary("/library", emptyLibraryPayload);
+
+    await screen.findByRole("tab", { name: "Movies" });
+
+    expect(apiRequest.mock.calls.some(([path]) => path === "/api/admin/maintenance-mode")).toBe(false);
     expect(screen.queryByText("Maintenance mode is still turned on")).not.toBeInTheDocument();
   });
 
@@ -527,6 +544,7 @@ describe("LibraryPage category switching", () => {
   });
 
   test("view changes do not reload user settings or maintenance status", async () => {
+    mockAuthState.role = "admin";
     const user = userEvent.setup();
     renderLibrary("/library?category=movies");
     await waitFor(() => {
@@ -1040,7 +1058,7 @@ describe("LibraryPage category switching", () => {
     });
     const cacheKey = buildLibraryQueryKey({
       userId: 2,
-      role: "user",
+      role: "standard_user",
       category: "movies",
       source: "all",
       genre: "",

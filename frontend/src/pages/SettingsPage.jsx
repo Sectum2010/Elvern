@@ -1048,7 +1048,6 @@ export function SettingsPage() {
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
-    floating_controls_position: "bottom",
     floating_library_search_enabled: true,
     poster_card_appearance: "classic",
     poster_card_display_max_width: "1400",
@@ -1447,32 +1446,6 @@ export function SettingsPage() {
       );
     } catch (requestError) {
       setError(requestError.message || "Failed to update settings");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleFloatingControlsPositionChange(event) {
-    const nextValue = event.target.value === "top" ? "top" : "bottom";
-    setSaving(true);
-    setError("");
-    setMessage("");
-    try {
-      const payload = await apiRequest("/api/user-settings", {
-        method: "PATCH",
-        data: { floating_controls_position: nextValue },
-      });
-      setSettings(payload);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
-      }
-      setMessage(
-        nextValue === "top"
-          ? "Floating controls now anchor to the top."
-          : "Floating controls now anchor to the bottom.",
-      );
-    } catch (requestError) {
-      setError(requestError.message || "Failed to update floating controls position");
     } finally {
       setSaving(false);
     }
@@ -2577,21 +2550,6 @@ export function SettingsPage() {
               <p className="page-subnote">Loading interface preferences...</p>
             ) : (
               <div className="settings-card-stack">
-                <label className="settings-field">
-                  <span>
-                    <strong>Floating island position</strong>
-                    <small>Move the full floating navigation and account island away from the Dynamic Island area.</small>
-                  </span>
-                  <select
-                    className="admin-select"
-                    disabled={saving}
-                    onChange={handleFloatingControlsPositionChange}
-                    value={settings.floating_controls_position || "bottom"}
-                  >
-                    <option value="bottom">Bottom</option>
-                    <option value="top">Top</option>
-                  </select>
-                </label>
                 <label className="settings-toggle">
                   <span>
                     <strong>Dynamic search button</strong>

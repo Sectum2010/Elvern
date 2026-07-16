@@ -756,7 +756,7 @@ export function LibraryPage() {
     ),
   });
   const library = libraryQuery.data || EMPTY_LIBRARY_PAYLOAD;
-  const loading = libraryQuery.isPending;
+  const loading = !libraryQuery.data && libraryQuery.isPending;
   const continueWatchingLimit = 6;
   const continueWatchingItems = useMemo(
     () => library.continue_watching.map((item) => {
@@ -905,6 +905,10 @@ export function LibraryPage() {
   }, [user?.id, user?.role]);
 
   useEffect(() => {
+    if (user?.role !== "admin") {
+      setMaintenanceModeActive(false);
+      return undefined;
+    }
     const controller = new AbortController();
     loadMaintenanceModeStatus({ signal: controller.signal });
     return () => {
@@ -921,8 +925,11 @@ export function LibraryPage() {
     if (!requestError || requestError.name === "AbortError" || isMaintenanceModeError(requestError)) {
       return;
     }
-    if (requestError.status === 401 || requestError.status === 403) {
+    if (requestError.status === 401) {
       void refreshAuth();
+      return;
+    }
+    if (requestError.status === 403) {
       return;
     }
     if (!libraryQuery.data) {

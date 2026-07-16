@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   apiRequest,
+  AUTH_REVALIDATION_REQUESTED_EVENT,
   extractApiErrorMessage,
   isMaintenanceModeError,
   MAINTENANCE_MODE_BLOCKED_EVENT,
@@ -111,21 +112,60 @@ test("apiRequest does not dispatch maintenance mode event for generic 503 errors
   }
 });
 
-test("apiRequest clears protected library cache on 401 and 403 responses", async () => {
-  for (const responseStatus of [401, 403]) {
-    const libraryKey = buildLibraryQueryKey({
-      userId: 2,
-      role: "user",
-      category: "movies",
-    });
-    queryClient.setQueryData(libraryKey, { items: [{ id: responseStatus }] });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(
-      JSON.stringify({ detail: "Authentication required" }),
-      { status: responseStatus, headers: { "content-type": "application/json" } },
-    )));
+test("apiRequest immediately clears protected library cache on 401", async () => {
+  const libraryKey = buildLibraryQueryKey({
+    userId: 2,
+    role: "standard_user",
+    category: "movies",
+  });
+  queryClient.setQueryData(libraryKey, { items: [{ id: 401 }] });
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ detail: "Authentication required" }),
+    { status: 401, headers: { "content-type": "application/json" } },
+  )));
 
-    await assert.rejects(() => apiRequest("/api/library"));
+  await assert.rejects(() => apiRequest("/api/library"));
 
-    assert.equal(queryClient.getQueryData(libraryKey), undefined);
+  assert.equal(queryClient.getQueryData(libraryKey), undefined);
+});
+
+test("apiRequest preserves protected cache and requests auth revalidation on a business 403", async () => {
+  const libraryKey = buildLibraryQueryKey({
+    userId: 2,
+    role: "standard_user",
+    category: "movies",
+  });
+  const events = [];
+  const handleRevalidation = () => events.push("requested");
+  window.addEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);
+  queryClient.setQueryData(libraryKey, { items: [{ id: 403 }] });
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ detail: "This action is not allowed" }),
+    { status: 403, headers: { "content-type": "application/json" } },
+  )));
+
+  try {
+    await assert.rejects(() => apiRequest("/api/assistant/requests"));
+    assert.deepEqual(queryClient.getQueryData(libraryKey), { items: [{ id: 403 }] });
+    assert.deepEqual(events, ["requested"]);
+  } finally {
+    window.removeEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);
+  }
+});
+
+test("auth verification 403 does not recursively request another auth revalidation", async () => {
+  const events = [];
+  const handleRevalidation = () => events.push("requested");
+  window.addEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ detail: "Session invalid" }),
+    { status: 403, headers: { "content-type": "application/json" } },
+  )));
+
+  try {
+    await assert.rejects(() => apiRequest("/api/auth/me"));
+    assert.deepEqual(events, []);
+  } finally {
+    window.removeEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);
   }
 });

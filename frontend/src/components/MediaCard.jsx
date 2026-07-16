@@ -4,6 +4,7 @@ import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCardPosterUrl } from "../lib/posterUrls";
 import { getQualityRank } from "../lib/qualityRank";
 import { buildLibraryReturnState, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
+import { usePosterContextMenu } from "./PosterContextMenu";
 import {
   getSmartPosterCardSnapshot,
   isSmartPosterLoadingSupported,
@@ -97,6 +98,7 @@ export function MediaCard({
   cardInstanceKey = null,
 }) {
   const location = useLocation();
+  const { openPosterContextMenu } = usePosterContextMenu();
   const displayTitle = getMovieCardTitle(item);
   const progressPercent = getProgressPercent(item);
   const monogram = displayTitle.trim().charAt(0).toUpperCase() || "E";
@@ -153,6 +155,16 @@ export function MediaCard({
     }));
   }
 
+  function handlePosterContextMenu(event) {
+    const opened = openPosterContextMenu(event, {
+      id: item.id,
+      title: displayTitle,
+    });
+    if (opened) {
+      event.preventDefault();
+    }
+  }
+
   function openRankTooltip() {
     setRankTooltipOpen(true);
   }
@@ -199,7 +211,12 @@ export function MediaCard({
       data-library-card-instance-key={cardInstanceKey || undefined}
     >
       <Link className="media-card__poster-link" onClick={handleOpenDetail} state={detailState} to={detailPath}>
-        <div className="media-card__poster" aria-hidden="true" ref={posterRef}>
+        <div
+          className="media-card__poster"
+          aria-hidden="true"
+          onContextMenu={handlePosterContextMenu}
+          ref={posterRef}
+        >
           {backgroundPlaybackActive ? (
             <div
               className="media-card__background-playback-indicator"
@@ -211,6 +228,7 @@ export function MediaCard({
               alt=""
               className="media-card__poster-image"
               decoding="async"
+              draggable="false"
               loading={smartPosterSchedulerActive ? "eager" : "lazy"}
               onError={() => {
                 if (smartPosterSchedulerActive) {

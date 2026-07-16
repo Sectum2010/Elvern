@@ -15,8 +15,9 @@ import { LoginPage } from "../pages/LoginPage";
 const standardUser = {
   id: 2,
   username: "viewer",
-  role: "user",
+  role: "standard_user",
   assistant_beta_enabled: false,
+  age_credential: 18,
 };
 
 function jsonResponse(payload, status = 200) {
@@ -199,5 +200,121 @@ describe("AuthProvider maintenance mode handling", () => {
 
     expect(await screen.findByText("Signed in as second-viewer")).toBeInTheDocument();
     expect(queryClient.getQueryData(userALibraryKey)).toBeUndefined();
+  });
+
+  test("a business 403 revalidates the same identity without clearing library cache", async () => {
+    let authMeCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/me") {
+        authMeCalls += 1;
+        return jsonResponse({ user: standardUser });
+      }
+      if (requestPath === "/api/protected") {
+        return jsonResponse({ detail: "This action is not allowed" }, 403);
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    }));
+
+    renderAuthRoutes();
+    expect(await screen.findByText("Signed in as viewer")).toBeInTheDocument();
+    const libraryKey = buildLibraryQueryKey({
+      userId: standardUser.id,
+      role: standardUser.role,
+      category: "movies",
+    });
+    queryClient.setQueryData(libraryKey, { items: [{ id: 42 }] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Call protected API" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("This action is not allowed");
+    await waitFor(() => expect(authMeCalls).toBe(2));
+    expect(screen.getByText("Signed in as viewer")).toBeInTheDocument();
+    expect(queryClient.getQueryData(libraryKey)).toEqual({ items: [{ id: 42 }] });
+  });
+
+  test("PWA-style visibility and focus revalidation keeps cache for the same identity", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/me") {
+        return jsonResponse({ user: { ...standardUser } });
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    }));
+
+    renderAuthRoutes();
+    expect(await screen.findByText("Signed in as viewer")).toBeInTheDocument();
+    const libraryKey = buildLibraryQueryKey({
+      userId: standardUser.id,
+      role: standardUser.role,
+      category: "movies",
+    });
+    queryClient.setQueryData(libraryKey, { items: [{ id: 42 }] });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+
+    fireEvent(document, new Event("visibilitychange"));
+    fireEvent.focus(window);
+
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+    expect(queryClient.getQueryData(libraryKey)).toEqual({ items: [{ id: 42 }] });
+  });
+
+  test("clears cache when the same user receives a different permission role", async () => {
+    let authMeCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/me") {
+        authMeCalls += 1;
+        return jsonResponse({
+          user: authMeCalls === 1
+            ? standardUser
+            : { ...standardUser, role: "admin" },
+        });
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    }));
+
+    renderAuthRoutes();
+    expect(await screen.findByText("Signed in as viewer")).toBeInTheDocument();
+    const libraryKey = buildLibraryQueryKey({
+      userId: standardUser.id,
+      role: standardUser.role,
+      category: "movies",
+    });
+    queryClient.setQueryData(libraryKey, { items: [{ id: 42 }] });
+
+    fireEvent.focus(window);
+
+    await waitFor(() => expect(authMeCalls).toBe(2));
+    expect(queryClient.getQueryData(libraryKey)).toBeUndefined();
+  });
+
+  test("clears cache when the same user's age permission changes", async () => {
+    let authMeCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/me") {
+        authMeCalls += 1;
+        return jsonResponse({
+          user: authMeCalls === 1
+            ? standardUser
+            : { ...standardUser, age_credential: 13 },
+        });
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    }));
+
+    renderAuthRoutes();
+    expect(await screen.findByText("Signed in as viewer")).toBeInTheDocument();
+    const libraryKey = buildLibraryQueryKey({
+      userId: standardUser.id,
+      role: standardUser.role,
+      category: "movies",
+    });
+    queryClient.setQueryData(libraryKey, { items: [{ id: 42 }] });
+
+    fireEvent.focus(window);
+
+    await waitFor(() => expect(authMeCalls).toBe(2));
+    expect(queryClient.getQueryData(libraryKey)).toBeUndefined();
   });
 });

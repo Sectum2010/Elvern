@@ -318,7 +318,6 @@ class LibraryListResponse(BaseModel):
 class UserSettingsResponse(BaseModel):
     hide_duplicate_movies: bool = True
     hide_recently_added: bool = False
-    floating_controls_position: Literal["bottom", "top"] = "bottom"
     floating_library_search_enabled: bool = True
     poster_card_appearance: Literal["classic", "modern", "clean"] = "classic"
     poster_card_display_max_width: Literal[
@@ -349,7 +348,6 @@ class UserSettingsResponse(BaseModel):
 class UserSettingsUpdateRequest(BaseModel):
     hide_duplicate_movies: bool | None = None
     hide_recently_added: bool | None = None
-    floating_controls_position: Literal["bottom", "top"] | None = None
     floating_library_search_enabled: bool | None = None
     poster_card_appearance: str | None = None
     poster_card_display_max_width: str | int | None = None

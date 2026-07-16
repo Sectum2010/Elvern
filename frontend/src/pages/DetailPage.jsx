@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Tag } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
@@ -553,6 +553,7 @@ export function DetailPage() {
   const providerReconnectContinuationRef = useRef(null);
   const providerReconnectPendingRef = useRef(false);
   const providerReconnectModalRef = useRef(null);
+  const detailScrollResetItemRef = useRef(null);
   const [item, setItem] = useState(null);
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState("");
@@ -652,6 +653,15 @@ export function DetailPage() {
     [iosMobile, itemId],
   );
   const isAdmin = user?.role === "admin";
+
+  useLayoutEffect(() => {
+    const nextItemId = String(itemId || "");
+    if (!nextItemId || detailScrollResetItemRef.current === nextItemId) {
+      return;
+    }
+    detailScrollResetItemRef.current = nextItemId;
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [itemId]);
 
   useEffect(() => {
     providerReconnectPendingRef.current = providerReconnectPending;
@@ -921,9 +931,8 @@ export function DetailPage() {
 
   function prepareLibraryReturnNavigation() {
     rememberLibraryReturnTarget({
+      ...activeLibraryReturn,
       listPath: libraryReturnPath,
-      anchorItemId: activeLibraryReturn?.anchorItemId ?? null,
-      scrollY: activeLibraryReturn?.scrollY ?? 0,
       pendingRestore: true,
     });
   }
@@ -1145,12 +1154,11 @@ export function DetailPage() {
       return;
     }
     rememberLibraryReturnTarget({
-      listPath: activeLibraryReturn.listPath,
-      anchorItemId: activeLibraryReturn.anchorItemId,
-      scrollY: activeLibraryReturn.scrollY,
+      ...activeLibraryReturn,
+      listPath: libraryReturnPath,
       pendingRestore: false,
     });
-  }, [activeLibraryReturn]);
+  }, [activeLibraryReturn, libraryReturnPath]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !iosExternalAppCallback) {
@@ -4032,25 +4040,6 @@ export function DetailPage() {
                   {note}
                 </p>
               ))}
-            </div>
-          ) : null}
-          {desktopPlayback?.open_method === "protocol_helper" && !desktopPlayback?.same_host_launch ? (
-            <div className="native-handoff">
-              <p className="native-handoff__label">
-                This desktop uses the client-side Elvern VLC Opener for Open in VLC. Server install does not register it on this device. If clicking Open in VLC does nothing or fails silently, open Install to download or update the helper, test the protocol handler, and check whether VLC was detected here.
-              </p>
-              <div className="player-actions">
-                <Link className="ghost-button" to="/install">
-                  Open Helper Setup
-                </Link>
-              </div>
-            </div>
-          ) : null}
-          {desktopPlayback?.used_backend_fallback && (desktopPlatform === "mac" || desktopPlatform === "windows") ? (
-            <div className="native-handoff">
-              <p className="native-handoff__label">
-                {desktopPlatform === "mac" ? "Mac direct path mapping" : "Windows direct path mapping"} is not configured, so Open in VLC is using a backend stream fallback. The helper now verifies that exact URL from this desktop before launching VLC; a helper launch alone does not prove VLC playback opened.
-              </p>
             </div>
           ) : null}
           {desktopPlayback && !desktopPlayback.open_supported && !desktopPlayback.handoff_supported ? (

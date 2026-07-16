@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { PosterContextMenuProvider } from "./PosterContextMenu";
 import { apiRequest } from "../lib/api";
 import { resolveBrowserPlaybackSessionRoot } from "../lib/browserPlayback";
 import {
@@ -15,6 +16,7 @@ import {
   resetUserBackgroundTheme,
 } from "../lib/userBackground";
 import { detectClientDeviceClass } from "../lib/platformDetection";
+import { detectClientPlatform, isDesktopClientPlatform } from "../lib/platformDetection";
 import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
@@ -30,7 +32,6 @@ export function ShellLayout({ children }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const [floatingControlsPosition, setFloatingControlsPosition] = useState("bottom");
   const [posterCardAppearance, setPosterCardAppearance] = useState("classic");
   const [backgroundSettings, setBackgroundSettings] = useState(DEFAULT_BACKGROUND_SETTINGS);
   const [accountExpanded, setAccountExpanded] = useState(false);
@@ -66,6 +67,8 @@ export function ShellLayout({ children }) {
   const isLibrarySourcePage = location.pathname === "/library/local" || location.pathname === "/library/cloud";
   const hideFloatingIsland = location.pathname === "/setup/totp";
   const clientDeviceClass = detectClientDeviceClass();
+  const desktopPosterContextMenuEnabled = isDesktopClientPlatform(detectClientPlatform());
+  const mobileSelectionGuardEnabled = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const floatingNavDragEnabled = clientDeviceClass !== "phone" && clientDeviceClass !== "tablet";
   const floatingActiveIndex = Math.max(0, navigation.findIndex((item) => (
     item.to === "/library"
@@ -337,13 +340,11 @@ export function ShellLayout({ children }) {
       try {
         const payload = await apiRequest("/api/user-settings");
         if (active) {
-          setFloatingControlsPosition(payload.floating_controls_position === "top" ? "top" : "bottom");
           setPosterCardAppearance(normalizePosterCardAppearance(payload.poster_card_appearance));
           setBackgroundSettings(normalizeUserBackgroundSettings(payload));
         }
       } catch {
         if (active) {
-          setFloatingControlsPosition("bottom");
           setPosterCardAppearance("classic");
           setBackgroundSettings(DEFAULT_BACKGROUND_SETTINGS);
         }
@@ -351,11 +352,7 @@ export function ShellLayout({ children }) {
     }
 
     function handleSettingsChanged(event) {
-      const nextFloatingControlsPosition = event?.detail?.floating_controls_position;
       const nextPosterCardAppearance = event?.detail?.poster_card_appearance;
-      if (nextFloatingControlsPosition !== undefined) {
-        setFloatingControlsPosition(nextFloatingControlsPosition === "top" ? "top" : "bottom");
-      }
       if (nextPosterCardAppearance !== undefined) {
         setPosterCardAppearance(normalizePosterCardAppearance(nextPosterCardAppearance));
       }
@@ -416,7 +413,7 @@ export function ShellLayout({ children }) {
       window.removeEventListener("resize", updateFloatingNavIndicator);
       navNode?.removeEventListener("scroll", updateFloatingNavIndicator);
     };
-  }, [floatingActiveIndex, floatingControlsPosition, navigation.length]);
+  }, [floatingActiveIndex, navigation.length]);
 
   useEffect(() => () => {
     if (typeof window !== "undefined" && collapseTimerRef.current) {
@@ -448,19 +445,21 @@ export function ShellLayout({ children }) {
   }, [logoutWorkerModal, logoutWorkerPending]);
 
   return (
-    <div
-      className={[
-        "app-shell",
-        `app-shell--floating-island-${floatingControlsPosition}`,
-        `app-shell--poster-card-${posterCardAppearance}`,
-        `app-shell--background-${backgroundSettings.background_mode}`,
-        backgroundSettings.background_mode === "preset"
-          ? `app-shell--background-preset-${backgroundSettings.background_preset}`
-          : "",
-        isLibraryRootPage ? "app-shell--library-root" : "",
-        isLibrarySourcePage ? "app-shell--library-source" : "",
-      ].filter(Boolean).join(" ")}
-    >
+    <PosterContextMenuProvider enabled={desktopPosterContextMenuEnabled}>
+      <div
+        className={[
+          "app-shell",
+          "app-shell--floating-island-bottom",
+          `app-shell--poster-card-${posterCardAppearance}`,
+          `app-shell--background-${backgroundSettings.background_mode}`,
+          backgroundSettings.background_mode === "preset"
+            ? `app-shell--background-preset-${backgroundSettings.background_preset}`
+            : "",
+          isLibraryRootPage ? "app-shell--library-root" : "",
+          isLibrarySourcePage ? "app-shell--library-source" : "",
+          mobileSelectionGuardEnabled ? "app-shell--selection-guard" : "",
+        ].filter(Boolean).join(" ")}
+      >
       {showLibraryHeader ? (
         <header className="topbar">
           <div>
@@ -540,7 +539,7 @@ export function ShellLayout({ children }) {
 
       {!hideFloatingIsland ? (
         <div
-          className={`floating-island floating-island--${floatingControlsPosition}`}
+          className="floating-island floating-island--bottom"
           aria-label="Primary navigation and account controls"
         >
           <nav className="floating-island__nav" aria-label="Primary" ref={floatingNavRef}>
@@ -603,7 +602,8 @@ export function ShellLayout({ children }) {
         </div>
       ) : null}
 
-      <main className="page-shell">{children}</main>
-    </div>
+        <main className="page-shell">{children}</main>
+      </div>
+    </PosterContextMenuProvider>
   );
 }

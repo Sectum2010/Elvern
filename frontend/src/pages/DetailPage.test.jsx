@@ -1,8 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { apiRequest } from "../lib/api";
+import {
+  readLibraryReturnTarget,
+  rememberLibraryReturnTarget,
+} from "../lib/libraryNavigation";
 import { DetailPage, iosExternalAppNavigator } from "./DetailPage";
 
 
@@ -15,6 +19,11 @@ const mockAuthState = vi.hoisted(() => ({
 }));
 const mockBrowserState = vi.hoisted(() => ({
   iosMobile: false,
+}));
+const mockPlatformState = vi.hoisted(() => ({
+  clientPlatform: "unknown",
+  desktopPlatform: null,
+  deviceClass: "desktop",
 }));
 const mockBrowserPlayerViewState = vi.hoisted(() => ({
   value: {
@@ -66,9 +75,9 @@ vi.mock("../lib/device", () => ({
 }));
 
 vi.mock("../lib/platformDetection", () => ({
-  detectClientDeviceClass: vi.fn(() => "desktop"),
-  detectClientPlatform: vi.fn(() => "desktop"),
-  detectDesktopPlatform: vi.fn(() => ""),
+  detectClientDeviceClass: vi.fn(() => mockPlatformState.deviceClass),
+  detectClientPlatform: vi.fn(() => mockPlatformState.clientPlatform),
+  detectDesktopPlatform: vi.fn(() => mockPlatformState.desktopPlatform),
 }));
 
 vi.mock("../lib/playbackRouting", () => ({
@@ -227,6 +236,9 @@ function mockApiForDetail(item, options = {}) {
     if (requestPath === "/api/playback/42") {
       return Promise.resolve({ status: "ready", reason: "", mode: "direct" });
     }
+    if (requestPath.startsWith("/api/desktop-playback/42?") && options.desktopPlayback) {
+      return Promise.resolve(options.desktopPlayback);
+    }
     if (requestPath === "/api/user-settings") {
       return Promise.resolve(userSettings);
     }
@@ -245,14 +257,28 @@ function mockApiForDetail(item, options = {}) {
 
 
 function renderDetailPage(item, options = {}) {
-  mockApiForDetail(item, options);
+  const {
+    initialEntry = "/library/item/42",
+    ...apiOptions
+  } = options;
+  mockApiForDetail(item, apiOptions);
   render(
-    <MemoryRouter initialEntries={["/library/item/42"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/library/item/:itemId" element={<DetailPage />} />
         <Route path="/library" element={<p>Library route</p>} />
       </Routes>
     </MemoryRouter>,
+  );
+}
+
+
+function DetailItemSwitcher() {
+  const navigate = useNavigate();
+  return (
+    <button onClick={() => navigate("/library/item/43")} type="button">
+      Open another item
+    </button>
   );
 }
 
@@ -265,12 +291,19 @@ async function openInfoModal() {
 
 
 describe("DetailPage source metadata privacy", () => {
+  beforeEach(() => {
+    window.scrollTo = vi.fn();
+  });
+
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
     window.sessionStorage.clear();
     window.history.replaceState({}, "", "/");
     mockBrowserState.iosMobile = false;
+    mockPlatformState.clientPlatform = "unknown";
+    mockPlatformState.desktopPlatform = null;
+    mockPlatformState.deviceClass = "desktop";
     mockBrowserPlayerViewState.value = {
       browserPlaybackPreparing: false,
       playerClassName: "player",
@@ -299,6 +332,96 @@ describe("DetailPage source metadata privacy", () => {
     expect(screen.getByRole("button", { name: "Lite Playback" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Full Playback" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download movie" })).toBeInTheDocument();
+  });
+
+  test("resets detail scroll once per item before async detail content renders", async () => {
+    window.scrollTo = vi.fn();
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 640 });
+    mockApiForDetail(detailItem());
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <DetailItemSwitcher />
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(window.scrollTo).toHaveBeenCalledTimes(1);
+    expect(window.scrollTo).toHaveBeenLastCalledWith({
+      top: 0,
+      left: 0,
+      behavior: "auto",
+    });
+
+    await screen.findByText("Privacy Movie");
+    expect(window.scrollTo).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open another item" }));
+    expect(window.scrollTo).toHaveBeenCalledTimes(2);
+  });
+
+  test("keeps the detail heading before the player card", async () => {
+    renderDetailPage(detailItem());
+
+    const heading = await screen.findByRole("heading", { level: 1, name: "Privacy Movie" });
+    const playerCard = document.querySelector(".player-card");
+
+    expect(playerCard).not.toBeNull();
+    expect(Boolean(heading.compareDocumentPosition(playerCard) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+  });
+
+  test("preserves the complete library relocation target when preparing the return", async () => {
+    const target = rememberLibraryReturnTarget({
+      listPath: "/library?category=anime&q=akira",
+      anchorItemId: 42,
+      anchorInstanceKey: "series:akira:42",
+      scrollY: 912,
+      pendingRestore: false,
+      anchorViewportRatioY: 0.27,
+      anchorViewportRatioX: 0.18,
+      viewportWidth: 1440,
+      viewportHeight: 900,
+      railKey: "series:akira",
+      railScrollLeft: 288,
+    });
+    renderDetailPage(detailItem(), {
+      initialEntry: {
+        pathname: "/library/item/42",
+        state: { libraryReturn: target },
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("link", { name: "Back to library" }));
+
+    expect(readLibraryReturnTarget()).toEqual({
+      ...target,
+      pendingRestore: true,
+    });
+  });
+
+  test("removes redundant desktop helper guidance while keeping notes and the real fallback", async () => {
+    mockPlatformState.clientPlatform = "windows";
+    mockPlatformState.desktopPlatform = "windows";
+    renderDetailPage(detailItem(), {
+      desktopPlayback: {
+        platform: "windows",
+        open_method: "protocol_helper",
+        same_host_launch: false,
+        open_supported: false,
+        handoff_supported: false,
+        used_backend_fallback: true,
+        notes: ["Desktop helper handoff is ready for this device."],
+        playlist_url: "/api/desktop-playback/42/playlist",
+        vlc_target: "safe-test-target",
+      },
+    });
+
+    expect(await screen.findByText("Desktop helper handoff is ready for this device.")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open Helper Setup" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/direct path mapping is not configured/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download VLC Playlist" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy VLC Target" })).toBeInTheDocument();
   });
 
   test("standard users see private reference and safe effective labels without shared default path", async () => {

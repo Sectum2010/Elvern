@@ -6438,10 +6438,6 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
     padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px));
   }
 
-  .app-shell--floating-island-top {
-    padding-top: calc(7rem + env(safe-area-inset-top, 0px));
-  }
-
   .toolbar {
     flex-direction: row;
     align-items: center;
@@ -6989,9 +6985,6 @@ html[data-device-shell="iphone"] .admin-recovery-card {
     padding-bottom: calc(6.2rem + env(safe-area-inset-bottom, 0px));
   }
 
-  .app-shell--floating-island-top {
-    padding-top: calc(5.9rem + env(safe-area-inset-top, 0px));
-  }
 }
 
 .page-section--library[data-floating-search-align="hero-right"] .floating-library-search {
@@ -7002,8 +6995,56 @@ html[data-device-shell="iphone"] .admin-recovery-card {
   bottom: calc(0.9rem + env(safe-area-inset-bottom, 0px));
 }
 
-.floating-island--top {
-  top: calc(0.8rem + env(safe-area-inset-top, 0px));
+.app-shell--selection-guard {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.app-shell--selection-guard :is(input, textarea, select, option, [contenteditable="true"], [data-allow-text-selection="true"]) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.app-shell--selection-guard img:not([data-allow-image-drag="true"]) {
+  -webkit-user-drag: none;
+}
+
+.poster-context-menu {
+  position: fixed;
+  z-index: 80;
+  display: grid;
+  inline-size: 11rem;
+  padding: 0.35rem;
+  border: 1px solid rgba(152, 176, 201, 0.24);
+  border-radius: 0.5rem;
+  background: rgba(10, 15, 24, 0.98);
+  box-shadow: 0 0.8rem 2rem rgba(0, 0, 0, 0.38);
+}
+
+.poster-context-menu__action {
+  display: grid;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+  min-block-size: 2.5rem;
+  padding: 0.45rem 0.65rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #eef3f8;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.poster-context-menu__action:hover,
+.poster-context-menu__action:focus-visible {
+  background: rgba(143, 182, 218, 0.12);
+  outline: none;
+}
+
+.poster-context-menu__pencil {
+  transform: rotate(-45deg);
 }
 
 html[data-device-shell="iphone"] .floating-island--bottom {

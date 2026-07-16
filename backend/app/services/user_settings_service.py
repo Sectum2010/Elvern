@@ -12,7 +12,6 @@ from ..db import get_connection, utcnow_iso
 
 HIDE_DUPLICATE_MOVIES_KEY = "hide_duplicate_movies"
 HIDE_RECENTLY_ADDED_KEY = "hide_recently_added"
-FLOATING_CONTROLS_POSITION_KEY = "floating_controls_position"
 FLOATING_LIBRARY_SEARCH_ENABLED_KEY = "floating_library_search_enabled"
 POSTER_CARD_APPEARANCE_KEY = "poster_card_appearance"
 POSTER_CARD_DISPLAY_MAX_WIDTH_KEY = "poster_card_display_max_width"
@@ -23,7 +22,6 @@ BACKGROUND_GRADIENT_START_KEY = "background_gradient_start"
 BACKGROUND_GRADIENT_END_KEY = "background_gradient_end"
 BACKGROUND_GRADIENT_ACCENT_KEY = "background_gradient_accent"
 BACKGROUND_SOLID_COLOR_KEY = "background_solid_color"
-FLOATING_CONTROLS_POSITIONS = {"bottom", "top"}
 POSTER_CARD_APPEARANCES = {"classic", "modern", "clean"}
 POSTER_CARD_DISPLAY_MAX_WIDTHS = {
     "800",
@@ -84,7 +82,6 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
     values = {
         HIDE_DUPLICATE_MOVIES_KEY: True,
         HIDE_RECENTLY_ADDED_KEY: False,
-        FLOATING_CONTROLS_POSITION_KEY: "bottom",
         FLOATING_LIBRARY_SEARCH_ENABLED_KEY: True,
         POSTER_CARD_APPEARANCE_KEY: "classic",
         POSTER_CARD_DISPLAY_MAX_WIDTH_KEY: "1400",
@@ -120,8 +117,6 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
             values[HIDE_DUPLICATE_MOVIES_KEY] = row["value"] == "1"
         if row["key"] == HIDE_RECENTLY_ADDED_KEY:
             values[HIDE_RECENTLY_ADDED_KEY] = row["value"] == "1"
-        if row["key"] == FLOATING_CONTROLS_POSITION_KEY and row["value"] in FLOATING_CONTROLS_POSITIONS:
-            values[FLOATING_CONTROLS_POSITION_KEY] = row["value"]
         if row["key"] == FLOATING_LIBRARY_SEARCH_ENABLED_KEY:
             values[FLOATING_LIBRARY_SEARCH_ENABLED_KEY] = row["value"] == "1"
         if row["key"] == POSTER_CARD_APPEARANCE_KEY and row["value"] in POSTER_CARD_APPEARANCES:
@@ -171,7 +166,6 @@ def update_user_settings(
     user_id: int,
     hide_duplicate_movies: bool | None = None,
     hide_recently_added: bool | None = None,
-    floating_controls_position: str | None = None,
     floating_library_search_enabled: bool | None = None,
     poster_card_appearance: str | None = None,
     poster_card_display_max_width: str | int | None = None,
@@ -186,7 +180,6 @@ def update_user_settings(
     if (
         hide_duplicate_movies is None
         and hide_recently_added is None
-        and floating_controls_position is None
         and floating_library_search_enabled is None
         and poster_card_appearance is None
         and poster_card_display_max_width is None
@@ -207,11 +200,6 @@ def update_user_settings(
         updates.append((HIDE_DUPLICATE_MOVIES_KEY, "1" if hide_duplicate_movies else "0"))
     if hide_recently_added is not None:
         updates.append((HIDE_RECENTLY_ADDED_KEY, "1" if hide_recently_added else "0"))
-    if floating_controls_position is not None:
-        normalized_position = floating_controls_position.strip().lower()
-        if normalized_position not in FLOATING_CONTROLS_POSITIONS:
-            normalized_position = "bottom"
-        updates.append((FLOATING_CONTROLS_POSITION_KEY, normalized_position))
     if floating_library_search_enabled is not None:
         updates.append((FLOATING_LIBRARY_SEARCH_ENABLED_KEY, "1" if floating_library_search_enabled else "0"))
     if poster_card_appearance is not None:

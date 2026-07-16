@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
+  AUTH_REVALIDATION_REQUESTED_EVENT,
   apiRequest,
   isMaintenanceModeError,
   MAINTENANCE_MODE_BLOCKED_EVENT,
@@ -16,10 +17,17 @@ function getProtectedCacheIdentity(user) {
   if (!user) {
     return "";
   }
+  const rawRole = String(user.role || "").trim().toLowerCase();
+  const role = rawRole === "user" || rawRole === "standard" || rawRole === "standard-user"
+    ? "standard_user"
+    : rawRole === "administrator"
+      ? "admin"
+      : rawRole;
   return JSON.stringify({
-    id: user.id ?? null,
-    role: user.role ?? "",
+    id: String(user.id ?? ""),
+    role,
     assistantBetaEnabled: Boolean(user.assistant_beta_enabled),
+    ageCredential: Number(user.age_credential ?? 18),
   });
 }
 
@@ -49,9 +57,9 @@ export function AuthProvider({ children }) {
     userRef.current = user;
   }, [user]);
 
-  async function refreshAuth({ notifyOnFailure = false } = {}) {
+  const refreshAuth = useCallback(async ({ notifyOnFailure = false } = {}) => {
     if (refreshInFlightRef.current) {
-      return user;
+      return userRef.current;
     }
     refreshInFlightRef.current = true;
     try {
@@ -86,9 +94,9 @@ export function AuthProvider({ children }) {
       refreshInFlightRef.current = false;
       setLoading(false);
     }
-  }
+  }, [applyAuthenticatedUser, endSessionWithNotice]);
 
-  async function heartbeatAuth({ notifyOnFailure = false } = {}) {
+  const heartbeatAuth = useCallback(async ({ notifyOnFailure = false } = {}) => {
     try {
       await apiRequest("/api/auth/heartbeat", {
         method: "POST",
@@ -119,7 +127,7 @@ export function AuthProvider({ children }) {
       }
       return Boolean(userRef.current);
     }
-  }
+  }, [applyAuthenticatedUser, endSessionWithNotice]);
 
   async function login(credentials) {
     setAuthNotice("");
@@ -161,8 +169,19 @@ export function AuthProvider({ children }) {
   }
 
   useEffect(() => {
-    refreshAuth();
-  }, []);
+    void refreshAuth();
+  }, [refreshAuth]);
+
+  useEffect(() => {
+    function handleAuthRevalidationRequested() {
+      void refreshAuth({ notifyOnFailure: true });
+    }
+
+    window.addEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleAuthRevalidationRequested);
+    return () => {
+      window.removeEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleAuthRevalidationRequested);
+    };
+  }, [refreshAuth]);
 
   useEffect(() => {
     function handleMaintenanceModeBlocked(event) {
@@ -184,17 +203,17 @@ export function AuthProvider({ children }) {
     }
 
     const intervalId = window.setInterval(() => {
-      heartbeatAuth({ notifyOnFailure: true });
+      void heartbeatAuth({ notifyOnFailure: true });
     }, SESSION_HEARTBEAT_MS);
 
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
-        refreshAuth({ notifyOnFailure: true });
+        void refreshAuth({ notifyOnFailure: true });
       }
     }
 
     function handleWindowFocus() {
-      refreshAuth({ notifyOnFailure: true });
+      void refreshAuth({ notifyOnFailure: true });
     }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -205,7 +224,7 @@ export function AuthProvider({ children }) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [user]);
+  }, [heartbeatAuth, refreshAuth, user]);
 
   return (
     <AuthContext.Provider

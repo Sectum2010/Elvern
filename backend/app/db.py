@@ -19,6 +19,7 @@ from .services.at_rest_encryption import CIPHERTEXT_PREFIX, encrypt_at_rest
 logger = logging.getLogger(__name__)
 BROWSER_SESSION_HMAC_MIGRATION_NAME = "browser_session_hmac1_v1"
 ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME = "account_short_token_hmac1_v1"
+FLOATING_POSITION_RETIREMENT_MIGRATION = "floating_controls_position_retired_v1"
 TOKEN_HASH_MIGRATION_REVOKE_REASON = "token_hash_migration"
 TOKEN_HASH_PREFIX = "hmac1$"
 TOTP_PENDING_SECRET_TTL_SECONDS = 10 * 60
@@ -958,10 +959,37 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "password_help_requests", "requester_user_agent", "TEXT")
     _ensure_column(connection, "invite_codes", "assigned_age", "INTEGER NOT NULL DEFAULT 18")
     _run_account_short_token_hmac_migration(connection)
+    _run_floating_position_retirement_migration(connection)
 
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)
     _backfill_hidden_movie_keys(connection)
+
+
+def _run_floating_position_retirement_migration(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        """
+        SELECT name
+        FROM schema_migrations
+        WHERE name = ?
+        LIMIT 1
+        """,
+        (FLOATING_POSITION_RETIREMENT_MIGRATION,),
+    ).fetchone()
+    if row is not None:
+        return
+    cursor = connection.execute(
+        "DELETE FROM user_settings WHERE key = 'floating_controls_position'"
+    )
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (name, applied_at)
+        VALUES (?, ?)
+        """,
+        (FLOATING_POSITION_RETIREMENT_MIGRATION, utcnow_iso()),
+    )
+    if cursor.rowcount:
+        logger.info("Removed %s retired floating position setting(s)", cursor.rowcount)
 
 
 def _harden_totp_at_rest_values(connection: sqlite3.Connection, *, settings: Settings) -> None:

@@ -37,7 +37,6 @@ const stylesPath = path.resolve(pagesDir, "../styles.css");
 const defaultSettings = {
   hide_duplicate_movies: true,
   hide_recently_added: false,
-  floating_controls_position: "bottom",
   floating_library_search_enabled: true,
   poster_card_appearance: "classic",
   poster_card_display_max_width: "1400",
@@ -334,6 +333,14 @@ describe("SettingsPage Display background controls", () => {
 
     expect(screen.getByText("Dynamic search button")).toBeInTheDocument();
     expect(screen.queryByText("Floating library search")).not.toBeInTheDocument();
+  });
+
+  test("interface settings no longer expose a floating island position control", async () => {
+    await renderDisplaySettings();
+
+    expect(screen.queryByText("Floating island position")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Top" })).not.toBeInTheDocument();
+    expect(screen.getByText("Dynamic search button")).toBeInTheDocument();
   });
 
   test("admin Libraries panel shows and manages age groups", async () => {

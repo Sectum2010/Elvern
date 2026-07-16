@@ -10,6 +10,24 @@ function joinMessages(values) {
 
 export const MAINTENANCE_MODE_MESSAGE = "The server is currently under construction, please try again later";
 export const MAINTENANCE_MODE_BLOCKED_EVENT = "elvern:maintenance-mode-blocked";
+export const AUTH_REVALIDATION_REQUESTED_EVENT = "elvern:auth-revalidation-requested";
+
+function isAuthRequestPath(path) {
+  const pathname = String(path || "").split("?", 1)[0];
+  return pathname.startsWith("/api/auth/");
+}
+
+function dispatchAuthRevalidationRequested(path, status) {
+  if (
+    status !== 403
+    || isAuthRequestPath(path)
+    || typeof window === "undefined"
+    || typeof window.dispatchEvent !== "function"
+  ) {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(AUTH_REVALIDATION_REQUESTED_EVENT));
+}
 
 function extractDetailMessage(detail) {
   if (typeof detail === "string") {
@@ -148,9 +166,10 @@ export async function apiRequest(path, options = {}) {
     error.status = response.status;
     error.payload = payload;
     error.detail = detail;
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401) {
       clearProtectedQueryCache();
     }
+    dispatchAuthRevalidationRequested(path, response.status);
     dispatchMaintenanceModeBlocked(error);
     throw error;
   }
