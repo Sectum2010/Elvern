@@ -1,3 +1,6 @@
+import { clearProtectedQueryCache } from "./queryClient";
+
+
 function joinMessages(values) {
   const messages = values
     .map((value) => (typeof value === "string" ? value.trim() : ""))
@@ -145,6 +148,9 @@ export async function apiRequest(path, options = {}) {
     error.status = response.status;
     error.payload = payload;
     error.detail = detail;
+    if (response.status === 401 || response.status === 403) {
+      clearProtectedQueryCache();
+    }
     dispatchMaintenanceModeBlocked(error);
     throw error;
   }

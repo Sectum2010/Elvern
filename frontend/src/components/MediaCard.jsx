@@ -108,31 +108,29 @@ export function MediaCard({
     () => `poster-${item.id}-${posterInstanceId}`,
     [item.id, posterInstanceId],
   );
-  const mobileCardPosterVariantEnabled = (
+  const smartPosterSchedulerEnabled = (
     smartPosterLoadingEnabled
     && Boolean(item.poster_url)
     && isSmartPosterLoadingSupported()
   );
   const resolvedPosterUrl = useMemo(
-    () => (mobileCardPosterVariantEnabled ? getCardPosterUrl(item.poster_url) : item.poster_url),
-    [item.poster_url, mobileCardPosterVariantEnabled],
+    () => getCardPosterUrl(item.poster_url),
+    [item.poster_url],
   );
-  const smartPosterSchedulerEnabled = (
-    mobileCardPosterVariantEnabled
+  const smartPosterSchedulerActive = smartPosterSchedulerEnabled
     && Boolean(resolvedPosterUrl)
-    && !posterFailed
-  );
+    && !posterFailed;
   const [smartPosterSnapshot, setSmartPosterSnapshot] = useState(() => (
-    smartPosterSchedulerEnabled
+    smartPosterSchedulerActive
       ? getSmartPosterCardSnapshot(smartPosterCardId)
       : null
   ));
-  const smartPosterMode = smartPosterSchedulerEnabled
+  const smartPosterMode = smartPosterSchedulerActive
     ? (smartPosterSnapshot?.mode || "defer")
     : POSTER_MODE_ATTACH;
   const showPoster = Boolean(resolvedPosterUrl)
     && !posterFailed
-    && (!smartPosterSchedulerEnabled || smartPosterMode === POSTER_MODE_ATTACH);
+    && (!smartPosterSchedulerActive || smartPosterMode === POSTER_MODE_ATTACH);
   const qualityRank = getQualityRank(item);
   const tooltipId = `quality-rank-tooltip-${item.id}`;
   const storageKind = (item.source_kind || "local") === "cloud" ? "cloud" : "local";
@@ -170,7 +168,7 @@ export function MediaCard({
   }
 
   useEffect(() => {
-    if (!smartPosterSchedulerEnabled) {
+    if (!smartPosterSchedulerActive) {
       setSmartPosterSnapshot(null);
       return undefined;
     }
@@ -178,10 +176,10 @@ export function MediaCard({
     return subscribeSmartPosterCard(smartPosterCardId, () => {
       setSmartPosterSnapshot(getSmartPosterCardSnapshot(smartPosterCardId));
     });
-  }, [smartPosterCardId, smartPosterSchedulerEnabled]);
+  }, [smartPosterCardId, smartPosterSchedulerActive]);
 
   useEffect(() => {
-    if (!smartPosterSchedulerEnabled || !posterRef.current) {
+    if (!smartPosterSchedulerActive || !posterRef.current) {
       return undefined;
     }
     registerSmartPosterCard({
@@ -192,7 +190,7 @@ export function MediaCard({
     return () => {
       unregisterSmartPosterCard(smartPosterCardId);
     };
-  }, [resolvedPosterUrl, smartPosterCardId, smartPosterSchedulerEnabled]);
+  }, [resolvedPosterUrl, smartPosterCardId, smartPosterSchedulerActive]);
 
   return (
     <article
@@ -213,15 +211,15 @@ export function MediaCard({
               alt=""
               className="media-card__poster-image"
               decoding="async"
-              loading={smartPosterSchedulerEnabled ? "eager" : "lazy"}
+              loading={smartPosterSchedulerActive ? "eager" : "lazy"}
               onError={() => {
-                if (smartPosterSchedulerEnabled) {
+                if (smartPosterSchedulerActive) {
                   markSmartPosterCardError(smartPosterCardId);
                 }
                 setPosterFailed(true);
               }}
               onLoad={() => {
-                if (smartPosterSchedulerEnabled) {
+                if (smartPosterSchedulerActive) {
                   markSmartPosterCardLoaded(smartPosterCardId);
                 }
               }}
@@ -231,7 +229,7 @@ export function MediaCard({
             <div
               className={[
                 "media-card__poster-fallback",
-                smartPosterSchedulerEnabled && !posterFailed
+                smartPosterSchedulerActive && !posterFailed
                   ? "media-card__poster-fallback--deferred"
                   : "",
               ].filter(Boolean).join(" ")}

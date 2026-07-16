@@ -1,3 +1,4 @@
+import { QueryClientProvider } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { ProviderAuthProvider } from "./auth/ProviderAuthContext";
@@ -18,6 +19,7 @@ import { AssistantPage } from "./pages/AssistantPage";
 import { AssistantAttachmentViewerPage } from "./pages/AssistantAttachmentViewerPage";
 import { InstallPage } from "./pages/DesktopPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { queryClient } from "./lib/queryClient";
 
 
 function ProtectedShell() {
@@ -33,61 +35,63 @@ function ProtectedShell() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <ProviderAuthProvider>
-        <div aria-hidden="true" className="app-viewport-backdrop" />
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/login/totp" element={<TotpChallengePage />} />
-          <Route path="/new-user" element={<NewUserPage />} />
-          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-          <Route element={<ProtectedShell />}>
-            <Route path="/setup/totp" element={<TotpSetupPage />} />
-            <Route path="/" element={<Navigate to="/library" replace />} />
-            <Route path="/library" element={<LibraryPage />} />
-            <Route path="/library/local" element={<LibrarySourcePage sourceKind="local" />} />
-            <Route path="/library/cloud" element={<LibrarySourcePage sourceKind="cloud" />} />
-            <Route path="/library/:itemId" element={<DetailPage />} />
-            <Route
-              path="/assistant"
-              element={(
-                <ProtectedRoute requireAssistant>
-                  <AssistantPage />
-                </ProtectedRoute>
-              )}
-            />
-            <Route path="/attachments/:attachmentId/view" element={<AssistantAttachmentViewerPage />} />
-            <Route path="/install" element={<InstallPage />} />
-            <Route path="/desktop" element={<Navigate to="/install" replace />} />
-            <Route
-              path="/admin"
-              element={(
-                <ProtectedRoute requireAdmin>
-                  <AdminPage />
-                </ProtectedRoute>
-              )}
-            />
-            <Route
-              path="/admin/assistant"
-              element={(
-                <ProtectedRoute requireAdmin>
-                  <AdminAssistantRequestsPage />
-                </ProtectedRoute>
-              )}
-            />
-            <Route
-              path="/admin/assistant/:requestId"
-              element={(
-                <ProtectedRoute requireAdmin>
-                  <AdminAssistantRequestDetailPage />
-                </ProtectedRoute>
-              )}
-            />
-            <Route path="/settings" element={<SettingsPage />} />
-          </Route>
-          <Route path="*" element={<Navigate to="/library" replace />} />
-        </Routes>
-      </ProviderAuthProvider>
-    </AuthProvider>
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <ProviderAuthProvider>
+          <div aria-hidden="true" className="app-viewport-backdrop" />
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/login/totp" element={<TotpChallengePage />} />
+            <Route path="/new-user" element={<NewUserPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route element={<ProtectedShell />}>
+              <Route path="/setup/totp" element={<TotpSetupPage />} />
+              <Route path="/" element={<Navigate to="/library" replace />} />
+              <Route path="/library" element={<LibraryPage />} />
+              <Route path="/library/local" element={<LibrarySourcePage sourceKind="local" />} />
+              <Route path="/library/cloud" element={<LibrarySourcePage sourceKind="cloud" />} />
+              <Route path="/library/:itemId" element={<DetailPage />} />
+              <Route
+                path="/assistant"
+                element={(
+                  <ProtectedRoute requireAssistant>
+                    <AssistantPage />
+                  </ProtectedRoute>
+                )}
+              />
+              <Route path="/attachments/:attachmentId/view" element={<AssistantAttachmentViewerPage />} />
+              <Route path="/install" element={<InstallPage />} />
+              <Route path="/desktop" element={<Navigate to="/install" replace />} />
+              <Route
+                path="/admin"
+                element={(
+                  <ProtectedRoute requireAdmin>
+                    <AdminPage />
+                  </ProtectedRoute>
+                )}
+              />
+              <Route
+                path="/admin/assistant"
+                element={(
+                  <ProtectedRoute requireAdmin>
+                    <AdminAssistantRequestsPage />
+                  </ProtectedRoute>
+                )}
+              />
+              <Route
+                path="/admin/assistant/:requestId"
+                element={(
+                  <ProtectedRoute requireAdmin>
+                    <AdminAssistantRequestDetailPage />
+                  </ProtectedRoute>
+                )}
+              />
+              <Route path="/settings" element={<SettingsPage />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/library" replace />} />
+          </Routes>
+        </ProviderAuthProvider>
+      </AuthProvider>
+    </QueryClientProvider>
   );
 }

@@ -5,10 +5,23 @@ import {
   MAINTENANCE_MODE_BLOCKED_EVENT,
   MAINTENANCE_MODE_MESSAGE,
 } from "../lib/api";
+import { clearProtectedQueryCache } from "../lib/queryClient";
 
 
 const AuthContext = createContext(null);
 const SESSION_HEARTBEAT_MS = 15000;
+
+
+function getProtectedCacheIdentity(user) {
+  if (!user) {
+    return "";
+  }
+  return JSON.stringify({
+    id: user.id ?? null,
+    role: user.role ?? "",
+    assistantBetaEnabled: Boolean(user.assistant_beta_enabled),
+  });
+}
 
 
 export function AuthProvider({ children }) {
@@ -18,12 +31,19 @@ export function AuthProvider({ children }) {
   const refreshInFlightRef = useRef(false);
   const userRef = useRef(null);
 
+  const applyAuthenticatedUser = useCallback((nextUser) => {
+    if (getProtectedCacheIdentity(userRef.current) !== getProtectedCacheIdentity(nextUser)) {
+      clearProtectedQueryCache();
+    }
+    userRef.current = nextUser;
+    setUser(nextUser);
+  }, []);
+
   const endSessionWithNotice = useCallback((message) => {
     setAuthNotice(message);
-    setUser(null);
-    userRef.current = null;
+    applyAuthenticatedUser(null);
     setLoading(false);
-  }, []);
+  }, [applyAuthenticatedUser]);
 
   useEffect(() => {
     userRef.current = user;
@@ -36,8 +56,7 @@ export function AuthProvider({ children }) {
     refreshInFlightRef.current = true;
     try {
       const payload = await apiRequest("/api/auth/me");
-      setUser(payload.user);
-      userRef.current = payload.user;
+      applyAuthenticatedUser(payload.user);
       if (notifyOnFailure) {
         setAuthNotice("");
       }
@@ -59,8 +78,7 @@ export function AuthProvider({ children }) {
         console.error("Failed to load session", error);
       }
       if (authFailure) {
-        setUser(null);
-        userRef.current = null;
+        applyAuthenticatedUser(null);
         return null;
       }
       return userRef.current;
@@ -96,8 +114,7 @@ export function AuthProvider({ children }) {
         console.error("Failed to send session heartbeat", error);
       }
       if (authFailure) {
-        setUser(null);
-        userRef.current = null;
+        applyAuthenticatedUser(null);
         return false;
       }
       return Boolean(userRef.current);
@@ -122,8 +139,7 @@ export function AuthProvider({ children }) {
       return payload;
     }
     if (payload?.user) {
-      setUser(payload.user);
-      userRef.current = payload.user;
+      applyAuthenticatedUser(payload.user);
       setLoading(false);
       return payload;
     }
@@ -131,12 +147,12 @@ export function AuthProvider({ children }) {
   }
 
   async function logout() {
+    clearProtectedQueryCache();
     try {
       await apiRequest("/api/auth/logout", { method: "POST" });
     } finally {
       setAuthNotice("");
-      setUser(null);
-      userRef.current = null;
+      applyAuthenticatedUser(null);
     }
   }
 

@@ -7,6 +7,7 @@ import {
   formatGoogleDriveSetupLabel,
 } from "../lib/cloudSyncStatus";
 import { startGoogleDriveReconnect } from "../lib/providerAuth";
+import { invalidateLibraryQueries } from "../lib/libraryQueries";
 import {
   BACKGROUND_PRESETS,
   DEFAULT_BACKGROUND_SETTINGS,
@@ -1371,6 +1372,7 @@ export function SettingsPage() {
     if (statusValue === "connected") {
       setMessage(statusMessage || "Google Drive connected.");
       setError("");
+      void invalidateLibraryQueries();
       apiRequest("/api/cloud-libraries")
         .then((payload) => {
           setCloudLibraries(payload);
@@ -1411,6 +1413,8 @@ export function SettingsPage() {
         data: { hide_duplicate_movies: nextValue },
       });
       setSettings(payload);
+      window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+      void invalidateLibraryQueries();
       setMessage(
         nextValue
           ? "Duplicate copies are now hidden by default."
@@ -1434,6 +1438,8 @@ export function SettingsPage() {
         data: { hide_recently_added: nextValue },
       });
       setSettings(payload);
+      window.dispatchEvent(new CustomEvent(USER_SETTINGS_CHANGED_EVENT, { detail: payload }));
+      void invalidateLibraryQueries();
       setMessage(
         nextValue
           ? "Recently added is now hidden in your library."
@@ -1714,6 +1720,7 @@ export function SettingsPage() {
       });
       setHiddenItems((current) => current.filter((item) => item.id !== itemId));
       setMessage(payload.message || "This movie is visible again.");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to restore hidden movie");
     } finally {
@@ -1731,6 +1738,7 @@ export function SettingsPage() {
       });
       setGlobalHiddenItems((current) => current.filter((item) => item.id !== itemId));
       setMessage(payload.message || "This movie is visible again.");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to restore globally hidden movie");
     } finally {
@@ -1764,6 +1772,7 @@ export function SettingsPage() {
         ];
       });
       setMessage(payload.message || "This movie is hidden for everyone.");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to hide this movie for everyone");
     } finally {
@@ -1797,6 +1806,7 @@ export function SettingsPage() {
         ];
       });
       setMessage(payload.message || "This movie is now hidden only for your account.");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to hide this movie only for your account");
     } finally {
@@ -1823,6 +1833,7 @@ export function SettingsPage() {
       setPosterReference(payload);
       setPosterReferenceInput(payload.configured_value || payload.default_value || "");
       setMessage("Poster reference location saved.");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to save poster reference location");
     } finally {
@@ -1843,6 +1854,7 @@ export function SettingsPage() {
       setSharedMediaLibraryReference(payload);
       setSharedMediaLibraryReferenceInput(payload.configured_value || payload.default_value || "");
       setMessage("Library reference locations saved.");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to save library reference locations");
     } finally {
@@ -2080,6 +2092,7 @@ export function SettingsPage() {
       setMessage("Age requirement removed.");
       setError("");
       setAgeBucketManager((current) => ({ ...current, savingKey: "", error: "" }));
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setAgeBucketManager((current) => ({
         ...current,
@@ -2108,6 +2121,7 @@ export function SettingsPage() {
       await loadAgeGroupDetail(group.age_group_key);
       setMessage("Age requirement saved.");
       setError("");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setAgeGroupManager((current) => ({
         ...current,
@@ -2164,6 +2178,7 @@ export function SettingsPage() {
         searchResults: [],
         searchQuery: "",
       }));
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setAgeGroupManager((current) => ({
         ...current,
@@ -2185,6 +2200,7 @@ export function SettingsPage() {
       });
       await refreshAgeGroups();
       await loadAgeGroupDetail(group.age_group_key);
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setAgeGroupManager((current) => ({
         ...current,
@@ -2245,6 +2261,7 @@ export function SettingsPage() {
         : "Google Drive setup saved.";
       try {
         await refreshCloudLibraries();
+        void invalidateLibraryQueries();
         setMessage(successMessage);
       } catch (refreshError) {
         setMessage(buildCloudRefreshWarning(successMessage, refreshError));
@@ -2319,6 +2336,7 @@ export function SettingsPage() {
         : "Google Drive library added.";
       try {
         await refreshCloudLibraries();
+        void invalidateLibraryQueries();
         setMessage(successMessage);
       } catch (refreshError) {
         setMessage(buildCloudRefreshWarning(successMessage, refreshError));
@@ -2350,6 +2368,7 @@ export function SettingsPage() {
         payload.message
           || (nextHidden ? "This shared library is hidden for your account." : "This shared library is visible again."),
       );
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to update shared library visibility");
     } finally {
@@ -2385,6 +2404,7 @@ export function SettingsPage() {
       });
       setMessage(nextShared ? "Library shared globally." : "Library moved back to My Libraries.");
       await refreshCloudLibraries();
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setError(requestError.message || "Failed to move cloud library");
     } finally {

@@ -1,13 +1,27 @@
 import { readFileSync } from "node:fs";
 import { useEffect } from "react";
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import {
+  Link,
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useNavigationType,
+} from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { apiRequest } from "../lib/api";
-import { readLibraryReturnTarget } from "../lib/libraryNavigation";
+import { readLibraryReturnTarget, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
+import {
+  buildLibraryQueryKey,
+  LIBRARY_QUERY_STALE_TIME_MS,
+} from "../lib/libraryQueries";
+import { queryClient } from "../lib/queryClient";
 import { LibraryPage } from "./LibraryPage";
 
 const MAINTENANCE_MODE_MESSAGE = "The server is currently under construction, please try again later";
@@ -21,6 +35,10 @@ const mockPlatformState = vi.hoisted(() => ({
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({
     refreshAuth: vi.fn(),
+    user: {
+      id: 2,
+      role: "user",
+    },
   }),
 }));
 
@@ -149,25 +167,59 @@ function mockApi(payload = emptyLibraryPayload, { maintenanceModeEnabled = false
 }
 
 
-function LocationProbe({ locations }) {
+function LocationProbe({ locations, navigationTypes }) {
   const location = useLocation();
+  const navigationType = useNavigationType();
   useEffect(() => {
     locations.push(`${location.pathname}${location.search}`);
-  }, [location.pathname, location.search, locations]);
+    navigationTypes.push(navigationType);
+  }, [location.pathname, location.search, locations, navigationType, navigationTypes]);
   return null;
+}
+
+
+function HistoryControls() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button onClick={() => navigate(-1)} type="button">History back</button>
+      <button onClick={() => navigate(1)} type="button">History forward</button>
+    </>
+  );
 }
 
 
 function renderLibrary(initialEntry = "/library", payload = emptyLibraryPayload, options = {}) {
   const locations = [];
-  mockApi(payload, options);
+  const navigationTypes = [];
+  const {
+    initialEntries = [initialEntry],
+    initialIndex,
+    withHistoryControls = false,
+    ...apiOptions
+  } = options;
+  mockApi(payload, apiOptions);
   render(
-    <MemoryRouter initialEntries={[initialEntry]}>
-      <LocationProbe locations={locations} />
-      <LibraryPage />
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={initialEntries} initialIndex={initialIndex}>
+        <LocationProbe locations={locations} navigationTypes={navigationTypes} />
+        {withHistoryControls ? <HistoryControls /> : null}
+        <LibraryPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
-  return { locations };
+  return { locations, navigationTypes };
+}
+
+
+function DetailStub() {
+  const location = useLocation();
+  const returnTarget = location.state?.libraryReturn;
+  return (
+    <Link state={{ restoreLibraryReturn: true }} to={returnTarget?.listPath || "/library"}>
+      Return to library
+    </Link>
+  );
 }
 
 
@@ -225,6 +277,8 @@ function mockCategorySwitchRects() {
 
 describe("LibraryPage category switching", () => {
   beforeEach(() => {
+    queryClient.clear();
+    apiRequest.mockReset();
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "desktop";
     Object.defineProperty(window, "matchMedia", {
@@ -248,6 +302,7 @@ describe("LibraryPage category switching", () => {
 
   afterEach(() => {
     cleanup();
+    queryClient.clear();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -259,7 +314,10 @@ describe("LibraryPage category switching", () => {
 
     expect(moviesTab).toHaveAttribute("aria-selected", "true");
     await waitFor(() => {
-      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies", expect.any(Object));
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library?category=movies",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
     });
   });
 
@@ -296,9 +354,11 @@ describe("LibraryPage category switching", () => {
     });
 
     render(
-      <MemoryRouter initialEntries={["/library"]}>
-        <LibraryPage />
-      </MemoryRouter>,
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library"]}>
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
     );
 
     await screen.findByRole("tab", { name: "Movies" });
@@ -378,6 +438,174 @@ describe("LibraryPage category switching", () => {
         expect.any(Object),
       );
     });
+  });
+
+  test("initializes the search input and request from q in the URL", async () => {
+    renderLibrary("/library?category=anime&q=akira");
+
+    expect((await screen.findAllByRole("searchbox", { name: "Search library" }))[0]).toHaveValue("akira");
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library/search?q=akira&category=anime",
+        expect.any(Object),
+      );
+    });
+  });
+
+  test("debounces search requests and replaces the current history entry", async () => {
+    const { locations, navigationTypes } = renderLibrary("/library?category=movies");
+    await screen.findByRole("tab", { name: "Movies" });
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies", expect.any(Object));
+    });
+    apiRequest.mockClear();
+
+    fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
+      target: { value: "matrix" },
+    });
+
+    expect(apiRequest).not.toHaveBeenCalledWith(
+      expect.stringContaining("/api/library/search"),
+      expect.any(Object),
+    );
+    expect(locations.at(-1)).toBe("/library?category=movies");
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library/search?q=matrix&category=movies",
+        expect.any(Object),
+      );
+    });
+    expect(locations.at(-1)).toBe("/library?category=movies&q=matrix");
+    expect(navigationTypes.at(-1)).toBe("REPLACE");
+  });
+
+  test("clearing search removes q while preserving the other view parameters", async () => {
+    const { locations } = renderLibrary("/library?category=anime&source=local&q=akira");
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library/search?q=akira&category=anime&source=local",
+        expect.any(Object),
+      );
+    });
+    apiRequest.mockClear();
+
+    fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
+      target: { value: "" },
+    });
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library?category=anime&source=local",
+        expect.any(Object),
+      );
+    });
+    expect(locations.at(-1)).toBe("/library?category=anime&source=local");
+  });
+
+  test("browser history synchronizes the input and exact library query", async () => {
+    renderLibrary("/library?q=matrix", emptyLibraryPayload, {
+      initialEntries: ["/library?category=anime&q=akira", "/library?category=movies&q=matrix"],
+      initialIndex: 1,
+      withHistoryControls: true,
+    });
+    expect((await screen.findAllByRole("searchbox", { name: "Search library" }))[0]).toHaveValue("matrix");
+
+    fireEvent.click(screen.getByRole("button", { name: "History back" }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("searchbox", { name: "Search library" })[0]).toHaveValue("akira");
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library/search?q=akira&category=anime",
+        expect.any(Object),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "History forward" }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("searchbox", { name: "Search library" })[0]).toHaveValue("matrix");
+    });
+  });
+
+  test("view changes do not reload user settings or maintenance status", async () => {
+    const user = userEvent.setup();
+    renderLibrary("/library?category=movies");
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=movies", expect.any(Object));
+    });
+
+    await user.click(screen.getByRole("tab", { name: "Anime" }));
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/library?category=anime", expect.any(Object));
+    });
+    fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
+      target: { value: "akira" },
+    });
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library/search?q=akira&category=anime",
+        expect.any(Object),
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Arrange library" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Arrange library" })).getByRole("button", { name: "Local" }));
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/library/search?q=akira&category=anime&source=local",
+        expect.any(Object),
+      );
+    });
+
+    expect(apiRequest.mock.calls.filter(([path]) => path === "/api/user-settings")).toHaveLength(1);
+    expect(apiRequest.mock.calls.filter(([path]) => path === "/api/admin/maintenance-mode")).toHaveLength(1);
+  });
+
+  test("an older view response cannot replace the current exact query", async () => {
+    const user = userEvent.setup();
+    let resolveMovies;
+    const moviesRequest = new Promise((resolve) => {
+      resolveMovies = resolve;
+    });
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (path === "/api/admin/maintenance-mode") {
+        return Promise.resolve({ enabled: false });
+      }
+      if (path === "/api/library?category=movies") {
+        return moviesRequest;
+      }
+      if (path === "/api/library?category=anime") {
+        return Promise.resolve(libraryPayload({
+          items: [libraryItem({ id: 42, title: "Akira" })],
+          total_items: 1,
+        }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library?category=movies"]}>
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await user.click(await screen.findByRole("tab", { name: "Anime" }));
+    expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveMovies(libraryPayload({
+        items: [libraryItem({ id: 7, title: "The Matrix" })],
+        total_items: 1,
+      }));
+      await moviesRequest;
+    });
+
+    expect(screen.getByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "The Matrix" })).not.toBeInTheDocument();
   });
 
   test("arrange icon renders in the hero category row and is icon-only by default", async () => {
@@ -729,9 +957,9 @@ describe("LibraryPage category switching", () => {
     expect(section).not.toHaveAttribute("data-floating-search-align");
   });
 
-  test("detail return target preserves the category query", async () => {
+  test("detail return target preserves q and the search-result card instance", async () => {
     renderLibrary(
-      "/library?category=anime",
+      "/library?category=anime&q=akira",
       {
         ...emptyLibraryPayload,
         items: [
@@ -774,7 +1002,119 @@ describe("LibraryPage category switching", () => {
     const titleLink = await screen.findByRole("link", { name: "Akira" });
     await userEvent.click(titleLink);
 
-    expect(readLibraryReturnTarget()?.listPath).toBe("/library?category=anime");
+    expect(readLibraryReturnTarget()).toMatchObject({
+      listPath: "/library?category=anime&q=akira",
+      anchorInstanceKey: "search-results:42",
+    });
+  });
+
+  test("library detail return renders a fresh exact-key cache without full-page loading", async () => {
+    const payload = libraryPayload({
+      items: [libraryItem({ id: 42, title: "Akira" })],
+      total_items: 1,
+    });
+    mockApi(payload);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library?category=anime"]}>
+          <Routes>
+            <Route path="/library" element={<LibraryPage />} />
+            <Route path="/library/:itemId" element={<DetailStub />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await userEvent.click(await screen.findByRole("link", { name: "Akira" }));
+    await userEvent.click(await screen.findByRole("link", { name: "Return to library" }));
+
+    expect(screen.queryByText("Loading library...")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(apiRequest.mock.calls.filter(([path]) => path === "/api/library?category=anime")).toHaveLength(1);
+  });
+
+  test("stale cache restores before background refetch and does not jump twice", async () => {
+    const payload = libraryPayload({
+      items: [libraryItem({ id: 42, title: "Akira" })],
+      total_items: 1,
+    });
+    const cacheKey = buildLibraryQueryKey({
+      userId: 2,
+      role: "user",
+      category: "movies",
+      source: "all",
+      genre: "",
+      quality: "all",
+      sort: "smart",
+      query: "",
+    });
+    queryClient.setQueryData(cacheKey, payload, {
+      updatedAt: Date.now() - LIBRARY_QUERY_STALE_TIME_MS - 1,
+    });
+    rememberLibraryReturnTarget({
+      listPath: "/library?category=movies",
+      anchorItemId: 42,
+      anchorInstanceKey: "other-movies:42",
+      anchorViewportRatioY: 0.4,
+      scrollY: 500,
+      pendingRestore: true,
+    });
+    let resolveRefresh;
+    const refreshPromise = new Promise((resolve) => {
+      resolveRefresh = resolve;
+    });
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/admin/maintenance-mode") {
+        return Promise.resolve({ enabled: false });
+      }
+      if (requestPath === "/api/library?category=movies") {
+        return refreshPromise;
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      bottom: 500,
+      height: 300,
+      left: 0,
+      right: 200,
+      top: 200,
+      width: 200,
+      x: 0,
+      y: 200,
+      toJSON: () => {},
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[{
+          pathname: "/library",
+          search: "?category=movies",
+          state: { restoreLibraryReturn: true },
+        }]}
+        >
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading library...")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.scrollTo).toHaveBeenCalled();
+    });
+    const restoreCallCount = window.scrollTo.mock.calls.length;
+
+    await act(async () => {
+      resolveRefresh(payload);
+      await refreshPromise;
+    });
+    await act(async () => Promise.resolve());
+
+    expect(window.scrollTo).toHaveBeenCalledTimes(restoreCallCount);
+    rectSpy.mockRestore();
   });
 });
 

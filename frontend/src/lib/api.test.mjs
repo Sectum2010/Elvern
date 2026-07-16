@@ -8,8 +8,11 @@ import {
   MAINTENANCE_MODE_BLOCKED_EVENT,
   MAINTENANCE_MODE_MESSAGE,
 } from "./api.js";
+import { buildLibraryQueryKey } from "./libraryQueries.js";
+import { queryClient } from "./queryClient.js";
 
 afterEach(() => {
+  queryClient.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -105,5 +108,24 @@ test("apiRequest does not dispatch maintenance mode event for generic 503 errors
     assert.deepEqual(events, []);
   } finally {
     window.removeEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handleMaintenanceModeBlocked);
+  }
+});
+
+test("apiRequest clears protected library cache on 401 and 403 responses", async () => {
+  for (const responseStatus of [401, 403]) {
+    const libraryKey = buildLibraryQueryKey({
+      userId: 2,
+      role: "user",
+      category: "movies",
+    });
+    queryClient.setQueryData(libraryKey, { items: [{ id: responseStatus }] });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ detail: "Authentication required" }),
+      { status: responseStatus, headers: { "content-type": "application/json" } },
+    )));
+
+    await assert.rejects(() => apiRequest("/api/library"));
+
+    assert.equal(queryClient.getQueryData(libraryKey), undefined);
   }
 });

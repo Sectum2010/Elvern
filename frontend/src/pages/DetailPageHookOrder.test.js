@@ -14,6 +14,12 @@ function readDetailPage() {
 }
 
 describe("DetailPage hook-order guards", () => {
+  test("does not route detail media through the card poster URL helper", () => {
+    const source = readDetailPage();
+    expect(source).not.toContain("getCardPosterUrl");
+    expect(source).not.toContain("variant=card");
+  });
+
   test("does not declare React hooks after early render returns", () => {
     const source = readDetailPage();
     const firstEarlyReturnIndex = source.indexOf("if (loading) {");

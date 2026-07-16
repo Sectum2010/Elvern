@@ -1,4 +1,5 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
@@ -54,6 +55,13 @@ import {
   shouldRecoverZoomedLibraryRotation,
   shouldLogViewportAnchorDebug,
 } from "../lib/viewportAnchor";
+import {
+  buildLibraryQueryKey,
+  invalidateLibraryQueries,
+  LIBRARY_QUERY_GC_TIME_MS,
+  LIBRARY_QUERY_STALE_TIME_MS,
+} from "../lib/libraryQueries";
+import { queryClient } from "../lib/queryClient";
 
 
 export const LIBRARY_CATEGORY_OPTIONS = [
@@ -100,6 +108,19 @@ const DEFAULT_LIBRARY_ARRANGE = {
   sort: "smart",
 };
 const SCROLLABLE_ARRANGE_DEVICE_CLASSES = new Set(["phone", "tablet"]);
+const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
+export const LIBRARY_SEARCH_DEBOUNCE_MS = 300;
+const EMPTY_LIBRARY_PAYLOAD = Object.freeze({
+  items: [],
+  series_rails: [],
+  cloud_series_rails: [],
+  continue_watching: [],
+  recently_added: [],
+  arrange: DEFAULT_LIBRARY_ARRANGE,
+  available_genres: [],
+  total_items: 0,
+  scan_in_progress: false,
+});
 
 
 export function resolveLibraryCategoryFromSearch(search = "") {
@@ -121,6 +142,12 @@ export function resolveLibraryArrangeFromSearch(search = "") {
     quality: LIBRARY_QUALITY_KEYS.has(quality) ? quality : DEFAULT_LIBRARY_ARRANGE.quality,
     sort: LIBRARY_SORT_KEYS.has(sort) ? sort : DEFAULT_LIBRARY_ARRANGE.sort,
   };
+}
+
+
+export function resolveLibraryQueryFromSearch(search = "") {
+  const params = new URLSearchParams(search);
+  return String(params.get("q") || "").trim();
 }
 
 
@@ -159,6 +186,19 @@ export function buildLibraryCategorySearch(currentSearch = "", category = DEFAUL
 export function buildLibraryArrangeSearch(currentSearch = "", arrange = DEFAULT_LIBRARY_ARRANGE) {
   const params = new URLSearchParams(currentSearch);
   applyLibraryArrangeParams(params, arrange);
+  const nextSearch = params.toString();
+  return nextSearch ? `?${nextSearch}` : "";
+}
+
+
+export function buildLibraryQuerySearch(currentSearch = "", query = "") {
+  const params = new URLSearchParams(currentSearch);
+  const normalizedQuery = String(query || "").trim();
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  } else {
+    params.delete("q");
+  }
   const nextSearch = params.toString();
   return nextSearch ? `?${nextSearch}` : "";
 }
@@ -581,7 +621,7 @@ function useIpadPortraitLibraryLayout() {
 }
 
 export function LibraryPage() {
-  const { refreshAuth } = useAuth();
+  const { refreshAuth, user } = useAuth();
   const {
     providerAuthRequirement,
     providerAuthDismissedThisSession,
@@ -599,6 +639,10 @@ export function LibraryPage() {
     () => resolveLibraryArrangeFromSearch(location.search),
     [location.search],
   );
+  const activeLibraryQuery = useMemo(
+    () => resolveLibraryQueryFromSearch(location.search),
+    [location.search],
+  );
   const activeLibraryCategoryConfig = useMemo(
     () => LIBRARY_CATEGORY_OPTIONS.find((category) => category.key === activeLibraryCategory) || LIBRARY_CATEGORY_OPTIONS[0],
     [activeLibraryCategory],
@@ -608,29 +652,16 @@ export function LibraryPage() {
     [location.pathname, location.search],
   );
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
-  const [query, setQuery] = useState("");
-  const deferredQuery = useDeferredValue(query);
+  const [query, setQuery] = useState(() => activeLibraryQuery);
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
     floating_library_search_enabled: true,
   });
-  const [loading, setLoading] = useState(true);
   const [rescanPending, setRescanPending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [maintenanceModeActive, setMaintenanceModeActive] = useState(false);
-  const [library, setLibrary] = useState({
-    items: [],
-    series_rails: [],
-    cloud_series_rails: [],
-    continue_watching: [],
-    recently_added: [],
-    arrange: DEFAULT_LIBRARY_ARRANGE,
-    available_genres: [],
-    total_items: 0,
-    scan_in_progress: false,
-  });
   const cloudSyncWarningRef = useRef("");
   const scanRunningRef = useRef(false);
   const orientationAnchorsRef = useRef([]);
@@ -683,6 +714,49 @@ export function LibraryPage() {
     const userAgent = navigator.userAgent || "";
     return /iphone|ipod|android.+mobile|windows phone/i.test(userAgent);
   }, []);
+  const libraryRequestPath = useMemo(
+    () => buildLibraryRequestPath({
+      category: activeLibraryCategory,
+      query: activeLibraryQuery,
+      arrange: activeLibraryArrange,
+    }),
+    [activeLibraryArrange, activeLibraryCategory, activeLibraryQuery],
+  );
+  const libraryQueryKey = useMemo(
+    () => buildLibraryQueryKey({
+      userId: user?.id,
+      role: user?.role,
+      category: activeLibraryCategory,
+      source: activeLibraryArrange.source,
+      genre: activeLibraryArrange.genre,
+      quality: activeLibraryArrange.quality,
+      sort: activeLibraryArrange.sort,
+      query: activeLibraryQuery,
+    }),
+    [
+      activeLibraryArrange.genre,
+      activeLibraryArrange.quality,
+      activeLibraryArrange.sort,
+      activeLibraryArrange.source,
+      activeLibraryCategory,
+      activeLibraryQuery,
+      user?.id,
+      user?.role,
+    ],
+  );
+  const libraryQuery = useQuery({
+    queryKey: libraryQueryKey,
+    queryFn: ({ signal }) => apiRequest(libraryRequestPath, { signal }),
+    enabled: Boolean(user?.id),
+    staleTime: LIBRARY_QUERY_STALE_TIME_MS,
+    gcTime: LIBRARY_QUERY_GC_TIME_MS,
+    retry: false,
+    refetchInterval: (queryState) => (
+      queryState.state.data?.scan_in_progress ? 2500 : false
+    ),
+  });
+  const library = libraryQuery.data || EMPTY_LIBRARY_PAYLOAD;
+  const loading = libraryQuery.isPending;
   const continueWatchingLimit = 6;
   const continueWatchingItems = useMemo(
     () => library.continue_watching.map((item) => {
@@ -748,7 +822,6 @@ export function LibraryPage() {
     () => getProviderAuthPassiveNoticeMessage(providerAuthRequirement),
     [providerAuthRequirement],
   );
-
   function scheduleFloatingSearchScrollRestore() {
     if (
       typeof window === "undefined"
@@ -764,52 +837,6 @@ export function LibraryPage() {
         window.scrollTo({ top: restoreY, behavior: "auto" });
       });
     });
-  }
-
-  async function loadLibrary({ signal, silent = false } = {}) {
-    if (!silent) {
-      startTransition(() => {
-        setLoading(true);
-      });
-    }
-    setError("");
-    try {
-      const target = buildLibraryRequestPath({
-        category: activeLibraryCategory,
-        query: deferredQuery,
-        arrange: activeLibraryArrange,
-      });
-      const payload = await apiRequest(target, { signal });
-      if (scanRunningRef.current && !payload.scan_in_progress) {
-        if (cloudSyncWarningRef.current) {
-          setError(formatCompletedRescanWarning(cloudSyncWarningRef.current));
-          setNotice("");
-        } else {
-          setNotice("Library scan completed.");
-        }
-      }
-      scanRunningRef.current = Boolean(payload.scan_in_progress);
-      setLibrary(payload);
-      if (!deferredQuery.trim()) {
-        scheduleFloatingSearchScrollRestore();
-      }
-    } catch (requestError) {
-      if (requestError.name === "AbortError") {
-        return;
-      }
-      if (isMaintenanceModeError(requestError)) {
-        return;
-      }
-      if (requestError.status === 401) {
-        await refreshAuth();
-        return;
-      }
-      setError(requestError.message || "Failed to load library");
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
   }
 
   async function loadLibrarySettings({ signal } = {}) {
@@ -839,14 +866,88 @@ export function LibraryPage() {
   }
 
   useEffect(() => {
+    setQuery(activeLibraryQuery);
+  }, [activeLibraryQuery]);
+
+  useEffect(() => {
+    const normalizedQuery = query.trim();
+    if (normalizedQuery === activeLibraryQuery) {
+      return undefined;
+    }
+    const timerId = window.setTimeout(() => {
+      navigate(
+        {
+          pathname: location.pathname,
+          search: buildLibraryQuerySearch(location.search, normalizedQuery),
+          hash: location.hash,
+        },
+        { replace: true },
+      );
+    }, LIBRARY_SEARCH_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [activeLibraryQuery, location.hash, location.pathname, location.search, navigate, query]);
+
+  useEffect(() => {
     const controller = new AbortController();
     loadLibrarySettings({ signal: controller.signal });
+    function handleUserSettingsChanged(event) {
+      if (event?.detail && typeof event.detail === "object") {
+        setSettings((current) => ({ ...current, ...event.detail }));
+      }
+    }
+    window.addEventListener(USER_SETTINGS_CHANGED_EVENT, handleUserSettingsChanged);
+    return () => {
+      controller.abort();
+      window.removeEventListener(USER_SETTINGS_CHANGED_EVENT, handleUserSettingsChanged);
+    };
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    const controller = new AbortController();
     loadMaintenanceModeStatus({ signal: controller.signal });
-    loadLibrary({ signal: controller.signal });
     return () => {
       controller.abort();
     };
-  }, [activeLibraryArrange, activeLibraryCategory, deferredQuery]);
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    setError("");
+  }, [libraryQueryKey]);
+
+  useEffect(() => {
+    const requestError = libraryQuery.error;
+    if (!requestError || requestError.name === "AbortError" || isMaintenanceModeError(requestError)) {
+      return;
+    }
+    if (requestError.status === 401 || requestError.status === 403) {
+      void refreshAuth();
+      return;
+    }
+    if (!libraryQuery.data) {
+      setError(requestError.message || "Failed to load library");
+    }
+  }, [libraryQuery.data, libraryQuery.error, refreshAuth]);
+
+  useEffect(() => {
+    if (!libraryQuery.data) {
+      return;
+    }
+    const scanRunning = Boolean(libraryQuery.data.scan_in_progress);
+    if (scanRunningRef.current && !scanRunning) {
+      if (cloudSyncWarningRef.current) {
+        setError(formatCompletedRescanWarning(cloudSyncWarningRef.current));
+        setNotice("");
+      } else {
+        setNotice("Library scan completed.");
+      }
+    }
+    scanRunningRef.current = scanRunning;
+    if (!activeLibraryQuery) {
+      scheduleFloatingSearchScrollRestore();
+    }
+  }, [activeLibraryQuery, libraryQuery.data]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -886,7 +987,7 @@ export function LibraryPage() {
   }, [clientDeviceClass]);
 
   useEffect(() => {
-    if (loading || deferredQuery.trim() || !activeLibraryArrange.genre) {
+    if (loading || activeLibraryQuery || !activeLibraryArrange.genre) {
       return;
     }
     const availableGenreKeys = new Set(
@@ -907,7 +1008,7 @@ export function LibraryPage() {
       },
       { replace: true },
     );
-  }, [activeLibraryArrange, deferredQuery, library.available_genres, loading, location.hash, location.pathname, location.search, navigate]);
+  }, [activeLibraryArrange, activeLibraryQuery, library.available_genres, loading, location.hash, location.pathname, location.search, navigate]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -920,6 +1021,7 @@ export function LibraryPage() {
       setNotice(statusMessage || "Google Drive connected.");
       setError("");
       void refreshProviderAuthStatus();
+      void invalidateLibraryQueries();
     } else {
       setError(statusMessage || "Google Drive reconnect failed.");
       setNotice("");
@@ -936,18 +1038,6 @@ export function LibraryPage() {
       { replace: true },
     );
   }, [location.hash, location.pathname, location.search, navigate]);
-
-  useEffect(() => {
-    if (!library.scan_in_progress) {
-      return undefined;
-    }
-    const intervalId = window.setInterval(() => {
-      loadLibrary({ silent: true });
-    }, 2500);
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [activeLibraryArrange, activeLibraryCategory, library.scan_in_progress, deferredQuery]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") {
@@ -1470,9 +1560,11 @@ export function LibraryPage() {
       } else {
         setNotice(formatRescanBannerText(payload));
       }
-      setLibrary((current) => ({ ...current, scan_in_progress: payload.running }));
+      queryClient.setQueryData(libraryQueryKey, (current) => (
+        current ? { ...current, scan_in_progress: payload.running } : current
+      ));
       scanRunningRef.current = Boolean(payload.running);
-      await loadLibrary({ silent: true });
+      await invalidateLibraryQueries();
     } catch (requestError) {
       if (isMaintenanceModeError(requestError)) {
         return;
@@ -1534,7 +1626,7 @@ export function LibraryPage() {
     );
   }
 
-  const isSearching = deferredQuery.trim().length > 0;
+  const isSearching = activeLibraryQuery.length > 0;
   const isFlatSortedView = activeLibraryArrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort;
 
   return (

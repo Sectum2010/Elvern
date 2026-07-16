@@ -4,9 +4,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { AuthProvider } from "./AuthContext";
+import { AuthProvider, useAuth } from "./AuthContext";
 import { ProtectedRoute } from "../components/ProtectedRoute";
 import { apiRequest, MAINTENANCE_MODE_MESSAGE } from "../lib/api";
+import { buildLibraryQueryKey } from "../lib/libraryQueries";
+import { queryClient } from "../lib/queryClient";
 import { LoginPage } from "../pages/LoginPage";
 
 
@@ -25,6 +27,7 @@ function jsonResponse(payload, status = 200) {
 }
 
 function ProtectedApiProbe({ protectedPath = "/api/protected" }) {
+  const { user } = useAuth();
   const [error, setError] = useState("");
 
   async function handleProtectedRequest() {
@@ -39,6 +42,7 @@ function ProtectedApiProbe({ protectedPath = "/api/protected" }) {
   return (
     <div>
       <p>Protected content</p>
+      <p>Signed in as {user?.username || "unknown"}</p>
       <button onClick={handleProtectedRequest} type="button">Call protected API</button>
       {error ? <p role="alert">{error}</p> : null}
     </div>
@@ -67,11 +71,13 @@ function renderAuthRoutes({ initialEntry = "/library", protectedPath = "/api/pro
 
 describe("AuthProvider maintenance mode handling", () => {
   beforeEach(() => {
+    queryClient.clear();
     window.scrollTo = vi.fn();
   });
 
   afterEach(() => {
     cleanup();
+    queryClient.clear();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -161,5 +167,37 @@ describe("AuthProvider maintenance mode handling", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
     expect(screen.getByText("Protected content")).toBeInTheDocument();
     expect(screen.queryByText(MAINTENANCE_MODE_MESSAGE)).not.toBeInTheDocument();
+  });
+
+  test("clears user A library data before applying user B identity", async () => {
+    const secondUser = {
+      ...standardUser,
+      id: 3,
+      username: "second-viewer",
+    };
+    let authMeCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/me") {
+        authMeCalls += 1;
+        return jsonResponse({ user: authMeCalls === 1 ? standardUser : secondUser });
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    }));
+
+    renderAuthRoutes();
+    expect(await screen.findByText("Signed in as viewer")).toBeInTheDocument();
+
+    const userALibraryKey = buildLibraryQueryKey({
+      userId: standardUser.id,
+      role: standardUser.role,
+      category: "movies",
+    });
+    queryClient.setQueryData(userALibraryKey, { items: [{ id: 42 }] });
+    expect(queryClient.getQueryData(userALibraryKey)).toBeDefined();
+
+    fireEvent.focus(window);
+
+    expect(await screen.findByText("Signed in as second-viewer")).toBeInTheDocument();
+    expect(queryClient.getQueryData(userALibraryKey)).toBeUndefined();
   });
 });

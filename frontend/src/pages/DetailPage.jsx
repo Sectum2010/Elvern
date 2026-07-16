@@ -40,6 +40,7 @@ import {
   normalizeVideoFitMode,
 } from "../lib/playerFitMode";
 import { getMovieCardTitle } from "../lib/movieTitles";
+import { invalidateLibraryQueries } from "../lib/libraryQueries";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
   clearProviderAuthIntent,
@@ -1466,6 +1467,7 @@ export function DetailPage() {
         const refreshedItem = await apiRequest(`/api/library/item/${item.id}`);
         if (!cancelled) {
           setItem(refreshedItem);
+          void invalidateLibraryQueries();
         }
       } catch {
         // Detail metadata already carries the honest scan state; avoid retry loops.
@@ -2019,6 +2021,7 @@ export function DetailPage() {
       setHiddenActionMessage(
         payload.message || "This movie is hidden for your account. Restore it from Settings > Hidden for me.",
       );
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setHiddenActionError(requestError.message || "Failed to hide this movie");
     } finally {
@@ -2039,6 +2042,7 @@ export function DetailPage() {
       });
       setHiddenActionMessage(payload.message || "This movie is visible again");
       setDetailRefreshKey((current) => current + 1);
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setHiddenActionError(requestError.message || "Failed to show this movie again");
     } finally {
@@ -2059,6 +2063,7 @@ export function DetailPage() {
       });
       setItem((current) => (current ? { ...current, hidden_globally: true } : current));
       setGlobalHiddenActionMessage(payload.message || "This movie is hidden for everyone");
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setGlobalHiddenActionError(requestError.message || "Failed to hide this movie for everyone");
     } finally {
@@ -2079,6 +2084,7 @@ export function DetailPage() {
       });
       setGlobalHiddenActionMessage(payload.message || "This movie is visible again for everyone");
       setDetailRefreshKey((current) => current + 1);
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setGlobalHiddenActionError(requestError.message || "Failed to show this movie again for everyone");
     } finally {
@@ -2210,6 +2216,7 @@ export function DetailPage() {
         pending: false,
         error: "",
       });
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setGenreEditor((current) => ({
         ...current,
@@ -2238,6 +2245,7 @@ export function DetailPage() {
         pending: false,
         error: "",
       });
+      void invalidateLibraryQueries();
     } catch (requestError) {
       setAgeRequirementEditor((current) => ({
         ...current,
