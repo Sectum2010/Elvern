@@ -4,6 +4,7 @@ import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCardPosterUrl } from "../lib/posterUrls";
 import { getQualityRank } from "../lib/qualityRank";
 import { buildLibraryReturnState, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
+import { logDesktopLibraryReturnCapture } from "../lib/desktopLibraryReturnRestore";
 import { usePosterContextMenu } from "./PosterContextMenu";
 import {
   getSmartPosterCardSnapshot,
@@ -155,12 +156,17 @@ export function MediaCard({
   });
 
   function handleOpenDetail(event) {
-    rememberLibraryReturnTarget(getLibraryReturnTargetFromCardClick({
+    const target = getLibraryReturnTargetFromCardClick({
       event,
       listPath: libraryListPath,
       itemId: item.id,
       fallbackInstanceKey: cardInstanceKey,
-    }));
+    });
+    rememberLibraryReturnTarget(target);
+    const cardNode = event?.currentTarget?.closest?.(".media-card")
+      || event?.target?.closest?.(".media-card")
+      || null;
+    logDesktopLibraryReturnCapture({ target, cardNode });
   }
 
   function handlePosterContextMenu(event) {

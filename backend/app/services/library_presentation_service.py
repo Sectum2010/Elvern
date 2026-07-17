@@ -8,6 +8,7 @@ from ..media_scan import infer_title_and_year
 from .app_settings_service import get_poster_reference_location_payload
 from .library_movie_identity_service import QUALITY_TIER_LABELS, _edition_label, quality_tier_for_row
 from .media_title_parser import parse_media_title
+from .poster_index_service import PosterIndexSnapshot, get_poster_index_snapshot
 from .title_normalization import (
     apostrophe_title_variants,
     build_poster_candidate_family,
@@ -89,6 +90,26 @@ def _poster_filename_key(stem: str) -> tuple[str | None, int | None]:
     return normalize_poster_title_key(match.group(1)), int(match.group(2))
 
 
+def _safe_poster_file(poster_path: Path, *, poster_dir: Path) -> bool:
+    if poster_path.suffix.lower() not in {".jpg", ".png"}:
+        return False
+    try:
+        if poster_path.is_symlink() or not poster_path.is_file():
+            return False
+        poster_path.resolve(strict=True).relative_to(poster_dir.resolve(strict=True))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _safe_sorted_poster_paths(poster_dir: Path) -> list[Path]:
+    try:
+        candidates = sorted(poster_dir.iterdir(), key=lambda candidate: candidate.name.lower())
+    except OSError:
+        return []
+    return [candidate for candidate in candidates if _safe_poster_file(candidate, poster_dir=poster_dir)]
+
+
 def _resolve_unique_yearless_poster_match(*, poster_dir: Path, title: object, year: object, original_filename: object) -> Path | None:
     candidate_title_keys = _poster_yearless_key_family(
         title=title,
@@ -99,11 +120,7 @@ def _resolve_unique_yearless_poster_match(*, poster_dir: Path, title: object, ye
         return None
 
     matches: list[Path] = []
-    for poster_path in sorted(poster_dir.iterdir(), key=lambda candidate: candidate.name.lower()):
-        if not poster_path.is_file():
-            continue
-        if poster_path.suffix.lower() not in {".jpg", ".png"}:
-            continue
+    for poster_path in _safe_sorted_poster_paths(poster_dir):
         if re.fullmatch(r".+\s+\(\d{4}\)", poster_path.stem):
             continue
         poster_key = normalize_poster_title_key(poster_path.stem)
@@ -123,11 +140,7 @@ def _resolve_normalized_yearful_poster_match(*, poster_dir: Path, title: object,
     if not candidate_keys or normalized_year is None:
         return None
 
-    for poster_path in sorted(poster_dir.iterdir(), key=lambda candidate: candidate.name.lower()):
-        if not poster_path.is_file():
-            continue
-        if poster_path.suffix.lower() not in {".jpg", ".png"}:
-            continue
+    for poster_path in _safe_sorted_poster_paths(poster_dir):
         title_key, poster_year = _poster_filename_key(poster_path.stem)
         if title_key is None or poster_year is None:
             continue
@@ -161,11 +174,7 @@ def _resolve_unique_singular_plural_yearful_poster_match(
         return None
 
     matches: list[Path] = []
-    for poster_path in sorted(poster_dir.iterdir(), key=lambda candidate: candidate.name.lower()):
-        if not poster_path.is_file():
-            continue
-        if poster_path.suffix.lower() not in {".jpg", ".png"}:
-            continue
+    for poster_path in _safe_sorted_poster_paths(poster_dir):
         title_key, poster_year = _poster_filename_key(poster_path.stem)
         if title_key is None or poster_year != normalized_year:
             continue
@@ -259,7 +268,7 @@ def _parsed_title_payload(*, title: object, year: object, original_filename: obj
     }
 
 
-def _resolve_poster_path(
+def _resolve_poster_path_legacy(
     settings: Settings,
     *,
     poster_dir: Path | None = None,
@@ -278,7 +287,7 @@ def _resolve_poster_path(
     )
     for candidate_name in candidate_names:
         candidate_path = resolved_poster_dir / candidate_name
-        if candidate_path.is_file():
+        if _safe_poster_file(candidate_path, poster_dir=resolved_poster_dir):
             return candidate_path
 
     normalized_yearful = _resolve_normalized_yearful_poster_match(
@@ -307,6 +316,109 @@ def _resolve_poster_path(
     )
 
 
+def _first_index_entry(entries) -> Path | None:
+    if not entries:
+        return None
+    return min(entries, key=lambda entry: entry.ordinal).path
+
+
+def _resolve_poster_path_from_index(
+    poster_index: PosterIndexSnapshot,
+    *,
+    title: object,
+    year: object,
+    original_filename: object,
+) -> Path | None:
+    for candidate_name in _poster_candidate_names(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    ):
+        exact_entry = poster_index.exact_filename_map.get(candidate_name)
+        if exact_entry is not None:
+            return exact_entry.path
+
+    candidate_keys, normalized_year = _poster_yearful_key_family(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+    normalized_matches = []
+    for candidate_key in candidate_keys:
+        normalized_matches.extend(poster_index.normalized_yearful_map.get(candidate_key, ()))
+    normalized_match = _first_index_entry(normalized_matches)
+    if normalized_match is not None:
+        return normalized_match
+
+    if normalized_year is not None:
+        candidate_title_keys = {
+            candidate_key.rsplit("|", 1)[0]
+            for candidate_key in candidate_keys
+            if "|" in candidate_key
+        }
+        singular_plural_matches = [
+            entry
+            for entry in poster_index.year_entries_map.get(normalized_year, ())
+            if entry.title_key and any(
+                poster_singular_plural_title_keys_equivalent(candidate_title_key, entry.title_key)
+                for candidate_title_key in candidate_title_keys
+            )
+        ]
+        if len(singular_plural_matches) == 1:
+            return singular_plural_matches[0].path
+
+    yearless_matches = []
+    seen_yearless_paths: set[Path] = set()
+    for candidate_key in _poster_yearless_key_family(
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    ):
+        for entry in poster_index.yearless_map.get(candidate_key, ()):
+            if entry.path not in seen_yearless_paths:
+                yearless_matches.append(entry)
+                seen_yearless_paths.add(entry.path)
+    if len(yearless_matches) == 1:
+        return yearless_matches[0].path
+    return None
+
+
+_POSTER_INDEX_UNSET = object()
+
+
+def _resolve_poster_path(
+    settings: Settings,
+    *,
+    poster_dir: Path | None = None,
+    poster_index: PosterIndexSnapshot | None | object = _POSTER_INDEX_UNSET,
+    title: object,
+    year: object,
+    original_filename: object,
+    source_kind: object = "local",
+) -> Path | None:
+    del source_kind
+    resolved_poster_dir = poster_dir or _poster_directory(settings)
+    resolved_index = (
+        get_poster_index_snapshot(resolved_poster_dir)
+        if poster_index is _POSTER_INDEX_UNSET
+        else poster_index
+    )
+    if isinstance(resolved_index, PosterIndexSnapshot):
+        return _resolve_poster_path_from_index(
+            resolved_index,
+            title=title,
+            year=year,
+            original_filename=original_filename,
+        )
+    return _resolve_poster_path_legacy(
+        settings,
+        poster_dir=resolved_poster_dir,
+        title=title,
+        year=year,
+        original_filename=original_filename,
+    )
+
+
 def _poster_cache_token(*, poster_path: Path, poster_dir: Path) -> str:
     try:
         stat = poster_path.stat()
@@ -323,20 +435,36 @@ def _poster_cache_token(*, poster_path: Path, poster_dir: Path) -> str:
     return hashlib.sha1(token_source.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
-def _poster_url_for_row(settings: Settings, row, *, poster_dir: Path | None = None) -> str | None:
+def _poster_url_for_row(
+    settings: Settings,
+    row,
+    *,
+    poster_dir: Path | None = None,
+    poster_index: PosterIndexSnapshot | None | object = _POSTER_INDEX_UNSET,
+    poster_url_memo: dict[int, str | None] | None = None,
+) -> str | None:
     resolved_poster_dir = poster_dir or _poster_directory(settings)
+    media_item_id = int(row["id"])
+    if poster_url_memo is not None and media_item_id in poster_url_memo:
+        return poster_url_memo[media_item_id]
     poster_path = _resolve_poster_path(
         settings,
         poster_dir=resolved_poster_dir,
+        poster_index=poster_index,
         title=row["title"],
         year=row["year"],
         original_filename=row["original_filename"],
         source_kind=_row_value(row, "source_kind", "local"),
     )
     if poster_path is None:
+        if poster_url_memo is not None:
+            poster_url_memo[media_item_id] = None
         return None
     token = _poster_cache_token(poster_path=poster_path, poster_dir=resolved_poster_dir)
-    return f"/api/library/item/{int(row['id'])}/poster?v={token}"
+    poster_url = f"/api/library/item/{media_item_id}/poster?v={token}"
+    if poster_url_memo is not None:
+        poster_url_memo[media_item_id] = poster_url
+    return poster_url
 
 
 def _source_label_for_row(row) -> str:
@@ -357,6 +485,8 @@ def _serialize_media_item(
     row,
     *,
     poster_dir: Path | None = None,
+    poster_index: PosterIndexSnapshot | None | object = _POSTER_INDEX_UNSET,
+    poster_url_memo: dict[int, str | None] | None = None,
 ) -> dict[str, object]:
     source_kind = str(_row_value(row, "source_kind", "local") or "local")
     quality_tier = _row_value(row, "quality_tier") or quality_tier_for_row(row)
@@ -387,7 +517,13 @@ def _serialize_media_item(
         "library_folder_role": _row_value(row, "library_folder_role"),
         "library_folder_path": _row_value(row, "library_folder_path"),
         "library_folder_name": _row_value(row, "library_folder_name"),
-        "poster_url": _poster_url_for_row(settings, row, poster_dir=poster_dir),
+        "poster_url": _poster_url_for_row(
+            settings,
+            row,
+            poster_dir=poster_dir,
+            poster_index=poster_index,
+            poster_url_memo=poster_url_memo,
+        ),
         "edition_label": _edition_label(metadata["edition_identity"]),
         "quality_tier": quality_tier,
         "quality_label": _row_value(row, "quality_label") or QUALITY_TIER_LABELS.get(str(quality_tier or "")),

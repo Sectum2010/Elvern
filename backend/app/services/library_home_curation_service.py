@@ -10,6 +10,7 @@ from .library_presentation_service import (
     _serialize_media_item,
 )
 from .local_library_source_service import get_effective_shared_local_library_path
+from .poster_index_service import PosterIndexSnapshot
 from .title_normalization import clean_title_for_matching, collapse_spaces, normalize_title_key
 from ..config import Settings
 
@@ -258,6 +259,8 @@ def _build_series_rails(
     *,
     rows: list[object],
     poster_dir: Path | None = None,
+    poster_index: PosterIndexSnapshot | None = None,
+    poster_url_memo: dict[int, str | None] | None = None,
     include_cloud: bool = False,
 ) -> list[dict[str, object]]:
     grouped_rows: dict[str, dict[str, object]] = {}
@@ -318,7 +321,13 @@ def _build_series_rails(
         rows_by_id: dict[int, object] = payload["rows_by_id"]  # type: ignore[assignment]
         sorted_rows = sorted(rows_by_id.values(), key=_series_row_sort_key)
         serialized_items = [
-            _serialize_media_item(settings, row, poster_dir=poster_dir)
+            _serialize_media_item(
+                settings,
+                row,
+                poster_dir=poster_dir,
+                poster_index=poster_index,
+                poster_url_memo=poster_url_memo,
+            )
             for row in sorted_rows
         ]
         if len(serialized_items) < 2:

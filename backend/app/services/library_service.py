@@ -54,6 +54,7 @@ from .title_normalization import (
 )
 from .user_settings_service import get_user_settings
 from .local_library_source_service import ensure_current_shared_local_source_binding
+from .poster_index_service import get_poster_index_snapshot
 from ..config import Settings
 from ..db import get_connection
 
@@ -545,6 +546,8 @@ def list_library(
         globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
         hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
         hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
+    poster_index = get_poster_index_snapshot(poster_dir)
+    poster_url_memo: dict[int, str | None] = {}
     all_rows = _decorate_rows_with_arrange_metadata(list(all_rows), genre_map)
     continue_rows = _decorate_rows_with_arrange_metadata(list(continue_rows), genre_map)
     all_rows = _filter_rows_for_library_category(list(all_rows), normalized_category)
@@ -589,11 +592,15 @@ def list_library(
         settings,
         rows=list(filtered_all_rows),
         poster_dir=poster_dir,
+        poster_index=poster_index,
+        poster_url_memo=poster_url_memo,
     )
     cloud_series_rails = _build_series_rails(
         settings,
         rows=list(filtered_all_rows),
         poster_dir=poster_dir,
+        poster_index=poster_index,
+        poster_url_memo=poster_url_memo,
         include_cloud=True,
     )
     visible_continue_rows = _apply_library_arrange_filters(
@@ -639,11 +646,38 @@ def list_library(
             reverse=True,
         )[:12]
     return {
-        "items": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in sorted_visible_all_rows],
+        "items": [
+            _serialize_media_item(
+                settings,
+                row,
+                poster_dir=poster_dir,
+                poster_index=poster_index,
+                poster_url_memo=poster_url_memo,
+            )
+            for row in sorted_visible_all_rows
+        ],
         "series_rails": series_rails,
         "cloud_series_rails": cloud_series_rails,
-        "continue_watching": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in visible_continue_rows],
-        "recently_added": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in visible_recent_rows],
+        "continue_watching": [
+            _serialize_media_item(
+                settings,
+                row,
+                poster_dir=poster_dir,
+                poster_index=poster_index,
+                poster_url_memo=poster_url_memo,
+            )
+            for row in visible_continue_rows
+        ],
+        "recently_added": [
+            _serialize_media_item(
+                settings,
+                row,
+                poster_dir=poster_dir,
+                poster_index=poster_index,
+                poster_url_memo=poster_url_memo,
+            )
+            for row in visible_recent_rows
+        ],
         "total_items": len(filtered_all_rows),
         "arrange": arrange,
         "available_genres": available_genres,
@@ -699,6 +733,8 @@ def search_library(
             _base_query() + " ORDER BY lower(m.title) ASC",
             (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
+    poster_index = get_poster_index_snapshot(poster_dir)
+    poster_url_memo: dict[int, str | None] = {}
     rows = _decorate_rows_with_arrange_metadata(list(rows), genre_map)
     rows = _filter_rows_for_library_category(list(rows), normalized_category)
     scored_rows: list[tuple[int, object]] = []
@@ -742,7 +778,16 @@ def search_library(
     if arrange["sort"] != "smart":
         visible_rows = _sort_library_rows(visible_rows, str(arrange["sort"] or "smart"))
     return {
-        "items": [_serialize_media_item(settings, row, poster_dir=poster_dir) for row in visible_rows],
+        "items": [
+            _serialize_media_item(
+                settings,
+                row,
+                poster_dir=poster_dir,
+                poster_index=poster_index,
+                poster_url_memo=poster_url_memo,
+            )
+            for row in visible_rows
+        ],
         "series_rails": [],
         "cloud_series_rails": [],
         "continue_watching": [],
@@ -915,7 +960,14 @@ def get_media_item_detail(
         track_scan_source = "failed"
     else:
         track_scan_source = "not_scanned"
-    payload = _serialize_media_item(settings, row, poster_dir=poster_dir)
+    poster_index = get_poster_index_snapshot(poster_dir)
+    payload = _serialize_media_item(
+        settings,
+        row,
+        poster_dir=poster_dir,
+        poster_index=poster_index,
+        poster_url_memo={},
+    )
     age_requirement_payload = resolve_media_age_requirement(settings, item_id)
     genre_payload = get_media_genre_metadata(settings, item_id)
     payload.update(
@@ -1021,9 +1073,11 @@ def get_media_item_poster_path(
     )
     if hidden_globally and not allow_globally_hidden:
         return None
+    poster_index = get_poster_index_snapshot(poster_dir)
     return _resolve_poster_path(
         settings,
         poster_dir=poster_dir,
+        poster_index=poster_index,
         title=row["title"],
         year=row["year"],
         original_filename=row["original_filename"],

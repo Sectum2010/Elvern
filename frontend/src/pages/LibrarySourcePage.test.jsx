@@ -276,14 +276,16 @@ describe("LibrarySourcePage cached source views", () => {
     expect(apiRequest.mock.calls.filter(([path]) => path.includes("/api/library?"))).toHaveLength(1);
   });
 
-  test("source search detail return preserves q, card instance, and exact cached payload", async () => {
-    const payload = sourcePayload();
+  test.each(["local", "cloud"])(
+    "%s source search detail return preserves q, card instance, and exact cached payload",
+    async (sourceKind) => {
+    const payload = sourcePayload({ source: sourceKind });
     mockSourceApi(payload);
     render(
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={["/library/local?q=akira"]}>
+        <MemoryRouter initialEntries={[`/library/${sourceKind}?q=akira`]}>
           <Routes>
-            <Route path="/library/local" element={<LibrarySourcePage sourceKind="local" />} />
+            <Route path={`/library/${sourceKind}`} element={<LibrarySourcePage sourceKind={sourceKind} />} />
             <Route path="/library/:itemId" element={<DetailStub />} />
           </Routes>
         </MemoryRouter>
@@ -292,13 +294,15 @@ describe("LibrarySourcePage cached source views", () => {
 
     fireEvent.click(await screen.findByRole("link", { name: "Akira" }));
     expect(readLibraryReturnTarget()).toMatchObject({
-      listPath: "/library/local?q=akira",
-      anchorInstanceKey: "local:other-movies:42",
+      listPath: `/library/${sourceKind}?q=akira`,
+      anchorInstanceKey: `${sourceKind}:other-movies:42`,
     });
     fireEvent.click(await screen.findByRole("link", { name: "Return to source" }));
 
-    expect(await screen.findByRole("searchbox", { name: "Search Local Library" })).toHaveValue("akira");
-    expect(screen.queryByText("Loading local library...")).not.toBeInTheDocument();
-    expect(apiRequest.mock.calls.filter(([path]) => path.includes("source=local"))).toHaveLength(1);
-  });
+    const sourceLabel = sourceKind === "cloud" ? "Cloud" : "Local";
+    expect(await screen.findByRole("searchbox", { name: `Search ${sourceLabel} Library` })).toHaveValue("akira");
+    expect(screen.queryByText(`Loading ${sourceKind} library...`)).not.toBeInTheDocument();
+    expect(apiRequest.mock.calls.filter(([path]) => path.includes(`source=${sourceKind}`))).toHaveLength(1);
+  },
+  );
 });

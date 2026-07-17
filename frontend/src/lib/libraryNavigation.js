@@ -6,11 +6,17 @@ function normalizePositiveNumber(value, fallback = null) {
 }
 
 function normalizeNonNegativeNumber(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
   const parsedValue = Number(value);
   return Number.isFinite(parsedValue) && parsedValue >= 0 ? parsedValue : fallback;
 }
 
 function normalizeFiniteNumber(value, fallback = null) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
   const parsedValue = Number(value);
   return Number.isFinite(parsedValue) ? parsedValue : fallback;
 }

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useProviderAuth } from "../auth/ProviderAuthContext";
 import { EmptyState } from "../components/EmptyState";
@@ -16,6 +16,10 @@ import {
   shouldUseProviderAuthPassiveNotice,
 } from "../lib/providerAuth";
 import { useActiveBrowserPlaybackItemId } from "../lib/browserPlayback";
+import {
+  isDesktopLibraryReturnPlatform,
+  useDesktopLibraryReturnRestore,
+} from "../lib/desktopLibraryReturnRestore";
 import {
   formatCompletedRescanWarning,
   formatRescanBannerText,
@@ -633,6 +637,7 @@ export function LibraryPage() {
   } = useProviderAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const navigationType = useNavigationType();
   const activeLibraryCategory = useMemo(
     () => resolveLibraryCategoryFromSearch(location.search),
     [location.search],
@@ -756,6 +761,26 @@ export function LibraryPage() {
   });
   const library = libraryQuery.data || EMPTY_LIBRARY_PAYLOAD;
   const loading = !libraryQuery.data && libraryQuery.isPending;
+  useDesktopLibraryReturnRestore({
+    enabled: true,
+    currentListPath: currentLibraryListPath,
+    locationState: location.state,
+    loading,
+    rootRef: librarySectionRef,
+    platform: clientPlatform,
+    deviceClass: clientDeviceClass,
+    navigationType,
+    queryState: {
+      hasExactData: Boolean(libraryQuery.data),
+      isFresh: Boolean(libraryQuery.data) && !libraryQuery.isStale,
+      isFetching: libraryQuery.isFetching,
+      dataUpdatedAt: libraryQuery.dataUpdatedAt,
+    },
+    settingsState: {
+      hasData: Boolean(userSettingsQuery.data),
+      isPending: !userSettingsQuery.data && userSettingsQuery.isPending,
+    },
+  });
   const continueWatchingLimit = 6;
   const continueWatchingItems = useMemo(
     () => library.continue_watching.map((item) => {
@@ -1469,6 +1494,12 @@ export function LibraryPage() {
     if (loading || typeof window === "undefined" || typeof document === "undefined") {
       return undefined;
     }
+    if (isDesktopLibraryReturnPlatform({
+      platform: clientPlatform,
+      deviceClass: clientDeviceClass,
+    })) {
+      return undefined;
+    }
     const rememberedTarget = readLibraryReturnTarget();
     const shouldRestore = Boolean(location.state?.restoreLibraryReturn) || Boolean(rememberedTarget?.pendingRestore);
     if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== currentLibraryListPath) {
@@ -1516,7 +1547,14 @@ export function LibraryPage() {
     return () => {
       window.clearTimeout(timerId);
     };
-  }, [currentLibraryListPath, library.items, loading, location.state]);
+  }, [
+    clientDeviceClass,
+    clientPlatform,
+    currentLibraryListPath,
+    library.items,
+    loading,
+    location.state,
+  ]);
 
   async function handleRescan() {
     setRescanPending(true);

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState } from "../components/EmptyState";
 import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
@@ -9,6 +9,10 @@ import { MediaCard } from "../components/MediaCard";
 import { SeriesRail } from "../components/SeriesRail";
 import { apiRequest } from "../lib/api";
 import { useActiveBrowserPlaybackItemId } from "../lib/browserPlayback";
+import {
+  isDesktopLibraryReturnPlatform,
+  useDesktopLibraryReturnRestore,
+} from "../lib/desktopLibraryReturnRestore";
 import {
   clearLibraryReturnPending,
   readLibraryReturnTarget,
@@ -154,6 +158,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const { refreshAuth, user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const navigationType = useNavigationType();
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
   const activeSourceQuery = useMemo(
     () => resolveLibrarySourceQueryFromSearch(location.search),
@@ -171,6 +176,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const sourceSearchInputRef = useRef(null);
   const floatingSearchScrollYRef = useRef(null);
   const pendingFloatingSearchRestoreYRef = useRef(null);
+  const librarySectionRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const resolvedSourceKind = sourceKind === "cloud" ? "cloud" : "local";
@@ -208,6 +214,26 @@ export function LibrarySourcePage({ sourceKind }) {
   });
   const library = libraryQuery.data || EMPTY_SOURCE_LIBRARY_PAYLOAD;
   const loading = !libraryQuery.data && libraryQuery.isPending;
+  useDesktopLibraryReturnRestore({
+    enabled: true,
+    currentListPath: currentLibraryListPath,
+    locationState: location.state,
+    loading,
+    rootRef: librarySectionRef,
+    platform: clientPlatform,
+    deviceClass: clientDeviceClass,
+    navigationType,
+    queryState: {
+      hasExactData: Boolean(libraryQuery.data),
+      isFresh: Boolean(libraryQuery.data) && !libraryQuery.isStale,
+      isFetching: libraryQuery.isFetching,
+      dataUpdatedAt: libraryQuery.dataUpdatedAt,
+    },
+    settingsState: {
+      hasData: Boolean(userSettingsQuery.data),
+      isPending: !userSettingsQuery.data && userSettingsQuery.isPending,
+    },
+  });
   const items = library.items || [];
   const seriesRails = resolvedSourceKind === "cloud"
     ? (library.cloud_series_rails || [])
@@ -326,6 +352,12 @@ export function LibrarySourcePage({ sourceKind }) {
     if (loading || typeof window === "undefined" || typeof document === "undefined") {
       return undefined;
     }
+    if (isDesktopLibraryReturnPlatform({
+      platform: clientPlatform,
+      deviceClass: clientDeviceClass,
+    })) {
+      return undefined;
+    }
     const rememberedTarget = readLibraryReturnTarget();
     const shouldRestore = Boolean(location.state?.restoreLibraryReturn) || Boolean(rememberedTarget?.pendingRestore);
     if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== currentLibraryListPath) {
@@ -373,7 +405,15 @@ export function LibrarySourcePage({ sourceKind }) {
     return () => {
       window.clearTimeout(timerId);
     };
-  }, [currentLibraryListPath, items, loading, location.state, seriesRails]);
+  }, [
+    clientDeviceClass,
+    clientPlatform,
+    currentLibraryListPath,
+    items,
+    loading,
+    location.state,
+    seriesRails,
+  ]);
 
   function handleFloatingSearchChange(nextValue, details = {}) {
     const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
@@ -401,6 +441,7 @@ export function LibrarySourcePage({ sourceKind }) {
       className="page-section page-section--library-source"
       data-device-class={libraryDeviceClass}
       data-library-device={libraryDevice}
+      ref={librarySectionRef}
     >
       <div className={`library-focus-hero library-focus-hero--${resolvedSourceKind}`}>
         <div className="library-focus-hero__row">

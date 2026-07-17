@@ -201,3 +201,27 @@ test("location state is enriched from matching session target", () => withSessio
   assert.equal(extracted.railKey, "series:exact");
   assert.equal(extracted.railScrollLeft, 88);
 }));
+
+test("explicit null viewport ratios do not overwrite captured session ratios", () => withSessionStorage(() => {
+  rememberLibraryReturnTarget({
+    listPath: "/library?category=movies",
+    anchorItemId: 72,
+    anchorInstanceKey: "other-movies:72",
+    scrollY: 5118,
+    anchorViewportRatioY: 0.4433,
+    anchorViewportRatioX: 0.25,
+  });
+
+  const extracted = extractLibraryReturnState(buildLibraryReturnState({
+    listPath: "/library?category=movies",
+    anchorItemId: 72,
+    anchorInstanceKey: "other-movies:72",
+    scrollY: 0,
+    anchorViewportRatioY: null,
+    anchorViewportRatioX: null,
+  }));
+
+  assert.equal(extracted.anchorViewportRatioY, 0.4433);
+  assert.equal(extracted.anchorViewportRatioX, 0.25);
+  assert.equal(extracted.scrollY, 5118);
+}));

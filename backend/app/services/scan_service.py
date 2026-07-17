@@ -9,6 +9,7 @@ from ..config import Settings
 from ..db import utcnow_iso
 from ..media_scan import build_local_library_freshness_snapshot, scan_media_library
 from .app_settings_service import get_global_app_setting, set_global_app_setting
+from .poster_index_service import invalidate_poster_indexes
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class ScanService:
                 self._job_lock.release()
                 return self.get_state()
         started_at = utcnow_iso()
+        invalidate_poster_indexes()
         self._update_state(
             running=True,
             started_at=started_at,
@@ -239,4 +241,5 @@ class ScanService:
         else:
             self._update_state(**result)
         finally:
+            invalidate_poster_indexes()
             self._job_lock.release()

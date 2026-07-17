@@ -590,6 +590,10 @@ button {
   gap: 1rem;
 }
 
+.page-section[data-library-return-restoring="true"] {
+  overflow-anchor: none;
+}
+
 .library-desktop-hero {
   position: relative;
   z-index: 80;

@@ -33,6 +33,7 @@ from .local_path_security import (
     validate_safe_library_reference_path,
     validate_safe_poster_reference_path,
 )
+from .poster_index_service import invalidate_poster_indexes
 
 
 POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
@@ -597,6 +598,7 @@ def update_poster_reference_location(settings: Settings, *, value: str | None) -
         key=POSTER_REFERENCE_LOCATION_KEY,
         value=normalized_value,
     )
+    invalidate_poster_indexes()
     return get_poster_reference_location_payload(settings)
 
 
