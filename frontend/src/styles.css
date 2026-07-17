@@ -138,6 +138,121 @@ body {
   background: var(--app-page-background);
 }
 
+.runtime-connectivity-notice {
+  position: fixed;
+  z-index: 10050;
+  top: max(0.65rem, env(safe-area-inset-top));
+  left: 50%;
+  min-width: 8.5rem;
+  padding: 0.65rem 1rem;
+  border-radius: 6px;
+  background: #b4232f;
+  color: #fff;
+  font-weight: 700;
+  text-align: center;
+  touch-action: pan-x;
+  user-select: none;
+  cursor: grab;
+  transition: transform 140ms ease, opacity 140ms ease;
+}
+
+.runtime-connectivity-notice:active {
+  cursor: grabbing;
+}
+
+.runtime-connectivity-oops {
+  position: fixed;
+  z-index: 10040;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: max(1.25rem, env(safe-area-inset-top)) max(1.25rem, env(safe-area-inset-right)) max(1.25rem, env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
+  background: rgb(8 11 18 / 94%);
+  color: #e7e0cf;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  text-align: center;
+}
+
+.runtime-connectivity-oops__content {
+  max-width: 34rem;
+}
+
+.runtime-connectivity-oops h1 {
+  margin: 0 0 0.75rem;
+  font-size: clamp(1.55rem, 5vw, 2.2rem);
+}
+
+.runtime-connectivity-oops p {
+  margin: 0;
+  color: #aeb8c5;
+  line-height: 1.6;
+}
+
+.runtime-connectivity-oops button {
+  margin-top: 1.25rem;
+  padding: 0.25rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #8799a8;
+  font: inherit;
+  cursor: pointer;
+}
+
+.runtime-connectivity-oops button:hover {
+  color: #d2dde2;
+  text-decoration: underline;
+  text-underline-offset: 0.25rem;
+}
+
+.runtime-connectivity-oops button:focus-visible {
+  color: #e7e0cf;
+  outline: 2px solid #6aa5ad;
+  outline-offset: 4px;
+}
+
+.detail-progressive-shell {
+  min-height: min(34rem, 62vh);
+}
+
+.detail-progressive-shell__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+}
+
+.detail-progressive-skeleton {
+  overflow: hidden;
+  background: #202532;
+}
+
+.detail-progressive-skeleton--title {
+  width: min(22rem, 62vw);
+  height: 2.4rem;
+  margin: 0.35rem 0 0;
+  border-radius: 4px;
+}
+
+.detail-progressive-skeleton--player {
+  min-height: min(23rem, 42vh);
+  margin-top: 1.25rem;
+  border-radius: 6px;
+}
+
+.detail-progressive-skeleton--progress {
+  width: min(18rem, 70%);
+  height: 1rem;
+  margin-top: 1rem;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-connectivity-notice {
+    transition: none;
+  }
+}
+
 html.elvern-player-fullscreen-active,
 html.elvern-player-fullscreen-active body,
 html.elvern-player-fullscreen-active #root {

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render as testingLibraryRender, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as testingLibraryRender, screen, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -10,6 +10,7 @@ import {
 } from "../lib/libraryNavigation";
 import { DetailPage, iosExternalAppNavigator } from "./DetailPage";
 import { queryClient } from "../lib/queryClient";
+import { buildLibraryV2QueryKey } from "../lib/libraryQueries";
 
 
 const mockAuthState = vi.hoisted(() => ({
@@ -383,6 +384,89 @@ describe("DetailPage source metadata privacy", () => {
     expect(Boolean(heading.compareDocumentPosition(playerCard) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
   });
 
+  test("renders a cached v2 preview and player shell before detail metadata resolves", async () => {
+    let resolveItem;
+    const itemPromise = new Promise((resolve) => {
+      resolveItem = resolve;
+    });
+    queryClient.setQueryData(buildLibraryV2QueryKey({
+      userId: 2,
+      role: "standard_user",
+      category: "movies",
+      source: "all",
+      quality: "all",
+      sort: "smart",
+    }), {
+      schema_version: "library-summary-v2",
+      items_by_id: {
+        "42": {
+          id: 42,
+          title: "Cached Preview Movie",
+          year: 2025,
+          source_kind: "local",
+        },
+      },
+    });
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        return itemPromise;
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request before metadata: ${requestPath}`));
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { level: 1, name: "Cached Preview Movie" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Lite Playback" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Full Playback" })).toBeInTheDocument();
+    expect(screen.queryByText(/Diamond|Gold|Silver|Bronze/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveItem(detailItem({ title: "Authoritative Movie", parsed_title: null }));
+      await itemPromise;
+    });
+    expect(await screen.findByRole("heading", { level: 1, name: "Authoritative Movie" })).toBeInTheDocument();
+  });
+
+  test("aborts the previous metadata request when the item changes", async () => {
+    const itemSignals = [];
+    apiRequest.mockImplementation((requestPath, options = {}) => {
+      if (requestPath.startsWith("/api/library/item/")) {
+        itemSignals.push(options.signal);
+        return new Promise(() => {});
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <DetailItemSwitcher />
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(itemSignals).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Open another item" }));
+    await waitFor(() => expect(itemSignals).toHaveLength(2));
+
+    expect(itemSignals[0]).toBeInstanceOf(AbortSignal);
+    expect(itemSignals[0].aborted).toBe(true);
+    expect(itemSignals[1].aborted).toBe(false);
+  });
+
   test("preserves the complete library relocation target when preparing the return", async () => {
     const target = rememberLibraryReturnTarget({
       listPath: "/library?category=anime&q=akira",
@@ -404,6 +488,7 @@ describe("DetailPage source metadata privacy", () => {
       },
     });
 
+    await screen.findByRole("heading", { level: 1, name: "Privacy Movie" });
     fireEvent.click(await screen.findByRole("link", { name: "Back to library" }));
 
     expect(readLibraryReturnTarget()).toEqual({

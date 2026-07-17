@@ -93,6 +93,20 @@ describe("frontend production server proxy target hardening", () => {
     expect(targetUrl.pathname).toBe("/health");
   });
 
+  test("frontend health is served by the frontend process instead of the backend proxy", () => {
+    const parsedTarget = resolveSafeRequestTarget("/_elvern/frontend-health");
+
+    expect(classifyFrontendRequestTarget(parsedTarget, activePrefix, "GET")).toEqual({
+      kind: "frontend_health",
+      route: "frontend_health",
+    });
+    expect(classifyFrontendRequestTarget(parsedTarget, activePrefix, "POST")).toEqual({
+      kind: "method_not_allowed",
+      route: "frontend_health",
+      allowedMethods: ["GET", "HEAD"],
+    });
+  });
+
   test("active-prefix manifest requests resolve to the configured backend origin", () => {
     const parsedTarget = resolveSafeRequestTarget(`/${activePrefix}/manifest.webmanifest?version=1`);
     const targetUrl = buildBackendProxyUrl(parsedTarget, backendOrigin);

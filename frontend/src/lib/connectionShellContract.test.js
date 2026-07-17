@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 
 import {
-  CONNECTION_OOPS_COPY,
   CONNECTION_OOPS_TITLE,
+  CONNECTION_SERVER_OOPS_COPY,
+  CONNECTION_VPN_OOPS_COPY,
   CONNECTION_FAMILIARS,
   CONNECTION_STATUS_WORDS,
   STARTUP_HEALTH_PROBE_INTERVAL_MS,
@@ -23,7 +24,9 @@ describe("static connection shell contract", () => {
     for (const html of [indexHtml, offlineHtml]) {
       expect(html).toContain('id="elvern-connection-shell"');
       expect(html).toContain(CONNECTION_OOPS_TITLE);
-      expect(html).toContain(CONNECTION_OOPS_COPY);
+      expect(html).toContain(CONNECTION_SERVER_OOPS_COPY);
+      expect(html).toContain(CONNECTION_VPN_OOPS_COPY);
+      expect(html).toContain('/_elvern/frontend-health');
       expect(html).toContain(">Retry<");
       CONNECTION_STATUS_WORDS.forEach((word) => expect(html).toContain(word));
     }

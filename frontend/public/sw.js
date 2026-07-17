@@ -39,6 +39,7 @@ function navigationIsEligible(request) {
     ? requestUrl.pathname.slice(scopePath.length)
     : requestUrl.pathname;
   return !relativePath.startsWith("api/")
+    && requestUrl.pathname !== "/_elvern/frontend-health"
     && relativePath !== "health"
     && relativePath !== "sw.js"
     && relativePath !== "manifest.webmanifest"

@@ -1,11 +1,15 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { StartupConnectionGate } from "./StartupConnectionGate.jsx";
 import {
+  CONNECTION_SERVER_OOPS_COPY,
+  CONNECTION_VPN_OOPS_COPY,
   CONNECTION_FAMILIAR_ROTATION_MS,
   createStartupConnectionController,
+  NO_INTERNET_REAPPEAR_MS,
   STARTUP_APPLICATION_READY_EVENT,
+  STARTUP_CONNECTIVITY_FAILURE_EVENT,
   STARTUP_SHELL_REVEAL_DELAY_MS,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "../lib/startupConnection.js";
@@ -17,7 +21,7 @@ function installShellFixture() {
       <span data-connection-waiting-word>Flibbertigibbeting...</span>
       <div class="elvern-connection-shell__oops">
         <h1>Oops!</h1>
-        <p>Elvern could not be reached. Check your connection and try again.</p>
+        <p data-connection-oops-copy>${CONNECTION_VPN_OOPS_COPY}</p>
         <button class="elvern-connection-shell__retry" data-connection-retry type="button">Retry</button>
       </div>
     </div>
@@ -54,7 +58,7 @@ describe("StartupConnectionGate", () => {
     await act(() => vi.advanceTimersByTimeAsync(1));
     expect(document.getElementById("elvern-connection-shell").dataset.state).toBe("unreachable");
     expect(screen.getByRole("heading", { name: "Oops!" })).toBeInTheDocument();
-    expect(screen.getByText("Elvern could not be reached. Check your connection and try again.")).toBeInTheDocument();
+    expect(screen.getByText(CONNECTION_VPN_OOPS_COPY)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toHaveClass("elvern-connection-shell__retry");
 
     const callsBeforeRetry = fetchImpl.mock.calls.length;
@@ -123,6 +127,54 @@ describe("StartupConnectionGate", () => {
 
     act(() => window.dispatchEvent(new CustomEvent(STARTUP_APPLICATION_READY_EVENT)));
     expect(document.getElementById("elvern-connection-shell")).toHaveClass("elvern-connection-shell--ready");
+  });
+
+  test("keeps the mounted application alive and overlays the server copy after a runtime outage", async () => {
+    const container = installShellFixture();
+    let backendHealthy = true;
+    const fetchImpl = vi.fn((path) => {
+      if (path === "/_elvern/frontend-health") {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return backendHealthy
+        ? Promise.resolve(new Response("ok", { status: 200 }))
+        : Promise.reject(new TypeError("backend down"));
+    });
+    const controller = createStartupConnectionController({ fetchImpl, requireApplicationReady: true });
+    render(<StartupConnectionGate controller={controller}><p>Persistent detail state</p></StartupConnectionGate>, { container });
+
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    act(() => window.dispatchEvent(new CustomEvent(STARTUP_APPLICATION_READY_EVENT)));
+    expect(screen.getByText("Persistent detail state")).toBeInTheDocument();
+
+    backendHealthy = false;
+    act(() => window.dispatchEvent(new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT)));
+    await act(() => vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS));
+
+    expect(screen.getByText("Persistent detail state")).toBeInTheDocument();
+    expect(within(document.querySelector(".runtime-connectivity-oops")).getByText(
+      CONNECTION_SERVER_OOPS_COPY,
+    )).toBeInTheDocument();
+  });
+
+  test("shows a local swipe-only No Internet notice and reappears after 10 seconds", async () => {
+    const container = installShellFixture();
+    const navigatorObject = { onLine: true };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
+    render(<StartupConnectionGate controller={controller}><p>Library state</p></StartupConnectionGate>, { container });
+
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    navigatorObject.onLine = false;
+    act(() => window.dispatchEvent(new Event("offline")));
+    const notice = screen.getByText("No Internet");
+    fireEvent(notice, new MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+    fireEvent(notice, new MouseEvent("pointerup", { bubbles: true, clientY: 60 }));
+    expect(screen.queryByText("No Internet")).not.toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(NO_INTERNET_REAPPEAR_MS));
+    expect(screen.getByText("No Internet")).toBeInTheDocument();
+    expect(screen.getByText("Library state")).toBeInTheDocument();
   });
 
   test("rotates familiar and waiting word in discrete seven second steps", async () => {

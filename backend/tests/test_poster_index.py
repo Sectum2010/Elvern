@@ -132,6 +132,35 @@ def test_missing_directory_returns_empty_snapshot_and_no_match(initialized_setti
     ) is None
 
 
+def test_empty_snapshot_skips_per_item_title_normalization(
+    initialized_settings,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    poster_dir = tmp_path / "empty-posters"
+    poster_dir.mkdir()
+    snapshot = get_poster_index_snapshot(poster_dir)
+    assert snapshot is not None
+    assert snapshot.entry_count == 0
+
+    def unexpected_normalization(*_args, **_kwargs):
+        raise AssertionError("empty poster indexes should return before title normalization")
+
+    monkeypatch.setattr(
+        library_presentation_service,
+        "_poster_candidate_names",
+        unexpected_normalization,
+    )
+    assert _resolve_poster_path(
+        initialized_settings,
+        poster_dir=poster_dir,
+        poster_index=snapshot,
+        title="No Poster",
+        year=2000,
+        original_filename="No.Poster.2000.mkv",
+    ) is None
+
+
 def test_warm_snapshot_does_not_iterate_directory_again(monkeypatch, tmp_path: Path) -> None:
     poster_dir = tmp_path / "posters"
     _poster(poster_dir, "Warm Film (2000).jpg")

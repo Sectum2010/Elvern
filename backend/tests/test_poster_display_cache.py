@@ -10,6 +10,7 @@ from PIL import Image, JpegImagePlugin
 
 from backend.app.db import get_connection
 from backend.app.media_scan import scan_media_library
+from backend.app.routes import library as library_routes
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
 from backend.app.services.poster_display_cache_service import get_or_create_card_poster_display_cache
 
@@ -253,6 +254,47 @@ def test_route_original_or_missing_variant_keeps_original_behavior(client, admin
     assert original_response.content == poster_path.read_bytes()
     assert default_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
     assert original_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
+
+
+def test_detail_route_enters_interactive_window_before_loading_metadata(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    settings = _display_cache_settings(initialized_settings, tmp_path)
+    _sync_client_settings(client, settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _seed_movie_with_poster(
+        settings,
+        movie_filename="Contact.1997.1080p.mkv",
+        poster_filename="Contact (1997).jpg",
+    )
+    item_id = client.get("/api/library").json()["items"][0]["id"]
+    real_manager = client.app.state.poster_derivative_manager
+    entered = False
+
+    class InteractionManagerStub:
+        def enter_interactive_window(self) -> None:
+            nonlocal entered
+            entered = True
+
+    original_detail_loader = library_routes.get_media_item_detail
+
+    def asserting_detail_loader(*args, **kwargs):
+        assert entered
+        return original_detail_loader(*args, **kwargs)
+
+    monkeypatch.setattr(library_routes, "get_media_item_detail", asserting_detail_loader)
+    client.app.state.poster_derivative_manager = InteractionManagerStub()
+    try:
+        response = client.get(f"/api/library/item/{item_id}")
+    finally:
+        client.app.state.poster_derivative_manager = real_manager
+
+    assert response.status_code == 200
+    assert entered is True
 
 
 def test_unsupported_variant_returns_400(client, admin_credentials, initialized_settings, tmp_path) -> None:

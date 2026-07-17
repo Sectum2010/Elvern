@@ -330,6 +330,9 @@ def _resolve_poster_path_from_index(
     year: object,
     original_filename: object,
 ) -> Path | None:
+    if poster_index.entry_count == 0:
+        return None
+
     for candidate_name in _poster_candidate_names(
         title=title,
         year=year,

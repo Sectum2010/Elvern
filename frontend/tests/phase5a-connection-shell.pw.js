@@ -22,6 +22,7 @@ function emptyV2Payload(source = "all") {
 
 
 async function installConnectedFixture(page) {
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 200, body: "" }));
   await page.route("**/health", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -91,6 +92,7 @@ test("desktop canonicalizes Library routes and renders one root hero", async ({ 
 test("mobile shows the dark connection shell and enters Elvern automatically after recovery", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium-mobile", "Mobile connection shell coverage");
   let reachable = false;
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 200, body: "" }));
   await page.route("**/health", async (route) => {
     if (reachable) {
       await route.fulfill({ status: 200, contentType: "application/json", body: '{"status":"ok"}' });

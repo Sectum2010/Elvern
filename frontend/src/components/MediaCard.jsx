@@ -4,6 +4,7 @@ import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCardPosterUrl } from "../lib/posterUrls";
 import { resolveLibraryQualityRank } from "../lib/qualityRank";
 import { buildLibraryReturnState, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
+import { startDetailPerformanceTrace } from "../lib/detailPerformanceTiming";
 import { logDesktopLibraryReturnCapture } from "../lib/desktopLibraryReturnRestore";
 import { usePosterContextMenu } from "./PosterContextMenu";
 import {
@@ -156,6 +157,7 @@ export function MediaCard({
   });
 
   function handleOpenDetail(event) {
+    startDetailPerformanceTrace();
     const target = getLibraryReturnTargetFromCardClick({
       event,
       listPath: libraryListPath,
@@ -267,6 +269,7 @@ export function MediaCard({
               ].filter(Boolean).join(" ")}
               decoding="async"
               draggable="false"
+              fetchPriority={smartPosterSchedulerActive ? undefined : "low"}
               loading={smartPosterSchedulerActive ? "eager" : "lazy"}
               onError={() => {
                 if (smartPosterSchedulerActive) {

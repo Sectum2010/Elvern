@@ -22,7 +22,9 @@ describe("DetailPage hook-order guards", () => {
 
   test("does not declare React hooks after early render returns", () => {
     const source = readDetailPage();
-    const firstEarlyReturnIndex = source.indexOf("if (loading) {");
+    const firstEarlyReturnIndex = source.indexOf(
+      'if (!item) {\n    return (\n      <section aria-busy={loading ? "true" : "false"}',
+    );
     expect(firstEarlyReturnIndex).toBeGreaterThan(0);
 
     const afterEarlyReturns = source.slice(firstEarlyReturnIndex);

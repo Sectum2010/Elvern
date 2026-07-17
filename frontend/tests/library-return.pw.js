@@ -60,6 +60,9 @@ const libraryPayload = {
 
 
 async function installApiFixture(page) {
+  await page.route("**/_elvern/frontend-health", async (route) => {
+    await route.fulfill({ status: 200, body: "" });
+  });
   await page.route("**/health", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: '{"status":"ok"}' });
   });

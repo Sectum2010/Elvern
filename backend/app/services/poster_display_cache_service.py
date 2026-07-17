@@ -60,6 +60,39 @@ def _card_cache_path(
     return variant_dir / f"{cache_key}{extension}"
 
 
+def find_cached_card_poster_display_path(
+    settings: Settings,
+    original_poster_path: Path | str,
+    *,
+    target_width: int | None = None,
+) -> Path | None:
+    if not settings.poster_display_cache_enabled:
+        return None
+    original_path = Path(original_poster_path)
+    try:
+        source_stat = original_path.stat()
+    except OSError:
+        return None
+    resolved_target_width = int(target_width or settings.poster_card_cache_max_width)
+    for output_format, extension in (("JPEG", ".jpg"), ("PNG", ".png")):
+        cache_key = _card_cache_key(
+            original_poster_path=original_path,
+            source_stat=source_stat,
+            target_width=resolved_target_width,
+            output_format=output_format,
+            jpeg_quality=int(settings.poster_card_cache_jpeg_quality),
+        )
+        candidate = _card_cache_path(
+            settings,
+            cache_key=cache_key,
+            extension=extension,
+            target_width=resolved_target_width,
+        )
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _atomic_save_image(image: Image.Image, *, target_path: Path, output_format: str, jpeg_quality: int, icc_profile) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     file_descriptor, temp_name = tempfile.mkstemp(
@@ -105,6 +138,13 @@ def get_or_create_card_poster_display_cache(
 
     resolved_target_width = int(target_width or settings.poster_card_cache_max_width)
     try:
+        cached_path = find_cached_card_poster_display_path(
+            settings,
+            original_path,
+            target_width=resolved_target_width,
+        )
+        if cached_path is not None:
+            return cached_path
         source_stat = original_path.stat()
         with Image.open(original_path) as opened_image:
             icc_profile = opened_image.info.get("icc_profile")
@@ -148,8 +188,7 @@ def get_or_create_card_poster_display_cache(
             return target_path
     except Exception as exc:
         logger.warning(
-            "Poster display cache generation failed for %s; falling back to original poster: %s",
-            original_path,
-            exc,
+            "Poster display cache generation failed; falling back to the original poster (%s).",
+            type(exc).__name__,
         )
         return original_path

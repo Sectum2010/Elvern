@@ -17,6 +17,7 @@ from ..config import Settings
 CONTINUE_WATCHING_MAX_ITEMS = 6
 SERIES_PREFIX_TRAILING_TOKENS = {"the", "a", "an", "and"}
 SERIES_HEADING_SMALL_WORDS = {"a", "an", "and", "as", "at", "for", "in", "of", "on", "the", "to"}
+_LOCAL_MEDIA_ROOT_UNSET = object()
 
 
 def _merge_continue_progress_row(representative_row, source_progress_row):
@@ -145,7 +146,13 @@ def _select_continue_watching_rows(
     return selected_rows[:CONTINUE_WATCHING_MAX_ITEMS]
 
 
-def _series_folder_key(settings: Settings, row, *, include_cloud: bool = False) -> tuple[str, str] | None:
+def _series_folder_key(
+    settings: Settings,
+    row,
+    *,
+    include_cloud: bool = False,
+    local_media_root: Path | None | object = _LOCAL_MEDIA_ROOT_UNSET,
+) -> tuple[str, str] | None:
     source_kind = str(_row_value(row, "source_kind", "local") or "local")
     if source_kind == "cloud":
         if not include_cloud:
@@ -168,7 +175,12 @@ def _series_folder_key(settings: Settings, row, *, include_cloud: bool = False) 
         return None
     try:
         resolved_file = Path(file_path).resolve()
-        media_root = get_effective_shared_local_library_path(settings).resolve()
+        if local_media_root is _LOCAL_MEDIA_ROOT_UNSET:
+            media_root = get_effective_shared_local_library_path(settings).resolve()
+        elif local_media_root is None:
+            return None
+        else:
+            media_root = Path(local_media_root)
     except OSError:
         return None
     if media_root not in resolved_file.parents:
@@ -261,8 +273,28 @@ def _build_series_rail_plans(
     include_cloud: bool = False,
 ) -> list[dict[str, object]]:
     grouped_rows: dict[str, dict[str, object]] = {}
+    local_media_root: Path | None | object = _LOCAL_MEDIA_ROOT_UNSET
     for row in rows:
-        folder_metadata = _series_folder_key(settings, row, include_cloud=include_cloud)
+        source_kind = str(_row_value(row, "source_kind", "local") or "local")
+        folder_key = str(_row_value(row, "series_folder_key", "") or "").strip()
+        folder_name = str(_row_value(row, "series_folder_name", "") or "").strip()
+        needs_local_root = (
+            not include_cloud
+            and source_kind == "local"
+            and not (folder_key and folder_name)
+            and bool(str(_row_value(row, "file_path", "") or "").strip())
+        )
+        if needs_local_root and local_media_root is _LOCAL_MEDIA_ROOT_UNSET:
+            try:
+                local_media_root = get_effective_shared_local_library_path(settings).resolve()
+            except OSError:
+                local_media_root = None
+        folder_metadata = _series_folder_key(
+            settings,
+            row,
+            include_cloud=include_cloud,
+            local_media_root=local_media_root,
+        )
         if folder_metadata is None:
             continue
         folder_key, folder_name = folder_metadata

@@ -55,6 +55,13 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
+def _get_positive_int(name: str, default: int) -> int:
+    value = _get_int(name, default)
+    if value <= 0:
+        raise ConfigError(f"{name} must be a positive integer")
+    return value
+
+
 def _get_optional_int(name: str) -> int | None:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -192,7 +199,13 @@ class Settings:
     poster_display_cache_dir: Path
     poster_card_cache_max_width: int
     poster_card_cache_jpeg_quality: int
+    poster_generation_workers: int
+    poster_generation_queue_max: int
+    poster_prewarm_enabled: bool
+    poster_prewarm_first_items: int
+    poster_prewarm_recent_items: int
     library_summary_v2_enabled: bool
+    library_plan_timing_enabled: bool
     max_concurrent_transcodes: int
     max_concurrent_mobile_workers: int
     mobile_queue_timeout_seconds: int
@@ -313,7 +326,13 @@ def load_settings() -> Settings:
         ),
         poster_card_cache_max_width=_get_int("ELVERN_POSTER_CARD_CACHE_MAX_WIDTH", 1400),
         poster_card_cache_jpeg_quality=_get_int("ELVERN_POSTER_CARD_CACHE_JPEG_QUALITY", 97),
+        poster_generation_workers=_get_positive_int("ELVERN_POSTER_GENERATION_WORKERS", 2),
+        poster_generation_queue_max=_get_positive_int("ELVERN_POSTER_GENERATION_QUEUE_MAX", 256),
+        poster_prewarm_enabled=_get_bool("ELVERN_POSTER_PREWARM_ENABLED", True),
+        poster_prewarm_first_items=_get_positive_int("ELVERN_POSTER_PREWARM_FIRST_ITEMS", 12),
+        poster_prewarm_recent_items=_get_positive_int("ELVERN_POSTER_PREWARM_RECENT_ITEMS", 6),
         library_summary_v2_enabled=_get_bool("ELVERN_LIBRARY_SUMMARY_V2_ENABLED", True),
+        library_plan_timing_enabled=_get_bool("ELVERN_LIBRARY_PLAN_TIMING_ENABLED", False),
         max_concurrent_transcodes=_get_int("ELVERN_MAX_CONCURRENT_TRANSCODES", 1),
         max_concurrent_mobile_workers=_get_int("ELVERN_MAX_CONCURRENT_MOBILE_WORKERS", 2),
         mobile_queue_timeout_seconds=_get_int("ELVERN_MOBILE_QUEUE_TIMEOUT_SECONDS", 12),

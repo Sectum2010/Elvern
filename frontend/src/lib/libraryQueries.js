@@ -94,6 +94,75 @@ export function markLibraryQueriesStale({ refetchType = "none" } = {}) {
 }
 
 
+function toDetailPreview(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  const id = Number(item.id);
+  if (!Number.isFinite(id) || id <= 0 || !String(item.title || "").trim()) {
+    return null;
+  }
+  return {
+    id,
+    title: String(item.title).trim(),
+    year: item.year ?? null,
+    source_kind: String(item.source_kind || "").trim() || null,
+  };
+}
+
+
+function findItemInV1Payload(payload, itemId) {
+  const collections = [
+    payload?.items,
+    payload?.continue_watching,
+    payload?.recently_added,
+    ...(Array.isArray(payload?.series_rails) ? payload.series_rails.map((rail) => rail?.items) : []),
+    ...(Array.isArray(payload?.cloud_series_rails) ? payload.cloud_series_rails.map((rail) => rail?.items) : []),
+  ];
+  for (const items of collections) {
+    const match = Array.isArray(items)
+      ? items.find((item) => Number(item?.id) === itemId)
+      : null;
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+
+
+export function findLibraryItemDetailPreview({ itemId, userId, role } = {}) {
+  const normalizedItemId = Number(itemId);
+  const normalizedUserId = normalizeString(userId);
+  const normalizedRole = normalizeString(role).toLowerCase();
+  if (!Number.isFinite(normalizedItemId) || normalizedItemId <= 0 || !normalizedUserId || !normalizedRole) {
+    return null;
+  }
+  const queries = queryClient.getQueryCache().findAll();
+  for (const query of queries) {
+    if (!isLibraryRenderQueryKey(query.queryKey)) {
+      continue;
+    }
+    const identity = query.queryKey[2] || {};
+    if (
+      normalizeString(identity.userId) !== normalizedUserId
+      || normalizeString(identity.role).toLowerCase() !== normalizedRole
+    ) {
+      continue;
+    }
+    const payload = query.state.data;
+    const item = query.queryKey[1] === "v2"
+      ? payload?.items_by_id?.[String(normalizedItemId)]
+      : findItemInV1Payload(payload, normalizedItemId);
+    const preview = toDetailPreview(item);
+    if (preview) {
+      return preview;
+    }
+  }
+  return null;
+}
+
+
 function patchProgressInItems(items, itemId, progressFields) {
   if (!Array.isArray(items)) {
     return items;

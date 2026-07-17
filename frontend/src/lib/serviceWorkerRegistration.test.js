@@ -9,7 +9,7 @@ import {
 describe("service worker dynamic-prefix registration", () => {
   test("uses document.baseURI for both script and scope", () => {
     expect(buildServiceWorkerRegistration("https://elvern.test/abc23456/")).toEqual({
-      scriptUrl: "https://elvern.test/abc23456/sw.js",
+      scriptUrl: "https://elvern.test/abc23456/sw.js?elvern_worker=offline-shell-v1",
       scope: "/abc23456/",
     });
   });
@@ -37,8 +37,8 @@ describe("service worker dynamic-prefix registration", () => {
       unregister: vi.fn(),
     };
     const staleElvernRegistration = {
-      scope: "https://elvern.test/old23456/",
-      active: { scriptURL: "https://elvern.test/old23456/sw.js" },
+      scope: "https://elvern.test/bcd23456/",
+      active: { scriptURL: "https://elvern.test/bcd23456/sw.js?elvern_worker=offline-shell-v1" },
       unregister: vi.fn().mockResolvedValue(true),
     };
     const unrelatedRegistration = {
@@ -64,6 +64,33 @@ describe("service worker dynamic-prefix registration", () => {
     expect(activeRegistration.update).toHaveBeenCalledOnce();
     expect(activeRegistration.unregister).not.toHaveBeenCalled();
     expect(unrelatedRegistration.unregister).not.toHaveBeenCalled();
+  });
+
+  test("never unregisters an unrelated same-origin service worker named sw.js", async () => {
+    const activeRegistration = {
+      scope: "https://elvern.test/abc23456/",
+      active: { scriptURL: "https://elvern.test/abc23456/sw.js?elvern_worker=offline-shell-v1" },
+      installing: null,
+      waiting: null,
+      update: vi.fn().mockResolvedValue(undefined),
+      unregister: vi.fn(),
+    };
+    const unrelatedSwRegistration = {
+      scope: "https://elvern.test/another-app/",
+      active: { scriptURL: "https://elvern.test/another-app/sw.js" },
+      unregister: vi.fn(),
+    };
+    const serviceWorker = {
+      register: vi.fn().mockResolvedValue(activeRegistration),
+      getRegistrations: vi.fn().mockResolvedValue([activeRegistration, unrelatedSwRegistration]),
+    };
+
+    await registerElvernServiceWorker({
+      baseUri: "https://elvern.test/abc23456/",
+      serviceWorker,
+    });
+
+    expect(unrelatedSwRegistration.unregister).not.toHaveBeenCalled();
   });
 
   test("a background update failure keeps the active worker and does not fail registration", async () => {

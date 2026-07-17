@@ -57,6 +57,12 @@ function renderCard({
 
 
 describe("MediaCard poster loading", () => {
+  test("gives non-scheduler poster downloads low fetch priority", () => {
+    const image = renderCard({ smartPosterLoadingEnabled: false });
+
+    expect(image).toHaveAttribute("fetchpriority", "low");
+  });
+
   beforeEach(() => {
     smartPosterMocks.register.mockClear();
     smartPosterMocks.subscribe.mockClear();

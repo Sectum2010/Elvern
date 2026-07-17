@@ -157,6 +157,13 @@ export function sendMethodNotAllowed(response, allowedMethods) {
   response.end("Method Not Allowed");
 }
 
+export function sendFrontendHealth(response) {
+  response.writeHead(204, withSecurityHeaders({
+    "Cache-Control": "no-store",
+  }));
+  response.end();
+}
+
 function redactSensitiveUrl(value) {
   return String(value || "").replace(downloadSessionTokenPattern, "/api/download/sessions/[redacted]");
 }
@@ -321,6 +328,13 @@ export function classifyFrontendRequestTarget(parsedTarget, urlPrefix, method = 
     return { kind: "proxy", route: "api" };
   }
 
+  if (parsedTarget.pathname === "/_elvern/frontend-health") {
+    if (method === "GET" || method === "HEAD") {
+      return { kind: "frontend_health", route: "frontend_health" };
+    }
+    return { kind: "method_not_allowed", route: "frontend_health", allowedMethods: ["GET", "HEAD"] };
+  }
+
   if (parsedTarget.pathname === "/health") {
     return { kind: "proxy", route: "health" };
   }
@@ -414,6 +428,10 @@ export async function handleFrontendRequest(request, response) {
     }
 
     const initialRoute = classifyFrontendRequestTarget(parsedTarget, null, request.method);
+    if (initialRoute.kind === "frontend_health") {
+      sendFrontendHealth(response);
+      return;
+    }
     if (initialRoute.kind === "proxy") {
       await proxyRequest(request, response, buildBackendProxyUrl(parsedTarget));
       return;

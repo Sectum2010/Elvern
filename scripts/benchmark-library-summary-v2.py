@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.app import db as db_module  # noqa: E402
 from backend.app.auth import ensure_admin_user  # noqa: E402
 from backend.app.config import get_settings, refresh_settings  # noqa: E402
 from backend.app.db import get_connection, init_db  # noqa: E402
@@ -89,6 +90,7 @@ def _configure_isolated_settings(work_root: Path, media_root: Path):
         "ELVERN_ARGON2_TIME_COST": "1",
         "ELVERN_ARGON2_MEMORY_COST": "8192",
         "ELVERN_ARGON2_PARALLELISM": "1",
+        "ELVERN_LIBRARY_PLAN_TIMING_ENABLED": "true",
     }
     os.environ.update(safe_environment)
     get_settings.cache_clear()
@@ -204,9 +206,24 @@ def _run_cell(item_count: int, overlap_ratio: float, repetitions: int) -> dict[s
             "v2_json_encode": [],
         }
         poster_resolve_counts = {"v1": [], "v2": []}
+        stage_timings: dict[str, list[float]] = {}
+        sql_statement_counts: list[int] = []
         original_presentation_resolver = library_presentation_service._poster_url_for_row
         original_v2_resolver = library_service._poster_url_for_row
         active_counter = {"value": 0}
+        sql_counter = {"value": 0}
+        original_connect = db_module.connect
+
+        def counted_connect(db_path):
+            connection = original_connect(db_path)
+
+            def count_statement(statement: str) -> None:
+                normalized = statement.lstrip().upper()
+                if normalized.startswith(("SELECT", "WITH")):
+                    sql_counter["value"] += 1
+
+            connection.set_trace_callback(count_statement)
+            return connection
 
         def counted_presentation_resolver(*args, **kwargs):
             active_counter["value"] += 1
@@ -218,13 +235,16 @@ def _run_cell(item_count: int, overlap_ratio: float, repetitions: int) -> dict[s
 
         library_presentation_service._poster_url_for_row = counted_presentation_resolver
         library_service._poster_url_for_row = counted_v2_resolver
+        db_module.connect = counted_connect
         try:
             v1_payload = v2_payload = {}
             v1_json = v2_json = b""
             for _ in range(repetitions):
+                sql_counter["value"] = 0
                 started = time.perf_counter()
                 plan = library_service.build_library_view_plan(settings, user_id=1)
                 timings["view_plan_build"].append((time.perf_counter() - started) * 1000)
+                sql_statement_counts.append(sql_counter["value"])
 
                 active_counter["value"] = 0
                 started = time.perf_counter()
@@ -240,6 +260,8 @@ def _run_cell(item_count: int, overlap_ratio: float, repetitions: int) -> dict[s
                     scan_in_progress=False,
                 )
                 timings["v2_serialization"].append((time.perf_counter() - started) * 1000)
+                for stage_name, duration_ms in (plan.timing.snapshot()["stages_ms"] if plan.timing else {}).items():
+                    stage_timings.setdefault(stage_name, []).append(float(duration_ms))
                 poster_resolve_counts["v2"].append(active_counter["value"])
 
                 started = time.perf_counter()
@@ -251,6 +273,7 @@ def _run_cell(item_count: int, overlap_ratio: float, repetitions: int) -> dict[s
         finally:
             library_presentation_service._poster_url_for_row = original_presentation_resolver
             library_service._poster_url_for_row = original_v2_resolver
+            db_module.connect = original_connect
 
         poster_metrics = get_poster_index_metrics()
         v1_gzip_bytes = len(gzip.compress(v1_json))
@@ -268,8 +291,19 @@ def _run_cell(item_count: int, overlap_ratio: float, repetitions: int) -> dict[s
             "uncompressed_reduction_ratio": round(1 - (len(v2_json) / len(v1_json)), 4),
             "gzip_reduction_ratio": round(1 - (v2_gzip_bytes / v1_gzip_bytes), 4),
             "poster_index_directory_iterations": poster_metrics["directory_iteration_count"],
+            "poster_index_cache_hits": poster_metrics["cache_hit_count"],
+            "sql_statement_count": int(statistics.median(sql_statement_counts)),
             "v1_poster_resolve_count": int(statistics.median(poster_resolve_counts["v1"])),
             "v2_poster_resolve_count": int(statistics.median(poster_resolve_counts["v2"])),
+            "v1_poster_memo_hit_estimate": max(
+                0,
+                _count_v1_item_objects(v1_payload) - len(v2_payload["items_by_id"]),
+            ),
+            "v2_poster_memo_hit_estimate": 0,
+            "view_plan_stage_timings": {
+                name: _timing_summary(values)
+                for name, values in sorted(stage_timings.items())
+            },
         }
 
 

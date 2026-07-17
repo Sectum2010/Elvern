@@ -3,8 +3,14 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   CONNECTION_FAMILIARS,
   CONNECTION_FAMILIAR_ROTATION_MS,
+  CONNECTION_SERVER_OOPS_COPY,
   CONNECTION_STATUS_WORDS,
+  CONNECTION_VPN_OOPS_COPY,
+  CONNECTIVITY_BACKEND_UNREACHABLE,
+  CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE,
+  CONNECTIVITY_INTERNET_OFFLINE,
   createStartupConnectionController,
+  NO_INTERNET_REAPPEAR_MS,
   STARTUP_APPLICATION_READY_EVENT,
   STARTUP_CONNECTIVITY_FAILURE_EVENT,
   STARTUP_SHELL_REVEAL_DELAY_MS,
@@ -31,14 +37,21 @@ function renderWaitingWord(element, text) {
 }
 
 
-function updateStaticConnectionShell({ status, familiarIndex, wordIndex, visible }) {
+function updateStaticConnectionShell({ status, classification, familiarIndex, wordIndex, visible }) {
   const shell = document.getElementById("elvern-connection-shell");
   if (!shell) {
     return;
   }
   const waitingWord = shell.querySelector("[data-connection-waiting-word]");
+  const oopsCopy = shell.querySelector("[data-connection-oops-copy]");
   renderWaitingWord(waitingWord, CONNECTION_STATUS_WORDS[wordIndex] || CONNECTION_STATUS_WORDS[0]);
+  if (oopsCopy) {
+    oopsCopy.textContent = classification === CONNECTIVITY_BACKEND_UNREACHABLE
+      ? CONNECTION_SERVER_OOPS_COPY
+      : CONNECTION_VPN_OOPS_COPY;
+  }
   shell.dataset.familiar = CONNECTION_FAMILIARS[familiarIndex] || CONNECTION_FAMILIARS[0];
+  shell.dataset.classification = classification || "";
   shell.dataset.state = status;
   if (status === "connected") {
     shell.classList.remove("elvern-connection-shell--visible");
@@ -55,6 +68,103 @@ function updateStaticConnectionShell({ status, familiarIndex, wordIndex, visible
     shell.removeAttribute("aria-hidden");
     shell.classList.toggle("elvern-connection-shell--visible", visible || status === "unreachable");
   }
+}
+
+
+export function RuntimeConnectivityLayer({ controller, snapshot }) {
+  const [internetNoticeDismissed, setInternetNoticeDismissed] = useState(false);
+  const [dragOffset, setDragOffset] = useState(0);
+  const pointerStartYRef = useRef(null);
+  const reappearTimerRef = useRef(0);
+  const internetOffline = snapshot.runtimeReady
+    && snapshot.classification === CONNECTIVITY_INTERNET_OFFLINE;
+  const showRuntimeOops = snapshot.runtimeReady
+    && snapshot.status === "unreachable"
+    && [CONNECTIVITY_BACKEND_UNREACHABLE, CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE]
+      .includes(snapshot.classification);
+
+  useEffect(() => {
+    if (!internetOffline) {
+      window.clearTimeout(reappearTimerRef.current);
+      reappearTimerRef.current = 0;
+      setInternetNoticeDismissed(false);
+      setDragOffset(0);
+    }
+  }, [internetOffline]);
+
+  useEffect(() => () => {
+    window.clearTimeout(reappearTimerRef.current);
+  }, []);
+
+  function dismissInternetNotice() {
+    if (!internetOffline || internetNoticeDismissed) {
+      return;
+    }
+    setInternetNoticeDismissed(true);
+    setDragOffset(0);
+    window.clearTimeout(reappearTimerRef.current);
+    reappearTimerRef.current = window.setTimeout(() => {
+      reappearTimerRef.current = 0;
+      setInternetNoticeDismissed(false);
+    }, NO_INTERNET_REAPPEAR_MS);
+  }
+
+  function handlePointerDown(event) {
+    pointerStartYRef.current = event.clientY;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handlePointerMove(event) {
+    if (pointerStartYRef.current == null) {
+      return;
+    }
+    setDragOffset(Math.min(0, event.clientY - pointerStartYRef.current));
+  }
+
+  function handlePointerEnd(event) {
+    if (pointerStartYRef.current == null) {
+      return;
+    }
+    const movement = event.clientY - pointerStartYRef.current;
+    pointerStartYRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (movement <= -24) {
+      dismissInternetNotice();
+      return;
+    }
+    setDragOffset(0);
+  }
+
+  const oopsCopy = snapshot.classification === CONNECTIVITY_BACKEND_UNREACHABLE
+    ? CONNECTION_SERVER_OOPS_COPY
+    : CONNECTION_VPN_OOPS_COPY;
+
+  return (
+    <>
+      {internetOffline && !internetNoticeDismissed ? (
+        <div
+          className="runtime-connectivity-notice"
+          onPointerCancel={handlePointerEnd}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          role="status"
+          style={{ transform: `translate(-50%, ${dragOffset}px)` }}
+        >
+          No Internet
+        </div>
+      ) : null}
+      {showRuntimeOops ? (
+        <div className="runtime-connectivity-oops" role="alert">
+          <div className="runtime-connectivity-oops__content">
+            <h1>Oops!</h1>
+            <p>{oopsCopy}</p>
+            <button onClick={() => void controller.retry()} type="button">Retry</button>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 
@@ -124,12 +234,19 @@ export function StartupConnectionGate({ children, controller: providedController
 
   useEffect(() => {
     updateStaticConnectionShell({
-      status: snapshot.status,
+      status: snapshot.runtimeReady ? "connected" : snapshot.status,
+      classification: snapshot.classification,
       familiarIndex: rotationIndex % CONNECTION_FAMILIARS.length,
       wordIndex: rotationIndex % CONNECTION_STATUS_WORDS.length,
       visible: shellVisible,
     });
-  }, [rotationIndex, shellVisible, snapshot.status]);
+  }, [rotationIndex, shellVisible, snapshot.classification, snapshot.runtimeReady, snapshot.status]);
 
-  return snapshot.serviceReachable ? children : null;
+  const canRenderApplication = snapshot.runtimeReady || snapshot.serviceReachable;
+  return (
+    <>
+      {canRenderApplication ? children : null}
+      <RuntimeConnectivityLayer controller={controller} snapshot={snapshot} />
+    </>
+  );
 }

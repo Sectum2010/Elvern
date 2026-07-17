@@ -5,6 +5,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 from .library_home_curation_service import (
     _build_series_rail_plans,
@@ -58,6 +59,7 @@ from .title_normalization import (
 from .user_settings_service import get_user_settings
 from .local_library_source_service import ensure_current_shared_local_source_binding
 from .poster_index_service import PosterIndexSnapshot, get_poster_index_snapshot
+from .library_view_plan_timing import LibraryViewPlanTiming
 from ..config import Settings
 from ..db import get_connection
 
@@ -94,6 +96,7 @@ class LibraryViewPlan:
     recently_added_rows: list[object]
     available_genres: list[str]
     total_items: int
+    timing: LibraryViewPlanTiming | None = None
 
 
 def normalize_library_category(category: str | None = None) -> str:
@@ -220,18 +223,39 @@ def _row_genre_keys(row) -> set[str]:
     return {str(genre).casefold() for genre in (_row_value(row, "genres", []) or [])}
 
 
-def _apply_library_arrange_filters(rows: list, arrange: dict[str, str | None]) -> list:
+def _apply_library_arrange_filters(
+    rows: list,
+    arrange: dict[str, str | None],
+    *,
+    timing: LibraryViewPlanTiming | None = None,
+) -> list:
     source_filter = str(arrange["source"] or "all")
     genre_filter = arrange["genre"]
     quality_filter = str(arrange["quality"] or "all")
     genre_key = str(genre_filter).casefold() if genre_filter else None
     filtered_rows = []
     for row in rows:
-        if source_filter != "all" and str(_row_value(row, "source_kind", "local") or "local") != source_filter:
+        started_ns = time.perf_counter_ns() if timing and timing.enabled else 0
+        source_matches = source_filter == "all" or str(
+            _row_value(row, "source_kind", "local") or "local"
+        ) == source_filter
+        if started_ns:
+            timing.add_ns("source_filter", time.perf_counter_ns() - started_ns)
+        if not source_matches:
             continue
-        if genre_key and genre_key not in _row_genre_keys(row):
+        started_ns = time.perf_counter_ns() if timing and timing.enabled else 0
+        genre_matches = not genre_key or genre_key in _row_genre_keys(row)
+        if started_ns:
+            timing.add_ns("genre_filter", time.perf_counter_ns() - started_ns)
+        if not genre_matches:
             continue
-        if quality_filter != "all" and str(_row_value(row, "quality_tier", "") or "") != quality_filter:
+        started_ns = time.perf_counter_ns() if timing and timing.enabled else 0
+        quality_matches = quality_filter == "all" or str(
+            _row_value(row, "quality_tier", "") or ""
+        ) == quality_filter
+        if started_ns:
+            timing.add_ns("quality_filter", time.perf_counter_ns() - started_ns)
+        if not quality_matches:
             continue
         filtered_rows.append(row)
     return filtered_rows
@@ -526,79 +550,93 @@ def build_library_view_plan(
     quality: str | None = None,
     sort: str | None = None,
 ) -> LibraryViewPlan:
+    timing = LibraryViewPlanTiming(enabled=settings.library_plan_timing_enabled)
+    request_started_ns = time.perf_counter_ns() if timing.enabled else 0
     normalized_category = normalize_library_category(category)
     arrange = normalize_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
-    user_settings = get_user_settings(settings, user_id=user_id)
+    with timing.stage("user_settings"):
+        user_settings = get_user_settings(settings, user_id=user_id)
     with get_connection(settings) as connection:
-        shared_local_source_id = ensure_current_shared_local_source_binding(
-            settings,
-            connection=connection,
-        )
-        poster_dir = _poster_directory(settings, connection=connection)
-        genre_map = _genre_map_from_connection(connection)
-        all_rows = connection.execute(
-            _base_query() + " ORDER BY lower(m.title) ASC",
-            (user_id, user_id, shared_local_source_id, user_id),
-        ).fetchall()
-        continue_rows = connection.execute(
-            _base_query()
-            + """
-              AND COALESCE(p.completed, 0) = 0
-                AND (
-                    COALESCE(p.position_seconds, 0) > 0
-                    OR COALESCE(p.watch_seconds_total, 0) > 0
-                )
-              ORDER BY p.updated_at DESC
-              """,
-            (user_id, user_id, shared_local_source_id, user_id),
-        ).fetchall()
-        watch_history_rows = connection.execute(
-            """
-            SELECT
-                media_item_id,
-                ROUND(SUM(watched_seconds), 2) AS watch_seconds_total,
-                MAX(recorded_at_epoch) AS last_watch_event_epoch
-            FROM playback_watch_events
-            WHERE user_id = ?
-            GROUP BY media_item_id
-            """,
-            (user_id,),
-        ).fetchall()
-        tracking_activity_rows = connection.execute(
-            """
-            SELECT
-                media_item_id,
-                MAX(recorded_at_epoch) AS last_tracking_event_epoch
-            FROM playback_tracking_events
-            WHERE user_id = ?
-              AND event_type IN ('playback_progress', 'playback_seeked', 'playback_stopped', 'playback_completed')
-            GROUP BY media_item_id
-            """,
-            (user_id,),
-        ).fetchall()
-        globally_hidden_media_item_ids = _load_globally_hidden_media_item_ids(connection)
-        globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
-        hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
-        hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
-    poster_index = get_poster_index_snapshot(poster_dir)
+        with timing.stage("accessible_media_context"):
+            shared_local_source_id = ensure_current_shared_local_source_binding(
+                settings,
+                connection=connection,
+            )
+            poster_dir = _poster_directory(settings, connection=connection)
+        with timing.stage("genre_loading"):
+            genre_map = _genre_map_from_connection(connection)
+        with timing.stage("accessible_media_sql"):
+            all_rows = connection.execute(
+                _base_query() + " ORDER BY lower(m.title) ASC",
+                (user_id, user_id, shared_local_source_id, user_id),
+            ).fetchall()
+        with timing.stage("continue_watching_sql"):
+            continue_rows = connection.execute(
+                _base_query()
+                + """
+                  AND COALESCE(p.completed, 0) = 0
+                    AND (
+                        COALESCE(p.position_seconds, 0) > 0
+                        OR COALESCE(p.watch_seconds_total, 0) > 0
+                    )
+                  ORDER BY p.updated_at DESC
+                  """,
+                (user_id, user_id, shared_local_source_id, user_id),
+            ).fetchall()
+        with timing.stage("watch_event_aggregates"):
+            watch_history_rows = connection.execute(
+                """
+                SELECT
+                    media_item_id,
+                    ROUND(SUM(watched_seconds), 2) AS watch_seconds_total,
+                    MAX(recorded_at_epoch) AS last_watch_event_epoch
+                FROM playback_watch_events
+                WHERE user_id = ?
+                GROUP BY media_item_id
+                """,
+                (user_id,),
+            ).fetchall()
+        with timing.stage("tracking_event_aggregates"):
+            tracking_activity_rows = connection.execute(
+                """
+                SELECT
+                    media_item_id,
+                    MAX(recorded_at_epoch) AS last_tracking_event_epoch
+                FROM playback_tracking_events
+                WHERE user_id = ?
+                  AND event_type IN ('playback_progress', 'playback_seeked', 'playback_stopped', 'playback_completed')
+                GROUP BY media_item_id
+                """,
+                (user_id,),
+            ).fetchall()
+        with timing.stage("hidden_access_loading"):
+            globally_hidden_media_item_ids = _load_globally_hidden_media_item_ids(connection)
+            globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
+            hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
+            hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
+    with timing.stage("poster_index_snapshot"):
+        poster_index = get_poster_index_snapshot(poster_dir)
     quality_rank_memo: dict[int, dict[str, object]] = {}
-    all_rows = _decorate_rows_with_arrange_metadata(
-        list(all_rows),
-        genre_map,
-        quality_rank_memo=quality_rank_memo,
-    )
-    continue_rows = _decorate_rows_with_arrange_metadata(
-        list(continue_rows),
-        genre_map,
-        quality_rank_memo=quality_rank_memo,
-    )
-    all_rows = _filter_rows_for_library_category(list(all_rows), normalized_category)
-    continue_rows = _filter_rows_for_library_category(list(continue_rows), normalized_category)
-    recent_rows = sorted(
-        all_rows,
-        key=lambda row: str(_row_value(row, "last_scanned_at", "") or ""),
-        reverse=True,
-    )[:12]
+    with timing.stage("row_decoration"):
+        all_rows = _decorate_rows_with_arrange_metadata(
+            list(all_rows),
+            genre_map,
+            quality_rank_memo=quality_rank_memo,
+        )
+        continue_rows = _decorate_rows_with_arrange_metadata(
+            list(continue_rows),
+            genre_map,
+            quality_rank_memo=quality_rank_memo,
+        )
+    with timing.stage("category_filter"):
+        all_rows = _filter_rows_for_library_category(list(all_rows), normalized_category)
+        continue_rows = _filter_rows_for_library_category(list(continue_rows), normalized_category)
+    with timing.stage("recently_added_selection"):
+        recent_rows = sorted(
+            all_rows,
+            key=lambda row: str(_row_value(row, "last_scanned_at", "") or ""),
+            reverse=True,
+        )[:12]
     watch_seconds_total_by_media_item_id = {
         int(row["media_item_id"]): float(row["watch_seconds_total"] or 0)
         for row in watch_history_rows
@@ -611,6 +649,7 @@ def build_library_view_plan(
         int(row["media_item_id"]): int(row["last_tracking_event_epoch"] or 0)
         for row in tracking_activity_rows
     }
+    visible_started_ns = time.perf_counter_ns()
     visible_context = _build_visible_representative_context(
         rows=list(all_rows),
         hide_duplicate_movies=bool(user_settings["hide_duplicate_movies"]),
@@ -619,6 +658,9 @@ def build_library_view_plan(
         hidden_media_item_ids=hidden_media_item_ids,
         hidden_movie_keys=set(hidden_movie_key_records),
     )
+    visible_elapsed_ns = time.perf_counter_ns() - visible_started_ns
+    timing.add_ns("hidden_filtering", visible_elapsed_ns)
+    timing.add_ns("duplicate_representative", visible_elapsed_ns)
     visible_all_rows = visible_context["rows"]
     available_genre_rows = _apply_library_arrange_filters(
         list(visible_all_rows),
@@ -626,34 +668,41 @@ def build_library_view_plan(
             **arrange,
             "genre": None,
         },
+        timing=timing,
     )
-    available_genres = _available_genres_for_rows(available_genre_rows)
-    filtered_all_rows = _apply_library_arrange_filters(list(visible_all_rows), arrange)
-    sorted_visible_all_rows = _sort_library_rows(filtered_all_rows, str(arrange["sort"] or "smart"))
-    series_rail_plans = _build_series_rail_plans(
-        settings,
-        rows=list(filtered_all_rows),
-    )
-    cloud_series_rail_plans = _build_series_rail_plans(
-        settings,
-        rows=list(filtered_all_rows),
-        include_cloud=True,
-    )
-    visible_continue_rows = _apply_library_arrange_filters(
-        _select_continue_watching_rows(
-            _resolve_continue_watching_rows(
-                continue_rows=_decorate_continue_rows(
-                    list(continue_rows),
-                    watch_seconds_total_by_media_item_id=watch_seconds_total_by_media_item_id,
-                    last_watch_event_epoch_by_media_item_id=last_watch_event_epoch_by_media_item_id,
-                    last_tracking_event_epoch_by_media_item_id=last_tracking_event_epoch_by_media_item_id,
+    with timing.stage("available_genres"):
+        available_genres = _available_genres_for_rows(available_genre_rows)
+    filtered_all_rows = _apply_library_arrange_filters(list(visible_all_rows), arrange, timing=timing)
+    with timing.stage("sorting"):
+        sorted_visible_all_rows = _sort_library_rows(filtered_all_rows, str(arrange["sort"] or "smart"))
+    with timing.stage("local_series_rail_build"):
+        series_rail_plans = _build_series_rail_plans(
+            settings,
+            rows=list(filtered_all_rows),
+        )
+    with timing.stage("cloud_series_rail_build"):
+        cloud_series_rail_plans = _build_series_rail_plans(
+            settings,
+            rows=list(filtered_all_rows),
+            include_cloud=True,
+        )
+    with timing.stage("continue_watching_selection"):
+        visible_continue_rows = _apply_library_arrange_filters(
+            _select_continue_watching_rows(
+                _resolve_continue_watching_rows(
+                    continue_rows=_decorate_continue_rows(
+                        list(continue_rows),
+                        watch_seconds_total_by_media_item_id=watch_seconds_total_by_media_item_id,
+                        last_watch_event_epoch_by_media_item_id=last_watch_event_epoch_by_media_item_id,
+                        last_tracking_event_epoch_by_media_item_id=last_tracking_event_epoch_by_media_item_id,
+                    ),
+                    visible_context=visible_context,
                 ),
-                visible_context=visible_context,
+                utc_iso_to_epoch_seconds=_utc_iso_to_epoch_seconds,
             ),
-            utc_iso_to_epoch_seconds=_utc_iso_to_epoch_seconds,
-        ),
-        arrange,
-    )
+            arrange,
+            timing=timing,
+        )
     if user_settings["hide_duplicate_movies"]:
         visible_recent_rows = _apply_manual_hidden_filter(
             _apply_global_hidden_filter(
@@ -681,6 +730,12 @@ def build_library_view_plan(
             key=lambda row: str(_row_value(row, "last_scanned_at", "") or ""),
             reverse=True,
         )[:12]
+    timing.count("rows_fetched", len(all_rows))
+    timing.count("rows_returned", len(sorted_visible_all_rows))
+    timing.count("rail_count", len(series_rail_plans) + len(cloud_series_rail_plans))
+    timing.count("unique_item_count", len({int(row["id"]) for row in sorted_visible_all_rows}))
+    if timing.enabled:
+        timing.add_ns("view_plan_total", time.perf_counter_ns() - request_started_ns)
     return LibraryViewPlan(
         category=normalized_category,
         arrange=arrange,
@@ -693,6 +748,7 @@ def build_library_view_plan(
         recently_added_rows=list(visible_recent_rows),
         total_items=len(filtered_all_rows),
         available_genres=available_genres,
+        timing=timing,
     )
 
 
@@ -835,17 +891,22 @@ def _serialize_media_item_v2(
         original_filename=_row_value(row, "original_filename"),
         source_kind=source_kind,
     )
+    timing_enabled = bool(plan.timing and plan.timing.enabled)
+    poster_started_ns = time.perf_counter_ns() if timing_enabled else 0
+    poster_url = _poster_url_for_row(
+        settings,
+        row,
+        poster_dir=plan.poster_dir,
+        poster_index=plan.poster_index,
+        poster_url_memo=poster_url_memo,
+    )
+    if timing_enabled:
+        plan.timing.add_ns("poster_url_resolution", time.perf_counter_ns() - poster_started_ns)
     return {
         "id": int(row["id"]),
         "title": display_title,
         "year": display_year,
-        "poster_url": _poster_url_for_row(
-            settings,
-            row,
-            poster_dir=plan.poster_dir,
-            poster_index=plan.poster_index,
-            poster_url_memo=poster_url_memo,
-        ),
+        "poster_url": poster_url,
         "source_kind": source_kind,
         "quality_rank": _row_value(row, "quality_rank") or build_library_quality_rank(row),
         "duration_seconds": _row_value(row, "duration_seconds"),
@@ -883,6 +944,8 @@ def serialize_library_view_v2(
     *,
     scan_in_progress: bool,
 ) -> dict[str, object]:
+    timing_enabled = bool(plan.timing and plan.timing.enabled)
+    serialization_started_ns = time.perf_counter_ns() if timing_enabled else 0
     rows_by_id = _v2_rows_by_id(plan)
     poster_url_memo: dict[int, str | None] = {}
     items_by_id = {
@@ -915,9 +978,13 @@ def serialize_library_view_v2(
         "total_items": plan.total_items,
         "scan_in_progress": bool(scan_in_progress),
     }
-    return {
+    revision_started_ns = time.perf_counter_ns() if timing_enabled else 0
+    revision = _library_summary_revision(payload_without_revision)
+    if timing_enabled:
+        plan.timing.add_ns("revision_hash", time.perf_counter_ns() - revision_started_ns)
+    payload = {
         "schema_version": payload_without_revision["schema_version"],
-        "revision": _library_summary_revision(payload_without_revision),
+        "revision": revision,
         "view": payload_without_revision["view"],
         "items_by_id": payload_without_revision["items_by_id"],
         "sections": payload_without_revision["sections"],
@@ -925,6 +992,9 @@ def serialize_library_view_v2(
         "total_items": payload_without_revision["total_items"],
         "scan_in_progress": payload_without_revision["scan_in_progress"],
     }
+    if timing_enabled:
+        plan.timing.add_ns("v2_serialization", time.perf_counter_ns() - serialization_started_ns)
+    return payload
 
 
 def list_library(
@@ -937,6 +1007,7 @@ def list_library(
     quality: str | None = None,
     sort: str | None = None,
 ) -> dict[str, object]:
+    route_started_ns = time.perf_counter_ns() if settings.library_plan_timing_enabled else 0
     plan = build_library_view_plan(
         settings,
         user_id=user_id,
@@ -946,7 +1017,18 @@ def list_library(
         quality=quality,
         sort=sort,
     )
-    return serialize_library_view_v1(settings, plan)
+    if plan.timing is not None and plan.timing.enabled:
+        with plan.timing.stage("v1_serialization"):
+            payload = serialize_library_view_v1(settings, plan)
+    else:
+        payload = serialize_library_view_v1(settings, plan)
+    if plan.timing is not None and plan.timing.enabled:
+        encoding_started_ns = time.perf_counter_ns()
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        plan.timing.add_ns("json_encoding", time.perf_counter_ns() - encoding_started_ns)
+        plan.timing.add_ns("route_total", time.perf_counter_ns() - route_started_ns)
+        plan.timing.log()
+    return payload
 
 
 def list_library_summary_v2(
@@ -960,6 +1042,7 @@ def list_library_summary_v2(
     sort: str | None = None,
     scan_in_progress: bool = False,
 ) -> dict[str, object]:
+    route_started_ns = time.perf_counter_ns() if settings.library_plan_timing_enabled else 0
     plan = build_library_view_plan(
         settings,
         user_id=user_id,
@@ -969,11 +1052,18 @@ def list_library_summary_v2(
         quality=quality,
         sort=sort,
     )
-    return serialize_library_view_v2(
+    payload = serialize_library_view_v2(
         settings,
         plan,
         scan_in_progress=scan_in_progress,
     )
+    if plan.timing is not None and plan.timing.enabled:
+        encoding_started_ns = time.perf_counter_ns()
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        plan.timing.add_ns("json_encoding", time.perf_counter_ns() - encoding_started_ns)
+        plan.timing.add_ns("route_total", time.perf_counter_ns() - route_started_ns)
+        plan.timing.log()
+    return payload
 
 
 def _search_match_score(row, query: str) -> int:

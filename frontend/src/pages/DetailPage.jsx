@@ -3,7 +3,6 @@ import { Tag } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useProviderAuth } from "../auth/ProviderAuthContext";
-import { LoadingView } from "../components/LoadingView";
 import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
 import { apiRequest } from "../lib/api";
 import {
@@ -40,7 +39,12 @@ import {
   normalizeVideoFitMode,
 } from "../lib/playerFitMode";
 import { getMovieCardTitle } from "../lib/movieTitles";
-import { invalidateLibraryQueries, patchLibraryProgressCaches } from "../lib/libraryQueries";
+import {
+  findLibraryItemDetailPreview,
+  invalidateLibraryQueries,
+  patchLibraryProgressCaches,
+} from "../lib/libraryQueries";
+import { DETAIL_PERFORMANCE_MARKS, markDetailPerformance } from "../lib/detailPerformanceTiming";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
@@ -557,7 +561,13 @@ export function DetailPage() {
   const providerReconnectPendingRef = useRef(false);
   const providerReconnectModalRef = useRef(null);
   const detailScrollResetItemRef = useRef(null);
-  const [item, setItem] = useState(null);
+  const libraryReturnPreparedRef = useRef(false);
+  const cachedDetailPreview = useMemo(() => findLibraryItemDetailPreview({
+    itemId,
+    userId: user?.id,
+    role: user?.role,
+  }), [itemId, user?.id, user?.role]);
+  const [item, setItem] = useState(() => cachedDetailPreview);
   const [progress, setProgress] = useState(null);
   const progressRef = useRef(null);
   const [error, setError] = useState("");
@@ -625,6 +635,8 @@ export function DetailPage() {
   });
   const [mediaLibraryReferenceInfo, setMediaLibraryReferenceInfo] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [progressLoadError, setProgressLoadError] = useState("");
+  const [playbackCapabilityError, setPlaybackCapabilityError] = useState("");
   const [hiddenActionPending, setHiddenActionPending] = useState(false);
   const [hiddenActionMessage, setHiddenActionMessage] = useState("");
   const [hiddenActionError, setHiddenActionError] = useState("");
@@ -665,6 +677,11 @@ export function DetailPage() {
     }
     detailScrollResetItemRef.current = nextItemId;
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [itemId]);
+
+  useLayoutEffect(() => {
+    markDetailPerformance(DETAIL_PERFORMANCE_MARKS.routeCommit);
+    markDetailPerformance(DETAIL_PERFORMANCE_MARKS.shellVisible);
   }, [itemId]);
 
   useEffect(() => {
@@ -952,6 +969,7 @@ export function DetailPage() {
   );
 
   function prepareLibraryReturnNavigation() {
+    libraryReturnPreparedRef.current = true;
     rememberLibraryReturnTarget({
       ...activeLibraryReturn,
       listPath: libraryReturnPath,
@@ -1171,8 +1189,8 @@ export function DetailPage() {
     setGlobalHiddenActionError("");
   }, [itemId]);
 
-  useEffect(() => {
-    if (!activeLibraryReturn) {
+  useLayoutEffect(() => {
+    if (!activeLibraryReturn || libraryReturnPreparedRef.current) {
       return;
     }
     rememberLibraryReturnTarget({
@@ -1374,11 +1392,16 @@ export function DetailPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const abortController = new AbortController();
 
     async function loadDetails() {
       prepareControllerForLoad(itemId);
       setLoading(true);
+      setItem(cachedDetailPreview);
+      setProgress(null);
       setError("");
+      setProgressLoadError("");
+      setPlaybackCapabilityError("");
       if (!iosExternalAppCallback) {
         resetIosExternalAppState();
       }
@@ -1406,57 +1429,87 @@ export function DetailPage() {
         blocked: false,
       });
       try {
-        const itemPayload = await apiRequest(`/api/library/item/${itemId}`);
+        const itemPayload = await apiRequest(`/api/library/item/${itemId}`, {
+          signal: abortController.signal,
+        });
         if (cancelled) {
           return;
         }
         setItem(itemPayload);
+        markDetailPerformance(DETAIL_PERFORMANCE_MARKS.metadataReceived);
+        setLoading(false);
         if (itemPayload.hidden_globally) {
           setProgress(null);
-          setLoading(false);
           return;
         }
         if (itemPayload.hidden_for_user) {
           setProgress(null);
-          setLoading(false);
           return;
-        }
-        const progressPayload = await apiRequest(`/api/progress/${itemId}`);
-        if (cancelled) {
-          return;
-        }
-        setProgress(progressPayload);
-        if (!iosMobile) {
-          const playbackPayload = await apiRequest(`/api/playback/${itemId}`);
-          if (cancelled) {
-            return;
-          }
-          syncPlaybackState(playbackPayload);
-        }
-        if (desktopPlatform) {
-          try {
-            const desktopPayload = await apiRequest(
-              `/api/desktop-playback/${itemId}?platform=${desktopPlatform}&same_host=${localDevLoopback ? "1" : "0"}`,
-            );
-            if (!cancelled) {
-              setDesktopPlayback(desktopPayload);
-            }
-          } catch (desktopError) {
-            if (!cancelled) {
-              setVlcLaunchError(desktopError.message || "Failed to resolve desktop VLC playback");
-            }
-          }
         }
 
-        const restoredActiveBrowserPlayback = await restoreActiveBrowserPlaybackSession();
-        if (cancelled) {
-          return;
-        }
-        if (restoredActiveBrowserPlayback && iosMobile) {
-          return;
+        const progressRequest = apiRequest(`/api/progress/${itemId}`, {
+          signal: abortController.signal,
+        }).then((progressPayload) => {
+          if (!cancelled) {
+            setProgress(progressPayload);
+            markDetailPerformance(DETAIL_PERFORMANCE_MARKS.progressReceived);
+          }
+        }).catch((progressError) => {
+          if (!cancelled && progressError?.name !== "AbortError") {
+            setProgressLoadError(progressError.message || "Progress is temporarily unavailable.");
+          }
+        });
+
+        const playbackRequest = iosMobile
+          ? Promise.resolve()
+          : apiRequest(`/api/playback/${itemId}`, {
+            signal: abortController.signal,
+          }).then((playbackPayload) => {
+            if (!cancelled) {
+              syncPlaybackState(playbackPayload);
+              markDetailPerformance(DETAIL_PERFORMANCE_MARKS.playbackCapabilityReceived);
+            }
+          }).catch((requestError) => {
+            if (!cancelled && requestError?.name !== "AbortError") {
+              setPlaybackCapabilityError(requestError.message || "Browser playback is temporarily unavailable.");
+            }
+          });
+
+        const desktopRequest = desktopPlatform
+          ? apiRequest(
+            `/api/desktop-playback/${itemId}?platform=${desktopPlatform}&same_host=${localDevLoopback ? "1" : "0"}`,
+            { signal: abortController.signal },
+          ).then((desktopPayload) => {
+            if (!cancelled) {
+              setDesktopPlayback(desktopPayload);
+              markDetailPerformance(DETAIL_PERFORMANCE_MARKS.desktopCapabilityReceived);
+            }
+          }).catch((desktopError) => {
+            if (!cancelled && desktopError?.name !== "AbortError") {
+              setVlcLaunchError(desktopError.message || "Failed to resolve desktop VLC playback");
+            }
+          })
+          : Promise.resolve();
+
+        const activeSessionRequest = Promise.resolve()
+          .then(() => restoreActiveBrowserPlaybackSession())
+          .catch((restoreError) => {
+            if (!cancelled && restoreError?.name !== "AbortError") {
+              setPlaybackCapabilityError(restoreError.message || "Active playback restore is temporarily unavailable.");
+            }
+          });
+
+        await Promise.allSettled([
+          progressRequest,
+          playbackRequest,
+          desktopRequest,
+          activeSessionRequest,
+        ]);
+        if (!cancelled) {
+          markDetailPerformance(DETAIL_PERFORMANCE_MARKS.interactiveReady);
         }
       } catch (requestError) {
-        if (!cancelled) {
+        if (!cancelled && requestError?.name !== "AbortError") {
           setError(requestError.message || "Failed to load media item");
         }
       } finally {
@@ -1469,10 +1522,11 @@ export function DetailPage() {
     loadDetails();
     return () => {
       cancelled = true;
+      abortController.abort();
       clearPlaybackResources();
       resetMobilePlaybackState();
     };
-  }, [desktopPlatform, iosExternalAppCallback, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
+  }, [cachedDetailPreview, desktopPlatform, iosExternalAppCallback, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
 
   useEffect(() => {
     if (!item?.id) {
@@ -2783,15 +2837,30 @@ export function DetailPage() {
     }
   }
 
-  if (loading) {
-    return <LoadingView label="Loading player..." />;
-  }
-
-  if (error || !item) {
+  if (!item) {
     return (
-      <section className="page-section page-section--detail">
-        <p className="form-error">{error || "Media item not found"}</p>
-        {renderBackToLibraryButton()}
+      <section aria-busy={loading ? "true" : "false"} className="page-section page-section--detail">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Player</p>
+            {loading ? (
+              <h1 aria-label="Loading title" className="detail-progressive-skeleton detail-progressive-skeleton--title" />
+            ) : (
+              <h1>Media item unavailable</h1>
+            )}
+          </div>
+          {renderBackToLibraryButton()}
+        </div>
+        <div className="player-card detail-progressive-shell">
+          <div aria-hidden="true" className="player-actions">
+            <span className="ghost-button detail-progressive-shell__action">Lite Playback</span>
+            <span className="ghost-button detail-progressive-shell__action">Full Playback</span>
+            <span className="ghost-button detail-progressive-shell__action">Open in VLC</span>
+          </div>
+          <div aria-hidden="true" className="detail-progressive-skeleton detail-progressive-skeleton--player" />
+          <div aria-hidden="true" className="detail-progressive-skeleton detail-progressive-skeleton--progress" />
+        </div>
+        {error ? <p className="form-error">{error}</p> : null}
       </section>
     );
   }
@@ -3301,6 +3370,7 @@ export function DetailPage() {
 
 	  return (
 	    <section className="page-section page-section--detail">
+      {error ? <p className="form-error">{error}</p> : null}
       <ProviderReconnectModal
         allowReconnect={providerReconnectModal.allowReconnect}
         errorMessage={providerReconnectModal.errorMessage}
@@ -3994,7 +4064,10 @@ export function DetailPage() {
               </>
             ) : null}
           </div>
-          {playbackError ? <p className="form-error">{playbackError}</p> : null}
+          {playbackError || playbackCapabilityError ? (
+            <p className="form-error">{playbackError || playbackCapabilityError}</p>
+          ) : null}
+          {progressLoadError ? <p className="form-error">{progressLoadError}</p> : null}
           {globalHiddenActionError ? <p className="form-error">{globalHiddenActionError}</p> : null}
           {globalHiddenActionMessage ? <p className="page-note">{globalHiddenActionMessage}</p> : null}
           {hiddenActionError ? <p className="form-error">{hiddenActionError}</p> : null}

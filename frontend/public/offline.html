@@ -54,7 +54,8 @@
         <span hidden>Ruminating... Conjuring... Recombobulating... Scrying... Divining... Wayfinding... Enchanting...</span>
         <div class="elvern-connection-shell__oops">
           <h1>Oops!</h1>
-          <p>Elvern could not be reached. Check your connection and try again.</p>
+          <p data-connection-oops-copy>Elvern could not be reached, check your VPN connection and try again.</p>
+          <span hidden>Seems like the server has been bamboozled, please try again later.</span>
           <button class="elvern-connection-shell__retry" data-connection-retry type="button">Retry</button>
         </div>
       </div>
@@ -65,17 +66,23 @@
         const HEALTH_PROBE_INTERVAL_MS = 10000;
         const HEALTH_PROBE_TIMEOUT_MS = 5000;
         const ROTATION_MS = 7000;
+        const FRONTEND_HEALTH_URL = new URL("/_elvern/frontend-health", window.location.origin);
+        const BACKEND_HEALTH_URL = new URL("/health", window.location.origin);
+        const SERVER_OOPS_COPY = "Seems like the server has been bamboozled, please try again later.";
+        const VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
         const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating...", "Scrying...", "Divining...", "Wayfinding...", "Enchanting..."];
         const FAMILIARS = ["raven", "wisp", "horned", "gargoyle", "keeper"];
         const shell = document.getElementById("elvern-connection-shell");
         const word = shell.querySelector("[data-connection-waiting-word]");
         const retry = shell.querySelector("[data-connection-retry]");
+        const oopsCopy = shell.querySelector("[data-connection-oops-copy]");
         let inFlight = null;
         let probeInterval = 0;
         let rotationInterval = 0;
         let unreachableTimer = 0;
         let activeController = null;
         let rotationIndex = 0;
+        let lastClassification = "frontend_or_vpn_unreachable";
 
         function setWaitingWord(text) {
           word.setAttribute("aria-label", text);
@@ -90,6 +97,7 @@
         }
 
         function showOops() {
+          oopsCopy.textContent = lastClassification === "backend_unreachable" ? SERVER_OOPS_COPY : VPN_OOPS_COPY;
           shell.dataset.state = "unreachable";
         }
 
@@ -106,14 +114,23 @@
           if (inFlight) return inFlight;
           activeController = new AbortController();
           const timeout = window.setTimeout(() => activeController.abort(), HEALTH_PROBE_TIMEOUT_MS);
-          inFlight = fetch(new URL("/health", window.location.origin), {
-            cache: "no-store",
-            credentials: "same-origin",
-            signal: activeController.signal,
-          }).then((response) => {
-            if (response.ok) window.location.reload();
-            return response.ok;
-          }).catch(() => false).finally(() => {
+          const requestHealth = (url) => fetch(url, {
+            cache: "no-store", credentials: "same-origin", signal: activeController.signal,
+          }).then((response) => response.ok).catch(() => false);
+          inFlight = (async () => {
+            const frontendHealthy = await requestHealth(FRONTEND_HEALTH_URL);
+            if (!frontendHealthy) {
+              lastClassification = "frontend_or_vpn_unreachable";
+              return false;
+            }
+            const backendHealthy = await requestHealth(BACKEND_HEALTH_URL);
+            if (!backendHealthy) {
+              lastClassification = "backend_unreachable";
+              return false;
+            }
+            window.location.reload();
+            return true;
+          })().finally(() => {
             window.clearTimeout(timeout);
             activeController = null;
             inFlight = null;

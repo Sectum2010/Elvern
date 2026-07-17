@@ -1,9 +1,35 @@
+const ELVERN_WORKER_IDENTITY_PARAM = "elvern_worker";
+const ELVERN_WORKER_IDENTITY = "offline-shell-v1";
+const ELVERN_DYNAMIC_SCOPE_PATTERN = /^\/[a-hjkmnp-z2-9]{8,24}\/$/;
+
+
 export function buildServiceWorkerRegistration(baseUri = document.baseURI) {
   const scopeUrl = new URL("./", baseUri);
+  const scriptUrl = new URL("sw.js", scopeUrl);
+  scriptUrl.searchParams.set(ELVERN_WORKER_IDENTITY_PARAM, ELVERN_WORKER_IDENTITY);
   return {
-    scriptUrl: new URL("sw.js", scopeUrl).href,
+    scriptUrl: scriptUrl.href,
     scope: scopeUrl.pathname,
   };
+}
+
+
+export function isElvernOfflineWorkerRegistration(candidate, currentOrigin) {
+  const scriptValue = candidate?.active?.scriptURL
+    || candidate?.waiting?.scriptURL
+    || candidate?.installing?.scriptURL
+    || "";
+  try {
+    const scopeUrl = new URL(candidate.scope);
+    const scriptUrl = new URL(scriptValue);
+    return scopeUrl.origin === currentOrigin
+      && scriptUrl.origin === currentOrigin
+      && ELVERN_DYNAMIC_SCOPE_PATTERN.test(scopeUrl.pathname)
+      && scriptUrl.pathname === `${scopeUrl.pathname}sw.js`
+      && scriptUrl.searchParams.get(ELVERN_WORKER_IDENTITY_PARAM) === ELVERN_WORKER_IDENTITY;
+  } catch {
+    return false;
+  }
 }
 
 
@@ -16,6 +42,7 @@ export async function registerElvernServiceWorker({
     return null;
   }
   const registrationConfig = buildServiceWorkerRegistration(baseUri);
+  const currentOrigin = new URL(baseUri).origin;
   try {
     const registration = await serviceWorker.register(registrationConfig.scriptUrl, {
       scope: registrationConfig.scope,
@@ -34,8 +61,7 @@ export async function registerElvernServiceWorker({
         if (candidate === registration || candidate.scope === registration.scope) {
           return;
         }
-        const scriptUrl = candidate.active?.scriptURL || candidate.waiting?.scriptURL || candidate.installing?.scriptURL || "";
-        if (new URL(scriptUrl || location.href).pathname.endsWith("/sw.js")) {
+        if (isElvernOfflineWorkerRegistration(candidate, currentOrigin)) {
           await candidate.unregister();
         }
       }));

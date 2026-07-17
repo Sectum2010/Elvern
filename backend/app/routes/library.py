@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 
 from ..auth import CurrentAdmin, CurrentUser, resolve_client_ip
@@ -38,13 +38,52 @@ from ..services.media_age_access_service import (
     unlink_media_item_from_age_group,
 )
 from ..services.media_genre_service import set_media_genres
-from ..services.poster_display_cache_service import get_or_create_card_poster_display_cache
+from ..services.poster_derivative_manager import (
+    PosterDerivativePriority,
+    PosterDerivativeQueueFullError,
+)
 from ..services.user_settings_service import get_poster_card_display_max_width
 from ..services.audit_service import log_audit_event
 from ..services.security_event_service import log_security_event
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+
+
+def _prewarm_library_card_posters(
+    request: Request,
+    *,
+    user_id: int,
+    allow_globally_hidden: bool,
+    payload: dict[str, object],
+) -> None:
+    settings = request.app.state.settings
+    if not settings.poster_prewarm_enabled:
+        return
+    target_width = get_poster_card_display_max_width(settings, user_id=user_id)
+    if target_width is None:
+        return
+    sections = payload.get("sections") if isinstance(payload, dict) else None
+    if not isinstance(sections, dict):
+        return
+    requested_ids = [
+        *list(sections.get("continue_watching_item_ids") or []),
+        *list(sections.get("item_ids") or [])[: settings.poster_prewarm_first_items],
+        *list(sections.get("recently_added_item_ids") or [])[: settings.poster_prewarm_recent_items],
+    ]
+    for item_id in dict.fromkeys(int(value) for value in requested_ids):
+        poster_path = get_media_item_poster_path(
+            settings,
+            user_id=user_id,
+            item_id=item_id,
+            allow_globally_hidden=allow_globally_hidden,
+        )
+        if poster_path is None:
+            continue
+        request.app.state.poster_derivative_manager.prewarm(
+            poster_path,
+            target_width=target_width,
+        )
 
 
 def _validated_library_category(category: str | None) -> str:
@@ -240,6 +279,7 @@ def get_library(
 def get_library_summary_v2(
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     category: str | None = None,
     source: str | None = None,
     genre: str | None = None,
@@ -277,6 +317,13 @@ def get_library_summary_v2(
     )
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "Cookie"
+    background_tasks.add_task(
+        _prewarm_library_card_posters,
+        request,
+        user_id=user.id,
+        allow_globally_hidden=user.role == "admin",
+        payload=payload,
+    )
     return LibrarySummaryV2Response(**payload)
 
 
@@ -369,6 +416,7 @@ def unlink_age_group(media_item_id: int, request: Request, user=CurrentAdmin) ->
 
 @router.get("/item/{item_id}", response_model=MediaItemDetail)
 def get_item(item_id: int, request: Request, user=CurrentUser) -> MediaItemDetail:
+    request.app.state.poster_derivative_manager.enter_interactive_window()
     item = get_media_item_detail(
         request.app.state.settings,
         user_id=user.id,
@@ -480,7 +528,7 @@ def request_item_track_scan(item_id: int, request: Request, user=CurrentUser) ->
 
 
 @router.get("/item/{item_id}/poster")
-def get_item_poster(item_id: int, request: Request, user=CurrentUser, variant: str = "original"):
+async def get_item_poster(item_id: int, request: Request, user=CurrentUser, variant: str = "original"):
     normalized_variant = (variant or "original").strip().lower() or "original"
     if normalized_variant not in {"original", "card"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported poster variant")
@@ -499,11 +547,14 @@ def get_item_poster(item_id: int, request: Request, user=CurrentUser, variant: s
     if normalized_variant == "card":
         target_width = get_poster_card_display_max_width(request.app.state.settings, user_id=user.id)
         if target_width is not None:
-            response_path = get_or_create_card_poster_display_cache(
-                request.app.state.settings,
-                poster_path,
-                target_width=target_width,
-            )
+            try:
+                response_path = await request.app.state.poster_derivative_manager.get_or_create(
+                    poster_path,
+                    target_width=target_width,
+                    priority=PosterDerivativePriority.REQUESTED,
+                )
+            except PosterDerivativeQueueFullError:
+                response_path = poster_path
             cache_control = "private, max-age=604800, immutable"
 
     return FileResponse(

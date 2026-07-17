@@ -34,6 +34,7 @@ from .services.admin_events_service import admin_event_hub
 from .services.transcode_service import TranscodeManager
 from .services.mobile_playback_service import MobilePlaybackManager
 from .services.scan_service import ScanService
+from .services.poster_derivative_manager import PosterDerivativeManager
 from .spa_static import install_manifest_middleware, mount_spa
 from .url_prefix_service import resolve_url_prefix
 
@@ -75,9 +76,11 @@ async def lifespan(app: FastAPI):
     app.state.url_prefix = url_prefix
     mount_spa(app, prefix=url_prefix)
     app.state.scan_service = ScanService(settings)
+    app.state.poster_derivative_manager = PosterDerivativeManager(settings)
     app.state.transcode_manager = TranscodeManager(settings)
     app.state.mobile_playback_manager = MobilePlaybackManager(settings)
     app.state.admin_event_hub = admin_event_hub
+    app.state.poster_derivative_manager.start()
     app.state.transcode_manager.start()
     app.state.mobile_playback_manager.start()
     app.state.admin_event_hub.start()
@@ -91,6 +94,7 @@ async def lifespan(app: FastAPI):
         app.state.scan_service.enqueue_scan(reason="startup")
     yield
     app.state.admin_event_hub.shutdown()
+    app.state.poster_derivative_manager.shutdown()
     app.state.mobile_playback_manager.shutdown()
     app.state.transcode_manager.shutdown()
     logger.info("Elvern API shutting down")
