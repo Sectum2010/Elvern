@@ -2,7 +2,7 @@
 
 ## Scope
 
-Phase 4B fixes one Phase 4 rollout blocker: the same media item could receive different visible quality ranks by role or API version. It does not enable v2 by default and does not change search, pagination, virtualization, poster quality, playback, relocation, orientation restore, or scheduler behavior.
+Phase 4B fixes one Phase 4 rollout blocker: the same media item could receive different visible quality ranks by role or API version. After that fix and final contract hardening, v2 is now the frontend default for non-search Root, Local, and Cloud views. This activation does not change search, pagination, virtualization, poster quality, playback, relocation, orientation restore, or scheduler behavior.
 
 ## Confirmed root cause
 
@@ -78,9 +78,9 @@ No immediate related defect required a broader architecture change.
 
 ## Deployment mode audit
 
-Frontend source defaults `VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE` to `off` when it is absent or invalid. No tracked env example, Docker file, systemd template, CI workflow, Vite script, frontend preview command, or deploy file overrides that frontend mode. Docker and systemd reference an operator-managed `deploy/env/elvern.env`; its deployed contents cannot be inferred from source.
+Frontend source defaults `VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE` to `on` when it is absent or empty. Explicit `off`, `shadow`, and `on` remain valid; an invalid non-empty value fails closed to `off`. No tracked env example, Docker file, systemd template, CI workflow, Vite script, frontend preview command, or deploy file overrides that mode. The current operator-managed deploy env also leaves the frontend mode unset, so a rebuilt bundle uses the source default.
 
-Backend `ELVERN_LIBRARY_SUMMARY_V2_ENABLED` defaults to `true`, which exposes the capability for an opt-in frontend while leaving visible frontend behavior off by default.
+Backend `ELVERN_LIBRARY_SUMMARY_V2_ENABLED` defaults to `true`, and the current deploy env does not override it to false. The emergency backend capability stop remains available.
 
 Live mode must be checked in browser Network tools against the deployed bundle:
 
@@ -88,15 +88,28 @@ Live mode must be checked in browser Network tools against the deployed bundle:
 - non-search views request v1 plus background v2: `shadow`;
 - non-search views request only v2, while formal search still requests v1: `on`.
 
-Changing a Vite mode requires a frontend rebuild. This audit does not claim the current live bundle mode and does not modify live configuration.
+Changing a Vite mode requires a frontend rebuild.
+
+Before final activation, `validateLibrarySummaryV2Payload()` was hardened to call `isCompleteLibraryQualityRank()` after exact field validation. Unknown rank keys, non-finite scores, malformed `detected` values, and missing or incorrectly typed rank fields now raise `LibrarySummaryV2ContractError`. That error retains the existing narrow v1 capability fallback.
+
+Activation and rollback values are:
+
+```text
+# Default non-search Root/Local/Cloud mode; explicit form
+VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=on
+
+# One-step frontend rollback; rebuild the frontend after changing it
+VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=off
+
+# Emergency backend capability stop
+ELVERN_LIBRARY_SUMMARY_V2_ENABLED=false
+```
 
 ## Rollout readiness
 
-Phase 4B can be considered ready for a controlled shadow only after the complete local validation set passes. Synthetic parity is necessary but does not prove a representative private library or real devices.
+The final activation requires complete local validation plus Chromium Root, Local, and Cloud Detail-return coverage. Synthetic and mocked-browser parity do not prove a representative private library or real devices.
 
-An `on` canary still requires approved-library shadow mismatch count zero plus manual checks on desktop, iPhone, iPad, and Android for root, Local, Cloud, search, Detail return, progress, Continue Watching, Recently Added, badges, and tooltips.
-
-Default `on` is not recommended until the canary is stable, Firefox/WebKit risk is reduced, real-device performance is checked, and rollback is rehearsed.
+Deployment verification must still inspect authenticated Network traffic and manually check desktop, iPhone, iPad, and Android for Root, Local, Cloud, formal search, Detail return, progress, Continue Watching, Recently Added, badges, and tooltips. Firefox/WebKit and real-device performance remain residual risks, so the frontend rollback and backend emergency stop must stay rehearsable.
 
 ## Benchmark
 
@@ -125,7 +138,6 @@ The synthetic frontend benchmark also completed for all 12 cells. At 3,000 items
 
 ## Explicitly not implemented
 
-- v2 default or live-mode switch
 - v2 search or search optimization
 - pagination or virtualization
 - resource detection

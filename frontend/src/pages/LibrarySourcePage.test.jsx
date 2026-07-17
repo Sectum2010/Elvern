@@ -147,6 +147,7 @@ function DetailStub() {
 describe("LibrarySourcePage cached source views", () => {
   beforeEach(() => {
     queryClient.clear();
+    vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "off");
     window.sessionStorage.clear();
     window.scrollTo = vi.fn();
     Object.defineProperty(window, "matchMedia", {

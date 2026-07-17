@@ -346,6 +346,7 @@ describe("LibraryPage category switching", () => {
   beforeEach(() => {
     queryClient.clear();
     apiRequest.mockReset();
+    vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "off");
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "desktop";
     mockAuthState.id = 2;

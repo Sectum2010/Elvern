@@ -67,6 +67,9 @@ export function resolveLibrarySummaryV2Mode(
   rawMode = import.meta.env.VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE,
 ) {
   const normalized = String(rawMode ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return LIBRARY_SUMMARY_V2_MODE_ON;
+  }
   return VALID_MODES.has(normalized) ? normalized : LIBRARY_SUMMARY_V2_MODE_OFF;
 }
 
@@ -205,6 +208,12 @@ export function validateLibrarySummaryV2Payload(payload) {
     requireExactFields(item.quality_rank, REQUIRED_QUALITY_FIELDS, "quality_rank", {
       itemId: Number(item.id) || null,
     });
+    if (!isCompleteLibraryQualityRank(item.quality_rank)) {
+      throw new LibrarySummaryV2ContractError("quality_rank has invalid field values", {
+        category: "quality_rank",
+        itemId: Number(item.id) || null,
+      });
+    }
   });
   const sections = requireObject(payload.sections, "sections");
   requireExactFields(sections, REQUIRED_SECTION_FIELDS, "sections");

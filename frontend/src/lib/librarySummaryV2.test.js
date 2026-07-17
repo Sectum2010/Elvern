@@ -94,8 +94,11 @@ function v1Payload() {
 
 
 describe("library summary v2 contract", () => {
-  test("feature mode defaults safely to off", () => {
-    expect(resolveLibrarySummaryV2Mode(undefined)).toBe("off");
+  test("feature mode defaults missing and empty values to on but rejects invalid values", () => {
+    expect(resolveLibrarySummaryV2Mode(undefined)).toBe("on");
+    expect(resolveLibrarySummaryV2Mode("")).toBe("on");
+    expect(resolveLibrarySummaryV2Mode("   ")).toBe("on");
+    expect(resolveLibrarySummaryV2Mode("OFF")).toBe("off");
     expect(resolveLibrarySummaryV2Mode("SHADOW")).toBe("shadow");
     expect(resolveLibrarySummaryV2Mode("on")).toBe("on");
     expect(resolveLibrarySummaryV2Mode("unexpected")).toBe("off");
@@ -147,6 +150,24 @@ describe("library summary v2 contract", () => {
     mutations.forEach((mutate) => {
       const raw = v2Payload();
       mutate(raw);
+      expect(() => validateLibrarySummaryV2Payload(raw)).toThrow(LibrarySummaryV2ContractError);
+    });
+  });
+
+  test("invalid quality rank values reject the entire normalized payload", () => {
+    const mutations = [
+      (rank) => { rank.key = "mythic"; },
+      (rank) => { rank.score = Number.POSITIVE_INFINITY; },
+      (rank) => { rank.detected = "REMUX"; },
+      (rank) => { rank.detected = ["REMUX", 2160]; },
+      (rank) => { rank.label = null; },
+      (rank) => { rank.tooltip = false; },
+      (rank) => { delete rank.description; },
+    ];
+
+    mutations.forEach((mutate) => {
+      const raw = v2Payload();
+      mutate(raw.items_by_id["1"].quality_rank);
       expect(() => validateLibrarySummaryV2Payload(raw)).toThrow(LibrarySummaryV2ContractError);
     });
   });

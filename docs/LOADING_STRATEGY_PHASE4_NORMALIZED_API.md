@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-Phase 4 adds an opt-in, versioned, normalized Library response while retaining every v1 route. The frontend default remains `off`. Formal root search remains on v1. No pagination, virtualization, search algorithm change, smart-poster expansion, poster-quality change, or playback change is part of this phase.
+Phase 4 adds a versioned, normalized Library response while retaining every v1 route. After Phase 4B quality-rank parity and final contract hardening, the frontend default is `on` for non-search Root, Local, and Cloud Library views. Formal search remains on v1. No pagination, virtualization, search algorithm change, smart-poster expansion, poster-quality change, or playback change is part of this phase.
 
 ## Endpoint
 
@@ -74,7 +74,7 @@ This prevents browser/shared HTTP persistence. TanStack Query still provides the
 }
 ```
 
-Every section ID must exist in `items_by_id`. Each entity is transferred once, while the same ID can still produce distinct visual cards in multiple sections through the existing section/rail `cardInstanceKey` rules. The frontend contract validator rejects dangling IDs, missing fields, and unversioned extra fields instead of rendering a partial snapshot.
+Every section ID must exist in `items_by_id`. Each entity is transferred once, while the same ID can still produce distinct visual cards in multiple sections through the existing section/rail `cardInstanceKey` rules. The frontend contract validator rejects dangling IDs, missing fields, unversioned extra fields, and incomplete `quality_rank` values instead of rendering a partial snapshot. Quality-rank validation uses `isCompleteLibraryQualityRank()`, including known keys, finite scores, string arrays, and required field types.
 
 ## Lightweight entity and privacy
 
@@ -118,9 +118,11 @@ One resolver reads `VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE`:
 
 | Mode | Root non-search | Root formal search | Local/Cloud source | Render source |
 | --- | --- | --- | --- | --- |
-| `off` (default) | v1 | v1 search | v1 | v1 |
+| `off` | v1 | v1 search | v1 | v1 |
 | `shadow` | v1 plus background v2 | v1 search | v1 plus background v2 | v1 |
-| `on` | v2 | v1 search | v2 | v2 |
+| `on` (default when unset or empty) | v2 | v1 search | v2 | v2 |
+
+Explicit `off`, `shadow`, and `on` values remain valid. An absent or whitespace-only value selects `on`; any other value fails closed to `off` rather than enabling v2 accidentally.
 
 Shadow v2 does not participate in loading, rendering, relocation, orientation restore, or visible errors. The semantic comparer checks view identity, section membership/order, card fields, progress, poster identity, and quality parity. Diagnostics contain only mismatch category, numeric item ID, section type, and a hashed rail key. Console output is disabled unless local debug key `elvern_library_summary_v2_debug` is explicitly enabled. Vitest treats a shadow mismatch as a test failure; production keeps the v1 UI.
 
@@ -142,7 +144,7 @@ Routine progress saves patch existing v1 item instances and `v2.items_by_id[Stri
 
 ## Fallback and rollback
 
-The backend capability switch is `ELVERN_LIBRARY_SUMMARY_V2_ENABLED` and defaults to enabled so the opt-in frontend can probe it. Disabled returns an explicit `library_summary_v2_disabled` capability error.
+The backend capability switch is `ELVERN_LIBRARY_SUMMARY_V2_ENABLED` and defaults to enabled for the default-on frontend. Disabled returns an explicit `library_summary_v2_disabled` capability error.
 
 In frontend `on` mode, only these conditions use v1 fallback:
 
@@ -155,13 +157,13 @@ Authentication 401/403 and ordinary 500 errors are not disguised as capability f
 Rollout commands/configuration:
 
 ```text
-# Default and immediate frontend rollback
+# Immediate frontend rollback
 VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=off
 
 # Background semantic comparison while v1 renders
 VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=shadow
 
-# Opt-in v2 rendering for non-search views
+# Explicit v2 rendering for non-search views (also the source default)
 VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=on
 
 # Emergency server capability stop
@@ -213,7 +215,7 @@ Selected frontend p50 results:
 | 3000 | 0% | 2.829 | 4.249 | 12.924 | 0.138 / 0.010 |
 | 3000 | 60% | 3.795 | 3.703 | 12.205 | 0.118 / 0.008 |
 
-The adapter cost is measurable but remains under 13 ms p50 at 3000 synthetic items on this machine. Node does not measure React render/commit, first stable layout, DOM count, browser memory, or Detail-return error; those remain browser/real-device work. Contract and synthetic shadow parity tests produced zero unexplained mismatches. No representative private-library shadow run was performed, so Phase 4 does not recommend changing the default from `off` to `on` yet.
+The adapter cost is measurable but remains under 13 ms p50 at 3000 synthetic items on this machine. Node does not measure React render/commit, first stable layout, DOM count, browser memory, or Detail-return error; those remain browser/real-device work. Contract and synthetic shadow parity tests produced zero unexplained mismatches. These Phase 4 results did not by themselves authorize activation; Phase 4B role parity, final quality-rank contract validation, complete regression checks, and an explicit product decision subsequently moved non-search views to default `on`.
 
 ## Known limitations and future work
 
@@ -230,4 +232,4 @@ Phase 4 does not implement:
 - pinch-zoom restriction;
 - JPEG quality or poster-width changes.
 
-The default remains `off`. A future default-on decision requires an explained zero-mismatch shadow run against representative approved libraries plus real desktop/mobile/tablet render, memory, rotation, and return benchmarks.
+The default is now `on` for non-search Root, Local, and Cloud views. Formal search remains v1. Real desktop/mobile/tablet render, memory, rotation, return, and authenticated Network checks remain deployment verification responsibilities, with one-step frontend rollback through `VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=off`.
