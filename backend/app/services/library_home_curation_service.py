@@ -254,13 +254,10 @@ def _series_row_sort_key(row) -> tuple[int, str, int]:
     )
 
 
-def _build_series_rails(
+def _build_series_rail_plans(
     settings: Settings,
     *,
     rows: list[object],
-    poster_dir: Path | None = None,
-    poster_index: PosterIndexSnapshot | None = None,
-    poster_url_memo: dict[int, str | None] | None = None,
     include_cloud: bool = False,
 ) -> list[dict[str, object]]:
     grouped_rows: dict[str, dict[str, object]] = {}
@@ -320,25 +317,49 @@ def _build_series_rails(
     for payload in rail_buckets.values():
         rows_by_id: dict[int, object] = payload["rows_by_id"]  # type: ignore[assignment]
         sorted_rows = sorted(rows_by_id.values(), key=_series_row_sort_key)
-        serialized_items = [
-            _serialize_media_item(
-                settings,
-                row,
-                poster_dir=poster_dir,
-                poster_index=poster_index,
-                poster_url_memo=poster_url_memo,
-            )
-            for row in sorted_rows
-        ]
-        if len(serialized_items) < 2:
+        if len(sorted_rows) < 2:
             continue
         rails.append(
             {
                 "key": payload["key"],
                 "title": payload["title"],
-                "film_count": len(serialized_items),
-                "items": serialized_items,
+                "film_count": len(sorted_rows),
+                "rows": sorted_rows,
             }
         )
     rails.sort(key=lambda rail: (str(rail["title"]).lower(), str(rail["key"]).lower()))
     return rails
+
+
+def _build_series_rails(
+    settings: Settings,
+    *,
+    rows: list[object],
+    poster_dir: Path | None = None,
+    poster_index: PosterIndexSnapshot | None = None,
+    poster_url_memo: dict[int, str | None] | None = None,
+    include_cloud: bool = False,
+) -> list[dict[str, object]]:
+    rail_plans = _build_series_rail_plans(
+        settings,
+        rows=rows,
+        include_cloud=include_cloud,
+    )
+    return [
+        {
+            "key": rail["key"],
+            "title": rail["title"],
+            "film_count": rail["film_count"],
+            "items": [
+                _serialize_media_item(
+                    settings,
+                    row,
+                    poster_dir=poster_dir,
+                    poster_index=poster_index,
+                    poster_url_memo=poster_url_memo,
+                )
+                for row in rail["rows"]
+            ],
+        }
+        for rail in rail_plans
+    ]

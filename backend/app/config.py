@@ -192,6 +192,7 @@ class Settings:
     poster_display_cache_dir: Path
     poster_card_cache_max_width: int
     poster_card_cache_jpeg_quality: int
+    library_summary_v2_enabled: bool
     max_concurrent_transcodes: int
     max_concurrent_mobile_workers: int
     mobile_queue_timeout_seconds: int
@@ -312,6 +313,7 @@ def load_settings() -> Settings:
         ),
         poster_card_cache_max_width=_get_int("ELVERN_POSTER_CARD_CACHE_MAX_WIDTH", 1400),
         poster_card_cache_jpeg_quality=_get_int("ELVERN_POSTER_CARD_CACHE_JPEG_QUALITY", 97),
+        library_summary_v2_enabled=_get_bool("ELVERN_LIBRARY_SUMMARY_V2_ENABLED", True),
         max_concurrent_transcodes=_get_int("ELVERN_MAX_CONCURRENT_TRANSCODES", 1),
         max_concurrent_mobile_workers=_get_int("ELVERN_MAX_CONCURRENT_MOBILE_WORKERS", 2),
         mobile_queue_timeout_seconds=_get_int("ELVERN_MOBILE_QUEUE_TIMEOUT_SECONDS", 12),

@@ -185,6 +185,41 @@ describe("MediaCard poster loading", () => {
       "media-card__poster-fallback--hidden",
     );
   });
+
+  test("uses the authoritative v2 quality rank when the item provides one", () => {
+    renderCard({
+      item: {
+        quality_rank: {
+          key: "gold",
+          label: "Server Gold",
+          description: "Server-provided quality description.",
+          detected: ["server"],
+          tooltip: "Server-provided quality tooltip.",
+        },
+      },
+    });
+
+    expect(screen.getByRole("button", {
+      name: "Server Gold: Server-provided quality description.",
+    })).toHaveTextContent("Server Gold");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Server-provided quality tooltip.");
+  });
+
+  test("keeps the existing client quality rank fallback for v1 items", () => {
+    renderCard({
+      item: {
+        original_filename: "Akira.1988.2160p.REMUX.TrueHD.Atmos.HEVC.mkv",
+        width: 3840,
+        height: 2160,
+        video_codec: "hevc",
+        audio_codec: "truehd",
+        container: "mkv",
+        file_size: 80 * 1024 * 1024 * 1024,
+      },
+    });
+
+    expect(screen.getByRole("button", { name: /^Diamond:/ })).toHaveTextContent("Diamond");
+  });
 });
 
 

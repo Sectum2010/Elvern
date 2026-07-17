@@ -1,0 +1,338 @@
+[
+  {
+    "name": "remux_2160_atmos_hevc_large",
+    "item": {
+      "title": "Reference",
+      "original_filename": "Reference.2024.2160p.REMUX.Atmos.HEVC.mkv",
+      "width": 3840,
+      "height": 2160,
+      "audio_codec": "Atmos",
+      "video_codec": "HEVC",
+      "container": "mkv",
+      "file_size": 96636764160
+    },
+    "expected": {
+      "key": "diamond",
+      "label": "Diamond",
+      "score": 17,
+      "description": "Reference-grade library copy with minimal compromise.",
+      "detected": ["REMUX", "2160p", "Atmos", "HEVC", "90 GB"],
+      "tooltip": "Reference-grade library copy with minimal compromise. Detected: REMUX · 2160p · Atmos · HEVC · 90 GB."
+    }
+  },
+  {
+    "name": "bluray_1080_truehd_avc",
+    "item": {
+      "title": "Feature",
+      "original_filename": "Feature.2023.BluRay.1080p.TrueHD.x264.mkv",
+      "width": 1920,
+      "height": 1080,
+      "audio_codec": "truehd",
+      "video_codec": "h264",
+      "container": "mkv",
+      "file_size": 59055800320
+    },
+    "expected": {
+      "key": "gold",
+      "label": "Gold",
+      "score": 13,
+      "description": "Excellent quality, just below reference tier.",
+      "detected": ["BluRay", "1080p", "TrueHD / DTS-HD", "AVC", "55 GB"],
+      "tooltip": "Excellent quality, just below reference tier. Detected: BluRay · 1080p · TrueHD / DTS-HD · AVC · 55 GB."
+    }
+  },
+  {
+    "name": "webdl_720_eac3_av1",
+    "item": {
+      "title": "Stream",
+      "original_filename": "Stream.2022.WEB-DL.720p.EAC3.AV1.mkv",
+      "width": 1280,
+      "height": 720,
+      "audio_codec": "eac3",
+      "video_codec": "av1",
+      "container": "mkv",
+      "file_size": 23622320128
+    },
+    "expected": {
+      "key": "silver",
+      "label": "Silver",
+      "score": 9,
+      "description": "Good quality, highly watchable.",
+      "detected": ["WEB-DL", "720p", "Dolby Digital", "AV1", "22 GB"],
+      "tooltip": "Good quality, highly watchable. Detected: WEB-DL · 720p · Dolby Digital · AV1 · 22 GB."
+    }
+  },
+  {
+    "name": "webrip_1080_dts_hevc",
+    "item": {
+      "title": "Rip",
+      "original_filename": "Rip.2021.WEBRip.1080p.DTS.x265.mkv",
+      "width": 1920,
+      "height": 1080,
+      "audio_codec": "dts",
+      "video_codec": "hevc",
+      "container": "mkv",
+      "file_size": 10737418240
+    },
+    "expected": {
+      "key": "silver",
+      "label": "Silver",
+      "score": 9.5,
+      "description": "Good quality, highly watchable.",
+      "detected": ["WEBRip", "1080p", "DTS", "HEVC", "10 GB"],
+      "tooltip": "Good quality, highly watchable. Detected: WEBRip · 1080p · DTS · HEVC · 10 GB."
+    }
+  },
+  {
+    "name": "legacy_480_aac_avc_small",
+    "item": {
+      "title": "Legacy",
+      "original_filename": "Legacy.480p.DVDRip.AAC.H264.mp4",
+      "width": 720,
+      "height": 480,
+      "audio_codec": "aac",
+      "video_codec": "h264",
+      "container": "mp4",
+      "file_size": 1610612736
+    },
+    "expected": {
+      "key": "wood",
+      "label": "Wood",
+      "score": 2,
+      "description": "Basic fallback copy.",
+      "detected": ["Legacy source", "SD", "AAC", "AVC", "1.5 GB"],
+      "tooltip": "Basic fallback copy. Detected: Legacy source · SD · AAC · AVC · 1.5 GB."
+    }
+  },
+  {
+    "name": "token_4k_dts_hd",
+    "item": {
+      "title": "Token 4K",
+      "original_filename": "Token.4K.DTS-HD.x265.mkv",
+      "width": null,
+      "height": null,
+      "audio_codec": "dts-hd",
+      "video_codec": "x265",
+      "container": "mkv",
+      "file_size": 53687091200
+    },
+    "expected": {
+      "key": "silver",
+      "label": "Silver",
+      "score": 10,
+      "description": "Good quality, highly watchable.",
+      "detected": ["2160p", "TrueHD / DTS-HD", "HEVC", "50 GB"],
+      "tooltip": "Good quality, highly watchable. Detected: 2160p · TrueHD / DTS-HD · HEVC · 50 GB."
+    }
+  },
+  {
+    "name": "width_2160_no_tokens",
+    "item": {
+      "title": "Measured",
+      "original_filename": "Measured.mkv",
+      "width": 4096,
+      "height": 1716,
+      "audio_codec": null,
+      "video_codec": null,
+      "container": "mkv",
+      "file_size": 0
+    },
+    "expected": {
+      "key": "bronze",
+      "label": "Bronze",
+      "score": 4,
+      "description": "Lower-quality convenience copy.",
+      "detected": ["2160p"],
+      "tooltip": "Lower-quality convenience copy. Detected: 2160p."
+    }
+  },
+  {
+    "name": "height_1080_ac3",
+    "item": {
+      "title": "Measured HD",
+      "original_filename": "Measured.HD.mkv",
+      "width": 1440,
+      "height": 1080,
+      "audio_codec": "ac3",
+      "video_codec": "avc",
+      "container": "mkv",
+      "file_size": 3221225472
+    },
+    "expected": {
+      "key": "bronze",
+      "label": "Bronze",
+      "score": 4,
+      "description": "Lower-quality convenience copy.",
+      "detected": ["1080p", "Dolby Digital", "AVC", "3.0 GB"],
+      "tooltip": "Lower-quality convenience copy. Detected: 1080p · Dolby Digital · AVC · 3.0 GB."
+    }
+  },
+  {
+    "name": "height_720_dts",
+    "item": {
+      "title": "Measured 720",
+      "original_filename": "Measured.720.mkv",
+      "width": 960,
+      "height": 720,
+      "audio_codec": "dts",
+      "video_codec": null,
+      "container": "mkv",
+      "file_size": 8589934592
+    },
+    "expected": {
+      "key": "bronze",
+      "label": "Bronze",
+      "score": 4.5,
+      "description": "Lower-quality convenience copy.",
+      "detected": ["720p", "DTS", "8 GB"],
+      "tooltip": "Lower-quality convenience copy. Detected: 720p · DTS · 8 GB."
+    }
+  },
+  {
+    "name": "sd_576_aac",
+    "item": {
+      "title": "Standard",
+      "original_filename": "Standard.576p.AAC.mp4",
+      "width": 720,
+      "height": 576,
+      "audio_codec": "aac",
+      "video_codec": "h264",
+      "container": "mp4",
+      "file_size": 2684354560
+    },
+    "expected": {
+      "key": "wood",
+      "label": "Wood",
+      "score": 1,
+      "description": "Basic fallback copy.",
+      "detected": ["SD", "AAC", "AVC", "2.5 GB"],
+      "tooltip": "Basic fallback copy. Detected: SD · AAC · AVC · 2.5 GB."
+    }
+  },
+  {
+    "name": "atmos_precedence",
+    "item": {
+      "title": "Atmos",
+      "original_filename": "Atmos.TrueHD.DTS.AC3.mkv",
+      "width": 1920,
+      "height": 1080,
+      "audio_codec": "atmos",
+      "video_codec": "hevc",
+      "container": "mkv",
+      "file_size": 21474836480
+    },
+    "expected": {
+      "key": "silver",
+      "label": "Silver",
+      "score": 8,
+      "description": "Good quality, highly watchable.",
+      "detected": ["1080p", "Atmos", "HEVC", "20 GB"],
+      "tooltip": "Good quality, highly watchable. Detected: 1080p · Atmos · HEVC · 20 GB."
+    }
+  },
+  {
+    "name": "truehd_precedence",
+    "item": {
+      "title": "Lossless",
+      "original_filename": "Lossless.TrueHD.DTS.mkv",
+      "width": 1920,
+      "height": 1080,
+      "audio_codec": "truehd",
+      "video_codec": "h264",
+      "container": "mkv",
+      "file_size": 21474836480
+    },
+    "expected": {
+      "key": "silver",
+      "label": "Silver",
+      "score": 7,
+      "description": "Good quality, highly watchable.",
+      "detected": ["1080p", "TrueHD / DTS-HD", "AVC", "20 GB"],
+      "tooltip": "Good quality, highly watchable. Detected: 1080p · TrueHD / DTS-HD · AVC · 20 GB."
+    }
+  },
+  {
+    "name": "dolby_digital",
+    "item": {
+      "title": "Dolby",
+      "original_filename": "Dolby.DDP.mkv",
+      "width": 1920,
+      "height": 1080,
+      "audio_codec": "eac3",
+      "video_codec": "h264",
+      "container": "mkv",
+      "file_size": 21474836480
+    },
+    "expected": {
+      "key": "iron",
+      "label": "Iron",
+      "score": 5,
+      "description": "Decent but clearly compromised.",
+      "detected": ["1080p", "Dolby Digital", "AVC", "20 GB"],
+      "tooltip": "Decent but clearly compromised. Detected: 1080p · Dolby Digital · AVC · 20 GB."
+    }
+  },
+  {
+    "name": "aac_only",
+    "item": {
+      "title": "AAC",
+      "original_filename": "AAC.720p.mkv",
+      "width": 1280,
+      "height": 720,
+      "audio_codec": "aac",
+      "video_codec": "h264",
+      "container": "mkv",
+      "file_size": 4294967296
+    },
+    "expected": {
+      "key": "wood",
+      "label": "Wood",
+      "score": 2,
+      "description": "Basic fallback copy.",
+      "detected": ["720p", "AAC", "AVC", "4.0 GB"],
+      "tooltip": "Basic fallback copy. Detected: 720p · AAC · AVC · 4.0 GB."
+    }
+  },
+  {
+    "name": "av1_only",
+    "item": {
+      "title": "AV1",
+      "original_filename": "AV1.1080p.mkv",
+      "width": 1920,
+      "height": 1080,
+      "audio_codec": null,
+      "video_codec": "av1",
+      "container": "mkv",
+      "file_size": 4294967296
+    },
+    "expected": {
+      "key": "bronze",
+      "label": "Bronze",
+      "score": 4,
+      "description": "Lower-quality convenience copy.",
+      "detected": ["1080p", "AV1", "4.0 GB"],
+      "tooltip": "Lower-quality convenience copy. Detected: 1080p · AV1 · 4.0 GB."
+    }
+  },
+  {
+    "name": "empty_metadata",
+    "item": {
+      "title": "Plain",
+      "original_filename": "Plain.mkv",
+      "width": null,
+      "height": null,
+      "audio_codec": null,
+      "video_codec": null,
+      "container": "mkv",
+      "file_size": 0
+    },
+    "expected": {
+      "key": "wood",
+      "label": "Wood",
+      "score": 0,
+      "description": "Basic fallback copy.",
+      "detected": [],
+      "tooltip": "Basic fallback copy."
+    }
+  }
+]

@@ -142,7 +142,7 @@ export function MediaCard({
   const showPoster = Boolean(resolvedPosterUrl)
     && !posterFailed
     && (!smartPosterSchedulerActive || smartPosterMode === POSTER_MODE_ATTACH);
-  const qualityRank = getQualityRank(item);
+  const qualityRank = item.quality_rank || getQualityRank(item);
   const tooltipId = `quality-rank-tooltip-${item.id}`;
   const storageKind = (item.source_kind || "local") === "cloud" ? "cloud" : "local";
   const storageLabel = storageKind === "cloud" ? "Cloud" : "Local";

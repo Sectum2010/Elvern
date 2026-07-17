@@ -1,0 +1,51 @@
+{
+  "schema_version": "library-summary-v2",
+  "top_level_fields": [
+    "schema_version",
+    "revision",
+    "view",
+    "items_by_id",
+    "sections",
+    "available_genres",
+    "total_items",
+    "scan_in_progress"
+  ],
+  "item_fields": [
+    "id",
+    "title",
+    "year",
+    "poster_url",
+    "source_kind",
+    "quality_rank",
+    "duration_seconds",
+    "progress_seconds",
+    "progress_duration_seconds",
+    "completed"
+  ],
+  "forbidden_item_fields": [
+    "original_filename",
+    "file_path",
+    "library_category_path",
+    "library_folder_path",
+    "library_source_name",
+    "library_source_shared",
+    "genres",
+    "width",
+    "height",
+    "video_codec",
+    "audio_codec",
+    "container",
+    "file_size",
+    "created_at",
+    "updated_at",
+    "last_scanned_at",
+    "download_access_allowed"
+  ],
+  "section_fields": [
+    "item_ids",
+    "series_rails",
+    "cloud_series_rails",
+    "continue_watching_item_ids",
+    "recently_added_item_ids"
+  ]
+}

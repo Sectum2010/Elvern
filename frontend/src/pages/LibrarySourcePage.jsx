@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
@@ -7,7 +6,6 @@ import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
 import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
 import { SeriesRail } from "../components/SeriesRail";
-import { apiRequest } from "../lib/api";
 import { useActiveBrowserPlaybackItemId } from "../lib/browserPlayback";
 import {
   isDesktopLibraryReturnPlatform,
@@ -18,10 +16,8 @@ import {
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
 import {
-  buildLibraryQueryKey,
-  LIBRARY_QUERY_GC_TIME_MS,
-  LIBRARY_QUERY_STALE_TIME_MS,
-} from "../lib/libraryQueries";
+  buildLibrarySummaryV2RequestPath,
+} from "../lib/librarySummaryV2";
 import { detectClientDeviceClass, detectClientPlatform } from "../lib/platformDetection";
 import {
   packIpadPortraitSeriesRailRows,
@@ -34,6 +30,7 @@ import {
   selectLibraryReturnRestoreTarget,
 } from "../lib/viewportAnchor";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
+import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 
 
 export const LIBRARY_SOURCE_SEARCH_DEBOUNCE_MS = 300;
@@ -188,8 +185,18 @@ export function LibrarySourcePage({ sourceKind }) {
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
   const floatingSearchScrollRestoreEnabled = ["desktop", "phone", "tablet"].includes(clientDeviceClass);
   const libraryRequestPath = `/api/library?category=movies&source=${resolvedSourceKind}`;
-  const libraryQueryKey = useMemo(
-    () => buildLibraryQueryKey({
+  const libraryV2RequestPath = useMemo(
+    () => buildLibrarySummaryV2RequestPath({
+      category: "movies",
+      source: resolvedSourceKind,
+      genre: "",
+      quality: "all",
+      sort: "smart",
+    }),
+    [resolvedSourceKind],
+  );
+  const libraryQueryIdentity = useMemo(
+    () => ({
       userId: user?.id,
       role: user?.role,
       category: "movies",
@@ -201,17 +208,16 @@ export function LibrarySourcePage({ sourceKind }) {
     }),
     [resolvedSourceKind, user?.id, user?.role],
   );
-  const libraryQuery = useQuery({
-    queryKey: libraryQueryKey,
-    queryFn: ({ signal }) => apiRequest(libraryRequestPath, { signal }),
+  const libraryViewIdentity = useMemo(() => ({ category: "movies" }), []);
+  const libraryQuery = useLibraryViewQuery({
     enabled: Boolean(user?.id),
-    staleTime: LIBRARY_QUERY_STALE_TIME_MS,
-    gcTime: LIBRARY_QUERY_GC_TIME_MS,
-    retry: false,
-    refetchInterval: (queryState) => (
-      queryState.state.data?.scan_in_progress ? 2500 : false
-    ),
+    identity: libraryQueryIdentity,
+    searchActive: false,
+    v1RequestPath: libraryRequestPath,
+    v2RequestPath: libraryV2RequestPath,
+    viewIdentity: libraryViewIdentity,
   });
+  const libraryQueryKey = libraryQuery.activeQueryKey;
   const library = libraryQuery.data || EMPTY_SOURCE_LIBRARY_PAYLOAD;
   const loading = !libraryQuery.data && libraryQuery.isPending;
   useDesktopLibraryReturnRestore({

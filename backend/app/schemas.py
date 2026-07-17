@@ -315,6 +315,72 @@ class LibraryListResponse(BaseModel):
     total_items: int = 0
 
 
+class LibraryQualityRankResponse(BaseModel):
+    key: Literal["diamond", "gold", "silver", "iron", "bronze", "wood"]
+    label: str
+    score: float
+    description: str
+    detected: list[str] = Field(default_factory=list)
+    tooltip: str
+
+
+class LibrarySummaryV2Item(BaseModel):
+    id: int
+    title: str
+    year: int | None = None
+    poster_url: str | None = None
+    source_kind: Literal["local", "cloud"] = "local"
+    quality_rank: LibraryQualityRankResponse
+    duration_seconds: float | None = None
+    progress_seconds: float | None = None
+    progress_duration_seconds: float | None = None
+    completed: bool = False
+
+
+class LibrarySummaryV2View(BaseModel):
+    category: Literal["movies", "tv", "anime", "cartoon"] = "movies"
+    source: Literal["all", "local", "cloud"] = "all"
+    genre: str | None = None
+    quality: Literal["all", "diamond", "gold", "silver", "iron", "bronze", "wood"] = "all"
+    sort: Literal[
+        "smart",
+        "az",
+        "za",
+        "recent_desc",
+        "recent_asc",
+        "year_desc",
+        "year_asc",
+        "size_desc",
+        "size_asc",
+    ] = "smart"
+
+
+class LibrarySummaryV2Rail(BaseModel):
+    key: str
+    title: str
+    film_count: int
+    item_ids: list[int] = Field(default_factory=list)
+
+
+class LibrarySummaryV2Sections(BaseModel):
+    item_ids: list[int] = Field(default_factory=list)
+    series_rails: list[LibrarySummaryV2Rail] = Field(default_factory=list)
+    cloud_series_rails: list[LibrarySummaryV2Rail] = Field(default_factory=list)
+    continue_watching_item_ids: list[int] = Field(default_factory=list)
+    recently_added_item_ids: list[int] = Field(default_factory=list)
+
+
+class LibrarySummaryV2Response(BaseModel):
+    schema_version: Literal["library-summary-v2"] = "library-summary-v2"
+    revision: str
+    view: LibrarySummaryV2View
+    items_by_id: dict[str, LibrarySummaryV2Item] = Field(default_factory=dict)
+    sections: LibrarySummaryV2Sections
+    available_genres: list[str] = Field(default_factory=list)
+    total_items: int = 0
+    scan_in_progress: bool = False
+
+
 class UserSettingsResponse(BaseModel):
     hide_duplicate_movies: bool = True
     hide_recently_added: bool = False

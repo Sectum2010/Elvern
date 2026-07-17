@@ -9,7 +9,11 @@ import {
   MAINTENANCE_MODE_BLOCKED_EVENT,
   MAINTENANCE_MODE_MESSAGE,
 } from "./api.js";
-import { buildLibraryQueryKey } from "./libraryQueries.js";
+import {
+  buildLibraryQueryKey,
+  buildLibraryShadowV2QueryKey,
+  buildLibraryV2QueryKey,
+} from "./libraryQueries.js";
 import { queryClient } from "./queryClient.js";
 import { buildUserSettingsQueryKey } from "./userSettingsQueries.js";
 
@@ -114,13 +118,18 @@ test("apiRequest does not dispatch maintenance mode event for generic 503 errors
 });
 
 test("apiRequest immediately clears protected library cache on 401", async () => {
-  const libraryKey = buildLibraryQueryKey({
+  const identity = {
     userId: 2,
     role: "standard_user",
     category: "movies",
-  });
+  };
+  const libraryKey = buildLibraryQueryKey(identity);
+  const v2LibraryKey = buildLibraryV2QueryKey(identity);
+  const shadowLibraryKey = buildLibraryShadowV2QueryKey(identity);
   const settingsKey = buildUserSettingsQueryKey({ userId: 2, role: "standard_user" });
   queryClient.setQueryData(libraryKey, { items: [{ id: 401 }] });
+  queryClient.setQueryData(v2LibraryKey, { items_by_id: { "401": { id: 401 } } });
+  queryClient.setQueryData(shadowLibraryKey, { items_by_id: { "401": { id: 401 } } });
   queryClient.setQueryData(settingsKey, { poster_card_display_max_width: "800" });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(
     JSON.stringify({ detail: "Authentication required" }),
@@ -130,20 +139,25 @@ test("apiRequest immediately clears protected library cache on 401", async () =>
   await assert.rejects(() => apiRequest("/api/library"));
 
   assert.equal(queryClient.getQueryData(libraryKey), undefined);
+  assert.equal(queryClient.getQueryData(v2LibraryKey), undefined);
+  assert.equal(queryClient.getQueryData(shadowLibraryKey), undefined);
   assert.equal(queryClient.getQueryData(settingsKey), undefined);
 });
 
 test("apiRequest preserves protected cache and requests auth revalidation on a business 403", async () => {
-  const libraryKey = buildLibraryQueryKey({
+  const identity = {
     userId: 2,
     role: "standard_user",
     category: "movies",
-  });
+  };
+  const libraryKey = buildLibraryQueryKey(identity);
+  const v2LibraryKey = buildLibraryV2QueryKey(identity);
   const settingsKey = buildUserSettingsQueryKey({ userId: 2, role: "standard_user" });
   const events = [];
   const handleRevalidation = () => events.push("requested");
   window.addEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);
   queryClient.setQueryData(libraryKey, { items: [{ id: 403 }] });
+  queryClient.setQueryData(v2LibraryKey, { items_by_id: { "403": { id: 403 } } });
   queryClient.setQueryData(settingsKey, { poster_card_display_max_width: "800" });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(
     JSON.stringify({ detail: "This action is not allowed" }),
@@ -153,6 +167,9 @@ test("apiRequest preserves protected cache and requests auth revalidation on a b
   try {
     await assert.rejects(() => apiRequest("/api/assistant/requests"));
     assert.deepEqual(queryClient.getQueryData(libraryKey), { items: [{ id: 403 }] });
+    assert.deepEqual(queryClient.getQueryData(v2LibraryKey), {
+      items_by_id: { "403": { id: 403 } },
+    });
     assert.deepEqual(queryClient.getQueryData(settingsKey), { poster_card_display_max_width: "800" });
     assert.deepEqual(events, ["requested"]);
   } finally {

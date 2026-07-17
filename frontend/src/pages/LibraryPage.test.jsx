@@ -146,6 +146,69 @@ function libraryPayload(overrides = {}) {
 }
 
 
+function summaryV2Payload(v1Payload = emptyLibraryPayload) {
+  const itemsById = {};
+  const addItems = (items = []) => items.forEach((item) => {
+    itemsById[String(item.id)] ||= {
+      id: item.id,
+      title: item.title,
+      year: item.year ?? null,
+      poster_url: item.poster_url ?? null,
+      source_kind: item.source_kind || "local",
+      quality_rank: {
+        key: "wood",
+        label: "Wood",
+        score: 0,
+        description: "Basic fallback copy.",
+        detected: [],
+        tooltip: "Basic fallback copy.",
+      },
+      duration_seconds: item.duration_seconds ?? null,
+      progress_seconds: item.progress_seconds ?? null,
+      progress_duration_seconds: item.progress_duration_seconds ?? null,
+      completed: Boolean(item.completed),
+    };
+  });
+  addItems(v1Payload.items);
+  (v1Payload.series_rails || []).forEach((rail) => addItems(rail.items));
+  (v1Payload.cloud_series_rails || []).forEach((rail) => addItems(rail.items));
+  addItems(v1Payload.continue_watching);
+  addItems(v1Payload.recently_added);
+  return {
+    schema_version: "library-summary-v2",
+    revision: "a".repeat(64),
+    view: {
+      category: "movies",
+      source: v1Payload.arrange?.source || "all",
+      genre: v1Payload.arrange?.genre ?? null,
+      quality: v1Payload.arrange?.quality || "all",
+      sort: v1Payload.arrange?.sort || "smart",
+    },
+    items_by_id: itemsById,
+    sections: {
+      item_ids: (v1Payload.items || []).map((item) => item.id),
+      series_rails: (v1Payload.series_rails || []).map((rail) => ({
+        key: rail.key,
+        title: rail.title,
+        film_count: rail.film_count,
+        item_ids: (rail.items || []).map((item) => item.id),
+      })),
+      cloud_series_rails: (v1Payload.cloud_series_rails || []).map((rail) => ({
+        key: rail.key,
+        title: rail.title,
+        film_count: rail.film_count,
+        item_ids: (rail.items || []).map((item) => item.id),
+      })),
+      continue_watching_item_ids: (v1Payload.continue_watching || []).map((item) => item.id),
+      recently_added_item_ids: (v1Payload.recently_added || []).map((item) => item.id),
+    },
+    available_genres: v1Payload.available_genres || [],
+    total_items: v1Payload.total_items || 0,
+    scan_in_progress: Boolean(v1Payload.scan_in_progress),
+  };
+}
+
+
 function visibleTitleLinkNames(...names) {
   const expectedNames = new Set(names);
   return screen
@@ -311,6 +374,7 @@ describe("LibraryPage category switching", () => {
     queryClient.clear();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   test("defaults to Movies and requests the movies category", async () => {
@@ -325,6 +389,47 @@ describe("LibraryPage category switching", () => {
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
     });
+  });
+
+  test("on mode renders a non-search root view from normalized v2 only", async () => {
+    vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "on");
+    const v1 = libraryPayload({ items: [libraryItem({ id: 71, title: "V2 Root" })], total_items: 1 });
+    const v2 = summaryV2Payload(v1);
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") return Promise.resolve(defaultSettings);
+      if (requestPath === "/api/library/v2/summary?category=movies") return Promise.resolve(v2);
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library"]}>
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("link", { name: "V2 Root" })).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledWith(
+      "/api/library/v2/summary?category=movies",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(apiRequest.mock.calls.some(([path]) => path === "/api/library?category=movies")).toBe(false);
+  });
+
+  test("on mode keeps formal root search on the v1 search endpoint", async () => {
+    vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "on");
+    renderLibrary("/library?q=akira", libraryPayload({
+      items: [libraryItem({ title: "Akira" })],
+      total_items: 1,
+    }));
+
+    expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledWith(
+      "/api/library/search?q=akira&category=movies",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(apiRequest.mock.calls.some(([path]) => path.includes("/api/library/v2/summary"))).toBe(false);
   });
 
   test("shows the maintenance mode warning line when Maintenance Mode is on", async () => {

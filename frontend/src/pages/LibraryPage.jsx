@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { Link, useLocation, useNavigate, useNavigationType } from "react-router-dom";
@@ -60,12 +59,11 @@ import {
   shouldLogViewportAnchorDebug,
 } from "../lib/viewportAnchor";
 import {
-  buildLibraryQueryKey,
   invalidateLibraryQueries,
-  LIBRARY_QUERY_GC_TIME_MS,
-  LIBRARY_QUERY_STALE_TIME_MS,
 } from "../lib/libraryQueries";
+import { buildLibrarySummaryV2RequestPath } from "../lib/librarySummaryV2";
 import { queryClient } from "../lib/queryClient";
+import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 
 
@@ -726,8 +724,18 @@ export function LibraryPage() {
     }),
     [activeLibraryArrange, activeLibraryCategory, activeLibraryQuery],
   );
-  const libraryQueryKey = useMemo(
-    () => buildLibraryQueryKey({
+  const libraryV2RequestPath = useMemo(
+    () => buildLibrarySummaryV2RequestPath({
+      category: activeLibraryCategory,
+      source: activeLibraryArrange.source,
+      genre: activeLibraryArrange.genre,
+      quality: activeLibraryArrange.quality,
+      sort: activeLibraryArrange.sort,
+    }),
+    [activeLibraryArrange, activeLibraryCategory],
+  );
+  const libraryQueryIdentity = useMemo(
+    () => ({
       userId: user?.id,
       role: user?.role,
       category: activeLibraryCategory,
@@ -738,27 +746,26 @@ export function LibraryPage() {
       query: activeLibraryQuery,
     }),
     [
-      activeLibraryArrange.genre,
-      activeLibraryArrange.quality,
-      activeLibraryArrange.sort,
-      activeLibraryArrange.source,
+      activeLibraryArrange,
       activeLibraryCategory,
       activeLibraryQuery,
       user?.id,
       user?.role,
     ],
   );
-  const libraryQuery = useQuery({
-    queryKey: libraryQueryKey,
-    queryFn: ({ signal }) => apiRequest(libraryRequestPath, { signal }),
+  const libraryViewIdentity = useMemo(
+    () => ({ category: activeLibraryCategory }),
+    [activeLibraryCategory],
+  );
+  const libraryQuery = useLibraryViewQuery({
     enabled: Boolean(user?.id),
-    staleTime: LIBRARY_QUERY_STALE_TIME_MS,
-    gcTime: LIBRARY_QUERY_GC_TIME_MS,
-    retry: false,
-    refetchInterval: (queryState) => (
-      queryState.state.data?.scan_in_progress ? 2500 : false
-    ),
+    identity: libraryQueryIdentity,
+    searchActive: Boolean(activeLibraryQuery),
+    v1RequestPath: libraryRequestPath,
+    v2RequestPath: libraryV2RequestPath,
+    viewIdentity: libraryViewIdentity,
   });
+  const libraryQueryKey = libraryQuery.activeQueryKey;
   const library = libraryQuery.data || EMPTY_LIBRARY_PAYLOAD;
   const loading = !libraryQuery.data && libraryQuery.isPending;
   useDesktopLibraryReturnRestore({

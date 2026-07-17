@@ -46,6 +46,46 @@ function sourcePayload({ source = "local", title = "Akira" } = {}) {
 }
 
 
+function sourceSummaryV2Payload({ source = "local", title = "Akira" } = {}) {
+  return {
+    schema_version: "library-summary-v2",
+    revision: "b".repeat(64),
+    view: { category: "movies", source, genre: null, quality: "all", sort: "smart" },
+    items_by_id: {
+      "42": {
+        id: 42,
+        title,
+        year: null,
+        poster_url: "/api/library/item/42/poster?v=cache-token#poster",
+        source_kind: source,
+        quality_rank: {
+          key: "wood",
+          label: "Wood",
+          score: 0,
+          description: "Basic fallback copy.",
+          detected: [],
+          tooltip: "Basic fallback copy.",
+        },
+        duration_seconds: null,
+        progress_seconds: null,
+        progress_duration_seconds: null,
+        completed: false,
+      },
+    },
+    sections: {
+      item_ids: [42],
+      series_rails: [],
+      cloud_series_rails: [],
+      continue_watching_item_ids: [],
+      recently_added_item_ids: [],
+    },
+    available_genres: [],
+    total_items: 1,
+    scan_in_progress: false,
+  };
+}
+
+
 function mockSourceApi(payload = sourcePayload()) {
   apiRequest.mockImplementation((path) => {
     if (path === "/api/user-settings") {
@@ -124,6 +164,7 @@ describe("LibrarySourcePage cached source views", () => {
     queryClient.clear();
     apiRequest.mockReset();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   test("local source requests only the server-filtered payload and uses card width identity", async () => {
@@ -153,6 +194,36 @@ describe("LibrarySourcePage cached source views", () => {
       "/api/library?category=movies&source=cloud",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     ));
+  });
+
+  test("on mode loads the normalized source payload while q remains local", async () => {
+    vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "on");
+    const payload = sourceSummaryV2Payload({ source: "local", title: "Akira" });
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/user-settings") {
+        return Promise.resolve({ floating_library_search_enabled: true });
+      }
+      if (path === "/api/library/v2/summary?category=movies&source=local") {
+        return Promise.resolve(payload);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library/local?q=akira"]}>
+          <LibrarySourcePage sourceKind="local" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "Search Local Library" })).toHaveValue("akira");
+    expect(apiRequest).toHaveBeenCalledWith(
+      "/api/library/v2/summary?category=movies&source=local",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(apiRequest.mock.calls.some(([path]) => path.includes("q="))).toBe(false);
+    expect(apiRequest.mock.calls.some(([path]) => path === "/api/library?category=movies&source=local")).toBe(false);
   });
 
   test("fresh exact cache renders immediately without another source request", async () => {

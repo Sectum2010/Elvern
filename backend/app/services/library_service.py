@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .library_home_curation_service import (
-    _build_series_rails,
+    _build_series_rail_plans,
     _decorate_continue_rows,
     _resolve_continue_watching_rows,
     _select_continue_watching_rows,
@@ -35,12 +37,15 @@ from .library_movie_identity_service import (
     quality_tier_for_row,
 )
 from .library_presentation_service import (
+    _normalize_cloud_title_and_year,
     _poster_directory,
     _parsed_title_payload,
+    _poster_url_for_row,
     _resolve_poster_path,
     _row_value,
     _serialize_media_item,
 )
+from .library_quality_rank_service import build_library_quality_rank
 from .media_age_access_service import resolve_media_age_requirement
 from .media_genre_service import (
     COMMON_MOVIE_GENRES,
@@ -54,7 +59,7 @@ from .title_normalization import (
 )
 from .user_settings_service import get_user_settings
 from .local_library_source_service import ensure_current_shared_local_source_binding
-from .poster_index_service import get_poster_index_snapshot
+from .poster_index_service import PosterIndexSnapshot, get_poster_index_snapshot
 from ..config import Settings
 from ..db import get_connection
 
@@ -76,6 +81,21 @@ LIBRARY_SORT_VALUES = (
     "size_desc",
     "size_asc",
 )
+
+
+@dataclass(slots=True)
+class LibraryViewPlan:
+    category: str
+    arrange: dict[str, str | None]
+    poster_dir: Path
+    poster_index: PosterIndexSnapshot | None
+    item_rows: list[object]
+    series_rail_plans: list[dict[str, object]]
+    cloud_series_rail_plans: list[dict[str, object]]
+    continue_watching_rows: list[object]
+    recently_added_rows: list[object]
+    available_genres: list[str]
+    total_items: int
 
 
 def normalize_library_category(category: str | None = None) -> str:
@@ -482,7 +502,7 @@ def _base_query() -> str:
     """
 
 
-def list_library(
+def build_library_view_plan(
     settings: Settings,
     *,
     user_id: int,
@@ -491,7 +511,7 @@ def list_library(
     genre: str | None = None,
     quality: str | None = None,
     sort: str | None = None,
-) -> dict[str, object]:
+) -> LibraryViewPlan:
     normalized_category = normalize_library_category(category)
     arrange = normalize_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
     user_settings = get_user_settings(settings, user_id=user_id)
@@ -547,7 +567,6 @@ def list_library(
         hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
         hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
     poster_index = get_poster_index_snapshot(poster_dir)
-    poster_url_memo: dict[int, str | None] = {}
     all_rows = _decorate_rows_with_arrange_metadata(list(all_rows), genre_map)
     continue_rows = _decorate_rows_with_arrange_metadata(list(continue_rows), genre_map)
     all_rows = _filter_rows_for_library_category(list(all_rows), normalized_category)
@@ -588,19 +607,13 @@ def list_library(
     available_genres = _available_genres_for_rows(available_genre_rows)
     filtered_all_rows = _apply_library_arrange_filters(list(visible_all_rows), arrange)
     sorted_visible_all_rows = _sort_library_rows(filtered_all_rows, str(arrange["sort"] or "smart"))
-    series_rails = _build_series_rails(
+    series_rail_plans = _build_series_rail_plans(
         settings,
         rows=list(filtered_all_rows),
-        poster_dir=poster_dir,
-        poster_index=poster_index,
-        poster_url_memo=poster_url_memo,
     )
-    cloud_series_rails = _build_series_rails(
+    cloud_series_rail_plans = _build_series_rail_plans(
         settings,
         rows=list(filtered_all_rows),
-        poster_dir=poster_dir,
-        poster_index=poster_index,
-        poster_url_memo=poster_url_memo,
         include_cloud=True,
     )
     visible_continue_rows = _apply_library_arrange_filters(
@@ -645,16 +658,75 @@ def list_library(
             key=lambda row: str(_row_value(row, "last_scanned_at", "") or ""),
             reverse=True,
         )[:12]
+    return LibraryViewPlan(
+        category=normalized_category,
+        arrange=arrange,
+        poster_dir=poster_dir,
+        poster_index=poster_index,
+        item_rows=list(sorted_visible_all_rows),
+        series_rail_plans=series_rail_plans,
+        cloud_series_rail_plans=cloud_series_rail_plans,
+        continue_watching_rows=list(visible_continue_rows),
+        recently_added_rows=list(visible_recent_rows),
+        total_items=len(filtered_all_rows),
+        available_genres=available_genres,
+    )
+
+
+def _serialize_rail_plans_v1(
+    settings: Settings,
+    rail_plans: list[dict[str, object]],
+    *,
+    plan: LibraryViewPlan,
+    poster_url_memo: dict[int, str | None],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "key": rail["key"],
+            "title": rail["title"],
+            "film_count": rail["film_count"],
+            "items": [
+                _serialize_media_item(
+                    settings,
+                    row,
+                    poster_dir=plan.poster_dir,
+                    poster_index=plan.poster_index,
+                    poster_url_memo=poster_url_memo,
+                )
+                for row in rail["rows"]
+            ],
+        }
+        for rail in rail_plans
+    ]
+
+
+def serialize_library_view_v1(
+    settings: Settings,
+    plan: LibraryViewPlan,
+) -> dict[str, object]:
+    poster_url_memo: dict[int, str | None] = {}
+    series_rails = _serialize_rail_plans_v1(
+        settings,
+        plan.series_rail_plans,
+        plan=plan,
+        poster_url_memo=poster_url_memo,
+    )
+    cloud_series_rails = _serialize_rail_plans_v1(
+        settings,
+        plan.cloud_series_rail_plans,
+        plan=plan,
+        poster_url_memo=poster_url_memo,
+    )
     return {
         "items": [
             _serialize_media_item(
                 settings,
                 row,
-                poster_dir=poster_dir,
-                poster_index=poster_index,
+                poster_dir=plan.poster_dir,
+                poster_index=plan.poster_index,
                 poster_url_memo=poster_url_memo,
             )
-            for row in sorted_visible_all_rows
+            for row in plan.item_rows
         ],
         "series_rails": series_rails,
         "cloud_series_rails": cloud_series_rails,
@@ -662,26 +734,224 @@ def list_library(
             _serialize_media_item(
                 settings,
                 row,
-                poster_dir=poster_dir,
-                poster_index=poster_index,
+                poster_dir=plan.poster_dir,
+                poster_index=plan.poster_index,
                 poster_url_memo=poster_url_memo,
             )
-            for row in visible_continue_rows
+            for row in plan.continue_watching_rows
         ],
         "recently_added": [
             _serialize_media_item(
                 settings,
                 row,
-                poster_dir=poster_dir,
-                poster_index=poster_index,
+                poster_dir=plan.poster_dir,
+                poster_index=plan.poster_index,
                 poster_url_memo=poster_url_memo,
             )
-            for row in visible_recent_rows
+            for row in plan.recently_added_rows
         ],
-        "total_items": len(filtered_all_rows),
-        "arrange": arrange,
-        "available_genres": available_genres,
+        "total_items": plan.total_items,
+        "arrange": plan.arrange,
+        "available_genres": plan.available_genres,
     }
+
+
+def _v2_rows_by_id(plan: LibraryViewPlan) -> dict[int, object]:
+    rows_by_id: dict[int, object] = {}
+    row_collections = [
+        plan.item_rows,
+        *[list(rail["rows"]) for rail in plan.series_rail_plans],
+        *[list(rail["rows"]) for rail in plan.cloud_series_rail_plans],
+        plan.recently_added_rows,
+    ]
+    for rows in row_collections:
+        for row in rows:
+            rows_by_id.setdefault(int(row["id"]), row)
+
+    # Continue Watching can carry progress from a hidden duplicate onto its
+    # visible representative. Keep that authoritative progress on the single
+    # normalized entity shared by every section.
+    for row in plan.continue_watching_rows:
+        media_item_id = int(row["id"])
+        existing = rows_by_id.get(media_item_id)
+        if existing is None:
+            rows_by_id[media_item_id] = row
+            continue
+        merged = dict(existing)
+        for field_name in (
+            "progress_seconds",
+            "progress_duration_seconds",
+            "completed",
+            "progress_updated_at",
+            "watch_seconds_total",
+        ):
+            merged[field_name] = _row_value(row, field_name)
+        rows_by_id[media_item_id] = merged
+    return rows_by_id
+
+
+def _serialize_media_item_v2(
+    settings: Settings,
+    row,
+    *,
+    plan: LibraryViewPlan,
+    poster_url_memo: dict[int, str | None],
+    include_original_filename_for_quality: bool,
+) -> dict[str, object]:
+    source_kind = str(_row_value(row, "source_kind", "local") or "local")
+    display_title, display_year, _ = _normalize_cloud_title_and_year(
+        title=_row_value(row, "title"),
+        year=_row_value(row, "year"),
+        original_filename=_row_value(row, "original_filename"),
+        source_kind=source_kind,
+    )
+    quality_row = row
+    if not include_original_filename_for_quality:
+        quality_row = dict(row)
+        quality_row["original_filename"] = None
+    return {
+        "id": int(row["id"]),
+        "title": display_title,
+        "year": display_year,
+        "poster_url": _poster_url_for_row(
+            settings,
+            row,
+            poster_dir=plan.poster_dir,
+            poster_index=plan.poster_index,
+            poster_url_memo=poster_url_memo,
+        ),
+        "source_kind": source_kind,
+        "quality_rank": build_library_quality_rank(quality_row),
+        "duration_seconds": _row_value(row, "duration_seconds"),
+        "progress_seconds": _row_value(row, "progress_seconds"),
+        "progress_duration_seconds": _row_value(row, "progress_duration_seconds"),
+        "completed": bool(_row_value(row, "completed", 0) or 0),
+    }
+
+
+def _v2_rail_membership(rail_plans: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "key": rail["key"],
+            "title": rail["title"],
+            "film_count": rail["film_count"],
+            "item_ids": [int(row["id"]) for row in rail["rows"]],
+        }
+        for rail in rail_plans
+    ]
+
+
+def _library_summary_revision(payload: dict[str, object]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def serialize_library_view_v2(
+    settings: Settings,
+    plan: LibraryViewPlan,
+    *,
+    scan_in_progress: bool,
+    include_original_filename_for_quality: bool,
+) -> dict[str, object]:
+    rows_by_id = _v2_rows_by_id(plan)
+    poster_url_memo: dict[int, str | None] = {}
+    items_by_id = {
+        str(media_item_id): _serialize_media_item_v2(
+            settings,
+            row,
+            plan=plan,
+            poster_url_memo=poster_url_memo,
+            include_original_filename_for_quality=include_original_filename_for_quality,
+        )
+        for media_item_id, row in rows_by_id.items()
+    }
+    payload_without_revision: dict[str, object] = {
+        "schema_version": "library-summary-v2",
+        "view": {
+            "category": plan.category,
+            "source": plan.arrange["source"],
+            "genre": plan.arrange["genre"],
+            "quality": plan.arrange["quality"],
+            "sort": plan.arrange["sort"],
+        },
+        "items_by_id": items_by_id,
+        "sections": {
+            "item_ids": [int(row["id"]) for row in plan.item_rows],
+            "series_rails": _v2_rail_membership(plan.series_rail_plans),
+            "cloud_series_rails": _v2_rail_membership(plan.cloud_series_rail_plans),
+            "continue_watching_item_ids": [int(row["id"]) for row in plan.continue_watching_rows],
+            "recently_added_item_ids": [int(row["id"]) for row in plan.recently_added_rows],
+        },
+        "available_genres": plan.available_genres,
+        "total_items": plan.total_items,
+        "scan_in_progress": bool(scan_in_progress),
+    }
+    return {
+        "schema_version": payload_without_revision["schema_version"],
+        "revision": _library_summary_revision(payload_without_revision),
+        "view": payload_without_revision["view"],
+        "items_by_id": payload_without_revision["items_by_id"],
+        "sections": payload_without_revision["sections"],
+        "available_genres": payload_without_revision["available_genres"],
+        "total_items": payload_without_revision["total_items"],
+        "scan_in_progress": payload_without_revision["scan_in_progress"],
+    }
+
+
+def list_library(
+    settings: Settings,
+    *,
+    user_id: int,
+    category: str = "movies",
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+) -> dict[str, object]:
+    plan = build_library_view_plan(
+        settings,
+        user_id=user_id,
+        category=category,
+        source=source,
+        genre=genre,
+        quality=quality,
+        sort=sort,
+    )
+    return serialize_library_view_v1(settings, plan)
+
+
+def list_library_summary_v2(
+    settings: Settings,
+    *,
+    user_id: int,
+    category: str = "movies",
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+    scan_in_progress: bool = False,
+    include_original_filename_for_quality: bool = False,
+) -> dict[str, object]:
+    plan = build_library_view_plan(
+        settings,
+        user_id=user_id,
+        category=category,
+        source=source,
+        genre=genre,
+        quality=quality,
+        sort=sort,
+    )
+    return serialize_library_view_v2(
+        settings,
+        plan,
+        scan_in_progress=scan_in_progress,
+        include_original_filename_for_quality=include_original_filename_for_quality,
+    )
 
 
 def _search_match_score(row, query: str) -> int:

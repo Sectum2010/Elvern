@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   buildLibraryQueryKey,
+  buildLibraryShadowV2QueryKey,
+  buildLibraryV2QueryKey,
   invalidateLibraryQueries,
   isLibraryQueryKey,
   LIBRARY_QUERY_GC_TIME_MS,
@@ -63,6 +65,12 @@ describe("library query identity", () => {
     expect(baseKey).not.toEqual(buildLibraryQueryKey({ ...base, category: "anime" }));
     expect(baseKey).not.toEqual(buildLibraryQueryKey({ ...base, query: "Akira" }));
     expect(isLibraryQueryKey(baseKey)).toBe(true);
+    expect(buildLibraryV2QueryKey(base)).toEqual([
+      "library",
+      "v2",
+      { ...normalizeLibraryQueryIdentity(base), query: "" },
+    ]);
+    expect(buildLibraryShadowV2QueryKey(base)[1]).toBe("shadow-v2");
   });
 
   test("central invalidation marks every library view stale without removing data", async () => {
@@ -119,6 +127,64 @@ describe("library query identity", () => {
     expect(refetchSpy).not.toHaveBeenCalled();
   });
 
+  test("patches only the normalized v2 entity and preserves section membership", async () => {
+    const key = buildLibraryV2QueryKey({ userId: 1, role: "user", category: "movies" });
+    const sections = {
+      item_ids: [42, 7],
+      series_rails: [{ key: "rail", item_ids: [42, 7] }],
+      cloud_series_rails: [],
+      continue_watching_item_ids: [42],
+      recently_added_item_ids: [7, 42],
+    };
+    queryClient.setQueryData(key, {
+      schema_version: "library-summary-v2",
+      revision: "authoritative-revision",
+      items_by_id: {
+        "42": { id: 42, title: "Akira", progress_seconds: 1 },
+        "7": { id: 7, title: "Arrival", progress_seconds: 9 },
+      },
+      sections,
+    });
+
+    const result = await patchLibraryProgressCaches({
+      media_item_id: 42,
+      position_seconds: 120,
+      duration_seconds: 900,
+      completed: false,
+    });
+    const payload = queryClient.getQueryData(key);
+
+    expect(result.patchedQueryCount).toBe(1);
+    expect(payload.items_by_id["42"]).toMatchObject({
+      id: 42,
+      title: "Akira",
+      progress_seconds: 120,
+      progress_duration_seconds: 900,
+      completed: false,
+    });
+    expect(payload.items_by_id["7"].progress_seconds).toBe(9);
+    expect(payload.sections).toBe(sections);
+    expect(payload.revision).toBe("authoritative-revision");
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
+  test("central invalidation covers v1, v2, and shadow without deleting payloads", async () => {
+    const identity = { userId: 1, role: "user", category: "movies" };
+    const keys = [
+      buildLibraryQueryKey(identity),
+      buildLibraryV2QueryKey(identity),
+      buildLibraryShadowV2QueryKey(identity),
+    ];
+    keys.forEach((key, index) => queryClient.setQueryData(key, { marker: index }));
+
+    await invalidateLibraryQueries({ refetchType: "none" });
+
+    keys.forEach((key, index) => {
+      expect(queryClient.getQueryData(key)).toEqual({ marker: index });
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+    });
+  });
+
   test("completion may perform one explicit silent active refetch", async () => {
     const key = buildLibraryQueryKey({ userId: 1, role: "user", category: "movies" });
     queryClient.setQueryData(key, { items: [{ id: 42, title: "Akira" }] });
@@ -134,7 +200,7 @@ describe("library query identity", () => {
     expect(result.activeRefetched).toBe(true);
     expect(refetchSpy).toHaveBeenCalledTimes(1);
     expect(refetchSpy).toHaveBeenCalledWith({
-      queryKey: ["library", "v1"],
+      predicate: expect.any(Function),
       type: "active",
     });
   });

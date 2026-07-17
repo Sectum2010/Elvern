@@ -98,10 +98,14 @@ describe("user settings query", () => {
     const settingsKey = buildUserSettingsQueryKey({ userId: user.id, role: user.role });
     queryClient.setQueryData(settingsKey, { poster_card_display_max_width: "800" });
     queryClient.setQueryData(["library", "v1", { userId: "7" }], { items: [{ id: 42 }] });
+    queryClient.setQueryData(["library", "v2", { userId: "7" }], { items_by_id: { "42": { id: 42 } } });
+    queryClient.setQueryData(["library", "shadow-v2", { userId: "7" }], { items_by_id: { "42": { id: 42 } } });
 
     clearProtectedQueryCache();
 
     expect(queryClient.getQueryData(settingsKey)).toBeUndefined();
     expect(queryClient.getQueryData(["library", "v1", { userId: "7" }])).toBeUndefined();
+    expect(queryClient.getQueryData(["library", "v2", { userId: "7" }])).toBeUndefined();
+    expect(queryClient.getQueryData(["library", "shadow-v2", { userId: "7" }])).toBeUndefined();
   });
 });

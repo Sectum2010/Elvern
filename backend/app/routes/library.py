@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 
 from ..auth import CurrentAdmin, CurrentUser, resolve_client_ip
 from ..progress import refresh_recent_tracking
 from ..schemas import (
     LibraryListResponse,
+    LibrarySummaryV2Response,
     MediaAgeManualGroupLinkRequest,
     MediaAgeRequirementUpdateRequest,
     MediaGenreUpdateRequest,
@@ -19,6 +20,7 @@ from ..services.library_service import (
     get_media_item_detail,
     get_media_item_poster_path,
     list_library,
+    list_library_summary_v2,
     normalize_library_arrange,
     normalize_library_category,
     search_library,
@@ -232,6 +234,51 @@ def get_library(
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
     payload = _redact_library_list_payload_for_role(payload, user=user)
     return LibraryListResponse(**payload)
+
+
+@router.get("/v2/summary", response_model=LibrarySummaryV2Response)
+def get_library_summary_v2(
+    request: Request,
+    response: Response,
+    category: str | None = None,
+    source: str | None = None,
+    genre: str | None = None,
+    quality: str | None = None,
+    sort: str | None = None,
+    q: str | None = None,
+    user=CurrentUser,
+) -> LibrarySummaryV2Response:
+    if not request.app.state.settings.library_summary_v2_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "library_summary_v2_disabled",
+                "message": "Library summary v2 is disabled by the server capability switch.",
+            },
+        )
+    if str(q or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Search is not supported by library summary v2; use /api/library/search.",
+        )
+    normalized_category = _validated_library_category(category)
+    arrange = _validated_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
+    request.app.state.scan_service.maybe_refresh_local_library(trigger="library-v2-summary")
+    scan_in_progress = bool(request.app.state.scan_service.get_state()["running"])
+    payload = list_library_summary_v2(
+        request.app.state.settings,
+        user_id=user.id,
+        category=normalized_category,
+        source=arrange["source"],
+        genre=arrange["genre"],
+        quality=arrange["quality"],
+        sort=arrange["sort"],
+        scan_in_progress=scan_in_progress,
+        include_original_filename_for_quality=getattr(user, "role", "") == "admin",
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Cookie"
+    return LibrarySummaryV2Response(**payload)
 
 
 @router.get("/search", response_model=LibraryListResponse)

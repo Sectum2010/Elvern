@@ -4,6 +4,9 @@ import { queryClient } from "./queryClient";
 export const LIBRARY_QUERY_STALE_TIME_MS = 5 * 60 * 1000;
 export const LIBRARY_QUERY_GC_TIME_MS = 4 * 60 * 60 * 1000;
 export const LIBRARY_QUERY_PREFIX = Object.freeze(["library", "v1"]);
+export const LIBRARY_V2_QUERY_PREFIX = Object.freeze(["library", "v2"]);
+export const LIBRARY_SHADOW_V2_QUERY_PREFIX = Object.freeze(["library", "shadow-v2"]);
+export const LIBRARY_ALL_QUERY_PREFIX = Object.freeze(["library"]);
 
 
 function normalizeString(value, fallback = "") {
@@ -43,16 +46,44 @@ export function buildLibraryQueryKey(identity = {}) {
 }
 
 
+export function buildLibraryV2QueryKey(identity = {}) {
+  return [
+    ...LIBRARY_V2_QUERY_PREFIX,
+    normalizeLibraryQueryIdentity({ ...identity, query: "" }),
+  ];
+}
+
+
+export function buildLibraryShadowV2QueryKey(identity = {}) {
+  return [
+    ...LIBRARY_SHADOW_V2_QUERY_PREFIX,
+    normalizeLibraryQueryIdentity({ ...identity, query: "" }),
+  ];
+}
+
+
 export function isLibraryQueryKey(queryKey) {
   return Array.isArray(queryKey)
-    && queryKey[0] === LIBRARY_QUERY_PREFIX[0]
-    && queryKey[1] === LIBRARY_QUERY_PREFIX[1];
+    && queryKey[0] === LIBRARY_ALL_QUERY_PREFIX[0]
+    && ["v1", "v2", "shadow-v2"].includes(queryKey[1]);
+}
+
+
+export function isLibraryV2QueryKey(queryKey) {
+  return Array.isArray(queryKey)
+    && queryKey[0] === LIBRARY_V2_QUERY_PREFIX[0]
+    && [LIBRARY_V2_QUERY_PREFIX[1], LIBRARY_SHADOW_V2_QUERY_PREFIX[1]].includes(queryKey[1]);
+}
+
+
+export function isLibraryRenderQueryKey(queryKey) {
+  return isLibraryQueryKey(queryKey) && queryKey[1] !== LIBRARY_SHADOW_V2_QUERY_PREFIX[1];
 }
 
 
 export function invalidateLibraryQueries({ refetchType = "active" } = {}) {
   return queryClient.invalidateQueries({
-    queryKey: LIBRARY_QUERY_PREFIX,
+    queryKey: LIBRARY_ALL_QUERY_PREFIX,
     refetchType,
   });
 }
@@ -118,6 +149,28 @@ function patchLibraryPayloadProgress(payload, itemId, progressFields) {
 }
 
 
+function patchLibrarySummaryV2Progress(payload, itemId, progressFields) {
+  if (payload?.schema_version !== "library-summary-v2" || !payload.items_by_id) {
+    return payload;
+  }
+  const itemKey = String(itemId);
+  const currentItem = payload.items_by_id[itemKey];
+  if (!currentItem) {
+    return payload;
+  }
+  return {
+    ...payload,
+    items_by_id: {
+      ...payload.items_by_id,
+      [itemKey]: {
+        ...currentItem,
+        ...progressFields,
+      },
+    },
+  };
+}
+
+
 export async function patchLibraryProgressCaches(
   progressPayload,
   { refetchActiveOnCompletion = false } = {},
@@ -138,7 +191,9 @@ export async function patchLibraryProgressCaches(
     if (!isLibraryQueryKey(query.queryKey) || query.state.data === undefined) {
       return;
     }
-    const nextPayload = patchLibraryPayloadProgress(query.state.data, itemId, progressFields);
+    const nextPayload = isLibraryV2QueryKey(query.queryKey)
+      ? patchLibrarySummaryV2Progress(query.state.data, itemId, progressFields)
+      : patchLibraryPayloadProgress(query.state.data, itemId, progressFields);
     if (nextPayload !== query.state.data) {
       patchedQueryCount += 1;
       queryClient.setQueryData(query.queryKey, nextPayload);
@@ -148,7 +203,7 @@ export async function patchLibraryProgressCaches(
   const activeRefetched = Boolean(progressFields.completed && refetchActiveOnCompletion);
   if (activeRefetched) {
     await queryClient.refetchQueries({
-      queryKey: LIBRARY_QUERY_PREFIX,
+      predicate: (query) => isLibraryRenderQueryKey(query.queryKey),
       type: "active",
     });
   }
