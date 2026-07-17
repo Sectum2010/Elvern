@@ -5,8 +5,10 @@ import { describe, expect, test } from "vitest";
 import {
   CONNECTION_OOPS_COPY,
   CONNECTION_OOPS_TITLE,
+  CONNECTION_FAMILIARS,
   CONNECTION_STATUS_WORDS,
   STARTUP_HEALTH_PROBE_INTERVAL_MS,
+  STARTUP_SHELL_REVEAL_DELAY_MS,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "./startupConnection.js";
 
@@ -36,13 +38,36 @@ describe("static connection shell contract", () => {
     }
   });
 
-  test("familiars are unframed and waiting text moves unless motion is reduced", () => {
+  test("familiars are unframed and waiting letters move individually unless motion is reduced", () => {
     for (const html of [indexHtml, offlineHtml]) {
       expect(html).toMatch(/\.elvern-familiar-stage\s*\{[^}]*(?:width:\s*128px)[^}]*\}/s);
       expect(html).not.toMatch(/\.elvern-familiar-stage\s*\{[^}]*(?:border|background|box-shadow):/s);
-      expect(html).toContain("@keyframes elvern-word-bounce");
-      expect(html).toMatch(/\.elvern-connection-shell__waiting\s*\{[^}]*animation:\s*elvern-word-bounce/s);
-      expect(html).toMatch(/prefers-reduced-motion[\s\S]*\.elvern-connection-shell__waiting\s*\{\s*animation:\s*none\s*!important/s);
+      expect(html).not.toContain("#elvern-connection-shell::before");
+      expect(html).not.toContain("#elvern-connection-shell::after");
+      expect(html).toContain("@keyframes elvern-letter-wave");
+      expect(html).toMatch(/\.elvern-connection-shell__letter\s*\{[^}]*animation:\s*elvern-letter-wave/s);
+      expect(html).not.toContain("@keyframes elvern-word-bounce");
+      expect(html).toMatch(/prefers-reduced-motion[\s\S]*\.elvern-connection-shell__letter\s*\{\s*animation:\s*none\s*!important/s);
+      CONNECTION_FAMILIARS.forEach((familiar) => expect(html).toContain(`elvern-familiar--${familiar}`));
+    }
+  });
+
+  test("the loading typeface stays scoped to the shell and includes Oops and Retry", () => {
+    expect(indexHtml).not.toMatch(/body\s*\{[^}]*font-family:\s*ui-monospace/s);
+    for (const html of [indexHtml, offlineHtml]) {
+      expect(html).toMatch(/#elvern-connection-shell\s*\{[^}]*font-family:\s*ui-monospace/s);
+      expect(html).toMatch(/\.elvern-connection-shell__oops p\s*\{[^}]*font-family:\s*inherit/s);
+      expect(html).toMatch(/\.elvern-connection-shell__retry\s*\{[^}]*font-family:\s*inherit/s);
+    }
+  });
+
+  test("normal startup waits 400ms before revealing the shell and Retry restarts connecting", () => {
+    expect(indexHtml).toContain(`const SHELL_REVEAL_DELAY_MS = ${STARTUP_SHELL_REVEAL_DELAY_MS}`);
+    expect(indexHtml).toContain("elvern-connection-shell--visible");
+    for (const html of [indexHtml, offlineHtml]) {
+      expect(html).toContain("function restartConnectingCycle()");
+      expect(html).toContain('shell.dataset.state = "connecting"');
+      expect(html).toContain("setWaitingWord(WORDS[0])");
     }
   });
 
@@ -57,6 +82,8 @@ describe("static connection shell contract", () => {
 
   test("service worker allowlists only offline.html and never caches private routes", () => {
     expect(serviceWorker).toContain('"offline.html"');
+    expect(serviceWorker).toContain('const OFFLINE_SHELL_REVISION = "__ELVERN_OFFLINE_SHELL_REVISION__"');
+    expect(serviceWorker).toContain("${OFFLINE_CACHE_FAMILY}${OFFLINE_SHELL_REVISION}");
     expect(serviceWorker).not.toMatch(/cache\.addAll\([^)]*(?:api|library|poster|auth)/is);
     expect(serviceWorker).not.toMatch(/cache\.put\(/);
     expect(serviceWorker).toContain('request.mode !== "navigate"');

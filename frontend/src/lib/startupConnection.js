@@ -1,6 +1,7 @@
 export const STARTUP_UNREACHABLE_DELAY_MS = 60_000;
 export const STARTUP_HEALTH_PROBE_INTERVAL_MS = 10_000;
 export const STARTUP_HEALTH_PROBE_TIMEOUT_MS = 5_000;
+export const STARTUP_SHELL_REVEAL_DELAY_MS = 400;
 export const STARTUP_CONNECTIVITY_FAILURE_EVENT = "elvern:connectivity-failure";
 export const STARTUP_APPLICATION_READY_EVENT = "elvern:application-response";
 export const CONNECTION_OOPS_TITLE = "Oops!";
@@ -10,8 +11,12 @@ export const CONNECTION_STATUS_WORDS = Object.freeze([
   "Ruminating...",
   "Conjuring...",
   "Recombobulating...",
+  "Scrying...",
+  "Divining...",
+  "Wayfinding...",
+  "Enchanting...",
 ]);
-export const CONNECTION_FAMILIARS = Object.freeze(["raven", "wisp", "horned"]);
+export const CONNECTION_FAMILIARS = Object.freeze(["raven", "wisp", "horned", "gargoyle", "keeper"]);
 export const CONNECTION_FAMILIAR_ROTATION_MS = 7_000;
 
 
@@ -215,12 +220,20 @@ export function createStartupConnectionController({
     }
   }
 
+  function retry() {
+    outageStartedAt = Date.now();
+    applicationReady = !requireApplicationReady;
+    emit("connecting", false);
+    scheduleUnreachable();
+    return probe();
+  }
+
   return {
     getSnapshot: () => snapshot,
     probe,
     reportApplicationReady,
     reportFailure,
-    retry: probe,
+    retry,
     start,
     stop,
     subscribe(listener) {

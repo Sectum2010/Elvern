@@ -18,23 +18,17 @@
     <style>
       :root { color-scheme: dark; background: #080b12; }
       html, body { min-height: 100%; margin: 0; background: #080b12; }
-      body { color: #e7e0cf; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      body { color: #e7e0cf; }
       #elvern-connection-shell {
         position: fixed; inset: 0; z-index: 2147483000; display: grid; place-items: center;
         min-height: 100dvh; padding: max(1.25rem, env(safe-area-inset-top)) max(1.25rem, env(safe-area-inset-right))
           max(1.25rem, env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
-        box-sizing: border-box; overflow: hidden; background: #080b12; opacity: 1;
-        transition: opacity 160ms linear;
+        box-sizing: border-box; overflow: hidden; background: #080b12; opacity: 0; visibility: hidden;
+        pointer-events: none; transition: opacity 160ms linear;
+        font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
       }
-      #elvern-connection-shell::before {
-        content: ""; position: absolute; inset: 12px; border: 2px solid #24263d;
-        box-shadow: inset 0 0 0 4px #101426; pointer-events: none;
-      }
-      #elvern-connection-shell::after {
-        content: ""; position: absolute; width: min(34rem, 78vw); height: 2px; bottom: 18%;
-        background: #34304b; box-shadow: 0 5px 0 #161a2c, 0 -5px 0 #0d2630; pointer-events: none;
-      }
-      #elvern-connection-shell.elvern-connection-shell--ready { opacity: 0; pointer-events: none; }
+      #elvern-connection-shell.elvern-connection-shell--visible { opacity: 1; visibility: visible; pointer-events: auto; }
+      #elvern-connection-shell.elvern-connection-shell--ready { opacity: 0; visibility: hidden; pointer-events: none; }
       #elvern-connection-shell[hidden] { display: none; }
       .elvern-connection-shell__content { position: relative; z-index: 1; display: grid; justify-items: center; gap: 1rem; text-align: center; }
       .elvern-familiar-stage {
@@ -43,36 +37,56 @@
       .elvern-familiar { grid-area: 1 / 1; display: none; width: 96px; height: 80px; image-rendering: pixelated; shape-rendering: crispEdges; }
       #elvern-connection-shell[data-familiar="raven"] .elvern-familiar--raven,
       #elvern-connection-shell[data-familiar="wisp"] .elvern-familiar--wisp,
-      #elvern-connection-shell[data-familiar="horned"] .elvern-familiar--horned { display: block; }
-      .elvern-familiar--raven .familiar-motion { transform-origin: 48px 44px; animation: elvern-raven 1200ms steps(4, end) infinite; }
-      .elvern-familiar--raven .raven-eye { animation: elvern-blink 2400ms steps(4, end) infinite; }
-      .elvern-familiar--wisp .familiar-motion { transform-origin: 48px 42px; animation: elvern-wisp 1000ms steps(4, end) infinite; }
-      .elvern-familiar--horned .familiar-motion { transform-origin: 48px 54px; animation: elvern-horned 1400ms steps(4, end) infinite; }
-      @keyframes elvern-raven { 0%,100%{transform:translate(0,0)}25%{transform:translate(-2px,-2px)}50%{transform:translate(0,-2px)}75%{transform:translate(2px,0)} }
-      @keyframes elvern-blink { 0%,25%,75%,100%{opacity:1}50%{opacity:0} }
-      @keyframes elvern-wisp { 0%,100%{transform:translate(0,2px)}25%{transform:translate(-2px,-2px)}50%{transform:translate(0,-4px)}75%{transform:translate(2px,-2px)} }
-      @keyframes elvern-horned { 0%,100%{transform:translate(0,0)}25%{transform:translate(-2px,0)}50%{transform:translate(0,-2px)}75%{transform:translate(2px,0)} }
-      @keyframes elvern-word-bounce { from{transform:translateX(-14px)}to{transform:translateX(14px)} }
-      .elvern-connection-shell__waiting {
-        margin: 0; color: #b8c9d2; font-size: clamp(0.9rem, 2.4vw, 1.05rem); letter-spacing: 0;
-        animation: elvern-word-bounce 1800ms ease-in-out infinite alternate;
+      #elvern-connection-shell[data-familiar="horned"] .elvern-familiar--horned,
+      #elvern-connection-shell[data-familiar="gargoyle"] .elvern-familiar--gargoyle,
+      #elvern-connection-shell[data-familiar="keeper"] .elvern-familiar--keeper { display: block; }
+      .elvern-familiar .familiar-breath {
+        transform-box: fill-box; transform-origin: center bottom;
+        animation: elvern-body-breath var(--breath-duration, 2200ms) steps(4, end) infinite;
       }
+      .elvern-familiar .familiar-head {
+        animation: elvern-head-breath var(--breath-duration, 2200ms) steps(4, end) infinite;
+      }
+      .elvern-familiar .familiar-accent {
+        animation: elvern-accent-breath var(--breath-duration, 2200ms) steps(4, end) infinite;
+      }
+      .elvern-familiar--raven { --breath-duration: 2400ms; }
+      .elvern-familiar--wisp { --breath-duration: 1800ms; }
+      .elvern-familiar--horned { --breath-duration: 2600ms; }
+      .elvern-familiar--gargoyle { --breath-duration: 2800ms; }
+      .elvern-familiar--keeper { --breath-duration: 2300ms; }
+      .elvern-familiar--raven .raven-eye { animation: elvern-blink 2400ms steps(4, end) infinite; }
+      @keyframes elvern-body-breath {
+        0%,100%{transform:translateY(0) scaleY(1)}25%{transform:translateY(1px) scaleY(.98)}
+        50%{transform:translateY(-1px) scaleY(1.03)}75%{transform:translateY(0) scaleY(1.01)}
+      }
+      @keyframes elvern-head-breath { 0%,100%{transform:translateY(0)}25%{transform:translateY(1px)}50%,75%{transform:translateY(-1px)} }
+      @keyframes elvern-accent-breath { 0%,100%{transform:translateY(0);opacity:.72}50%{transform:translateY(-2px);opacity:1} }
+      @keyframes elvern-blink { 0%,25%,75%,100%{opacity:1}50%{opacity:0} }
+      .elvern-connection-shell__waiting {
+        margin: 0; color: #b8c9d2; font-size: clamp(0.9rem, 2.4vw, 1.05rem); letter-spacing: 0; white-space: pre;
+      }
+      .elvern-connection-shell__letter {
+        display: inline-block;
+        animation: elvern-letter-wave 1200ms ease-in-out infinite;
+        animation-delay: calc(var(--letter-index) * 55ms);
+      }
+      @keyframes elvern-letter-wave { 0%,55%,100%{transform:translateY(0)}20%{transform:translateY(-3px)}35%{transform:translateY(1px)} }
       .elvern-connection-shell__oops { display: none; max-width: 34rem; }
       .elvern-connection-shell__oops h1 { margin: 0 0 0.75rem; color: #e7e0cf; font-size: clamp(1.55rem, 5vw, 2.2rem); letter-spacing: 0; }
-      .elvern-connection-shell__oops p { margin: 0; color: #aeb8c5; font: 1rem/1.6 system-ui, sans-serif; letter-spacing: 0; }
+      .elvern-connection-shell__oops p { margin: 0; color: #aeb8c5; font-size: 1rem; line-height: 1.6; font-family: inherit; letter-spacing: 0; }
       .elvern-connection-shell__retry {
         margin-top: 1.25rem; padding: 0.25rem; border: 0; border-radius: 0; background: transparent;
-        box-shadow: none; color: #8799a8; font: 0.95rem/1.4 system-ui, sans-serif; cursor: pointer;
+        box-shadow: none; color: #8799a8; font-size: 0.95rem; line-height: 1.4; font-family: inherit; cursor: pointer;
       }
       .elvern-connection-shell__retry:hover { color: #d2dde2; text-decoration: underline; text-underline-offset: 0.25rem; }
       .elvern-connection-shell__retry:focus-visible { color: #e7e0cf; outline: 2px solid #6aa5ad; outline-offset: 4px; }
       #elvern-connection-shell[data-state="unreachable"] .elvern-connection-shell__waiting { display: none; }
       #elvern-connection-shell[data-state="unreachable"] .elvern-connection-shell__oops { display: block; }
-      #elvern-connection-shell[data-state="unreachable"] .elvern-familiar { animation-play-state: paused; }
+      #elvern-connection-shell[data-state="unreachable"] .elvern-familiar * { animation-play-state: paused; }
       @media (prefers-reduced-motion: reduce) {
         #elvern-connection-shell { transition: none; }
-        .elvern-familiar .familiar-motion, .elvern-familiar .raven-eye,
-        .elvern-connection-shell__waiting { animation: none !important; }
+        .elvern-familiar *, .elvern-connection-shell__letter { animation: none !important; }
       }
       @media (orientation: landscape) and (max-height: 520px) {
         .elvern-connection-shell__content { grid-template-columns: auto minmax(0, 28rem); column-gap: 1.5rem; }
@@ -85,37 +99,84 @@
       <div class="elvern-connection-shell__content">
         <div class="elvern-familiar-stage" aria-hidden="true">
           <svg class="elvern-familiar elvern-familiar--raven" viewBox="0 0 96 80">
-            <g class="familiar-motion">
+            <g class="familiar-breath">
               <path fill="#171b2a" d="M22 30h12v-8h28v6h10v8h8v12h-8v8H58v8H34v-6H22V48H14V36h8z"/>
               <path fill="#2b3047" d="M30 26h28v6h10v12H58v8H34v-6H22V34h8z"/>
               <path fill="#0a0d15" d="M18 42h20v8H24v8H14V48h4zm40-8h18v8h8v8H64v-8h-6z"/>
+              <path fill="#20263a" d="M30 60h8v8h-8zm24 0h8v8h-8z"/>
+            </g>
+            <g class="familiar-head">
               <path fill="#6aa5ad" d="M30 34h8v6h-8zm28 0h8v6h-8z" class="raven-eye"/>
               <path fill="#b79c5b" d="M44 42h10v5H44z"/>
-              <path fill="#20263a" d="M30 60h8v8h-8zm24 0h8v8h-8z"/>
             </g>
           </svg>
           <svg class="elvern-familiar elvern-familiar--wisp" viewBox="0 0 96 80">
-            <g class="familiar-motion">
-              <path fill="#18333a" d="M42 10h12v10h8v10h8v18h-8v12H54v10H42V60H32V48h-6V30h8V20h8z"/>
-              <path fill="#3e7f82" d="M44 18h8v10h8v20h-8v10h-8V48h-8V30h8z"/>
-              <path fill="#9bc8bd" d="M44 30h8v16h-8z"/>
-              <path fill="#d8d6b5" d="M38 34h6v6h-6zm14 0h6v6h-6z"/>
-              <path fill="#20253a" d="M32 62h8v8h-8zm24-4h8v8h-8z"/>
+            <g class="familiar-accent">
+              <path fill="#6aa5ad" d="M20 24h6v6h-6zm54-8h6v8h-6zM16 48h6v6h-6zm62 10h6v6h-6z"/>
+            </g>
+            <g class="familiar-breath">
+              <path fill="#17343b" d="M46 4h10v10h8v8h8v12h8v20H68v10H58v12H48V66H38v8H26V62h-8V44h8V30h8V18h12z"/>
+              <path fill="#34777e" d="M46 14h10v12h8v10h6v16H58v10h-8v8h-6V58H34V46h-8V36h10V24h10z"/>
+              <path fill="#89c2ba" d="M46 24h8v10h6v16h-8v10h-8V50h-8V36h10z"/>
+              <path fill="#22454f" d="M28 58h10v8h8v10H34V68H24zm30 0h12v8h-6v8H52V64h6z"/>
+            </g>
+            <g class="familiar-head">
+              <path fill="#e3dfbd" d="M38 38h6v6h-6zm16 0h6v6h-6z"/>
+              <path fill="#102127" d="M44 50h10v5H44z"/>
             </g>
           </svg>
           <svg class="elvern-familiar elvern-familiar--horned" viewBox="0 0 96 80">
-            <g class="familiar-motion">
+            <g class="familiar-head">
               <path fill="#b79c5b" d="M24 12h10v14H24zm38 0h10v14H62z"/>
+            </g>
+            <g class="familiar-breath">
               <path fill="#2d2940" d="M30 22h36v8h8v28h-8v10H30V58h-8V30h8z"/>
               <path fill="#4a3b55" d="M34 28h28v8h8v20h-8v8H34v-8h-8V36h8z"/>
+              <path fill="#20263a" d="M30 66h10v8H30zm26 0h10v8H56z"/>
+            </g>
+            <g class="familiar-head">
               <path fill="#91b5b1" d="M34 40h8v6h-8zm20 0h8v6h-8z"/>
               <path fill="#171624" d="M42 52h12v6H42z"/>
-              <path fill="#20263a" d="M30 66h10v8H30zm26 0h10v8H56z"/>
+            </g>
+          </svg>
+          <svg class="elvern-familiar elvern-familiar--gargoyle" viewBox="0 0 96 80">
+            <g class="familiar-accent">
+              <path fill="#242b3d" d="M8 30h18v8H14v16H6V38h2zm62 0h18v8h2v16h-8V38H70z"/>
+              <path fill="#3d4658" d="M14 24h16v10H20v10H10V32h4zm52 0h16v8h4v12H76V34H66z"/>
+            </g>
+            <g class="familiar-breath">
+              <path fill="#4b5363" d="M30 22h36v8h8v30h-8v10H30V60h-8V30h8z"/>
+              <path fill="#697180" d="M34 30h28v8h8v18h-8v8H34v-8h-8V38h8z"/>
+              <path fill="#343b4c" d="M32 64h12v10H26v-6h6zm20 0h12v4h6v6H52z"/>
+            </g>
+            <g class="familiar-head">
+              <path fill="#8b7b62" d="M28 14h10v12H28zm30 0h10v12H58z"/>
+              <path fill="#9bc8bd" d="M34 40h8v6h-8zm20 0h8v6h-8z"/>
+              <path fill="#2a2f3c" d="M42 52h12v6H42z"/>
+              <path fill="#c4b998" d="M44 58h4v6h-4zm8 0h4v6h-4z"/>
+            </g>
+          </svg>
+          <svg class="elvern-familiar elvern-familiar--keeper" viewBox="0 0 96 80">
+            <g class="familiar-breath">
+              <path fill="#1d2032" d="M32 18h30v8h8v34h-8v12H28V60h-8V34h8v-8h4z"/>
+              <path fill="#35334a" d="M34 24h26v8h6v28h-8v8H32v-8h-8V36h10z"/>
+              <path fill="#171a27" d="M28 66h14v8H26zm28 0h12v8H54z"/>
+            </g>
+            <g class="familiar-head">
+              <path fill="#4c435a" d="M34 12h24v6h8v18H28V18h6z"/>
+              <path fill="#10131e" d="M34 22h24v14H34z"/>
+              <path fill="#8cc8c1" d="M40 26h6v5h-6zm12 0h6v5h-6z"/>
+            </g>
+            <g class="familiar-accent">
+              <path fill="#77684b" d="M68 38h8v26h-8zM64 46h16v20H64z"/>
+              <path fill="#b9a867" d="M68 50h8v12h-8z"/>
+              <path fill="#91d1c7" d="M70 52h4v8h-4z"/>
+              <path fill="#334b52" d="M62 42h20v4H62zm2 24h16v4H64z"/>
             </g>
           </svg>
         </div>
-        <p class="elvern-connection-shell__waiting" data-connection-waiting-word>Flibbertigibbeting...</p>
-        <span hidden>Ruminating... Conjuring... Recombobulating...</span>
+        <p class="elvern-connection-shell__waiting" data-connection-waiting-word aria-label="Flibbertigibbeting...">Flibbertigibbeting...</p>
+        <span hidden>Ruminating... Conjuring... Recombobulating... Scrying... Divining... Wayfinding... Enchanting...</span>
         <div class="elvern-connection-shell__oops">
           <h1>Oops!</h1>
           <p>Elvern could not be reached. Check your connection and try again.</p>
@@ -129,9 +190,10 @@
         const UNREACHABLE_DELAY_MS = 60000;
         const HEALTH_PROBE_INTERVAL_MS = 10000;
         const HEALTH_PROBE_TIMEOUT_MS = 5000;
+        const SHELL_REVEAL_DELAY_MS = 400;
         const ROTATION_MS = 7000;
-        const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating..."];
-        const FAMILIARS = ["raven", "wisp", "horned"];
+        const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating...", "Scrying...", "Divining...", "Wayfinding...", "Enchanting..."];
+        const FAMILIARS = ["raven", "wisp", "horned", "gargoyle", "keeper"];
         window.__elvernConnectionStartedAt = Date.now();
         const shell = document.getElementById("elvern-connection-shell");
         const word = shell.querySelector("[data-connection-waiting-word]");
@@ -140,9 +202,34 @@
         let inFlight = null;
         let observedFailure = false;
         let rotationIndex = 0;
+        let unreachableTimer = 0;
+
+        function setWaitingWord(text) {
+          word.setAttribute("aria-label", text);
+          word.replaceChildren(...Array.from(text, (letter, index) => {
+            const span = document.createElement("span");
+            span.className = "elvern-connection-shell__letter";
+            span.setAttribute("aria-hidden", "true");
+            span.style.setProperty("--letter-index", String(index));
+            span.textContent = letter === " " ? "\u00a0" : letter;
+            return span;
+          }));
+        }
 
         function showOops() {
+          shell.classList.add("elvern-connection-shell--visible");
           shell.dataset.state = "unreachable";
+        }
+
+        function restartConnectingCycle() {
+          window.clearTimeout(unreachableTimer);
+          window.__elvernConnectionStartedAt = Date.now();
+          rotationIndex = 0;
+          shell.dataset.familiar = FAMILIARS[0];
+          setWaitingWord(WORDS[0]);
+          shell.dataset.state = "connecting";
+          shell.classList.add("elvern-connection-shell--visible");
+          unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
         }
 
         async function probe({ forceReload = false } = {}) {
@@ -168,7 +255,10 @@
           return inFlight;
         }
 
-        const handleRetry = () => { void probe({ forceReload: true }); };
+        const handleRetry = () => {
+          restartConnectingCycle();
+          void probe({ forceReload: true });
+        };
         const handleOnline = () => { void probe(); };
         const handleVisibility = () => {
           if (document.visibilityState === "visible") void probe();
@@ -176,18 +266,24 @@
         retry.addEventListener("click", handleRetry);
         window.addEventListener("online", handleOnline);
         document.addEventListener("visibilitychange", handleVisibility);
-        const unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
+        const revealTimer = window.setTimeout(() => {
+          shell.classList.add("elvern-connection-shell--visible");
+        }, SHELL_REVEAL_DELAY_MS);
+        unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
         const probeInterval = window.setInterval(() => { void probe(); }, HEALTH_PROBE_INTERVAL_MS);
         const rotationInterval = window.matchMedia("(prefers-reduced-motion: reduce)").matches
           ? 0
           : window.setInterval(() => {
             rotationIndex += 1;
             shell.dataset.familiar = FAMILIARS[rotationIndex % FAMILIARS.length];
-            word.textContent = WORDS[rotationIndex % WORDS.length];
+            setWaitingWord(WORDS[rotationIndex % WORDS.length]);
           }, ROTATION_MS);
+
+        setWaitingWord(WORDS[0]);
 
         window.__elvernStaticConnectionShellCleanup = () => {
           window.clearTimeout(unreachableTimer);
+          window.clearTimeout(revealTimer);
           window.clearInterval(probeInterval);
           window.clearInterval(rotationInterval);
           activeController?.abort();

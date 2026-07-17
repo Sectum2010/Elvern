@@ -31,6 +31,9 @@ describe("service worker dynamic-prefix registration", () => {
     const activeRegistration = {
       scope: "https://elvern.test/abc23456/",
       active: { scriptURL: "https://elvern.test/abc23456/sw.js" },
+      installing: null,
+      waiting: null,
+      update: vi.fn().mockResolvedValue(undefined),
       unregister: vi.fn(),
     };
     const staleElvernRegistration = {
@@ -58,7 +61,33 @@ describe("service worker dynamic-prefix registration", () => {
     });
 
     expect(staleElvernRegistration.unregister).toHaveBeenCalledOnce();
+    expect(activeRegistration.update).toHaveBeenCalledOnce();
     expect(activeRegistration.unregister).not.toHaveBeenCalled();
     expect(unrelatedRegistration.unregister).not.toHaveBeenCalled();
+  });
+
+  test("a background update failure keeps the active worker and does not fail registration", async () => {
+    const warn = vi.fn();
+    const activeRegistration = {
+      scope: "https://elvern.test/abc23456/",
+      active: { scriptURL: "https://elvern.test/abc23456/sw.js" },
+      installing: null,
+      waiting: null,
+      update: vi.fn().mockRejectedValue(new Error("temporarily offline")),
+    };
+    const serviceWorker = {
+      register: vi.fn().mockResolvedValue(activeRegistration),
+      getRegistrations: vi.fn().mockResolvedValue([activeRegistration]),
+    };
+
+    await expect(registerElvernServiceWorker({
+      baseUri: "https://elvern.test/abc23456/",
+      serviceWorker,
+      warn,
+    })).resolves.toBe(activeRegistration);
+
+    expect(warn).toHaveBeenCalledWith(
+      "Elvern offline recovery update check failed; the current worker remains available.",
+    );
   });
 });

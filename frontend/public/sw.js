@@ -1,10 +1,10 @@
-const OFFLINE_CACHE_VERSION = "v1";
+const OFFLINE_SHELL_REVISION = "__ELVERN_OFFLINE_SHELL_REVISION__";
 const OFFLINE_CACHE_FAMILY = "elvern-offline-shell-";
 const LEGACY_CACHE_FAMILY = "elvern-shell";
 const NAVIGATION_HANDOFF_TIMEOUT_MS = 3_500;
 const scopePath = new URL(self.registration.scope).pathname;
 const cacheScopeIdentity = encodeURIComponent(scopePath);
-const OFFLINE_CACHE_NAME = `${OFFLINE_CACHE_FAMILY}${OFFLINE_CACHE_VERSION}:${cacheScopeIdentity}`;
+const OFFLINE_CACHE_NAME = `${OFFLINE_CACHE_FAMILY}${OFFLINE_SHELL_REVISION}:${cacheScopeIdentity}`;
 const OFFLINE_URL = new URL("offline.html", self.registration.scope).href;
 
 

@@ -21,6 +21,13 @@ export async function registerElvernServiceWorker({
       scope: registrationConfig.scope,
       updateViaCache: "none",
     });
+    if (registration.active && !registration.installing && !registration.waiting && typeof registration.update === "function") {
+      try {
+        await registration.update();
+      } catch {
+        warn("Elvern offline recovery update check failed; the current worker remains available.");
+      }
+    }
     if (typeof serviceWorker.getRegistrations === "function") {
       const registrations = await serviceWorker.getRegistrations();
       await Promise.all(registrations.map(async (candidate) => {

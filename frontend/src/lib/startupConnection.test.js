@@ -127,15 +127,22 @@ describe("startup connection controller", () => {
     controller.stop();
   });
 
-  test("retry probes immediately and keeps Oops visible after another failure", async () => {
+  test("retry probes immediately and starts a new full connecting window", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError("offline"));
     const controller = createStartupConnectionController({ fetchImpl });
     controller.start();
     await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS);
     expect(controller.getSnapshot().status).toBe("unreachable");
 
+    const callsBeforeRetry = fetchImpl.mock.calls.length;
     await controller.retry();
-    expect(fetchImpl).toHaveBeenCalledTimes(8);
+    expect(fetchImpl).toHaveBeenCalledTimes(callsBeforeRetry + 1);
+    expect(controller.getSnapshot().status).toBe("connecting");
+
+    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1);
+    expect(controller.getSnapshot().status).toBe("connecting");
+
+    await vi.advanceTimersByTimeAsync(1);
     expect(controller.getSnapshot().status).toBe("unreachable");
     controller.stop();
   });

@@ -33,10 +33,12 @@ The BrowserRouter basename is detected from the existing 8-24 character base32-s
 The original local pixel familiars are:
 
 - a raven;
-- a cold-light wisp;
-- a horned dungeon familiar.
+- a cold-light flame wisp with a pointed silhouette, split tail flame, face, core, and sparks;
+- a horned dungeon familiar;
+- a small stone gargoyle;
+- a hooded lantern keeper.
 
-They use inline SVG with crisp pixel edges and discrete familiar motion. They are intentionally unframed: the familiar stage has no border, background, or shadow. The waiting text moves smoothly left-to-right and back, following the latest product direction. Reduced-motion users receive a fixed raven, fixed text, and no sprite or text animation.
+They use compact inline SVG with crisp pixel edges and discrete body-part motion. Their bodies, heads, and accents breathe in offset stepped cycles instead of moving as one rigid image. They are intentionally unframed, and the connection page has no surrounding border or decorative horizontal divider. The waiting phrase stays centered while its individual letters bounce in a left-to-right wave. Reduced-motion users receive a fixed raven, fixed text, and no sprite or text animation.
 
 The rotating words are:
 
@@ -44,6 +46,10 @@ The rotating words are:
 - `Ruminating...`
 - `Conjuring...`
 - `Recombobulating...`
+- `Scrying...`
+- `Divining...`
+- `Wayfinding...`
+- `Enchanting...`
 
 The familiar and word change every 7 seconds. The shell uses `role="status"`, `aria-live="polite"`, hides decorative SVG from assistive technology, and provides a visible keyboard focus state for Retry.
 
@@ -57,7 +63,7 @@ Named production constants are:
 
 The states are `connecting`, `connected`, and `unreachable`.
 
-Cold startup begins in `connecting` and never displays Oops before the original 60-second deadline. Offline events and failed probes do not shorten or reset that deadline. Only one health probe can be in flight. Online and visible-page events request an immediate probe without creating another interval.
+Cold startup begins in `connecting` and never displays Oops before the original 60-second deadline. The visual shell has a 400ms reveal grace period: a normal fast startup reaches Login or the app without flashing the offline artwork, while a genuinely slow or unreachable startup reveals the shell after the grace period. Offline events and failed probes do not shorten or reset the original deadline. Only one health probe can be in flight. Online and visible-page events request an immediate probe without creating another interval.
 
 Startup uses two readiness phases:
 
@@ -73,7 +79,7 @@ Oops!
 Elvern could not be reached. Check your connection and try again.
 ```
 
-Retry is a semantic button rendered as muted text with no background, border, radius, card, or shadow. It probes immediately and leaves Oops visible on failure. A later successful probe/remounted Auth request enters Elvern automatically.
+Retry is a semantic button rendered as muted text with no background, border, radius, card, or shadow. It immediately restores the first familiar and `Flibbertigibbeting...`, starts a new complete 60-second connecting window, and probes without overlapping another request. A successful probe/remounted Auth request enters Elvern automatically.
 
 The static pre-bundle bootstrap has the same 60-second timer, 10-second probes, Retry, online/visibility handling, and cleanup. React cancels and aborts that bootstrap before starting the central controller, so the two implementations do not leave duplicate timers or probes.
 
@@ -106,6 +112,8 @@ The worker handles only same-origin GET navigation requests. It tries the networ
 
 Activation removes the old `elvern-shell*` family and obsolete `elvern-offline-shell-*` versions, while preserving unrelated origin caches. It then claims clients. Registration failure logs one controlled warning and never blocks online Elvern.
 
+The production build computes the SHA-256 of `dist/offline.html` and stamps that revision into `dist/sw.js`. The revision is part of the offline cache name, so any offline-shell content change also changes the worker bytes, installs a new worker, and removes the previous Elvern offline cache during activation. Existing stable registrations perform one non-blocking background `registration.update()` check with `updateViaCache: "none"`; a failed check leaves the current worker available and never blocks Login or the app. This avoids manual cache-version bumps and prevents installed devices from retaining an old offline visual after a deployment.
+
 `offline.html` is standalone and contains inline CSS, familiars, timing, probes, Retry, and recovery. It reloads the same deep link after health recovers. It does not inspect cookies or private browser storage.
 
 ## Dynamic prefix and first-install limits
@@ -123,6 +131,7 @@ Completed before final CI:
 - Backend prefix/static/smoke/security subset: 102 tests passed.
 - Chromium Phase 5A desktop/mobile: 2 passed, 2 project-specific skips.
 - Production Service Worker deep-link fallback: 1 passed.
+- Production Service Worker stale-offline upgrade: 1 passed; the new content revision replaced the legacy cache before an offline deep-link navigation.
 - Existing desktop return restore: 2 passed.
 - v2-on Root/Local/Cloud return restore: 3 passed.
 - Production build passed with the existing large-chunk warning.

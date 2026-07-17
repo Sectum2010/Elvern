@@ -6,6 +6,7 @@ import {
   CONNECTION_FAMILIAR_ROTATION_MS,
   createStartupConnectionController,
   STARTUP_APPLICATION_READY_EVENT,
+  STARTUP_SHELL_REVEAL_DELAY_MS,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "../lib/startupConnection.js";
 
@@ -60,7 +61,40 @@ describe("StartupConnectionGate", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(fetchImpl).toHaveBeenCalledTimes(callsBeforeRetry + 1);
-    expect(document.getElementById("elvern-connection-shell").dataset.state).toBe("unreachable");
+    expect(document.getElementById("elvern-connection-shell").dataset.state).toBe("connecting");
+  });
+
+  test("does not reveal the shell during a fast healthy startup", async () => {
+    const container = installShellFixture();
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      requireApplicationReady: true,
+    });
+    render(<StartupConnectionGate controller={controller}><p>Auth flow mounted</p></StartupConnectionGate>, { container });
+
+    await act(() => vi.advanceTimersByTimeAsync(STARTUP_SHELL_REVEAL_DELAY_MS - 1));
+    const shell = document.getElementById("elvern-connection-shell");
+    expect(shell).not.toHaveClass("elvern-connection-shell--visible");
+
+    act(() => window.dispatchEvent(new CustomEvent(STARTUP_APPLICATION_READY_EVENT)));
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(shell).not.toHaveClass("elvern-connection-shell--visible");
+    expect(shell).toHaveClass("elvern-connection-shell--ready");
+  });
+
+  test("reveals the connecting shell after the 400ms grace period", async () => {
+    const container = installShellFixture();
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("offline"));
+    const controller = createStartupConnectionController({ fetchImpl });
+    render(<StartupConnectionGate controller={controller}><p>App ready</p></StartupConnectionGate>, { container });
+
+    const shell = document.getElementById("elvern-connection-shell");
+    await act(() => vi.advanceTimersByTimeAsync(STARTUP_SHELL_REVEAL_DELAY_MS - 1));
+    expect(shell).not.toHaveClass("elvern-connection-shell--visible");
+
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(shell).toHaveClass("elvern-connection-shell--visible");
   });
 
   test("health recovery automatically enters the application", async () => {
@@ -99,7 +133,7 @@ describe("StartupConnectionGate", () => {
 
     await act(() => vi.advanceTimersByTimeAsync(CONNECTION_FAMILIAR_ROTATION_MS));
     expect(document.getElementById("elvern-connection-shell").dataset.familiar).toBe("wisp");
-    expect(screen.getByText("Ruminating...")).toBeInTheDocument();
+    expect(document.querySelector("[data-connection-waiting-word]")).toHaveAttribute("aria-label", "Ruminating...");
   });
 
   test("reduced motion keeps the first familiar and waiting word static", async () => {
@@ -111,6 +145,6 @@ describe("StartupConnectionGate", () => {
 
     await act(() => vi.advanceTimersByTimeAsync(21_000));
     expect(document.getElementById("elvern-connection-shell").dataset.familiar).toBe("raven");
-    expect(screen.getByText("Flibbertigibbeting...")).toBeInTheDocument();
+    expect(document.querySelector("[data-connection-waiting-word]")).toHaveAttribute("aria-label", "Flibbertigibbeting...");
   });
 });
