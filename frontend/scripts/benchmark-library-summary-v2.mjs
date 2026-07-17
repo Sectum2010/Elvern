@@ -53,6 +53,19 @@ function syntheticV1Item(id) {
     audio_codec: "eac3",
     container: "mkv",
     file_size: 20 * (1024 ** 3),
+    quality_rank: syntheticQualityRank(),
+  };
+}
+
+
+function syntheticQualityRank() {
+  return {
+    key: "gold",
+    label: "Gold",
+    score: 11,
+    description: "Excellent quality, just below reference tier.",
+    detected: ["WEB-DL", "2160p", "Dolby Digital", "HEVC", "20 GB"],
+    tooltip: "Excellent quality, just below reference tier. Detected: WEB-DL · 2160p · Dolby Digital · HEVC · 20 GB.",
   };
 }
 
@@ -64,14 +77,7 @@ function syntheticV2Item(item) {
     year: item.year,
     poster_url: item.poster_url,
     source_kind: item.source_kind,
-    quality_rank: {
-      key: "gold",
-      label: "Gold",
-      score: 12,
-      description: "Excellent quality, just below reference tier.",
-      detected: ["WEB-DL", "2160p", "Dolby Digital", "HEVC", "20 GB"],
-      tooltip: "Excellent quality, just below reference tier. Detected: WEB-DL.",
-    },
+    quality_rank: syntheticQualityRank(),
     duration_seconds: item.duration_seconds,
     progress_seconds: item.progress_seconds,
     progress_duration_seconds: item.progress_duration_seconds,

@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 from backend.app.db import get_connection, utcnow_iso
+from backend.app.services import library_service
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
-from backend.app.services.library_quality_rank_service import build_library_quality_rank
 from backend.app.services.library_service import _library_summary_revision
 
 
@@ -84,6 +84,12 @@ def _insert_media_item(
     series_key: str | None = None,
     series_name: str | None = None,
     scanned_at: str,
+    file_size: int | None = None,
+    width: int | None = 3840,
+    height: int | None = 2160,
+    video_codec: str | None = "hevc",
+    audio_codec: str | None = "eac3",
+    container: str | None = "mkv",
 ) -> int:
     media_path = Path(settings.media_root) / "Movies" / (media_relative_path or original_filename)
     media_path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +125,7 @@ def _insert_media_item(
                 created_at,
                 updated_at,
                 last_scanned_at
-            ) VALUES (?, ?, ?, 'local', ?, ?, ?, 'movies', ?, 'Movies', ?, ?, ?, ?, ?, 7200, 3840, 2160, 'hevc', 'eac3', 'mkv', 2024, ?, ?, ?)
+            ) VALUES (?, ?, ?, 'local', ?, ?, ?, 'movies', ?, 'Movies', ?, ?, ?, ?, ?, 7200, ?, ?, ?, ?, ?, 2024, ?, ?, ?)
             """,
             (
                 title,
@@ -132,8 +138,13 @@ def _insert_media_item(
                 "list" if series_key else "movie",
                 str(media_path.parent),
                 series_name or "Movies",
-                media_path.stat().st_size,
+                media_path.stat().st_size if file_size is None else file_size,
                 media_path.stat().st_mtime,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
                 now,
                 now,
                 scanned_at,
@@ -172,6 +183,18 @@ def _flatten_v1_ids(payload: dict[str, object]) -> set[int]:
     return ids
 
 
+def _v1_items_by_id(payload: dict[str, object]) -> dict[int, dict[str, object]]:
+    items_by_id: dict[int, dict[str, object]] = {}
+    for collection_name in ("items", "continue_watching", "recently_added"):
+        for item in payload[collection_name]:
+            items_by_id.setdefault(int(item["id"]), item)
+    for rail_name in ("series_rails", "cloud_series_rails"):
+        for rail in payload[rail_name]:
+            for item in rail["items"]:
+                items_by_id.setdefault(int(item["id"]), item)
+    return items_by_id
+
+
 def _assert_v1_v2_membership_and_order(v1: dict[str, object], v2: dict[str, object]) -> None:
     assert v2["sections"]["item_ids"] == [item["id"] for item in v1["items"]]
     assert v2["sections"]["continue_watching_item_ids"] == [
@@ -197,6 +220,9 @@ def _assert_v1_v2_membership_and_order(v1: dict[str, object], v2: dict[str, obje
     assert v2["total_items"] == v1["total_items"]
     assert v2["available_genres"] == v1["available_genres"]
     assert v2["scan_in_progress"] == v1["scan_in_progress"]
+    for item_id, v1_item in _v1_items_by_id(v1).items():
+        assert v1_item["quality_tier"] == v1_item["quality_rank"]["key"]
+        assert v1_item["quality_rank"] == v2["items_by_id"][str(item_id)]["quality_rank"]
 
 
 def test_v2_summary_is_atomic_normalized_and_semantically_matches_v1(
@@ -370,7 +396,7 @@ def test_v2_summary_matches_v1_item_order_for_every_supported_sort(
         _assert_v1_v2_membership_and_order(v1_response.json(), v2_response.json())
 
 
-def test_v2_quality_rank_matches_each_roles_current_v1_visible_inputs(
+def test_filename_only_quality_rank_is_server_authoritative_and_role_invariant(
     client,
     initialized_settings,
     admin_credentials,
@@ -382,26 +408,171 @@ def test_v2_quality_rank_matches_each_roles_current_v1_visible_inputs(
         title="Role Quality",
         original_filename="Role.Quality.2024.2160p.REMUX.Atmos.HEVC.mkv",
         scanned_at="2026-01-01T00:00:00+00:00",
+        file_size=80 * 1024**3,
+        width=None,
+        height=None,
+        video_codec=None,
+        audio_codec=None,
     )
 
     admin_v1 = client.get("/api/library").json()
     admin_v2 = client.get("/api/library/v2/summary").json()
     admin_item = next(item for item in admin_v1["items"] if item["id"] == item_id)
-    assert admin_v2["items_by_id"][str(item_id)]["quality_rank"] == build_library_quality_rank(admin_item)
+    admin_rank = admin_item["quality_rank"]
+    assert admin_rank["key"] == "diamond"
+    assert admin_item["quality_tier"] == admin_rank["key"]
+    assert admin_v2["items_by_id"][str(item_id)]["quality_rank"] == admin_rank
 
     _logout(client)
     _login(client, username="summary-viewer", password="viewer-password")
-    standard_v1 = client.get("/api/library").json()
+    standard_v1_response = client.get("/api/library")
+    assert standard_v1_response.status_code == 200
+    standard_v1 = standard_v1_response.json()
     standard_v2_response = client.get("/api/library/v2/summary")
     assert standard_v2_response.status_code == 200
     standard_v2 = standard_v2_response.json()
     standard_item = next(item for item in standard_v1["items"] if item["id"] == item_id)
     assert standard_item["original_filename"] is None
-    assert standard_v2["items_by_id"][str(item_id)]["quality_rank"] == build_library_quality_rank(
-        standard_item
-    )
+    assert standard_item["quality_rank"] == admin_rank
+    assert standard_item["quality_tier"] == admin_rank["key"]
+    assert standard_v2["items_by_id"][str(item_id)]["quality_rank"] == admin_rank
+    assert "Role.Quality.2024.2160p.REMUX.Atmos.HEVC.mkv" not in standard_v1_response.text
+    assert str(initialized_settings.media_root) not in standard_v1_response.text
     assert "Role.Quality.2024.2160p.REMUX.Atmos.HEVC.mkv" not in standard_v2_response.text
     assert str(initialized_settings.media_root) not in standard_v2_response.text
+
+
+def test_quality_filter_matches_canonical_rank_for_every_tier(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    fixtures = {
+        "diamond": ("Filter Diamond", "Filter.Diamond.2160p.REMUX.Atmos.HEVC.mkv", 80 * 1024**3),
+        "gold": ("Filter Gold", "Filter.Gold.1080p.BluRay.TrueHD.x264.mkv", 50 * 1024**3),
+        "silver": ("Filter Silver", "Filter.Silver.720p.WEB-DL.EAC3.AV1.mkv", 20 * 1024**3),
+        "iron": ("Filter Iron", "Filter.Iron.1080p.WEBRip.AAC.H264.mkv", 3 * 1024**3),
+        "bronze": ("Filter Bronze", "Filter.Bronze.720p.EAC3.H264.mkv", 3 * 1024**3),
+        "wood": ("Filter Wood", "Filter.Wood.480p.AAC.H264.mkv", int(1.5 * 1024**3)),
+    }
+    expected_ids = {
+        tier: _insert_media_item(
+            initialized_settings,
+            title=title,
+            original_filename=filename,
+            scanned_at=f"2026-02-{index:02d}T00:00:00+00:00",
+            file_size=file_size,
+            width=None,
+            height=None,
+            video_codec=None,
+            audio_codec=None,
+        )
+        for index, (tier, (title, filename, file_size)) in enumerate(fixtures.items(), start=1)
+    }
+
+    for tier, expected_id in expected_ids.items():
+        v1_response = client.get("/api/library", params={"quality": tier})
+        v2_response = client.get("/api/library/v2/summary", params={"quality": tier})
+        assert v1_response.status_code == 200
+        assert v2_response.status_code == 200
+        v1 = v1_response.json()
+        v2 = v2_response.json()
+        _assert_v1_v2_membership_and_order(v1, v2)
+        assert expected_id in {item["id"] for item in v1["items"]}
+        assert all(item["quality_tier"] == tier for item in v1["items"])
+        assert all(item["quality_rank"]["key"] == tier for item in v1["items"])
+        assert all(item["quality_rank"]["key"] == tier for item in v2["items_by_id"].values())
+
+
+def test_search_returns_the_same_authoritative_rank_for_admin_and_standard_user(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _create_standard_user(client, username="search-rank-viewer", password="viewer-password")
+    item_id = _insert_media_item(
+        initialized_settings,
+        title="Unique Search Rank Marker",
+        original_filename="Unique.Search.Rank.Marker.2160p.REMUX.Atmos.HEVC.mkv",
+        scanned_at="2026-03-01T00:00:00+00:00",
+        file_size=80 * 1024**3,
+        width=None,
+        height=None,
+        video_codec=None,
+        audio_codec=None,
+    )
+
+    admin_root = client.get("/api/library").json()
+    admin_search_response = client.get("/api/library/search", params={"q": "Unique Search Rank Marker"})
+    assert admin_search_response.status_code == 200
+    admin_search = admin_search_response.json()
+    admin_rank = next(item for item in admin_root["items"] if item["id"] == item_id)["quality_rank"]
+    assert [item["id"] for item in admin_search["items"]] == [item_id]
+    assert admin_search["items"][0]["quality_rank"] == admin_rank
+
+    _logout(client)
+    _login(client, username="search-rank-viewer", password="viewer-password")
+    standard_root = client.get("/api/library").json()
+    standard_search_response = client.get(
+        "/api/library/search",
+        params={"q": "Unique Search Rank Marker"},
+    )
+    assert standard_search_response.status_code == 200
+    standard_search = standard_search_response.json()
+    assert [item["id"] for item in standard_search["items"]] == [item_id]
+    assert next(item for item in standard_root["items"] if item["id"] == item_id)["quality_rank"] == admin_rank
+    assert standard_search["items"][0]["quality_rank"] == admin_rank
+    assert standard_search["items"][0]["original_filename"] is None
+    assert "Unique.Search.Rank.Marker.2160p.REMUX.Atmos.HEVC.mkv" not in standard_search_response.text
+    assert str(initialized_settings.media_root) not in standard_search_response.text
+
+
+def test_v1_reuses_one_quality_rank_per_item_within_a_request(
+    client,
+    initialized_settings,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    first_id = _insert_media_item(
+        initialized_settings,
+        title="Memo Saga One",
+        original_filename="Memo.Saga.One.2160p.WEB-DL.mkv",
+        series_key="memo-saga",
+        series_name="Memo Saga",
+        scanned_at="2026-04-01T00:00:00+00:00",
+    )
+    second_id = _insert_media_item(
+        initialized_settings,
+        title="Memo Saga Two",
+        original_filename="Memo.Saga.Two.2160p.WEB-DL.mkv",
+        series_key="memo-saga",
+        series_name="Memo Saga",
+        scanned_at="2026-04-02T00:00:00+00:00",
+    )
+    _insert_progress(initialized_settings, item_id=second_id)
+    calls: dict[int, int] = {}
+    original_builder = library_service.build_library_quality_rank
+
+    def counted_builder(row):
+        item_id = int(row["id"])
+        calls[item_id] = calls.get(item_id, 0) + 1
+        return original_builder(row)
+
+    monkeypatch.setattr(
+        library_service,
+        "build_library_quality_rank",
+        counted_builder,
+    )
+
+    response = client.get("/api/library")
+
+    assert response.status_code == 200
+    assert calls[first_id] == 1
+    assert calls[second_id] == 1
+    assert all(call_count == 1 for call_count in calls.values())
 
 
 def test_v2_revision_is_stable_opaque_and_tracks_card_summary_truth() -> None:
@@ -487,6 +658,7 @@ def test_v2_source_visibility_and_membership_match_v1_for_admin_and_standard_use
     _move_item_to_cloud(initialized_settings, item_id=shared_cloud_id, source_id=shared_source_id)
     _move_item_to_cloud(initialized_settings, item_id=private_cloud_id, source_id=private_source_id)
 
+    admin_ranks_by_source: dict[str, dict[int, dict[str, object]]] = {}
     for source, expected_ids in (
         ("all", {local_id, shared_cloud_id, private_cloud_id}),
         ("local", {local_id}),
@@ -496,6 +668,10 @@ def test_v2_source_visibility_and_membership_match_v1_for_admin_and_standard_use
         v2 = client.get("/api/library/v2/summary", params={"source": source}).json()
         _assert_v1_v2_membership_and_order(v1, v2)
         assert set(v2["sections"]["item_ids"]) == expected_ids
+        admin_ranks_by_source[source] = {
+            item_id: v2["items_by_id"][str(item_id)]["quality_rank"]
+            for item_id in expected_ids
+        }
 
     _logout(client)
     _login(client, username="source-viewer", password="viewer-password")
@@ -508,6 +684,13 @@ def test_v2_source_visibility_and_membership_match_v1_for_admin_and_standard_use
         v2 = client.get("/api/library/v2/summary", params={"source": source}).json()
         _assert_v1_v2_membership_and_order(v1, v2)
         assert set(v2["sections"]["item_ids"]) == expected_ids
+        assert {
+            item_id: v2["items_by_id"][str(item_id)]["quality_rank"]
+            for item_id in expected_ids
+        } == {
+            item_id: admin_ranks_by_source[source][item_id]
+            for item_id in expected_ids
+        }
         assert private_cloud_id not in set(map(int, v2["items_by_id"]))
 
 

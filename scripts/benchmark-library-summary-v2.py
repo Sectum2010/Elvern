@@ -238,7 +238,6 @@ def _run_cell(item_count: int, overlap_ratio: float, repetitions: int) -> dict[s
                     settings,
                     plan,
                     scan_in_progress=False,
-                    include_original_filename_for_quality=True,
                 )
                 timings["v2_serialization"].append((time.perf_counter() - started) * 1000)
                 poster_resolve_counts["v2"].append(active_counter["value"])

@@ -29,12 +29,10 @@ from .library_hidden_service import (
 )
 from .status_service import get_scan_job_summary
 from .library_movie_identity_service import (
-    QUALITY_TIER_LABELS,
     QUALITY_TIER_VALUES,
     _apply_duplicate_filter,
     _dedupe_rows,
     _row_hidden_movie_key,
-    quality_tier_for_row,
 )
 from .library_presentation_service import (
     _normalize_cloud_title_and_year,
@@ -187,17 +185,33 @@ def _genre_map_from_connection(connection) -> dict[str, list[str]]:
     }
 
 
-def _decorate_rows_with_arrange_metadata(rows: list, genre_map: dict[str, list[str]]) -> list[dict[str, object]]:
+def _decorate_rows_with_arrange_metadata(
+    rows: list,
+    genre_map: dict[str, list[str]],
+    *,
+    quality_rank_memo: dict[int, dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
     decorated_rows: list[dict[str, object]] = []
     for row in rows:
         payload = dict(row)
         genre_group = resolve_genre_movie_group(payload)
         genres = list(genre_map.get(genre_group.genre_group_key, []))
-        quality_tier = quality_tier_for_row(payload)
+        media_item_id = int(payload["id"])
+        quality_rank = (
+            quality_rank_memo.get(media_item_id)
+            if quality_rank_memo is not None
+            else None
+        )
+        if quality_rank is None:
+            quality_rank = build_library_quality_rank(payload)
+            if quality_rank_memo is not None:
+                quality_rank_memo[media_item_id] = quality_rank
+        quality_tier = str(quality_rank["key"])
         payload["genres"] = genres
         payload["genre_display"] = ", ".join(genres) if genres else "Unknown"
         payload["quality_tier"] = quality_tier
-        payload["quality_label"] = QUALITY_TIER_LABELS.get(quality_tier, quality_tier.title())
+        payload["quality_label"] = str(quality_rank["label"])
+        payload["quality_rank"] = quality_rank
         decorated_rows.append(payload)
     return decorated_rows
 
@@ -567,8 +581,17 @@ def build_library_view_plan(
         hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
         hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
     poster_index = get_poster_index_snapshot(poster_dir)
-    all_rows = _decorate_rows_with_arrange_metadata(list(all_rows), genre_map)
-    continue_rows = _decorate_rows_with_arrange_metadata(list(continue_rows), genre_map)
+    quality_rank_memo: dict[int, dict[str, object]] = {}
+    all_rows = _decorate_rows_with_arrange_metadata(
+        list(all_rows),
+        genre_map,
+        quality_rank_memo=quality_rank_memo,
+    )
+    continue_rows = _decorate_rows_with_arrange_metadata(
+        list(continue_rows),
+        genre_map,
+        quality_rank_memo=quality_rank_memo,
+    )
     all_rows = _filter_rows_for_library_category(list(all_rows), normalized_category)
     continue_rows = _filter_rows_for_library_category(list(continue_rows), normalized_category)
     recent_rows = sorted(
@@ -679,6 +702,7 @@ def _serialize_rail_plans_v1(
     *,
     plan: LibraryViewPlan,
     poster_url_memo: dict[int, str | None],
+    quality_rank_memo: dict[int, dict[str, object]],
 ) -> list[dict[str, object]]:
     return [
         {
@@ -692,6 +716,7 @@ def _serialize_rail_plans_v1(
                     poster_dir=plan.poster_dir,
                     poster_index=plan.poster_index,
                     poster_url_memo=poster_url_memo,
+                    quality_rank_memo=quality_rank_memo,
                 )
                 for row in rail["rows"]
             ],
@@ -705,17 +730,20 @@ def serialize_library_view_v1(
     plan: LibraryViewPlan,
 ) -> dict[str, object]:
     poster_url_memo: dict[int, str | None] = {}
+    quality_rank_memo: dict[int, dict[str, object]] = {}
     series_rails = _serialize_rail_plans_v1(
         settings,
         plan.series_rail_plans,
         plan=plan,
         poster_url_memo=poster_url_memo,
+        quality_rank_memo=quality_rank_memo,
     )
     cloud_series_rails = _serialize_rail_plans_v1(
         settings,
         plan.cloud_series_rail_plans,
         plan=plan,
         poster_url_memo=poster_url_memo,
+        quality_rank_memo=quality_rank_memo,
     )
     return {
         "items": [
@@ -725,6 +753,7 @@ def serialize_library_view_v1(
                 poster_dir=plan.poster_dir,
                 poster_index=plan.poster_index,
                 poster_url_memo=poster_url_memo,
+                quality_rank_memo=quality_rank_memo,
             )
             for row in plan.item_rows
         ],
@@ -737,6 +766,7 @@ def serialize_library_view_v1(
                 poster_dir=plan.poster_dir,
                 poster_index=plan.poster_index,
                 poster_url_memo=poster_url_memo,
+                quality_rank_memo=quality_rank_memo,
             )
             for row in plan.continue_watching_rows
         ],
@@ -747,6 +777,7 @@ def serialize_library_view_v1(
                 poster_dir=plan.poster_dir,
                 poster_index=plan.poster_index,
                 poster_url_memo=poster_url_memo,
+                quality_rank_memo=quality_rank_memo,
             )
             for row in plan.recently_added_rows
         ],
@@ -796,7 +827,6 @@ def _serialize_media_item_v2(
     *,
     plan: LibraryViewPlan,
     poster_url_memo: dict[int, str | None],
-    include_original_filename_for_quality: bool,
 ) -> dict[str, object]:
     source_kind = str(_row_value(row, "source_kind", "local") or "local")
     display_title, display_year, _ = _normalize_cloud_title_and_year(
@@ -805,10 +835,6 @@ def _serialize_media_item_v2(
         original_filename=_row_value(row, "original_filename"),
         source_kind=source_kind,
     )
-    quality_row = row
-    if not include_original_filename_for_quality:
-        quality_row = dict(row)
-        quality_row["original_filename"] = None
     return {
         "id": int(row["id"]),
         "title": display_title,
@@ -821,7 +847,7 @@ def _serialize_media_item_v2(
             poster_url_memo=poster_url_memo,
         ),
         "source_kind": source_kind,
-        "quality_rank": build_library_quality_rank(quality_row),
+        "quality_rank": _row_value(row, "quality_rank") or build_library_quality_rank(row),
         "duration_seconds": _row_value(row, "duration_seconds"),
         "progress_seconds": _row_value(row, "progress_seconds"),
         "progress_duration_seconds": _row_value(row, "progress_duration_seconds"),
@@ -856,7 +882,6 @@ def serialize_library_view_v2(
     plan: LibraryViewPlan,
     *,
     scan_in_progress: bool,
-    include_original_filename_for_quality: bool,
 ) -> dict[str, object]:
     rows_by_id = _v2_rows_by_id(plan)
     poster_url_memo: dict[int, str | None] = {}
@@ -866,7 +891,6 @@ def serialize_library_view_v2(
             row,
             plan=plan,
             poster_url_memo=poster_url_memo,
-            include_original_filename_for_quality=include_original_filename_for_quality,
         )
         for media_item_id, row in rows_by_id.items()
     }
@@ -935,7 +959,6 @@ def list_library_summary_v2(
     quality: str | None = None,
     sort: str | None = None,
     scan_in_progress: bool = False,
-    include_original_filename_for_quality: bool = False,
 ) -> dict[str, object]:
     plan = build_library_view_plan(
         settings,
@@ -950,7 +973,6 @@ def list_library_summary_v2(
         settings,
         plan,
         scan_in_progress=scan_in_progress,
-        include_original_filename_for_quality=include_original_filename_for_quality,
     )
 
 
@@ -1005,7 +1027,12 @@ def search_library(
         ).fetchall()
     poster_index = get_poster_index_snapshot(poster_dir)
     poster_url_memo: dict[int, str | None] = {}
-    rows = _decorate_rows_with_arrange_metadata(list(rows), genre_map)
+    quality_rank_memo: dict[int, dict[str, object]] = {}
+    rows = _decorate_rows_with_arrange_metadata(
+        list(rows),
+        genre_map,
+        quality_rank_memo=quality_rank_memo,
+    )
     rows = _filter_rows_for_library_category(list(rows), normalized_category)
     scored_rows: list[tuple[int, object]] = []
     for row in rows:
@@ -1055,6 +1082,7 @@ def search_library(
                 poster_dir=poster_dir,
                 poster_index=poster_index,
                 poster_url_memo=poster_url_memo,
+                quality_rank_memo=quality_rank_memo,
             )
             for row in visible_rows
         ],

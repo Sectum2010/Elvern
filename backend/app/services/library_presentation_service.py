@@ -6,7 +6,8 @@ import re
 
 from ..media_scan import infer_title_and_year
 from .app_settings_service import get_poster_reference_location_payload
-from .library_movie_identity_service import QUALITY_TIER_LABELS, _edition_label, quality_tier_for_row
+from .library_movie_identity_service import _edition_label
+from .library_quality_rank_service import build_library_quality_rank
 from .media_title_parser import parse_media_title
 from .poster_index_service import PosterIndexSnapshot, get_poster_index_snapshot
 from .title_normalization import (
@@ -480,6 +481,20 @@ def _row_value(row, key: str, default=None):
     return default
 
 
+def _quality_rank_for_row(
+    row,
+    *,
+    quality_rank_memo: dict[int, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    media_item_id = int(row["id"])
+    if quality_rank_memo is not None and media_item_id in quality_rank_memo:
+        return quality_rank_memo[media_item_id]
+    quality_rank = _row_value(row, "quality_rank") or build_library_quality_rank(row)
+    if quality_rank_memo is not None:
+        quality_rank_memo[media_item_id] = quality_rank
+    return quality_rank
+
+
 def _serialize_media_item(
     settings: Settings,
     row,
@@ -487,9 +502,11 @@ def _serialize_media_item(
     poster_dir: Path | None = None,
     poster_index: PosterIndexSnapshot | None | object = _POSTER_INDEX_UNSET,
     poster_url_memo: dict[int, str | None] | None = None,
+    quality_rank_memo: dict[int, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     source_kind = str(_row_value(row, "source_kind", "local") or "local")
-    quality_tier = _row_value(row, "quality_tier") or quality_tier_for_row(row)
+    quality_rank = _quality_rank_for_row(row, quality_rank_memo=quality_rank_memo)
+    quality_tier = str(quality_rank["key"])
     parsed_title = _parsed_title_payload(
         title=row["title"],
         year=row["year"],
@@ -526,7 +543,8 @@ def _serialize_media_item(
         ),
         "edition_label": _edition_label(metadata["edition_identity"]),
         "quality_tier": quality_tier,
-        "quality_label": _row_value(row, "quality_label") or QUALITY_TIER_LABELS.get(str(quality_tier or "")),
+        "quality_label": str(quality_rank["label"]),
+        "quality_rank": quality_rank,
         "genres": list(_row_value(row, "genres", []) or []),
         "genre_display": _row_value(row, "genre_display") or "Unknown",
         "hidden_for_user": bool(row["hidden_for_user"]) if "hidden_for_user" in row.keys() else False,

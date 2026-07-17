@@ -159,6 +159,41 @@ describe("library summary v2 contract", () => {
     expect(result).toEqual({ matches: true, mismatchCount: 0, mismatches: [] });
   });
 
+  test("shadow uses the v1 server rank even when v1 raw metadata is redacted", () => {
+    const v1 = v1Payload();
+    const v2 = v2Payload();
+    const diamond = {
+      key: "diamond",
+      label: "Diamond",
+      score: 17,
+      description: "Reference-grade library copy with minimal compromise.",
+      detected: ["REMUX", "2160p", "Atmos", "HEVC", "80 GB"],
+      tooltip: "Reference-grade library copy with minimal compromise. Detected: REMUX · 2160p · Atmos · HEVC · 80 GB.",
+    };
+    v1.items[0].quality_rank = diamond;
+    v1.series_rails[0].items[0].quality_rank = diamond;
+    v1.recently_added[1].quality_rank = diamond;
+    v2.items_by_id["1"].quality_rank = diamond;
+
+    expect(compareLibraryV1AndV2(v1, v2, {
+      viewIdentity: { category: "movies" },
+    })).toEqual({ matches: true, mismatchCount: 0, mismatches: [] });
+  });
+
+  test("shadow reports a missing v1 server rank instead of recalculating it", () => {
+    const v1 = v1Payload();
+    delete v1.items[0].quality_rank;
+    delete v1.series_rails[0].items[0].quality_rank;
+    delete v1.recently_added[1].quality_rank;
+
+    const result = compareLibraryV1AndV2(v1, v2Payload(), {
+      viewIdentity: { category: "movies" },
+    });
+
+    expect(result.matches).toBe(false);
+    expect(result.mismatches).toContainEqual({ category: "v1_quality_rank_missing", itemId: 1 });
+  });
+
   test("semantic mismatch diagnostics include only category and numeric identity", () => {
     const raw = v2Payload();
     raw.items_by_id["2"].poster_url = "/private/poster/value";

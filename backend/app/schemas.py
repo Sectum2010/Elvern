@@ -254,6 +254,15 @@ class ParsedTitleResponse(BaseModel):
     suspicious_output: bool = False
 
 
+class LibraryQualityRankResponse(BaseModel):
+    key: Literal["diamond", "gold", "silver", "iron", "bronze", "wood"]
+    label: str
+    score: float
+    description: str
+    detected: list[str] = Field(default_factory=list)
+    tooltip: str
+
+
 class LibraryItemSummary(BaseModel):
     id: int
     title: str
@@ -274,6 +283,7 @@ class LibraryItemSummary(BaseModel):
     edition_label: str | None = None
     quality_tier: Literal["diamond", "gold", "silver", "iron", "bronze", "wood"] | None = None
     quality_label: str | None = None
+    quality_rank: LibraryQualityRankResponse | None = None
     genres: list[str] = Field(default_factory=list)
     genre_display: str = "Unknown"
     hidden_for_user: bool = False
@@ -313,15 +323,6 @@ class LibraryListResponse(BaseModel):
     available_genres: list[str] = Field(default_factory=list)
     scan_in_progress: bool = False
     total_items: int = 0
-
-
-class LibraryQualityRankResponse(BaseModel):
-    key: Literal["diamond", "gold", "silver", "iron", "bronze", "wood"]
-    label: str
-    score: float
-    description: str
-    detected: list[str] = Field(default_factory=list)
-    tooltip: str
 
 
 class LibrarySummaryV2Item(BaseModel):

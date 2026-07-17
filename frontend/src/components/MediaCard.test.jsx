@@ -192,6 +192,7 @@ describe("MediaCard poster loading", () => {
         quality_rank: {
           key: "gold",
           label: "Server Gold",
+          score: 11,
           description: "Server-provided quality description.",
           detected: ["server"],
           tooltip: "Server-provided quality tooltip.",
@@ -205,7 +206,17 @@ describe("MediaCard poster loading", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("Server-provided quality tooltip.");
   });
 
-  test("keeps the existing client quality rank fallback for v1 items", () => {
+  test("uses the server quality tier when connected to an older v1 response", () => {
+    renderCard({
+      item: {
+        quality_tier: "diamond",
+      },
+    });
+
+    expect(screen.getByRole("button", { name: /^Diamond:/ })).toHaveTextContent("Diamond");
+  });
+
+  test("keeps the existing client quality rank as the final legacy fallback", () => {
     renderCard({
       item: {
         original_filename: "Akira.1988.2160p.REMUX.TrueHD.Atmos.HEVC.mkv",

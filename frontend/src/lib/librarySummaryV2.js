@@ -1,4 +1,4 @@
-import { getQualityRank } from "./qualityRank.js";
+import { isCompleteLibraryQualityRank } from "./qualityRank.js";
 
 
 export const LIBRARY_SUMMARY_V2_SCHEMA_VERSION = "library-summary-v2";
@@ -383,11 +383,15 @@ export function compareLibraryV1AndV2(v1Payload, v2Payload, { viewIdentity = {} 
       ["progress", v1Item.progress_seconds ?? null, v2Item.progress_seconds ?? null],
       ["progress_duration", v1Item.progress_duration_seconds ?? null, v2Item.progress_duration_seconds ?? null],
       ["completed", Boolean(v1Item.completed), Boolean(v2Item.completed)],
-      ["quality_rank", getQualityRank(v1Item), v2Item.quality_rank],
     ];
     fieldPairs.forEach(([category, left, right]) => {
       if (!sameValue(left, right)) record(category, { itemId });
     });
+    if (!isCompleteLibraryQualityRank(v1Item.quality_rank)) {
+      record("v1_quality_rank_missing", { itemId });
+    } else if (!sameValue(v1Item.quality_rank, v2Item.quality_rank)) {
+      record("quality_rank", { itemId });
+    }
   });
   return {
     matches: mismatches.length === 0,

@@ -274,7 +274,6 @@ def get_library_summary_v2(
         quality=arrange["quality"],
         sort=arrange["sort"],
         scan_in_progress=scan_in_progress,
-        include_original_filename_for_quality=getattr(user, "role", "") == "admin",
     )
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "Cookie"

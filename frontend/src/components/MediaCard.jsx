@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCardPosterUrl } from "../lib/posterUrls";
-import { getQualityRank } from "../lib/qualityRank";
+import { resolveLibraryQualityRank } from "../lib/qualityRank";
 import { buildLibraryReturnState, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
 import { logDesktopLibraryReturnCapture } from "../lib/desktopLibraryReturnRestore";
 import { usePosterContextMenu } from "./PosterContextMenu";
@@ -142,7 +142,7 @@ export function MediaCard({
   const showPoster = Boolean(resolvedPosterUrl)
     && !posterFailed
     && (!smartPosterSchedulerActive || smartPosterMode === POSTER_MODE_ATTACH);
-  const qualityRank = item.quality_rank || getQualityRank(item);
+  const qualityRank = resolveLibraryQualityRank(item);
   const tooltipId = `quality-rank-tooltip-${item.id}`;
   const storageKind = (item.source_kind || "local") === "cloud" ? "cloud" : "local";
   const storageLabel = storageKind === "cloud" ? "Cloud" : "Local";

@@ -100,9 +100,11 @@ It does not transfer raw filename, media or library paths, source internals, par
 
 ## Quality rank authority
 
-The backend helper is a compatibility port of the existing frontend `getQualityRank()` behavior, including rank key/label/score, description, detected labels, and tooltip. Python and Vitest read the same golden fixture covering REMUX, BluRay, WEB-DL, WEBRip, 2160p/4K, 1080p, 720p, SD, Atmos, TrueHD/DTS-HD, DTS, EAC3/AC3, AAC, HEVC, AV1, H264, and size thresholds.
+The backend helper is a compatibility port of the existing frontend `getQualityRank()` behavior, including rank key/label/score, description, detected labels, and tooltip. Python and Vitest read the same golden fixture covering source, resolution, audio, codec, size boundaries, filename-only metadata, technical-fields-only metadata, empty metadata, and token precedence.
 
-v2 `MediaCard` uses `item.quality_rank`. v1 items continue to use `getQualityRank(item)`. Standard-user v2 rank computation intentionally uses the same inputs visible to the current redacted v1 client; administrator v2 uses the current administrator-visible inputs. Raw inputs do not cross the v2 wire.
+Phase 4B makes `backend/app/services/library_quality_rank_service.py` the single card-rank and quality-tier authority. Both v1 and v2 compute `quality_rank` from the complete internal row before any role redaction, so admin and standard users receive the same derived rank. v1 adds the rank object to its existing item shape; v2 keeps its existing lightweight entity shape. Raw filename, path, dimensions, codecs, container, and file size still do not cross the v2 wire, and standard-user v1 redaction remains in place.
+
+`MediaCard` resolves rank in rolling-deployment order: complete server `quality_rank`, then server `quality_tier` identity plus legacy detected details, then the legacy client calculation only when neither server field exists. Shadow comparison treats v1 `quality_rank` as truth and records `v1_quality_rank_missing` rather than recalculating from redacted v1 fields.
 
 ## Opaque revision
 

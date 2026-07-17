@@ -36,6 +36,9 @@ const RANK_DEFINITIONS = [
     description: "Basic fallback copy.",
   },
 ];
+const RANK_DEFINITIONS_BY_KEY = new Map(
+  RANK_DEFINITIONS.map((definition) => [definition.key, definition]),
+);
 
 function hasToken(haystack, ...tokens) {
   return tokens.some((token) => haystack.includes(token));
@@ -161,5 +164,44 @@ export function getQualityRank(item) {
     tooltip: detected.length > 0
       ? `${rank.description} Detected: ${detected.join(" · ")}.`
       : rank.description,
+  };
+}
+
+
+export function isCompleteLibraryQualityRank(value) {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && RANK_DEFINITIONS_BY_KEY.has(value.key)
+    && typeof value.label === "string"
+    && typeof value.score === "number"
+    && Number.isFinite(value.score)
+    && typeof value.description === "string"
+    && Array.isArray(value.detected)
+    && value.detected.every((label) => typeof label === "string")
+    && typeof value.tooltip === "string"
+  );
+}
+
+
+export function resolveLibraryQualityRank(item) {
+  if (isCompleteLibraryQualityRank(item?.quality_rank)) {
+    return item.quality_rank;
+  }
+  const legacyRank = getQualityRank(item || {});
+  const tierDefinition = RANK_DEFINITIONS_BY_KEY.get(item?.quality_tier);
+  if (!tierDefinition) {
+    return legacyRank;
+  }
+  const detected = legacyRank.detected;
+  return {
+    key: tierDefinition.key,
+    label: tierDefinition.label,
+    score: legacyRank.score,
+    description: tierDefinition.description,
+    detected,
+    tooltip: detected.length > 0
+      ? `${tierDefinition.description} Detected: ${detected.join(" · ")}.`
+      : tierDefinition.description,
   };
 }

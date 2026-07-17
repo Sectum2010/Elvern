@@ -334,5 +334,110 @@
       "detected": [],
       "tooltip": "Basic fallback copy."
     }
+  },
+  {
+    "name": "filename_only_diamond_exact_80gb",
+    "item": {
+      "title": "Filename Only",
+      "original_filename": "Filename.Only.2160p.REMUX.Atmos.HEVC.mkv",
+      "width": null,
+      "height": null,
+      "audio_codec": null,
+      "video_codec": null,
+      "container": null,
+      "file_size": 85899345920
+    },
+    "expected": {
+      "key": "diamond",
+      "label": "Diamond",
+      "score": 17,
+      "description": "Reference-grade library copy with minimal compromise.",
+      "detected": ["REMUX", "2160p", "Atmos", "HEVC", "80 GB"],
+      "tooltip": "Reference-grade library copy with minimal compromise. Detected: REMUX · 2160p · Atmos · HEVC · 80 GB."
+    }
+  },
+  {
+    "name": "bdrip_token",
+    "item": {
+      "title": "BDRip Token",
+      "original_filename": "Source.BDRip.1080p.AC3.x265.mkv",
+      "width": null,
+      "height": null,
+      "audio_codec": null,
+      "video_codec": null,
+      "container": null,
+      "file_size": 3221225472
+    },
+    "expected": {
+      "key": "silver",
+      "label": "Silver",
+      "score": 10,
+      "description": "Good quality, highly watchable.",
+      "detected": ["BluRay", "1080p", "Dolby Digital", "HEVC", "3.0 GB"],
+      "tooltip": "Good quality, highly watchable. Detected: BluRay · 1080p · Dolby Digital · HEVC · 3.0 GB."
+    }
+  },
+  {
+    "name": "brrip_phase4_frontend_compatibility",
+    "item": {
+      "title": "BRRip Token",
+      "original_filename": "Source.BRRip.1080p.AC3.x265.mkv",
+      "width": null,
+      "height": null,
+      "audio_codec": null,
+      "video_codec": null,
+      "container": null,
+      "file_size": 3221225472
+    },
+    "expected": {
+      "key": "iron",
+      "label": "Iron",
+      "score": 5,
+      "description": "Decent but clearly compromised.",
+      "detected": ["1080p", "Dolby Digital", "HEVC", "3.0 GB"],
+      "tooltip": "Decent but clearly compromised. Detected: 1080p · Dolby Digital · HEVC · 3.0 GB."
+    }
+  },
+  {
+    "name": "uhd_h265_filename_tokens_exact_8gb",
+    "item": {
+      "title": "UHD Alias",
+      "original_filename": "Alias.UHD.WEB-DL.DDP.H265.mkv",
+      "width": null,
+      "height": null,
+      "audio_codec": null,
+      "video_codec": null,
+      "container": null,
+      "file_size": 8589934592
+    },
+    "expected": {
+      "key": "silver",
+      "label": "Silver",
+      "score": 10.5,
+      "description": "Good quality, highly watchable.",
+      "detected": ["WEB-DL", "2160p", "Dolby Digital", "HEVC", "8 GB"],
+      "tooltip": "Good quality, highly watchable. Detected: WEB-DL · 2160p · Dolby Digital · HEVC · 8 GB."
+    }
+  },
+  {
+    "name": "technical_fields_only_exact_80gb",
+    "item": {
+      "title": "Technical Only",
+      "original_filename": "Technical.Only.mkv",
+      "width": 3840,
+      "height": 2160,
+      "audio_codec": "truehd",
+      "video_codec": "h265",
+      "container": "mkv",
+      "file_size": 85899345920
+    },
+    "expected": {
+      "key": "gold",
+      "label": "Gold",
+      "score": 11,
+      "description": "Excellent quality, just below reference tier.",
+      "detected": ["2160p", "TrueHD / DTS-HD", "HEVC", "80 GB"],
+      "tooltip": "Excellent quality, just below reference tier. Detected: 2160p · TrueHD / DTS-HD · HEVC · 80 GB."
+    }
   }
 ]
