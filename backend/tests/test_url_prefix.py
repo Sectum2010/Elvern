@@ -61,6 +61,8 @@ def spa_frontend_dist(tmp_path):
         "export const elvernSpaAssetMimeCheck = true;\n",
         encoding="utf-8",
     )
+    (dist / "sw.js").write_text("self.addEventListener('fetch', () => {});\n", encoding="utf-8")
+    (dist / "offline.html").write_text("<!doctype html><title>Elvern Offline</title>", encoding="utf-8")
     return dist
 
 
@@ -338,6 +340,20 @@ class TestSpaServing:
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         assert f'<base href="/{prefix}/">' in response.text
+
+    def test_trailing_slash_library_route_still_serves_spa_document(self, spa_client) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/library/")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert f'<base href="/{prefix}/">' in response.text
+
+    @pytest.mark.parametrize("asset_name", ["sw.js", "offline.html"])
+    def test_offline_shell_assets_are_never_http_cached(self, spa_client, asset_name) -> None:
+        prefix = spa_client.app.state.url_prefix
+        response = spa_client.get(f"/{prefix}/{asset_name}")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
 
     def test_nested_html_route_uses_prefix_base_href(self, spa_client) -> None:
         prefix = spa_client.app.state.url_prefix

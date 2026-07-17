@@ -54,6 +54,9 @@ function summaryPayload(source = "all") {
 
 
 async function installApiFixture(page) {
+  await page.route("**/health", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: '{"status":"ok"}' });
+  });
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;

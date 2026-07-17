@@ -3,7 +3,9 @@ import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { ProviderAuthProvider } from "./auth/ProviderAuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { CanonicalSpaRouteGuard } from "./components/CanonicalSpaRouteGuard";
 import { ShellLayout } from "./components/ShellLayout";
+import { StartupConnectionGate } from "./components/StartupConnectionGate";
 import { DetailPage } from "./pages/DetailPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { LibrarySourcePage } from "./pages/LibrarySourcePage";
@@ -36,8 +38,10 @@ function ProtectedShell() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <ProviderAuthProvider>
+      <StartupConnectionGate>
+        <AuthProvider>
+          <ProviderAuthProvider>
+            <CanonicalSpaRouteGuard>
           <div aria-hidden="true" className="app-viewport-backdrop" />
           <Routes>
             <Route path="/login" element={<LoginPage />} />
@@ -90,8 +94,10 @@ export default function App() {
             </Route>
             <Route path="*" element={<Navigate to="/library" replace />} />
           </Routes>
-        </ProviderAuthProvider>
-      </AuthProvider>
+            </CanonicalSpaRouteGuard>
+          </ProviderAuthProvider>
+        </AuthProvider>
+      </StartupConnectionGate>
     </QueryClientProvider>
   );
 }

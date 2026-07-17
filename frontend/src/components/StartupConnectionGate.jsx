@@ -1,0 +1,104 @@
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+
+import {
+  CONNECTION_FAMILIARS,
+  CONNECTION_FAMILIAR_ROTATION_MS,
+  CONNECTION_STATUS_WORDS,
+  createStartupConnectionController,
+  STARTUP_APPLICATION_READY_EVENT,
+  STARTUP_CONNECTIVITY_FAILURE_EVENT,
+} from "../lib/startupConnection.js";
+
+
+const READY_TRANSITION_MS = 180;
+
+
+function updateStaticConnectionShell({ status, familiarIndex, wordIndex }) {
+  const shell = document.getElementById("elvern-connection-shell");
+  if (!shell) {
+    return;
+  }
+  const waitingWord = shell.querySelector("[data-connection-waiting-word]");
+  if (waitingWord) {
+    waitingWord.textContent = CONNECTION_STATUS_WORDS[wordIndex] || CONNECTION_STATUS_WORDS[0];
+  }
+  shell.dataset.familiar = CONNECTION_FAMILIARS[familiarIndex] || CONNECTION_FAMILIARS[0];
+  shell.dataset.state = status;
+  if (status === "connected") {
+    shell.classList.add("elvern-connection-shell--ready");
+    shell.setAttribute("aria-hidden", "true");
+    window.setTimeout(() => {
+      if (shell.dataset.state === "connected") {
+        shell.hidden = true;
+      }
+    }, READY_TRANSITION_MS);
+  } else {
+    shell.hidden = false;
+    shell.classList.remove("elvern-connection-shell--ready");
+    shell.removeAttribute("aria-hidden");
+  }
+}
+
+
+export function StartupConnectionGate({ children, controller: providedController = null }) {
+  const controllerRef = useRef(providedController || createStartupConnectionController({ requireApplicationReady: true }));
+  const controller = controllerRef.current;
+  const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const [rotationIndex, setRotationIndex] = useState(0);
+
+  useEffect(() => {
+    window.__elvernStaticConnectionShellCleanup?.();
+    controller.start();
+    return () => controller.stop();
+  }, [controller]);
+
+  useEffect(() => {
+    function handleApplicationReady() {
+      controller.reportApplicationReady();
+    }
+    window.addEventListener(STARTUP_APPLICATION_READY_EVENT, handleApplicationReady);
+    return () => window.removeEventListener(STARTUP_APPLICATION_READY_EVENT, handleApplicationReady);
+  }, [controller]);
+
+  useEffect(() => {
+    function handleConnectivityFailure() {
+      controller.reportFailure();
+    }
+    window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleConnectivityFailure);
+    return () => window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleConnectivityFailure);
+  }, [controller]);
+
+  useEffect(() => {
+    const retryButton = document.querySelector("#elvern-connection-shell [data-connection-retry]");
+    if (!retryButton) {
+      return undefined;
+    }
+    const handleRetry = () => {
+      void controller.retry();
+    };
+    retryButton.addEventListener("click", handleRetry);
+    return () => retryButton.removeEventListener("click", handleRetry);
+  }, [controller]);
+
+  useEffect(() => {
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    if (reducedMotion || snapshot.status !== "connecting") {
+      setRotationIndex(0);
+      return undefined;
+    }
+    const intervalId = window.setInterval(() => {
+      setRotationIndex((current) => current + 1);
+    }, CONNECTION_FAMILIAR_ROTATION_MS);
+    return () => window.clearInterval(intervalId);
+  }, [snapshot.status]);
+
+  useEffect(() => {
+    updateStaticConnectionShell({
+      status: snapshot.status,
+      familiarIndex: rotationIndex % CONNECTION_FAMILIARS.length,
+      wordIndex: rotationIndex % CONNECTION_STATUS_WORDS.length,
+    });
+  }, [rotationIndex, snapshot.status]);
+
+  return snapshot.serviceReachable ? children : null;
+}

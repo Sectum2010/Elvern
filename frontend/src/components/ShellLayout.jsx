@@ -18,6 +18,7 @@ import { detectClientDeviceClass } from "../lib/platformDetection";
 import { detectClientPlatform, isDesktopClientPlatform } from "../lib/platformDetection";
 import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
+import { classifyLibrarySpaPath } from "../lib/canonicalSpaPath.js";
 
 function normalizePosterCardAppearance(value) {
   if (value === "modern" || value === "clean") {
@@ -66,8 +67,9 @@ export function ShellLayout({ children }) {
     pathname: location.pathname,
     navigate,
   });
-  const isLibraryRootPage = location.pathname === "/library";
-  const isLibrarySourcePage = location.pathname === "/library/local" || location.pathname === "/library/cloud";
+  const libraryPath = classifyLibrarySpaPath(location.pathname);
+  const isLibraryRootPage = libraryPath.kind === "root";
+  const isLibrarySourcePage = libraryPath.kind === "source";
   const hideFloatingIsland = location.pathname === "/setup/totp";
   const clientDeviceClass = detectClientDeviceClass();
   const desktopPosterContextMenuEnabled = isDesktopClientPlatform(detectClientPlatform());
@@ -195,22 +197,13 @@ export function ShellLayout({ children }) {
     }
   }
 
-  function isLibraryDetailPath(pathname) {
-    return /^\/library\/\d+$/.test(pathname || "");
-  }
-
-  const showLibraryHeader =
-    location.pathname.startsWith("/library")
-    && !isLibrarySourcePage
-    && !isLibraryDetailPath(location.pathname);
-
   async function handleNavigationClick(event, item) {
     if (floatingIgnoreNextClickRef.current) {
       event.preventDefault();
       floatingIgnoreNextClickRef.current = false;
       return;
     }
-    if (item.to !== "/library" || location.pathname.startsWith("/library") || !isLibraryDetailPath(location.pathname)) {
+    if (item.to !== "/library" || location.pathname.startsWith("/library") || libraryPath.kind !== "detail") {
       return;
     }
     event.preventDefault();
@@ -419,17 +412,6 @@ export function ShellLayout({ children }) {
           mobileSelectionGuardEnabled ? "app-shell--selection-guard" : "",
         ].filter(Boolean).join(" ")}
       >
-      {showLibraryHeader ? (
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">Private Media Library</p>
-            <NavLink className="brand" to="/library">
-              Elvern
-            </NavLink>
-          </div>
-        </header>
-      ) : null}
-
       {playbackReadyNotice ? (
         <div className="playback-ready-bubble" role="status">
           <button

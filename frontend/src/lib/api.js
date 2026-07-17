@@ -1,4 +1,8 @@
 import { clearProtectedQueryCache } from "./queryClient";
+import {
+  dispatchStartupApplicationReady,
+  dispatchStartupConnectivityFailure,
+} from "./startupConnection.js";
 
 
 function joinMessages(values) {
@@ -135,13 +139,22 @@ export async function apiRequest(path, options = {}) {
     }
   }
 
-  const response = await fetch(path, {
-    method,
-    headers: requestHeaders,
-    body,
-    signal,
-    credentials: "include",
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: requestHeaders,
+      body,
+      signal,
+      credentials: "include",
+    });
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      dispatchStartupConnectivityFailure();
+    }
+    throw error;
+  }
+  dispatchStartupApplicationReady();
 
   const contentType = response.headers.get("content-type") || "";
   if (response.headers.get("x-elvern-totp-setup-required") === "true" && typeof window !== "undefined") {

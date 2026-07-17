@@ -8,6 +8,7 @@ import {
   handleFrontendRequest,
   isAbsoluteRequestTarget,
   resolveSafeRequestTarget,
+  resolveAssetCacheControl,
   securityHeaders,
   sendMethodNotAllowed,
   withSecurityHeaders,
@@ -163,6 +164,14 @@ describe("frontend production server proxy target hardening", () => {
     expect(headers["Cache-Control"]).toBe("no-cache");
     expect(headers).toMatchObject(expectedSecurityHeaders);
     expect(headers).not.toHaveProperty("Strict-Transport-Security");
+  });
+
+  test("service worker and offline shell always use no-cache", () => {
+    expect(resolveAssetCacheControl("/srv/elvern/dist/sw.js")).toBe("no-cache");
+    expect(resolveAssetCacheControl("/srv/elvern/dist/offline.html")).toBe("no-cache");
+    expect(resolveAssetCacheControl("/srv/elvern/dist/assets/app.js")).toBe(
+      "public, max-age=31536000, immutable",
+    );
   });
 
   test("static JS/CSS asset response headers include global security headers", () => {

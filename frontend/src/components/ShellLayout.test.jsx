@@ -42,16 +42,20 @@ vi.mock("../features/playback/usePlaybackReadyNotice", () => ({
 }));
 
 
-function renderShell() {
+function renderShell({ initialEntry = "/library", children = null } = {}) {
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/library"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <ShellLayout>
-          <label>
-            Editable value
-            <input aria-label="Editable value" />
-          </label>
-          <p data-allow-text-selection="true">Copy this text</p>
+          {children || (
+            <>
+              <label>
+                Editable value
+                <input aria-label="Editable value" />
+              </label>
+              <p data-allow-text-selection="true">Copy this text</p>
+            </>
+          )}
         </ShellLayout>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -108,6 +112,16 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
     renderShell();
 
     expect(document.querySelector(".app-shell")).not.toHaveClass("app-shell--selection-guard");
+  });
+
+  test("a trailing-slash Library root does not render a duplicate Elvern header", () => {
+    renderShell({
+      initialEntry: "/library/",
+      children: <div className="topbar library-desktop-hero">Elvern</div>,
+    });
+
+    expect(document.querySelectorAll(".topbar")).toHaveLength(1);
+    expect(document.querySelector(".app-shell")).toHaveClass("app-shell--library-root");
   });
 
   test("selection guard CSS restores selection for editable and explicit copy regions", () => {

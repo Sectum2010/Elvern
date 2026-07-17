@@ -1,3 +1,5 @@
+import { canonicalizeSpaPathname } from "./canonicalSpaPath.js";
+
 const LIBRARY_RETURN_STORAGE_KEY = "elvern:library-return-target";
 
 function normalizePositiveNumber(value, fallback = null) {
@@ -32,7 +34,9 @@ function normalizeString(value) {
 export function normalizeLibraryListPath(pathname = "") {
   const normalizedPath = String(pathname || "").split("#", 1)[0];
   const queryIndex = normalizedPath.indexOf("?");
-  const pathOnly = queryIndex >= 0 ? normalizedPath.slice(0, queryIndex) : normalizedPath;
+  const pathOnly = canonicalizeSpaPathname(
+    queryIndex >= 0 ? normalizedPath.slice(0, queryIndex) : normalizedPath,
+  );
   const search = queryIndex >= 0 ? normalizedPath.slice(queryIndex) : "";
   if (pathOnly === "/library/local" || pathOnly === "/library/cloud") {
     return search ? `${pathOnly}${search}` : pathOnly;

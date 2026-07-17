@@ -130,6 +130,17 @@ export function buildAssetResponseHeaders(contentType, cacheControl) {
 }
 
 
+export function resolveAssetCacheControl(filePath) {
+  const normalizedPath = path.normalize(filePath);
+  const extension = path.extname(normalizedPath);
+  const basename = path.basename(normalizedPath);
+  const isFavicon = basename.startsWith("favicon");
+  return basename === "sw.js" || extension === ".webmanifest" || extension === ".html" || isFavicon
+    ? "no-cache"
+    : "public, max-age=31536000, immutable";
+}
+
+
 export function sendError(response, statusCode, message) {
   response.writeHead(statusCode, withSecurityHeaders({ "Content-Type": "text/plain; charset=utf-8" }));
   response.end(message);
@@ -498,15 +509,8 @@ async function serveAsset(request, response) {
   const extension = path.extname(filePath);
   const normalizedPath = path.normalize(filePath);
   const contentType = mimeTypes[extension] || "application/octet-stream";
-  const basename = path.basename(normalizedPath);
-  const isFavicon = basename.startsWith("favicon");
   const isIndexHtml = normalizedPath === path.normalize(distEntry);
-  const cacheControl =
-    normalizedPath === path.join(distDir, "sw.js") || extension === ".webmanifest"
-      ? "no-cache"
-      : extension === ".html" || isFavicon
-      ? "no-cache"
-      : "public, max-age=31536000, immutable";
+  const cacheControl = resolveAssetCacheControl(normalizedPath);
 
   if (isIndexHtml) {
     const html = withBaseHref(await fsp.readFile(filePath, "utf-8"), urlPrefix);

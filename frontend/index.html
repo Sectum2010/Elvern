@@ -15,9 +15,190 @@
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=3" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <title>Elvern</title>
+    <style>
+      :root { color-scheme: dark; background: #080b12; }
+      html, body { min-height: 100%; margin: 0; background: #080b12; }
+      body { color: #e7e0cf; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #elvern-connection-shell {
+        position: fixed; inset: 0; z-index: 2147483000; display: grid; place-items: center;
+        min-height: 100dvh; padding: max(1.25rem, env(safe-area-inset-top)) max(1.25rem, env(safe-area-inset-right))
+          max(1.25rem, env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
+        box-sizing: border-box; overflow: hidden; background: #080b12; opacity: 1;
+        transition: opacity 160ms linear;
+      }
+      #elvern-connection-shell::before {
+        content: ""; position: absolute; inset: 12px; border: 2px solid #24263d;
+        box-shadow: inset 0 0 0 4px #101426; pointer-events: none;
+      }
+      #elvern-connection-shell::after {
+        content: ""; position: absolute; width: min(34rem, 78vw); height: 2px; bottom: 18%;
+        background: #34304b; box-shadow: 0 5px 0 #161a2c, 0 -5px 0 #0d2630; pointer-events: none;
+      }
+      #elvern-connection-shell.elvern-connection-shell--ready { opacity: 0; pointer-events: none; }
+      #elvern-connection-shell[hidden] { display: none; }
+      .elvern-connection-shell__content { position: relative; z-index: 1; display: grid; justify-items: center; gap: 1rem; text-align: center; }
+      .elvern-familiar-stage {
+        display: grid; place-items: center; width: 128px; height: 112px;
+      }
+      .elvern-familiar { grid-area: 1 / 1; display: none; width: 96px; height: 80px; image-rendering: pixelated; shape-rendering: crispEdges; }
+      #elvern-connection-shell[data-familiar="raven"] .elvern-familiar--raven,
+      #elvern-connection-shell[data-familiar="wisp"] .elvern-familiar--wisp,
+      #elvern-connection-shell[data-familiar="horned"] .elvern-familiar--horned { display: block; }
+      .elvern-familiar--raven .familiar-motion { transform-origin: 48px 44px; animation: elvern-raven 1200ms steps(4, end) infinite; }
+      .elvern-familiar--raven .raven-eye { animation: elvern-blink 2400ms steps(4, end) infinite; }
+      .elvern-familiar--wisp .familiar-motion { transform-origin: 48px 42px; animation: elvern-wisp 1000ms steps(4, end) infinite; }
+      .elvern-familiar--horned .familiar-motion { transform-origin: 48px 54px; animation: elvern-horned 1400ms steps(4, end) infinite; }
+      @keyframes elvern-raven { 0%,100%{transform:translate(0,0)}25%{transform:translate(-2px,-2px)}50%{transform:translate(0,-2px)}75%{transform:translate(2px,0)} }
+      @keyframes elvern-blink { 0%,25%,75%,100%{opacity:1}50%{opacity:0} }
+      @keyframes elvern-wisp { 0%,100%{transform:translate(0,2px)}25%{transform:translate(-2px,-2px)}50%{transform:translate(0,-4px)}75%{transform:translate(2px,-2px)} }
+      @keyframes elvern-horned { 0%,100%{transform:translate(0,0)}25%{transform:translate(-2px,0)}50%{transform:translate(0,-2px)}75%{transform:translate(2px,0)} }
+      @keyframes elvern-word-bounce { from{transform:translateX(-14px)}to{transform:translateX(14px)} }
+      .elvern-connection-shell__waiting {
+        margin: 0; color: #b8c9d2; font-size: clamp(0.9rem, 2.4vw, 1.05rem); letter-spacing: 0;
+        animation: elvern-word-bounce 1800ms ease-in-out infinite alternate;
+      }
+      .elvern-connection-shell__oops { display: none; max-width: 34rem; }
+      .elvern-connection-shell__oops h1 { margin: 0 0 0.75rem; color: #e7e0cf; font-size: clamp(1.55rem, 5vw, 2.2rem); letter-spacing: 0; }
+      .elvern-connection-shell__oops p { margin: 0; color: #aeb8c5; font: 1rem/1.6 system-ui, sans-serif; letter-spacing: 0; }
+      .elvern-connection-shell__retry {
+        margin-top: 1.25rem; padding: 0.25rem; border: 0; border-radius: 0; background: transparent;
+        box-shadow: none; color: #8799a8; font: 0.95rem/1.4 system-ui, sans-serif; cursor: pointer;
+      }
+      .elvern-connection-shell__retry:hover { color: #d2dde2; text-decoration: underline; text-underline-offset: 0.25rem; }
+      .elvern-connection-shell__retry:focus-visible { color: #e7e0cf; outline: 2px solid #6aa5ad; outline-offset: 4px; }
+      #elvern-connection-shell[data-state="unreachable"] .elvern-connection-shell__waiting { display: none; }
+      #elvern-connection-shell[data-state="unreachable"] .elvern-connection-shell__oops { display: block; }
+      #elvern-connection-shell[data-state="unreachable"] .elvern-familiar { animation-play-state: paused; }
+      @media (prefers-reduced-motion: reduce) {
+        #elvern-connection-shell { transition: none; }
+        .elvern-familiar .familiar-motion, .elvern-familiar .raven-eye,
+        .elvern-connection-shell__waiting { animation: none !important; }
+      }
+      @media (orientation: landscape) and (max-height: 520px) {
+        .elvern-connection-shell__content { grid-template-columns: auto minmax(0, 28rem); column-gap: 1.5rem; }
+        .elvern-familiar-stage { grid-row: 1 / span 2; }
+      }
+    </style>
   </head>
   <body>
+    <div id="elvern-connection-shell" data-familiar="raven" data-state="connecting" role="status" aria-live="polite">
+      <div class="elvern-connection-shell__content">
+        <div class="elvern-familiar-stage" aria-hidden="true">
+          <svg class="elvern-familiar elvern-familiar--raven" viewBox="0 0 96 80">
+            <g class="familiar-motion">
+              <path fill="#171b2a" d="M22 30h12v-8h28v6h10v8h8v12h-8v8H58v8H34v-6H22V48H14V36h8z"/>
+              <path fill="#2b3047" d="M30 26h28v6h10v12H58v8H34v-6H22V34h8z"/>
+              <path fill="#0a0d15" d="M18 42h20v8H24v8H14V48h4zm40-8h18v8h8v8H64v-8h-6z"/>
+              <path fill="#6aa5ad" d="M30 34h8v6h-8zm28 0h8v6h-8z" class="raven-eye"/>
+              <path fill="#b79c5b" d="M44 42h10v5H44z"/>
+              <path fill="#20263a" d="M30 60h8v8h-8zm24 0h8v8h-8z"/>
+            </g>
+          </svg>
+          <svg class="elvern-familiar elvern-familiar--wisp" viewBox="0 0 96 80">
+            <g class="familiar-motion">
+              <path fill="#18333a" d="M42 10h12v10h8v10h8v18h-8v12H54v10H42V60H32V48h-6V30h8V20h8z"/>
+              <path fill="#3e7f82" d="M44 18h8v10h8v20h-8v10h-8V48h-8V30h8z"/>
+              <path fill="#9bc8bd" d="M44 30h8v16h-8z"/>
+              <path fill="#d8d6b5" d="M38 34h6v6h-6zm14 0h6v6h-6z"/>
+              <path fill="#20253a" d="M32 62h8v8h-8zm24-4h8v8h-8z"/>
+            </g>
+          </svg>
+          <svg class="elvern-familiar elvern-familiar--horned" viewBox="0 0 96 80">
+            <g class="familiar-motion">
+              <path fill="#b79c5b" d="M24 12h10v14H24zm38 0h10v14H62z"/>
+              <path fill="#2d2940" d="M30 22h36v8h8v28h-8v10H30V58h-8V30h8z"/>
+              <path fill="#4a3b55" d="M34 28h28v8h8v20h-8v8H34v-8h-8V36h8z"/>
+              <path fill="#91b5b1" d="M34 40h8v6h-8zm20 0h8v6h-8z"/>
+              <path fill="#171624" d="M42 52h12v6H42z"/>
+              <path fill="#20263a" d="M30 66h10v8H30zm26 0h10v8H56z"/>
+            </g>
+          </svg>
+        </div>
+        <p class="elvern-connection-shell__waiting" data-connection-waiting-word>Flibbertigibbeting...</p>
+        <span hidden>Ruminating... Conjuring... Recombobulating...</span>
+        <div class="elvern-connection-shell__oops">
+          <h1>Oops!</h1>
+          <p>Elvern could not be reached. Check your connection and try again.</p>
+          <button class="elvern-connection-shell__retry" data-connection-retry type="button">Retry</button>
+        </div>
+      </div>
+    </div>
     <div id="root"></div>
+    <script>
+      (() => {
+        const UNREACHABLE_DELAY_MS = 60000;
+        const HEALTH_PROBE_INTERVAL_MS = 10000;
+        const HEALTH_PROBE_TIMEOUT_MS = 5000;
+        const ROTATION_MS = 7000;
+        const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating..."];
+        const FAMILIARS = ["raven", "wisp", "horned"];
+        window.__elvernConnectionStartedAt = Date.now();
+        const shell = document.getElementById("elvern-connection-shell");
+        const word = shell.querySelector("[data-connection-waiting-word]");
+        const retry = shell.querySelector("[data-connection-retry]");
+        let activeController = null;
+        let inFlight = null;
+        let observedFailure = false;
+        let rotationIndex = 0;
+
+        function showOops() {
+          shell.dataset.state = "unreachable";
+        }
+
+        async function probe({ forceReload = false } = {}) {
+          if (inFlight) return inFlight;
+          activeController = new AbortController();
+          const timeout = window.setTimeout(() => activeController.abort(), HEALTH_PROBE_TIMEOUT_MS);
+          inFlight = fetch(new URL("/health", window.location.origin), {
+            cache: "no-store",
+            credentials: "same-origin",
+            signal: activeController.signal,
+          }).then((response) => {
+            if (response.ok && (observedFailure || forceReload)) window.location.reload();
+            if (!response.ok) observedFailure = true;
+            return response.ok;
+          }).catch(() => {
+            observedFailure = true;
+            return false;
+          }).finally(() => {
+            window.clearTimeout(timeout);
+            activeController = null;
+            inFlight = null;
+          });
+          return inFlight;
+        }
+
+        const handleRetry = () => { void probe({ forceReload: true }); };
+        const handleOnline = () => { void probe(); };
+        const handleVisibility = () => {
+          if (document.visibilityState === "visible") void probe();
+        };
+        retry.addEventListener("click", handleRetry);
+        window.addEventListener("online", handleOnline);
+        document.addEventListener("visibilitychange", handleVisibility);
+        const unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
+        const probeInterval = window.setInterval(() => { void probe(); }, HEALTH_PROBE_INTERVAL_MS);
+        const rotationInterval = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? 0
+          : window.setInterval(() => {
+            rotationIndex += 1;
+            shell.dataset.familiar = FAMILIARS[rotationIndex % FAMILIARS.length];
+            word.textContent = WORDS[rotationIndex % WORDS.length];
+          }, ROTATION_MS);
+
+        window.__elvernStaticConnectionShellCleanup = () => {
+          window.clearTimeout(unreachableTimer);
+          window.clearInterval(probeInterval);
+          window.clearInterval(rotationInterval);
+          activeController?.abort();
+          retry.removeEventListener("click", handleRetry);
+          window.removeEventListener("online", handleOnline);
+          document.removeEventListener("visibilitychange", handleVisibility);
+          delete window.__elvernStaticConnectionShellCleanup;
+        };
+        void probe();
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

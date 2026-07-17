@@ -16,6 +16,10 @@ import {
 } from "./libraryQueries.js";
 import { queryClient } from "./queryClient.js";
 import { buildUserSettingsQueryKey } from "./userSettingsQueries.js";
+import {
+  STARTUP_APPLICATION_READY_EVENT,
+  STARTUP_CONNECTIVITY_FAILURE_EVENT,
+} from "./startupConnection.js";
 
 afterEach(() => {
   queryClient.clear();
@@ -191,5 +195,44 @@ test("auth verification 403 does not recursively request another auth revalidati
     assert.deepEqual(events, []);
   } finally {
     window.removeEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handleRevalidation);
+  }
+});
+
+test("network failure requests startup connection recovery but AbortError does not", async () => {
+  const events = [];
+  const handleFailure = () => events.push("network");
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  try {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValueOnce(new TypeError("offline")));
+    await assert.rejects(() => apiRequest("/api/auth/me"));
+    assert.deepEqual(events, ["network"]);
+
+    const abortError = new Error("cancelled");
+    abortError.name = "AbortError";
+    globalThis.fetch.mockRejectedValueOnce(abortError);
+    await assert.rejects(() => apiRequest("/api/library"));
+    assert.deepEqual(events, ["network"]);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  }
+});
+
+test("an HTTP 401 proves the application responded instead of reporting a connection failure", async () => {
+  const events = [];
+  const handleReady = () => events.push("ready");
+  const handleFailure = () => events.push("failure");
+  window.addEventListener(STARTUP_APPLICATION_READY_EVENT, handleReady);
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ detail: "Authentication required" }),
+    { status: 401, headers: { "content-type": "application/json" } },
+  )));
+
+  try {
+    await assert.rejects(() => apiRequest("/api/auth/me"));
+    assert.deepEqual(events, ["ready"]);
+  } finally {
+    window.removeEventListener(STARTUP_APPLICATION_READY_EVENT, handleReady);
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
   }
 });

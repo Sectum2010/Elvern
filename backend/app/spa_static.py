@@ -108,7 +108,10 @@ class SpaStaticFiles(StaticFiles):
         if normalized_path in {"", ".", "index.html"}:
             return self._index_response()
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
+            if normalized_path in {"sw.js", "offline.html"}:
+                response.headers["Cache-Control"] = "no-cache"
+            return response
         except StarletteHTTPException as exc:
             if exc.status_code != 404:
                 raise

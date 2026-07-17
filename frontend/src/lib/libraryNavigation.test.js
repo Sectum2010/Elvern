@@ -5,10 +5,20 @@ import {
   buildLibraryReturnState,
   clearLibraryReturnPending,
   extractLibraryReturnState,
+  normalizeLibraryListPath,
   normalizeLibraryReturnTarget,
   readLibraryReturnTarget,
   rememberLibraryReturnTarget,
 } from "./libraryNavigation.js";
+
+test.each([
+  ["/library/", "/library"],
+  ["/library/?category=anime", "/library?category=anime"],
+  ["/library/local/?q=akira", "/library/local?q=akira"],
+  ["/library/cloud/", "/library/cloud"],
+])("canonicalizes Library return list path %s", (input, expected) => {
+  assert.equal(normalizeLibraryListPath(input), expected);
+});
 
 function withSessionStorage(callback) {
   const storage = new Map();

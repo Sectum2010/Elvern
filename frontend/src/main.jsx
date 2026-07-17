@@ -3,9 +3,13 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./styles.css";
+import {
+  applyInitialSpaCanonicalization,
+  detectSpaBasename,
+} from "./lib/canonicalSpaPath.js";
+import { registerElvernServiceWorker } from "./lib/serviceWorkerRegistration.js";
 
 
-const LEGACY_SW_RESET_KEY = "elvern-sw-reset";
 const VIEWPORT_SYNC_SENTINEL = "__elvernViewportSyncInstalled";
 const VIEWPORT_SYNC_API_KEY = "__elvernRequestViewportNormalization";
 const BASE_VIEWPORT_CONTENT = "width=device-width, initial-scale=1.0, viewport-fit=cover, shrink-to-fit=no";
@@ -112,48 +116,14 @@ function installViewportSync() {
 
 installViewportSync();
 
+const basename = detectSpaBasename();
+applyInitialSpaCanonicalization(window, { basename });
+
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", async () => {
-    try {
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      if (!registrations.length) {
-        window.sessionStorage.removeItem(LEGACY_SW_RESET_KEY);
-        return;
-      }
-
-      await Promise.all(registrations.map((registration) => registration.unregister()));
-
-      if ("caches" in window) {
-        const cacheKeys = await window.caches.keys();
-        await Promise.all(
-          cacheKeys
-            .filter((key) => key.startsWith("elvern-shell"))
-            .map((key) => window.caches.delete(key)),
-        );
-      }
-
-      if (!window.sessionStorage.getItem(LEGACY_SW_RESET_KEY)) {
-        window.sessionStorage.setItem(LEGACY_SW_RESET_KEY, "1");
-        window.location.reload();
-        return;
-      }
-
-      window.sessionStorage.removeItem(LEGACY_SW_RESET_KEY);
-    } catch (error) {
-      console.error("Failed to disable legacy service worker caching", error);
-    }
-  });
+  window.addEventListener("load", () => {
+    void registerElvernServiceWorker();
+  }, { once: true });
 }
-
-
-function detectBasename() {
-  const segments = window.location.pathname.split("/").filter(Boolean);
-  const prefixCandidate = segments[0] || "";
-  return /^[a-hjkmnp-z2-9]{8,24}$/.test(prefixCandidate) ? `/${prefixCandidate}` : "/";
-}
-
-
-const basename = detectBasename();
 
 
 ReactDOM.createRoot(document.getElementById("root")).render(
