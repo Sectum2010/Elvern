@@ -6,6 +6,7 @@
   --app-viewport-height: 100vh;
   --app-stable-viewport-height: 100vh;
   --app-live-viewport-height: 100vh;
+  --app-paint-viewport-height: 100vh;
   --app-viewport-bleed: 240px;
   --app-shell-max-inline: 100%;
   --app-shell-inline-gutter: 1rem;
@@ -99,6 +100,19 @@
   }
 }
 
+@supports (height: 100lvh) {
+  :root {
+    --app-paint-viewport-height: 100lvh;
+  }
+
+  html,
+  body,
+  #root,
+  #elvern-app-paint-floor {
+    min-block-size: max(var(--app-paint-viewport-height), 100lvh);
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -122,10 +136,12 @@ body,
   min-height: 100%;
   min-height: var(--app-viewport-height);
   min-height: var(--app-stable-viewport-height);
+  min-block-size: var(--app-paint-viewport-height);
 }
 
 #root {
   position: relative;
+  z-index: 1;
   isolation: isolate;
 }
 
@@ -139,6 +155,7 @@ body {
   max-inline-size: 100%;
   min-height: var(--app-viewport-height);
   min-height: var(--app-stable-viewport-height);
+  min-block-size: var(--app-paint-viewport-height);
   overflow-x: hidden;
   color: inherit;
   background: var(--app-page-background);
@@ -287,9 +304,14 @@ body.elvern-player-fullscreen-active .app-viewport-backdrop::after {
     0
     calc(-1 * var(--app-viewport-bleed))
     0;
-  z-index: -1;
+  z-index: 0;
   pointer-events: none;
   background: var(--app-page-background);
+}
+
+#elvern-app-paint-floor {
+  position: fixed;
+  pointer-events: none;
 }
 
 .app-viewport-backdrop::after {

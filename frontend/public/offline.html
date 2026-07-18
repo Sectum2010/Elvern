@@ -57,6 +57,7 @@
           <p data-connection-oops-copy>Elvern could not be reached, check your VPN connection and try again.</p>
           <span hidden>Seems like the server has been bamboozled, we will fix it as soon as possible.</span>
           <span hidden>It looks like you're offline. Please check your connection and try again.</span>
+          <span hidden>Elvern could not be reached at the moment, please check your connection and try again.</span>
           <button class="elvern-connection-shell__retry" data-connection-retry type="button">Retry</button>
         </div>
       </div>
@@ -66,31 +67,89 @@
         const UNREACHABLE_DELAY_MS = 60000;
         const HEALTH_PROBE_INTERVAL_MS = 10000;
         const HEALTH_PROBE_TIMEOUT_MS = 5000;
+        const PUBLIC_PROBE_TIMEOUT_MS = 2000;
+        const PUBLIC_CONFIRMATION_DELAY_MS = 500;
+        const PUBLIC_TRUST_MAX_AGE_MS = 604800000;
+        const PUBLIC_TRUST_KEY = "elvern_public_probe_trust_v1";
+        const RECOVERY_RELOAD_COOLDOWN_MS = 30000;
+        const RECOVERY_RELOAD_KEY = "elvern_offline_recovery_reload_v1";
         const ROTATION_MS = 7000;
         const FRONTEND_HEALTH_URL = new URL("/_elvern/frontend-health", window.location.origin);
         const BACKEND_HEALTH_URL = new URL("/health", window.location.origin);
-        const RAW_PUBLIC_PROBE_URL = "__ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL__";
-        const PUBLIC_PROBE_URL = RAW_PUBLIC_PROBE_URL.startsWith("__ELVERN_") ? "" : RAW_PUBLIC_PROBE_URL.trim();
+        const RAW_PUBLIC_PROBES_JSON = "__ELVERN_PUBLIC_CONNECTIVITY_PROBES_JSON__";
+        const DEFAULT_PUBLIC_PROBES = [
+          { id: "cloudflare-trace", url: "https://www.cloudflare.com/cdn-cgi/trace", expectedStatuses: [200] },
+          { id: "ipify-api64", url: "https://api64.ipify.org/", expectedStatuses: [200] },
+          { id: "httpbin-204", url: "https://httpbin.org/status/204", expectedStatuses: [204] },
+        ];
         const SERVER_OOPS_COPY = "Seems like the server has been bamboozled, we will fix it as soon as possible.";
         const VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
         const OFFLINE_OOPS_COPY = "It looks like you're offline. Please check your connection and try again.";
+        const GENERIC_OOPS_COPY = "Elvern could not be reached at the moment, please check your connection and try again.";
         const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating...", "Scrying...", "Divining...", "Wayfinding...", "Enchanting..."];
         const FAMILIARS = ["raven", "wisp", "horned", "gargoyle", "keeper"];
         const shell = document.getElementById("elvern-connection-shell");
         const word = shell.querySelector("[data-connection-waiting-word]");
         const retry = shell.querySelector("[data-connection-retry]");
         const oopsCopy = shell.querySelector("[data-connection-oops-copy]");
+        const publicProbes = (() => {
+          if (RAW_PUBLIC_PROBES_JSON.startsWith("__ELVERN_")) return DEFAULT_PUBLIC_PROBES;
+          try { return JSON.parse(RAW_PUBLIC_PROBES_JSON); } catch { return []; }
+        })();
+        const debugEnabled = (() => {
+          try { return window.localStorage.getItem("elvern_connection_shell_debug") === "1"; } catch { return false; }
+        })();
+        const activePublicControllers = new Set();
         let inFlight = null;
         let probeInterval = 0;
         let rotationInterval = 0;
         let unreachableTimer = 0;
         let activeController = null;
-        let activePublicController = null;
         let rotationIndex = 0;
-        let warnedMissingPublicProbe = false;
-        let lastClassification = navigator.onLine === false ? "internet_offline" : "frontend_or_vpn_unreachable";
+        let consecutiveServiceSuccesses = 0;
+        let lastClassification = navigator.onLine === false ? "internet_offline" : "connectivity_evidence_insufficient";
+
+        function debug(message, detail = {}) {
+          if (debugEnabled) console.debug(`Elvern offline shell: ${message}`, detail);
+        }
+
+        function registryHash() {
+          const value = JSON.stringify(publicProbes.map((probe) => [probe.id, probe.url, probe.expectedStatuses]));
+          let hash = 0xcbf29ce484222325n;
+          for (let index = 0; index < value.length; index += 1) {
+            hash ^= BigInt(value.charCodeAt(index));
+            hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+          }
+          return hash.toString(16).padStart(16, "0");
+        }
+
+        function hasTrustedProbeSet() {
+          try {
+            const record = JSON.parse(window.localStorage.getItem(PUBLIC_TRUST_KEY) || "null");
+            const now = Date.now();
+            const trusted = record?.schema_version === 1
+              && record?.endpoint_list_hash === registryHash()
+              && Number.isFinite(Number(record?.last_successful_at))
+              && now - Number(record.last_successful_at) <= PUBLIC_TRUST_MAX_AGE_MS
+              && Number(record.last_successful_at) <= now;
+            if (!trusted && record) window.localStorage.removeItem(PUBLIC_TRUST_KEY);
+            return trusted;
+          } catch { return false; }
+        }
+
+        function trustProbe(endpointId) {
+          try {
+            window.localStorage.setItem(PUBLIC_TRUST_KEY, JSON.stringify({
+              schema_version: 1,
+              endpoint_list_hash: registryHash(),
+              last_successful_at: Date.now(),
+              last_successful_endpoint_id: endpointId,
+            }));
+          } catch { /* Trust evidence is optional. */ }
+        }
 
         function setWaitingWord(text) {
+          if (word.getAttribute("aria-label") === text && word.children.length === text.length) return;
           word.setAttribute("aria-label", text);
           word.replaceChildren(...Array.from(text, (letter, index) => {
             const span = document.createElement("span");
@@ -105,7 +164,9 @@
         function showOops() {
           oopsCopy.textContent = lastClassification === "backend_unreachable"
             ? SERVER_OOPS_COPY
-            : lastClassification === "internet_offline" ? OFFLINE_OOPS_COPY : VPN_OOPS_COPY;
+            : lastClassification === "internet_offline"
+              ? OFFLINE_OOPS_COPY
+              : lastClassification === "frontend_or_vpn_unreachable" ? VPN_OOPS_COPY : GENERIC_OOPS_COPY;
           shell.dataset.state = "unreachable";
         }
 
@@ -118,36 +179,62 @@
           unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
         }
 
-        async function probePublicInternet() {
-          if (!PUBLIC_PROBE_URL) {
-            if (!warnedMissingPublicProbe) {
-              warnedMissingPublicProbe = true;
-              console.warn("Public connectivity probe is not configured; using VPN/origin fallback classification.");
+        async function probePublicChain() {
+          for (const endpoint of publicProbes) {
+            const controller = new AbortController();
+            activePublicControllers.add(controller);
+            const timeout = window.setTimeout(() => controller.abort(), PUBLIC_PROBE_TIMEOUT_MS);
+            let success = false;
+            let status = 0;
+            try {
+              const response = await fetch(endpoint.url, {
+                method: "GET", cache: "no-store", credentials: "omit", mode: "cors", referrerPolicy: "no-referrer",
+                signal: controller.signal,
+              });
+              status = Number(response.status) || 0;
+              success = Boolean(response.ok) && endpoint.expectedStatuses.includes(status);
+            } catch { success = false; }
+            window.clearTimeout(timeout);
+            activePublicControllers.delete(controller);
+            debug("public probe", { endpointId: endpoint.id, success, status });
+            if (success) {
+              trustProbe(endpoint.id);
+              return true;
             }
-            return null;
           }
-          activePublicController = new AbortController();
-          const publicTimeout = window.setTimeout(() => activePublicController.abort(), HEALTH_PROBE_TIMEOUT_MS);
-          try {
-            const response = await fetch(PUBLIC_PROBE_URL, {
-              cache: "no-store", credentials: "omit", mode: "cors", referrerPolicy: "no-referrer",
-              signal: activePublicController.signal,
-            });
-            return response.ok;
-          } catch {
-            return false;
-          } finally {
-            window.clearTimeout(publicTimeout);
-            activePublicController = null;
-          }
+          return false;
         }
 
-        async function classifyFrontendFailure() {
-          if (navigator.onLine === false) return "internet_offline";
-          const firstPublicResult = await probePublicInternet();
-          if (firstPublicResult === null || firstPublicResult === true) return "frontend_or_vpn_unreachable";
-          await new Promise((resolve) => window.setTimeout(resolve, 250));
-          return await probePublicInternet() ? "frontend_or_vpn_unreachable" : "internet_offline";
+        async function probePublicInternet() {
+          if (navigator.onLine === false) return "offline";
+          if (!publicProbes.length) return "unknown";
+          const trusted = hasTrustedProbeSet();
+          if (await probePublicChain()) return "online";
+          await new Promise((resolve) => window.setTimeout(resolve, PUBLIC_CONFIRMATION_DELAY_MS));
+          if (await probePublicChain()) return "online";
+          return trusted ? "offline" : "unknown";
+        }
+
+        function reloadAfterConfirmedRecovery() {
+          if (consecutiveServiceSuccesses < 2) return false;
+          try {
+            const record = JSON.parse(window.sessionStorage.getItem(RECOVERY_RELOAD_KEY) || "null");
+            const lastReloadAt = Number(record?.last_reload_at) || 0;
+            if (record?.schema_version === 1 && Date.now() - lastReloadAt < RECOVERY_RELOAD_COOLDOWN_MS) {
+              debug("reload blocked by cooldown", { reloadCooldown: true });
+              return false;
+            }
+            window.sessionStorage.setItem(RECOVERY_RELOAD_KEY, JSON.stringify({
+              schema_version: 1,
+              last_reload_at: Date.now(),
+            }));
+          } catch {
+            debug("reload blocked because cooldown storage is unavailable", { reloadCooldown: true });
+            return false;
+          }
+          debug("service recovered", { reloadReason: "two_consecutive_service_successes" });
+          window.location.reload();
+          return true;
         }
 
         async function probe() {
@@ -158,18 +245,24 @@
             cache: "no-store", credentials: "same-origin", signal: activeController.signal,
           }).then((response) => response.ok).catch(() => false);
           inFlight = (async () => {
+            const publicResultPromise = probePublicInternet();
             const frontendHealthy = await requestHealth(FRONTEND_HEALTH_URL);
-            if (!frontendHealthy) {
-              lastClassification = await classifyFrontendFailure();
-              return false;
+            const backendHealthy = frontendHealthy ? await requestHealth(BACKEND_HEALTH_URL) : false;
+            const publicResult = await publicResultPromise;
+            if (frontendHealthy && backendHealthy) {
+              consecutiveServiceSuccesses += 1;
+              reloadAfterConfirmedRecovery();
+            } else {
+              consecutiveServiceSuccesses = 0;
             }
-            const backendHealthy = await requestHealth(BACKEND_HEALTH_URL);
-            if (!backendHealthy) {
-              lastClassification = "backend_unreachable";
-              return false;
-            }
-            window.location.reload();
-            return true;
+            if (publicResult === "offline") lastClassification = "internet_offline";
+            else if (!frontendHealthy) {
+              lastClassification = publicResult === "online"
+                ? "frontend_or_vpn_unreachable"
+                : "connectivity_evidence_insufficient";
+            } else if (!backendHealthy) lastClassification = "backend_unreachable";
+            else lastClassification = "healthy";
+            return frontendHealthy && backendHealthy;
           })().finally(() => {
             window.clearTimeout(timeout);
             activeController = null;
@@ -178,18 +271,20 @@
           return inFlight;
         }
 
-        retry.addEventListener("click", () => {
-          restartConnectingCycle();
-          void probe();
-        });
-        window.addEventListener("online", () => { void probe(); });
-        window.addEventListener("offline", () => {
+        const handleRetry = () => { restartConnectingCycle(); void probe(); };
+        const handleOnline = () => { void probe(); };
+        const handleOffline = () => {
+          consecutiveServiceSuccesses = 0;
           lastClassification = "internet_offline";
           if (shell.dataset.state === "unreachable") showOops();
-        });
-        document.addEventListener("visibilitychange", () => {
+        };
+        const handleVisibility = () => {
           if (document.visibilityState === "visible") void probe();
-        });
+        };
+        retry.addEventListener("click", handleRetry);
+        window.addEventListener("online", handleOnline);
+        window.addEventListener("offline", handleOffline);
+        document.addEventListener("visibilitychange", handleVisibility);
         unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
         probeInterval = window.setInterval(() => { void probe(); }, HEALTH_PROBE_INTERVAL_MS);
         if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -205,7 +300,7 @@
           window.clearInterval(probeInterval);
           window.clearInterval(rotationInterval);
           activeController?.abort();
-          activePublicController?.abort();
+          activePublicControllers.forEach((controller) => controller.abort());
         }, { once: true });
         void probe();
       })();

@@ -5,8 +5,8 @@ import {
   CONNECTION_FAMILIAR_ROTATION_MS,
   CONNECTION_STATUS_WORDS,
   CONNECTIVITY_BACKEND_UNREACHABLE,
+  CONNECTIVITY_EVIDENCE_INSUFFICIENT,
   CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE,
-  CONNECTIVITY_INTERNET_OFFLINE,
   createStartupConnectionController,
   getConnectionOopsCopy,
   NO_INTERNET_REAPPEAR_MS,
@@ -74,11 +74,16 @@ export function RuntimeConnectivityLayer({ controller, snapshot }) {
   const pointerStartYRef = useRef(null);
   const reappearTimerRef = useRef(0);
   const internetOffline = snapshot.runtimeReady
-    && snapshot.classification === CONNECTIVITY_INTERNET_OFFLINE
+    && snapshot.internetOutageLatched
     && !snapshot.offlineOopsRequired;
   const showRuntimeOops = snapshot.runtimeReady
     && snapshot.status === "unreachable"
-    && [CONNECTIVITY_BACKEND_UNREACHABLE, CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE]
+    && !snapshot.internetOutageLatched
+    && [
+      CONNECTIVITY_BACKEND_UNREACHABLE,
+      CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE,
+      CONNECTIVITY_EVIDENCE_INSUFFICIENT,
+    ]
       .includes(snapshot.classification);
 
   useEffect(() => {
@@ -133,6 +138,15 @@ export function RuntimeConnectivityLayer({ controller, snapshot }) {
     setDragOffset(0);
   }
 
+  function handlePointerCancel(event) {
+    if (pointerStartYRef.current == null) {
+      return;
+    }
+    pointerStartYRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    setDragOffset(0);
+  }
+
   const oopsCopy = getConnectionOopsCopy(snapshot.classification);
 
   return (
@@ -140,7 +154,7 @@ export function RuntimeConnectivityLayer({ controller, snapshot }) {
       {internetOffline && !internetNoticeDismissed ? (
         <div
           className="runtime-connectivity-notice"
-          onPointerCancel={handlePointerEnd}
+          onPointerCancel={handlePointerCancel}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerEnd}

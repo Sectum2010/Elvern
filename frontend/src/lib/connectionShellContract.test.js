@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   CONNECTION_OFFLINE_OOPS_COPY,
+  CONNECTION_GENERIC_OOPS_COPY,
   CONNECTION_OOPS_TITLE,
   CONNECTION_SERVER_OOPS_COPY,
   CONNECTION_VPN_OOPS_COPY,
@@ -28,9 +29,10 @@ describe("static connection shell contract", () => {
       expect(html).toContain(CONNECTION_SERVER_OOPS_COPY);
       expect(html).toContain(CONNECTION_VPN_OOPS_COPY);
       expect(html).toContain(CONNECTION_OFFLINE_OOPS_COPY);
+      expect(html).toContain(CONNECTION_GENERIC_OOPS_COPY);
       expect(html).toContain('navigator.onLine === false ? "internet_offline"');
       expect(html).toContain('/_elvern/frontend-health');
-      expect(html).toContain("__ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL__");
+      expect(html).toContain("__ELVERN_PUBLIC_CONNECTIVITY_PROBES_JSON__");
       expect(html).toContain(">Retry<");
       CONNECTION_STATUS_WORDS.forEach((word) => expect(html).toContain(word));
     }
@@ -92,6 +94,28 @@ describe("static connection shell contract", () => {
     }
     expect(indexHtml).toContain("__elvernStaticConnectionShellCleanup");
     expect(indexHtml).toContain("__elvernConnectionStartedAt = Date.now()");
+  });
+
+  test("static bootstrap never reloads and offline recovery is bounded by confirmation and cooldown", () => {
+    expect(indexHtml).toContain("__elvernAppBootstrapStarted");
+    expect(indexHtml).toContain("__elvernRuntimeReady");
+    expect(indexHtml).not.toContain("window.location.reload()");
+    expect(offlineHtml).toContain("consecutiveServiceSuccesses");
+    expect(offlineHtml).toContain("RECOVERY_RELOAD_COOLDOWN_MS = 30000");
+    expect(offlineHtml).toContain("consecutiveServiceSuccesses < 2");
+    expect(offlineHtml).toContain("reload blocked because cooldown storage is unavailable");
+    expect(offlineHtml).toContain("window.location.reload()");
+  });
+
+  test("static probes use status-only ordered requests and never consume response bodies", () => {
+    for (const html of [indexHtml, offlineHtml]) {
+      expect(html).toContain('credentials: "omit"');
+      expect(html).toContain('referrerPolicy: "no-referrer"');
+      expect(html).toContain('cache: "no-store"');
+      expect(html).not.toContain("response.text(");
+      expect(html).not.toContain("response.json(");
+      expect(html).not.toContain("response.clone(");
+    }
   });
 
   test("service worker allowlists only offline.html and never caches private routes", () => {

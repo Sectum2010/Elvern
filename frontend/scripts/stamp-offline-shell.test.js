@@ -3,8 +3,8 @@ import { describe, expect, test } from "vitest";
 import {
   computeOfflineShellRevision,
   OFFLINE_SHELL_REVISION_PLACEHOLDER,
-  PUBLIC_CONNECTIVITY_PROBE_URL_PLACEHOLDER,
-  stampPublicConnectivityProbeUrl,
+  PUBLIC_CONNECTIVITY_PROBES_JSON_PLACEHOLDER,
+  stampPublicConnectivityProbes,
   stampServiceWorkerSource,
 } from "./stamp-offline-shell.mjs";
 
@@ -36,11 +36,17 @@ describe("offline shell build revision", () => {
     );
   });
 
-  test("stamps the operator public connectivity probe without changing unrelated content", () => {
-    const source = `const probe = "${PUBLIC_CONNECTIVITY_PROBE_URL_PLACEHOLDER}";`;
-    expect(stampPublicConnectivityProbeUrl(source, "https://probe.operator.example/health"))
-      .toBe('const probe = "https://probe.operator.example/health";');
-    expect(stampPublicConnectivityProbeUrl(source, ""))
-      .toBe('const probe = "";');
+  test("stamps a safely escaped JSON probe registry without changing unrelated content", () => {
+    const source = `const probes = "${PUBLIC_CONNECTIVITY_PROBES_JSON_PLACEHOLDER}";`;
+    const stamped = stampPublicConnectivityProbes(source, [{
+      id: "operator-1",
+      url: "https://probe.operator.example/health?<unsafe>&quote=\"",
+      expectedStatuses: [200, 204],
+    }]);
+
+    expect(stamped).not.toContain(PUBLIC_CONNECTIVITY_PROBES_JSON_PLACEHOLDER);
+    expect(stamped).not.toContain("<unsafe>");
+    expect(stamped).toContain("\\\\u003cunsafe\\\\u003e");
+    expect(stamped).toContain("operator-1");
   });
 });

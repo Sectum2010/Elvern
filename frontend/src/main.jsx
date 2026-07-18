@@ -11,6 +11,8 @@ import { registerElvernServiceWorker } from "./lib/serviceWorkerRegistration.js"
 import { installIOSViewportCoordinator } from "./lib/iosViewportCoordinator.js";
 
 
+window.__elvernAppBootstrapStarted = true;
+window.__elvernBootstrapPhase = "module_bootstrap_started";
 installIOSViewportCoordinator();
 
 const basename = detectSpaBasename();
@@ -22,7 +24,7 @@ if ("serviceWorker" in navigator) {
   }, { once: true });
 }
 
-
+window.__elvernBootstrapPhase = "react_started";
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <BrowserRouter basename={basename}>

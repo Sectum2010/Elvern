@@ -42,7 +42,6 @@ export default function App() {
         <AuthProvider>
           <ProviderAuthProvider>
             <CanonicalSpaRouteGuard>
-          <div aria-hidden="true" className="app-viewport-backdrop" />
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route path="/login/totp" element={<TotpChallengePage />} />

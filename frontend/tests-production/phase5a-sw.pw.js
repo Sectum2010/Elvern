@@ -3,6 +3,13 @@ import { expect, test } from "@playwright/test";
 
 test("production service worker returns offline shell for a deep-link navigation", async ({ context, page, baseURL }) => {
   let healthReachable = true;
+  for (const [url, status] of [
+    ["https://www.cloudflare.com/cdn-cgi/trace", 200],
+    ["https://api64.ipify.org/", 200],
+    ["https://httpbin.org/status/204", 204],
+  ]) {
+    await page.route(url, (route) => route.fulfill({ status, body: "" }));
+  }
   await page.route("**/health", (route) => {
     if (!healthReachable) {
       return route.abort("failed");

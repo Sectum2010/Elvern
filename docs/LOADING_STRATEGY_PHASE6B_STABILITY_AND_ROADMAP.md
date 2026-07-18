@@ -8,6 +8,11 @@ queue correctness. It does not change playback, Library quality authority,
 search behavior, card dimensions, JPEG quality, or existing relocation
 algorithms.
 
+Phase 6C supersedes this document's single-probe classification and initial
+Auth stable-height acceptance. Poster priority, no-cache fallback, bounded
+metrics, and prewarm results in this document remain current. See
+`LOADING_STRATEGY_PHASE6C_CONNECTIVITY_AND_VIEWPORT_STABILITY.md`.
+
 ## Connectivity Evidence
 
 ### Confirmed desktop failure mode
@@ -28,9 +33,10 @@ The shared classifier uses four independent signals:
 1. Browser evidence: `navigator.onLine` and online/offline events.
 2. Frontend evidence: `/_elvern/frontend-health`.
 3. Backend evidence: `/health`, only after frontend success.
-4. Public Internet evidence: an operator-configured URL outside Elvern and its
-   VPN, supplied at build time as
-   `VITE_ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL`.
+4. Public Internet evidence: the ordered Cloudflare, ipify, and httpbin
+   registry, or an operator override supplied with the plural
+   `VITE_ELVERN_PUBLIC_CONNECTIVITY_PROBE_URLS` variable. The legacy singular
+   variable remains compatible.
 
 Classification is deterministic:
 
@@ -40,15 +46,16 @@ Classification is deterministic:
 - Frontend success plus backend failure: `backend_unreachable`.
 - Frontend and backend success: `healthy`.
 
-If the public probe is not configured, one privacy-safe warning is emitted and
-a frontend failure remains `frontend_or_vpn_unreachable`. Elvern does not claim
-to know that the Internet is offline without that evidence.
+Missing configuration now uses the built-in ordered registry. Explicit `none`
+or a never-verified all-failed registry produces evidence-insufficient generic
+copy rather than claiming VPN or offline.
 
 The exact Oops copy is:
 
 - Offline: `It looks like you're offline. Please check your connection and try again.`
 - VPN/origin: `Elvern could not be reached, check your VPN connection and try again.`
 - Server: `Seems like the server has been bamboozled, we will fix it as soon as possible.`
+- Insufficient evidence: `Elvern could not be reached at the moment, please check your connection and try again.`
 
 Cold start, refresh, and a login request made while truly offline retain the
 60-second startup window. Once `runtimeReady` is latched, Internet loss keeps
@@ -67,9 +74,8 @@ return triggers one immediate probe. Outages continue using the existing
 
 ### Public probe privacy contract
 
-The public endpoint is chosen and controlled by the operator. It must be
-outside the Elvern/VPN path, return an empty 204 or small 200, and allow
-anonymous CORS. Elvern does not hardcode a third-party service. Requests use:
+Phase 6C provides three default external endpoints and still allows an operator
+override outside the Elvern/VPN path. Requests use:
 
 - `credentials: "omit"`
 - `cache: "no-store"`
@@ -78,7 +84,8 @@ anonymous CORS. Elvern does not hardcode a third-party service. Requests use:
 - an independent timeout and `AbortController`
 
 No Cookie, Authorization header, username, item ID, media path, Library query,
-or Library payload is sent. The same build-time value is stamped into
+or Library payload is sent. No response body is read or stored. The same
+build-time ordered registry is stamped into
 `index.html` and `offline.html`, so React, bootstrap, and Service Worker
 fallback shells classify failures consistently.
 
@@ -286,8 +293,8 @@ poster scheduling, and any pinch-zoom restriction.
 
 ## Rollback
 
-- Omit `VITE_ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL` to return frontend failures
-  to the conservative VPN/origin classification.
+- Set `VITE_ELVERN_PUBLIC_CONNECTIVITY_PROBE_URLS=none` and rebuild to disable
+  public evidence and use the generic evidence-insufficient classification.
 - Revert the Phase 6B frontend coordinator/watchdog changes as one code change;
   there is no schema or private persisted payload.
 - Poster prewarm remains independently disableable with

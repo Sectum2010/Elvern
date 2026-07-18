@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { StartupConnectionGate } from "./StartupConnectionGate.jsx";
 import {
   CONNECTION_OFFLINE_OOPS_COPY,
+  CONNECTION_GENERIC_OOPS_COPY,
   CONNECTION_SERVER_OOPS_COPY,
   CONNECTION_VPN_OOPS_COPY,
   CONNECTION_FAMILIAR_ROTATION_MS,
@@ -49,7 +50,7 @@ describe("StartupConnectionGate", () => {
   test("shows connecting first, exact Oops at 60 seconds, and a text-only Retry button", async () => {
     const container = installShellFixture();
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError("offline"));
-    const controller = createStartupConnectionController({ fetchImpl });
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
     render(<StartupConnectionGate controller={controller}><p>App ready</p></StartupConnectionGate>, { container });
 
     await act(() => vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1));
@@ -59,7 +60,7 @@ describe("StartupConnectionGate", () => {
     await act(() => vi.advanceTimersByTimeAsync(1));
     expect(document.getElementById("elvern-connection-shell").dataset.state).toBe("unreachable");
     expect(screen.getByRole("heading", { name: "Oops!" })).toBeInTheDocument();
-    expect(screen.getByText(CONNECTION_VPN_OOPS_COPY)).toBeInTheDocument();
+    expect(screen.getByText(CONNECTION_GENERIC_OOPS_COPY)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toHaveClass("elvern-connection-shell__retry");
 
     const callsBeforeRetry = fetchImpl.mock.calls.length;
@@ -134,6 +135,9 @@ describe("StartupConnectionGate", () => {
     const container = installShellFixture();
     let backendHealthy = true;
     const fetchImpl = vi.fn((path) => {
+      if (String(path).startsWith("https://")) {
+        return Promise.resolve({ status: 200, ok: true });
+      }
       if (path === "/_elvern/frontend-health") {
         return Promise.resolve(new Response(null, { status: 204 }));
       }
@@ -187,6 +191,63 @@ describe("StartupConnectionGate", () => {
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(screen.queryByText("No Internet")).not.toBeInTheDocument();
     expect(screen.getByText("Library state")).toBeInTheDocument();
+  });
+
+  test("pointer cancellation resets drag state without dismissing No Internet", async () => {
+    const container = installShellFixture();
+    const navigatorObject = { onLine: true };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
+    render(<StartupConnectionGate controller={controller}><p>Library state</p></StartupConnectionGate>, { container });
+
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    navigatorObject.onLine = false;
+    act(() => window.dispatchEvent(new Event("offline")));
+    const notice = screen.getByText("No Internet");
+    fireEvent(notice, new MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+    fireEvent(notice, new MouseEvent("pointermove", { bubbles: true, clientY: 40 }));
+    fireEvent(notice, new MouseEvent("pointercancel", { bubbles: true, clientY: 40 }));
+
+    expect(screen.getByText("No Internet")).toBeInTheDocument();
+    expect(screen.getByText("No Internet")).toHaveStyle({ transform: "translate(-50%, 0px)" });
+  });
+
+  test("a swipe stays dismissed through 9999ms and creates only one reappearance deadline", async () => {
+    const container = installShellFixture();
+    const navigatorObject = { onLine: true };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
+    render(<StartupConnectionGate controller={controller}><p>Library state</p></StartupConnectionGate>, { container });
+
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    navigatorObject.onLine = false;
+    act(() => window.dispatchEvent(new Event("offline")));
+    const notice = screen.getByText("No Internet");
+    fireEvent(notice, new MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+    fireEvent(notice, new MouseEvent("pointerup", { bubbles: true, clientY: 50 }));
+
+    await act(() => vi.advanceTimersByTimeAsync(NO_INTERNET_REAPPEAR_MS - 1));
+    expect(screen.queryByText("No Internet")).not.toBeInTheDocument();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(screen.getByText("No Internet")).toBeInTheDocument();
+  });
+
+  test("evidence-insufficient runtime outages use the generic Oops copy", async () => {
+    const container = installShellFixture();
+    const controller = createStartupConnectionController({
+      fetchImpl: vi.fn().mockRejectedValue(new TypeError("unreachable")),
+      publicConnectivityProbeUrl: "https://probe.operator.example/connectivity",
+      publicProbeConfirmationDelayMs: 0,
+    });
+    render(<StartupConnectionGate controller={controller}><p>Persistent app</p></StartupConnectionGate>, { container });
+
+    controller.reportApplicationReady();
+    await act(() => vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS));
+
+    expect(screen.getByText("Persistent app")).toBeInTheDocument();
+    expect(within(document.querySelector(".runtime-connectivity-oops")).getByText(
+      CONNECTION_GENERIC_OOPS_COPY,
+    )).toBeInTheDocument();
   });
 
   test("an offline login attempt waits 60 seconds before showing the offline Oops shell", async () => {

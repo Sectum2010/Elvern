@@ -4,6 +4,10 @@
 
 Phase 6 prioritizes an already-running Elvern session, progressive Detail rendering, and bounded card-poster derivative work. It does not change playback protocols, search behavior, poster quality, the iPhone scheduler, or Library relocation algorithms.
 
+Phase 6C supersedes the original connectivity classification and Auth viewport
+acceptance details below where noted. See
+`LOADING_STRATEGY_PHASE6C_CONNECTIVITY_AND_VIEWPORT_STABILITY.md`.
+
 ## Runtime Connectivity
 
 ### Confirmed bug
@@ -16,29 +20,39 @@ The controller now has a one-way `runtimeReady` latch. Once an application respo
 
 Phase 6 originally did not poll continuously while healthy. Phase 6B adds an 8-second healthy watchdog on visible Windows, macOS, and Linux sessions because virtual adapters can keep `navigator.onLine` true after Wi-Fi loss. Phone and tablet healthy sessions do not run this watchdog. Recovery still uses the existing 10-second interval.
 
-### Classification heuristic
+### Classification heuristic (updated by Phase 6C)
 
-The probes are sequential and never overlap:
+Elvern service checks remain sequential and never overlap:
 
 1. `/_elvern/frontend-health` checks the frontend process without the backend proxy.
 2. `/health` checks the backend only after the frontend probe succeeds.
 
-The runtime classifications are:
+Internet state is now independent from these service checks. A visible desktop
+also runs the ordered Cloudflare, ipify, and httpbin public chain every eight
+seconds. Two all-failed rounds produce offline only after that endpoint list
+has previously succeeded; an unverified failure remains evidence-insufficient.
+The runtime classifications derived from these dimensions are:
 
-- `internet_offline`: the browser explicitly reports offline, or the frontend and an operator-configured public Internet probe both fail twice within a bounded evidence window. The running application stays mounted and shows `No Internet`; cold start, refresh, and offline login use the 60-second offline Oops path.
+- `internet_offline`: the browser explicitly reports offline, or a trusted public probe set fails two complete rounds. A sticky latch is cleared only by a public-probe success. The running application stays mounted and shows `No Internet`; cold start, refresh, and offline login use the 60-second offline Oops path.
 - `frontend_or_vpn_unreachable`: the browser reports online but the frontend process cannot be reached. After the existing 60 second outage window, the VPN/reachability Oops copy is used.
 - `backend_unreachable`: the frontend process responds but the backend health endpoint does not. After 60 seconds, the server Oops copy is used.
+- `connectivity_evidence_insufficient`: the frontend is unreachable and the public probe set is disabled or has never been verified. The generic connection copy is used instead of guessing VPN or offline.
 - `healthy`: both probes succeed. Recovery UI disappears automatically and the fixed 10 second recovery polling stops.
 
-The three exact Oops messages are:
+The four exact Oops messages are:
 
 - Server: `Seems like the server has been bamboozled, we will fix it as soon as possible.`
 - Frontend/VPN: `Elvern could not be reached, check your VPN connection and try again.`
 - Offline: `It looks like you're offline. Please check your connection and try again.`
+- Insufficient evidence: `Elvern could not be reached at the moment, please check your connection and try again.`
 
 `No Internet` can be swiped upward by 24 px. It returns after 10 seconds while Internet evidence remains offline. It does not block Library, Detail, or playback interaction.
 
-The public evidence URL is operator-controlled and supplied as `VITE_ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL`. It is requested anonymously with no credentials, referrer, cache, user data, or Library data. If absent, frontend failure stays conservatively classified as VPN/origin failure. See `LOADING_STRATEGY_PHASE6B_STABILITY_AND_ROADMAP.md`.
+The preferred operator override is `VITE_ELVERN_PUBLIC_CONNECTIVITY_PROBE_URLS`;
+the legacy singular variable remains compatible. Missing configuration uses the
+three documented defaults, while `none` disables public evidence and selects
+the generic fallback. Requests are status-only and use no credentials,
+referrer, cache, user data, or Library data. Response bodies are never read.
 
 ### Offline shell and worker identity
 

@@ -7,17 +7,22 @@ export const IOS_VIEWPORT_DEBUG_STORAGE_KEY = "elvern_ios_viewport_debug";
 export const IOS_VIEWPORT_STABLE_EVENT = "elvern:ios-viewport-stable";
 export const IOS_VIEWPORT_BASE_CONTENT = "width=device-width, initial-scale=1.0, viewport-fit=cover, shrink-to-fit=no";
 export const IOS_VIEWPORT_RESET_CONTENT = `${IOS_VIEWPORT_BASE_CONTENT}, maximum-scale=1.0`;
+export const IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX = 64;
+export const IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO = 0.08;
+export const IOS_POST_KEYBOARD_QUARANTINE_MS = 700;
+export const IOS_VIEWPORT_SETTLE_MAX_MS = 1_500;
 
 const DEFAULT_STABLE_SAMPLE_COUNT = 2;
 const DEFAULT_STABLE_SAMPLE_DELAY_MS = 32;
-const DEFAULT_SETTLE_TIMEOUT_MS = 1_200;
-const DEFAULT_AUTH_EXIT_TIMEOUT_MS = 1_200;
+const DEFAULT_SETTLE_TIMEOUT_MS = IOS_VIEWPORT_SETTLE_MAX_MS;
+const DEFAULT_AUTH_EXIT_TIMEOUT_MS = IOS_VIEWPORT_SETTLE_MAX_MS;
 const DEFAULT_RESET_DURATION_MS = 180;
 const KEYBOARD_MIN_HEIGHT_PX = 120;
 const SCALE_TOLERANCE = 0.02;
 const SAMPLE_TOLERANCE_PX = 3;
 const FOCUS_AUTOZOOM_WINDOW_MS = 1_500;
 const DEBUG_THROTTLE_MS = 250;
+const OFFSET_TOLERANCE_PX = 1;
 
 
 function toFinite(value, fallback = 0) {
@@ -56,8 +61,28 @@ function readLiveViewport(windowObject) {
 }
 
 
-function orientationFor(viewport) {
+function orientationFor(viewport, windowObject = globalThis.window) {
+  const screenOrientation = String(windowObject?.screen?.orientation?.type || "").toLowerCase();
+  if (screenOrientation.startsWith("landscape")) {
+    return "landscape";
+  }
+  if (screenOrientation.startsWith("portrait")) {
+    return "portrait";
+  }
+  const legacyOrientation = Number(windowObject?.orientation);
+  if (legacyOrientation === 90 || legacyOrientation === -90) {
+    return "landscape";
+  }
+  if (legacyOrientation === 0 || legacyOrientation === 180 || legacyOrientation === -180) {
+    return "portrait";
+  }
   return viewport.width > viewport.height ? "landscape" : "portrait";
+}
+
+
+function isStandaloneDisplay(windowObject, navigatorObject) {
+  return navigatorObject?.standalone === true
+    || windowObject?.matchMedia?.("(display-mode: standalone)")?.matches === true;
 }
 
 
@@ -84,13 +109,15 @@ export function createIOSViewportCoordinator({
   settleTimeoutMs = DEFAULT_SETTLE_TIMEOUT_MS,
   authExitTimeoutMs = DEFAULT_AUTH_EXIT_TIMEOUT_MS,
   resetDurationMs = DEFAULT_RESET_DURATION_MS,
+  postKeyboardQuarantineMs = IOS_POST_KEYBOARD_QUARANTINE_MS,
 } = {}) {
   const isIOS = isIOSClientPlatform(platform);
   const root = documentObject?.documentElement || null;
   const viewportMeta = documentObject?.querySelector?.('meta[name="viewport"]') || null;
   const originalViewportContent = viewportMeta?.getAttribute("content") || IOS_VIEWPORT_BASE_CONTENT;
   const listeners = new Set();
-  const stableByOrientation = new Map();
+  const trustedViewportByOrientation = new Map();
+  const standaloneDisplay = isStandaloneDisplay(windowObject, navigatorObject);
   let started = false;
   let pendingFrame = 0;
   let stableSampleTimer = 0;
@@ -106,6 +133,13 @@ export function createIOSViewportCoordinator({
   let authFocusActive = false;
   let focusAutozoomObserved = false;
   let authResetPerformed = false;
+  let authContaminationActive = false;
+  let authInteractionGeneration = 0;
+  let authSettleGeneration = -1;
+  let authSettlePromise = null;
+  let preFocusTrustedViewport = null;
+  let postKeyboardQuarantineUntil = 0;
+  let suspiciousShrink = false;
   let orientationChanging = false;
   let settling = isIOS;
   let lastDebugAt = 0;
@@ -118,11 +152,16 @@ export function createIOSViewportCoordinator({
     keyboardOpen: false,
     editableFocused: false,
     focusAutozoom: false,
+    postKeyboardQuarantine: false,
+    suspiciousShrink: false,
     restoreGateOpen: !isIOS,
     resetGeneration: 0,
   };
 
-  stableByOrientation.set(orientationFor(snapshot.stableViewport), snapshot.stableViewport);
+  trustedViewportByOrientation.set(
+    orientationFor(snapshot.stableViewport, windowObject),
+    snapshot.stableViewport,
+  );
 
   function emit(next) {
     const previousGate = snapshot.restoreGateOpen;
@@ -155,6 +194,7 @@ export function createIOSViewportCoordinator({
     if (stable.height > 0) {
       root.style.setProperty("--app-stable-viewport-height", `${stable.height}px`);
       root.style.setProperty("--app-viewport-height", `${stable.height}px`);
+      root.style.setProperty("--app-paint-viewport-height", `${stable.height}px`);
       root.style.setProperty("--app-viewport-bleed", `${Math.max(240, Math.round(stable.height * 0.38))}px`);
     }
     if (live.height > 0) {
@@ -165,13 +205,15 @@ export function createIOSViewportCoordinator({
     root.style.setProperty("--app-visual-viewport-scale", String(live.scale));
     root.style.setProperty("--app-viewport-offset-left", `${live.offsetLeft}px`);
     root.style.setProperty("--app-viewport-offset-right", `${offsetRight}px`);
-    root.dataset.viewportOrientation = orientationFor(layout);
+    root.dataset.viewportOrientation = orientationFor(layout, windowObject);
     if (platform === "iphone") {
       root.dataset.deviceShell = "iphone";
     }
     setBooleanDataset("elvernIosViewport", isIOS);
     setBooleanDataset("elvernKeyboardOpen", nextSnapshot.keyboardOpen);
     setBooleanDataset("elvernEditableFocused", nextSnapshot.editableFocused);
+    setBooleanDataset("elvernPostKeyboardQuarantine", nextSnapshot.postKeyboardQuarantine);
+    setBooleanDataset("elvernSuspiciousShrink", nextSnapshot.suspiciousShrink);
     setBooleanDataset("elvernViewportSettling", !nextSnapshot.restoreGateOpen);
   }
 
@@ -190,7 +232,7 @@ export function createIOSViewportCoordinator({
     const layout = readLayoutViewport(windowObject, documentObject);
     console.debug("Elvern iOS viewport", {
       eventType,
-      orientation: orientationFor(layout),
+      orientation: orientationFor(layout, windowObject),
       innerWidth: windowObject.innerWidth,
       innerHeight: windowObject.innerHeight,
       clientWidth: layout.width,
@@ -199,17 +241,27 @@ export function createIOSViewportCoordinator({
       stableViewport: { ...snapshot.stableViewport },
       keyboardOpen: snapshot.keyboardOpen,
       editableFocused: snapshot.editableFocused,
+      postKeyboardQuarantine: snapshot.postKeyboardQuarantine,
+      suspiciousShrink: snapshot.suspiciousShrink,
       state: snapshot.state,
       resetGeneration,
       restoreGateOpen: snapshot.restoreGateOpen,
     });
   }
 
-  function resolveState({ keyboardOpen, editableFocused, focusAutozoom }) {
+  function resolveState({
+    keyboardOpen,
+    editableFocused,
+    focusAutozoom,
+    postKeyboardQuarantine,
+    hasSuspiciousShrink,
+  }) {
     if (orientationChanging) return "orientation_changing";
     if (focusAutozoom) return "focus_autozoom";
     if (keyboardOpen) return "keyboard_open";
     if (editableFocused) return "editable_focused";
+    if (postKeyboardQuarantine) return "post_keyboard_quarantine";
+    if (hasSuspiciousShrink) return "suspicious_shrink";
     if (settling) return "settling";
     return "stable";
   }
@@ -222,12 +274,20 @@ export function createIOSViewportCoordinator({
   }
 
   function markStable(viewport, eventType) {
-    const orientation = orientationFor(viewport);
-    stableByOrientation.set(orientation, viewport);
+    const orientation = orientationFor(viewport, windowObject);
+    trustedViewportByOrientation.set(orientation, viewport);
     settling = false;
     orientationChanging = false;
+    suspiciousShrink = false;
+    authContaminationActive = false;
+    postKeyboardQuarantineUntil = 0;
+    preFocusTrustedViewport = null;
     stableCandidate = null;
     stableCandidateCount = 0;
+    if (stableSampleTimer) {
+      windowObject?.clearTimeout?.(stableSampleTimer);
+      stableSampleTimer = 0;
+    }
     clearSettleFallback();
     const next = {
       ...snapshot,
@@ -236,6 +296,8 @@ export function createIOSViewportCoordinator({
       keyboardOpen: false,
       editableFocused: false,
       focusAutozoom: false,
+      postKeyboardQuarantine: false,
+      suspiciousShrink: false,
       restoreGateOpen: true,
     };
     applyRootMetrics(next);
@@ -254,13 +316,17 @@ export function createIOSViewportCoordinator({
     settleFallbackTimer = windowObject?.setTimeout?.(() => {
       settleFallbackTimer = 0;
       if (isEditable(documentObject?.activeElement)) {
-        sample(`${eventType}_fallback_deferred`);
+        beginSettling(`${eventType}_fallback_deferred`);
         return;
       }
       const layout = readLayoutViewport(windowObject, documentObject);
-      const fallback = layout.height > 0
-        ? layout
-        : stableByOrientation.get(orientationFor(snapshot.liveViewport)) || snapshot.stableViewport;
+      const orientation = orientationFor(layout, windowObject);
+      const trusted = trustedViewportByOrientation.get(orientation)
+        || (preFocusTrustedViewport?.orientation === orientation ? preFocusTrustedViewport : null)
+        || snapshot.stableViewport;
+      const fallback = authContaminationActive || suspiciousShrink
+        ? { width: trusted.width, height: trusted.height }
+        : (layout.height > 0 ? layout : { width: trusted.width, height: trusted.height });
       markStable(fallback, `${eventType}_fallback`);
     }, settleTimeoutMs) || 0;
     emit({
@@ -290,22 +356,59 @@ export function createIOSViewportCoordinator({
     if (focusAutozoom) {
       focusAutozoomObserved = true;
     }
+    const orientation = orientationFor(layout, windowObject);
+    const trustedViewport = trustedViewportByOrientation.get(orientation) || snapshot.stableViewport;
+    const preFocusBaseline = preFocusTrustedViewport?.orientation === orientation
+      ? preFocusTrustedViewport
+      : null;
+    const candidate = layout.height > 0 ? layout : { width: live.width, height: live.height };
+    const shrinkPixels = preFocusBaseline ? preFocusBaseline.height - candidate.height : 0;
+    const shrinkRatio = preFocusBaseline?.height > 0 ? shrinkPixels / preFocusBaseline.height : 0;
+    suspiciousShrink = Boolean(
+      authContaminationActive
+      && preFocusBaseline
+      && shrinkPixels > 0
+      && (
+        standaloneDisplay
+        || shrinkPixels >= IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX
+        || shrinkRatio >= IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO
+      )
+    );
+    const viewportNeutral = Math.abs(live.scale - 1) <= SCALE_TOLERANCE
+      && Math.abs(live.offsetTop) <= OFFSET_TOLERANCE_PX
+      && Math.abs(live.offsetLeft) <= OFFSET_TOLERANCE_PX;
+    const postKeyboardQuarantine = Boolean(
+      authContaminationActive
+      && (
+        Date.now() < postKeyboardQuarantineUntil
+        || editableFocused
+        || !viewportNeutral
+      )
+    );
     const canTrustStable = isIOS
       && !editableFocused
       && !keyboardOpen
-      && Math.abs(live.scale - 1) <= SCALE_TOLERANCE
+      && viewportNeutral
+      && !postKeyboardQuarantine
+      && !suspiciousShrink
       && !orientationChanging
       && !resetActive;
     if (canTrustStable) {
-      const candidate = layout.height > 0 ? layout : { width: live.width, height: live.height };
+      const measuredCandidate = {
+        ...candidate,
+        liveHeight: live.height,
+        liveWidth: live.width,
+      };
       if (
         stableCandidate
-        && Math.abs(candidate.width - stableCandidate.width) <= SAMPLE_TOLERANCE_PX
-        && Math.abs(candidate.height - stableCandidate.height) <= SAMPLE_TOLERANCE_PX
+        && Math.abs(measuredCandidate.width - stableCandidate.width) <= SAMPLE_TOLERANCE_PX
+        && Math.abs(measuredCandidate.height - stableCandidate.height) <= SAMPLE_TOLERANCE_PX
+        && Math.abs(measuredCandidate.liveWidth - stableCandidate.liveWidth) <= SAMPLE_TOLERANCE_PX
+        && Math.abs(measuredCandidate.liveHeight - stableCandidate.liveHeight) <= SAMPLE_TOLERANCE_PX
       ) {
         stableCandidateCount += 1;
       } else {
-        stableCandidate = candidate;
+        stableCandidate = measuredCandidate;
         stableCandidateCount = 1;
       }
       if (stableCandidateCount >= stableSampleCount) {
@@ -321,10 +424,23 @@ export function createIOSViewportCoordinator({
     } else {
       stableCandidate = null;
       stableCandidateCount = 0;
+      if (settling && !stableSampleTimer) {
+        stableSampleTimer = windowObject?.setTimeout?.(() => {
+          stableSampleTimer = 0;
+          sample("settle_observation");
+        }, stableSampleDelayMs) || 0;
+      }
     }
-    const orientation = orientationFor(layout);
-    const stableViewport = stableByOrientation.get(orientation) || snapshot.stableViewport;
-    const restoreGateOpen = !isIOS || (!settling && !orientationChanging && !editableFocused && !keyboardOpen && !focusAutozoom);
+    const stableViewport = trustedViewport;
+    const restoreGateOpen = !isIOS || (
+      !settling
+      && !orientationChanging
+      && !editableFocused
+      && !keyboardOpen
+      && !focusAutozoom
+      && !postKeyboardQuarantine
+      && !suspiciousShrink
+    );
     const next = {
       ...snapshot,
       stableViewport,
@@ -332,8 +448,16 @@ export function createIOSViewportCoordinator({
       keyboardOpen,
       editableFocused,
       focusAutozoom,
+      postKeyboardQuarantine,
+      suspiciousShrink,
       restoreGateOpen,
-      state: resolveState({ keyboardOpen, editableFocused, focusAutozoom }),
+      state: resolveState({
+        keyboardOpen,
+        editableFocused,
+        focusAutozoom,
+        postKeyboardQuarantine,
+        hasSuspiciousShrink: suspiciousShrink,
+      }),
     };
     applyRootMetrics(next);
     emit(next);
@@ -358,6 +482,26 @@ export function createIOSViewportCoordinator({
     focusBaseline = readLiveViewport(windowObject);
     focusAutozoomObserved = false;
     authResetPerformed = false;
+    if (authFocusActive) {
+      const layout = readLayoutViewport(windowObject, documentObject);
+      const orientation = orientationFor(layout, windowObject);
+      const trusted = trustedViewportByOrientation.get(orientation) || snapshot.stableViewport;
+      preFocusTrustedViewport = {
+        orientation,
+        width: trusted.width,
+        height: trusted.height,
+        scale: focusBaseline.scale,
+        offsetTop: focusBaseline.offsetTop,
+        timestamp: Date.now(),
+        standalone: standaloneDisplay,
+      };
+      authContaminationActive = true;
+      postKeyboardQuarantineUntil = 0;
+      suspiciousShrink = false;
+      authInteractionGeneration += 1;
+      authSettleGeneration = -1;
+      authSettlePromise = null;
+    }
     requestSample("focusin");
   }
 
@@ -366,6 +510,9 @@ export function createIOSViewportCoordinator({
       if (isEditable(documentObject?.activeElement)) {
         requestSample("focus_switch");
         return;
+      }
+      if (authContaminationActive) {
+        postKeyboardQuarantineUntil = Date.now() + Math.max(0, postKeyboardQuarantineMs);
       }
       authFocusActive = false;
       beginSettling("focusout");
@@ -447,22 +594,35 @@ export function createIOSViewportCoordinator({
     });
   }
 
-  async function settleAuthExit() {
+  function settleAuthExit() {
     if (!isIOS) {
-      return true;
+      return Promise.resolve(true);
     }
-    const activeElement = documentObject?.activeElement;
-    if (isEditable(activeElement)) {
-      sample("auth_exit_pre_blur");
-      activeElement.blur();
+    if (authSettlePromise && authSettleGeneration === authInteractionGeneration) {
+      return authSettlePromise;
     }
-    beginSettling("auth_exit");
-    await nextAnimationFrame(windowObject);
-    await nextAnimationFrame(windowObject);
-    if (focusAutozoomObserved && !authResetPerformed) {
-      requestNormalization({ reason: "auth-exit" });
-    }
-    return waitForStable(authExitTimeoutMs);
+    authSettleGeneration = authInteractionGeneration;
+    authSettlePromise = (async () => {
+      const activeElement = documentObject?.activeElement;
+      if (isEditable(activeElement)) {
+        sample("auth_exit_pre_blur");
+        activeElement.blur();
+      }
+      if (authContaminationActive) {
+        postKeyboardQuarantineUntil = Math.max(
+          postKeyboardQuarantineUntil,
+          Date.now() + Math.max(0, postKeyboardQuarantineMs),
+        );
+      }
+      beginSettling("auth_exit");
+      await nextAnimationFrame(windowObject);
+      await nextAnimationFrame(windowObject);
+      if (focusAutozoomObserved && !authResetPerformed) {
+        requestNormalization({ reason: "auth-exit" });
+      }
+      return waitForStable(authExitTimeoutMs);
+    })();
+    return authSettlePromise;
   }
 
   function requestSettledViewportSync({ resetViewport = false } = {}) {
