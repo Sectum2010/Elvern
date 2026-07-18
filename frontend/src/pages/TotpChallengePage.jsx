@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
+import { prepareAuthViewportExit, useAuthViewportRedirectReady } from "../lib/authViewportNavigation.js";
 
 
 export function TotpChallengePage() {
@@ -12,6 +13,7 @@ export function TotpChallengePage() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now());
+  const authRedirectReady = useAuthViewportRedirectReady(Boolean(user));
 
   const challengeToken = sessionStorage.getItem("elvern_totp_challenge") || "";
   const expiresAt = Number(sessionStorage.getItem("elvern_totp_expires") || 0);
@@ -27,7 +29,7 @@ export function TotpChallengePage() {
     return () => window.clearInterval(id);
   }, []);
 
-  if (user) {
+  if (authRedirectReady) {
     return <Navigate to="/library" replace />;
   }
 
@@ -42,6 +44,7 @@ export function TotpChallengePage() {
       });
       sessionStorage.removeItem("elvern_totp_challenge");
       sessionStorage.removeItem("elvern_totp_expires");
+      await prepareAuthViewportExit();
       await refreshAuth();
       navigate("/library", { replace: true });
     } catch (requestError) {

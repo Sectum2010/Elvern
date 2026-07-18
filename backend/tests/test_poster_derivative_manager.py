@@ -11,11 +11,17 @@ from PIL import Image, ImageCms, JpegImagePlugin
 
 from backend.app.config import ConfigError, refresh_settings
 from backend.app.services.poster_derivative_manager import (
+    POSTER_METRIC_SAMPLE_LIMIT,
     PosterDerivativeManager,
     PosterDerivativePriority,
     PosterDerivativeQueueFullError,
 )
-from backend.app.services.poster_display_cache_service import get_or_create_card_poster_display_cache
+from backend.app.services.poster_display_cache_service import (
+    PosterDerivativeDisposition,
+    PosterDerivativeResult,
+    get_or_create_card_poster_display_cache,
+)
+from backend.app.services import library_service
 from backend.app.routes import library as library_routes
 
 
@@ -82,20 +88,18 @@ def test_library_prewarm_uses_only_bounded_sections(
     monkeypatch.setattr(
         library_routes,
         "get_media_item_poster_path",
-        lambda *_args, item_id, **_kwargs: Path(f"poster-{item_id}.jpg"),
+        lambda *_args, **_kwargs: pytest.fail("prewarm must not perform per-item poster lookup"),
     )
 
     library_routes._prewarm_library_card_posters(
         request,
         user_id=1,
-        allow_globally_hidden=False,
-        payload={
-            "sections": {
-                "continue_watching_item_ids": [1, 2],
-                "item_ids": [2, 3, 4],
-                "recently_added_item_ids": [4, 5],
-            },
-        },
+        candidates=[
+            (1, Path("poster-1.jpg")),
+            (2, Path("poster-2.jpg")),
+            (3, Path("poster-3.jpg")),
+            (4, Path("poster-4.jpg")),
+        ],
     )
 
     assert calls == [
@@ -104,6 +108,135 @@ def test_library_prewarm_uses_only_bounded_sections(
         ("poster-3.jpg", 1400),
         ("poster-4.jpg", 1400),
     ]
+
+
+def test_v2_prewarm_candidates_reuse_request_poster_memo(
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    settings = replace(
+        initialized_settings,
+        poster_prewarm_first_items=2,
+        poster_prewarm_recent_items=1,
+    )
+    rows = [
+        {
+            "id": item_id,
+            "title": f"Title {item_id}",
+            "year": 2026,
+            "original_filename": f"Title.{item_id}.2026.mkv",
+            "source_kind": "local",
+            "quality_rank": {"key": "gold", "score": 11},
+        }
+        for item_id in range(1, 6)
+    ]
+    poster_paths = {item_id: tmp_path / f"poster-{item_id}.jpg" for item_id in range(1, 6)}
+
+    def resolve_from_request_memo(_settings, row, **kwargs):
+        item_id = int(row["id"])
+        kwargs["poster_path_memo"][item_id] = poster_paths[item_id]
+        return f"/api/library/item/{item_id}/poster?v=test"
+
+    monkeypatch.setattr(library_service, "_poster_url_for_row", resolve_from_request_memo)
+    plan = library_service.LibraryViewPlan(
+        category="movies",
+        arrange={"source": "all", "genre": None, "quality": "all", "sort": "smart"},
+        poster_dir=tmp_path,
+        poster_index=None,
+        item_rows=rows[:3],
+        series_rail_plans=[],
+        cloud_series_rail_plans=[],
+        continue_watching_rows=[rows[3]],
+        recently_added_rows=[rows[4]],
+        available_genres=[],
+        total_items=5,
+    )
+    candidates: list[tuple[int, Path]] = []
+
+    library_service.serialize_library_view_v2(
+        settings,
+        plan,
+        scan_in_progress=False,
+        prewarm_candidates=candidates,
+    )
+
+    assert candidates == [
+        (4, poster_paths[4]),
+        (1, poster_paths[1]),
+        (2, poster_paths[2]),
+        (5, poster_paths[5]),
+    ]
+
+
+def test_metrics_samples_remain_bounded_after_one_hundred_thousand_observations(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    manager = PosterDerivativeManager(_manager_settings(initialized_settings, tmp_path))
+    with manager._condition:
+        for value in range(100_000):
+            manager._record_timing_locked("queue_wait_seconds", value / 1000)
+            manager._record_timing_locked("generation_seconds", value / 500)
+
+    stats = manager.snapshot_stats()
+    assert len(stats["queue_wait_seconds"]) == POSTER_METRIC_SAMPLE_LIMIT
+    assert len(stats["generation_seconds"]) == POSTER_METRIC_SAMPLE_LIMIT
+    assert stats["queue_wait_seconds_summary"]["count"] == 100_000
+    assert stats["generation_seconds_summary"]["count"] == 100_000
+    assert stats["queue_wait_seconds_summary"]["max"] == pytest.approx(99.999)
+
+
+def test_structured_result_distinguishes_warm_cache_from_generation(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    settings = _manager_settings(initialized_settings, tmp_path)
+    source = tmp_path / "source.jpg"
+    cached = tmp_path / "cached.jpg"
+    manager = PosterDerivativeManager(
+        settings,
+        cache_lookup_function=lambda *_args, **_kwargs: cached,
+    )
+
+    result = manager.submit_result(source, target_width=1400).result(timeout=1)
+
+    assert result.path == cached
+    assert result.disposition == PosterDerivativeDisposition.DERIVATIVE_CACHE_HIT
+    assert result.immutable is True
+
+
+def test_structured_generation_fallback_counts_as_failure(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    settings = _manager_settings(initialized_settings, tmp_path)
+    source = tmp_path / "source.jpg"
+
+    def fallback(_settings, path, *, target_width):
+        del target_width
+        return PosterDerivativeResult(
+            path=Path(path),
+            disposition=PosterDerivativeDisposition.FALLBACK_GENERATION_ERROR,
+            immutable=False,
+        )
+
+    manager = PosterDerivativeManager(
+        settings,
+        generation_function=fallback,
+        cache_lookup_function=lambda *_args, **_kwargs: None,
+    )
+    manager.start()
+    try:
+        result = manager.submit_result(source, target_width=1400).result(timeout=2)
+        stats = manager.snapshot_stats()
+    finally:
+        manager.shutdown()
+
+    assert result.disposition == PosterDerivativeDisposition.FALLBACK_GENERATION_ERROR
+    assert stats["generated"] == 0
+    assert stats["generation_failures"] == 1
+    assert stats["disposition_counts"]["fallback_generation_error"] == 1
 
 
 def test_single_flight_collapses_duplicate_generation(initialized_settings, tmp_path) -> None:

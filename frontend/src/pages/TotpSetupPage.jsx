@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
+import { prepareAuthViewportExit } from "../lib/authViewportNavigation.js";
 
 
 export function TotpSetupPage() {
@@ -57,6 +58,7 @@ export function TotpSetupPage() {
     setError("");
     try {
       await apiRequest("/api/auth/totp/skip", { method: "POST" });
+      await prepareAuthViewportExit();
       await refreshAuth();
       navigate("/library", { replace: true });
     } catch (requestError) {
@@ -74,8 +76,13 @@ export function TotpSetupPage() {
     URL.revokeObjectURL(url);
   }
 
+  async function finishSetup() {
+    await prepareAuthViewportExit();
+    navigate("/library", { replace: true });
+  }
+
   return (
-    <div className="settings-page">
+    <div className="settings-page auth-viewport-page">
       <section className="settings-card totp-setup-card">
         <div className="totp-setup-card__intro">
           <p className="eyebrow">TWO-FACTOR AUTHENTICATION</p>
@@ -136,7 +143,7 @@ export function TotpSetupPage() {
               <button className="ghost-button" onClick={downloadCodes} type="button">
                 Download as .txt
               </button>
-              <button className="primary-button" onClick={() => navigate("/library", { replace: true })} type="button">
+              <button className="primary-button" onClick={() => void finishSetup()} type="button">
                 I've saved them
               </button>
             </div>

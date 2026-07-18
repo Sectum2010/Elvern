@@ -883,6 +883,7 @@ def _serialize_media_item_v2(
     *,
     plan: LibraryViewPlan,
     poster_url_memo: dict[int, str | None],
+    poster_path_memo: dict[int, Path | None],
 ) -> dict[str, object]:
     source_kind = str(_row_value(row, "source_kind", "local") or "local")
     display_title, display_year, _ = _normalize_cloud_title_and_year(
@@ -899,6 +900,7 @@ def _serialize_media_item_v2(
         poster_dir=plan.poster_dir,
         poster_index=plan.poster_index,
         poster_url_memo=poster_url_memo,
+        poster_path_memo=poster_path_memo,
     )
     if timing_enabled:
         plan.timing.add_ns("poster_url_resolution", time.perf_counter_ns() - poster_started_ns)
@@ -943,17 +945,20 @@ def serialize_library_view_v2(
     plan: LibraryViewPlan,
     *,
     scan_in_progress: bool,
+    prewarm_candidates: list[tuple[int, Path]] | None = None,
 ) -> dict[str, object]:
     timing_enabled = bool(plan.timing and plan.timing.enabled)
     serialization_started_ns = time.perf_counter_ns() if timing_enabled else 0
     rows_by_id = _v2_rows_by_id(plan)
     poster_url_memo: dict[int, str | None] = {}
+    poster_path_memo: dict[int, Path | None] = {}
     items_by_id = {
         str(media_item_id): _serialize_media_item_v2(
             settings,
             row,
             plan=plan,
             poster_url_memo=poster_url_memo,
+            poster_path_memo=poster_path_memo,
         )
         for media_item_id, row in rows_by_id.items()
     }
@@ -978,6 +983,17 @@ def serialize_library_view_v2(
         "total_items": plan.total_items,
         "scan_in_progress": bool(scan_in_progress),
     }
+    if prewarm_candidates is not None:
+        prewarm_candidates.clear()
+        candidate_ids = [
+            *payload_without_revision["sections"]["continue_watching_item_ids"],
+            *payload_without_revision["sections"]["item_ids"][: settings.poster_prewarm_first_items],
+            *payload_without_revision["sections"]["recently_added_item_ids"][: settings.poster_prewarm_recent_items],
+        ]
+        for media_item_id in dict.fromkeys(int(value) for value in candidate_ids):
+            poster_path = poster_path_memo.get(media_item_id)
+            if poster_path is not None:
+                prewarm_candidates.append((media_item_id, poster_path))
     revision_started_ns = time.perf_counter_ns() if timing_enabled else 0
     revision = _library_summary_revision(payload_without_revision)
     if timing_enabled:
@@ -1041,6 +1057,7 @@ def list_library_summary_v2(
     quality: str | None = None,
     sort: str | None = None,
     scan_in_progress: bool = False,
+    prewarm_candidates: list[tuple[int, Path]] | None = None,
 ) -> dict[str, object]:
     route_started_ns = time.perf_counter_ns() if settings.library_plan_timing_enabled else 0
     plan = build_library_view_plan(
@@ -1056,6 +1073,7 @@ def list_library_summary_v2(
         settings,
         plan,
         scan_in_progress=scan_in_progress,
+        prewarm_candidates=prewarm_candidates,
     )
     if plan.timing is not None and plan.timing.enabled:
         encoding_started_ns = time.perf_counter_ns()

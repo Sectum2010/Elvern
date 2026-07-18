@@ -63,6 +63,10 @@ import {
 } from "../lib/libraryQueries";
 import { buildLibrarySummaryV2RequestPath } from "../lib/librarySummaryV2";
 import { queryClient } from "../lib/queryClient";
+import {
+  IOS_VIEWPORT_STABLE_EVENT,
+  isIOSViewportRestoreGateOpen,
+} from "../lib/iosViewportCoordinator";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 
@@ -1173,7 +1177,8 @@ export function LibraryPage() {
       if (pendingOrientationAnchorRef.current?.itemId) {
         return pendingOrientationAnchorRef.current;
       }
-      const capturedAnchor = isVisualViewportZoomed({ viewportWindow: window })
+      const coordinatorStable = isIOSViewportRestoreGateOpen(window);
+      const capturedAnchor = !coordinatorStable || isVisualViewportZoomed({ viewportWindow: window })
         ? null
         : captureCenterMovieAnchor({
           doc: document,
@@ -1196,7 +1201,7 @@ export function LibraryPage() {
     }
 
     function captureFallbackOrientationAnchors({ allowSeriesQueryFallback = false } = {}) {
-      if (isVisualViewportZoomed({ viewportWindow: window })) {
+      if (!isIOSViewportRestoreGateOpen(window) || isVisualViewportZoomed({ viewportWindow: window })) {
         return orientationAnchorsRef.current;
       }
       const nextAnchors = captureViewportAnchorCandidates({
@@ -1318,6 +1323,9 @@ export function LibraryPage() {
     }
 
     function attemptOrientationRestore(scheduledToken, scheduledUserIntentVersion) {
+      if (!isIOSViewportRestoreGateOpen(window)) {
+        return;
+      }
       if (isRestoreAttemptStale({
         scheduledToken,
         activeToken: orientationRestoreTokenRef.current,
@@ -1413,6 +1421,15 @@ export function LibraryPage() {
         scheduleCenterMovieAnchorSample({ reason: "initial_measurement", immediate: true });
         return;
       }
+      if (!isIOSViewportRestoreGateOpen(window)) {
+        if (!orientationViewportChangeActiveRef.current) {
+          freezePendingOrientationAnchor("viewport_coordinator_unstable");
+        }
+        orientationViewportChangeActiveRef.current = true;
+        orientationLastMeasurementRef.current = measurement;
+        orientationRef.current = nextOrientation;
+        return;
+      }
       orientationLastMeasurementRef.current = measurement;
       if (!orientationChanged && !majorViewportChange && event?.type !== "orientationchange") {
         scheduleCenterMovieAnchorSample({ reason: "stable_resize" });
@@ -1425,6 +1442,12 @@ export function LibraryPage() {
       orientationViewportChangeActiveRef.current = true;
       orientationRef.current = nextOrientation;
       scheduleOrientationRestore({ zoomedRotationRecovery });
+    }
+
+    function handleViewportCoordinatorStable() {
+      if (orientationViewportChangeActiveRef.current && pendingOrientationAnchorRef.current?.itemId) {
+        scheduleOrientationRestore();
+      }
     }
 
     function handleUserOrientationInteraction(event) {
@@ -1455,6 +1478,7 @@ export function LibraryPage() {
     window.addEventListener("scroll", scheduleCenterMovieAnchorSample, { passive: true });
     window.addEventListener("resize", handleViewportShift);
     window.addEventListener("orientationchange", handleViewportShift);
+    window.addEventListener(IOS_VIEWPORT_STABLE_EVENT, handleViewportCoordinatorStable);
     window.addEventListener("touchstart", handleUserOrientationInteraction, { passive: true });
     window.addEventListener("touchmove", handleUserOrientationInteraction, { passive: true });
     window.addEventListener("wheel", handleUserOrientationInteraction, { passive: true });
@@ -1466,6 +1490,7 @@ export function LibraryPage() {
       window.removeEventListener("scroll", scheduleCenterMovieAnchorSample);
       window.removeEventListener("resize", handleViewportShift);
       window.removeEventListener("orientationchange", handleViewportShift);
+      window.removeEventListener(IOS_VIEWPORT_STABLE_EVENT, handleViewportCoordinatorStable);
       window.removeEventListener("touchstart", handleUserOrientationInteraction);
       window.removeEventListener("touchmove", handleUserOrientationInteraction);
       window.removeEventListener("wheel", handleUserOrientationInteraction);

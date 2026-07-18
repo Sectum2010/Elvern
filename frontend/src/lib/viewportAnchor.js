@@ -153,6 +153,7 @@ export function canUpdateStableViewportAnchor({
   return (
     isLibraryOrientationRestorePlatform(platform)
     && !restoreInProgress
+    && (viewportWindow?.__elvernIOSViewportCoordinator?.isRestoreGateOpen?.() ?? true)
     && !isVisualViewportZoomed({ viewportWindow })
   );
 }
@@ -203,6 +204,10 @@ export function requestTemporaryViewportScaleReset({
   viewportWindow = typeof window !== "undefined" ? window : null,
   restoreDelayMs = DEFAULT_VIEWPORT_RESET_DELAY_MS,
 } = {}) {
+  const coordinator = viewportWindow?.__elvernIOSViewportCoordinator;
+  if (coordinator?.requestNormalization) {
+    return coordinator.requestNormalization({ reason: "orientation_restore" });
+  }
   const viewportMeta = doc?.querySelector?.('meta[name="viewport"]') || null;
   if (!viewportMeta || !viewportWindow?.setTimeout) {
     return false;

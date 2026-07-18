@@ -14,7 +14,7 @@ The previous startup gate rendered its children only while `serviceReachable` wa
 
 The controller now has a one-way `runtimeReady` latch. Once an application response proves that Elvern has entered the normal auth/application flow, runtime connectivity changes do not unmount the application. The gate may place a notice or recovery overlay above the mounted tree, but the tree and its in-memory Query cache remain present.
 
-Healthy runtime state does not poll continuously. Probes resume after an API network failure event, browser `offline`/`online`, a visibility return, Retry, or an active recovery interval.
+Phase 6 originally did not poll continuously while healthy. Phase 6B adds an 8-second healthy watchdog on visible Windows, macOS, and Linux sessions because virtual adapters can keep `navigator.onLine` true after Wi-Fi loss. Phone and tablet healthy sessions do not run this watchdog. Recovery still uses the existing 10-second interval.
 
 ### Classification heuristic
 
@@ -25,17 +25,20 @@ The probes are sequential and never overlap:
 
 The runtime classifications are:
 
-- `internet_offline`: the browser explicitly reports offline. The application stays mounted and shows `No Internet`; no full-screen Oops page is used.
+- `internet_offline`: the browser explicitly reports offline, or the frontend and an operator-configured public Internet probe both fail twice within a bounded evidence window. The running application stays mounted and shows `No Internet`; cold start, refresh, and offline login use the 60-second offline Oops path.
 - `frontend_or_vpn_unreachable`: the browser reports online but the frontend process cannot be reached. After the existing 60 second outage window, the VPN/reachability Oops copy is used.
 - `backend_unreachable`: the frontend process responds but the backend health endpoint does not. After 60 seconds, the server Oops copy is used.
 - `healthy`: both probes succeed. Recovery UI disappears automatically and the fixed 10 second recovery polling stops.
 
-The two exact Oops messages are:
+The three exact Oops messages are:
 
-- Server: `Seems like the server has been bamboozled, please try again later.`
+- Server: `Seems like the server has been bamboozled, we will fix it as soon as possible.`
 - Frontend/VPN: `Elvern could not be reached, check your VPN connection and try again.`
+- Offline: `It looks like you're offline. Please check your connection and try again.`
 
-`No Internet` can be swiped upward by 24 px. It returns after 10 seconds while the browser remains offline. It does not block Library, Detail, or playback interaction.
+`No Internet` can be swiped upward by 24 px. It returns after 10 seconds while Internet evidence remains offline. It does not block Library, Detail, or playback interaction.
+
+The public evidence URL is operator-controlled and supplied as `VITE_ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL`. It is requested anonymously with no credentials, referrer, cache, user data, or Library data. If absent, frontend failure stays conservatively classified as VPN/origin failure. See `LOADING_STRATEGY_PHASE6B_STABILITY_AND_ROADMAP.md`.
 
 ### Offline shell and worker identity
 
@@ -99,6 +102,8 @@ Manager guarantees:
 The Detail item route enters a named 2 second interaction window before loading metadata. Already-running poster jobs finish, requested poster jobs can run, and queued normal/prewarm dispatch pauses until the window expires. Detail, progress, playback, and desktop APIs never enter this queue.
 
 Prewarm is a background enqueue after a v2 response. It is limited to all Continue Watching items (maximum 6), the current main section's first configured items (default 12), and Recently Added's first configured items (default 6). It uses the current user's card display width and q97, is deduplicated by single-flight, and is first to be dropped under queue pressure.
+
+Phase 6B assigns ordinary HTTP card requests to NORMAL rather than REQUESTED. Queue-full and generation-error original fallbacks now use no-cache response headers, timing samples are bounded, and prewarm reuses the request-local poster-path memo instead of doing per-item background lookups. See the Phase 6B document for the result contract and tests.
 
 ## Poster Benchmark
 

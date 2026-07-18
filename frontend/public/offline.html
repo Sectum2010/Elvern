@@ -55,7 +55,7 @@
         <div class="elvern-connection-shell__oops">
           <h1>Oops!</h1>
           <p data-connection-oops-copy>Elvern could not be reached, check your VPN connection and try again.</p>
-          <span hidden>Seems like the server has been bamboozled, please try again later.</span>
+          <span hidden>Seems like the server has been bamboozled, we will fix it as soon as possible.</span>
           <span hidden>It looks like you're offline. Please check your connection and try again.</span>
           <button class="elvern-connection-shell__retry" data-connection-retry type="button">Retry</button>
         </div>
@@ -69,7 +69,9 @@
         const ROTATION_MS = 7000;
         const FRONTEND_HEALTH_URL = new URL("/_elvern/frontend-health", window.location.origin);
         const BACKEND_HEALTH_URL = new URL("/health", window.location.origin);
-        const SERVER_OOPS_COPY = "Seems like the server has been bamboozled, please try again later.";
+        const RAW_PUBLIC_PROBE_URL = "__ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL__";
+        const PUBLIC_PROBE_URL = RAW_PUBLIC_PROBE_URL.startsWith("__ELVERN_") ? "" : RAW_PUBLIC_PROBE_URL.trim();
+        const SERVER_OOPS_COPY = "Seems like the server has been bamboozled, we will fix it as soon as possible.";
         const VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
         const OFFLINE_OOPS_COPY = "It looks like you're offline. Please check your connection and try again.";
         const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating...", "Scrying...", "Divining...", "Wayfinding...", "Enchanting..."];
@@ -83,7 +85,9 @@
         let rotationInterval = 0;
         let unreachableTimer = 0;
         let activeController = null;
+        let activePublicController = null;
         let rotationIndex = 0;
+        let warnedMissingPublicProbe = false;
         let lastClassification = navigator.onLine === false ? "internet_offline" : "frontend_or_vpn_unreachable";
 
         function setWaitingWord(text) {
@@ -114,6 +118,38 @@
           unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
         }
 
+        async function probePublicInternet() {
+          if (!PUBLIC_PROBE_URL) {
+            if (!warnedMissingPublicProbe) {
+              warnedMissingPublicProbe = true;
+              console.warn("Public connectivity probe is not configured; using VPN/origin fallback classification.");
+            }
+            return null;
+          }
+          activePublicController = new AbortController();
+          const publicTimeout = window.setTimeout(() => activePublicController.abort(), HEALTH_PROBE_TIMEOUT_MS);
+          try {
+            const response = await fetch(PUBLIC_PROBE_URL, {
+              cache: "no-store", credentials: "omit", mode: "cors", referrerPolicy: "no-referrer",
+              signal: activePublicController.signal,
+            });
+            return response.ok;
+          } catch {
+            return false;
+          } finally {
+            window.clearTimeout(publicTimeout);
+            activePublicController = null;
+          }
+        }
+
+        async function classifyFrontendFailure() {
+          if (navigator.onLine === false) return "internet_offline";
+          const firstPublicResult = await probePublicInternet();
+          if (firstPublicResult === null || firstPublicResult === true) return "frontend_or_vpn_unreachable";
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+          return await probePublicInternet() ? "frontend_or_vpn_unreachable" : "internet_offline";
+        }
+
         async function probe() {
           if (inFlight) return inFlight;
           activeController = new AbortController();
@@ -124,7 +160,7 @@
           inFlight = (async () => {
             const frontendHealthy = await requestHealth(FRONTEND_HEALTH_URL);
             if (!frontendHealthy) {
-              lastClassification = navigator.onLine === false ? "internet_offline" : "frontend_or_vpn_unreachable";
+              lastClassification = await classifyFrontendFailure();
               return false;
             }
             const backendHealthy = await requestHealth(BACKEND_HEALTH_URL);
@@ -169,6 +205,7 @@
           window.clearInterval(probeInterval);
           window.clearInterval(rotationInterval);
           activeController?.abort();
+          activePublicController?.abort();
         }, { once: true });
         void probe();
       })();

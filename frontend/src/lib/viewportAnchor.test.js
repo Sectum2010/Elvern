@@ -674,6 +674,20 @@ test("zoomed viewport blocks canonical stable anchor updates", () => {
   }), false);
 });
 
+test("closed iOS coordinator gate blocks canonical stable anchor updates", () => {
+  const viewportWindow = {
+    visualViewport: { scale: 1 },
+    __elvernIOSViewportCoordinator: {
+      isRestoreGateOpen: () => false,
+    },
+  };
+
+  assert.equal(canUpdateStableViewportAnchor({
+    platform: "iphone",
+    viewportWindow,
+  }), false);
+});
+
 test("zoomed iPad rotation requests recovery without applying to iPhone or non-rotation zoom", () => {
   const zoomedWindow = {
     visualViewport: {

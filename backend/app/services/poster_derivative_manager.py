@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -14,14 +15,17 @@ from typing import Callable
 from ..config import Settings
 from .poster_display_cache_service import (
     POSTER_CARD_CACHE_ALGORITHM_VERSION,
+    PosterDerivativeDisposition,
+    PosterDerivativeResult,
     find_cached_card_poster_display_path,
-    get_or_create_card_poster_display_cache,
+    get_or_create_card_poster_display_result,
 )
 
 
 logger = logging.getLogger(__name__)
 POSTER_INTERACTION_PRIORITY_WINDOW_SECONDS = 2.0
 POSTER_REQUESTED_BURST_LIMIT = 8
+POSTER_METRIC_SAMPLE_LIMIT = 2_048
 
 
 class PosterDerivativePriority(IntEnum):
@@ -70,7 +74,7 @@ class PosterDerivativeManager:
         self,
         settings: Settings,
         *,
-        generation_function: Callable = get_or_create_card_poster_display_cache,
+        generation_function: Callable = get_or_create_card_poster_display_result,
         cache_lookup_function: Callable = find_cached_card_poster_display_path,
         interactive_window_seconds: float = POSTER_INTERACTION_PRIORITY_WINDOW_SECONDS,
     ) -> None:
@@ -104,9 +108,14 @@ class PosterDerivativeManager:
             "cancelled_before_start": 0,
             "queued_peak": 0,
             "active_worker_peak": 0,
-            "queue_wait_seconds": [],
-            "generation_seconds": [],
+            "queue_wait_seconds": deque(maxlen=POSTER_METRIC_SAMPLE_LIMIT),
+            "generation_seconds": deque(maxlen=POSTER_METRIC_SAMPLE_LIMIT),
         }
+        self._timing_totals = {
+            "queue_wait_seconds": {"count": 0, "sum": 0.0, "max": 0.0},
+            "generation_seconds": {"count": 0, "sum": 0.0, "max": 0.0},
+        }
+        self._disposition_counts = {value.value: 0 for value in PosterDerivativeDisposition}
         cpu_count = os.cpu_count() or 0
         if cpu_count and self.worker_count > cpu_count:
             logger.warning(
@@ -148,7 +157,7 @@ class PosterDerivativeManager:
             )
             self._condition.notify_all()
 
-    def submit(
+    def submit_result(
         self,
         source_path: Path | str,
         *,
@@ -170,7 +179,14 @@ class PosterDerivativeManager:
         if cached is not None:
             with self._condition:
                 self._stats["cache_hits"] += 1
-            waiter.set_result(Path(cached))
+                self._disposition_counts[
+                    PosterDerivativeDisposition.DERIVATIVE_CACHE_HIT.value
+                ] += 1
+            waiter.set_result(PosterDerivativeResult(
+                path=Path(cached),
+                disposition=PosterDerivativeDisposition.DERIVATIVE_CACHE_HIT,
+                immutable=True,
+            ))
             return waiter
 
         if not self._started:
@@ -213,6 +229,56 @@ class PosterDerivativeManager:
             self._condition.notify_all()
         return waiter
 
+    def submit(
+        self,
+        source_path: Path | str,
+        *,
+        target_width: int,
+        priority: PosterDerivativePriority = PosterDerivativePriority.REQUESTED,
+        prewarm: bool = False,
+    ) -> Future:
+        result_waiter = self.submit_result(
+            source_path,
+            target_width=target_width,
+            priority=priority,
+            prewarm=prewarm,
+        )
+        path_waiter: Future = Future()
+
+        def copy_result(completed: Future) -> None:
+            if path_waiter.done():
+                return
+            try:
+                path_waiter.set_result(completed.result().path)
+            except Exception as exc:
+                path_waiter.set_exception(exc)
+
+        def propagate_cancel(completed: Future) -> None:
+            if completed.cancelled() and not result_waiter.done():
+                result_waiter.cancel()
+
+        result_waiter.add_done_callback(copy_result)
+        path_waiter.add_done_callback(propagate_cancel)
+        return path_waiter
+
+    async def get_or_create_result(
+        self,
+        source_path: Path | str,
+        *,
+        target_width: int,
+        priority: PosterDerivativePriority = PosterDerivativePriority.REQUESTED,
+    ) -> PosterDerivativeResult:
+        waiter = self.submit_result(
+            source_path,
+            target_width=target_width,
+            priority=priority,
+        )
+        try:
+            return await asyncio.wrap_future(waiter)
+        except asyncio.CancelledError:
+            waiter.cancel()
+            raise
+
     async def get_or_create(
         self,
         source_path: Path | str,
@@ -220,16 +286,12 @@ class PosterDerivativeManager:
         target_width: int,
         priority: PosterDerivativePriority = PosterDerivativePriority.REQUESTED,
     ) -> Path:
-        waiter = self.submit(
+        result = await self.get_or_create_result(
             source_path,
             target_width=target_width,
             priority=priority,
         )
-        try:
-            return Path(await asyncio.wrap_future(waiter))
-        except asyncio.CancelledError:
-            waiter.cancel()
-            raise
+        return result.path
 
     def prewarm(self, source_path: Path | str, *, target_width: int) -> Future:
         return self.submit(
@@ -241,10 +303,37 @@ class PosterDerivativeManager:
 
     def snapshot_stats(self) -> dict[str, object]:
         with self._condition:
-            return {
-                key: list(value) if isinstance(value, list) else value
+            snapshot = {
+                key: list(value) if isinstance(value, deque) else value
                 for key, value in self._stats.items()
             }
+            for metric_name, totals in self._timing_totals.items():
+                samples = sorted(self._stats[metric_name])
+                count = int(totals["count"])
+                snapshot[f"{metric_name}_summary"] = {
+                    "count": count,
+                    "mean": (float(totals["sum"]) / count) if count else 0.0,
+                    "max": float(totals["max"]),
+                    "p50": self._sample_percentile(samples, 0.50),
+                    "p90": self._sample_percentile(samples, 0.90),
+                }
+            snapshot["disposition_counts"] = dict(self._disposition_counts)
+            return snapshot
+
+    @staticmethod
+    def _sample_percentile(samples: list[float], percentile: float) -> float:
+        if not samples:
+            return 0.0
+        index = min(len(samples) - 1, max(0, round((len(samples) - 1) * percentile)))
+        return float(samples[index])
+
+    def _record_timing_locked(self, metric_name: str, value: float) -> None:
+        normalized = max(0.0, float(value))
+        self._stats[metric_name].append(normalized)
+        totals = self._timing_totals[metric_name]
+        totals["count"] += 1
+        totals["sum"] += normalized
+        totals["max"] = max(float(totals["max"]), normalized)
 
     def _drop_queued_prewarm_locked(self) -> _DerivativeJob | None:
         candidates = [job for job in self._queued if job.priority == PosterDerivativePriority.PREWARM]
@@ -319,21 +408,28 @@ class PosterDerivativeManager:
                     self._stats["active_worker_peak"],
                     self._active_workers,
                 )
-                self._stats["queue_wait_seconds"].append(max(0.0, time.monotonic() - job.enqueued_at))
+                self._record_timing_locked("queue_wait_seconds", time.monotonic() - job.enqueued_at)
             worker_future = self._executor.submit(self._run_job, job)
             worker_future.add_done_callback(lambda completed, queued_job=job: self._finish_job(queued_job, completed))
 
-    def _run_job(self, job: _DerivativeJob) -> Path:
+    def _run_job(self, job: _DerivativeJob) -> PosterDerivativeResult:
         started_at = time.monotonic()
         try:
-            return Path(self._generate(
+            generated = self._generate(
                 self.settings,
                 job.source_path,
                 target_width=job.target_width,
-            ))
+            )
+            if isinstance(generated, PosterDerivativeResult):
+                return generated
+            return PosterDerivativeResult(
+                path=Path(generated),
+                disposition=PosterDerivativeDisposition.DERIVATIVE_GENERATED,
+                immutable=True,
+            )
         finally:
             with self._condition:
-                self._stats["generation_seconds"].append(max(0.0, time.monotonic() - started_at))
+                self._record_timing_locked("generation_seconds", time.monotonic() - started_at)
 
     def _finish_job(self, job: _DerivativeJob, completed: Future) -> None:
         try:
@@ -345,10 +441,17 @@ class PosterDerivativeManager:
         with self._condition:
             self._active_workers -= 1
             self._jobs.pop(job.key, None)
-            if error is None:
+            if (
+                error is None
+                and result.disposition
+                != PosterDerivativeDisposition.FALLBACK_GENERATION_ERROR
+            ):
                 self._stats["generated"] += 1
+                self._disposition_counts[result.disposition.value] += 1
             else:
                 self._stats["generation_failures"] += 1
+                if result is not None:
+                    self._disposition_counts[result.disposition.value] += 1
             waiters = tuple(job.waiters)
             self._condition.notify_all()
         for waiter in waiters:

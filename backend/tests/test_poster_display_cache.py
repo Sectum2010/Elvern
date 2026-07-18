@@ -12,7 +12,13 @@ from backend.app.db import get_connection
 from backend.app.media_scan import scan_media_library
 from backend.app.routes import library as library_routes
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
-from backend.app.services.poster_display_cache_service import get_or_create_card_poster_display_cache
+from backend.app.services.poster_derivative_manager import PosterDerivativeQueueFullError
+from backend.app.services.poster_display_cache_service import (
+    PosterDerivativeDisposition,
+    PosterDerivativeResult,
+    get_or_create_card_poster_display_cache,
+    get_or_create_card_poster_display_result,
+)
 
 
 def _login(client, *, username: str, password: str) -> None:
@@ -150,6 +156,10 @@ def test_small_source_is_not_upscaled(initialized_settings, tmp_path) -> None:
 
     assert cache_path == original_path
 
+    result = get_or_create_card_poster_display_result(settings, original_path)
+    assert result.disposition == PosterDerivativeDisposition.ORIGINAL_ALREADY_SMALL
+    assert result.immutable is True
+
 
 def test_alpha_png_source_returns_png_cache(initialized_settings, tmp_path) -> None:
     settings = _display_cache_settings(initialized_settings, tmp_path)
@@ -175,6 +185,9 @@ def test_corrupt_source_falls_back_without_modifying_original(initialized_settin
 
     assert cache_path == original_path
     assert _file_sha256(original_path) == before_hash
+    result = get_or_create_card_poster_display_result(settings, original_path)
+    assert result.disposition == PosterDerivativeDisposition.FALLBACK_GENERATION_ERROR
+    assert result.immutable is False
 
 
 def test_route_variant_card_returns_display_cache(client, admin_credentials, initialized_settings, tmp_path) -> None:
@@ -199,6 +212,107 @@ def test_route_variant_card_returns_display_cache(client, admin_credentials, ini
     assert poster_response.content != poster_path.read_bytes()
     with Image.open(BytesIO(poster_response.content)) as cached_image:
         assert cached_image.width == 1400
+
+
+def test_route_variant_card_uses_normal_priority(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    settings = _display_cache_settings(initialized_settings, tmp_path)
+    _sync_client_settings(client, settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    poster_path = _seed_movie_with_poster(
+        settings,
+        movie_filename="Normal.Priority.2026.mkv",
+        poster_filename="Normal Priority (2026).jpg",
+    )
+    item = client.get("/api/library").json()["items"][0]
+    priorities = []
+    real_manager = client.app.state.poster_derivative_manager
+
+    class ManagerStub:
+        async def get_or_create_result(self, source_path, *, target_width, priority):
+            priorities.append(priority)
+            return PosterDerivativeResult(
+                path=poster_path,
+                disposition=PosterDerivativeDisposition.ORIGINAL_ALREADY_SMALL,
+                immutable=True,
+            )
+
+    client.app.state.poster_derivative_manager = ManagerStub()
+    try:
+        response = client.get(f"{item['poster_url']}&variant=card")
+    finally:
+        client.app.state.poster_derivative_manager = real_manager
+
+    assert response.status_code == 200
+    assert priorities == [library_routes.PosterDerivativePriority.NORMAL]
+
+
+def test_route_queue_full_original_fallback_is_not_cached(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+) -> None:
+    settings = _display_cache_settings(initialized_settings, tmp_path)
+    _sync_client_settings(client, settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _seed_movie_with_poster(
+        settings,
+        movie_filename="Queue.Full.2026.mkv",
+        poster_filename="Queue Full (2026).jpg",
+    )
+    item = client.get("/api/library").json()["items"][0]
+    real_manager = client.app.state.poster_derivative_manager
+
+    class QueueFullManager:
+        async def get_or_create_result(self, *_args, **_kwargs):
+            raise PosterDerivativeQueueFullError("full")
+
+    client.app.state.poster_derivative_manager = QueueFullManager()
+    try:
+        response = client.get(f"{item['poster_url']}&variant=card")
+    finally:
+        client.app.state.poster_derivative_manager = real_manager
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
+    assert response.headers["vary"] == "Cookie"
+
+
+def test_route_generation_error_original_fallback_is_not_cached(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+) -> None:
+    settings = _display_cache_settings(initialized_settings, tmp_path)
+    _sync_client_settings(client, settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _seed_movie_with_poster(
+        settings,
+        movie_filename="Generation.Error.2026.mkv",
+        poster_filename="Generation Error (2026).jpg",
+    )
+    item = client.get("/api/library").json()["items"][0]
+    real_manager = client.app.state.poster_derivative_manager
+
+    class FailureManager:
+        async def get_or_create_result(self, *_args, **_kwargs):
+            raise RuntimeError("generation failed")
+
+    client.app.state.poster_derivative_manager = FailureManager()
+    try:
+        response = client.get(f"{item['poster_url']}&variant=card")
+    finally:
+        client.app.state.poster_derivative_manager = real_manager
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
 
 
 def test_route_variant_card_respects_user_poster_width_setting(client, admin_credentials, initialized_settings, tmp_path) -> None:

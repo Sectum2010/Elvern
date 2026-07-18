@@ -7,6 +7,7 @@ import {
   MAINTENANCE_MODE_MESSAGE,
 } from "../lib/api";
 import { clearProtectedQueryCache } from "../lib/queryClient";
+import { prepareAuthViewportExit } from "../lib/authViewportNavigation.js";
 
 
 const AuthContext = createContext(null);
@@ -147,6 +148,7 @@ export function AuthProvider({ children }) {
       return payload;
     }
     if (payload?.user) {
+      await prepareAuthViewportExit();
       applyAuthenticatedUser(payload.user);
       setLoading(false);
       return payload;

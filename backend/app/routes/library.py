@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 
@@ -42,20 +45,24 @@ from ..services.poster_derivative_manager import (
     PosterDerivativePriority,
     PosterDerivativeQueueFullError,
 )
+from ..services.poster_display_cache_service import (
+    PosterDerivativeDisposition,
+    PosterDerivativeResult,
+)
 from ..services.user_settings_service import get_poster_card_display_max_width
 from ..services.audit_service import log_audit_event
 from ..services.security_event_service import log_security_event
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
+logger = logging.getLogger(__name__)
 
 
 def _prewarm_library_card_posters(
     request: Request,
     *,
     user_id: int,
-    allow_globally_hidden: bool,
-    payload: dict[str, object],
+    candidates: list[tuple[int, Path]],
 ) -> None:
     settings = request.app.state.settings
     if not settings.poster_prewarm_enabled:
@@ -63,23 +70,12 @@ def _prewarm_library_card_posters(
     target_width = get_poster_card_display_max_width(settings, user_id=user_id)
     if target_width is None:
         return
-    sections = payload.get("sections") if isinstance(payload, dict) else None
-    if not isinstance(sections, dict):
-        return
-    requested_ids = [
-        *list(sections.get("continue_watching_item_ids") or []),
-        *list(sections.get("item_ids") or [])[: settings.poster_prewarm_first_items],
-        *list(sections.get("recently_added_item_ids") or [])[: settings.poster_prewarm_recent_items],
-    ]
-    for item_id in dict.fromkeys(int(value) for value in requested_ids):
-        poster_path = get_media_item_poster_path(
-            settings,
-            user_id=user_id,
-            item_id=item_id,
-            allow_globally_hidden=allow_globally_hidden,
-        )
-        if poster_path is None:
+    seen_paths: set[str] = set()
+    for _item_id, poster_path in candidates:
+        dedupe_key = str(Path(poster_path).resolve())
+        if dedupe_key in seen_paths:
             continue
+        seen_paths.add(dedupe_key)
         request.app.state.poster_derivative_manager.prewarm(
             poster_path,
             target_width=target_width,
@@ -305,6 +301,7 @@ def get_library_summary_v2(
     arrange = _validated_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
     request.app.state.scan_service.maybe_refresh_local_library(trigger="library-v2-summary")
     scan_in_progress = bool(request.app.state.scan_service.get_state()["running"])
+    prewarm_candidates: list[tuple[int, Path]] = []
     payload = list_library_summary_v2(
         request.app.state.settings,
         user_id=user.id,
@@ -314,6 +311,7 @@ def get_library_summary_v2(
         quality=arrange["quality"],
         sort=arrange["sort"],
         scan_in_progress=scan_in_progress,
+        prewarm_candidates=prewarm_candidates,
     )
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "Cookie"
@@ -321,8 +319,7 @@ def get_library_summary_v2(
         _prewarm_library_card_posters,
         request,
         user_id=user.id,
-        allow_globally_hidden=user.role == "admin",
-        payload=payload,
+        candidates=prewarm_candidates,
     )
     return LibrarySummaryV2Response(**payload)
 
@@ -548,14 +545,30 @@ async def get_item_poster(item_id: int, request: Request, user=CurrentUser, vari
         target_width = get_poster_card_display_max_width(request.app.state.settings, user_id=user.id)
         if target_width is not None:
             try:
-                response_path = await request.app.state.poster_derivative_manager.get_or_create(
+                derivative_result = await request.app.state.poster_derivative_manager.get_or_create_result(
                     poster_path,
                     target_width=target_width,
-                    priority=PosterDerivativePriority.REQUESTED,
+                    priority=PosterDerivativePriority.NORMAL,
                 )
             except PosterDerivativeQueueFullError:
-                response_path = poster_path
-            cache_control = "private, max-age=604800, immutable"
+                derivative_result = PosterDerivativeResult(
+                    path=poster_path,
+                    disposition=PosterDerivativeDisposition.FALLBACK_QUEUE_FULL,
+                    immutable=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Poster derivative generation failed; returning uncached original (%s).",
+                    type(exc).__name__,
+                )
+                derivative_result = PosterDerivativeResult(
+                    path=poster_path,
+                    disposition=PosterDerivativeDisposition.FALLBACK_GENERATION_ERROR,
+                    immutable=False,
+                )
+            response_path = derivative_result.path
+            if derivative_result.immutable:
+                cache_control = "private, max-age=604800, immutable"
 
     return FileResponse(
         response_path,

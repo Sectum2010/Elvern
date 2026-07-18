@@ -4,6 +4,8 @@
   line-height: 1.5;
   font-weight: 400;
   --app-viewport-height: 100vh;
+  --app-stable-viewport-height: 100vh;
+  --app-live-viewport-height: 100vh;
   --app-viewport-bleed: 240px;
   --app-shell-max-inline: 100%;
   --app-shell-inline-gutter: 1rem;
@@ -92,6 +94,8 @@
 @supports (height: 100dvh) {
   :root {
     --app-viewport-height: 100dvh;
+    --app-stable-viewport-height: 100dvh;
+    --app-live-viewport-height: 100dvh;
   }
 }
 
@@ -117,6 +121,7 @@ body,
   min-inline-size: 0;
   min-height: 100%;
   min-height: var(--app-viewport-height);
+  min-height: var(--app-stable-viewport-height);
 }
 
 #root {
@@ -133,6 +138,7 @@ body {
   inline-size: 100%;
   max-inline-size: 100%;
   min-height: var(--app-viewport-height);
+  min-height: var(--app-stable-viewport-height);
   overflow-x: hidden;
   color: inherit;
   background: var(--app-page-background);
@@ -2027,6 +2033,21 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
     max(var(--app-centered-shell-inline-gutter), env(safe-area-inset-right, 0px))
     calc(1.25rem + env(safe-area-inset-bottom, 0px))
     max(var(--app-centered-shell-inline-gutter), env(safe-area-inset-left, 0px));
+}
+
+:root[data-elvern-ios-viewport="true"] .login-form input,
+:root[data-elvern-ios-viewport="true"] .totp-setup-card input {
+  font-size: 16px;
+}
+
+:root[data-elvern-keyboard-open="true"] .login-screen,
+:root[data-elvern-keyboard-open="true"] .auth-viewport-page {
+  display: grid;
+  align-content: start;
+  align-items: start;
+  overflow-y: auto;
+  min-height: var(--app-stable-viewport-height);
+  padding-top: max(1rem, env(safe-area-inset-top, 0px));
 }
 
 .centered-state {

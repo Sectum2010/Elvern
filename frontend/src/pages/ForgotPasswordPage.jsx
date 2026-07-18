@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
+import { useAuthViewportRedirectReady } from "../lib/authViewportNavigation.js";
 
 
 const PASSWORD_HELP_SUCCESS = "Request sent. Expect feedback within the next 48 hours.";
@@ -12,8 +13,9 @@ export function ForgotPasswordPage() {
   const [username, setUsername] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
+  const authRedirectReady = useAuthViewportRedirectReady(!loading && Boolean(user));
 
-  if (!loading && user) {
+  if (authRedirectReady) {
     return <Navigate to="/library" replace />;
   }
 

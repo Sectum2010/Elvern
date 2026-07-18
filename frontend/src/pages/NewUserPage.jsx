@@ -3,6 +3,7 @@ import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { apiRequest } from "../lib/api";
+import { prepareAuthViewportExit, useAuthViewportRedirectReady } from "../lib/authViewportNavigation.js";
 
 
 export function NewUserPage() {
@@ -16,8 +17,9 @@ export function NewUserPage() {
   });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const authRedirectReady = useAuthViewportRedirectReady(!loading && Boolean(user));
 
-  if (!loading && user) {
+  if (authRedirectReady) {
     return <Navigate to="/library" replace />;
   }
 
@@ -39,6 +41,7 @@ export function NewUserPage() {
           invite_code: form.invite_code.trim(),
         },
       });
+      await prepareAuthViewportExit();
       await refreshAuth();
       navigate("/library", { replace: true });
     } catch (requestError) {

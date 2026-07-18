@@ -3,6 +3,8 @@ import { describe, expect, test } from "vitest";
 import {
   computeOfflineShellRevision,
   OFFLINE_SHELL_REVISION_PLACEHOLDER,
+  PUBLIC_CONNECTIVITY_PROBE_URL_PLACEHOLDER,
+  stampPublicConnectivityProbeUrl,
   stampServiceWorkerSource,
 } from "./stamp-offline-shell.mjs";
 
@@ -32,5 +34,13 @@ describe("offline shell build revision", () => {
     expect(() => stampServiceWorkerSource("const revision = 'missing';", revision)).toThrow(
       "Expected exactly one offline shell revision placeholder",
     );
+  });
+
+  test("stamps the operator public connectivity probe without changing unrelated content", () => {
+    const source = `const probe = "${PUBLIC_CONNECTIVITY_PROBE_URL_PLACEHOLDER}";`;
+    expect(stampPublicConnectivityProbeUrl(source, "https://probe.operator.example/health"))
+      .toBe('const probe = "https://probe.operator.example/health";');
+    expect(stampPublicConnectivityProbeUrl(source, ""))
+      .toBe('const probe = "";');
   });
 });

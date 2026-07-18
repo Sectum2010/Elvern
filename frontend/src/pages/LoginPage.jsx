@@ -3,8 +3,7 @@ import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PasswordInput } from "../components/PasswordInput";
 import { isMaintenanceModeError, MAINTENANCE_MODE_MESSAGE } from "../lib/api";
-
-const VIEWPORT_SYNC_API_KEY = "__elvernRequestViewportNormalization";
+import { useAuthViewportRedirectReady } from "../lib/authViewportNavigation.js";
 
 function clearStaleInteractionState() {
   if (typeof document === "undefined") {
@@ -16,13 +15,6 @@ function clearStaleInteractionState() {
   document.documentElement?.removeAttribute("inert");
 }
 
-function isEditableElement(element) {
-  if (!(element instanceof HTMLElement)) {
-    return false;
-  }
-  return element.matches("input, textarea, select, [contenteditable='true']");
-}
-
 export function LoginPage() {
   const { user, login, loading, authNotice, clearAuthNotice } = useAuth();
   const navigate = useNavigate();
@@ -32,6 +24,7 @@ export function LoginPage() {
   const [error, setError] = useState("");
   const maintenanceModeNotice = authNotice === MAINTENANCE_MODE_MESSAGE ? authNotice : "";
   const inlineAuthNotice = maintenanceModeNotice ? "" : authNotice;
+  const authRedirectReady = useAuthViewportRedirectReady(!loading && Boolean(user));
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -41,27 +34,10 @@ export function LoginPage() {
     clearStaleInteractionState();
 
     window.scrollTo(0, 0);
-    const requestViewportNormalization = window[VIEWPORT_SYNC_API_KEY];
-    if (typeof requestViewportNormalization === "function") {
-      requestViewportNormalization({ resetViewport: !isEditableElement(document.activeElement) });
-    }
-
-    const settleTimer = window.setTimeout(() => {
-      if (isEditableElement(document.activeElement)) {
-        return;
-      }
-      window.scrollTo(0, 0);
-      if (typeof requestViewportNormalization === "function") {
-        requestViewportNormalization({ resetViewport: true });
-      }
-    }, 180);
-
-    return () => {
-      window.clearTimeout(settleTimer);
-    };
+    return undefined;
   }, []);
 
-  if (!loading && user) {
+  if (authRedirectReady) {
     return <Navigate to="/library" replace />;
   }
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from enum import Enum
 import logging
 import os
 from pathlib import Path
@@ -14,6 +16,22 @@ from ..config import Settings
 logger = logging.getLogger(__name__)
 
 POSTER_CARD_CACHE_ALGORITHM_VERSION = "poster-card-cache-v1"
+
+
+class PosterDerivativeDisposition(str, Enum):
+    DERIVATIVE_CACHE_HIT = "derivative_cache_hit"
+    DERIVATIVE_GENERATED = "derivative_generated"
+    ORIGINAL_ALREADY_SMALL = "original_already_small"
+    ORIGINAL_PASSTHROUGH = "original_passthrough"
+    FALLBACK_QUEUE_FULL = "fallback_queue_full"
+    FALLBACK_GENERATION_ERROR = "fallback_generation_error"
+
+
+@dataclass(frozen=True, slots=True)
+class PosterDerivativeResult:
+    path: Path
+    disposition: PosterDerivativeDisposition
+    immutable: bool
 
 
 def _source_has_alpha(image: Image.Image) -> bool:
@@ -126,15 +144,19 @@ def _atomic_save_image(image: Image.Image, *, target_path: Path, output_format: 
             temp_path.unlink(missing_ok=True)
 
 
-def get_or_create_card_poster_display_cache(
+def get_or_create_card_poster_display_result(
     settings: Settings,
     original_poster_path: Path | str,
     *,
     target_width: int | None = None,
-) -> Path:
+) -> PosterDerivativeResult:
     original_path = Path(original_poster_path)
     if not settings.poster_display_cache_enabled:
-        return original_path
+        return PosterDerivativeResult(
+            path=original_path,
+            disposition=PosterDerivativeDisposition.ORIGINAL_PASSTHROUGH,
+            immutable=False,
+        )
 
     resolved_target_width = int(target_width or settings.poster_card_cache_max_width)
     try:
@@ -144,14 +166,22 @@ def get_or_create_card_poster_display_cache(
             target_width=resolved_target_width,
         )
         if cached_path is not None:
-            return cached_path
+            return PosterDerivativeResult(
+                path=cached_path,
+                disposition=PosterDerivativeDisposition.DERIVATIVE_CACHE_HIT,
+                immutable=True,
+            )
         source_stat = original_path.stat()
         with Image.open(original_path) as opened_image:
             icc_profile = opened_image.info.get("icc_profile")
             normalized_image = ImageOps.exif_transpose(opened_image)
             source_width, source_height = normalized_image.size
             if source_width <= resolved_target_width:
-                return original_path
+                return PosterDerivativeResult(
+                    path=original_path,
+                    disposition=PosterDerivativeDisposition.ORIGINAL_ALREADY_SMALL,
+                    immutable=True,
+                )
 
             output_format, extension = _card_cache_output_format(normalized_image)
             cache_key = _card_cache_key(
@@ -168,7 +198,11 @@ def get_or_create_card_poster_display_cache(
                 target_width=resolved_target_width,
             )
             if target_path.is_file():
-                return target_path
+                return PosterDerivativeResult(
+                    path=target_path,
+                    disposition=PosterDerivativeDisposition.DERIVATIVE_CACHE_HIT,
+                    immutable=True,
+                )
 
             resize_ratio = resolved_target_width / float(source_width)
             target_height = max(1, round(source_height * resize_ratio))
@@ -185,10 +219,31 @@ def get_or_create_card_poster_display_cache(
                 jpeg_quality=int(settings.poster_card_cache_jpeg_quality),
                 icc_profile=icc_profile,
             )
-            return target_path
+            return PosterDerivativeResult(
+                path=target_path,
+                disposition=PosterDerivativeDisposition.DERIVATIVE_GENERATED,
+                immutable=True,
+            )
     except Exception as exc:
         logger.warning(
             "Poster display cache generation failed; falling back to the original poster (%s).",
             type(exc).__name__,
         )
-        return original_path
+        return PosterDerivativeResult(
+            path=original_path,
+            disposition=PosterDerivativeDisposition.FALLBACK_GENERATION_ERROR,
+            immutable=False,
+        )
+
+
+def get_or_create_card_poster_display_cache(
+    settings: Settings,
+    original_poster_path: Path | str,
+    *,
+    target_width: int | None = None,
+) -> Path:
+    return get_or_create_card_poster_display_result(
+        settings,
+        original_poster_path,
+        target_width=target_width,
+    ).path

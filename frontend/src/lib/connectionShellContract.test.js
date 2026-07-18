@@ -30,8 +30,16 @@ describe("static connection shell contract", () => {
       expect(html).toContain(CONNECTION_OFFLINE_OOPS_COPY);
       expect(html).toContain('navigator.onLine === false ? "internet_offline"');
       expect(html).toContain('/_elvern/frontend-health');
+      expect(html).toContain("__ELVERN_PUBLIC_CONNECTIVITY_PROBE_URL__");
       expect(html).toContain(">Retry<");
       CONNECTION_STATUS_WORDS.forEach((word) => expect(html).toContain(word));
+    }
+  });
+
+  test("all shells use the new exact server copy and no old server copy remains", () => {
+    for (const html of [indexHtml, offlineHtml]) {
+      expect(html).toContain("Seems like the server has been bamboozled, we will fix it as soon as possible.");
+      expect(html).not.toContain("Seems like the server has been bamboozled, please try again later.");
     }
   });
 

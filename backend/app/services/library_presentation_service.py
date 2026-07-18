@@ -446,6 +446,7 @@ def _poster_url_for_row(
     poster_dir: Path | None = None,
     poster_index: PosterIndexSnapshot | None | object = _POSTER_INDEX_UNSET,
     poster_url_memo: dict[int, str | None] | None = None,
+    poster_path_memo: dict[int, Path | None] | None = None,
 ) -> str | None:
     resolved_poster_dir = poster_dir or _poster_directory(settings)
     media_item_id = int(row["id"])
@@ -461,9 +462,13 @@ def _poster_url_for_row(
         source_kind=_row_value(row, "source_kind", "local"),
     )
     if poster_path is None:
+        if poster_path_memo is not None:
+            poster_path_memo[media_item_id] = None
         if poster_url_memo is not None:
             poster_url_memo[media_item_id] = None
         return None
+    if poster_path_memo is not None:
+        poster_path_memo[media_item_id] = poster_path
     token = _poster_cache_token(poster_path=poster_path, poster_dir=resolved_poster_dir)
     poster_url = f"/api/library/item/{media_item_id}/poster?v={token}"
     if poster_url_memo is not None:

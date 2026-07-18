@@ -6,6 +6,7 @@ import {
   CONNECTIVITY_HEALTHY,
   CONNECTIVITY_INTERNET_OFFLINE,
   createStartupConnectionController,
+  DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS,
   STARTUP_HEALTH_PROBE_INTERVAL_MS,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "./startupConnection.js";
@@ -92,9 +93,9 @@ describe("startup connection controller", () => {
     controller.stop();
   });
 
-  test("stops fixed health polling after the application becomes healthy", async () => {
+  test("stops recovery polling after the application becomes healthy on non-desktop", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
-    const controller = createStartupConnectionController({ fetchImpl });
+    const controller = createStartupConnectionController({ fetchImpl, platform: "iphone" });
 
     controller.start();
     await vi.advanceTimersByTimeAsync(0);
@@ -128,6 +129,88 @@ describe("startup connection controller", () => {
 
     expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE);
     controller.stop();
+  });
+
+  test("classifies frontend failure with public success as VPN/origin unreachable", async () => {
+    const fetchImpl = vi.fn((path) => {
+      if (path === "https://probe.operator.example/connectivity") {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return Promise.reject(new TypeError("frontend unavailable"));
+    });
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      publicConnectivityProbeUrl: "https://probe.operator.example/connectivity",
+    });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE);
+    controller.stop();
+  });
+
+  test("requires two public probe failures before classifying frontend failure as offline", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("unavailable"));
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      publicConnectivityProbeUrl: "https://probe.operator.example/connectivity",
+      publicProbeConfirmationDelayMs: 25,
+    });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getSnapshot().classification).not.toBe(CONNECTIVITY_INTERNET_OFFLINE);
+
+    await vi.advanceTimersByTimeAsync(24);
+    expect(controller.getSnapshot().classification).not.toBe(CONNECTIVITY_INTERNET_OFFLINE);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_INTERNET_OFFLINE);
+    expect(fetchImpl.mock.calls.filter(([path]) => path === "https://probe.operator.example/connectivity"))
+      .toHaveLength(2);
+    controller.stop();
+  });
+
+  test("runs a non-overlapping healthy watchdog every 8 seconds on desktop only", async () => {
+    let releaseWatchdog;
+    const fetchImpl = vi.fn((path) => {
+      if (fetchImpl.mock.calls.length > 2 && path === "/_elvern/frontend-health") {
+        return new Promise((resolve) => {
+          releaseWatchdog = resolve;
+        });
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      platform: "windows",
+    });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const startupCalls = fetchImpl.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS * 3);
+    expect(fetchImpl).toHaveBeenCalledTimes(startupCalls + 1);
+
+    releaseWatchdog(new Response(null, { status: 204 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(startupCalls + 2);
+    controller.stop();
+  });
+
+  test("does not run the healthy watchdog on phone or tablet platforms", async () => {
+    for (const platform of ["iphone", "ipad", "android"]) {
+      const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+      const controller = createStartupConnectionController({ fetchImpl, platform });
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      const startupCalls = fetchImpl.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS * 2);
+      expect(fetchImpl).toHaveBeenCalledTimes(startupCalls);
+      controller.stop();
+    }
   });
 
   test("browser offline is classified immediately and shows Oops after 60 seconds", async () => {
@@ -216,6 +299,54 @@ describe("startup connection controller", () => {
 
     await vi.advanceTimersByTimeAsync(1);
     expect(controller.getSnapshot().status).toBe("unreachable");
+    controller.stop();
+  });
+
+  test("an offline login failure confirmed by public evidence also uses offline Oops", async () => {
+    const navigatorObject = { onLine: true };
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("unavailable"));
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      navigatorObject,
+      publicConnectivityProbeUrl: "https://probe.operator.example/connectivity",
+      publicProbeConfirmationDelayMs: 10,
+    });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(10);
+    controller.reportApplicationReady();
+    const failureProbe = controller.reportFailure({ forceOfflineOops: true });
+    await vi.advanceTimersByTimeAsync(10);
+    await failureProbe;
+
+    expect(controller.getSnapshot()).toMatchObject({
+      classification: CONNECTIVITY_INTERNET_OFFLINE,
+      offlineOopsRequired: true,
+      runtimeReady: true,
+      status: "connecting",
+    });
+    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS);
+    expect(controller.getSnapshot().status).toBe("unreachable");
+    controller.stop();
+  });
+
+  test("hidden desktop pages stop the watchdog and visible pages probe immediately", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const controller = createStartupConnectionController({ fetchImpl, platform: "linux" });
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    const callsWhileHidden = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS * 2);
+    expect(fetchImpl).toHaveBeenCalledTimes(callsWhileHidden);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(callsWhileHidden + 2);
     controller.stop();
   });
 
