@@ -1,73 +1,44 @@
 import {
   createPublicConnectivityProbeRunner,
-  PUBLIC_PROBE_CONFIRMATION_DELAY_MS,
   resolvePublicConnectivityProbeRegistry,
 } from "./publicConnectivityProbes.js";
+import {
+  CONNECTION_RUNTIME_CONTRACT,
+  deriveConnectivityClassification,
+  getRuntimeConnectionOopsCopy,
+} from "./connectivityRuntimeCore.js";
 import { detectClientPlatform, isDesktopClientPlatform } from "./platformDetection.js";
 
 
-export const STARTUP_UNREACHABLE_DELAY_MS = 60_000;
-export const STARTUP_HEALTH_PROBE_INTERVAL_MS = 10_000;
-export const STARTUP_HEALTH_PROBE_TIMEOUT_MS = 5_000;
+export const STARTUP_UNREACHABLE_DELAY_MS = CONNECTION_RUNTIME_CONTRACT.offlineDocumentOopsDelayMs;
+export const STARTUP_HEALTH_PROBE_INTERVAL_MS = CONNECTION_RUNTIME_CONTRACT.offlineRecoveryProbeIntervalMs;
+export const STARTUP_HEALTH_PROBE_TIMEOUT_MS = CONNECTION_RUNTIME_CONTRACT.healthProbeTimeoutMs;
 export const DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS = 8_000;
-export const PUBLIC_CONNECTIVITY_CONFIRMATION_DELAY_MS = PUBLIC_PROBE_CONFIRMATION_DELAY_MS;
+export const PUBLIC_CONNECTIVITY_CONFIRMATION_DELAY_MS = CONNECTION_RUNTIME_CONTRACT.publicProbeConfirmationDelayMs;
 export const STARTUP_SHELL_REVEAL_DELAY_MS = 400;
 export const NO_INTERNET_REAPPEAR_MS = 10_000;
 export const STARTUP_CONNECTIVITY_FAILURE_EVENT = "elvern:connectivity-failure";
 export const STARTUP_APPLICATION_READY_EVENT = "elvern:application-response";
 export const FRONTEND_HEALTH_PATH = "/_elvern/frontend-health";
 export const BACKEND_HEALTH_PATH = "/health";
-export const CONNECTIVITY_INTERNET_OFFLINE = "internet_offline";
-export const CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE = "frontend_or_vpn_unreachable";
-export const CONNECTIVITY_BACKEND_UNREACHABLE = "backend_unreachable";
-export const CONNECTIVITY_EVIDENCE_INSUFFICIENT = "connectivity_evidence_insufficient";
-export const CONNECTIVITY_HEALTHY = "healthy";
-export const CONNECTION_OOPS_TITLE = "Oops!";
-export const CONNECTION_SERVER_OOPS_COPY = "Seems like the server has been bamboozled, we will fix it as soon as possible.";
-export const CONNECTION_VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
-export const CONNECTION_OFFLINE_OOPS_COPY = "It looks like you're offline. Please check your connection and try again.";
-export const CONNECTION_GENERIC_OOPS_COPY = "Elvern could not be reached at the moment, please check your connection and try again.";
+export const CONNECTIVITY_INTERNET_OFFLINE = CONNECTION_RUNTIME_CONTRACT.classifications.internetOffline;
+export const CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE = CONNECTION_RUNTIME_CONTRACT.classifications.frontendOrVpnUnreachable;
+export const CONNECTIVITY_BACKEND_UNREACHABLE = CONNECTION_RUNTIME_CONTRACT.classifications.backendUnreachable;
+export const CONNECTIVITY_EVIDENCE_INSUFFICIENT = CONNECTION_RUNTIME_CONTRACT.classifications.evidenceInsufficient;
+export const CONNECTIVITY_HEALTHY = CONNECTION_RUNTIME_CONTRACT.classifications.healthy;
+export const CONNECTION_OOPS_TITLE = CONNECTION_RUNTIME_CONTRACT.copy.title;
+export const CONNECTION_SERVER_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.server;
+export const CONNECTION_VPN_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.vpn;
+export const CONNECTION_OFFLINE_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.offline;
+export const CONNECTION_GENERIC_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.generic;
 export const CONNECTION_OOPS_COPY = CONNECTION_VPN_OOPS_COPY;
-export const CONNECTION_STATUS_WORDS = Object.freeze([
-  "Flibbertigibbeting...",
-  "Ruminating...",
-  "Conjuring...",
-  "Recombobulating...",
-  "Scrying...",
-  "Divining...",
-  "Wayfinding...",
-  "Enchanting...",
-]);
-export const CONNECTION_FAMILIARS = Object.freeze(["raven", "wisp", "horned", "gargoyle", "keeper"]);
-export const CONNECTION_FAMILIAR_ROTATION_MS = 7_000;
+export const CONNECTION_STATUS_WORDS = CONNECTION_RUNTIME_CONTRACT.statusWords;
+export const CONNECTION_FAMILIARS = CONNECTION_RUNTIME_CONTRACT.familiars;
+export const CONNECTION_FAMILIAR_ROTATION_MS = CONNECTION_RUNTIME_CONTRACT.familiarRotationMs;
 
 
 function isSuccessfulHealthResponse(response) {
   return Boolean(response && response.ok);
-}
-
-
-function deriveConnectivityClassification({
-  internetState,
-  internetOutageLatched,
-  frontendState,
-  backendState,
-}) {
-  if (internetState === "offline" || internetOutageLatched) {
-    return CONNECTIVITY_INTERNET_OFFLINE;
-  }
-  if (frontendState === "reachable" && backendState === "unreachable") {
-    return CONNECTIVITY_BACKEND_UNREACHABLE;
-  }
-  if (frontendState === "unreachable") {
-    return internetState === "online"
-      ? CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE
-      : CONNECTIVITY_EVIDENCE_INSUFFICIENT;
-  }
-  if (frontendState === "reachable" && backendState === "reachable") {
-    return CONNECTIVITY_HEALTHY;
-  }
-  return CONNECTIVITY_EVIDENCE_INSUFFICIENT;
 }
 
 
@@ -81,16 +52,7 @@ function isDebugEnabled(windowObject) {
 
 
 export function getConnectionOopsCopy(classification) {
-  if (classification === CONNECTIVITY_BACKEND_UNREACHABLE) {
-    return CONNECTION_SERVER_OOPS_COPY;
-  }
-  if (classification === CONNECTIVITY_INTERNET_OFFLINE) {
-    return CONNECTION_OFFLINE_OOPS_COPY;
-  }
-  if (classification === CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE) {
-    return CONNECTION_VPN_OOPS_COPY;
-  }
-  return CONNECTION_GENERIC_OOPS_COPY;
+  return getRuntimeConnectionOopsCopy(classification);
 }
 
 
@@ -221,11 +183,7 @@ export function createStartupConnectionController({
     return runtimeReady && snapshot.internetOutageLatched && !offlineOopsRequired;
   }
 
-  function scheduleUnreachable({ reset = false } = {}) {
-    if (reset) {
-      outageStartedAt = Date.now();
-      clearUnreachableTimer();
-    }
+  function scheduleUnreachable() {
     if (unreachableTimer || shouldSuppressRuntimeOops()) {
       return;
     }
@@ -488,8 +446,11 @@ export function createStartupConnectionController({
       forceOfflineOopsPending = true;
       if (snapshot.internetOutageLatched || navigatorObject?.onLine === false) {
         offlineOopsRequired = true;
+        if (!outageStartedAt) {
+          outageStartedAt = Date.now();
+        }
         emit({ status: "connecting" });
-        scheduleUnreachable({ reset: true });
+        scheduleUnreachable();
       }
     }
     if (navigatorObject?.onLine === false) {
@@ -519,10 +480,6 @@ export function createStartupConnectionController({
   }
 
   function retry() {
-    outageStartedAt = Date.now();
-    clearUnreachableTimer();
-    emit({ status: "connecting" });
-    scheduleUnreachable();
     return probe();
   }
 

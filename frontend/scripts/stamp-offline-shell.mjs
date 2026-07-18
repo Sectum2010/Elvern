@@ -8,10 +8,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadEnv } from "vite";
 
 import { resolvePublicConnectivityProbeRegistry } from "../src/lib/publicConnectivityProbes.js";
+import { buildInlineConnectivityRuntimeSource } from "../src/lib/connectivityRuntimeCore.js";
 
 
 export const OFFLINE_SHELL_REVISION_PLACEHOLDER = "__ELVERN_OFFLINE_SHELL_REVISION__";
 export const PUBLIC_CONNECTIVITY_PROBES_JSON_PLACEHOLDER = "__ELVERN_PUBLIC_CONNECTIVITY_PROBES_JSON__";
+export const CONNECTIVITY_RUNTIME_PLACEHOLDER = "/*__ELVERN_CONNECTIVITY_RUNTIME__*/";
 
 
 function configuredPublicConnectivityProbes() {
@@ -68,6 +70,15 @@ export function stampPublicConnectivityProbes(source, probes) {
 }
 
 
+export function stampConnectivityRuntime(source) {
+  const occurrences = source.split(CONNECTIVITY_RUNTIME_PLACEHOLDER).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`Expected exactly one connectivity runtime placeholder, found ${occurrences}.`);
+  }
+  return source.replace(CONNECTIVITY_RUNTIME_PLACEHOLDER, buildInlineConnectivityRuntimeSource());
+}
+
+
 export async function stampBuiltOfflineShell({ distDir } = {}) {
   const resolvedDistDir = path.resolve(distDir || path.join(path.dirname(fileURLToPath(import.meta.url)), "../dist"));
   const offlinePath = path.join(resolvedDistDir, "offline.html");
@@ -79,12 +90,11 @@ export async function stampBuiltOfflineShell({ distDir } = {}) {
     readFile(serviceWorkerPath, "utf8"),
   ]);
   const publicProbes = configuredPublicConnectivityProbes();
-  const offlineContent = stampPublicConnectivityProbes(offlineSource, publicProbes);
-  const indexContent = stampPublicConnectivityProbes(indexSource, publicProbes);
+  const offlineContent = stampConnectivityRuntime(stampPublicConnectivityProbes(offlineSource, publicProbes));
   const revision = computeOfflineShellRevision(offlineContent);
   await Promise.all([
     writeFile(offlinePath, offlineContent, "utf8"),
-    writeFile(indexPath, indexContent, "utf8"),
+    writeFile(indexPath, indexSource, "utf8"),
     writeFile(serviceWorkerPath, stampServiceWorkerSource(serviceWorkerSource, revision), "utf8"),
   ]);
   return revision;

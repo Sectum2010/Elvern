@@ -122,11 +122,15 @@ export function applySecurityHeadersToResponse(response) {
 }
 
 
-export function buildAssetResponseHeaders(contentType, cacheControl) {
-  return withSecurityHeaders({
+export function buildAssetResponseHeaders(contentType, cacheControl, { appShell = false } = {}) {
+  const headers = {
     "Content-Type": contentType,
     "Cache-Control": cacheControl,
-  });
+  };
+  if (appShell) {
+    headers["X-Elvern-App-Shell"] = "1";
+  }
+  return withSecurityHeaders(headers);
 }
 
 
@@ -532,7 +536,7 @@ async function serveAsset(request, response) {
 
   if (isIndexHtml) {
     const html = withBaseHref(await fsp.readFile(filePath, "utf-8"), urlPrefix);
-    response.writeHead(200, buildAssetResponseHeaders(contentType, cacheControl));
+    response.writeHead(200, buildAssetResponseHeaders(contentType, cacheControl, { appShell: true }));
     if (request.method === "HEAD") {
       response.end();
       return;

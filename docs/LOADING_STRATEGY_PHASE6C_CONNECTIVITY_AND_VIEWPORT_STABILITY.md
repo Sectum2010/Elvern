@@ -118,17 +118,24 @@ Bootstrap now records `static_only`, `module_bootstrap_started`,
 health probe. Once module or React bootstrap starts, the static shell can only
 be cleaned up by React.
 
-Only `offline.html` may reload. It requires two consecutive frontend+backend
-successes and uses the session-only `elvern_offline_recovery_reload_v1` record
-to enforce a 30-second cooldown. The record contains only schema and timestamp.
-Retry starts a probe but cannot bypass the cooldown. Reload keeps the original
-deep link.
+Phase 6D supersedes the original Phase 6C recovery rule. Two consecutive local
+frontend+backend successes were not sufficient evidence because a same-host
+Elvern installation can remain reachable while public Internet is offline. That
+rule could reload the offline document, reset its timer, and repeat forever.
+
+The current offline document never reloads from local health alone. Recovery
+requires public Internet evidence, frontend health, backend health, and a
+network-only request that returns the online App Shell marker. Retry starts the
+same recovery transaction but does not restart the 60-second deadline or clear
+an Oops state. See
+`docs/LOADING_STRATEGY_PHASE6D_OFFLINE_DEADLINE_AND_PHYSICAL_VIEWPORT.md` for the
+authoritative recovery contract.
 
 Normal motion retains running familiar idle frames, seven-second familiar/word
 rotation, and per-letter wave animation. Reduced motion keeps one visible
 static familiar and word. Optional `elvern_connection_shell_debug=1` logs only
-motion mode, bootstrap/shell state, endpoint ID/status/timing, and reload
-reason/cooldown; it logs no response body or user data.
+  motion mode, bootstrap/shell state, and endpoint ID/status/timing; it logs no
+  response body or user data.
 
 ## iOS/iPadOS Trusted Viewport
 

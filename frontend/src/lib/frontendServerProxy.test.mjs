@@ -172,10 +172,11 @@ describe("frontend production server proxy target hardening", () => {
   });
 
   test("static index/html response headers include global security headers", () => {
-    const headers = buildAssetResponseHeaders("text/html; charset=utf-8", "no-cache");
+    const headers = buildAssetResponseHeaders("text/html; charset=utf-8", "no-cache", { appShell: true });
 
     expect(headers["Content-Type"]).toBe("text/html; charset=utf-8");
     expect(headers["Cache-Control"]).toBe("no-cache");
+    expect(headers["X-Elvern-App-Shell"]).toBe("1");
     expect(headers).toMatchObject(expectedSecurityHeaders);
     expect(headers).not.toHaveProperty("Strict-Transport-Security");
   });

@@ -1,8 +1,16 @@
-export const PUBLIC_PROBE_ATTEMPT_TIMEOUT_MS = 2_000;
-export const PUBLIC_PROBE_CONFIRMATION_DELAY_MS = 500;
-export const PUBLIC_PROBE_TRUST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-export const PUBLIC_PROBE_TRUST_STORAGE_KEY = "elvern_public_probe_trust_v1";
+import {
+  CONNECTION_RUNTIME_CONTRACT,
+  createPublicProbeCircuit,
+} from "./connectivityRuntimeCore.js";
+
+
+export const PUBLIC_PROBE_ATTEMPT_TIMEOUT_MS = CONNECTION_RUNTIME_CONTRACT.publicProbeAttemptTimeoutMs;
+export const PUBLIC_PROBE_CONFIRMATION_DELAY_MS = CONNECTION_RUNTIME_CONTRACT.publicProbeConfirmationDelayMs;
+export const PUBLIC_PROBE_TRUST_MAX_AGE_MS = CONNECTION_RUNTIME_CONTRACT.publicProbeTrustMaxAgeMs;
+export const PUBLIC_PROBE_TRUST_STORAGE_KEY = CONNECTION_RUNTIME_CONTRACT.publicProbeTrustStorageKey;
 export const PUBLIC_PROBE_MAX_ENDPOINTS = 8;
+export const PUBLIC_PROBE_ENDPOINT_FAILURE_THRESHOLD = CONNECTION_RUNTIME_CONTRACT.publicProbeEndpointFailureThreshold;
+export const PUBLIC_PROBE_ENDPOINT_COOLDOWN_MS = CONNECTION_RUNTIME_CONTRACT.publicProbeEndpointCooldownMs;
 
 const PUBLIC_PROBE_TRUST_SCHEMA_VERSION = 1;
 const OPERATOR_EXPECTED_STATUSES = Object.freeze([200, 204]);
@@ -224,10 +232,7 @@ export function createPublicConnectivityProbeRunner({
 } = {}) {
   const registry = Object.freeze([...(probes || [])]);
   const endpointListHash = hashPublicConnectivityProbeRegistry(registry);
-  const endpointStates = new Map(registry.map((probe) => [probe.id, {
-    consecutiveFailureCount: 0,
-    cooldownUntil: 0,
-  }]));
+  const circuit = createPublicProbeCircuit(registry.map((probe) => probe.id));
   const activeControllers = new Set();
 
   async function attempt(probe) {
@@ -259,12 +264,6 @@ export function createPublicConnectivityProbeRunner({
       }
       activeControllers.delete(abortController);
     }
-    const endpointState = endpointStates.get(probe.id);
-    if (success) {
-      endpointState.consecutiveFailureCount = 0;
-    } else {
-      endpointState.consecutiveFailureCount += 1;
-    }
     debug?.({
       endpointId: probe.id,
       success,
@@ -275,10 +274,20 @@ export function createPublicConnectivityProbeRunner({
   }
 
   async function probeChain() {
+    const selectedIds = new Set(circuit.selectEndpointIds(now()));
+    const failedEndpointIds = [];
     for (const probe of registry) {
+      if (!selectedIds.has(probe.id)) {
+        continue;
+      }
       const result = await attempt(probe);
       if (result.success) {
         const succeededAt = now();
+        circuit.commitSuccessfulChain({
+          failedEndpointIds,
+          successfulEndpointId: result.endpointId,
+          at: succeededAt,
+        });
         writeTrustRecord({
           storage,
           endpointListHash,
@@ -287,6 +296,7 @@ export function createPublicConnectivityProbeRunner({
         });
         return { reachable: true, endpointId: result.endpointId };
       }
+      failedEndpointIds.push(result.endpointId);
     }
     return { reachable: false, endpointId: null };
   }
@@ -338,7 +348,7 @@ export function createPublicConnectivityProbeRunner({
       activeControllers.clear();
     },
     getEndpointListHash: () => endpointListHash,
-    getEndpointStates: () => Object.fromEntries([...endpointStates.entries()].map(([id, state]) => [id, { ...state }])),
+    getEndpointStates: () => circuit.snapshot(now()),
     getTrustState: () => readTrustRecord({ storage, endpointListHash, now: now() }),
     probeChain,
     probeConfirmed,

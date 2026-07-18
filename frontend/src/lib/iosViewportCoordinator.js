@@ -1,4 +1,9 @@
 import { detectClientPlatform, isIOSClientPlatform } from "./platformDetection.js";
+import {
+  getIOSViewportWidthBucket,
+  readMatchingIOSViewportGeometry,
+  writeIOSViewportGeometry,
+} from "./iosViewportGeometry.js";
 
 
 export const IOS_VIEWPORT_COORDINATOR_API_KEY = "__elvernIOSViewportCoordinator";
@@ -86,6 +91,44 @@ function isStandaloneDisplay(windowObject, navigatorObject) {
 }
 
 
+function readScreenGeometry(windowObject) {
+  return {
+    width: Math.round(toFinite(windowObject?.screen?.width, 0)),
+    height: Math.round(toFinite(windowObject?.screen?.height, 0)),
+  };
+}
+
+
+function measureLargeViewportHeight(documentObject) {
+  if (!documentObject?.body?.appendChild || !documentObject?.createElement) {
+    return 0;
+  }
+  const probe = documentObject.createElement("div");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText = "position:fixed;inset:0 auto auto -10000px;width:1px;height:100lvh;pointer-events:none;visibility:hidden";
+  documentObject.body.appendChild(probe);
+  const height = Math.round(toFinite(probe.getBoundingClientRect?.().height, 0));
+  probe.remove();
+  return height;
+}
+
+
+function screenDerivedPaintFloor({ layout, orientation, screen, standalone }) {
+  if (!standalone || !screen.width || !screen.height) {
+    return 0;
+  }
+  const expectedWidth = orientation === "portrait"
+    ? Math.min(screen.width, screen.height)
+    : Math.max(screen.width, screen.height);
+  if (Math.abs(layout.width - expectedWidth) >= 64) {
+    return 0;
+  }
+  return orientation === "portrait"
+    ? Math.max(screen.width, screen.height)
+    : Math.min(screen.width, screen.height);
+}
+
+
 function nextAnimationFrame(windowObject) {
   return new Promise((resolve) => {
     const request = windowObject?.requestAnimationFrame
@@ -118,6 +161,57 @@ export function createIOSViewportCoordinator({
   const listeners = new Set();
   const trustedViewportByOrientation = new Map();
   const standaloneDisplay = isStandaloneDisplay(windowObject, navigatorObject);
+  const displayMode = standaloneDisplay ? "standalone" : "browser";
+  const initialLayout = readLayoutViewport(windowObject, documentObject);
+  const initialLive = readLiveViewport(windowObject);
+  const initialOrientation = orientationFor(initialLayout, windowObject);
+  const screenGeometry = readScreenGeometry(windowObject);
+  const largeViewportHeight = measureLargeViewportHeight(documentObject);
+  const persistedGeometry = isIOS
+    ? readMatchingIOSViewportGeometry({
+      storage: windowObject?.localStorage,
+      now: Date.now(),
+      platform,
+      displayMode,
+      orientation: initialOrientation,
+      layoutWidth: initialLayout.width,
+      screenWidth: screenGeometry.width,
+      screenHeight: screenGeometry.height,
+    })
+    : null;
+  const initialScreenFloor = screenDerivedPaintFloor({
+    layout: initialLayout,
+    orientation: initialOrientation,
+    screen: screenGeometry,
+    standalone: standaloneDisplay,
+  });
+  let physicalPaintFloorHeight = Math.max(
+    initialLayout.height,
+    largeViewportHeight,
+    initialScreenFloor,
+    Number(persistedGeometry?.physical_paint_floor_height) || 0,
+  );
+  const initialReferenceHeight = Math.max(
+    Number(persistedGeometry?.trusted_layout_height) || 0,
+    initialScreenFloor,
+    largeViewportHeight,
+  );
+  const initialShrinkPixels = initialReferenceHeight - initialLayout.height;
+  const initialShrinkRatio = initialReferenceHeight > 0 ? initialShrinkPixels / initialReferenceHeight : 0;
+  let initialSuspiciousShrink = Boolean(
+    isIOS
+    && initialShrinkPixels > 0
+    && (
+      initialShrinkPixels >= IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX
+      || initialShrinkRatio >= IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO
+    )
+  );
+  const restoredViewport = persistedGeometry
+    ? {
+      width: persistedGeometry.trusted_layout_width,
+      height: persistedGeometry.trusted_layout_height,
+    }
+    : null;
   let started = false;
   let pendingFrame = 0;
   let stableSampleTimer = 0;
@@ -146,22 +240,24 @@ export function createIOSViewportCoordinator({
   let snapshot = {
     isIOS,
     platform,
-    state: isIOS ? "settling" : "stable",
-    stableViewport: readLayoutViewport(windowObject, documentObject),
-    liveViewport: readLiveViewport(windowObject),
+    state: isIOS
+      ? (initialSuspiciousShrink
+        ? "initial_suspicious_shrink"
+        : (restoredViewport ? "geometry_restored" : "initial_provisional"))
+      : "stable",
+    stableViewport: restoredViewport || initialLayout,
+    liveViewport: initialLive,
     keyboardOpen: false,
     editableFocused: false,
     focusAutozoom: false,
     postKeyboardQuarantine: false,
     suspiciousShrink: false,
+    initialSuspiciousShrink,
+    physicalPaintFloorHeight,
+    geometryRestored: Boolean(restoredViewport),
     restoreGateOpen: !isIOS,
     resetGeneration: 0,
   };
-
-  trustedViewportByOrientation.set(
-    orientationFor(snapshot.stableViewport, windowObject),
-    snapshot.stableViewport,
-  );
 
   function emit(next) {
     const previousGate = snapshot.restoreGateOpen;
@@ -196,6 +292,12 @@ export function createIOSViewportCoordinator({
       root.style.setProperty("--app-viewport-height", `${stable.height}px`);
       root.style.setProperty("--app-paint-viewport-height", `${stable.height}px`);
       root.style.setProperty("--app-viewport-bleed", `${Math.max(240, Math.round(stable.height * 0.38))}px`);
+    }
+    if (nextSnapshot.physicalPaintFloorHeight > 0) {
+      root.style.setProperty(
+        "--app-physical-paint-floor-height",
+        `${nextSnapshot.physicalPaintFloorHeight}px`,
+      );
     }
     if (live.height > 0) {
       root.style.setProperty("--app-live-viewport-height", `${live.height}px`);
@@ -243,6 +345,8 @@ export function createIOSViewportCoordinator({
       editableFocused: snapshot.editableFocused,
       postKeyboardQuarantine: snapshot.postKeyboardQuarantine,
       suspiciousShrink: snapshot.suspiciousShrink,
+      initialSuspiciousShrink: snapshot.initialSuspiciousShrink,
+      physicalPaintFloorHeight: snapshot.physicalPaintFloorHeight,
       state: snapshot.state,
       resetGeneration,
       restoreGateOpen: snapshot.restoreGateOpen,
@@ -257,6 +361,7 @@ export function createIOSViewportCoordinator({
     hasSuspiciousShrink,
   }) {
     if (orientationChanging) return "orientation_changing";
+    if (initialSuspiciousShrink) return "initial_suspicious_shrink";
     if (focusAutozoom) return "focus_autozoom";
     if (keyboardOpen) return "keyboard_open";
     if (editableFocused) return "editable_focused";
@@ -275,6 +380,8 @@ export function createIOSViewportCoordinator({
 
   function markStable(viewport, eventType) {
     const orientation = orientationFor(viewport, windowObject);
+    initialSuspiciousShrink = false;
+    physicalPaintFloorHeight = Math.max(physicalPaintFloorHeight, viewport.height);
     trustedViewportByOrientation.set(orientation, viewport);
     settling = false;
     orientationChanging = false;
@@ -298,8 +405,29 @@ export function createIOSViewportCoordinator({
       focusAutozoom: false,
       postKeyboardQuarantine: false,
       suspiciousShrink: false,
+      initialSuspiciousShrink: false,
+      physicalPaintFloorHeight,
+      geometryRestored: false,
       restoreGateOpen: true,
     };
+    if (isIOS) {
+      writeIOSViewportGeometry({
+        storage: windowObject?.localStorage,
+        record: {
+          schema_version: 1,
+          platform,
+          display_mode: displayMode,
+          orientation,
+          width_bucket: getIOSViewportWidthBucket(viewport.width),
+          screen_width: screenGeometry.width,
+          screen_height: screenGeometry.height,
+          trusted_layout_width: viewport.width,
+          trusted_layout_height: viewport.height,
+          physical_paint_floor_height: physicalPaintFloorHeight,
+          updated_at: Date.now(),
+        },
+      });
+    }
     applyRootMetrics(next);
     emit(next);
     debug(eventType);
@@ -323,14 +451,19 @@ export function createIOSViewportCoordinator({
       const orientation = orientationFor(layout, windowObject);
       const trusted = trustedViewportByOrientation.get(orientation)
         || (preFocusTrustedViewport?.orientation === orientation ? preFocusTrustedViewport : null)
+        || restoredViewport
         || snapshot.stableViewport;
-      const fallback = authContaminationActive || suspiciousShrink
+      const fallback = initialSuspiciousShrink
+        ? (restoredViewport || { width: layout.width, height: physicalPaintFloorHeight })
+        : (authContaminationActive || suspiciousShrink
         ? { width: trusted.width, height: trusted.height }
-        : (layout.height > 0 ? layout : { width: trusted.width, height: trusted.height });
+        : (layout.height > 0 ? layout : { width: trusted.width, height: trusted.height }));
       markStable(fallback, `${eventType}_fallback`);
     }, settleTimeoutMs) || 0;
     emit({
-      state: orientationChanging ? "orientation_changing" : "settling",
+      state: orientationChanging
+        ? "orientation_changing"
+        : (initialSuspiciousShrink ? "initial_suspicious_shrink" : "settling"),
       restoreGateOpen: false,
     });
     requestSample(eventType);
@@ -362,6 +495,24 @@ export function createIOSViewportCoordinator({
       ? preFocusTrustedViewport
       : null;
     const candidate = layout.height > 0 ? layout : { width: live.width, height: live.height };
+    if (initialSuspiciousShrink) {
+      const referenceHeight = Math.max(
+        Number(restoredViewport?.height) || 0,
+        screenDerivedPaintFloor({
+          layout,
+          orientation,
+          screen: screenGeometry,
+          standalone: standaloneDisplay,
+        }),
+        largeViewportHeight,
+      );
+      const initialGap = referenceHeight - candidate.height;
+      const initialRatio = referenceHeight > 0 ? initialGap / referenceHeight : 0;
+      initialSuspiciousShrink = initialGap > 0 && (
+        initialGap >= IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX
+        || initialRatio >= IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO
+      );
+    }
     const shrinkPixels = preFocusBaseline ? preFocusBaseline.height - candidate.height : 0;
     const shrinkRatio = preFocusBaseline?.height > 0 ? shrinkPixels / preFocusBaseline.height : 0;
     suspiciousShrink = Boolean(
@@ -393,7 +544,8 @@ export function createIOSViewportCoordinator({
       && !suspiciousShrink
       && !orientationChanging
       && !resetActive;
-    if (canTrustStable) {
+    const canTrustInitialCandidate = canTrustStable && !initialSuspiciousShrink;
+    if (canTrustInitialCandidate) {
       const measuredCandidate = {
         ...candidate,
         liveHeight: live.height,
@@ -450,6 +602,8 @@ export function createIOSViewportCoordinator({
       focusAutozoom,
       postKeyboardQuarantine,
       suspiciousShrink,
+      initialSuspiciousShrink,
+      physicalPaintFloorHeight,
       restoreGateOpen,
       state: resolveState({
         keyboardOpen,

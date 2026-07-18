@@ -340,6 +340,7 @@ class TestSpaServing:
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         assert f'<base href="/{prefix}/">' in response.text
+        assert response.headers["x-elvern-app-shell"] == "1"
 
     def test_trailing_slash_library_route_still_serves_spa_document(self, spa_client) -> None:
         prefix = spa_client.app.state.url_prefix
@@ -347,6 +348,7 @@ class TestSpaServing:
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         assert f'<base href="/{prefix}/">' in response.text
+        assert response.headers["x-elvern-app-shell"] == "1"
 
     @pytest.mark.parametrize("asset_name", ["sw.js", "offline.html"])
     def test_offline_shell_assets_are_never_http_cached(self, spa_client, asset_name) -> None:

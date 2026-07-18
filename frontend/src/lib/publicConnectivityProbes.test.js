@@ -226,4 +226,108 @@ describe("ordered public connectivity probes", () => {
     });
     expect(storage.removeItem).toHaveBeenCalledWith(PUBLIC_PROBE_TRUST_STORAGE_KEY);
   });
+
+  test("cools a failing primary only after three fallback-validated failures", async () => {
+    let now = 10_000;
+    const fetchImpl = vi.fn((url) => Promise.resolve(
+      url === DEFAULT_PUBLIC_CONNECTIVITY_PROBES[0].url
+        ? { status: 503, ok: false }
+        : { status: 200, ok: true },
+    ));
+    const runner = createPublicConnectivityProbeRunner({
+      fetchImpl,
+      probes: DEFAULT_PUBLIC_CONNECTIVITY_PROBES,
+      storage: createStorage(),
+      now: () => now,
+    });
+
+    await runner.probeChain();
+    await runner.probeChain();
+    await runner.probeChain();
+
+    expect(runner.getEndpointStates()["cloudflare-trace"]).toMatchObject({
+      circuitState: "open",
+      consecutiveFailureCount: 3,
+      cooldownUntil: now + (5 * 60 * 1000),
+    });
+
+    fetchImpl.mockClear();
+    await runner.probeChain();
+    expect(fetchImpl.mock.calls[0][0]).toBe(DEFAULT_PUBLIC_CONNECTIVITY_PROBES[1].url);
+  });
+
+  test("half-opens after cooldown, closes on success, and reopens on fallback-validated failure", async () => {
+    let now = 20_000;
+    let primaryHealthy = false;
+    const fetchImpl = vi.fn((url) => Promise.resolve(
+      url === DEFAULT_PUBLIC_CONNECTIVITY_PROBES[0].url && !primaryHealthy
+        ? { status: 503, ok: false }
+        : { status: 200, ok: true },
+    ));
+    const runner = createPublicConnectivityProbeRunner({
+      fetchImpl,
+      probes: DEFAULT_PUBLIC_CONNECTIVITY_PROBES,
+      storage: createStorage(),
+      now: () => now,
+    });
+    await runner.probeChain();
+    await runner.probeChain();
+    await runner.probeChain();
+
+    now += 5 * 60 * 1000;
+    primaryHealthy = true;
+    await runner.probeChain();
+    expect(runner.getEndpointStates()["cloudflare-trace"]).toMatchObject({
+      circuitState: "closed",
+      consecutiveFailureCount: 0,
+      cooldownUntil: 0,
+    });
+
+    primaryHealthy = false;
+    await runner.probeChain();
+    await runner.probeChain();
+    await runner.probeChain();
+    now += 5 * 60 * 1000;
+    await runner.probeChain();
+    expect(runner.getEndpointStates()["cloudflare-trace"].circuitState).toBe("open");
+  });
+
+  test("a full-chain outage never cools down every endpoint", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ status: 503, ok: false });
+    const runner = createPublicConnectivityProbeRunner({
+      fetchImpl,
+      probes: DEFAULT_PUBLIC_CONNECTIVITY_PROBES,
+      storage: createStorage(),
+    });
+
+    for (let round = 0; round < 5; round += 1) {
+      await runner.probeChain();
+    }
+
+    expect(Object.values(runner.getEndpointStates())).toEqual([
+      expect.objectContaining({ circuitState: "closed", cooldownUntil: 0 }),
+      expect.objectContaining({ circuitState: "closed", cooldownUntil: 0 }),
+      expect.objectContaining({ circuitState: "closed", cooldownUntil: 0 }),
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(15);
+  });
+
+  test("primary and secondary failures both count when tertiary succeeds", async () => {
+    const fetchImpl = vi.fn((url) => Promise.resolve(
+      url === DEFAULT_PUBLIC_CONNECTIVITY_PROBES[2].url
+        ? { status: 204, ok: true }
+        : { status: 503, ok: false },
+    ));
+    const runner = createPublicConnectivityProbeRunner({
+      fetchImpl,
+      probes: DEFAULT_PUBLIC_CONNECTIVITY_PROBES,
+      storage: createStorage(),
+    });
+
+    await runner.probeChain();
+
+    expect(runner.getEndpointStates()["cloudflare-trace"].consecutiveFailureCount).toBe(1);
+    expect(runner.getEndpointStates()["ipify-api64"].consecutiveFailureCount).toBe(1);
+    expect(runner.getEndpointStates()["httpbin-204"].consecutiveFailureCount).toBe(0);
+  });
 });

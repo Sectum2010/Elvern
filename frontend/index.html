@@ -192,24 +192,8 @@
     <script>
       (() => {
         const UNREACHABLE_DELAY_MS = 60000;
-        const HEALTH_PROBE_INTERVAL_MS = 10000;
-        const HEALTH_PROBE_TIMEOUT_MS = 5000;
-        const PUBLIC_PROBE_TIMEOUT_MS = 2000;
-        const PUBLIC_CONFIRMATION_DELAY_MS = 500;
-        const PUBLIC_TRUST_MAX_AGE_MS = 604800000;
-        const PUBLIC_TRUST_KEY = "elvern_public_probe_trust_v1";
         const SHELL_REVEAL_DELAY_MS = 400;
         const ROTATION_MS = 7000;
-        const FRONTEND_HEALTH_URL = new URL("/_elvern/frontend-health", window.location.origin);
-        const BACKEND_HEALTH_URL = new URL("/health", window.location.origin);
-        const RAW_PUBLIC_PROBES_JSON = "__ELVERN_PUBLIC_CONNECTIVITY_PROBES_JSON__";
-        const DEFAULT_PUBLIC_PROBES = [
-          { id: "cloudflare-trace", url: "https://www.cloudflare.com/cdn-cgi/trace", expectedStatuses: [200] },
-          { id: "ipify-api64", url: "https://api64.ipify.org/", expectedStatuses: [200] },
-          { id: "httpbin-204", url: "https://httpbin.org/status/204", expectedStatuses: [204] },
-        ];
-        const SERVER_OOPS_COPY = "Seems like the server has been bamboozled, we will fix it as soon as possible.";
-        const VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
         const OFFLINE_OOPS_COPY = "It looks like you're offline. Please check your connection and try again.";
         const GENERIC_OOPS_COPY = "Elvern could not be reached at the moment, please check your connection and try again.";
         const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating...", "Scrying...", "Divining...", "Wayfinding...", "Enchanting..."];
@@ -220,59 +204,16 @@
         window.__elvernBootstrapPhase = "static_only";
         const shell = document.getElementById("elvern-connection-shell");
         const word = shell.querySelector("[data-connection-waiting-word]");
-        const retry = shell.querySelector("[data-connection-retry]");
         const oopsCopy = shell.querySelector("[data-connection-oops-copy]");
         const debugEnabled = (() => {
           try { return window.localStorage.getItem("elvern_connection_shell_debug") === "1"; } catch { return false; }
         })();
-        const publicProbes = (() => {
-          if (RAW_PUBLIC_PROBES_JSON.startsWith("__ELVERN_")) return DEFAULT_PUBLIC_PROBES;
-          try { return JSON.parse(RAW_PUBLIC_PROBES_JSON); } catch { return []; }
-        })();
-        let activeController = null;
-        const activePublicControllers = new Set();
-        let inFlight = null;
         let rotationIndex = 0;
         let unreachableTimer = 0;
         let lastClassification = navigator.onLine === false ? "internet_offline" : "connectivity_evidence_insufficient";
 
         function debug(message, detail = {}) {
           if (debugEnabled) console.debug(`Elvern connection shell: ${message}`, detail);
-        }
-
-        function registryHash() {
-          const value = JSON.stringify(publicProbes.map((probe) => [probe.id, probe.url, probe.expectedStatuses]));
-          let hash = 0xcbf29ce484222325n;
-          for (let index = 0; index < value.length; index += 1) {
-            hash ^= BigInt(value.charCodeAt(index));
-            hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-          }
-          return hash.toString(16).padStart(16, "0");
-        }
-
-        function hasTrustedProbeSet() {
-          try {
-            const record = JSON.parse(window.localStorage.getItem(PUBLIC_TRUST_KEY) || "null");
-            const now = Date.now();
-            const trusted = record?.schema_version === 1
-              && record?.endpoint_list_hash === registryHash()
-              && Number.isFinite(Number(record?.last_successful_at))
-              && now - Number(record.last_successful_at) <= PUBLIC_TRUST_MAX_AGE_MS
-              && Number(record.last_successful_at) <= now;
-            if (!trusted && record) window.localStorage.removeItem(PUBLIC_TRUST_KEY);
-            return trusted;
-          } catch { return false; }
-        }
-
-        function trustProbe(endpointId) {
-          try {
-            window.localStorage.setItem(PUBLIC_TRUST_KEY, JSON.stringify({
-              schema_version: 1,
-              endpoint_list_hash: registryHash(),
-              last_successful_at: Date.now(),
-              last_successful_endpoint_id: endpointId,
-            }));
-          } catch { /* Trust evidence is optional. */ }
         }
 
         function setWaitingWord(text) {
@@ -289,107 +230,20 @@
         }
 
         function showOops() {
-          oopsCopy.textContent = lastClassification === "backend_unreachable"
-            ? SERVER_OOPS_COPY
-            : lastClassification === "internet_offline"
-              ? OFFLINE_OOPS_COPY
-              : lastClassification === "frontend_or_vpn_unreachable" ? VPN_OOPS_COPY : GENERIC_OOPS_COPY;
+          oopsCopy.textContent = lastClassification === "internet_offline"
+            ? OFFLINE_OOPS_COPY
+            : GENERIC_OOPS_COPY;
           shell.classList.add("elvern-connection-shell--visible");
           shell.dataset.state = "unreachable";
           debug("unreachable", { bootstrapPhase: window.__elvernBootstrapPhase, classification: lastClassification });
         }
-
-        function restartConnectingCycle() {
-          window.clearTimeout(unreachableTimer);
-          window.__elvernConnectionStartedAt = Date.now();
-          rotationIndex = 0;
-          shell.dataset.familiar = FAMILIARS[0];
-          setWaitingWord(WORDS[0]);
-          shell.dataset.state = "connecting";
-          shell.classList.add("elvern-connection-shell--visible");
-          unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
-        }
-
-        async function probePublicChain() {
-          for (const endpoint of publicProbes) {
-            const controller = new AbortController();
-            activePublicControllers.add(controller);
-            const timeout = window.setTimeout(() => controller.abort(), PUBLIC_PROBE_TIMEOUT_MS);
-            let success = false;
-            let status = 0;
-            try {
-              const response = await fetch(endpoint.url, {
-                method: "GET", cache: "no-store", credentials: "omit", mode: "cors", referrerPolicy: "no-referrer",
-                signal: controller.signal,
-              });
-              status = Number(response.status) || 0;
-              success = Boolean(response.ok) && endpoint.expectedStatuses.includes(status);
-            } catch { success = false; }
-            window.clearTimeout(timeout);
-            activePublicControllers.delete(controller);
-            debug("public probe", { endpointId: endpoint.id, success, status });
-            if (success) {
-              trustProbe(endpoint.id);
-              return true;
-            }
-          }
-          return false;
-        }
-
-        async function probePublicInternet() {
-          if (navigator.onLine === false) return "offline";
-          if (!publicProbes.length) return "unknown";
-          const trusted = hasTrustedProbeSet();
-          if (await probePublicChain()) return "online";
-          await new Promise((resolve) => window.setTimeout(resolve, PUBLIC_CONFIRMATION_DELAY_MS));
-          if (await probePublicChain()) return "online";
-          return trusted ? "offline" : "unknown";
-        }
-
-        async function probe() {
-          if (inFlight || window.__elvernRuntimeReady) return inFlight;
-          activeController = new AbortController();
-          const timeout = window.setTimeout(() => activeController.abort(), HEALTH_PROBE_TIMEOUT_MS);
-          const requestHealth = (url) => fetch(url, {
-            cache: "no-store", credentials: "same-origin", signal: activeController.signal,
-          }).then((response) => response.ok).catch(() => false);
-          inFlight = (async () => {
-            const publicResultPromise = probePublicInternet();
-            const frontendHealthy = await requestHealth(FRONTEND_HEALTH_URL);
-            const backendHealthy = frontendHealthy ? await requestHealth(BACKEND_HEALTH_URL) : false;
-            const publicResult = await publicResultPromise;
-            if (publicResult === "offline") lastClassification = "internet_offline";
-            else if (!frontendHealthy) {
-              lastClassification = publicResult === "online"
-                ? "frontend_or_vpn_unreachable"
-                : "connectivity_evidence_insufficient";
-            } else if (!backendHealthy) lastClassification = "backend_unreachable";
-            else lastClassification = "healthy";
-            return frontendHealthy && backendHealthy;
-          })().finally(() => {
-            window.clearTimeout(timeout);
-            activeController = null;
-            inFlight = null;
-          });
-          return inFlight;
-        }
-
-        const handleRetry = () => { restartConnectingCycle(); void probe(); };
-        const handleOnline = () => { void probe(); };
         const handleOffline = () => {
           lastClassification = "internet_offline";
           if (shell.dataset.state === "unreachable") showOops();
         };
-        const handleVisibility = () => {
-          if (document.visibilityState === "visible") void probe();
-        };
-        retry.addEventListener("click", handleRetry);
-        window.addEventListener("online", handleOnline);
         window.addEventListener("offline", handleOffline);
-        document.addEventListener("visibilitychange", handleVisibility);
         const revealTimer = window.setTimeout(() => shell.classList.add("elvern-connection-shell--visible"), SHELL_REVEAL_DELAY_MS);
         unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
-        const probeInterval = window.setInterval(() => { void probe(); }, HEALTH_PROBE_INTERVAL_MS);
         const rotationInterval = window.matchMedia("(prefers-reduced-motion: reduce)").matches
           ? 0
           : window.setInterval(() => {
@@ -403,17 +257,10 @@
         window.__elvernStaticConnectionShellCleanup = () => {
           window.clearTimeout(unreachableTimer);
           window.clearTimeout(revealTimer);
-          window.clearInterval(probeInterval);
           window.clearInterval(rotationInterval);
-          activeController?.abort();
-          activePublicControllers.forEach((controller) => controller.abort());
-          retry.removeEventListener("click", handleRetry);
-          window.removeEventListener("online", handleOnline);
           window.removeEventListener("offline", handleOffline);
-          document.removeEventListener("visibilitychange", handleVisibility);
           delete window.__elvernStaticConnectionShellCleanup;
         };
-        void probe();
       })();
     </script>
     <script type="module" src="/src/main.jsx"></script>

@@ -33,6 +33,8 @@ test("production service worker returns offline shell for a deep-link navigation
   });
   expect(registration.scope).toBe(baseURL);
   expect(registration.scriptURL).toBe(`${baseURL}sw.js?elvern_worker=offline-shell-v1`);
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
 
   healthReachable = false;
   await context.setOffline(true);

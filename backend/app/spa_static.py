@@ -134,7 +134,13 @@ class SpaStaticFiles(StaticFiles):
                 html = f"{html[:base_start]}{base_tag}{html[base_end + 1:]}"
         else:
             html = html.replace("<head>", f"<head>\n    {base_tag}", 1)
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+        return HTMLResponse(
+            html,
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Elvern-App-Shell": "1",
+            },
+        )
 
 
 def mount_spa(app: FastAPI, *, prefix: str, frontend_dist: Path | None = None) -> None:

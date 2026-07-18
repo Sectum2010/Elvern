@@ -10,10 +10,10 @@ import {
   CONNECTION_VPN_OOPS_COPY,
   CONNECTION_FAMILIARS,
   CONNECTION_STATUS_WORDS,
-  STARTUP_HEALTH_PROBE_INTERVAL_MS,
   STARTUP_SHELL_REVEAL_DELAY_MS,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "./startupConnection.js";
+import { CONNECTION_RUNTIME_CONTRACT } from "./connectivityRuntimeCore.js";
 
 
 const indexHtml = readFileSync(`${process.cwd()}/index.html`, "utf8");
@@ -30,9 +30,7 @@ describe("static connection shell contract", () => {
       expect(html).toContain(CONNECTION_VPN_OOPS_COPY);
       expect(html).toContain(CONNECTION_OFFLINE_OOPS_COPY);
       expect(html).toContain(CONNECTION_GENERIC_OOPS_COPY);
-      expect(html).toContain('navigator.onLine === false ? "internet_offline"');
-      expect(html).toContain('/_elvern/frontend-health');
-      expect(html).toContain("__ELVERN_PUBLIC_CONNECTIVITY_PROBES_JSON__");
+      expect(html).toContain("navigator.onLine === false");
       expect(html).toContain(">Retry<");
       CONNECTION_STATUS_WORDS.forEach((word) => expect(html).toContain(word));
     }
@@ -77,45 +75,47 @@ describe("static connection shell contract", () => {
     }
   });
 
-  test("normal startup waits 400ms before revealing the shell and Retry restarts connecting", () => {
+  test("normal startup waits 400ms before revealing the shell and Retry never restarts the deadline", () => {
     expect(indexHtml).toContain(`const SHELL_REVEAL_DELAY_MS = ${STARTUP_SHELL_REVEAL_DELAY_MS}`);
     expect(indexHtml).toContain("elvern-connection-shell--visible");
-    for (const html of [indexHtml, offlineHtml]) {
-      expect(html).toContain("function restartConnectingCycle()");
-      expect(html).toContain('shell.dataset.state = "connecting"');
-      expect(html).toContain("setWaitingWord(WORDS[0])");
-    }
+    expect(indexHtml).not.toContain("function restartConnectingCycle()");
+    expect(offlineHtml).not.toContain("function restartConnectingCycle()");
+    expect(offlineHtml).toContain("machine.beginRecovery()");
+    expect(offlineHtml).toContain("machine.finishRecovery(false)");
   });
 
   test("offline shell keeps the fixed 60 second and 10 second constants", () => {
-    for (const html of [indexHtml, offlineHtml]) {
-      expect(html).toContain(`const UNREACHABLE_DELAY_MS = ${STARTUP_UNREACHABLE_DELAY_MS}`);
-      expect(html).toContain(`const HEALTH_PROBE_INTERVAL_MS = ${STARTUP_HEALTH_PROBE_INTERVAL_MS}`);
-    }
+    expect(indexHtml).toContain(`const UNREACHABLE_DELAY_MS = ${STARTUP_UNREACHABLE_DELAY_MS}`);
+    expect(offlineHtml).toContain("/*__ELVERN_CONNECTIVITY_RUNTIME__*/");
+    expect(offlineHtml).toContain("contract.offlineRecoveryProbeIntervalMs");
+    expect(offlineHtml).toContain("machine.getSnapshot().oopsDeadlineAt");
     expect(indexHtml).toContain("__elvernStaticConnectionShellCleanup");
     expect(indexHtml).toContain("__elvernConnectionStartedAt = Date.now()");
   });
 
-  test("static bootstrap never reloads and offline recovery is bounded by confirmation and cooldown", () => {
+  test("offline recovery requires the four-layer transaction and never reloads on local health alone", () => {
     expect(indexHtml).toContain("__elvernAppBootstrapStarted");
     expect(indexHtml).toContain("__elvernRuntimeReady");
     expect(indexHtml).not.toContain("window.location.reload()");
-    expect(offlineHtml).toContain("consecutiveServiceSuccesses");
-    expect(offlineHtml).toContain("RECOVERY_RELOAD_COOLDOWN_MS = 30000");
-    expect(offlineHtml).toContain("consecutiveServiceSuccesses < 2");
-    expect(offlineHtml).toContain("reload blocked because cooldown storage is unavailable");
-    expect(offlineHtml).toContain("window.location.reload()");
+    expect(offlineHtml).not.toContain("consecutiveServiceSuccesses");
+    expect(offlineHtml).not.toContain("RECOVERY_RELOAD_COOLDOWN_MS");
+    expect(offlineHtml.match(/window\.location\.reload\(\)/g)).toHaveLength(1);
+    expect(offlineHtml).toContain("verifyActualAppShell");
+    expect(offlineHtml).toContain("contract.appShellHeader");
+    expect(offlineHtml).toContain("contract.offlineShellHeader");
+    expect(offlineHtml).toContain("contract.recoveryMessageType");
+    expect(offlineHtml).toContain("await armRecoveryNavigation()");
   });
 
-  test("static probes use status-only ordered requests and never consume response bodies", () => {
-    for (const html of [indexHtml, offlineHtml]) {
-      expect(html).toContain('credentials: "omit"');
-      expect(html).toContain('referrerPolicy: "no-referrer"');
-      expect(html).toContain('cache: "no-store"');
-      expect(html).not.toContain("response.text(");
-      expect(html).not.toContain("response.json(");
-      expect(html).not.toContain("response.clone(");
-    }
+  test("only the stamped offline runtime performs static public probes", () => {
+    expect(indexHtml).not.toContain("probePublicChain");
+    expect(indexHtml).not.toContain("__ELVERN_PUBLIC_CONNECTIVITY_PROBES_JSON__");
+    expect(offlineHtml).toContain('credentials: "omit"');
+    expect(offlineHtml).toContain('referrerPolicy: "no-referrer"');
+    expect(offlineHtml).toContain('cache: "no-store"');
+    expect(offlineHtml).not.toContain("response.text(");
+    expect(offlineHtml).not.toContain("response.json(");
+    expect(offlineHtml).not.toContain("response.clone(");
   });
 
   test("service worker allowlists only offline.html and never caches private routes", () => {
@@ -128,5 +128,13 @@ describe("static connection shell contract", () => {
     expect(serviceWorker).toContain('const LEGACY_CACHE_FAMILY = "elvern-shell"');
     expect(serviceWorker).toContain("caches.delete(key)");
     expect(serviceWorker).toContain("self.clients.claim()");
+    expect(serviceWorker).toContain("const NAVIGATION_HANDOFF_TIMEOUT_MS = 8_000");
+    expect(serviceWorker).toContain("const RECOVERY_NAVIGATION_TIMEOUT_MS = 15_000");
+    expect(serviceWorker).toContain(CONNECTION_RUNTIME_CONTRACT.recoveryMessageType);
+    expect(serviceWorker).toContain(CONNECTION_RUNTIME_CONTRACT.recoveryMessageAckType);
+    expect(serviceWorker).toContain(CONNECTION_RUNTIME_CONTRACT.offlineShellHeader);
+    expect(serviceWorker).toContain("recoveryNavigationByClientId");
+    expect(serviceWorker).toContain("event.clientId");
+    expect(serviceWorker).not.toContain("isElvernOfflineCache(key) && key !== OFFLINE_CACHE_NAME");
   });
 });

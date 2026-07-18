@@ -67,7 +67,7 @@ describe("StartupConnectionGate", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(fetchImpl).toHaveBeenCalledTimes(callsBeforeRetry + 1);
-    expect(document.getElementById("elvern-connection-shell").dataset.state).toBe("connecting");
+    expect(document.getElementById("elvern-connection-shell").dataset.state).toBe("unreachable");
   });
 
   test("does not reveal the shell during a fast healthy startup", async () => {

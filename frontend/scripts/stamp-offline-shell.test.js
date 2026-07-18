@@ -2,9 +2,11 @@ import { describe, expect, test } from "vitest";
 
 import {
   computeOfflineShellRevision,
+  CONNECTIVITY_RUNTIME_PLACEHOLDER,
   OFFLINE_SHELL_REVISION_PLACEHOLDER,
   PUBLIC_CONNECTIVITY_PROBES_JSON_PLACEHOLDER,
   stampPublicConnectivityProbes,
+  stampConnectivityRuntime,
   stampServiceWorkerSource,
 } from "./stamp-offline-shell.mjs";
 
@@ -48,5 +50,16 @@ describe("offline shell build revision", () => {
     expect(stamped).not.toContain("<unsafe>");
     expect(stamped).toContain("\\\\u003cunsafe\\\\u003e");
     expect(stamped).toContain("operator-1");
+  });
+
+  test("inlines the shared connectivity runtime deterministically", () => {
+    const source = `<script>${CONNECTIVITY_RUNTIME_PLACEHOLDER}</script>`;
+    const first = stampConnectivityRuntime(source);
+    const second = stampConnectivityRuntime(source);
+
+    expect(first).toBe(second);
+    expect(first).toContain("ElvernConnectivityRuntime");
+    expect(first).toContain("createOfflineDocumentStateMachine");
+    expect(first).not.toContain(CONNECTIVITY_RUNTIME_PLACEHOLDER);
   });
 });

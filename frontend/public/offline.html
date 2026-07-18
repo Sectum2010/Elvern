@@ -63,17 +63,10 @@
       </div>
     </div>
     <script>
+      /*__ELVERN_CONNECTIVITY_RUNTIME__*/
       (() => {
-        const UNREACHABLE_DELAY_MS = 60000;
-        const HEALTH_PROBE_INTERVAL_MS = 10000;
-        const HEALTH_PROBE_TIMEOUT_MS = 5000;
-        const PUBLIC_PROBE_TIMEOUT_MS = 2000;
-        const PUBLIC_CONFIRMATION_DELAY_MS = 500;
-        const PUBLIC_TRUST_MAX_AGE_MS = 604800000;
-        const PUBLIC_TRUST_KEY = "elvern_public_probe_trust_v1";
-        const RECOVERY_RELOAD_COOLDOWN_MS = 30000;
-        const RECOVERY_RELOAD_KEY = "elvern_offline_recovery_reload_v1";
-        const ROTATION_MS = 7000;
+        const runtime = window.ElvernConnectivityRuntime;
+        const contract = runtime.contract;
         const FRONTEND_HEALTH_URL = new URL("/_elvern/frontend-health", window.location.origin);
         const BACKEND_HEALTH_URL = new URL("/health", window.location.origin);
         const RAW_PUBLIC_PROBES_JSON = "__ELVERN_PUBLIC_CONNECTIVITY_PROBES_JSON__";
@@ -82,36 +75,25 @@
           { id: "ipify-api64", url: "https://api64.ipify.org/", expectedStatuses: [200] },
           { id: "httpbin-204", url: "https://httpbin.org/status/204", expectedStatuses: [204] },
         ];
-        const SERVER_OOPS_COPY = "Seems like the server has been bamboozled, we will fix it as soon as possible.";
-        const VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
-        const OFFLINE_OOPS_COPY = "It looks like you're offline. Please check your connection and try again.";
-        const GENERIC_OOPS_COPY = "Elvern could not be reached at the moment, please check your connection and try again.";
-        const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating...", "Scrying...", "Divining...", "Wayfinding...", "Enchanting..."];
-        const FAMILIARS = ["raven", "wisp", "horned", "gargoyle", "keeper"];
+        const WORDS = contract.statusWords;
+        const FAMILIARS = contract.familiars;
         const shell = document.getElementById("elvern-connection-shell");
         const word = shell.querySelector("[data-connection-waiting-word]");
         const retry = shell.querySelector("[data-connection-retry]");
         const oopsCopy = shell.querySelector("[data-connection-oops-copy]");
+        const documentStartedAt = Date.now();
+        const machine = runtime.createOfflineDocumentStateMachine({ documentStartedAt, now: () => Date.now() });
         const publicProbes = (() => {
           if (RAW_PUBLIC_PROBES_JSON.startsWith("__ELVERN_")) return DEFAULT_PUBLIC_PROBES;
           try { return JSON.parse(RAW_PUBLIC_PROBES_JSON); } catch { return []; }
         })();
-        const debugEnabled = (() => {
-          try { return window.localStorage.getItem("elvern_connection_shell_debug") === "1"; } catch { return false; }
-        })();
-        const activePublicControllers = new Set();
+        const publicCircuit = runtime.createPublicProbeCircuit(publicProbes.map((probe) => probe.id));
+        const activeControllers = new Set();
         let inFlight = null;
-        let probeInterval = 0;
-        let rotationInterval = 0;
-        let unreachableTimer = 0;
-        let activeController = null;
         let rotationIndex = 0;
-        let consecutiveServiceSuccesses = 0;
-        let lastClassification = navigator.onLine === false ? "internet_offline" : "connectivity_evidence_insufficient";
-
-        function debug(message, detail = {}) {
-          if (debugEnabled) console.debug(`Elvern offline shell: ${message}`, detail);
-        }
+        let lastClassification = navigator.onLine === false
+          ? contract.classifications.internetOffline
+          : contract.classifications.evidenceInsufficient;
 
         function registryHash() {
           const value = JSON.stringify(publicProbes.map((probe) => [probe.id, probe.url, probe.expectedStatuses]));
@@ -125,27 +107,27 @@
 
         function hasTrustedProbeSet() {
           try {
-            const record = JSON.parse(window.localStorage.getItem(PUBLIC_TRUST_KEY) || "null");
+            const record = JSON.parse(window.localStorage.getItem(contract.publicProbeTrustStorageKey) || "null");
             const now = Date.now();
             const trusted = record?.schema_version === 1
               && record?.endpoint_list_hash === registryHash()
               && Number.isFinite(Number(record?.last_successful_at))
-              && now - Number(record.last_successful_at) <= PUBLIC_TRUST_MAX_AGE_MS
+              && now - Number(record.last_successful_at) <= contract.publicProbeTrustMaxAgeMs
               && Number(record.last_successful_at) <= now;
-            if (!trusted && record) window.localStorage.removeItem(PUBLIC_TRUST_KEY);
+            if (!trusted && record) window.localStorage.removeItem(contract.publicProbeTrustStorageKey);
             return trusted;
           } catch { return false; }
         }
 
         function trustProbe(endpointId) {
           try {
-            window.localStorage.setItem(PUBLIC_TRUST_KEY, JSON.stringify({
+            window.localStorage.setItem(contract.publicProbeTrustStorageKey, JSON.stringify({
               schema_version: 1,
               endpoint_list_hash: registryHash(),
               last_successful_at: Date.now(),
               last_successful_endpoint_id: endpointId,
             }));
-          } catch { /* Trust evidence is optional. */ }
+          } catch { /* Public probe trust is optional recovery evidence. */ }
         }
 
         function setWaitingWord(text) {
@@ -161,46 +143,55 @@
           }));
         }
 
-        function showOops() {
-          oopsCopy.textContent = lastClassification === "backend_unreachable"
-            ? SERVER_OOPS_COPY
-            : lastClassification === "internet_offline"
-              ? OFFLINE_OOPS_COPY
-              : lastClassification === "frontend_or_vpn_unreachable" ? VPN_OOPS_COPY : GENERIC_OOPS_COPY;
-          shell.dataset.state = "unreachable";
+        function renderState() {
+          const snapshot = machine.advanceDeadline();
+          shell.dataset.documentState = snapshot.state;
+          if (snapshot.visibleState === "oops_latched") {
+            oopsCopy.textContent = runtime.getConnectionOopsCopy(lastClassification);
+            shell.dataset.state = "unreachable";
+          } else if (snapshot.visibleState === "connecting") {
+            shell.dataset.state = "connecting";
+          }
         }
 
-        function restartConnectingCycle() {
-          window.clearTimeout(unreachableTimer);
-          rotationIndex = 0;
-          shell.dataset.familiar = FAMILIARS[0];
-          setWaitingWord(WORDS[0]);
-          shell.dataset.state = "connecting";
-          unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
+        async function attemptPublicProbe(endpoint) {
+          const controller = new AbortController();
+          activeControllers.add(controller);
+          const timeout = window.setTimeout(() => controller.abort(), contract.publicProbeAttemptTimeoutMs);
+          try {
+            const response = await fetch(endpoint.url, {
+              method: "GET",
+              cache: "no-store",
+              credentials: "omit",
+              mode: "cors",
+              referrerPolicy: "no-referrer",
+              signal: controller.signal,
+            });
+            return Boolean(response.ok) && endpoint.expectedStatuses.includes(Number(response.status));
+          } catch {
+            return false;
+          } finally {
+            window.clearTimeout(timeout);
+            activeControllers.delete(controller);
+          }
         }
 
         async function probePublicChain() {
+          const selected = new Set(publicCircuit.selectEndpointIds(Date.now()));
+          const failedEndpointIds = [];
           for (const endpoint of publicProbes) {
-            const controller = new AbortController();
-            activePublicControllers.add(controller);
-            const timeout = window.setTimeout(() => controller.abort(), PUBLIC_PROBE_TIMEOUT_MS);
-            let success = false;
-            let status = 0;
-            try {
-              const response = await fetch(endpoint.url, {
-                method: "GET", cache: "no-store", credentials: "omit", mode: "cors", referrerPolicy: "no-referrer",
-                signal: controller.signal,
+            if (!selected.has(endpoint.id)) continue;
+            if (await attemptPublicProbe(endpoint)) {
+              const succeededAt = Date.now();
+              publicCircuit.commitSuccessfulChain({
+                failedEndpointIds,
+                successfulEndpointId: endpoint.id,
+                at: succeededAt,
               });
-              status = Number(response.status) || 0;
-              success = Boolean(response.ok) && endpoint.expectedStatuses.includes(status);
-            } catch { success = false; }
-            window.clearTimeout(timeout);
-            activePublicControllers.delete(controller);
-            debug("public probe", { endpointId: endpoint.id, success, status });
-            if (success) {
               trustProbe(endpoint.id);
               return true;
             }
+            failedEndpointIds.push(endpoint.id);
           }
           return false;
         }
@@ -210,99 +201,191 @@
           if (!publicProbes.length) return "unknown";
           const trusted = hasTrustedProbeSet();
           if (await probePublicChain()) return "online";
-          await new Promise((resolve) => window.setTimeout(resolve, PUBLIC_CONFIRMATION_DELAY_MS));
+          await new Promise((resolve) => window.setTimeout(resolve, contract.publicProbeConfirmationDelayMs));
           if (await probePublicChain()) return "online";
           return trusted ? "offline" : "unknown";
         }
 
-        function reloadAfterConfirmedRecovery() {
-          if (consecutiveServiceSuccesses < 2) return false;
+        async function requestHealth(url) {
+          const controller = new AbortController();
+          activeControllers.add(controller);
+          const timeout = window.setTimeout(() => controller.abort(), contract.healthProbeTimeoutMs);
           try {
-            const record = JSON.parse(window.sessionStorage.getItem(RECOVERY_RELOAD_KEY) || "null");
-            const lastReloadAt = Number(record?.last_reload_at) || 0;
-            if (record?.schema_version === 1 && Date.now() - lastReloadAt < RECOVERY_RELOAD_COOLDOWN_MS) {
-              debug("reload blocked by cooldown", { reloadCooldown: true });
-              return false;
-            }
-            window.sessionStorage.setItem(RECOVERY_RELOAD_KEY, JSON.stringify({
-              schema_version: 1,
-              last_reload_at: Date.now(),
-            }));
+            const response = await fetch(url, {
+              cache: "no-store",
+              credentials: "same-origin",
+              signal: controller.signal,
+            });
+            return Boolean(response.ok);
           } catch {
-            debug("reload blocked because cooldown storage is unavailable", { reloadCooldown: true });
             return false;
+          } finally {
+            window.clearTimeout(timeout);
+            activeControllers.delete(controller);
           }
-          debug("service recovered", { reloadReason: "two_consecutive_service_successes" });
+        }
+
+        async function verifyActualAppShell() {
+          const controller = new AbortController();
+          activeControllers.add(controller);
+          const timeout = window.setTimeout(
+            () => controller.abort(),
+            contract.recoveryNavigationTimeoutMs,
+          );
+          try {
+            const response = await fetch(window.location.href, {
+              method: "GET",
+              cache: "no-store",
+              credentials: "same-origin",
+              redirect: "follow",
+              headers: { "Accept": "text/html", "X-Elvern-Recovery-Probe": "1" },
+              signal: controller.signal,
+            });
+            return Boolean(response.ok)
+              && response.headers.get(contract.appShellHeader) === "1"
+              && response.headers.get(contract.offlineShellHeader) !== "1";
+          } catch {
+            return false;
+          } finally {
+            window.clearTimeout(timeout);
+            activeControllers.delete(controller);
+          }
+        }
+
+        function createRecoveryNonce() {
+          const values = new Uint32Array(4);
+          window.crypto.getRandomValues(values);
+          return Array.from(values, (value) => value.toString(16).padStart(8, "0")).join("");
+        }
+
+        async function armRecoveryNavigation() {
+          const controller = navigator.serviceWorker?.controller;
+          if (!controller) return true;
+          const nonce = createRecoveryNonce();
+          const channel = new MessageChannel();
+          return new Promise((resolve) => {
+            let settled = false;
+            const finish = (accepted) => {
+              if (settled) return;
+              settled = true;
+              window.clearTimeout(timeout);
+              channel.port1.close();
+              resolve(accepted);
+            };
+            const timeout = window.setTimeout(
+              () => finish(false),
+              contract.healthProbeTimeoutMs,
+            );
+            channel.port1.onmessage = (event) => {
+              const payload = event.data;
+              finish(Boolean(
+                payload?.type === contract.recoveryMessageAckType
+                && payload?.schema_version === contract.schemaVersion
+                && payload?.nonce === nonce
+                && payload?.accepted === true
+              ));
+            };
+            channel.port1.start?.();
+            try {
+              controller.postMessage({
+                type: contract.recoveryMessageType,
+                schema_version: contract.schemaVersion,
+                nonce,
+                expires_at: Date.now() + contract.recoveryNavigationArmTtlMs,
+              }, [channel.port2]);
+            } catch {
+              finish(false);
+            }
+          });
+        }
+
+        async function enterRecoveredApp() {
+          if (!await armRecoveryNavigation()) return false;
+          machine.finishRecovery(true);
           window.location.reload();
           return true;
         }
 
-        async function probe() {
-          if (inFlight) return inFlight;
-          activeController = new AbortController();
-          const timeout = window.setTimeout(() => activeController.abort(), HEALTH_PROBE_TIMEOUT_MS);
-          const requestHealth = (url) => fetch(url, {
-            cache: "no-store", credentials: "same-origin", signal: activeController.signal,
-          }).then((response) => response.ok).catch(() => false);
+        async function runRecoveryTransaction() {
+          if (!machine.beginRecovery()) return inFlight || false;
+          renderState();
           inFlight = (async () => {
             const publicResultPromise = probePublicInternet();
             const frontendHealthy = await requestHealth(FRONTEND_HEALTH_URL);
-            const backendHealthy = frontendHealthy ? await requestHealth(BACKEND_HEALTH_URL) : false;
+            const backendHealthy = frontendHealthy
+              ? await requestHealth(BACKEND_HEALTH_URL)
+              : false;
             const publicResult = await publicResultPromise;
-            if (frontendHealthy && backendHealthy) {
-              consecutiveServiceSuccesses += 1;
-              reloadAfterConfirmedRecovery();
-            } else {
-              consecutiveServiceSuccesses = 0;
+            lastClassification = runtime.deriveConnectivityClassification({
+              internetState: publicResult,
+              internetOutageLatched: publicResult === "offline",
+              frontendState: frontendHealthy ? "reachable" : "unreachable",
+              backendState: backendHealthy ? "reachable" : (frontendHealthy ? "unreachable" : "unknown"),
+            });
+            const appShellHealthy = publicResult === "online"
+              && frontendHealthy
+              && backendHealthy
+              && await verifyActualAppShell();
+            if (runtime.isVerifiedRecoveryEvidence({
+              internetState: publicResult,
+              frontendHealthy,
+              backendHealthy,
+              appShellHealthy,
+            }) && await enterRecoveredApp()) {
+              return true;
             }
-            if (publicResult === "offline") lastClassification = "internet_offline";
-            else if (!frontendHealthy) {
-              lastClassification = publicResult === "online"
-                ? "frontend_or_vpn_unreachable"
-                : "connectivity_evidence_insufficient";
-            } else if (!backendHealthy) lastClassification = "backend_unreachable";
-            else lastClassification = "healthy";
-            return frontendHealthy && backendHealthy;
+            machine.finishRecovery(false);
+            renderState();
+            return false;
           })().finally(() => {
-            window.clearTimeout(timeout);
-            activeController = null;
             inFlight = null;
           });
           return inFlight;
         }
 
-        const handleRetry = () => { restartConnectingCycle(); void probe(); };
-        const handleOnline = () => { void probe(); };
+        const deadlineTimer = window.setTimeout(
+          renderState,
+          Math.max(0, machine.getSnapshot().oopsDeadlineAt - Date.now()),
+        );
+        const probeInterval = window.setInterval(
+          () => { void runRecoveryTransaction(); },
+          contract.offlineRecoveryProbeIntervalMs,
+        );
+        const rotationInterval = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? 0
+          : window.setInterval(() => {
+            if (machine.getSnapshot().visibleState !== "connecting") return;
+            rotationIndex += 1;
+            shell.dataset.familiar = FAMILIARS[rotationIndex % FAMILIARS.length];
+            setWaitingWord(WORDS[rotationIndex % WORDS.length]);
+          }, contract.familiarRotationMs);
+        const handleRetry = () => { void runRecoveryTransaction(); };
+        const handleOnline = () => { void runRecoveryTransaction(); };
         const handleOffline = () => {
-          consecutiveServiceSuccesses = 0;
-          lastClassification = "internet_offline";
-          if (shell.dataset.state === "unreachable") showOops();
+          lastClassification = contract.classifications.internetOffline;
+          renderState();
         };
         const handleVisibility = () => {
-          if (document.visibilityState === "visible") void probe();
+          renderState();
+          if (document.visibilityState === "visible") void runRecoveryTransaction();
         };
         retry.addEventListener("click", handleRetry);
         window.addEventListener("online", handleOnline);
         window.addEventListener("offline", handleOffline);
         document.addEventListener("visibilitychange", handleVisibility);
-        unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
-        probeInterval = window.setInterval(() => { void probe(); }, HEALTH_PROBE_INTERVAL_MS);
-        if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-          rotationInterval = window.setInterval(() => {
-            rotationIndex += 1;
-            shell.dataset.familiar = FAMILIARS[rotationIndex % FAMILIARS.length];
-            setWaitingWord(WORDS[rotationIndex % WORDS.length]);
-          }, ROTATION_MS);
-        }
         setWaitingWord(WORDS[0]);
+        renderState();
         window.addEventListener("pagehide", () => {
-          window.clearTimeout(unreachableTimer);
+          window.clearTimeout(deadlineTimer);
           window.clearInterval(probeInterval);
           window.clearInterval(rotationInterval);
-          activeController?.abort();
-          activePublicControllers.forEach((controller) => controller.abort());
+          activeControllers.forEach((controller) => controller.abort());
+          retry.removeEventListener("click", handleRetry);
+          window.removeEventListener("online", handleOnline);
+          window.removeEventListener("offline", handleOffline);
+          document.removeEventListener("visibilitychange", handleVisibility);
         }, { once: true });
-        void probe();
+        void runRecoveryTransaction();
       })();
     </script>
   </body>

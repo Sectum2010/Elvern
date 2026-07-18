@@ -8,6 +8,10 @@ import {
   IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX,
   IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO,
 } from "./iosViewportCoordinator.js";
+import {
+  getIOSViewportWidthBucket,
+  IOS_VIEWPORT_GEOMETRY_STORAGE_KEY,
+} from "./iosViewportGeometry.js";
 
 
 class MockVisualViewport extends EventTarget {
@@ -23,7 +27,7 @@ class MockVisualViewport extends EventTarget {
 }
 
 
-function installViewport({ width = 390, height = 844, visualViewport = null } = {}) {
+function installViewport({ width = 390, height = 844, screenWidth = width, screenHeight = height, visualViewport = null } = {}) {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
   Object.defineProperty(window, "innerHeight", { configurable: true, value: height });
   Object.defineProperty(document.documentElement, "clientWidth", { configurable: true, value: width });
@@ -32,6 +36,8 @@ function installViewport({ width = 390, height = 844, visualViewport = null } = 
     configurable: true,
     value: visualViewport || new MockVisualViewport({ width, height }),
   });
+  Object.defineProperty(window.screen, "width", { configurable: true, value: screenWidth });
+  Object.defineProperty(window.screen, "height", { configurable: true, value: screenHeight });
   document.head.innerHTML = '<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, shrink-to-fit=no">';
   document.body.innerHTML = '<main class="login-screen"><input data-auth-field type="text"></main>';
   return window.visualViewport;
@@ -51,6 +57,8 @@ describe("iOS viewport coordinator", () => {
     document.documentElement.removeAttribute("style");
     document.documentElement.removeAttribute("data-elvern-ios-viewport");
     document.documentElement.removeAttribute("data-elvern-keyboard-open");
+    window.localStorage.clear();
+    vi.unstubAllGlobals();
   });
 
   test("keeps stable root height while the keyboard and focus autozoom shrink the live viewport", async () => {
@@ -358,5 +366,79 @@ describe("iOS viewport coordinator", () => {
       restoreGateOpen: true,
       stableViewport: expect.objectContaining({ height: 780 }),
     });
+  });
+
+  test("rejects an initially contaminated 600px launch when trusted geometry is 844px", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query) => ({ matches: query === "(display-mode: standalone)" })));
+    installViewport({ height: 600, screenHeight: 844 });
+    window.localStorage.setItem(IOS_VIEWPORT_GEOMETRY_STORAGE_KEY, JSON.stringify({
+      schema_version: 1,
+      records: [{
+        schema_version: 1,
+        platform: "iphone",
+        display_mode: "standalone",
+        orientation: "portrait",
+        width_bucket: getIOSViewportWidthBucket(390),
+        screen_width: 390,
+        screen_height: 844,
+        trusted_layout_width: 390,
+        trusted_layout_height: 844,
+        physical_paint_floor_height: 844,
+        updated_at: Date.now(),
+      }],
+    }));
+    const coordinator = createIOSViewportCoordinator({
+      windowObject: window,
+      documentObject: document,
+      platform: "iphone",
+      settleTimeoutMs: 120,
+    });
+
+    coordinator.start();
+    expect(coordinator.getSnapshot()).toMatchObject({
+      state: "initial_suspicious_shrink",
+      initialSuspiciousShrink: true,
+      restoreGateOpen: false,
+      physicalPaintFloorHeight: 844,
+    });
+    expect(document.documentElement.style.getPropertyValue("--app-physical-paint-floor-height")).toBe("844px");
+
+    await vi.advanceTimersByTimeAsync(140);
+    expect(coordinator.getSnapshot()).toMatchObject({
+      stableViewport: expect.objectContaining({ height: 844 }),
+      restoreGateOpen: true,
+    });
+  });
+
+  test("first standalone launch uses the physical screen floor until a clean 844px sample is stored", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query) => ({ matches: query === "(display-mode: standalone)" })));
+    const visualViewport = installViewport({ height: 600, screenHeight: 844 });
+    const coordinator = createIOSViewportCoordinator({
+      windowObject: window,
+      documentObject: document,
+      platform: "iphone",
+      settleTimeoutMs: 240,
+    });
+
+    coordinator.start();
+    expect(coordinator.getSnapshot()).toMatchObject({
+      state: "initial_suspicious_shrink",
+      physicalPaintFloorHeight: 844,
+      restoreGateOpen: false,
+    });
+    expect(window.localStorage.getItem(IOS_VIEWPORT_GEOMETRY_STORAGE_KEY)).toBeNull();
+
+    Object.defineProperty(document.documentElement, "clientHeight", { configurable: true, value: 844 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    visualViewport.update({ height: 844, scale: 1, offsetTop: 0, offsetLeft: 0 });
+    await vi.advanceTimersByTimeAsync(80);
+
+    expect(coordinator.getSnapshot()).toMatchObject({
+      state: "stable",
+      stableViewport: expect.objectContaining({ height: 844 }),
+      restoreGateOpen: true,
+    });
+    expect(JSON.parse(window.localStorage.getItem(IOS_VIEWPORT_GEOMETRY_STORAGE_KEY)).records[0])
+      .toMatchObject({ trusted_layout_height: 844, physical_paint_floor_height: 844 });
   });
 });

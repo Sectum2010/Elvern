@@ -21,5 +21,9 @@ describe("iOS auth viewport CSS contract", () => {
     expect(styles).toMatch(/#elvern-app-paint-floor\s*\{[^}]*position:\s*fixed[^}]*pointer-events:\s*none/s);
     expect(styles).toMatch(/#root\s*\{[^}]*z-index:\s*1/s);
     expect(styles).toMatch(/@supports\s*\(height:\s*100lvh\)[\s\S]*min-block-size/s);
+    expect(styles).toContain("--app-physical-paint-floor-height");
+    expect(styles).toMatch(/html,\s*body,\s*#root\s*\{[^}]*min-block-size:\s*var\(--app-physical-paint-floor-height\)/s);
+    expect(styles).toMatch(/body\s*\{[^}]*min-block-size:\s*var\(--app-physical-paint-floor-height\)/s);
+    expect(styles).toMatch(/#elvern-app-paint-floor\s*\{[^}]*min-block-size:\s*var\(--app-physical-paint-floor-height\)/s);
   });
 });
