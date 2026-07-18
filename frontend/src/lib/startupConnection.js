@@ -14,6 +14,7 @@ export const CONNECTIVITY_HEALTHY = "healthy";
 export const CONNECTION_OOPS_TITLE = "Oops!";
 export const CONNECTION_SERVER_OOPS_COPY = "Seems like the server has been bamboozled, please try again later.";
 export const CONNECTION_VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
+export const CONNECTION_OFFLINE_OOPS_COPY = "It looks like you're offline. Please check your connection and try again.";
 export const CONNECTION_OOPS_COPY = CONNECTION_VPN_OOPS_COPY;
 export const CONNECTION_STATUS_WORDS = Object.freeze([
   "Flibbertigibbeting...",
@@ -34,11 +35,22 @@ function isSuccessfulHealthResponse(response) {
 }
 
 
-export function dispatchStartupConnectivityFailure() {
+export function getConnectionOopsCopy(classification) {
+  if (classification === CONNECTIVITY_BACKEND_UNREACHABLE) {
+    return CONNECTION_SERVER_OOPS_COPY;
+  }
+  if (classification === CONNECTIVITY_INTERNET_OFFLINE) {
+    return CONNECTION_OFFLINE_OOPS_COPY;
+  }
+  return CONNECTION_VPN_OOPS_COPY;
+}
+
+
+export function dispatchStartupConnectivityFailure(detail = null) {
   if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") {
     return;
   }
-  window.dispatchEvent(new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT));
+  window.dispatchEvent(new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, { detail }));
 }
 
 
@@ -63,14 +75,17 @@ export function createStartupConnectionController({
     status: "connecting",
     serviceReachable: false,
     runtimeReady: false,
+    offlineOopsRequired: false,
     classification: initiallyOffline
       ? CONNECTIVITY_INTERNET_OFFLINE
       : CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE,
   };
   let applicationReady = !requireApplicationReady;
   let runtimeReady = false;
+  let offlineOopsRequired = false;
   let started = false;
-  let outageStartedAt = Number.isFinite(initialOutageStartedAt) && initialOutageStartedAt > 0
+  let outageStarted = Number.isFinite(initialOutageStartedAt) && initialOutageStartedAt > 0;
+  let outageStartedAt = outageStarted
     ? initialOutageStartedAt
     : 0;
   let unreachableTimer = 0;
@@ -85,11 +100,13 @@ export function createStartupConnectionController({
       ...snapshot,
       ...next,
       runtimeReady,
+      offlineOopsRequired,
     };
     if (
       snapshot.status === nextSnapshot.status
       && snapshot.serviceReachable === nextSnapshot.serviceReachable
       && snapshot.runtimeReady === nextSnapshot.runtimeReady
+      && snapshot.offlineOopsRequired === nextSnapshot.offlineOopsRequired
       && snapshot.classification === nextSnapshot.classification
     ) {
       return;
@@ -127,9 +144,6 @@ export function createStartupConnectionController({
     if (unreachableTimer) {
       return;
     }
-    if (snapshot.classification === CONNECTIVITY_INTERNET_OFFLINE) {
-      return;
-    }
     const elapsed = Math.max(0, Date.now() - outageStartedAt);
     const remaining = Math.max(0, STARTUP_UNREACHABLE_DELAY_MS - elapsed);
     unreachableTimer = windowObject?.setTimeout?.(() => {
@@ -141,8 +155,24 @@ export function createStartupConnectionController({
   }
 
   function beginOutage(classification, { preserveUnreachable = false } = {}) {
-    if (!outageStartedAt || snapshot.status === "connected") {
+    if (classification !== CONNECTIVITY_INTERNET_OFFLINE) {
+      offlineOopsRequired = false;
+    }
+    if (runtimeReady && classification === CONNECTIVITY_INTERNET_OFFLINE && !offlineOopsRequired) {
+      outageStartedAt = 0;
+      outageStarted = false;
+      clearUnreachableTimer();
+      emit({
+        status: "connecting",
+        serviceReachable: false,
+        classification,
+      });
+      ensureRecoveryInterval();
+      return;
+    }
+    if (!outageStarted || snapshot.status === "connected") {
       outageStartedAt = Date.now();
+      outageStarted = true;
     }
     const status = preserveUnreachable && snapshot.status === "unreachable"
       ? "unreachable"
@@ -152,9 +182,7 @@ export function createStartupConnectionController({
       serviceReachable: false,
       classification,
     });
-    if (classification === CONNECTIVITY_INTERNET_OFFLINE) {
-      clearUnreachableTimer();
-    } else if (status === "connecting") {
+    if (status === "connecting") {
       scheduleUnreachable();
     }
     ensureRecoveryInterval();
@@ -163,7 +191,9 @@ export function createStartupConnectionController({
   function markHealthy() {
     if (applicationReady) {
       outageStartedAt = 0;
+      outageStarted = false;
       runtimeReady = true;
+      offlineOopsRequired = false;
       clearUnreachableTimer();
       clearRecoveryInterval();
       emit({
@@ -185,7 +215,9 @@ export function createStartupConnectionController({
       return inFlightProbe || Promise.resolve(false);
     }
     if (navigatorObject?.onLine === false) {
-      beginOutage(CONNECTIVITY_INTERNET_OFFLINE);
+      beginOutage(CONNECTIVITY_INTERNET_OFFLINE, {
+        preserveUnreachable: snapshot.status === "unreachable",
+      });
       return false;
     }
 
@@ -259,7 +291,9 @@ export function createStartupConnectionController({
   }
 
   function handleOffline() {
-    beginOutage(CONNECTIVITY_INTERNET_OFFLINE);
+    beginOutage(CONNECTIVITY_INTERNET_OFFLINE, {
+      preserveUnreachable: snapshot.status === "unreachable",
+    });
   }
 
   function start() {
@@ -267,8 +301,9 @@ export function createStartupConnectionController({
       return;
     }
     started = true;
-    if (!outageStartedAt) {
+    if (!outageStarted) {
       outageStartedAt = Date.now();
+      outageStarted = true;
     }
     if (initiallyOffline || navigatorObject?.onLine === false) {
       beginOutage(CONNECTIVITY_INTERNET_OFFLINE);
@@ -298,7 +333,10 @@ export function createStartupConnectionController({
     documentObject?.removeEventListener?.("visibilitychange", handleVisibilityChange);
   }
 
-  function reportFailure() {
+  function reportFailure({ forceOfflineOops = false } = {}) {
+    if (runtimeReady && navigatorObject?.onLine === false && forceOfflineOops) {
+      offlineOopsRequired = true;
+    }
     beginOutage(
       navigatorObject?.onLine === false
         ? CONNECTIVITY_INTERNET_OFFLINE
@@ -310,9 +348,11 @@ export function createStartupConnectionController({
   function reportApplicationReady() {
     applicationReady = true;
     runtimeReady = true;
+    offlineOopsRequired = false;
     clearUnreachableTimer();
     clearRecoveryInterval();
     outageStartedAt = 0;
+    outageStarted = false;
     emit({
       status: "connected",
       serviceReachable: true,
@@ -322,9 +362,22 @@ export function createStartupConnectionController({
 
   function retry() {
     if (runtimeReady) {
+      if (offlineOopsRequired) {
+        outageStartedAt = Date.now();
+        outageStarted = true;
+        clearUnreachableTimer();
+        emit({
+          status: "connecting",
+          serviceReachable: false,
+          classification: CONNECTIVITY_INTERNET_OFFLINE,
+        });
+        scheduleUnreachable();
+        ensureRecoveryInterval();
+      }
       return probe();
     }
     outageStartedAt = Date.now();
+    outageStarted = true;
     clearUnreachableTimer();
     applicationReady = !requireApplicationReady;
     emit({

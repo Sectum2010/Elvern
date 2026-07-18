@@ -150,7 +150,7 @@ export async function apiRequest(path, options = {}) {
     });
   } catch (error) {
     if (error?.name !== "AbortError") {
-      dispatchStartupConnectivityFailure();
+      dispatchStartupConnectivityFailure({ path });
     }
     throw error;
   }

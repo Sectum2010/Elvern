@@ -3,13 +3,12 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   CONNECTION_FAMILIARS,
   CONNECTION_FAMILIAR_ROTATION_MS,
-  CONNECTION_SERVER_OOPS_COPY,
   CONNECTION_STATUS_WORDS,
-  CONNECTION_VPN_OOPS_COPY,
   CONNECTIVITY_BACKEND_UNREACHABLE,
   CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE,
   CONNECTIVITY_INTERNET_OFFLINE,
   createStartupConnectionController,
+  getConnectionOopsCopy,
   NO_INTERNET_REAPPEAR_MS,
   STARTUP_APPLICATION_READY_EVENT,
   STARTUP_CONNECTIVITY_FAILURE_EVENT,
@@ -46,9 +45,7 @@ function updateStaticConnectionShell({ status, classification, familiarIndex, wo
   const oopsCopy = shell.querySelector("[data-connection-oops-copy]");
   renderWaitingWord(waitingWord, CONNECTION_STATUS_WORDS[wordIndex] || CONNECTION_STATUS_WORDS[0]);
   if (oopsCopy) {
-    oopsCopy.textContent = classification === CONNECTIVITY_BACKEND_UNREACHABLE
-      ? CONNECTION_SERVER_OOPS_COPY
-      : CONNECTION_VPN_OOPS_COPY;
+    oopsCopy.textContent = getConnectionOopsCopy(classification);
   }
   shell.dataset.familiar = CONNECTION_FAMILIARS[familiarIndex] || CONNECTION_FAMILIARS[0];
   shell.dataset.classification = classification || "";
@@ -77,7 +74,8 @@ export function RuntimeConnectivityLayer({ controller, snapshot }) {
   const pointerStartYRef = useRef(null);
   const reappearTimerRef = useRef(0);
   const internetOffline = snapshot.runtimeReady
-    && snapshot.classification === CONNECTIVITY_INTERNET_OFFLINE;
+    && snapshot.classification === CONNECTIVITY_INTERNET_OFFLINE
+    && !snapshot.offlineOopsRequired;
   const showRuntimeOops = snapshot.runtimeReady
     && snapshot.status === "unreachable"
     && [CONNECTIVITY_BACKEND_UNREACHABLE, CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE]
@@ -135,9 +133,7 @@ export function RuntimeConnectivityLayer({ controller, snapshot }) {
     setDragOffset(0);
   }
 
-  const oopsCopy = snapshot.classification === CONNECTIVITY_BACKEND_UNREACHABLE
-    ? CONNECTION_SERVER_OOPS_COPY
-    : CONNECTION_VPN_OOPS_COPY;
+  const oopsCopy = getConnectionOopsCopy(snapshot.classification);
 
   return (
     <>
@@ -201,8 +197,10 @@ export function StartupConnectionGate({ children, controller: providedController
   }, [controller]);
 
   useEffect(() => {
-    function handleConnectivityFailure() {
-      controller.reportFailure();
+    function handleConnectivityFailure(event) {
+      controller.reportFailure({
+        forceOfflineOops: event.detail?.path === "/api/auth/login",
+      });
     }
     window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleConnectivityFailure);
     return () => window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleConnectivityFailure);
@@ -234,13 +232,13 @@ export function StartupConnectionGate({ children, controller: providedController
 
   useEffect(() => {
     updateStaticConnectionShell({
-      status: snapshot.runtimeReady ? "connected" : snapshot.status,
+      status: snapshot.runtimeReady && !snapshot.offlineOopsRequired ? "connected" : snapshot.status,
       classification: snapshot.classification,
       familiarIndex: rotationIndex % CONNECTION_FAMILIARS.length,
       wordIndex: rotationIndex % CONNECTION_STATUS_WORDS.length,
       visible: shellVisible,
     });
-  }, [rotationIndex, shellVisible, snapshot.classification, snapshot.runtimeReady, snapshot.status]);
+  }, [rotationIndex, shellVisible, snapshot.classification, snapshot.offlineOopsRequired, snapshot.runtimeReady, snapshot.status]);
 
   const canRenderApplication = snapshot.runtimeReady || snapshot.serviceReachable;
   return (

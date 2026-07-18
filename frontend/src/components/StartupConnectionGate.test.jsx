@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { StartupConnectionGate } from "./StartupConnectionGate.jsx";
 import {
+  CONNECTION_OFFLINE_OOPS_COPY,
   CONNECTION_SERVER_OOPS_COPY,
   CONNECTION_VPN_OOPS_COPY,
   CONNECTION_FAMILIAR_ROTATION_MS,
@@ -175,6 +176,40 @@ describe("StartupConnectionGate", () => {
     await act(() => vi.advanceTimersByTimeAsync(NO_INTERNET_REAPPEAR_MS));
     expect(screen.getByText("No Internet")).toBeInTheDocument();
     expect(screen.getByText("Library state")).toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS * 2));
+    expect(screen.getByText("No Internet")).toBeInTheDocument();
+    expect(screen.getByText("Library state")).toBeInTheDocument();
+    expect(document.querySelector(".runtime-connectivity-oops")).not.toBeInTheDocument();
+
+    navigatorObject.onLine = true;
+    act(() => window.dispatchEvent(new Event("online")));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.queryByText("No Internet")).not.toBeInTheDocument();
+    expect(screen.getByText("Library state")).toBeInTheDocument();
+  });
+
+  test("an offline login attempt waits 60 seconds before showing the offline Oops shell", async () => {
+    const container = installShellFixture();
+    const navigatorObject = { onLine: true };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
+    render(<StartupConnectionGate controller={controller}><p>Login state</p></StartupConnectionGate>, { container });
+
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    navigatorObject.onLine = false;
+    act(() => window.dispatchEvent(new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
+      detail: { path: "/api/auth/login" },
+    })));
+
+    await act(() => vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1));
+    expect(document.getElementById("elvern-connection-shell")).toHaveAttribute("data-state", "connecting");
+    expect(screen.getByText("Login state")).toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(document.getElementById("elvern-connection-shell")).toHaveAttribute("data-state", "unreachable");
+    expect(document.querySelector("[data-connection-oops-copy]")).toHaveTextContent(CONNECTION_OFFLINE_OOPS_COPY);
+    expect(screen.getByText("Login state")).toBeInTheDocument();
   });
 
   test("rotates familiar and waiting word in discrete seven second steps", async () => {

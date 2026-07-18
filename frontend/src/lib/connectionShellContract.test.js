@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 
 import {
+  CONNECTION_OFFLINE_OOPS_COPY,
   CONNECTION_OOPS_TITLE,
   CONNECTION_SERVER_OOPS_COPY,
   CONNECTION_VPN_OOPS_COPY,
@@ -26,6 +27,8 @@ describe("static connection shell contract", () => {
       expect(html).toContain(CONNECTION_OOPS_TITLE);
       expect(html).toContain(CONNECTION_SERVER_OOPS_COPY);
       expect(html).toContain(CONNECTION_VPN_OOPS_COPY);
+      expect(html).toContain(CONNECTION_OFFLINE_OOPS_COPY);
+      expect(html).toContain('navigator.onLine === false ? "internet_offline"');
       expect(html).toContain('/_elvern/frontend-health');
       expect(html).toContain(">Retry<");
       CONNECTION_STATUS_WORDS.forEach((word) => expect(html).toContain(word));

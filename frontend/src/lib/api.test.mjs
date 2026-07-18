@@ -200,18 +200,18 @@ test("auth verification 403 does not recursively request another auth revalidati
 
 test("network failure requests startup connection recovery but AbortError does not", async () => {
   const events = [];
-  const handleFailure = () => events.push("network");
+  const handleFailure = (event) => events.push(event.detail?.path);
   window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
   try {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValueOnce(new TypeError("offline")));
     await assert.rejects(() => apiRequest("/api/auth/me"));
-    assert.deepEqual(events, ["network"]);
+    assert.deepEqual(events, ["/api/auth/me"]);
 
     const abortError = new Error("cancelled");
     abortError.name = "AbortError";
     globalThis.fetch.mockRejectedValueOnce(abortError);
     await assert.rejects(() => apiRequest("/api/library"));
-    assert.deepEqual(events, ["network"]);
+    assert.deepEqual(events, ["/api/auth/me"]);
   } finally {
     window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
   }

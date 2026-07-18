@@ -180,7 +180,8 @@
         <div class="elvern-connection-shell__oops">
           <h1>Oops!</h1>
           <p data-connection-oops-copy>Elvern could not be reached, check your VPN connection and try again.</p>
-          <span hidden>Seems like the server has been bamboozled, please try again later.</span>
+          <span hidden>Seems like the server has been bamboozled, we will fix it as soon as possible.</span>
+          <span hidden>It looks like you're offline. Please check your connection and try again.</span>
           <button class="elvern-connection-shell__retry" data-connection-retry type="button">Retry</button>
         </div>
       </div>
@@ -197,6 +198,7 @@
         const BACKEND_HEALTH_URL = new URL("/health", window.location.origin);
         const SERVER_OOPS_COPY = "Seems like the server has been bamboozled, please try again later.";
         const VPN_OOPS_COPY = "Elvern could not be reached, check your VPN connection and try again.";
+        const OFFLINE_OOPS_COPY = "It looks like you're offline. Please check your connection and try again.";
         const WORDS = ["Flibbertigibbeting...", "Ruminating...", "Conjuring...", "Recombobulating...", "Scrying...", "Divining...", "Wayfinding...", "Enchanting..."];
         const FAMILIARS = ["raven", "wisp", "horned", "gargoyle", "keeper"];
         window.__elvernConnectionStartedAt = Date.now();
@@ -209,7 +211,7 @@
         let observedFailure = false;
         let rotationIndex = 0;
         let unreachableTimer = 0;
-        let lastClassification = "frontend_or_vpn_unreachable";
+        let lastClassification = navigator.onLine === false ? "internet_offline" : "frontend_or_vpn_unreachable";
 
         function setWaitingWord(text) {
           word.setAttribute("aria-label", text);
@@ -224,7 +226,9 @@
         }
 
         function showOops() {
-          oopsCopy.textContent = lastClassification === "backend_unreachable" ? SERVER_OOPS_COPY : VPN_OOPS_COPY;
+          oopsCopy.textContent = lastClassification === "backend_unreachable"
+            ? SERVER_OOPS_COPY
+            : lastClassification === "internet_offline" ? OFFLINE_OOPS_COPY : VPN_OOPS_COPY;
           shell.classList.add("elvern-connection-shell--visible");
           shell.dataset.state = "unreachable";
         }
@@ -250,7 +254,7 @@
           inFlight = (async () => {
             const frontendHealthy = await requestHealth(FRONTEND_HEALTH_URL);
             if (!frontendHealthy) {
-              lastClassification = "frontend_or_vpn_unreachable";
+              lastClassification = navigator.onLine === false ? "internet_offline" : "frontend_or_vpn_unreachable";
               observedFailure = true;
               return false;
             }
@@ -275,11 +279,16 @@
           void probe({ forceReload: true });
         };
         const handleOnline = () => { void probe(); };
+        const handleOffline = () => {
+          lastClassification = "internet_offline";
+          if (shell.dataset.state === "unreachable") showOops();
+        };
         const handleVisibility = () => {
           if (document.visibilityState === "visible") void probe();
         };
         retry.addEventListener("click", handleRetry);
         window.addEventListener("online", handleOnline);
+        window.addEventListener("offline", handleOffline);
         document.addEventListener("visibilitychange", handleVisibility);
         const revealTimer = window.setTimeout(() => {
           shell.classList.add("elvern-connection-shell--visible");
@@ -304,6 +313,7 @@
           activeController?.abort();
           retry.removeEventListener("click", handleRetry);
           window.removeEventListener("online", handleOnline);
+          window.removeEventListener("offline", handleOffline);
           document.removeEventListener("visibilitychange", handleVisibility);
           delete window.__elvernStaticConnectionShellCleanup;
         };

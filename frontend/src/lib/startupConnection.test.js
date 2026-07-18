@@ -130,17 +130,20 @@ describe("startup connection controller", () => {
     controller.stop();
   });
 
-  test("browser offline is classified immediately without advancing to Oops", async () => {
+  test("browser offline is classified immediately and shows Oops after 60 seconds", async () => {
     const navigatorObject = { onLine: false };
     const fetchImpl = vi.fn();
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
 
     controller.start();
-    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS * 2);
+    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1);
 
     expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_INTERNET_OFFLINE);
     expect(controller.getSnapshot().status).toBe("connecting");
     expect(fetchImpl).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(controller.getSnapshot().status).toBe("unreachable");
     controller.stop();
   });
 
@@ -169,6 +172,50 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS);
     expect(controller.getSnapshot().status).toBe("unreachable");
     expect(controller.getSnapshot().runtimeReady).toBe(true);
+    controller.stop();
+  });
+
+  test("runtime true-offline state never advances to unreachable", async () => {
+    const navigatorObject = { onLine: true };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getSnapshot().runtimeReady).toBe(true);
+
+    navigatorObject.onLine = false;
+    window.dispatchEvent(new Event("offline"));
+    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS * 2);
+
+    expect(controller.getSnapshot()).toMatchObject({
+      classification: CONNECTIVITY_INTERNET_OFFLINE,
+      runtimeReady: true,
+      status: "connecting",
+    });
+    controller.stop();
+  });
+
+  test("an offline login failure uses the 60 second offline Oops path", async () => {
+    const navigatorObject = { onLine: true };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    navigatorObject.onLine = false;
+    await controller.reportFailure({ forceOfflineOops: true });
+
+    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1);
+    expect(controller.getSnapshot()).toMatchObject({
+      classification: CONNECTIVITY_INTERNET_OFFLINE,
+      offlineOopsRequired: true,
+      runtimeReady: true,
+      status: "connecting",
+    });
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(controller.getSnapshot().status).toBe("unreachable");
     controller.stop();
   });
 
