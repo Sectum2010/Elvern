@@ -106,7 +106,11 @@ describe("ordered public connectivity probes", () => {
 
     const result = await runner.probeConfirmed({ confirmationDelayMs: 0 });
 
-    expect(result).toMatchObject({ internetState: "online", endpointId: "cloudflare-trace" });
+    expect(result).toMatchObject({
+      internetState: "online",
+      publicEvidenceReason: "endpoint_success",
+      endpointId: "cloudflare-trace",
+    });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl).toHaveBeenCalledWith(
       DEFAULT_PUBLIC_CONNECTIVITY_PROBES[0].url,
@@ -180,7 +184,12 @@ describe("ordered public connectivity probes", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(1);
 
-    await expect(pending).resolves.toMatchObject({ internetState: "unknown", trusted: false, rounds: 2 });
+    await expect(pending).resolves.toMatchObject({
+      internetState: "unknown",
+      publicEvidenceReason: "probe_failure_unverified",
+      trusted: false,
+      rounds: 2,
+    });
     expect(fetchImpl).toHaveBeenCalledTimes(6);
     vi.useRealTimers();
   });
@@ -199,8 +208,23 @@ describe("ordered public connectivity probes", () => {
 
     await expect(runner.probeConfirmed({ confirmationDelayMs: 0 })).resolves.toMatchObject({
       internetState: "offline",
+      publicEvidenceReason: "probe_failure_trusted",
       trusted: true,
       rounds: 2,
+    });
+  });
+
+  test("disabled probes report an explicit reason for manual recovery policy", async () => {
+    const runner = createPublicConnectivityProbeRunner({
+      fetchImpl: vi.fn(),
+      probes: [],
+      storage: createStorage(),
+    });
+
+    await expect(runner.probeConfirmed()).resolves.toMatchObject({
+      internetState: "unknown",
+      publicEvidenceReason: "probes_disabled",
+      rounds: 0,
     });
   });
 

@@ -90,6 +90,8 @@
         const publicCircuit = runtime.createPublicProbeCircuit(publicProbes.map((probe) => probe.id));
         const activeControllers = new Set();
         let inFlight = null;
+        let manualRetryQueued = false;
+        let lastRecoveryMode = null;
         let rotationIndex = 0;
         let lastClassification = navigator.onLine === false
           ? contract.classifications.internetOffline
@@ -197,13 +199,38 @@
         }
 
         async function probePublicInternet() {
-          if (navigator.onLine === false) return "offline";
-          if (!publicProbes.length) return "unknown";
+          if (navigator.onLine === false) {
+            return {
+              internetState: "offline",
+              publicEvidenceReason: contract.publicEvidenceReasons.browserExplicitOffline,
+            };
+          }
+          if (!publicProbes.length) {
+            return {
+              internetState: "unknown",
+              publicEvidenceReason: contract.publicEvidenceReasons.probesDisabled,
+            };
+          }
           const trusted = hasTrustedProbeSet();
-          if (await probePublicChain()) return "online";
+          if (await probePublicChain()) {
+            return {
+              internetState: "online",
+              publicEvidenceReason: contract.publicEvidenceReasons.endpointSuccess,
+            };
+          }
           await new Promise((resolve) => window.setTimeout(resolve, contract.publicProbeConfirmationDelayMs));
-          if (await probePublicChain()) return "online";
-          return trusted ? "offline" : "unknown";
+          if (await probePublicChain()) {
+            return {
+              internetState: "online",
+              publicEvidenceReason: contract.publicEvidenceReasons.endpointSuccess,
+            };
+          }
+          return {
+            internetState: trusted ? "offline" : "unknown",
+            publicEvidenceReason: trusted
+              ? contract.publicEvidenceReasons.probeFailureTrusted
+              : contract.publicEvidenceReasons.probeFailureUnverified,
+          };
         }
 
         async function requestHealth(url) {
@@ -283,6 +310,7 @@
                 && payload?.schema_version === contract.schemaVersion
                 && payload?.nonce === nonce
                 && payload?.accepted === true
+                && payload?.durability === "durable"
               ));
             };
             channel.port1.start?.();
@@ -306,8 +334,11 @@
           return true;
         }
 
-        async function runRecoveryTransaction() {
-          if (!machine.beginRecovery()) return inFlight || false;
+        async function runRecoveryTransaction(trigger = contract.recoveryTriggers.automatic) {
+          if (!machine.beginRecovery()) {
+            if (trigger === contract.recoveryTriggers.manualRetry) manualRetryQueued = true;
+            return inFlight || false;
+          }
           renderState();
           inFlight = (async () => {
             const publicResultPromise = probePublicInternet();
@@ -317,21 +348,33 @@
               : false;
             const publicResult = await publicResultPromise;
             lastClassification = runtime.deriveConnectivityClassification({
-              internetState: publicResult,
-              internetOutageLatched: publicResult === "offline",
+              internetState: publicResult.internetState,
+              internetOutageLatched: publicResult.internetState === "offline",
               frontendState: frontendHealthy ? "reachable" : "unreachable",
               backendState: backendHealthy ? "reachable" : (frontendHealthy ? "unreachable" : "unknown"),
             });
-            const appShellHealthy = publicResult === "online"
+            const mayVerifyAppShell = publicResult.internetState === "online"
+              || (
+                trigger === contract.recoveryTriggers.manualRetry
+                && publicResult.publicEvidenceReason !== contract.publicEvidenceReasons.browserExplicitOffline
+              );
+            const appShellHealthy = mayVerifyAppShell
               && frontendHealthy
               && backendHealthy
               && await verifyActualAppShell();
-            if (runtime.isVerifiedRecoveryEvidence({
-              internetState: publicResult,
+            const decision = runtime.getRecoveryDecision({
+              trigger,
+              internetState: publicResult.internetState,
+              publicEvidenceReason: publicResult.publicEvidenceReason,
               frontendHealthy,
               backendHealthy,
               appShellHealthy,
-            }) && await enterRecoveredApp()) {
+            });
+            if (decision.accepted) {
+              lastRecoveryMode = decision.recoveryMode;
+              shell.dataset.recoveryMode = lastRecoveryMode;
+            }
+            if (decision.accepted && await enterRecoveredApp()) {
               return true;
             }
             machine.finishRecovery(false);
@@ -339,6 +382,10 @@
             return false;
           })().finally(() => {
             inFlight = null;
+            if (manualRetryQueued && machine.getSnapshot().visibleState !== "recovered") {
+              manualRetryQueued = false;
+              void runRecoveryTransaction(contract.recoveryTriggers.manualRetry);
+            }
           });
           return inFlight;
         }
@@ -348,7 +395,7 @@
           Math.max(0, machine.getSnapshot().oopsDeadlineAt - Date.now()),
         );
         const probeInterval = window.setInterval(
-          () => { void runRecoveryTransaction(); },
+          () => { void runRecoveryTransaction(contract.recoveryTriggers.automatic); },
           contract.offlineRecoveryProbeIntervalMs,
         );
         const rotationInterval = window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -359,15 +406,17 @@
             shell.dataset.familiar = FAMILIARS[rotationIndex % FAMILIARS.length];
             setWaitingWord(WORDS[rotationIndex % WORDS.length]);
           }, contract.familiarRotationMs);
-        const handleRetry = () => { void runRecoveryTransaction(); };
-        const handleOnline = () => { void runRecoveryTransaction(); };
+        const handleRetry = () => { void runRecoveryTransaction(contract.recoveryTriggers.manualRetry); };
+        const handleOnline = () => { void runRecoveryTransaction(contract.recoveryTriggers.onlineEvent); };
         const handleOffline = () => {
           lastClassification = contract.classifications.internetOffline;
           renderState();
         };
         const handleVisibility = () => {
           renderState();
-          if (document.visibilityState === "visible") void runRecoveryTransaction();
+          if (document.visibilityState === "visible") {
+            void runRecoveryTransaction(contract.recoveryTriggers.visibilityReturn);
+          }
         };
         retry.addEventListener("click", handleRetry);
         window.addEventListener("online", handleOnline);
@@ -385,7 +434,7 @@
           window.removeEventListener("offline", handleOffline);
           document.removeEventListener("visibilitychange", handleVisibility);
         }, { once: true });
-        void runRecoveryTransaction();
+        void runRecoveryTransaction(contract.recoveryTriggers.automatic);
       })();
     </script>
   </body>

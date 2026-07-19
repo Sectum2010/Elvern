@@ -5,6 +5,12 @@ import { describe, expect, test } from "vitest";
 
 const styles = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
 const indexHtml = readFileSync(`${process.cwd()}/index.html`, "utf8");
+const relocationSources = [
+  "src/lib/viewportAnchor.js",
+  "src/lib/libraryNavigation.js",
+  "src/lib/desktopLibraryReturnRestore.js",
+  "src/pages/LibraryPage.jsx",
+].map((path) => readFileSync(`${process.cwd()}/${path}`, "utf8"));
 
 
 describe("iOS auth viewport CSS contract", () => {
@@ -25,5 +31,12 @@ describe("iOS auth viewport CSS contract", () => {
     expect(styles).toMatch(/html,\s*body,\s*#root\s*\{[^}]*min-block-size:\s*var\(--app-physical-paint-floor-height\)/s);
     expect(styles).toMatch(/body\s*\{[^}]*min-block-size:\s*var\(--app-physical-paint-floor-height\)/s);
     expect(styles).toMatch(/#elvern-app-paint-floor\s*\{[^}]*min-block-size:\s*var\(--app-physical-paint-floor-height\)/s);
+  });
+
+  test("physical paint floor is never read by relocation modules", () => {
+    relocationSources.forEach((source) => {
+      expect(source).not.toContain("physicalPaintFloorHeight");
+      expect(source).not.toContain("--app-physical-paint-floor-height");
+    });
   });
 });

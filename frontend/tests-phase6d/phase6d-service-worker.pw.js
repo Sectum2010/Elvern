@@ -71,6 +71,7 @@ test("production worker falls back offline and verified recovery returns to the 
     type: "ELVERN_RECOVERY_NAVIGATION_ARMED",
     nonce: "playwright-phase6d-recovery-arm",
     accepted: true,
+    durability: "durable",
   });
 
   await context.setOffline(false);
@@ -86,4 +87,47 @@ test("production worker falls back offline and verified recovery returns to the 
 
   const cacheKeys = await page.evaluate(() => caches.keys());
   expect(cacheKeys.every((key) => key.startsWith("elvern-offline-shell-"))).toBe(true);
+});
+
+
+test("blocked public probes require Retry before service-only recovery", async ({ context, page }) => {
+  let publicReachable = true;
+  for (const [url, status] of PUBLIC_PROBES) {
+    await page.route(url, (route) => publicReachable
+      ? route.fulfill({ status, body: "" })
+      : route.abort("failed"));
+  }
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route("**/health", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: '{"status":"ok"}',
+  }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({
+    status: 401,
+    contentType: "application/json",
+    body: '{"detail":"Authentication required"}',
+  }));
+
+  await page.goto("library");
+  await page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.ready;
+    await registration.update();
+  });
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
+
+  await context.setOffline(true);
+  await page.goto("library?category=anime#manual-retry", { waitUntil: "domcontentloaded" });
+  await expect(page.locator("#elvern-connection-shell")).toHaveAttribute("data-state", "connecting");
+
+  publicReachable = false;
+  await context.setOffline(false);
+  await page.waitForTimeout(1_500);
+  await expect(page.locator("#elvern-connection-shell")).toBeVisible();
+
+  await page.locator("[data-connection-retry]").dispatchEvent("click");
+  await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("#elvern-connection-shell")).toBeHidden();
+  expect(page.url()).toMatch(/\/abcd2345\/login$/);
 });

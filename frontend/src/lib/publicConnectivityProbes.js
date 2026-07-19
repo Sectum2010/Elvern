@@ -234,6 +234,7 @@ export function createPublicConnectivityProbeRunner({
   const endpointListHash = hashPublicConnectivityProbeRegistry(registry);
   const circuit = createPublicProbeCircuit(registry.map((probe) => probe.id));
   const activeControllers = new Set();
+  let abortGeneration = 0;
 
   async function attempt(probe) {
     const abortController = new AbortController();
@@ -302,10 +303,12 @@ export function createPublicConnectivityProbeRunner({
   }
 
   async function probeConfirmed({ confirmationDelayMs = PUBLIC_PROBE_CONFIRMATION_DELAY_MS } = {}) {
+    const generation = abortGeneration;
     const trust = readTrustRecord({ storage, endpointListHash, now: now() });
     if (!registry.length || typeof fetchImpl !== "function") {
       return {
         internetState: "unknown",
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.probesDisabled,
         trusted: false,
         trustState: "unverified",
         endpointId: null,
@@ -313,9 +316,20 @@ export function createPublicConnectivityProbeRunner({
       };
     }
     const first = await probeChain();
+    if (generation !== abortGeneration) {
+      return {
+        internetState: "unknown",
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.aborted,
+        trusted: trust.trusted,
+        trustState: trust.state,
+        endpointId: null,
+        rounds: 1,
+      };
+    }
     if (first.reachable) {
       return {
         internetState: "online",
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.endpointSuccess,
         trusted: true,
         trustState: "trusted",
         endpointId: first.endpointId,
@@ -323,10 +337,31 @@ export function createPublicConnectivityProbeRunner({
       };
     }
     await delay(Math.max(0, Number(confirmationDelayMs) || 0), setTimeoutImpl);
+    if (generation !== abortGeneration) {
+      return {
+        internetState: "unknown",
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.aborted,
+        trusted: trust.trusted,
+        trustState: trust.state,
+        endpointId: null,
+        rounds: 1,
+      };
+    }
     const second = await probeChain();
+    if (generation !== abortGeneration) {
+      return {
+        internetState: "unknown",
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.aborted,
+        trusted: trust.trusted,
+        trustState: trust.state,
+        endpointId: null,
+        rounds: 2,
+      };
+    }
     if (second.reachable) {
       return {
         internetState: "online",
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.endpointSuccess,
         trusted: true,
         trustState: "trusted",
         endpointId: second.endpointId,
@@ -335,6 +370,9 @@ export function createPublicConnectivityProbeRunner({
     }
     return {
       internetState: trust.trusted ? "offline" : "unknown",
+      publicEvidenceReason: trust.trusted
+        ? CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.probeFailureTrusted
+        : CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.probeFailureUnverified,
       trusted: trust.trusted,
       trustState: trust.state,
       endpointId: null,
@@ -344,6 +382,7 @@ export function createPublicConnectivityProbeRunner({
 
   return {
     abort() {
+      abortGeneration += 1;
       activeControllers.forEach((controller) => controller.abort());
       activeControllers.clear();
     },

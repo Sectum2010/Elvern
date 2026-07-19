@@ -31,7 +31,6 @@ export const CONNECTION_SERVER_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.serv
 export const CONNECTION_VPN_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.vpn;
 export const CONNECTION_OFFLINE_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.offline;
 export const CONNECTION_GENERIC_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.generic;
-export const CONNECTION_OOPS_COPY = CONNECTION_VPN_OOPS_COPY;
 export const CONNECTION_STATUS_WORDS = CONNECTION_RUNTIME_CONTRACT.statusWords;
 export const CONNECTION_FAMILIARS = CONNECTION_RUNTIME_CONTRACT.familiars;
 export const CONNECTION_FAMILIAR_ROTATION_MS = CONNECTION_RUNTIME_CONTRACT.familiarRotationMs;
@@ -126,6 +125,9 @@ export function createStartupConnectionController({
   let snapshot = {
     internetState: initiallyOffline ? "offline" : "unknown",
     internetOutageLatched: initiallyOffline,
+    publicEvidenceReason: initiallyOffline
+      ? CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline
+      : null,
     publicProbeTrusted: initialTrust.trusted,
     frontendState: "unknown",
     backendState: "unknown",
@@ -149,6 +151,7 @@ export function createStartupConnectionController({
     const keys = [
       "internetState",
       "internetOutageLatched",
+      "publicEvidenceReason",
       "publicProbeTrusted",
       "frontendState",
       "backendState",
@@ -217,7 +220,10 @@ export function createStartupConnectionController({
     }, delayMs) || 0;
   }
 
-  function markInternetOffline({ initialCycle = false } = {}) {
+  function markInternetOffline({
+    initialCycle = false,
+    publicEvidenceReason = CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
+  } = {}) {
     if (initialCycle || forceOfflineOopsPending) {
       offlineOopsRequired = true;
     }
@@ -225,6 +231,7 @@ export function createStartupConnectionController({
     emit({
       internetState: "offline",
       internetOutageLatched: true,
+      publicEvidenceReason,
     });
     if (shouldSuppressRuntimeOops()) {
       clearUnreachableTimer();
@@ -244,6 +251,7 @@ export function createStartupConnectionController({
       emit({
         internetState: "online",
         internetOutageLatched: false,
+        publicEvidenceReason: result.publicEvidenceReason,
         publicProbeTrusted: true,
       });
       if (snapshot.serviceReachable && applicationReady) {
@@ -254,12 +262,16 @@ export function createStartupConnectionController({
       return;
     }
     if (result.internetState === "offline") {
-      emit({ publicProbeTrusted: Boolean(result.trusted) });
-      markInternetOffline({ initialCycle });
+      emit({
+        publicEvidenceReason: result.publicEvidenceReason,
+        publicProbeTrusted: Boolean(result.trusted),
+      });
+      markInternetOffline({ initialCycle, publicEvidenceReason: result.publicEvidenceReason });
       return;
     }
     emit({
       internetState: snapshot.internetOutageLatched ? "offline" : "unknown",
+      publicEvidenceReason: result.publicEvidenceReason,
       publicProbeTrusted: Boolean(result.trusted),
     });
   }
@@ -343,6 +355,7 @@ export function createStartupConnectionController({
     const publicEvidence = navigatorObject?.onLine === false
       ? Promise.resolve({
         internetState: "offline",
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
         trusted: snapshot.publicProbeTrusted,
         endpointId: null,
         rounds: 0,
@@ -401,7 +414,10 @@ export function createStartupConnectionController({
   }
 
   function handleOffline() {
-    markInternetOffline({ initialCycle: !initialProbeCompleted });
+    markInternetOffline({
+      initialCycle: !initialProbeCompleted,
+      publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
+    });
     void probe();
   }
 
@@ -415,7 +431,10 @@ export function createStartupConnectionController({
       outageStartedAt = Date.now();
     }
     if (initiallyOffline || navigatorObject?.onLine === false) {
-      markInternetOffline({ initialCycle: true });
+      markInternetOffline({
+        initialCycle: true,
+        publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
+      });
     }
     scheduleUnreachable();
     windowObject?.addEventListener?.("online", handleOnline);

@@ -12,10 +12,31 @@ export const CONNECTION_RUNTIME_CONTRACT = Object.freeze({
   navigationHandoffTimeoutMs: 8_000,
   recoveryNavigationTimeoutMs: 15_000,
   recoveryNavigationArmTtlMs: 15_000,
+  recoveryNavigationArmMaxRecords: 32,
+  recoveryNavigationArmDatabaseName: "elvern-service-worker-state-v1",
+  recoveryNavigationArmStoreName: "recovery_arms",
   appShellHeader: "X-Elvern-App-Shell",
   offlineShellHeader: "X-Elvern-Offline-Shell",
   recoveryMessageType: "ELVERN_ARM_RECOVERY_NAVIGATION",
   recoveryMessageAckType: "ELVERN_RECOVERY_NAVIGATION_ARMED",
+  recoveryTriggers: Object.freeze({
+    automatic: "automatic",
+    manualRetry: "manual_retry",
+    onlineEvent: "online_event",
+    visibilityReturn: "visibility_return",
+  }),
+  recoveryModes: Object.freeze({
+    verifiedPublic: "verified_public",
+    manualServiceOnly: "manual_service_only",
+  }),
+  publicEvidenceReasons: Object.freeze({
+    endpointSuccess: "endpoint_success",
+    browserExplicitOffline: "browser_explicit_offline",
+    probeFailureTrusted: "probe_failure_trusted",
+    probeFailureUnverified: "probe_failure_unverified",
+    probesDisabled: "probes_disabled",
+    aborted: "aborted",
+  }),
   familiarRotationMs: 7_000,
   statusWords: Object.freeze([
     "Flibbertigibbeting...",
@@ -88,6 +109,38 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
       && frontendHealthy === true
       && backendHealthy === true
       && appShellHealthy === true;
+  }
+
+  function getRecoveryDecision({
+    trigger,
+    internetState,
+    publicEvidenceReason,
+    frontendHealthy,
+    backendHealthy,
+    appShellHealthy,
+  }) {
+    const servicesVerified = frontendHealthy === true
+      && backendHealthy === true
+      && appShellHealthy === true;
+    if (!servicesVerified) {
+      return { accepted: false, recoveryMode: null };
+    }
+    const reasons = contract.publicEvidenceReasons;
+    if (publicEvidenceReason === reasons.browserExplicitOffline) {
+      return { accepted: false, recoveryMode: null };
+    }
+    if (internetState === "online" && publicEvidenceReason === reasons.endpointSuccess) {
+      return { accepted: true, recoveryMode: contract.recoveryModes.verifiedPublic };
+    }
+    const manualReasonAllowed = new Set([
+      reasons.probeFailureTrusted,
+      reasons.probeFailureUnverified,
+      reasons.probesDisabled,
+    ]).has(publicEvidenceReason);
+    if (trigger === contract.recoveryTriggers.manualRetry && manualReasonAllowed) {
+      return { accepted: true, recoveryMode: contract.recoveryModes.manualServiceOnly };
+    }
+    return { accepted: false, recoveryMode: null };
   }
 
   function createOfflineDocumentStateMachine({
@@ -207,6 +260,7 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
     createOfflineDocumentStateMachine,
     createPublicProbeCircuit,
     deriveConnectivityClassification,
+    getRecoveryDecision,
     getConnectionOopsCopy,
     isVerifiedRecoveryEvidence,
   };
@@ -217,6 +271,7 @@ const sharedRuntime = createConnectivityRuntime();
 
 export const deriveConnectivityClassification = sharedRuntime.deriveConnectivityClassification;
 export const getRuntimeConnectionOopsCopy = sharedRuntime.getConnectionOopsCopy;
+export const getRecoveryDecision = sharedRuntime.getRecoveryDecision;
 export const isVerifiedRecoveryEvidence = sharedRuntime.isVerifiedRecoveryEvidence;
 export const createOfflineDocumentStateMachine = sharedRuntime.createOfflineDocumentStateMachine;
 export const createPublicProbeCircuit = sharedRuntime.createPublicProbeCircuit;

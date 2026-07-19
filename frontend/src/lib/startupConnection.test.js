@@ -174,6 +174,7 @@ describe("startup connection controller", () => {
 
     await vi.advanceTimersByTimeAsync(1);
     expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_INTERNET_OFFLINE);
+    expect(controller.getSnapshot().publicEvidenceReason).toBe("probe_failure_trusted");
     expect(fetchImpl.mock.calls.filter(([path]) => path === "https://probe.operator.example/connectivity"))
       .toHaveLength(2);
     controller.stop();
@@ -230,6 +231,7 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1);
 
     expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_INTERNET_OFFLINE);
+    expect(controller.getSnapshot().publicEvidenceReason).toBe("browser_explicit_offline");
     expect(controller.getSnapshot().status).toBe("connecting");
     expect(fetchImpl.mock.calls.every(([path]) => path === "/_elvern/frontend-health")).toBe(true);
 
@@ -588,6 +590,7 @@ describe("startup connection controller", () => {
 
     expect(controller.getSnapshot()).toMatchObject({
       internetState: "unknown",
+      publicEvidenceReason: "probe_failure_unverified",
       publicProbeTrusted: false,
       frontendState: "unreachable",
       backendState: "unknown",

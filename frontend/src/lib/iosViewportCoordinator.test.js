@@ -5,8 +5,11 @@ import {
   IOS_POST_KEYBOARD_QUARANTINE_MS,
   IOS_VIEWPORT_COORDINATOR_API_KEY,
   IOS_VIEWPORT_RESET_CONTENT,
+  IOS_VIEWPORT_STABLE_EVENT,
+  IOS_VIEWPORT_EVIDENCE_SOURCES,
   IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX,
   IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO,
+  validateTrustedViewportEvidenceSource,
 } from "./iosViewportCoordinator.js";
 import {
   getIOSViewportWidthBucket,
@@ -170,7 +173,7 @@ describe("iOS viewport coordinator", () => {
     expect(coordinator.requestNormalization({ force: true, reason: "test" })).toBe(true);
     await vi.advanceTimersByTimeAsync(80);
     expect(document.querySelector('meta[name="viewport"]').content).toBe(IOS_VIEWPORT_RESET_CONTENT);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(101);
     expect(document.querySelector('meta[name="viewport"]').content).not.toContain("maximum-scale");
   });
 
@@ -179,6 +182,25 @@ describe("iOS viewport coordinator", () => {
     expect(IOS_POST_KEYBOARD_QUARANTINE_MS).toBeLessThanOrEqual(800);
     expect(IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX).toBe(64);
     expect(IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO).toBe(0.08);
+  });
+
+  test("rejects paint, screen, and provisional evidence at the trusted promotion boundary", () => {
+    expect(validateTrustedViewportEvidenceSource(
+      IOS_VIEWPORT_EVIDENCE_SOURCES.cleanStableSamples,
+    )).toBe(true);
+    expect(validateTrustedViewportEvidenceSource(
+      IOS_VIEWPORT_EVIDENCE_SOURCES.persistedGeometry,
+    )).toBe(true);
+    for (const source of [
+      IOS_VIEWPORT_EVIDENCE_SOURCES.physicalPaintFloor,
+      IOS_VIEWPORT_EVIDENCE_SOURCES.provisionalLayout,
+      IOS_VIEWPORT_EVIDENCE_SOURCES.screenGeometry,
+      IOS_VIEWPORT_EVIDENCE_SOURCES.largeViewportProbe,
+    ]) {
+      expect(() => validateTrustedViewportEvidenceSource(source)).toThrow(
+        "Untrusted iOS viewport evidence cannot be promoted",
+      );
+    }
   });
 
   test("does not accept a repeated keyboard-shrunken layout height after blur", async () => {
@@ -191,7 +213,7 @@ describe("iOS viewport coordinator", () => {
       settleTimeoutMs: 240,
     });
     coordinator.start();
-    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersByTimeAsync(80);
     const trustedHeight = coordinator.getSnapshot().stableViewport.height;
 
     const input = document.querySelector("input");
@@ -255,7 +277,7 @@ describe("iOS viewport coordinator", () => {
       platform: "ipad",
     });
     coordinator.start();
-    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersByTimeAsync(80);
     const trustedHeight = coordinator.getSnapshot().stableViewport.height;
 
     const input = document.querySelector("input");
@@ -301,7 +323,7 @@ describe("iOS viewport coordinator", () => {
       platform: "ipad",
     });
     coordinator.start();
-    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersByTimeAsync(80);
 
     Object.defineProperty(window, "orientation", { configurable: true, value: 90 });
     Object.defineProperty(document.documentElement, "clientWidth", { configurable: true, value: 844 });
@@ -331,7 +353,7 @@ describe("iOS viewport coordinator", () => {
       settleTimeoutMs: 120,
     });
     coordinator.start();
-    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersByTimeAsync(80);
 
     const input = document.querySelector("input");
     input.focus();
@@ -398,6 +420,9 @@ describe("iOS viewport coordinator", () => {
     expect(coordinator.getSnapshot()).toMatchObject({
       state: "initial_suspicious_shrink",
       initialSuspiciousShrink: true,
+      trustedLayoutVerified: true,
+      trustedEvidenceSource: "persisted_geometry",
+      layoutVerificationState: "persisted_geometry_restored",
       restoreGateOpen: false,
       physicalPaintFloorHeight: 844,
     });
@@ -406,6 +431,8 @@ describe("iOS viewport coordinator", () => {
     await vi.advanceTimersByTimeAsync(140);
     expect(coordinator.getSnapshot()).toMatchObject({
       stableViewport: expect.objectContaining({ height: 844 }),
+      trustedLayoutVerified: true,
+      trustedEvidenceSource: "persisted_geometry",
       restoreGateOpen: true,
     });
   });
@@ -413,6 +440,9 @@ describe("iOS viewport coordinator", () => {
   test("first standalone launch uses the physical screen floor until a clean 844px sample is stored", async () => {
     vi.stubGlobal("matchMedia", vi.fn((query) => ({ matches: query === "(display-mode: standalone)" })));
     const visualViewport = installViewport({ height: 600, screenHeight: 844 });
+    const stableEvent = vi.fn();
+    window.addEventListener(IOS_VIEWPORT_STABLE_EVENT, stableEvent);
+    const storageWrite = vi.spyOn(Storage.prototype, "setItem");
     const coordinator = createIOSViewportCoordinator({
       windowObject: window,
       documentObject: document,
@@ -423,6 +453,8 @@ describe("iOS viewport coordinator", () => {
     coordinator.start();
     expect(coordinator.getSnapshot()).toMatchObject({
       state: "initial_suspicious_shrink",
+      trustedLayoutVerified: false,
+      layoutVerificationState: "provisional",
       physicalPaintFloorHeight: 844,
       restoreGateOpen: false,
     });
@@ -435,10 +467,56 @@ describe("iOS viewport coordinator", () => {
 
     expect(coordinator.getSnapshot()).toMatchObject({
       state: "stable",
+      trustedLayoutVerified: true,
+      layoutVerificationState: "trusted",
+      trustedEvidenceSource: "clean_stable_samples",
       stableViewport: expect.objectContaining({ height: 844 }),
       restoreGateOpen: true,
     });
     expect(JSON.parse(window.localStorage.getItem(IOS_VIEWPORT_GEOMETRY_STORAGE_KEY)).records[0])
       .toMatchObject({ trusted_layout_height: 844, physical_paint_floor_height: 844 });
+    visualViewport.update({ height: 844, scale: 1, offsetTop: 0, offsetLeft: 0 });
+    await vi.advanceTimersByTimeAsync(80);
+    expect(storageWrite.mock.calls.filter(([key]) => key === IOS_VIEWPORT_GEOMETRY_STORAGE_KEY))
+      .toHaveLength(1);
+    expect(stableEvent).toHaveBeenCalledTimes(1);
+    window.removeEventListener(IOS_VIEWPORT_STABLE_EVENT, stableEvent);
+  });
+
+  test("a suspicious first layout without geometry becomes paint-ready but never trusted at timeout", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query) => ({ matches: query === "(display-mode: standalone)" })));
+    installViewport({ height: 600, screenHeight: 844 });
+    const stableEvent = vi.fn();
+    window.addEventListener(IOS_VIEWPORT_STABLE_EVENT, stableEvent);
+    const storageWrite = vi.spyOn(Storage.prototype, "setItem");
+    const coordinator = createIOSViewportCoordinator({
+      windowObject: window,
+      documentObject: document,
+      platform: "iphone",
+      settleTimeoutMs: 100,
+      authExitTimeoutMs: 120,
+    });
+
+    coordinator.start();
+    const authSettled = coordinator.settleAuthExit();
+    await vi.advanceTimersByTimeAsync(160);
+
+    expect(coordinator.getSnapshot()).toMatchObject({
+      state: "paint_ready_layout_unverified",
+      layoutVerificationState: "paint_ready_layout_unverified",
+      trustedLayoutVerified: false,
+      provisionalViewport: expect.objectContaining({ width: 390, height: 600 }),
+      physicalPaintFloorHeight: 844,
+      restoreGateOpen: false,
+    });
+    expect(coordinator.getSnapshot().stableViewport.height).toBe(600);
+    expect(window.localStorage.getItem(IOS_VIEWPORT_GEOMETRY_STORAGE_KEY)).toBeNull();
+    expect(storageWrite).not.toHaveBeenCalledWith(
+      IOS_VIEWPORT_GEOMETRY_STORAGE_KEY,
+      expect.any(String),
+    );
+    expect(stableEvent).not.toHaveBeenCalled();
+    await expect(authSettled).resolves.toBe(false);
+    window.removeEventListener(IOS_VIEWPORT_STABLE_EVENT, stableEvent);
   });
 });

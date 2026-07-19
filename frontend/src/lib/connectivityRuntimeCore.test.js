@@ -4,6 +4,7 @@ import {
   CONNECTION_RUNTIME_CONTRACT,
   createConnectivityRuntime,
   createOfflineDocumentStateMachine,
+  getRecoveryDecision,
 } from "./connectivityRuntimeCore.js";
 
 
@@ -102,5 +103,65 @@ describe("offline document deadline state machine", () => {
       visibleState: "oops_latched",
       oopsLatched: true,
     });
+  });
+});
+
+
+describe("offline recovery evidence policy", () => {
+  const healthyServices = {
+    frontendHealthy: true,
+    backendHealthy: true,
+    appShellHealthy: true,
+  };
+
+  test("automatic recovery still requires public endpoint success", () => {
+    expect(getRecoveryDecision({
+      trigger: "automatic",
+      internetState: "unknown",
+      publicEvidenceReason: "probe_failure_unverified",
+      ...healthyServices,
+    })).toEqual({ accepted: false, recoveryMode: null });
+  });
+
+  test.each([
+    ["probe_failure_unverified", "unknown"],
+    ["probe_failure_trusted", "offline"],
+    ["probes_disabled", "unknown"],
+  ])("manual Retry permits service-only recovery for %s", (publicEvidenceReason, internetState) => {
+    expect(getRecoveryDecision({
+      trigger: "manual_retry",
+      internetState,
+      publicEvidenceReason,
+      ...healthyServices,
+    })).toEqual({ accepted: true, recoveryMode: "manual_service_only" });
+  });
+
+  test("manual Retry cannot bypass an explicit browser offline signal", () => {
+    expect(getRecoveryDecision({
+      trigger: "manual_retry",
+      internetState: "offline",
+      publicEvidenceReason: "browser_explicit_offline",
+      ...healthyServices,
+    })).toEqual({ accepted: false, recoveryMode: null });
+  });
+
+  test("manual Retry still requires every Elvern service layer", () => {
+    expect(getRecoveryDecision({
+      trigger: "manual_retry",
+      internetState: "unknown",
+      publicEvidenceReason: "probes_disabled",
+      frontendHealthy: true,
+      backendHealthy: true,
+      appShellHealthy: false,
+    })).toEqual({ accepted: false, recoveryMode: null });
+  });
+
+  test("public endpoint success retains verified-public recovery", () => {
+    expect(getRecoveryDecision({
+      trigger: "visibility_return",
+      internetState: "online",
+      publicEvidenceReason: "endpoint_success",
+      ...healthyServices,
+    })).toEqual({ accepted: true, recoveryMode: "verified_public" });
   });
 });

@@ -93,7 +93,7 @@ describe("static connection shell contract", () => {
     expect(indexHtml).toContain("__elvernConnectionStartedAt = Date.now()");
   });
 
-  test("offline recovery requires the four-layer transaction and never reloads on local health alone", () => {
+  test("offline recovery keeps automatic four-layer verification and scopes service-only recovery to Retry", () => {
     expect(indexHtml).toContain("__elvernAppBootstrapStarted");
     expect(indexHtml).toContain("__elvernRuntimeReady");
     expect(indexHtml).not.toContain("window.location.reload()");
@@ -105,6 +105,13 @@ describe("static connection shell contract", () => {
     expect(offlineHtml).toContain("contract.offlineShellHeader");
     expect(offlineHtml).toContain("contract.recoveryMessageType");
     expect(offlineHtml).toContain("await armRecoveryNavigation()");
+    expect(offlineHtml).toContain("runtime.getRecoveryDecision");
+    expect(offlineHtml).toContain("contract.recoveryTriggers.manualRetry");
+    expect(offlineHtml).toContain("contract.recoveryTriggers.automatic");
+    expect(offlineHtml).toContain("contract.publicEvidenceReasons.browserExplicitOffline");
+    expect(offlineHtml).toContain('payload?.durability === "durable"');
+    expect(offlineHtml).not.toContain("response.text(");
+    expect(offlineHtml).not.toContain("response.json(");
   });
 
   test("only the stamped offline runtime performs static public probes", () => {
@@ -133,7 +140,11 @@ describe("static connection shell contract", () => {
     expect(serviceWorker).toContain(CONNECTION_RUNTIME_CONTRACT.recoveryMessageType);
     expect(serviceWorker).toContain(CONNECTION_RUNTIME_CONTRACT.recoveryMessageAckType);
     expect(serviceWorker).toContain(CONNECTION_RUNTIME_CONTRACT.offlineShellHeader);
-    expect(serviceWorker).toContain("recoveryNavigationByClientId");
+    expect(serviceWorker).toContain('const RECOVERY_ARM_DATABASE_NAME = "elvern-service-worker-state-v1"');
+    expect(serviceWorker).toContain('const RECOVERY_ARM_STORE_NAME = "recovery_arms"');
+    expect(serviceWorker).toContain("consumeDurableRecoveryArm");
+    expect(serviceWorker).toContain('acknowledge(true, "durable")');
+    expect(serviceWorker).not.toContain("recoveryNavigationByClientId");
     expect(serviceWorker).toContain("event.clientId");
     expect(serviceWorker).not.toContain("isElvernOfflineCache(key) && key !== OFFLINE_CACHE_NAME");
   });

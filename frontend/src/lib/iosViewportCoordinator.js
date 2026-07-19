@@ -16,6 +16,19 @@ export const IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX = 64;
 export const IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO = 0.08;
 export const IOS_POST_KEYBOARD_QUARANTINE_MS = 700;
 export const IOS_VIEWPORT_SETTLE_MAX_MS = 1_500;
+export const IOS_VIEWPORT_EVIDENCE_SOURCES = Object.freeze({
+  cleanStableSamples: "clean_stable_samples",
+  persistedGeometry: "persisted_geometry",
+  provisionalLayout: "provisional_layout",
+  physicalPaintFloor: "physical_paint_floor",
+  screenGeometry: "screen_geometry",
+  largeViewportProbe: "large_viewport_probe",
+});
+
+const TRUSTED_VIEWPORT_EVIDENCE_SOURCES = new Set([
+  IOS_VIEWPORT_EVIDENCE_SOURCES.cleanStableSamples,
+  IOS_VIEWPORT_EVIDENCE_SOURCES.persistedGeometry,
+]);
 
 const DEFAULT_STABLE_SAMPLE_COUNT = 2;
 const DEFAULT_STABLE_SAMPLE_DELAY_MS = 32;
@@ -138,6 +151,17 @@ function nextAnimationFrame(windowObject) {
 }
 
 
+export function validateTrustedViewportEvidenceSource(source) {
+  if (TRUSTED_VIEWPORT_EVIDENCE_SOURCES.has(source)) {
+    return true;
+  }
+  if (import.meta.env?.DEV || import.meta.env?.MODE === "test") {
+    throw new Error(`Untrusted iOS viewport evidence cannot be promoted: ${String(source)}`);
+  }
+  return false;
+}
+
+
 export function createIOSViewportCoordinator({
   windowObject = globalThis.window,
   documentObject = globalThis.document,
@@ -160,6 +184,7 @@ export function createIOSViewportCoordinator({
   const originalViewportContent = viewportMeta?.getAttribute("content") || IOS_VIEWPORT_BASE_CONTENT;
   const listeners = new Set();
   const trustedViewportByOrientation = new Map();
+  const trustedEvidenceByOrientation = new Map();
   const standaloneDisplay = isStandaloneDisplay(windowObject, navigatorObject);
   const displayMode = standaloneDisplay ? "standalone" : "browser";
   const initialLayout = readLayoutViewport(windowObject, documentObject);
@@ -212,6 +237,10 @@ export function createIOSViewportCoordinator({
       height: persistedGeometry.trusted_layout_height,
     }
     : null;
+  if (restoredViewport) {
+    trustedViewportByOrientation.set(initialOrientation, restoredViewport);
+    trustedEvidenceByOrientation.set(initialOrientation, IOS_VIEWPORT_EVIDENCE_SOURCES.persistedGeometry);
+  }
   let started = false;
   let pendingFrame = 0;
   let stableSampleTimer = 0;
@@ -236,6 +265,11 @@ export function createIOSViewportCoordinator({
   let suspiciousShrink = false;
   let orientationChanging = false;
   let settling = isIOS;
+  let trustedLayoutVerified = !isIOS || Boolean(restoredViewport);
+  let trustedEvidenceSource = restoredViewport
+    ? IOS_VIEWPORT_EVIDENCE_SOURCES.persistedGeometry
+    : (!isIOS ? IOS_VIEWPORT_EVIDENCE_SOURCES.cleanStableSamples : null);
+  let provisionalViewport = initialLayout;
   let lastDebugAt = 0;
   let snapshot = {
     isIOS,
@@ -246,6 +280,11 @@ export function createIOSViewportCoordinator({
         : (restoredViewport ? "geometry_restored" : "initial_provisional"))
       : "stable",
     stableViewport: restoredViewport || initialLayout,
+    provisionalViewport: initialLayout,
+    trustedViewport: restoredViewport || (!isIOS ? initialLayout : null),
+    trustedLayoutVerified,
+    trustedEvidenceSource,
+    layoutVerificationState: restoredViewport ? "persisted_geometry_restored" : "provisional",
     liveViewport: initialLive,
     keyboardOpen: false,
     editableFocused: false,
@@ -261,7 +300,9 @@ export function createIOSViewportCoordinator({
 
   function emit(next) {
     const previousGate = snapshot.restoreGateOpen;
-    snapshot = { ...snapshot, ...next, resetGeneration };
+    const candidate = { ...snapshot, ...next, resetGeneration };
+    candidate.restoreGateOpen = Boolean(candidate.restoreGateOpen && candidate.trustedLayoutVerified);
+    snapshot = candidate;
     listeners.forEach((listener) => listener(snapshot));
     if (!previousGate && snapshot.restoreGateOpen) {
       windowObject?.dispatchEvent?.(new CustomEvent(IOS_VIEWPORT_STABLE_EVENT));
@@ -341,6 +382,11 @@ export function createIOSViewportCoordinator({
       clientHeight: layout.height,
       visualViewport: { ...snapshot.liveViewport },
       stableViewport: { ...snapshot.stableViewport },
+      provisionalViewport: { ...snapshot.provisionalViewport },
+      trustedViewport: snapshot.trustedViewport ? { ...snapshot.trustedViewport } : null,
+      trustedLayoutVerified: snapshot.trustedLayoutVerified,
+      trustedEvidenceSource: snapshot.trustedEvidenceSource,
+      layoutVerificationState: snapshot.layoutVerificationState,
       keyboardOpen: snapshot.keyboardOpen,
       editableFocused: snapshot.editableFocused,
       postKeyboardQuarantine: snapshot.postKeyboardQuarantine,
@@ -359,15 +405,21 @@ export function createIOSViewportCoordinator({
     focusAutozoom,
     postKeyboardQuarantine,
     hasSuspiciousShrink,
+    verificationState,
+    verified,
   }) {
     if (orientationChanging) return "orientation_changing";
-    if (initialSuspiciousShrink) return "initial_suspicious_shrink";
     if (focusAutozoom) return "focus_autozoom";
     if (keyboardOpen) return "keyboard_open";
     if (editableFocused) return "editable_focused";
     if (postKeyboardQuarantine) return "post_keyboard_quarantine";
     if (hasSuspiciousShrink) return "suspicious_shrink";
+    if (!verified && verificationState === "paint_ready_layout_unverified") {
+      return "paint_ready_layout_unverified";
+    }
+    if (initialSuspiciousShrink) return "initial_suspicious_shrink";
     if (settling) return "settling";
+    if (!verified) return verificationState || "provisional";
     return "stable";
   }
 
@@ -378,11 +430,57 @@ export function createIOSViewportCoordinator({
     }
   }
 
-  function markStable(viewport, eventType) {
+  function setProvisionalLayout(viewport, reason, eventType) {
+    provisionalViewport = {
+      width: Math.max(0, Math.round(toFinite(viewport?.width, 0))),
+      height: Math.max(0, Math.round(toFinite(viewport?.height, 0))),
+    };
+    settling = false;
+    orientationChanging = false;
+    stableCandidate = null;
+    stableCandidateCount = 0;
+    if (stableSampleTimer) {
+      windowObject?.clearTimeout?.(stableSampleTimer);
+      stableSampleTimer = 0;
+    }
+    clearSettleFallback();
+    const orientation = orientationFor(provisionalViewport, windowObject);
+    const currentTrusted = trustedViewportByOrientation.get(orientation) || null;
+    trustedLayoutVerified = !isIOS || Boolean(currentTrusted);
+    trustedEvidenceSource = trustedEvidenceByOrientation.get(orientation) || null;
+    const next = {
+      ...snapshot,
+      stableViewport: currentTrusted || provisionalViewport,
+      provisionalViewport,
+      trustedViewport: currentTrusted,
+      state: reason,
+      layoutVerificationState: reason,
+      trustedLayoutVerified,
+      trustedEvidenceSource,
+      restoreGateOpen: false,
+      physicalPaintFloorHeight,
+    };
+    applyRootMetrics(next);
+    emit(next);
+    debug(eventType);
+  }
+
+  function promoteTrustedLayout(viewport, evidenceSource, eventType, { persist = true } = {}) {
+    if (!validateTrustedViewportEvidenceSource(evidenceSource)) {
+      return false;
+    }
     const orientation = orientationFor(viewport, windowObject);
+    const previousTrusted = trustedViewportByOrientation.get(orientation);
+    const trustedChanged = !previousTrusted
+      || previousTrusted.width !== viewport.width
+      || previousTrusted.height !== viewport.height;
     initialSuspiciousShrink = false;
     physicalPaintFloorHeight = Math.max(physicalPaintFloorHeight, viewport.height);
     trustedViewportByOrientation.set(orientation, viewport);
+    trustedEvidenceByOrientation.set(orientation, evidenceSource);
+    trustedLayoutVerified = true;
+    trustedEvidenceSource = evidenceSource;
+    provisionalViewport = viewport;
     settling = false;
     orientationChanging = false;
     suspiciousShrink = false;
@@ -399,6 +497,13 @@ export function createIOSViewportCoordinator({
     const next = {
       ...snapshot,
       stableViewport: viewport,
+      provisionalViewport: viewport,
+      trustedViewport: viewport,
+      trustedLayoutVerified: true,
+      trustedEvidenceSource: evidenceSource,
+      layoutVerificationState: evidenceSource === IOS_VIEWPORT_EVIDENCE_SOURCES.persistedGeometry
+        ? "persisted_geometry_restored"
+        : "trusted",
       state: "stable",
       keyboardOpen: false,
       editableFocused: false,
@@ -407,10 +512,15 @@ export function createIOSViewportCoordinator({
       suspiciousShrink: false,
       initialSuspiciousShrink: false,
       physicalPaintFloorHeight,
-      geometryRestored: false,
+      geometryRestored: evidenceSource === IOS_VIEWPORT_EVIDENCE_SOURCES.persistedGeometry,
       restoreGateOpen: true,
     };
-    if (isIOS) {
+    if (
+      isIOS
+      && persist
+      && evidenceSource === IOS_VIEWPORT_EVIDENCE_SOURCES.cleanStableSamples
+      && trustedChanged
+    ) {
       writeIOSViewportGeometry({
         storage: windowObject?.localStorage,
         record: {
@@ -431,6 +541,7 @@ export function createIOSViewportCoordinator({
     applyRootMetrics(next);
     emit(next);
     debug(eventType);
+    return true;
   }
 
   function beginSettling(eventType = "settling") {
@@ -451,14 +562,22 @@ export function createIOSViewportCoordinator({
       const orientation = orientationFor(layout, windowObject);
       const trusted = trustedViewportByOrientation.get(orientation)
         || (preFocusTrustedViewport?.orientation === orientation ? preFocusTrustedViewport : null)
-        || restoredViewport
-        || snapshot.stableViewport;
-      const fallback = initialSuspiciousShrink
-        ? (restoredViewport || { width: layout.width, height: physicalPaintFloorHeight })
-        : (authContaminationActive || suspiciousShrink
-        ? { width: trusted.width, height: trusted.height }
-        : (layout.height > 0 ? layout : { width: trusted.width, height: trusted.height }));
-      markStable(fallback, `${eventType}_fallback`);
+        || null;
+      const trustedEvidence = trustedEvidenceByOrientation.get(orientation) || trustedEvidenceSource;
+      if (trusted) {
+        promoteTrustedLayout(
+          { width: trusted.width, height: trusted.height },
+          trustedEvidence,
+          `${eventType}_trusted_fallback`,
+          { persist: false },
+        );
+        return;
+      }
+      setProvisionalLayout(
+        layout.height > 0 ? layout : provisionalViewport,
+        "paint_ready_layout_unverified",
+        `${eventType}_provisional_fallback`,
+      );
     }, settleTimeoutMs) || 0;
     emit({
       state: orientationChanging
@@ -490,7 +609,9 @@ export function createIOSViewportCoordinator({
       focusAutozoomObserved = true;
     }
     const orientation = orientationFor(layout, windowObject);
-    const trustedViewport = trustedViewportByOrientation.get(orientation) || snapshot.stableViewport;
+    const trustedViewport = trustedViewportByOrientation.get(orientation) || null;
+    trustedLayoutVerified = !isIOS || Boolean(trustedViewport);
+    trustedEvidenceSource = trustedEvidenceByOrientation.get(orientation) || null;
     const preFocusBaseline = preFocusTrustedViewport?.orientation === orientation
       ? preFocusTrustedViewport
       : null;
@@ -564,7 +685,11 @@ export function createIOSViewportCoordinator({
         stableCandidateCount = 1;
       }
       if (stableCandidateCount >= stableSampleCount) {
-        markStable(candidate, eventType);
+        promoteTrustedLayout(
+          candidate,
+          IOS_VIEWPORT_EVIDENCE_SOURCES.cleanStableSamples,
+          eventType,
+        );
         return;
       }
       if (!stableSampleTimer) {
@@ -583,9 +708,16 @@ export function createIOSViewportCoordinator({
         }, stableSampleDelayMs) || 0;
       }
     }
-    const stableViewport = trustedViewport;
+    provisionalViewport = candidate;
+    const stableViewport = trustedViewport || provisionalViewport;
+    const nextLayoutVerificationState = trustedLayoutVerified
+      ? snapshot.layoutVerificationState
+      : (snapshot.layoutVerificationState === "paint_ready_layout_unverified"
+        ? "paint_ready_layout_unverified"
+        : (canTrustInitialCandidate ? "verifying_clean_samples" : "provisional"));
     const restoreGateOpen = !isIOS || (
-      !settling
+      trustedLayoutVerified
+      && !settling
       && !orientationChanging
       && !editableFocused
       && !keyboardOpen
@@ -596,6 +728,11 @@ export function createIOSViewportCoordinator({
     const next = {
       ...snapshot,
       stableViewport,
+      provisionalViewport,
+      trustedViewport,
+      trustedLayoutVerified,
+      trustedEvidenceSource,
+      layoutVerificationState: nextLayoutVerificationState,
       liveViewport: live,
       keyboardOpen,
       editableFocused,
@@ -611,6 +748,8 @@ export function createIOSViewportCoordinator({
         focusAutozoom,
         postKeyboardQuarantine,
         hasSuspiciousShrink: suspiciousShrink,
+        verificationState: nextLayoutVerificationState,
+        verified: trustedLayoutVerified,
       }),
     };
     applyRootMetrics(next);
@@ -639,8 +778,8 @@ export function createIOSViewportCoordinator({
     if (authFocusActive) {
       const layout = readLayoutViewport(windowObject, documentObject);
       const orientation = orientationFor(layout, windowObject);
-      const trusted = trustedViewportByOrientation.get(orientation) || snapshot.stableViewport;
-      preFocusTrustedViewport = {
+      const trusted = trustedViewportByOrientation.get(orientation) || null;
+      preFocusTrustedViewport = trusted ? {
         orientation,
         width: trusted.width,
         height: trusted.height,
@@ -648,7 +787,7 @@ export function createIOSViewportCoordinator({
         offsetTop: focusBaseline.offsetTop,
         timestamp: Date.now(),
         standalone: standaloneDisplay,
-      };
+      } : null;
       authContaminationActive = true;
       postKeyboardQuarantineUntil = 0;
       suspiciousShrink = false;

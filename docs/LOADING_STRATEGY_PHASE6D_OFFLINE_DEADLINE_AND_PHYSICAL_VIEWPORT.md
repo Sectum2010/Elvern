@@ -291,3 +291,21 @@ relocation rewrites, poster queue/prewarming or quality changes, search/v2
 search, pagination, virtualization, resource detection/adaptation,
 cross-platform smart-poster scheduling, cross-device revision, pinch policy,
 database schema changes, or deployment-environment changes.
+
+## Phase 6E Correction
+
+Phase 6E found one remaining trust-boundary bug in the Phase 6D settle-timeout
+fallback: with no matching persisted geometry, the physical paint floor could
+still be passed through the old stable-promotion path. Phase 6E separates
+provisional painting from trusted promotion. The paint floor never writes
+geometry, dispatches the stable event, opens the restore gate, or enters anchor
+math. Only validated persisted geometry and repeated clean layout/live samples
+may become trusted.
+
+Phase 6E also preserves strict public-Internet evidence for automatic recovery
+while allowing a user-initiated Retry to use verified frontend, backend, and
+real App Shell evidence when public probes are blocked or disabled. Explicit
+browser offline remains non-bypassable. Recovery arms are now 15-second,
+one-shot IndexedDB records instead of worker-process memory, so an ACK remains
+valid across worker restart. See
+`docs/LOADING_STRATEGY_PHASE6E_TRUST_AND_DURABLE_RECOVERY.md`.
