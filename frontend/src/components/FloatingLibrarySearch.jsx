@@ -93,9 +93,11 @@ export function FloatingLibrarySearch({
           <label className="floating-library-search__field">
             <span className="sr-only">{label}</span>
             <input
+              aria-label={label}
               ref={inputRef}
               autoComplete="off"
               disabled={locked}
+              inputMode="search"
               onChange={(event) => onChange(event.target.value, {
                 action: "input",
                 previousValue: value,
@@ -109,10 +111,11 @@ export function FloatingLibrarySearch({
               }}
               onKeyDown={handleKeyDown}
               placeholder={placeholder}
-              type="search"
+              role="searchbox"
+              type="text"
               value={value}
             />
-            {value ? (
+            {value && !desktopInteractionMode ? (
               <button
                 aria-label="Clear search"
                 className="floating-library-search__clear"

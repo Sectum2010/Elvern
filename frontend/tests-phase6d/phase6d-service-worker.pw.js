@@ -12,9 +12,12 @@ async function installConnectedRoutes(page) {
   for (const [url, status] of PUBLIC_PROBES) {
     await page.route(url, (route) => route.fulfill({ status, body: "" }));
   }
-  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({
+    status: 204, body: "", headers: { "X-Elvern-Frontend-Health": "1" },
+  }));
   await page.route("**/health", (route) => route.fulfill({
     status: 200,
+    headers: { "X-Elvern-Backend-Health": "1" },
     contentType: "application/json",
     body: '{"status":"ok"}',
   }));
@@ -72,9 +75,12 @@ test("blocked public probes require Retry before service-only recovery", async (
       ? route.fulfill({ status, body: "" })
       : route.abort("failed"));
   }
-  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({
+    status: 204, body: "", headers: { "X-Elvern-Frontend-Health": "1" },
+  }));
   await page.route("**/health", (route) => route.fulfill({
     status: 200,
+    headers: { "X-Elvern-Backend-Health": "1" },
     contentType: "application/json",
     body: '{"status":"ok"}',
   }));

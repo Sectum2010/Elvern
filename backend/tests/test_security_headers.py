@@ -20,6 +20,8 @@ def test_health_response_includes_global_security_headers(client) -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-elvern-backend-health"] == "1"
     _assert_global_security_headers(response)
 
 

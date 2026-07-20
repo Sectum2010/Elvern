@@ -10,6 +10,7 @@ import {
   LIBRARY_QUERY_STALE_TIME_MS,
   normalizeLibraryQueryIdentity,
   patchLibraryProgressCaches,
+  patchLibraryProgressStateCaches,
 } from "./libraryQueries";
 import { queryClient } from "./queryClient";
 
@@ -203,5 +204,38 @@ describe("library query identity", () => {
       predicate: expect.any(Function),
       type: "active",
     });
+  });
+
+  test("authoritative positive-to-zero reset patches all entities and silently refreshes membership", async () => {
+    const v1Key = buildLibraryQueryKey({ userId: 1, role: "user", category: "movies" });
+    const v2Key = buildLibraryV2QueryKey({ userId: 1, role: "user", category: "movies" });
+    queryClient.setQueryData(v1Key, {
+      items: [{ id: 42, progress_seconds: 120, progress_duration_seconds: 900, completed: false }],
+      continue_watching: [{ id: 42, progress_seconds: 120, progress_duration_seconds: 900, completed: false }],
+    });
+    queryClient.setQueryData(v2Key, {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 120, progress_duration_seconds: 900, completed: true } },
+      sections: { item_ids: [42], continue_watching_item_ids: [42] },
+    });
+    const refetchSpy = vi.spyOn(queryClient, "refetchQueries").mockResolvedValue();
+
+    const result = await patchLibraryProgressStateCaches({
+      items: [{ id: 42, progress_seconds: 0, progress_duration_seconds: 901, completed: false }],
+    });
+
+    expect(result).toEqual({ patchedQueryCount: 2, membershipMayHaveChanged: true });
+    expect(queryClient.getQueryData(v1Key).items[0]).toMatchObject({
+      progress_seconds: 0,
+      progress_duration_seconds: 901,
+      completed: false,
+    });
+    expect(queryClient.getQueryData(v1Key).continue_watching[0].progress_seconds).toBe(0);
+    expect(queryClient.getQueryData(v2Key).items_by_id["42"]).toMatchObject({
+      progress_seconds: 0,
+      progress_duration_seconds: 901,
+      completed: false,
+    });
+    expect(refetchSpy).toHaveBeenCalledTimes(1);
   });
 });

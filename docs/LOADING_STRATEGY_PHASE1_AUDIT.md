@@ -1,5 +1,10 @@
 # Loading Strategy Phase 1: Future-Phase Audit
 
+**Current status / superseded by:** Phase 1 caching and card-poster work is
+implemented. Its 300 ms search-debounce design was superseded by Phase 7's
+Enter-only committed search. Phase 7B hardens revision, search ownership, and
+browser automation; this document remains historical benchmark/design evidence.
+
 This audit is based on the repository state reviewed during Phase 1. It records future work only. Phase 1 does not implement a cross-platform poster scheduler, virtualization, adaptive device/network profiles, or a lightweight backend library API.
 
 ## Evidence Labels

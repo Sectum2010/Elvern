@@ -4,6 +4,12 @@ Status: implemented locally on 2026-07-19. Full validation and real-device
 verification status are reported separately at the end of the implementation
 round.
 
+**Current status / superseded by:** Phase 7B hardens zero-state progress,
+revision writes/triggers, poster filesystem changes, repeated runtime outages,
+health markers, controller-owned search locks, and the opt-in browser harness.
+The frontend revision mode remains `off` until all Phase 7B Gates A-F pass.
+See `LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`.
+
 ## Scope
 
 Phase 7 contains five deliberately independent changes:

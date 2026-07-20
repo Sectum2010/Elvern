@@ -19,6 +19,8 @@ export const CONNECTION_RUNTIME_CONTRACT = Object.freeze({
   manualServiceRecoveryStorageKey: "elvern-manual-service-recovery-v1",
   appShellHeader: "X-Elvern-App-Shell",
   offlineShellHeader: "X-Elvern-Offline-Shell",
+  frontendHealthHeader: "X-Elvern-Frontend-Health",
+  backendHealthHeader: "X-Elvern-Backend-Health",
   recoveryMessageType: "ELVERN_ARM_RECOVERY_NAVIGATION",
   recoveryMessageAckType: "ELVERN_RECOVERY_NAVIGATION_ARMED",
   recoveryTriggers: Object.freeze({
@@ -46,6 +48,7 @@ export const CONNECTION_RUNTIME_CONTRACT = Object.freeze({
     timeout: "timeout",
     aborted: "aborted",
     markerMissing: "marker_missing",
+    unexpectedHttpStatus: "unexpected_http_status",
   }),
   fastOopsReasons: Object.freeze({
     deadlineTimeout: "deadline_timeout",

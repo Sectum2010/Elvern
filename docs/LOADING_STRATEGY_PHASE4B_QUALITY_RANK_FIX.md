@@ -1,5 +1,9 @@
 # Loading Strategy Phase 4B: Server-Authoritative Quality Rank
 
+**Current status / superseded by:** the quality-rank authority and v2 activation
+remain current. The old Local/Cloud debounce-era wording is superseded by Phase
+7 Enter-only committed search. Phase 7B preserves this rank contract unchanged.
+
 ## Scope
 
 Phase 4B fixes one Phase 4 rollout blocker: the same media item could receive different visible quality ranks by role or API version. After that fix and final contract hardening, v2 is now the frontend default for non-search Root, Local, and Cloud views. This activation does not change search, pagination, virtualization, poster quality, playback, relocation, orientation restore, or scheduler behavior.

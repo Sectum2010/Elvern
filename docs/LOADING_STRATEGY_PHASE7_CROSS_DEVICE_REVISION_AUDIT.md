@@ -2,7 +2,10 @@
 
 Status: historical Phase 6E audit. The recommended endpoint, layered opaque
 revision counters, client polling, and progress-state patch were implemented
-by Phase 7. See `LOADING_STRATEGY_PHASE7_COMMITTED_SEARCH_FAST_OOPS_REVISION.md`.
+by Phase 7. Phase 7B implements zero-state progress, revision-off zero-write
+semantics, versioned narrow triggers, transaction de-duplication, poster
+fingerprints, and age-query batching. See
+`LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`. Activation remains gated.
 
 ## Confirmed Current Behavior
 

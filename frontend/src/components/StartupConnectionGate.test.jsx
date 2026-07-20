@@ -33,6 +33,33 @@ function installShellFixture() {
 }
 
 
+function backendHealthResponse(status = 200) {
+  return new Response("ok", {
+    status,
+    headers: { "X-Elvern-Backend-Health": "1" },
+  });
+}
+
+
+function frontendHealthResponse(status = 204) {
+  return new Response(null, {
+    status,
+    headers: { "X-Elvern-Frontend-Health": "1" },
+  });
+}
+
+
+function healthyServiceFetch(path) {
+  if (path === "/_elvern/frontend-health") {
+    return Promise.resolve(frontendHealthResponse());
+  }
+  if (path === "/health") {
+    return Promise.resolve(backendHealthResponse());
+  }
+  return Promise.resolve(new Response(null, { status: 204 }));
+}
+
+
 describe("StartupConnectionGate", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -74,7 +101,7 @@ describe("StartupConnectionGate", () => {
 
   test("does not reveal the shell during a fast healthy startup", async () => {
     const container = installShellFixture();
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn(healthyServiceFetch);
     const controller = createStartupConnectionController({
       fetchImpl,
       requireApplicationReady: true,
@@ -107,7 +134,7 @@ describe("StartupConnectionGate", () => {
 
   test("health recovery automatically enters the application", async () => {
     const container = installShellFixture();
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn(healthyServiceFetch);
     const controller = createStartupConnectionController({ fetchImpl });
     render(<StartupConnectionGate controller={controller}><p>App ready</p></StartupConnectionGate>, { container });
 
@@ -118,7 +145,7 @@ describe("StartupConnectionGate", () => {
 
   test("health mounts auth flow but keeps the shell until an HTTP response arrives", async () => {
     const container = installShellFixture();
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn(healthyServiceFetch);
     const controller = createStartupConnectionController({
       fetchImpl,
       requireApplicationReady: true,
@@ -157,10 +184,10 @@ describe("StartupConnectionGate", () => {
         return Promise.resolve({ status: 200, ok: true });
       }
       if (path === "/_elvern/frontend-health") {
-        return Promise.resolve(new Response(null, { status: 204 }));
+        return Promise.resolve(frontendHealthResponse());
       }
       return backendHealthy
-        ? Promise.resolve(new Response("ok", { status: 200 }))
+        ? Promise.resolve(backendHealthResponse())
         : Promise.reject(new TypeError("backend down"));
     });
     const controller = createStartupConnectionController({ fetchImpl, requireApplicationReady: true });
@@ -183,7 +210,7 @@ describe("StartupConnectionGate", () => {
   test("shows a local swipe-only No Internet notice and reappears after 10 seconds", async () => {
     const container = installShellFixture();
     const navigatorObject = { onLine: true };
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn(healthyServiceFetch);
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
     render(<StartupConnectionGate controller={controller}><p>Library state</p></StartupConnectionGate>, { container });
 
@@ -214,7 +241,7 @@ describe("StartupConnectionGate", () => {
   test("pointer cancellation resets drag state without dismissing No Internet", async () => {
     const container = installShellFixture();
     const navigatorObject = { onLine: true };
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn(healthyServiceFetch);
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
     render(<StartupConnectionGate controller={controller}><p>Library state</p></StartupConnectionGate>, { container });
 
@@ -233,7 +260,7 @@ describe("StartupConnectionGate", () => {
   test("a swipe stays dismissed through 9999ms and creates only one reappearance deadline", async () => {
     const container = installShellFixture();
     const navigatorObject = { onLine: true };
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn(healthyServiceFetch);
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
     render(<StartupConnectionGate controller={controller}><p>Library state</p></StartupConnectionGate>, { container });
 
@@ -271,7 +298,7 @@ describe("StartupConnectionGate", () => {
   test("an explicit offline login attempt shows the offline Oops shell immediately", async () => {
     const container = installShellFixture();
     const navigatorObject = { onLine: true };
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn(healthyServiceFetch);
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject });
     render(<StartupConnectionGate controller={controller}><p>Login state</p></StartupConnectionGate>, { container });
 

@@ -1,5 +1,10 @@
 # Loading Strategy Phase 6: Interaction First
 
+**Current status / superseded by:** the permanent mounted-app and sticky No
+Internet contracts remain current. Phase 7 added Fast Oops; Phase 7B replaces
+the one-outage runtime latch with generation-scoped repeated outages and requires
+explicit frontend/backend health markers. Historical text below is retained.
+
 ## Scope
 
 Phase 6 prioritizes an already-running Elvern session, progressive Detail rendering, and bounded card-poster derivative work. It does not change playback protocols, search behavior, poster quality, the iPhone scheduler, or Library relocation algorithms.

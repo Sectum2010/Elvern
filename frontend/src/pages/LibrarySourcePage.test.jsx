@@ -337,6 +337,7 @@ describe("LibrarySourcePage cached source views", () => {
     const { locations, navigationTypes } = renderSource({ initialEntry: "/library/local?q=akira" });
     const input = await screen.findByRole("searchbox", { name: "Search Local Library" });
     expect(input).toHaveValue("akira");
+    expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: "arrival" } });
     expect(locations.at(-1)).toBe("/library/local?q=akira");

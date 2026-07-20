@@ -9,6 +9,7 @@ import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { SeriesRail } from "../components/SeriesRail";
+import { StaticLibrarySearch } from "../components/StaticLibrarySearch";
 import { apiRequest, isMaintenanceModeError } from "../lib/api";
 import {
   getProviderAuthPassiveNoticeMessage,
@@ -69,10 +70,7 @@ import {
 } from "../lib/iosViewportCoordinator";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
-import {
-  shouldCommitLibrarySearchKey,
-  useCommittedLibrarySearch,
-} from "../lib/useCommittedLibrarySearch";
+import { useCommittedLibrarySearch } from "../lib/useCommittedLibrarySearch";
 import { LIBRARY_REVISION_CHECK_EVENT } from "../lib/libraryRevisionQueries.js";
 
 
@@ -699,7 +697,6 @@ export function LibraryPage() {
   const librarySectionRef = useRef(null);
   const libraryHeroRef = useRef(null);
   const desktopSearchInputRef = useRef(null);
-  const mobileSearchInputRef = useRef(null);
   const floatingSearchScrollYRef = useRef(null);
   const pendingFloatingSearchRestoreYRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
@@ -1676,31 +1673,11 @@ export function LibraryPage() {
             </Link>
             <span className="status-pill">{library.total_items} indexed</span>
           </div>
-          {!compactSearchOnly ? <form className="library-search-form" onSubmit={(event) => {
-            event.preventDefault();
-            committedSearch.commit("static");
-          }}><label className="search-field library-desktop-hero__search library-desktop-hero__search--desktop">
-            <span className="sr-only">Search library</span>
-            <input
-              aria-label="Search library"
-              disabled={committedSearch.isSourceLocked("static")}
-              onChange={(event) => committedSearch.updateDraft("static", event.target.value)}
-              onKeyDown={(event) => {
-                if (shouldCommitLibrarySearchKey(event)) {
-                  event.preventDefault();
-                  committedSearch.commit("static");
-                } else if (event.key === "Escape" && !event.isComposing) {
-                  event.preventDefault();
-                  committedSearch.revert("static");
-                }
-              }}
-              placeholder="Search title or filename"
-              ref={desktopSearchInputRef}
-              type="search"
-              value={committedSearch.staticDraft}
-            />
-            {committedSearch.staticDraft ? <button aria-label="Clear search" className="library-search__clear" onClick={() => committedSearch.clear("static")} type="button">X</button> : null}
-          </label></form> : null}
+          {!compactSearchOnly ? <StaticLibrarySearch
+            inputClassName="library-desktop-hero__search"
+            ref={desktopSearchInputRef}
+            search={committedSearch}
+          /> : null}
           <RefreshSweepButton
             className="ghost-button"
             disabled={rescanPending}
@@ -1730,37 +1707,12 @@ export function LibraryPage() {
         <p className="library-maintenance-warning-line">Maintenance mode is still turned on</p>
       ) : null}
 
-      {!compactSearchOnly ? <div className="library-mobile-search-card">
-        <label className="search-field library-desktop-hero__search library-desktop-hero__search--mobile">
-          <span className="sr-only">Search library</span>
-          <input
-            aria-label="Search library"
-            disabled={committedSearch.isSourceLocked("static")}
-            onChange={(event) => committedSearch.updateDraft("static", event.target.value)}
-            onKeyDown={(event) => {
-              if (shouldCommitLibrarySearchKey(event)) {
-                event.preventDefault();
-                committedSearch.commit("static");
-              } else if (event.key === "Escape" && !event.isComposing) {
-                event.preventDefault();
-                committedSearch.revert("static");
-              }
-            }}
-            placeholder="Search title or filename"
-            ref={mobileSearchInputRef}
-            type="search"
-            value={committedSearch.staticDraft}
-          />
-          {committedSearch.staticDraft ? <button aria-label="Clear search" className="library-search__clear" onClick={() => committedSearch.clear("static")} type="button">X</button> : null}
-        </label>
-      </div> : null}
-
       <FloatingLibrarySearch
         expanded={committedSearch.floatingExpanded}
         desktopInteractionMode={floatingSearchDesktopMode}
         enabled={compactSearchOnly || settings.floating_library_search_enabled !== false}
         label="Search library"
-        mainInputRefs={[desktopSearchInputRef, mobileSearchInputRef]}
+        mainInputRefs={[desktopSearchInputRef]}
         locked={committedSearch.isSourceLocked("floating")}
         onChange={(value) => committedSearch.updateDraft("floating", value)}
         onClear={committedSearch.clear}

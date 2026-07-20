@@ -5,8 +5,6 @@ import hmac
 import json
 from typing import Any
 
-from fastapi import HTTPException
-
 from ..auth import AuthenticatedUser
 from ..config import Settings
 from ..db import get_connection
@@ -16,7 +14,7 @@ from .library_hidden_service import (
 )
 from .library_movie_identity_service import _row_hidden_movie_key
 from .local_library_source_service import ensure_current_shared_local_source_binding
-from .media_age_access_service import assert_user_can_access_media_by_age
+from .media_age_access_service import load_accessible_media_item_ids_by_age
 
 
 LIBRARY_REVISION_SCHEMA = "library-revision-v1"
@@ -108,7 +106,6 @@ def get_library_progress_state(settings: Settings, *, user: AuthenticatedUser) -
             JOIN media_items m ON m.id = p.media_item_id
             LEFT JOIN library_sources s ON s.id = m.library_source_id
             WHERE p.user_id = ?
-              AND (p.position_seconds > 0 OR p.completed = 1)
               AND (
                   (
                       COALESCE(m.source_kind, 'local') = 'local'
@@ -141,6 +138,11 @@ def get_library_progress_state(settings: Settings, *, user: AuthenticatedUser) -
                 int(user.id),
             ),
         ).fetchall()
+        accessible_item_ids = load_accessible_media_item_ids_by_age(
+            connection,
+            user=user,
+            item_ids=[int(row["media_item_id"]) for row in rows],
+        )
         counters = _load_counters(connection, user_id=int(user.id))
 
     items: list[dict[str, object]] = []
@@ -149,12 +151,8 @@ def get_library_progress_state(settings: Settings, *, user: AuthenticatedUser) -
         movie_key = _row_hidden_movie_key(row)
         if movie_key and (movie_key in globally_hidden_movie_keys or movie_key in hidden_movie_keys):
             continue
-        try:
-            assert_user_can_access_media_by_age(settings, user=user, item_id=item_id, purpose="library-progress")
-        except HTTPException as exc:
-            if exc.status_code == 403:
-                continue
-            raise
+        if item_id not in accessible_item_ids:
+            continue
         items.append({
             "id": item_id,
             "progress_seconds": float(row["position_seconds"] or 0.0),

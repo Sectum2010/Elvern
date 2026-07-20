@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from typing import Any
 
@@ -522,6 +523,72 @@ def assert_user_can_access_media_by_age(
     user_age = validate_age_credential(getattr(user, "age_credential", 18))
     if user_age < int(requirement):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_age_denied_message(int(requirement)))
+
+
+def load_accessible_media_item_ids_by_age(
+    connection,
+    *,
+    user: AuthenticatedUser,
+    item_ids: list[int] | set[int] | tuple[int, ...],
+) -> set[int]:
+    """Resolve age access for a batch with a fixed three-query upper bound."""
+
+    normalized_ids = sorted({int(item_id) for item_id in item_ids if int(item_id) > 0})
+    if not normalized_ids:
+        return set()
+    if (user.role or "standard_user") == "admin":
+        return set(normalized_ids)
+
+    requested_json = json.dumps(normalized_ids, separators=(",", ":"))
+    rows = connection.execute(
+        """
+        WITH requested(id) AS (
+            SELECT CAST(value AS INTEGER) FROM json_each(?)
+        )
+        SELECT m.id, m.title, m.original_filename, m.year
+        FROM media_items m
+        JOIN requested r ON r.id = m.id
+        """,
+        (requested_json,),
+    ).fetchall()
+    manual_rows = connection.execute(
+        """
+        WITH requested(id) AS (
+            SELECT CAST(value AS INTEGER) FROM json_each(?)
+        )
+        SELECT links.media_item_id, links.age_group_key
+        FROM media_age_manual_group_links links
+        JOIN requested r ON r.id = links.media_item_id
+        """,
+        (requested_json,),
+    ).fetchall()
+    requirement_rows = connection.execute(
+        """
+        SELECT age_group_key, age_requirement
+        FROM media_age_requirements
+        WHERE age_requirement IS NOT NULL
+        """
+    ).fetchall()
+
+    manual_keys = {
+        int(row["media_item_id"]): str(row["age_group_key"])
+        for row in manual_rows
+    }
+    requirements = {
+        str(row["age_group_key"]): int(row["age_requirement"])
+        for row in requirement_rows
+    }
+    user_age = validate_age_credential(getattr(user, "age_credential", 18))
+    accessible: set[int] = set()
+    for row in rows:
+        item_id = int(row["id"])
+        group_key = manual_keys.get(item_id)
+        if group_key is None:
+            group_key = resolve_age_restriction_movie_group(row).age_group_key
+        requirement = requirements.get(group_key)
+        if requirement is None or user_age >= requirement:
+            accessible.add(item_id)
+    return accessible
 
 
 def _load_all_media_age_groups(connection) -> dict[int, AgeGroupResolution]:

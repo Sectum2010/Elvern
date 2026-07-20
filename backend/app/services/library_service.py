@@ -615,7 +615,7 @@ def build_library_view_plan(
             hidden_media_item_ids = _load_hidden_media_item_ids(connection, user_id=user_id)
             hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
     with timing.stage("poster_index_snapshot"):
-        poster_index = get_poster_index_snapshot(poster_dir)
+        poster_index = get_poster_index_snapshot(poster_dir, settings=settings)
     quality_rank_memo: dict[int, dict[str, object]] = {}
     with timing.stage("row_decoration"):
         all_rows = _decorate_rows_with_arrange_metadata(
@@ -1133,7 +1133,7 @@ def search_library(
             _base_query() + " ORDER BY lower(m.title) ASC",
             (user_id, user_id, shared_local_source_id, user_id),
         ).fetchall()
-    poster_index = get_poster_index_snapshot(poster_dir)
+    poster_index = get_poster_index_snapshot(poster_dir, settings=settings)
     poster_url_memo: dict[int, str | None] = {}
     quality_rank_memo: dict[int, dict[str, object]] = {}
     rows = _decorate_rows_with_arrange_metadata(
@@ -1366,7 +1366,7 @@ def get_media_item_detail(
         track_scan_source = "failed"
     else:
         track_scan_source = "not_scanned"
-    poster_index = get_poster_index_snapshot(poster_dir)
+    poster_index = get_poster_index_snapshot(poster_dir, settings=settings)
     payload = _serialize_media_item(
         settings,
         row,
@@ -1479,7 +1479,7 @@ def get_media_item_poster_path(
     )
     if hidden_globally and not allow_globally_hidden:
         return None
-    poster_index = get_poster_index_snapshot(poster_dir)
+    poster_index = get_poster_index_snapshot(poster_dir, settings=settings)
     return _resolve_poster_path(
         settings,
         poster_dir=poster_dir,

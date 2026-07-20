@@ -54,6 +54,35 @@ export function getConnectionOopsCopy(classification) {
 }
 
 
+export function classifyStartupHealthResponse(path, response) {
+  const status = Number(response?.status);
+  if (!(status >= 200 && status < 300)) {
+    return {
+      reachable: false,
+      reason: status >= 500 && status <= 599
+        ? CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.httpUnhealthy
+        : CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.unexpectedHttpStatus,
+      status: Number.isFinite(status) ? status : null,
+    };
+  }
+  const expectedMarker = path === FRONTEND_HEALTH_PATH
+    ? CONNECTION_RUNTIME_CONTRACT.frontendHealthHeader
+    : CONNECTION_RUNTIME_CONTRACT.backendHealthHeader;
+  if (response?.headers?.get?.(expectedMarker) !== "1") {
+    return {
+      reachable: false,
+      reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.markerMissing,
+      status,
+    };
+  }
+  return {
+    reachable: true,
+    reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.httpSuccess,
+    status,
+  };
+}
+
+
 export function dispatchStartupConnectivityFailure(detail = null) {
   if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") {
     return;
@@ -121,6 +150,9 @@ export function createStartupConnectionController({
   let forceOfflineOopsPending = false;
   let started = false;
   let lifecycleGeneration = 0;
+  let outageGeneration = 1;
+  let oopsLatchedGeneration = 0;
+  let outageActive = true;
   let browserOfflineEvidenceGeneration = 0;
   let initialProbeCompleted = false;
   let outageStartedAt = Number.isFinite(initialOutageStartedAt) && initialOutageStartedAt > 0
@@ -130,7 +162,7 @@ export function createStartupConnectionController({
   let scheduledProbeTimer = 0;
   let inFlightProbe = null;
   const activeHealthControllers = new Set();
-  const activeConfirmationTimers = new Set();
+  const activeConfirmationTimers = new Map();
   const listeners = new Set();
   const desktopWatchdogEnabled = isDesktopClientPlatform(platform);
   let snapshot = {
@@ -150,6 +182,8 @@ export function createStartupConnectionController({
       ? CONNECTIVITY_INTERNET_OFFLINE
       : CONNECTIVITY_EVIDENCE_INSUFFICIENT,
     oopsLatched: false,
+    outageGeneration,
+    oopsLatchedGeneration,
     oopsEvidenceReason: null,
   };
 
@@ -174,6 +208,8 @@ export function createStartupConnectionController({
       "offlineOopsRequired",
       "classification",
       "oopsLatched",
+      "outageGeneration",
+      "oopsLatchedGeneration",
       "oopsEvidenceReason",
     ];
     if (keys.every((key) => snapshot[key] === candidate[key])) {
@@ -201,13 +237,63 @@ export function createStartupConnectionController({
     return runtimeReady && snapshot.internetOutageLatched && !offlineOopsRequired;
   }
 
-  function latchOops({ classification = snapshot.classification, evidenceReason } = {}) {
-    if (snapshot.status === "connected" || snapshot.oopsLatched) {
+  function cancelConfirmationTimers() {
+    activeConfirmationTimers.forEach((resolve, timerId) => {
+      windowObject?.clearTimeout?.(timerId);
+      resolve(false);
+    });
+    activeConfirmationTimers.clear();
+  }
+
+  function beginOutage() {
+    if (outageActive) return;
+    outageActive = true;
+    outageGeneration += 1;
+    outageStartedAt = Date.now();
+    cancelConfirmationTimers();
+    emit({
+      outageGeneration,
+      oopsLatched: false,
+      oopsLatchedGeneration: 0,
+      oopsEvidenceReason: null,
+    });
+  }
+
+  function endOutageIfRecovered() {
+    if (
+      !outageActive
+      || !snapshot.serviceReachable
+      || !applicationReady
+      || snapshot.internetOutageLatched
+      || offlineOopsRequired
+    ) {
       return;
     }
+    outageActive = false;
+    oopsLatchedGeneration = 0;
+    clearUnreachableTimer();
+    cancelConfirmationTimers();
+    outageStartedAt = 0;
+    emit({
+      status: "connected",
+      oopsLatched: false,
+      oopsLatchedGeneration: 0,
+      oopsEvidenceReason: null,
+    });
+  }
+
+  function latchOops({ classification = snapshot.classification, evidenceReason } = {}) {
+    if (
+      snapshot.status === "connected"
+      || oopsLatchedGeneration === outageGeneration
+    ) {
+      return;
+    }
+    oopsLatchedGeneration = outageGeneration;
     emit({
       classification,
       oopsLatched: true,
+      oopsLatchedGeneration,
       oopsEvidenceReason: evidenceReason || null,
       status: "unreachable",
     });
@@ -251,6 +337,7 @@ export function createStartupConnectionController({
     initialCycle = false,
     publicEvidenceReason = CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
   } = {}) {
+    beginOutage();
     if (!outageStartedAt) {
       outageStartedAt = Date.now();
     }
@@ -296,8 +383,8 @@ export function createStartupConnectionController({
       });
       if (snapshot.serviceReachable && applicationReady) {
         clearUnreachableTimer();
-        outageStartedAt = 0;
         emit({ status: "connected" });
+        endOutageIfRecovered();
       }
       return;
     }
@@ -321,7 +408,6 @@ export function createStartupConnectionController({
     if (canConnect) {
       runtimeReady = true;
       clearUnreachableTimer();
-      outageStartedAt = 0;
     }
     emit({
       frontendState: "reachable",
@@ -329,13 +415,13 @@ export function createStartupConnectionController({
       serviceReachable: true,
       status: canConnect ? "connected" : (snapshot.status === "unreachable" ? "unreachable" : "connecting"),
     });
+    endOutageIfRecovered();
   }
 
   function markServiceFailure({ frontendState, backendState }) {
     const wasConnected = snapshot.status === "connected";
-    if (wasConnected || !outageStartedAt) {
-      outageStartedAt = Date.now();
-    }
+    if (wasConnected || !outageActive) beginOutage();
+    if (!outageStartedAt) outageStartedAt = Date.now();
     emit({
       frontendState,
       backendState,
@@ -378,25 +464,7 @@ export function createStartupConnectionController({
           reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.aborted,
         });
       }
-      const status = Number(response?.status);
-      if (status >= 500 && status <= 599) {
-        return createHealthResult({
-          reachable: false,
-          reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.httpUnhealthy,
-          status,
-        });
-      }
-      if (response) {
-        return createHealthResult({
-          reachable: true,
-          reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.httpSuccess,
-          status,
-        });
-      }
-      return createHealthResult({
-        reachable: false,
-        reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.networkError,
-      });
+      return createHealthResult(classifyStartupHealthResponse(path, response));
     } catch (error) {
       const activelyCancelled = generation !== lifecycleGeneration || !started;
       return createHealthResult({
@@ -432,17 +500,21 @@ export function createStartupConnectionController({
     };
   }
 
-  function waitForFastOopsConfirmation(generation) {
+  function waitForFastOopsConfirmation(generation, candidateOutageGeneration) {
     return new Promise((resolve) => {
       const timerId = windowObject?.setTimeout?.(() => {
         activeConfirmationTimers.delete(timerId);
-        resolve(started && generation === lifecycleGeneration);
+        resolve(
+          started
+          && generation === lifecycleGeneration
+          && candidateOutageGeneration === outageGeneration
+        );
       }, FAST_OOPS_CONFIRMATION_DELAY_MS) || 0;
       if (!timerId) {
         resolve(false);
         return;
       }
-      activeConfirmationTimers.add(timerId);
+      activeConfirmationTimers.set(timerId, resolve);
     });
   }
 
@@ -524,9 +596,15 @@ export function createStartupConnectionController({
       if (!transactionIsCurrent()) return false;
       applyProbeEvidence(firstEvidence, { initialCycle });
       const firstCandidate = fastOopsCandidateFor(firstEvidence);
+      const candidateOutageGeneration = outageGeneration;
       if (firstCandidate?.evidenceReason === CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.browserOffline) {
         if (!runtimeReady || offlineOopsRequired) latchOops(firstCandidate);
-      } else if (firstCandidate && await waitForFastOopsConfirmation(generation) && transactionIsCurrent()) {
+      } else if (
+        firstCandidate
+        && await waitForFastOopsConfirmation(generation, candidateOutageGeneration)
+        && transactionIsCurrent()
+        && candidateOutageGeneration === outageGeneration
+      ) {
         const secondEvidence = await collectProbeEvidence(generation);
         if (!transactionIsCurrent()) return false;
         applyProbeEvidence(secondEvidence);
@@ -608,8 +686,7 @@ export function createStartupConnectionController({
     clearScheduledProbe();
     activeHealthControllers.forEach((controller) => controller.abort());
     activeHealthControllers.clear();
-    activeConfirmationTimers.forEach((timerId) => windowObject?.clearTimeout?.(timerId));
-    activeConfirmationTimers.clear();
+    cancelConfirmationTimers();
     publicRunner.abort();
     inFlightProbe = null;
     windowObject?.removeEventListener?.("online", handleOnline);
@@ -646,8 +723,8 @@ export function createStartupConnectionController({
     }
     if (snapshot.serviceReachable && !offlineOopsRequired) {
       clearUnreachableTimer();
-      outageStartedAt = 0;
       emit({ status: "connected" });
+      endOutageIfRecovered();
     } else {
       emit({ status: snapshot.status === "unreachable" ? "unreachable" : "connecting" });
       scheduleUnreachable();

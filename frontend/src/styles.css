@@ -758,6 +758,7 @@ button {
 
 .library-desktop-hero__row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.85rem;
@@ -775,11 +776,13 @@ button {
 }
 
 .library-desktop-hero__search {
+  flex: 1 1 100%;
+  order: 3;
   max-width: none;
 }
 
 .library-desktop-hero__search--desktop {
-  display: none;
+  display: block;
 }
 
 .library-desktop-hero__category-row {
@@ -1065,19 +1068,6 @@ button {
   .library-arrange__option {
     transition: none;
   }
-}
-
-.library-mobile-search-card {
-  display: grid;
-  padding: 0.95rem 1rem;
-  border-radius: 1.25rem;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow);
-}
-
-.library-desktop-hero__search--mobile {
-  display: block;
 }
 
 .cloud-auth-passive-notice {
@@ -6769,6 +6759,7 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
 
   .app-shell--library-root .library-desktop-hero__search {
     flex: 1 1 auto;
+    order: initial;
     min-width: 0;
     max-width: none;
     margin-inline-start: 0.55rem;
@@ -6778,14 +6769,6 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
     margin-left: auto;
   }
 
-  .app-shell--library-root .library-desktop-hero__search--desktop {
-    display: block;
-  }
-
-  .app-shell--library-root .library-mobile-search-card,
-  .app-shell--library-root .library-desktop-hero__search--mobile {
-    display: none;
-  }
 }
 
 @media (min-width: 740px) and (max-width: 1400px) and (any-pointer: coarse) {
@@ -8315,6 +8298,10 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 }
 .library-search-form {
   display: contents;
+}
+
+.library-focus-search-card.library-search-form {
+  display: block;
 }
 
 .library-search__clear {

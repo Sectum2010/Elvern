@@ -1,19 +1,20 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import playwrightPackage from "playwright/package.json" with { type: "json" };
-
-
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const frontendDirectory = resolve(scriptDirectory, "..");
 const cliPath = resolve(frontendDirectory, "node_modules/playwright/cli.js");
+const require = createRequire(import.meta.url);
+const playwrightPackage = require("playwright/package.json");
+const playwrightTestPackage = require("@playwright/test/package.json");
 const browserCache = process.env.PLAYWRIGHT_BROWSERS_PATH
   ? resolve(process.env.PLAYWRIGHT_BROWSERS_PATH)
   : resolve(homedir(), ".cache/ms-playwright");
-const expectedVersion = "1.60.0";
+const installedVersion = String(playwrightPackage.version || "");
 
 
 function directorySize(path) {
@@ -33,16 +34,28 @@ function formatMiB(bytes) {
 }
 
 
-if (playwrightPackage.version !== expectedVersion) {
+if (!installedVersion || playwrightTestPackage.version !== installedVersion) {
   console.error(
-    `Playwright version mismatch: expected ${expectedVersion}, found ${playwrightPackage.version}. Run npm ci before installing browsers.`,
+    `Playwright package mismatch: playwright=${playwrightPackage.version || "missing"}, @playwright/test=${playwrightTestPackage.version || "missing"}. Run npm ci before installing browsers.`,
+  );
+  process.exit(1);
+}
+
+const cliVersionResult = spawnSync(process.execPath, [cliPath, "--version"], {
+  cwd: frontendDirectory,
+  encoding: "utf-8",
+});
+const cliVersion = String(cliVersionResult.stdout || "").match(/(\d+\.\d+\.\d+)/)?.[1] || "";
+if (cliVersionResult.status !== 0 || cliVersion !== installedVersion) {
+  console.error(
+    `Playwright CLI mismatch: packages=${installedVersion}, cli=${cliVersion || "unavailable"}. Run npm ci before installing browsers.`,
   );
   process.exit(1);
 }
 
 const startedAt = Date.now();
 const beforeBytes = directorySize(browserCache);
-console.log(`Installing Firefox and WebKit for Playwright ${expectedVersion}.`);
+console.log(`Installing Firefox and WebKit for Playwright ${installedVersion}.`);
 console.log(`Browser cache: ${browserCache}`);
 const result = spawnSync(process.execPath, [cliPath, "install", "firefox", "webkit"], {
   cwd: frontendDirectory,

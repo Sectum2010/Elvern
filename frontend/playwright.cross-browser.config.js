@@ -9,7 +9,7 @@ const origin = `http://127.0.0.1:${port}`;
 export default defineConfig({
   testDir: "./tests-phase7",
   testMatch: "phase7-cross-browser.pw.js",
-  outputDir: "../tmp/playwright-phase7-cross-browser-results",
+  outputDir: process.env.ELVERN_PHASE7_BROWSER_OUTPUT_DIR || "../tmp/playwright-phase7-cross-browser-results",
   timeout: 45_000,
   expect: { timeout: 10_000 },
   workers: 1,
@@ -26,6 +26,10 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
+    {
+      name: "chromium-desktop-production",
+      use: { browserName: "chromium", viewport: { width: 1440, height: 900 } },
+    },
     {
       name: "firefox-desktop-production",
       use: { browserName: "firefox", viewport: { width: 1440, height: 900 } },

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from .auth import build_login_rate_limiters, ensure_admin_user
@@ -150,5 +150,7 @@ async def add_security_headers(request: Request, call_next):
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health(response: Response) -> dict[str, str]:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Elvern-Backend-Health"] = "1"
     return {"status": "ok", "app": "Elvern"}

@@ -6,6 +6,7 @@ import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
 import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
 import { SeriesRail } from "../components/SeriesRail";
+import { StaticLibrarySearch } from "../components/StaticLibrarySearch";
 import { useActiveBrowserPlaybackItemId } from "../lib/browserPlayback";
 import {
   isDesktopLibraryReturnPlatform,
@@ -30,10 +31,7 @@ import {
   selectLibraryReturnRestoreTarget,
 } from "../lib/viewportAnchor";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
-import {
-  shouldCommitLibrarySearchKey,
-  useCommittedLibrarySearch,
-} from "../lib/useCommittedLibrarySearch";
+import { useCommittedLibrarySearch } from "../lib/useCommittedLibrarySearch";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 
 
@@ -465,30 +463,13 @@ export function LibrarySourcePage({ sourceKind }) {
         </div>
       </div>
 
-      {!compactSearchOnly ? <div className="library-focus-search-card">
-        <label className="search-field">
-          <span className="sr-only">Search {copy.title}</span>
-          <input
-            aria-label={`Search ${copy.title}`}
-            disabled={committedSearch.isSourceLocked("static")}
-            onChange={(event) => committedSearch.updateDraft("static", event.target.value)}
-            onKeyDown={(event) => {
-              if (shouldCommitLibrarySearchKey(event)) {
-                event.preventDefault();
-                committedSearch.commit("static");
-              } else if (event.key === "Escape" && !event.isComposing) {
-                event.preventDefault();
-                committedSearch.revert("static");
-              }
-            }}
-            placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
-            ref={sourceSearchInputRef}
-            type="search"
-            value={committedSearch.staticDraft}
-          />
-          {committedSearch.staticDraft ? <button aria-label="Clear search" className="library-search__clear" onClick={() => committedSearch.clear("static")} type="button">X</button> : null}
-        </label>
-      </div> : null}
+      {!compactSearchOnly ? <StaticLibrarySearch
+        containerClassName="library-focus-search-card"
+        label={`Search ${copy.title}`}
+        placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
+        ref={sourceSearchInputRef}
+        search={committedSearch}
+      /> : null}
 
       <FloatingLibrarySearch
         expanded={committedSearch.floatingExpanded}

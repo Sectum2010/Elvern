@@ -60,12 +60,29 @@ describe("Library revision synchronization", () => {
     vi.restoreAllMocks();
   });
 
-  test("mode defaults and invalid values stay safely off", () => {
+  test("mode defaults on while explicit off and invalid values stay safely off", () => {
     vi.stubEnv("VITE_ELVERN_LIBRARY_REVISION_MODE", "");
-    expect(resolveLibraryRevisionMode()).toBe("off");
-    expect(resolveLibraryRevisionMode("")).toBe("off");
+    expect(resolveLibraryRevisionMode()).toBe("on");
+    expect(resolveLibraryRevisionMode("")).toBe("on");
+    expect(resolveLibraryRevisionMode("   ")).toBe("on");
+    expect(resolveLibraryRevisionMode("off")).toBe("off");
     expect(resolveLibraryRevisionMode("unexpected")).toBe("off");
     expect(resolveLibraryRevisionMode("on")).toBe("on");
+  });
+
+  test("off mode mounts without polling on timers or lifecycle events", async () => {
+    vi.stubEnv("VITE_ELVERN_LIBRARY_REVISION_MODE", "off");
+    render(<LibraryRevisionSynchronizer />);
+    await act(() => Promise.resolve());
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("pageshow"));
+      window.dispatchEvent(new Event("online"));
+    });
+    await act(() => vi.advanceTimersByTimeAsync(LIBRARY_REVISION_VISIBLE_INTERVAL_MS * 2));
+
+    expect(apiRequest).not.toHaveBeenCalled();
   });
 
   test("query identity includes user, role, and permission identity", () => {

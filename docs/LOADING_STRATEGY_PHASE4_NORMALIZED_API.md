@@ -1,5 +1,9 @@
 # Loading Strategy Phase 4: Versioned Normalized Library Summary API
 
+**Current status / superseded by:** v2 is now the default for non-search Root,
+Local, and Cloud views. Formal search remains v1. Phase 7B does not change this
+contract; it only hardens the optional cross-device revision layer around it.
+
 ## Status and scope
 
 Phase 4 adds a versioned, normalized Library response while retaining every v1 route. After Phase 4B quality-rank parity and final contract hardening, the frontend default is `on` for non-search Root, Local, and Cloud Library views. Formal search remains on v1. No pagination, virtualization, search algorithm change, smart-poster expansion, poster-quality change, or playback change is part of this phase.

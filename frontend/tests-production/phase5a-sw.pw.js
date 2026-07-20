@@ -17,6 +17,7 @@ test("production service worker returns offline shell for a deep-link navigation
     return route.fulfill({
       status: 200,
       contentType: "application/json",
+      headers: { "X-Elvern-Backend-Health": "1" },
       body: '{"status":"ok"}',
     });
   });

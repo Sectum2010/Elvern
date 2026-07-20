@@ -265,9 +265,11 @@ export async function patchLibraryProgressStateCaches(progressState) {
         progress_duration_seconds: item.progress_duration_seconds ?? null,
         completed: Boolean(item.completed),
       };
+      const currentHasProgress = Number(currentItem.progress_seconds || 0) > 0;
+      const nextHasProgress = progressFields.progress_seconds > 0;
       if (
         Boolean(currentItem.completed) !== progressFields.completed
-        || (Number(currentItem.progress_seconds || 0) <= 0 && progressFields.progress_seconds > 0)
+        || currentHasProgress !== nextHasProgress
       ) {
         membershipMayHaveChanged = true;
       }

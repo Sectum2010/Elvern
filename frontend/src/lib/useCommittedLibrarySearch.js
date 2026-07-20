@@ -1,8 +1,48 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 
 
 const FLOATING_SEARCH_EXPANDED_STORAGE_PREFIX = "elvern:floating-library-search-expanded:v1:";
 const SEARCH_DRAFT_SOURCES = new Set(["static", "floating"]);
+
+
+function createSearchDraftState(committedQuery) {
+  return {
+    staticDraft: committedQuery,
+    floatingDraft: committedQuery,
+    activeDraftSource: null,
+  };
+}
+
+
+function sourceOwnsDraft(state, source) {
+  return SEARCH_DRAFT_SOURCES.has(source)
+    && (!state.activeDraftSource || state.activeDraftSource === source);
+}
+
+
+export function committedLibrarySearchReducer(state, action) {
+  switch (action.type) {
+    case "URL_SYNC":
+    case "COMMIT":
+    case "CLEAR":
+      return createSearchDraftState(String(action.query || ""));
+    case "UPDATE_DRAFT":
+      if (!sourceOwnsDraft(state, action.source)) return state;
+      return {
+        ...state,
+        [`${action.source}Draft`]: String(action.value ?? ""),
+        activeDraftSource: action.source,
+      };
+    case "REVERT":
+      if (!sourceOwnsDraft(state, action.source)) return state;
+      return createSearchDraftState(String(action.query || ""));
+    case "RELEASE_LOCK":
+      if (!sourceOwnsDraft(state, action.source)) return state;
+      return { ...state, activeDraftSource: null };
+    default:
+      return state;
+  }
+}
 
 
 function normalizeCommittedQuery(value) {
@@ -62,27 +102,28 @@ export function useCommittedLibrarySearch({
 } = {}) {
   const normalizedCommittedQuery = normalizeCommittedQuery(committedQuery);
   const pathname = String(location?.pathname || "/library");
-  const [staticDraft, setStaticDraft] = useState(normalizedCommittedQuery);
-  const [floatingDraft, setFloatingDraft] = useState(normalizedCommittedQuery);
-  const [activeDraftSource, setActiveDraftSource] = useState(null);
+  const [draftState, dispatchDraft] = useReducer(
+    committedLibrarySearchReducer,
+    normalizedCommittedQuery,
+    createSearchDraftState,
+  );
   const [floatingExpanded, setFloatingExpanded] = useState(() => readExpanded(storage, pathname));
 
   useEffect(() => {
-    setStaticDraft(normalizedCommittedQuery);
-    setFloatingDraft(normalizedCommittedQuery);
-    setActiveDraftSource(null);
+    dispatchDraft({ type: "URL_SYNC", query: normalizedCommittedQuery });
   }, [location?.search, normalizedCommittedQuery]);
 
   useEffect(() => {
     setFloatingExpanded(readExpanded(storage, pathname));
   }, [pathname, storage]);
 
-  const replaceCommittedQuery = useCallback((nextQuery) => {
+  const replaceCommittedQuery = useCallback((source, nextQuery, actionType = "COMMIT") => {
+    if (!sourceOwnsDraft(draftState, source)) {
+      return;
+    }
     const normalized = normalizeCommittedQuery(nextQuery);
     const nextSearch = buildCommittedSearch(location?.search, normalized);
-    setStaticDraft(normalized);
-    setFloatingDraft(normalized);
-    setActiveDraftSource(null);
+    dispatchDraft({ type: actionType, query: normalized });
     if (nextSearch === String(location?.search || "")) {
       return;
     }
@@ -91,37 +132,22 @@ export function useCommittedLibrarySearch({
       search: nextSearch,
       hash: location?.hash || "",
     }, { replace: true });
-  }, [location?.hash, location?.search, navigate, pathname]);
+  }, [draftState, location?.hash, location?.search, navigate, pathname]);
 
   const updateDraft = useCallback((source, value) => {
-    if (!SEARCH_DRAFT_SOURCES.has(source)) {
-      return;
-    }
-    setActiveDraftSource((current) => {
-      if (current && current !== source) {
-        return current;
-      }
-      if (source === "static") {
-        setStaticDraft(String(value ?? ""));
-      } else {
-        setFloatingDraft(String(value ?? ""));
-      }
-      return source;
-    });
+    dispatchDraft({ type: "UPDATE_DRAFT", source, value });
   }, []);
 
   const commit = useCallback((source) => {
-    replaceCommittedQuery(source === "floating" ? floatingDraft : staticDraft);
-  }, [floatingDraft, replaceCommittedQuery, staticDraft]);
+    replaceCommittedQuery(source, draftState[`${source}Draft`]);
+  }, [draftState, replaceCommittedQuery]);
 
-  const revert = useCallback(() => {
-    setStaticDraft(normalizedCommittedQuery);
-    setFloatingDraft(normalizedCommittedQuery);
-    setActiveDraftSource(null);
+  const revert = useCallback((source) => {
+    dispatchDraft({ type: "REVERT", source, query: normalizedCommittedQuery });
   }, [normalizedCommittedQuery]);
 
-  const clear = useCallback(() => {
-    replaceCommittedQuery("");
+  const clear = useCallback((source) => {
+    replaceCommittedQuery(source, "", "CLEAR");
   }, [replaceCommittedQuery]);
 
   const toggleFloatingExpanded = useCallback(() => {
@@ -133,26 +159,26 @@ export function useCommittedLibrarySearch({
   }, [pathname, storage]);
 
   return useMemo(() => ({
-    activeDraftSource,
+    activeDraftSource: draftState.activeDraftSource,
     clear,
     commit,
     committedQuery: normalizedCommittedQuery,
-    floatingDraft,
+    floatingDraft: draftState.floatingDraft,
     floatingExpanded,
-    isSourceLocked: (source) => Boolean(activeDraftSource && activeDraftSource !== source),
+    isSourceLocked: (source) => Boolean(
+      draftState.activeDraftSource && draftState.activeDraftSource !== source
+    ),
     revert,
-    staticDraft,
+    staticDraft: draftState.staticDraft,
     toggleFloatingExpanded,
     updateDraft,
   }), [
-    activeDraftSource,
     clear,
     commit,
-    floatingDraft,
+    draftState,
     floatingExpanded,
     normalizedCommittedQuery,
     revert,
-    staticDraft,
     toggleFloatingExpanded,
     updateDraft,
   ]);

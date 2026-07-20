@@ -34,6 +34,7 @@ from .local_path_security import (
     validate_safe_poster_reference_path,
 )
 from .poster_index_service import invalidate_poster_indexes
+from .library_revision_mutation_service import bump_library_revision_layers
 
 
 POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
@@ -101,8 +102,17 @@ def get_global_app_setting(
         return str(row["value"]) if row and row["value"] is not None else None
 
 
-def set_global_app_setting(settings: Settings, *, key: str, value: str | None) -> None:
-    with get_connection(settings) as connection:
+def set_global_app_setting(
+    settings: Settings,
+    *,
+    key: str,
+    value: str | None,
+    connection: sqlite3.Connection | None = None,
+) -> bool:
+    if connection is not None:
+        current = get_global_app_setting(settings, key=key, connection=connection)
+        if current == value:
+            return False
         if value is None:
             connection.execute("DELETE FROM app_settings WHERE key = ?", (key,))
         else:
@@ -116,7 +126,16 @@ def set_global_app_setting(settings: Settings, *, key: str, value: str | None) -
                 """,
                 (key, value, utcnow_iso()),
             )
-        connection.commit()
+        return True
+    with get_connection(settings) as owned_connection:
+        changed = set_global_app_setting(
+            settings,
+            key=key,
+            value=value,
+            connection=owned_connection,
+        )
+        owned_connection.commit()
+        return changed
 
 
 def get_effective_google_oauth_client_id(
@@ -447,19 +466,12 @@ def update_media_library_reference(settings: Settings, *, value: str | None) -> 
             value=normalized_locations[0],
             connection=connection,
         )
-        if configured_value is None:
-            connection.execute("DELETE FROM app_settings WHERE key = ?", (MEDIA_LIBRARY_REFERENCE_KEY,))
-        else:
-            connection.execute(
-                """
-                INSERT INTO app_settings (key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    updated_at = excluded.updated_at
-                """,
-                (MEDIA_LIBRARY_REFERENCE_KEY, configured_value, utcnow_iso()),
-            )
+        setting_changed = set_global_app_setting(
+            settings,
+            key=MEDIA_LIBRARY_REFERENCE_KEY,
+            value=configured_value,
+            connection=connection,
+        )
         shared_source_id = ensure_shared_local_library_source(
             settings,
             connection=connection,
@@ -468,6 +480,12 @@ def update_media_library_reference(settings: Settings, *, value: str | None) -> 
             connection,
             shared_source_id=shared_source_id,
         )
+        if setting_changed:
+            bump_library_revision_layers(
+                settings,
+                connection,
+                global_layers=("catalog",),
+            )
         connection.commit()
 
     scan_media_library(settings, reason="library_reference_locations_update")
@@ -593,12 +611,22 @@ def get_poster_reference_location_payload(
 
 def update_poster_reference_location(settings: Settings, *, value: str | None) -> dict[str, object]:
     normalized_value = validate_poster_reference_location(settings, value=value)
-    set_global_app_setting(
-        settings,
-        key=POSTER_REFERENCE_LOCATION_KEY,
-        value=normalized_value,
-    )
-    invalidate_poster_indexes()
+    with get_connection(settings) as connection:
+        changed = set_global_app_setting(
+            settings,
+            key=POSTER_REFERENCE_LOCATION_KEY,
+            value=normalized_value,
+            connection=connection,
+        )
+        if changed:
+            bump_library_revision_layers(
+                settings,
+                connection,
+                global_layers=("catalog",),
+            )
+        connection.commit()
+    if changed:
+        invalidate_poster_indexes()
     return get_poster_reference_location_payload(settings)
 
 

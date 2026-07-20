@@ -10,6 +10,7 @@ import {
   resolveSafeRequestTarget,
   resolveAssetCacheControl,
   securityHeaders,
+  sendFrontendHealth,
   sendMethodNotAllowed,
   withSecurityHeaders,
 } from "../../server.mjs";
@@ -105,6 +106,12 @@ describe("frontend production server proxy target hardening", () => {
       route: "frontend_health",
       allowedMethods: ["GET", "HEAD"],
     });
+
+    const response = createMockResponse();
+    sendFrontendHealth(response);
+    expect(response.statusCode).toBe(204);
+    expect(response.getHeader("Cache-Control")).toBe("no-store");
+    expect(response.getHeader("X-Elvern-Frontend-Health")).toBe("1");
   });
 
   test("active-prefix manifest requests resolve to the configured backend origin", () => {

@@ -403,7 +403,7 @@ def _resolve_poster_path(
     del source_kind
     resolved_poster_dir = poster_dir or _poster_directory(settings)
     resolved_index = (
-        get_poster_index_snapshot(resolved_poster_dir)
+        get_poster_index_snapshot(resolved_poster_dir, settings=settings)
         if poster_index is _POSTER_INDEX_UNSET
         else poster_index
     )

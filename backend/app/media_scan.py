@@ -19,6 +19,7 @@ from .services.library_folder_classifier import (
     discover_library_folders,
     path_is_same_or_inside,
 )
+from .services.library_revision_mutation_service import bump_library_revision_layers
 from .services.local_path_security import is_restricted_library_reference_path
 from .services.media_title_parser import parse_media_title
 
@@ -333,6 +334,19 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
     folder_warnings: list[dict[str, object]] = []
 
     with get_connection(settings) as connection:
+        catalog_revision_claimed = False
+
+        def claim_catalog_revision() -> None:
+            nonlocal catalog_revision_claimed
+            if catalog_revision_claimed:
+                return
+            bump_library_revision_layers(
+                settings,
+                connection,
+                global_layers=("catalog",),
+            )
+            catalog_revision_claimed = True
+
         library_reference_locations = [
             path.resolve()
             for path in get_effective_library_reference_locations(settings, connection=connection)
@@ -451,6 +465,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                 )
                 now = utcnow_iso()
                 media_item_id: int | None = None
+                claim_catalog_revision()
                 if rename_target is not None:
                     # Keep the same media row when a local rename is strongly detectable.
                     # This preserves progress/history/poster/year continuity instead of
@@ -631,6 +646,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                 if row["file_path"] not in seen_paths and int(row["id"]) not in rename_matched_existing_ids
             ]
             for row in removable_rows:
+                claim_catalog_revision()
                 preserve_hidden_movie_keys_for_media_item(
                     connection,
                     media_item_id=int(row["id"]),

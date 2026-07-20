@@ -60,6 +60,38 @@ describe("committed Library search controller", () => {
     expect(result.current.search.floatingExpanded).toBe(false);
   });
 
+  test("non-owner update, commit, clear, and revert calls are safe no-ops", () => {
+    const { result } = renderHook(useHarness, { wrapper });
+
+    act(() => result.current.search.updateDraft("static", "arrival"));
+    expect(result.current.search.activeDraftSource).toBe("static");
+
+    act(() => result.current.search.updateDraft("floating", "matrix"));
+    act(() => result.current.search.commit("floating"));
+    act(() => result.current.search.clear("floating"));
+    act(() => result.current.search.revert("floating"));
+
+    expect(result.current.location.search).toBe("?category=anime&q=akira");
+    expect(result.current.search.staticDraft).toBe("arrival");
+    expect(result.current.search.floatingDraft).toBe("akira");
+    expect(result.current.search.activeDraftSource).toBe("static");
+  });
+
+  test("floating ownership also blocks every static mutation entry point", () => {
+    const { result } = renderHook(useHarness, { wrapper });
+
+    act(() => result.current.search.updateDraft("floating", "matrix"));
+    act(() => result.current.search.updateDraft("static", "arrival"));
+    act(() => result.current.search.commit("static"));
+    act(() => result.current.search.clear("static"));
+    act(() => result.current.search.revert("static"));
+
+    expect(result.current.location.search).toBe("?category=anime&q=akira");
+    expect(result.current.search.staticDraft).toBe("akira");
+    expect(result.current.search.floatingDraft).toBe("matrix");
+    expect(result.current.search.activeDraftSource).toBe("floating");
+  });
+
   test("floating expansion is stored as one boolean per canonical list path", () => {
     const { result, unmount } = renderHook(useHarness, { wrapper });
 

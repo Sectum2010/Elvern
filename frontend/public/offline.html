@@ -272,10 +272,18 @@
               signal: controller.signal,
             });
             const status = Number(response.status);
-            if (status >= 500 && status <= 599) {
-              return healthResult(false, contract.healthEvidenceReasons.httpUnhealthy, status);
+            if (!(status >= 200 && status < 300)) {
+              return healthResult(false, status >= 500 && status <= 599
+                ? contract.healthEvidenceReasons.httpUnhealthy
+                : contract.healthEvidenceReasons.unexpectedHttpStatus, status);
             }
-            return healthResult(true, contract.healthEvidenceReasons.httpSuccess, status);
+            const expectedMarker = url.pathname === "/_elvern/frontend-health"
+              ? contract.frontendHealthHeader
+              : contract.backendHealthHeader;
+            const markerPresent = response.headers.get(expectedMarker) === "1";
+            return healthResult(markerPresent, markerPresent
+              ? contract.healthEvidenceReasons.httpSuccess
+              : contract.healthEvidenceReasons.markerMissing, status);
           } catch (error) {
             return healthResult(false, timedOut
               ? contract.healthEvidenceReasons.timeout

@@ -24,7 +24,9 @@ const REVISION_FIELDS = Object.freeze([
 
 
 export function resolveLibraryRevisionMode(rawValue = import.meta.env?.VITE_ELVERN_LIBRARY_REVISION_MODE) {
-  return String(rawValue || "").trim().toLowerCase() === "on" ? "on" : "off";
+  const normalized = String(rawValue || "").trim().toLowerCase();
+  if (!normalized) return "on";
+  return normalized === "on" ? "on" : "off";
 }
 
 

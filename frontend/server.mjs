@@ -164,6 +164,7 @@ export function sendMethodNotAllowed(response, allowedMethods) {
 export function sendFrontendHealth(response) {
   response.writeHead(204, withSecurityHeaders({
     "Cache-Control": "no-store",
+    "X-Elvern-Frontend-Health": "1",
   }));
   response.end();
 }

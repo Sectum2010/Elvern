@@ -6,6 +6,7 @@ import {
   CONNECTIVITY_EVIDENCE_INSUFFICIENT,
   CONNECTIVITY_HEALTHY,
   CONNECTIVITY_INTERNET_OFFLINE,
+  classifyStartupHealthResponse,
   createStartupConnectionController,
   DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS,
   FAST_OOPS_CONFIRMATION_DELAY_MS,
@@ -13,6 +14,14 @@ import {
   STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "./startupConnection.js";
+
+
+function healthResponse(path, status = path === "/_elvern/frontend-health" ? 204 : 200) {
+  const header = path === "/_elvern/frontend-health"
+    ? "X-Elvern-Frontend-Health"
+    : "X-Elvern-Backend-Health";
+  return new Response(null, { status, headers: { [header]: "1" } });
+}
 
 
 describe("startup connection controller", () => {
@@ -70,12 +79,12 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(STARTUP_HEALTH_PROBE_INTERVAL_MS * 3);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
 
-    resolveProbe(new Response("ok", { status: 200 }));
+    resolveProbe(healthResponse("/_elvern/frontend-health"));
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(STARTUP_HEALTH_PROBE_INTERVAL_MS);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    resolveProbe(new Response("ok", { status: 200 }));
+    resolveProbe(healthResponse("/health"));
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(STARTUP_HEALTH_PROBE_INTERVAL_MS);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
@@ -83,7 +92,7 @@ describe("startup connection controller", () => {
   });
 
   test("a successful health response enters connected immediately", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
     const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
 
     controller.start();
@@ -102,8 +111,165 @@ describe("startup connection controller", () => {
     controller.stop();
   });
 
+  test.each([
+    ["frontend 204 marker", "/_elvern/frontend-health", 204, "X-Elvern-Frontend-Health", "http_success", true],
+    ["backend 200 marker", "/health", 200, "X-Elvern-Backend-Health", "http_success", true],
+    ["missing marker", "/health", 200, null, "marker_missing", false],
+    ["redirected HTML fallback", "/health", 200, "Content-Type", "marker_missing", false],
+    ["404", "/health", 404, null, "unexpected_http_status", false],
+    ["401", "/health", 401, null, "unexpected_http_status", false],
+    ["403", "/health", 403, null, "unexpected_http_status", false],
+    ["503", "/health", 503, null, "http_unhealthy", false],
+    ["swapped frontend marker", "/health", 204, "X-Elvern-Frontend-Health", "marker_missing", false],
+    ["swapped backend marker", "/_elvern/frontend-health", 200, "X-Elvern-Backend-Health", "marker_missing", false],
+  ])("classifies strict health response: %s", (_label, path, status, header, reason, reachable) => {
+    const headers = header
+      ? { [header]: header === "Content-Type" ? "text/html" : "1" }
+      : {};
+
+    expect(classifyStartupHealthResponse(path, new Response(null, { status, headers }))).toEqual({
+      reachable,
+      reason,
+      status,
+    });
+  });
+
+  test.each([
+    ["missing marker", 200, null],
+    ["not found", 404, null],
+    ["unauthorized", 401, null],
+    ["forbidden", 403, null],
+    ["frontend marker on backend response", 204, "frontend"],
+  ])("rejects backend health response with %s", async (_label, status, markerKind) => {
+    const fetchImpl = vi.fn((path) => {
+      if (path === "/_elvern/frontend-health") {
+        return Promise.resolve(healthResponse(path));
+      }
+      const headers = markerKind === "frontend" ? { "X-Elvern-Frontend-Health": "1" } : {};
+      return Promise.resolve(new Response(null, { status, headers }));
+    });
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(controller.getSnapshot().serviceReachable).toBe(false);
+    expect(controller.getSnapshot().backendState).toBe("unreachable");
+    controller.stop();
+  });
+
+  test("a verified recovery clears the Oops latch so a second outage can latch again", async () => {
+    let backendHealthy = true;
+    const fetchImpl = vi.fn((path) => Promise.resolve(
+      path === "/health" && !backendHealthy
+        ? healthResponse(path, 503)
+        : healthResponse(path)
+    ));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getSnapshot()).toMatchObject({ status: "connected", oopsLatched: false });
+
+    backendHealthy = false;
+    const firstOutage = controller.reportFailure();
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+    await firstOutage;
+    const firstGeneration = controller.getSnapshot().outageGeneration;
+    expect(controller.getSnapshot()).toMatchObject({ status: "unreachable", oopsLatched: true });
+
+    backendHealthy = true;
+    await controller.retry();
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "connected",
+      oopsLatched: false,
+      oopsLatchedGeneration: 0,
+    });
+
+    backendHealthy = false;
+    const secondOutage = controller.reportFailure();
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+    await secondOutage;
+    expect(controller.getSnapshot()).toMatchObject({ status: "unreachable", oopsLatched: true });
+    expect(controller.getSnapshot().outageGeneration).toBe(firstGeneration + 1);
+    controller.stop();
+  });
+
+  test("a VPN-style outage can recover before an independent backend outage", async () => {
+    const publicUrl = "https://probe.operator.example/connectivity";
+    let frontendHealthy = true;
+    let backendHealthy = true;
+    const fetchImpl = vi.fn((path) => {
+      if (path === publicUrl) return Promise.resolve(new Response(null, { status: 204 }));
+      if (path === "/_elvern/frontend-health" && !frontendHealthy) {
+        return Promise.reject(new TypeError("frontend unavailable"));
+      }
+      if (path === "/health" && !backendHealthy) {
+        return Promise.resolve(healthResponse(path, 503));
+      }
+      return Promise.resolve(healthResponse(path));
+    });
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      publicConnectivityProbeUrl: publicUrl,
+    });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    frontendHealthy = false;
+    const vpnOutage = controller.reportFailure();
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+    await vpnOutage;
+    const vpnGeneration = controller.getSnapshot().outageGeneration;
+    expect(controller.getSnapshot()).toMatchObject({
+      classification: CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE,
+      oopsLatched: true,
+    });
+
+    frontendHealthy = true;
+    await controller.retry();
+    expect(controller.getSnapshot()).toMatchObject({ status: "connected", oopsLatched: false });
+
+    backendHealthy = false;
+    const backendOutage = controller.reportFailure();
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+    await backendOutage;
+    expect(controller.getSnapshot()).toMatchObject({
+      classification: CONNECTIVITY_BACKEND_UNREACHABLE,
+      oopsLatched: true,
+      outageGeneration: vpnGeneration + 1,
+    });
+    controller.stop();
+  });
+
+  test("a confirmation timer from a stopped lifecycle cannot latch after restart", async () => {
+    let frontendHealthy = true;
+    const fetchImpl = vi.fn((path) => {
+      if (path === "/_elvern/frontend-health" && !frontendHealthy) {
+        return Promise.reject(new TypeError("frontend unavailable"));
+      }
+      return Promise.resolve(healthResponse(path));
+    });
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    frontendHealthy = false;
+    const staleOutage = controller.reportFailure();
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS - 1);
+    controller.stop();
+    frontendHealthy = true;
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1);
+    await staleOutage;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(controller.getSnapshot()).toMatchObject({ status: "connected", oopsLatched: false });
+    controller.stop();
+  });
+
   test("stops recovery polling after the application becomes healthy on non-desktop", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
     const controller = createStartupConnectionController({ fetchImpl, platform: "iphone", publicConnectivityProbes: [] });
 
     controller.start();
@@ -116,10 +282,9 @@ describe("startup connection controller", () => {
   });
 
   test("classifies frontend-up backend-down without claiming VPN certainty", async () => {
-    const fetchImpl = vi.fn((path) => Promise.resolve(new Response(
-      path === "/_elvern/frontend-health" ? null : "unavailable",
-      { status: path === "/_elvern/frontend-health" ? 204 : 503 },
-    )));
+    const fetchImpl = vi.fn((path) => Promise.resolve(
+      healthResponse(path, path === "/_elvern/frontend-health" ? 204 : 503)
+    ));
     const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
 
     controller.start();
@@ -182,9 +347,9 @@ describe("startup connection controller", () => {
         frontendAttempts += 1;
         return frontendAttempts === 1
           ? Promise.reject(new TypeError("frontend unavailable"))
-          : Promise.resolve(new Response(null, { status: 204 }));
+          : Promise.resolve(healthResponse(path));
       }
-      return Promise.resolve(new Response(null, { status: 200 }));
+      return Promise.resolve(healthResponse(path));
     });
     const controller = createStartupConnectionController({
       fetchImpl,
@@ -233,7 +398,7 @@ describe("startup connection controller", () => {
           releaseWatchdog = resolve;
         });
       }
-      return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.resolve(healthResponse(path));
     });
     const controller = createStartupConnectionController({
       fetchImpl,
@@ -248,7 +413,7 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS * 3);
     expect(fetchImpl).toHaveBeenCalledTimes(startupCalls + 1);
 
-    releaseWatchdog(new Response(null, { status: 204 }));
+    releaseWatchdog(healthResponse("/_elvern/frontend-health"));
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchImpl).toHaveBeenCalledTimes(startupCalls + 2);
     controller.stop();
@@ -256,7 +421,7 @@ describe("startup connection controller", () => {
 
   test("does not run the healthy watchdog on phone or tablet platforms", async () => {
     for (const platform of ["iphone", "ipad", "android"]) {
-      const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+      const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
       const controller = createStartupConnectionController({ fetchImpl, platform, publicConnectivityProbes: [] });
       controller.start();
       await vi.advanceTimersByTimeAsync(0);
@@ -287,10 +452,10 @@ describe("startup connection controller", () => {
     let healthy = true;
     const fetchImpl = vi.fn((path) => {
       if (healthy) {
-        return Promise.resolve(new Response("ok", { status: 200 }));
+        return Promise.resolve(healthResponse(path));
       }
       return path === "/_elvern/frontend-health"
-        ? Promise.resolve(new Response(null, { status: 204 }))
+        ? Promise.resolve(healthResponse(path))
         : Promise.reject(new TypeError("backend unavailable"));
     });
     const controller = createStartupConnectionController({
@@ -317,7 +482,7 @@ describe("startup connection controller", () => {
 
   test("runtime true-offline state never advances to unreachable", async () => {
     const navigatorObject = { onLine: true };
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject, publicConnectivityProbes: [] });
 
     controller.start();
@@ -338,7 +503,7 @@ describe("startup connection controller", () => {
 
   test("an explicit offline login failure latches the offline Oops immediately", async () => {
     const navigatorObject = { onLine: true };
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject, publicConnectivityProbes: [] });
 
     controller.start();
@@ -394,7 +559,7 @@ describe("startup connection controller", () => {
   });
 
   test("hidden desktop pages stop the watchdog and visible pages probe immediately", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
     const controller = createStartupConnectionController({
       fetchImpl,
       platform: "linux",
@@ -418,7 +583,7 @@ describe("startup connection controller", () => {
   });
 
   test("application readiness is required without resetting the original 60 second deadline", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
     const controller = createStartupConnectionController({
       fetchImpl,
       requireApplicationReady: true,
@@ -444,7 +609,7 @@ describe("startup connection controller", () => {
   });
 
   test("an application response completes startup after health permits the app to mount", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
     const controller = createStartupConnectionController({
       fetchImpl,
       requireApplicationReady: true,
@@ -516,7 +681,7 @@ describe("startup connection controller", () => {
           options.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
         });
       }
-      return Promise.resolve(new Response("ok", { status: 200 }));
+      return Promise.resolve(healthResponse(_path));
     });
     const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
 
@@ -546,7 +711,7 @@ describe("startup connection controller", () => {
           ? Promise.resolve({ status: 204, ok: true })
           : Promise.reject(new TypeError("public Internet unavailable"));
       }
-      return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.resolve(healthResponse(path));
     });
     const controller = createStartupConnectionController({
       fetchImpl,
@@ -594,7 +759,7 @@ describe("startup connection controller", () => {
           ? Promise.resolve({ status: 204, ok: true })
           : Promise.reject(new TypeError("public probe blocked"));
       }
-      return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.resolve(healthResponse(path));
     });
     const firstController = createStartupConnectionController({
       fetchImpl,
@@ -639,7 +804,7 @@ describe("startup connection controller", () => {
           ? Promise.resolve({ status: 204, ok: true })
           : Promise.reject(new TypeError("public Internet unavailable"));
       }
-      return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.resolve(healthResponse(path));
     });
     const controller = createStartupConnectionController({
       fetchImpl,

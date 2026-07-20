@@ -783,43 +783,114 @@ TABLE_STATEMENTS = (
         PRIMARY KEY (scope_kind, scope_id, layer)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS poster_index_fingerprints (
+        root_identity_hash TEXT PRIMARY KEY,
+        fingerprint_hash TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
 )
 
 
+LIBRARY_REVISION_TRIGGER_VERSION = "v2"
+LIBRARY_REVISION_TRIGGER_PREFIX = "trg_library_revision_"
+
+
+def _changed_columns(*columns: str) -> str:
+    return " OR ".join(f"OLD.{column} IS NOT NEW.{column}" for column in columns)
+
+
 def _library_revision_trigger_statements() -> tuple[str, ...]:
-    trigger_specs = [
-        ("media_items", "catalog", "global", "0", None),
-        ("media_item_technical_metadata", "catalog", "global", "0", None),
-        ("media_genre_groups", "catalog", "global", "0", None),
-        ("library_sources", "catalog", "global", "0", None),
-        ("library_sources", "permission", "global", "0", None),
-        ("media_age_requirements", "permission", "global", "0", None),
-        ("media_age_manual_group_links", "permission", "global", "0", None),
-        ("global_hidden_media_items", "permission", "global", "0", None),
-        ("global_hidden_movie_keys", "permission", "global", "0", None),
-        ("users", "permission", "user", "{alias}.id", None),
+    trigger_specs: list[tuple[str, str, str, str, str | None]] = [
+        (
+            "media_items", "catalog", "global", "0",
+            _changed_columns(
+                "title", "original_filename", "file_path", "source_kind", "library_source_id",
+                "external_media_id", "cloud_mime_type", "cloud_resource_key", "series_folder_key",
+                "series_folder_name", "library_category", "library_category_path",
+                "library_category_name", "library_folder_role", "library_folder_path",
+                "library_folder_name", "file_size", "file_mtime", "duration_seconds", "width",
+                "height", "video_codec", "audio_codec", "container", "year",
+            ),
+        ),
+        (
+            "media_item_technical_metadata", "catalog", "global", "0",
+            _changed_columns(
+                "metadata_version", "source_fingerprint", "container", "duration_seconds", "bit_rate",
+                "video_codec", "video_profile", "video_level", "pixel_format", "bit_depth", "width",
+                "height", "color_transfer", "color_primaries", "color_space", "hdr_detected",
+                "dolby_vision_detected", "audio_codec", "audio_profile", "audio_channels",
+                "audio_channel_layout", "audio_sample_rate", "subtitle_count",
+            ),
+        ),
+        ("media_genre_groups", "catalog", "global", "0", _changed_columns("display_title", "year", "genres_json")),
+        (
+            "library_sources", "catalog", "global", "0",
+            _changed_columns(
+                "provider", "google_drive_account_id", "resource_type", "resource_id", "display_name", "local_path",
+            ),
+        ),
+        ("library_sources", "permission", "global", "0", _changed_columns("owner_user_id", "is_shared")),
+        (
+            "media_age_requirements", "permission", "global", "0",
+            _changed_columns("display_title", "year", "age_requirement"),
+        ),
+        (
+            "media_age_manual_group_links", "permission", "global", "0",
+            _changed_columns("age_group_key", "media_item_id"),
+        ),
+        ("global_hidden_media_items", "permission", "global", "0", _changed_columns("media_item_id")),
+        (
+            "global_hidden_movie_keys", "permission", "global", "0",
+            _changed_columns("movie_key", "display_title", "year", "edition_identity"),
+        ),
+        ("users", "permission", "user", "{alias}.id", _changed_columns("id", "role", "enabled", "age_credential")),
         (
             "user_settings",
             "presentation",
             "user",
             "{alias}.user_id",
-            "{alias}.key IN ('hide_duplicate_movies', 'hide_recently_added', 'poster_card_appearance', 'poster_card_display_max_width')",
+            "(OLD.key IN ('hide_duplicate_movies', 'hide_recently_added', 'poster_card_appearance', 'poster_card_display_max_width')"
+            " OR NEW.key IN ('hide_duplicate_movies', 'hide_recently_added', 'poster_card_appearance', 'poster_card_display_max_width'))"
+            " AND (OLD.value IS NOT NEW.value OR OLD.key IS NOT NEW.key OR OLD.user_id IS NOT NEW.user_id)",
         ),
-        ("user_hidden_library_sources", "user_overlay", "user", "{alias}.user_id", None),
-        ("user_hidden_media_items", "user_overlay", "user", "{alias}.user_id", None),
-        ("user_hidden_movie_keys", "user_overlay", "user", "{alias}.user_id", None),
-        ("playback_progress", "progress", "user", "{alias}.user_id", None),
+        (
+            "user_hidden_library_sources", "user_overlay", "user", "{alias}.user_id",
+            _changed_columns("user_id", "library_source_id"),
+        ),
+        (
+            "user_hidden_media_items", "user_overlay", "user", "{alias}.user_id",
+            _changed_columns("user_id", "media_item_id"),
+        ),
+        (
+            "user_hidden_movie_keys", "user_overlay", "user", "{alias}.user_id",
+            _changed_columns("user_id", "movie_key", "display_title", "year", "edition_identity"),
+        ),
+        (
+            "playback_progress", "progress", "user", "{alias}.user_id",
+            _changed_columns("user_id", "media_item_id", "position_seconds", "duration_seconds", "completed"),
+        ),
     ]
     statements: list[str] = []
-    for table, layer, scope_kind, scope_template, condition_template in trigger_specs:
+    for table, layer, scope_kind, scope_template, update_condition in trigger_specs:
         for operation, alias in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
             scope_id = scope_template.format(alias=alias)
-            condition = condition_template.format(alias=alias) if condition_template else None
-            trigger_name = f"trg_library_revision_{table}_{layer}_{operation.lower()}"
-            when_clause = f"WHEN {condition}" if condition else ""
+            condition = update_condition.format(alias=alias) if operation == "UPDATE" and update_condition else None
+            if table == "user_settings" and operation != "UPDATE":
+                condition = (
+                    f"{alias}.key IN ('hide_duplicate_movies', 'hide_recently_added', "
+                    "'poster_card_appearance', 'poster_card_display_max_width')"
+                )
+            claim = f"elvern_revision_should_bump('{scope_kind}', {scope_id}, '{layer}') = 1"
+            when_clause = f"WHEN ({condition}) AND {claim}" if condition else f"WHEN {claim}"
+            trigger_name = (
+                f"{LIBRARY_REVISION_TRIGGER_PREFIX}{LIBRARY_REVISION_TRIGGER_VERSION}_"
+                f"{table}_{layer}_{operation.lower()}"
+            )
             statements.append(
                 f"""
-                CREATE TRIGGER IF NOT EXISTS {trigger_name}
+                CREATE TRIGGER {trigger_name}
                 AFTER {operation} ON {table}
                 {when_clause}
                 BEGIN
@@ -832,10 +903,45 @@ def _library_revision_trigger_statements() -> tuple[str, ...]:
                 END
                 """
             )
+        old_scope_id = scope_template.format(alias="OLD")
+        new_scope_id = scope_template.format(alias="NEW")
+        if scope_kind == "user" and old_scope_id != new_scope_id:
+            scope_change_condition = f"{old_scope_id} IS NOT {new_scope_id}"
+            if table == "user_settings":
+                scope_change_condition += (
+                    " AND (OLD.key IN ('hide_duplicate_movies', 'hide_recently_added', "
+                    "'poster_card_appearance', 'poster_card_display_max_width')"
+                    " OR NEW.key IN ('hide_duplicate_movies', 'hide_recently_added', "
+                    "'poster_card_appearance', 'poster_card_display_max_width'))"
+                )
+            trigger_name = (
+                f"{LIBRARY_REVISION_TRIGGER_PREFIX}{LIBRARY_REVISION_TRIGGER_VERSION}_"
+                f"{table}_{layer}_update_old_scope"
+            )
+            statements.append(
+                f"""
+                CREATE TRIGGER {trigger_name}
+                AFTER UPDATE ON {table}
+                WHEN ({scope_change_condition})
+                  AND elvern_revision_should_bump('{scope_kind}', {old_scope_id}, '{layer}') = 1
+                BEGIN
+                    INSERT INTO library_revision_counters (
+                        scope_kind, scope_id, layer, counter, updated_at
+                    ) VALUES ('{scope_kind}', {old_scope_id}, '{layer}', 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(scope_kind, scope_id, layer) DO UPDATE SET
+                        counter = counter + 1,
+                        updated_at = CURRENT_TIMESTAMP;
+                END
+                """
+            )
     return tuple(statements)
 
 
 LIBRARY_REVISION_TRIGGER_STATEMENTS = _library_revision_trigger_statements()
+LIBRARY_REVISION_TRIGGER_NAMES = tuple(
+    statement.split("CREATE TRIGGER ", 1)[1].split(None, 1)[0]
+    for statement in LIBRARY_REVISION_TRIGGER_STATEMENTS
+)
 
 
 INDEX_STATEMENTS = (
@@ -931,9 +1037,42 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class ElvernConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._library_revision_claims: set[tuple[str, int, str]] = set()
+
+    def claim_library_revision(self, scope_kind: object, scope_id: object, layer: object) -> int:
+        try:
+            claim = (str(scope_kind), int(scope_id), str(layer))
+        except (TypeError, ValueError):
+            return 0
+        if claim in self._library_revision_claims:
+            return 0
+        self._library_revision_claims.add(claim)
+        return 1
+
+    def commit(self) -> None:
+        super().commit()
+        self._library_revision_claims.clear()
+
+    def rollback(self) -> None:
+        super().rollback()
+        self._library_revision_claims.clear()
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(db_path, check_same_thread=False)
+    connection = sqlite3.connect(
+        db_path,
+        check_same_thread=False,
+        factory=ElvernConnection,
+    )
     connection.row_factory = sqlite3.Row
+    connection.create_function(
+        "elvern_revision_should_bump",
+        3,
+        connection.claim_library_revision,
+    )
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA synchronous = NORMAL")
@@ -954,12 +1093,24 @@ def init_db(settings: Settings) -> None:
     with get_connection(settings) as connection:
         for statement in TABLE_STATEMENTS:
             connection.execute(statement)
-        for statement in LIBRARY_REVISION_TRIGGER_STATEMENTS:
-            connection.execute(statement)
+        _drop_library_revision_triggers(connection)
         _run_schema_migrations(connection, settings=settings)
+        if settings.library_revision_enabled:
+            for statement in LIBRARY_REVISION_TRIGGER_STATEMENTS:
+                connection.execute(statement)
         for statement in INDEX_STATEMENTS:
             connection.execute(statement)
         connection.commit()
+
+
+def _drop_library_revision_triggers(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE ?",
+        (f"{LIBRARY_REVISION_TRIGGER_PREFIX}%",),
+    ).fetchall()
+    for row in rows:
+        name = str(row["name"]).replace('"', '""')
+        connection.execute(f'DROP TRIGGER IF EXISTS "{name}"')
 
 
 def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings) -> None:

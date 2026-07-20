@@ -567,7 +567,9 @@ describe("LibraryPage category switching", () => {
   test("initializes the search input and request from q in the URL", async () => {
     renderLibrary("/library?category=anime&q=akira");
 
-    expect((await screen.findAllByRole("searchbox", { name: "Search library" }))[0]).toHaveValue("akira");
+    expect(await screen.findByRole("searchbox", { name: "Search library" })).toHaveValue("akira");
+    expect(screen.getAllByRole("searchbox", { name: "Search library" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
         "/api/library/search?q=akira&category=anime",
@@ -658,12 +660,13 @@ describe("LibraryPage category switching", () => {
   test("phone hides static search and keeps floating search enabled when the preference is false", async () => {
     mockPlatformState.deviceClass = "phone";
     mockPlatformState.platform = "android";
-    renderLibrary("/library");
+    renderLibrary("/library?q=akira");
     await screen.findByRole("tab", { name: "Movies" });
 
     expect(screen.queryByRole("searchbox", { name: "Search library" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Search library" }));
-    expect(screen.getByRole("searchbox", { name: "Search library" })).toBeInTheDocument();
+    expect(await screen.findByRole("searchbox", { name: "Search library" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear search" })).toBeInTheDocument();
   });
 
   test("view changes do not reload user settings or maintenance status", async () => {

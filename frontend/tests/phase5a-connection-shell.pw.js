@@ -42,9 +42,12 @@ function emptyV2Payload(source = "all") {
 
 async function installConnectedFixture(page) {
   await installPublicProbeFixture(page);
-  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 200, body: "" }));
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({
+    status: 200, body: "", headers: { "X-Elvern-Frontend-Health": "1" },
+  }));
   await page.route("**/health", (route) => route.fulfill({
     status: 200,
+    headers: { "X-Elvern-Backend-Health": "1" },
     contentType: "application/json",
     body: '{"status":"ok"}',
   }));
@@ -113,10 +116,17 @@ test("mobile shows the dark connection shell and enters Elvern automatically aft
   test.skip(testInfo.project.name !== "chromium-mobile", "Mobile connection shell coverage");
   let reachable = false;
   await installPublicProbeFixture(page);
-  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 200, body: "" }));
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({
+    status: 200, body: "", headers: { "X-Elvern-Frontend-Health": "1" },
+  }));
   await page.route("**/health", async (route) => {
     if (reachable) {
-      await route.fulfill({ status: 200, contentType: "application/json", body: '{"status":"ok"}' });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { "X-Elvern-Backend-Health": "1" },
+        body: '{"status":"ok"}',
+      });
       return;
     }
     await route.abort("failed");
@@ -146,8 +156,12 @@ test("Linux same-host health cannot clear a trusted public outage notice", async
   test.skip(testInfo.project.name !== "chromium-desktop", "Desktop watchdog coverage");
   let publicReachable = true;
   await installPublicProbeFixture(page, () => publicReachable);
-  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 200, body: "" }));
-  await page.route("**/health", (route) => route.fulfill({ status: 200, body: "" }));
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({
+    status: 200, body: "", headers: { "X-Elvern-Frontend-Health": "1" },
+  }));
+  await page.route("**/health", (route) => route.fulfill({
+    status: 200, body: "", headers: { "X-Elvern-Backend-Health": "1" },
+  }));
   await page.route("**/api/auth/me", (route) => route.fulfill({
     status: 401,
     contentType: "application/json",

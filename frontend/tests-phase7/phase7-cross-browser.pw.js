@@ -37,9 +37,20 @@ const ITEMS = [
 ];
 
 
-function v2Summary(source = "all", titleSuffix = "") {
+function v2Summary(source = "all", state = {}) {
   const sourceItems = source === "all" ? ITEMS : ITEMS.filter((entry) => entry.source_kind === source);
-  const visible = sourceItems.map((entry) => ({ ...entry, title: `${entry.title}${titleSuffix}` }));
+  const visible = sourceItems.map((entry) => ({
+    ...entry,
+    title: `${entry.title}${state.titleSuffix || ""}`,
+    ...(entry.id === 1 ? {
+      progress_seconds: Number(state.progressSeconds || 0),
+      progress_duration_seconds: Number(state.progressDuration || 7200),
+      completed: Boolean(state.completed),
+    } : {}),
+  }));
+  const continueWatchingItemIds = Number(state.progressSeconds || 0) > 0 && !state.completed
+    ? visible.filter((entry) => entry.id === 1).map((entry) => entry.id)
+    : [];
   return {
     schema_version: "library-summary-v2",
     revision: (source === "local" ? "b" : source === "cloud" ? "c" : "a").repeat(64),
@@ -49,7 +60,7 @@ function v2Summary(source = "all", titleSuffix = "") {
       item_ids: visible.map((entry) => entry.id),
       series_rails: [],
       cloud_series_rails: [],
-      continue_watching_item_ids: [],
+      continue_watching_item_ids: continueWatchingItemIds,
       recently_added_item_ids: [],
     },
     available_genres: [],
@@ -94,9 +105,12 @@ async function installFixture(page, requests, state = {}) {
   for (const probe of PUBLIC_PROBES) {
     await page.route(probe, (route) => route.fulfill({ status: 204, body: "" }));
   }
-  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route("**/_elvern/frontend-health", (route) => route.fulfill({
+    status: 204, body: "", headers: { "X-Elvern-Frontend-Health": "1" },
+  }));
   await page.route("**/health", (route) => route.fulfill({
     status: 200,
+    headers: { "X-Elvern-Backend-Health": "1" },
     contentType: "application/json",
     body: '{"status":"ok"}',
   }));
@@ -127,14 +141,48 @@ async function installFixture(page, requests, state = {}) {
     } else if (path === "/api/provider-auth/status") {
       payload = { provider_auth_required: false, reconnect_required: false };
     } else if (path === "/api/library/v2/summary") {
-      payload = v2Summary(url.searchParams.get("source") || "all", state.titleSuffix || "");
+      payload = v2Summary(url.searchParams.get("source") || "all", state);
     } else if (path === "/api/library/search") {
       payload = v1SearchPayload(url.searchParams.get("q") || "");
     } else if (path === "/api/library/v2/revision") {
       payload = {
         schema_version: "library-revision-v1",
         catalog: state.catalogToken || "a", presentation: "b", permission: "c",
-        user_overlay: "d", progress: "e", combined_library: "f",
+        user_overlay: "d", progress: state.progressToken || "e", combined_library: "f",
+      };
+    } else if (path === "/api/library/v2/progress-state") {
+      payload = {
+        schema_version: "library-progress-state-v1",
+        progress_revision: state.progressToken || "e",
+        items: [{
+          id: 1,
+          progress_seconds: Number(state.progressSeconds || 0),
+          progress_duration_seconds: Number(state.progressDuration || 7200),
+          completed: Boolean(state.completed),
+        }],
+      };
+    } else if (path === "/api/progress/1" && route.request().method() === "POST") {
+      const progress = route.request().postDataJSON();
+      state.progressSeconds = Number(progress.position_seconds || 0);
+      state.progressDuration = Number(progress.duration_seconds || 7200);
+      state.completed = Boolean(progress.completed);
+      state.progressSequence = Number(state.progressSequence || 0) + 1;
+      state.progressToken = `progress-${state.progressSequence}`;
+      payload = {
+        media_item_id: 1,
+        position_seconds: state.progressSeconds,
+        duration_seconds: state.progressDuration,
+        completed: state.completed,
+      };
+    } else if (path === "/api/library/rescan" && route.request().method() === "POST") {
+      state.catalogSequence = Number(state.catalogSequence || 0) + 1;
+      state.catalogToken = `catalog-${state.catalogSequence}`;
+      state.titleSuffix = ` Scan ${state.catalogSequence}`;
+      payload = {
+        message: "Library scan completed.",
+        running: false,
+        job_id: null,
+        cloud_sync: null,
       };
     } else if (/^\/api\/library\/item\/\d+$/.test(path)) {
       const itemId = Number(path.split("/").at(-1));
@@ -274,6 +322,82 @@ test("desktop poster context menu remains available", async ({ page }) => {
   await page.locator(".media-card").first().click({ button: "right" });
   await expect(page.getByText("Edit", { exact: true })).toBeVisible();
   await expect(page.getByText("Generate", { exact: true })).toBeVisible();
+});
+
+
+test("two independent same-account contexts apply progress reset and catalog revision silently", async ({ browser, baseURL }) => {
+  const sharedState = {
+    catalogToken: "catalog-0",
+    progressToken: "progress-0",
+    progressSeconds: 0,
+    progressDuration: 7200,
+    completed: false,
+  };
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+  const requestsA = [];
+  const requestsB = [];
+  await installFixture(pageA, requestsA, sharedState);
+  await installFixture(pageB, requestsB, sharedState);
+  try {
+    await Promise.all([pageA.goto(`${baseURL}library`), pageB.goto(`${baseURL}library`)]);
+    await expect(pageA.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+    await expect(pageB.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+    await expect.poll(() => requestsB.filter((request) => request === "/api/library/v2/revision").length)
+      .toBeGreaterThan(0);
+
+    await pageA.evaluate(async () => {
+      await fetch(new URL("api/progress/1", document.baseURI), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ position_seconds: 120, duration_seconds: 7200, completed: false }),
+      });
+    });
+    await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(pageB.getByRole("heading", { name: "Continue watching" })).toBeVisible();
+    await expect(pageB.locator(".media-card__progress")).not.toHaveCount(0);
+    await expect(pageB.getByText("Loading library...")).toHaveCount(0);
+
+    await pageA.evaluate(async () => {
+      await fetch(new URL("api/progress/1", document.baseURI), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ position_seconds: 0, duration_seconds: 7200, completed: false }),
+      });
+    });
+    await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(pageB.getByRole("heading", { name: "Continue watching" })).toHaveCount(0);
+    await expect(pageB.locator(".media-card__progress")).toHaveCount(0);
+    await expect(pageB.getByText("Loading library...")).toHaveCount(0);
+
+    await pageA.getByRole("button", { name: "Rescan library" }).click();
+    await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(pageB.getByText("Phase Seven Alpha Scan 1", { exact: true })).toBeVisible();
+    await expect(pageB.getByText("Loading library...")).toHaveCount(0);
+  } finally {
+    await Promise.all([contextA.close(), contextB.close()]);
+  }
+});
+
+
+test("Root keeps one desktop static search without a clear button at laptop widths", async ({ page }, testInfo) => {
+  await page.goto("library");
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1024, height: 768 },
+    { width: 900, height: 700 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(page.getByRole("searchbox", { name: "Search library" })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Clear search" })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath(`library-root-${viewport.width}x${viewport.height}.png`),
+      fullPage: true,
+    });
+  }
 });
 
 

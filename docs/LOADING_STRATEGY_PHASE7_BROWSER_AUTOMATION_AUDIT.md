@@ -2,7 +2,9 @@
 
 Status: historical Phase 6E audit. Phase 7 added local opt-in Firefox/WebKit
 installation and production-server projects without changing ordinary install
-or CI behavior. See `LOADING_STRATEGY_PHASE7_COMMITTED_SEARCH_FAST_OOPS_REVISION.md`.
+or CI behavior. Phase 7B replaces fixed ports/prefixes with a dynamic runner,
+derives the installed Playwright version, and retains opt-in-only browser
+execution. See `LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`.
 
 ## Confirmed Current State
 
