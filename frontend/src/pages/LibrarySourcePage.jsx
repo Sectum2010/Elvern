@@ -166,14 +166,19 @@ export function LibrarySourcePage({ sourceKind }) {
     () => `${location.pathname}${location.search || ""}`,
     [location.pathname, location.search],
   );
+  const userSettingsQuery = useUserSettingsQuery(user);
+  const settings = resolveUserSettings(userSettingsQuery.data);
+  const clientPlatform = detectClientPlatform();
+  const clientDeviceClass = detectClientDeviceClass();
+  const compactSearchOnly = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
+  const floatingSearchEnabled = compactSearchOnly || settings.floating_library_search_enabled !== false;
   const committedSearch = useCommittedLibrarySearch({
     committedQuery: activeSourceQuery,
+    floatingEnabled: floatingSearchEnabled,
     location,
     navigate,
   });
   const [error, setError] = useState("");
-  const userSettingsQuery = useUserSettingsQuery(user);
-  const settings = resolveUserSettings(userSettingsQuery.data);
   const sourceSearchInputRef = useRef(null);
   const floatingSearchScrollYRef = useRef(null);
   const pendingFloatingSearchRestoreYRef = useRef(null);
@@ -182,9 +187,6 @@ export function LibrarySourcePage({ sourceKind }) {
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const resolvedSourceKind = sourceKind === "cloud" ? "cloud" : "local";
   const copy = SOURCE_PAGE_COPY[resolvedSourceKind];
-  const clientPlatform = detectClientPlatform();
-  const clientDeviceClass = detectClientDeviceClass();
-  const compactSearchOnly = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
@@ -464,7 +466,7 @@ export function LibrarySourcePage({ sourceKind }) {
       </div>
 
       {!compactSearchOnly ? <StaticLibrarySearch
-        containerClassName="library-focus-search-card"
+        formClassName="library-focus-search-card"
         label={`Search ${copy.title}`}
         placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
         ref={sourceSearchInputRef}
@@ -474,7 +476,7 @@ export function LibrarySourcePage({ sourceKind }) {
       <FloatingLibrarySearch
         expanded={committedSearch.floatingExpanded}
         desktopInteractionMode={floatingSearchDesktopMode}
-        enabled={compactSearchOnly || settings.floating_library_search_enabled !== false}
+        enabled={floatingSearchEnabled}
         label={`Search ${copy.title}`}
         mainInputRefs={[sourceSearchInputRef]}
         locked={committedSearch.isSourceLocked("floating")}

@@ -37,6 +37,11 @@ const ITEMS = [
 ];
 
 
+function opaqueToken(sequence, namespace = 0) {
+  return (BigInt(namespace) * 1_000_000n + BigInt(sequence)).toString(16).padStart(64, "0");
+}
+
+
 function v2Summary(source = "all", state = {}) {
   const sourceItems = source === "all" ? ITEMS : ITEMS.filter((entry) => entry.source_kind === source);
   const visible = sourceItems.map((entry) => ({
@@ -134,7 +139,7 @@ async function installFixture(page, requests, state = {}) {
       payload = {
         hide_duplicate_movies: true,
         hide_recently_added: true,
-        floating_library_search_enabled: true,
+        floating_library_search_enabled: state.floatingSearchEnabled !== false,
         poster_card_appearance: "classic",
         poster_card_display_max_width: "1400",
       };
@@ -147,13 +152,17 @@ async function installFixture(page, requests, state = {}) {
     } else if (path === "/api/library/v2/revision") {
       payload = {
         schema_version: "library-revision-v1",
-        catalog: state.catalogToken || "a", presentation: "b", permission: "c",
-        user_overlay: "d", progress: state.progressToken || "e", combined_library: "f",
+        catalog: state.catalogToken || opaqueToken(1, 1),
+        presentation: opaqueToken(1, 2),
+        permission: opaqueToken(1, 3),
+        user_overlay: opaqueToken(1, 4),
+        progress: state.progressToken || opaqueToken(1, 5),
+        combined_library: opaqueToken(1, 6),
       };
     } else if (path === "/api/library/v2/progress-state") {
       payload = {
         schema_version: "library-progress-state-v1",
-        progress_revision: state.progressToken || "e",
+        progress_revision: state.progressToken || opaqueToken(1, 5),
         items: [{
           id: 1,
           progress_seconds: Number(state.progressSeconds || 0),
@@ -167,7 +176,7 @@ async function installFixture(page, requests, state = {}) {
       state.progressDuration = Number(progress.duration_seconds || 7200);
       state.completed = Boolean(progress.completed);
       state.progressSequence = Number(state.progressSequence || 0) + 1;
-      state.progressToken = `progress-${state.progressSequence}`;
+      state.progressToken = opaqueToken(state.progressSequence, 5);
       payload = {
         media_item_id: 1,
         position_seconds: state.progressSeconds,
@@ -176,7 +185,7 @@ async function installFixture(page, requests, state = {}) {
       };
     } else if (path === "/api/library/rescan" && route.request().method() === "POST") {
       state.catalogSequence = Number(state.catalogSequence || 0) + 1;
-      state.catalogToken = `catalog-${state.catalogSequence}`;
+      state.catalogToken = opaqueToken(state.catalogSequence, 1);
       state.titleSuffix = ` Scan ${state.catalogSequence}`;
       payload = {
         message: "Library scan completed.",
@@ -300,14 +309,14 @@ test("desktop search commits only on Enter and survives Detail return", async ({
 
 test("revision change silently refreshes the active Library without a loading reset", async ({ page }) => {
   const requests = [];
-  const state = { catalogToken: "a", titleSuffix: "" };
+  const state = { catalogToken: opaqueToken(1, 1), titleSuffix: "" };
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, requests, state);
   await page.goto("library");
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
   await expect.poll(() => requests.filter((request) => request === "/api/library/v2/revision").length).toBeGreaterThan(0);
 
-  state.catalogToken = "z";
+  state.catalogToken = opaqueToken(2, 1);
   state.titleSuffix = " Updated";
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
 
@@ -327,8 +336,8 @@ test("desktop poster context menu remains available", async ({ page }) => {
 
 test("two independent same-account contexts apply progress reset and catalog revision silently", async ({ browser, baseURL }) => {
   const sharedState = {
-    catalogToken: "catalog-0",
-    progressToken: "progress-0",
+    catalogToken: opaqueToken(0, 1),
+    progressToken: opaqueToken(0, 5),
     progressSeconds: 0,
     progressDuration: 7200,
     completed: false,
@@ -382,22 +391,107 @@ test("two independent same-account contexts apply progress reset and catalog rev
 });
 
 
-test("Root keeps one desktop static search without a clear button at laptop widths", async ({ page }, testInfo) => {
-  await page.goto("library");
+test("Root static search is interactive without a clear button at desktop and laptop widths", async ({ page }, testInfo) => {
+  const requests = [];
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests);
   for (const viewport of [
     { width: 1440, height: 900 },
     { width: 1024, height: 768 },
     { width: 900, height: 700 },
   ]) {
     await page.setViewportSize(viewport);
-    await expect(page.getByRole("searchbox", { name: "Search library" })).toHaveCount(1);
+    await page.goto("library");
+    await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+    const search = page.getByRole("searchbox", { name: "Search library" });
+    await expect(search).toHaveCount(1);
+    await expect(search).toBeEnabled();
     await expect(page.getByRole("button", { name: "Clear search" })).toHaveCount(0);
+    await search.click();
+    await expect(search).toBeFocused();
+    const searchRequestCount = requests.filter((request) => request.startsWith("/api/library/search")).length;
+    await search.fill("Beta");
+    await page.waitForTimeout(500);
+    expect(requests.filter((request) => request.startsWith("/api/library/search")).length).toBe(searchRequestCount);
+    await search.press("Enter");
+    await expect(page).toHaveURL(/library\?q=Beta$/);
+    await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({
       path: testInfo.outputPath(`library-root-${viewport.width}x${viewport.height}.png`),
       fullPage: true,
     });
   }
+});
+
+
+test("collapsing an uncommitted Floating draft immediately unlocks Static search", async ({ page, baseURL }) => {
+  const requests = [];
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests);
+  await page.setViewportSize({ width: 1024, height: 600 });
+  await page.goto("library");
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+
+  const staticSearch = page.locator(".library-desktop-hero__search input");
+  await page.locator(".media-card").last().scrollIntoViewIfNeeded();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Search library" }).click();
+  const floatingSearch = page.locator(".floating-library-search input");
+  await floatingSearch.fill("uncommitted floating value");
+  await expect(staticSearch).toBeDisabled();
+  const requestCount = requests.length;
+
+  await page.getByRole("button", { name: "Collapse search" }).click();
+
+  await expect(staticSearch).toBeEnabled();
+  await expect(staticSearch).toHaveValue("");
+  expect(requests.length).toBe(requestCount);
+  await staticSearch.fill("Beta");
+  await page.waitForTimeout(500);
+  expect(requests.filter((request) => request.includes("uncommitted"))).toHaveLength(0);
+  await staticSearch.press("Enter");
+  await expect(page).toHaveURL(`${baseURL}library?q=Beta`);
+  await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
+});
+
+
+test("Local and Cloud static search commits locally without another source payload request", async ({ page, baseURL }) => {
+  const requests = [];
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests);
+  for (const [source, query, title] of [
+    ["local", "Alpha", "Phase Seven Alpha"],
+    ["cloud", "Beta", "Phase Seven Beta"],
+  ]) {
+    await page.goto(`library/${source}`);
+    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    const staticSearch = page.getByRole("searchbox", { name: `Search ${source === "local" ? "Local" : "Cloud"} Library` });
+    await expect(staticSearch).toBeEnabled();
+    const sourcePayloadCount = requests.filter((request) => (
+      request.startsWith("/api/library/v2/summary") && request.includes(`source=${source}`)
+    )).length;
+    await staticSearch.fill(query);
+    await page.waitForTimeout(500);
+    expect(requests.filter((request) => request.startsWith("/api/library/search"))).toHaveLength(0);
+    await staticSearch.press("Enter");
+    await expect(page).toHaveURL(`${baseURL}library/${source}?q=${query}`);
+    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    expect(requests.filter((request) => (
+      request.startsWith("/api/library/v2/summary") && request.includes(`source=${source}`)
+    )).length).toBe(sourcePayloadCount);
+  }
+});
+
+
+test("desktop setting false hides Floating while Static remains usable", async ({ page }) => {
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], { floatingSearchEnabled: false });
+  await page.goto("library");
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+
+  await expect(page.locator(".floating-library-search")).toHaveCount(0);
+  await expect(page.getByRole("searchbox", { name: "Search library" })).toBeEnabled();
 });
 
 

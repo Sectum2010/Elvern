@@ -4,21 +4,21 @@ import { shouldCommitLibrarySearchKey } from "../lib/useCommittedLibrarySearch.j
 
 
 export const StaticLibrarySearch = forwardRef(function StaticLibrarySearch({
-  containerClassName = "",
-  inputClassName = "",
+  fieldClassName = "",
+  formClassName = "",
   label = "Search library",
   placeholder = "Search title or filename",
   search,
 }, ref) {
   return (
     <form
-      className={["library-search-form", containerClassName].filter(Boolean).join(" ")}
+      className={["library-search-form", formClassName].filter(Boolean).join(" ")}
       onSubmit={(event) => {
         event.preventDefault();
         search.commit("static");
       }}
     >
-      <label className={["search-field", inputClassName].filter(Boolean).join(" ")}>
+      <label className={["search-field", fieldClassName].filter(Boolean).join(" ")}>
         <span className="sr-only">{label}</span>
         <input
           aria-label={label}

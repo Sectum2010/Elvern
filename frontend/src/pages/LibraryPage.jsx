@@ -665,8 +665,13 @@ export function LibraryPage() {
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
   const userSettingsQuery = useUserSettingsQuery(user);
   const settings = resolveUserSettings(userSettingsQuery.data);
+  const clientPlatform = detectClientPlatform();
+  const clientDeviceClass = detectClientDeviceClass();
+  const compactSearchOnly = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
+  const floatingSearchEnabled = compactSearchOnly || settings.floating_library_search_enabled !== false;
   const committedSearch = useCommittedLibrarySearch({
     committedQuery: activeLibraryQuery,
+    floatingEnabled: floatingSearchEnabled,
     location,
     navigate,
   });
@@ -702,9 +707,6 @@ export function LibraryPage() {
   const libraryReturnRestoreKeyRef = useRef("");
   const [floatingSearchViewportOrientation, setFloatingSearchViewportOrientation] = useState(() => getFloatingSearchViewportOrientation());
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
-  const clientPlatform = detectClientPlatform();
-  const clientDeviceClass = detectClientDeviceClass();
-  const compactSearchOnly = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryArrangeDeviceClass = clientPlatform === "ipad"
     ? "tablet"
@@ -1674,7 +1676,7 @@ export function LibraryPage() {
             <span className="status-pill">{library.total_items} indexed</span>
           </div>
           {!compactSearchOnly ? <StaticLibrarySearch
-            inputClassName="library-desktop-hero__search"
+            formClassName="library-desktop-hero__search"
             ref={desktopSearchInputRef}
             search={committedSearch}
           /> : null}
@@ -1710,7 +1712,7 @@ export function LibraryPage() {
       <FloatingLibrarySearch
         expanded={committedSearch.floatingExpanded}
         desktopInteractionMode={floatingSearchDesktopMode}
-        enabled={compactSearchOnly || settings.floating_library_search_enabled !== false}
+        enabled={floatingSearchEnabled}
         label="Search library"
         mainInputRefs={[desktopSearchInputRef]}
         locked={committedSearch.isSourceLocked("floating")}

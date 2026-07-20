@@ -567,7 +567,10 @@ describe("LibraryPage category switching", () => {
   test("initializes the search input and request from q in the URL", async () => {
     renderLibrary("/library?category=anime&q=akira");
 
-    expect(await screen.findByRole("searchbox", { name: "Search library" })).toHaveValue("akira");
+    const input = await screen.findByRole("searchbox", { name: "Search library" });
+    expect(input).toHaveValue("akira");
+    expect(input.closest("form")).toHaveClass("library-desktop-hero__search");
+    expect(input.closest("label")).not.toHaveClass("library-desktop-hero__search");
     expect(screen.getAllByRole("searchbox", { name: "Search library" })).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
     await waitFor(() => {

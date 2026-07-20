@@ -7,8 +7,11 @@ round.
 **Current status / superseded by:** Phase 7B hardens zero-state progress,
 revision writes/triggers, poster filesystem changes, repeated runtime outages,
 health markers, controller-owned search locks, and the opt-in browser harness.
-The frontend revision mode remains `off` until all Phase 7B Gates A-F pass.
-See `LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`.
+Phase 7C fixes the hidden Floating draft lock, restores Root form layout wiring,
+validates/race-checks progress snapshots, and pauses unsupported capability
+polling. Cross-device revision now defaults to `on` by product decision;
+explicit `off` remains rollback. See
+`LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`.
 
 ## Scope
 
@@ -73,8 +76,9 @@ return-anchor compatible.
 ## Opaque Cross-Device Revision
 
 The backend flag `ELVERN_LIBRARY_REVISION_ENABLED` defaults to true. The
-frontend flag `VITE_ELVERN_LIBRARY_REVISION_MODE` defaults to off and enables
-polling only for the exact value `on`.
+frontend flag `VITE_ELVERN_LIBRARY_REVISION_MODE` defaults to `on` when unset or
+empty. Explicit `on` and `off` are honored; every other non-empty value fails
+closed to `off`.
 
 Authenticated endpoints:
 

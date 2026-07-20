@@ -2,10 +2,13 @@
 
 ## Status
 
-Implemented locally on 2026-07-19. Cross-device revision remains frontend
-`off` while activation evidence is collected. The code is **ready for canary**,
-not enabled. A missing or failed Gate A-F keeps it off; passing most gates is not
-sufficient.
+**Current status (Phase 7C):** Cross-device revision now defaults to frontend
+`on` by explicit product decision. An unset or empty
+`VITE_ELVERN_LIBRARY_REVISION_MODE` resolves to `on`; explicit `off` remains the
+immediate frontend rollback and every other non-empty value fails closed to
+`off`. The Phase 7B `ready-for-canary` decision and Gate A-F evidence below are
+retained as historical validation, including the unresolved WebKit host and
+real-device limitations; they are not rewritten as tests that never occurred.
 
 This phase does not change View Plan hidden/dedupe behavior, formal search
 ranking, v1 availability, pagination, virtualization, resource adaptation,
@@ -175,6 +178,62 @@ Dynamic search setting wording is unchanged.
 CSS places the same Root form beneath the hero actions at narrower laptop widths
 and in-row at wide desktop widths. No duplicated breakpoint-only input remains.
 
+## Phase 7C Runtime Contract
+
+### Desktop static search recovery
+
+Phase 7B left two correctness regressions. Collapsing Floating Search changed
+only its expanded boolean, so an uncommitted floating draft could remain the
+hidden owner and permanently disable Static Search. Root also passed
+`library-desktop-hero__search` to the inner label even though that class owns the
+form's flex sizing and order.
+
+`COLLAPSE_FLOATING` is now one reducer transaction. When floating owns the
+draft, collapse restores only `floatingDraft` to the committed URL query,
+releases the owner, and collapses the control without changing URL, results,
+Static draft, or issuing a request. A Static-owned draft remains untouched.
+Disabling the desktop Dynamic search setting applies the same transaction so an
+unmounted Floating control cannot retain a lock. Expansion remains controlled
+by the user's Floating button; Enter, Clear, URL changes, Detail return, and
+background refresh do not collapse it.
+
+`StaticLibrarySearch` now names its class inputs `formClassName` and
+`fieldClassName`. Root applies `library-desktop-hero__search` to a real block
+form with `min-inline-size: 0`; Local and Cloud apply
+`library-focus-search-card` to the same shared form component. Desktop/laptop
+Static and Floating controls contain no X. Phone/tablet render no Static control,
+force Floating on, and retain its explicit X.
+
+### Progress snapshot validation and race handling
+
+`validateLibraryProgressStatePayload()` accepts only the exact
+`library-progress-state-v1` top-level fields and exact item fields. The opaque
+revision token is 64 lowercase hexadecimal characters; IDs are unique positive
+integers; progress/duration are finite non-negative numbers with nullable
+duration; and `completed` is a strict boolean. Unknown fields, sensitive fields,
+missing fields, duplicate IDs, numeric strings, NaN, Infinity, and negative
+values fail before any Query cache patch.
+
+The progress snapshot token must equal the `progress` token in the revision
+snapshot that caused the fetch. A mismatch raises a bounded race result: no
+cache patch occurs, the prior progress baseline is retained, successful
+catalog/presentation/permission/overlay handling advances, and the synchronizer
+checks again only after the current request finishes. Each normal check allows
+at most two immediate retries; continued races return to the 60-second/focus
+cadence. Malformed or transiently failed progress snapshots keep the same
+progress baseline but wait for normal cadence instead of spinning.
+
+### Capability pause
+
+An exact 503 `library_revision_disabled` response or endpoint 404 marks revision
+capability unavailable for the current authenticated identity lifecycle. The
+visible timer and focus/pageshow/online/manual-check requests stop for that
+identity and document without clearing Library cache or showing an error UI.
+Full reload or user/role/permission identity change creates a new lifecycle and
+probes once again. Authentication responses, ordinary 500 responses, timeouts,
+network failures, and malformed payloads do not permanently disable probing;
+they retain the normal retry cadence.
+
 ## Opt-In Browser Harness
 
 `run-cross-browser-playwright.mjs` selects an OS-assigned localhost port,
@@ -187,7 +246,7 @@ The browser installer reads installed `playwright` and `@playwright/test`
 package metadata, verifies both and the local CLI have the same version, and
 then installs Firefox/WebKit. There is no handwritten Playwright version.
 
-## Activation Gates
+## Historical Phase 7B Activation Gates
 
 | Gate | Required evidence | Final local status |
 | --- | --- | --- |
@@ -198,14 +257,16 @@ then installs Firefox/WebKit. There is no handwritten Playwright version.
 | E approved real devices | one approved real two-device combination | **NOT RUN**: no approved real-device pair was available in this coding environment |
 | F rollback | frontend off and backend disabled rehearsal | **PASS (automated)**: frontend off-mode and backend disabled-mode contracts pass; final local bundle was rebuilt with revision off |
 
-Because Gate E cannot be claimed from this host, the maximum honest outcome is
-`ready-for-canary`; frontend revision remains `off` even if automated validation
-passes.
+At the end of Phase 7B, Gate E could not be claimed from this host, so that
+round's honest outcome was `ready-for-canary` with frontend revision `off`.
+Phase 7C does not claim those missing tests were later run; the subsequent
+default-on state is a separate explicit product decision.
 
 ## Validation Results
 
-The final local activation decision is **ready-for-canary**. Revision polling is
-not enabled by default and no live environment was changed.
+The Phase 7B local activation decision was **ready-for-canary**. Revision polling
+was not enabled by default during that historical validation and no live
+environment was changed in that round.
 
 - targeted backend revision/progress/poster/security checks: 82 passed;
 - targeted frontend revision/search/health/Library checks: 16 files, 247 passed;
@@ -231,17 +292,16 @@ not enabled by default and no live environment was changed.
 - Bandit repository gate: no qualifying issues.
 
 The opt-in browser commands use a dynamic port, random valid prefix, and unique
-ignored output directory. The final default/off production build was restored
-with:
+ignored output directory. Phase 7B restored an off-mode production build with:
 
 ```bash
 VITE_ELVERN_LIBRARY_REVISION_MODE=off npm run build --prefix frontend
 ```
 
-Remaining activation evidence is the complete Gate C mutation/isolation matrix,
-a WebKit run on a host with its required runtime libraries, and Gate E on an
-approved real-device pair. Until all three are recorded, revision mode stays
-off.
+Historical missing evidence remains the complete Gate C mutation/isolation
+matrix, a WebKit run on a host with its required runtime libraries, and Gate E
+on an approved real-device pair. Phase 7C retains those limitations in the
+record even though the product default is now on.
 
 ## Rollback
 

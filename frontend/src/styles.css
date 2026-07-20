@@ -781,8 +781,10 @@ button {
   max-width: none;
 }
 
-.library-desktop-hero__search--desktop {
+.library-desktop-hero__search.library-search-form {
   display: block;
+  inline-size: 100%;
+  min-inline-size: 0;
 }
 
 .library-desktop-hero__category-row {
@@ -1222,7 +1224,6 @@ button {
 }
 
 .page-section--library .library-desktop-hero__search input,
-.page-section--library .library-mobile-search-card .search-field input,
 .page-section--library-source .library-focus-search-card .search-field input {
   border-radius: 999px;
 }
@@ -8302,6 +8303,8 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
 
 .library-focus-search-card.library-search-form {
   display: block;
+  inline-size: 100%;
+  min-inline-size: 0;
 }
 
 .library-search__clear {

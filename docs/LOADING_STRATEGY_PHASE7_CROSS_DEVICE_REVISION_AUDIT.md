@@ -5,7 +5,15 @@ revision counters, client polling, and progress-state patch were implemented
 by Phase 7. Phase 7B implements zero-state progress, revision-off zero-write
 semantics, versioned narrow triggers, transaction de-duplication, poster
 fingerprints, and age-query batching. See
-`LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`. Activation remains gated.
+`LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`. That historical round's
+activation remained gated.
+
+**Current status (Phase 7C):** the audited revision endpoint, lightweight
+progress patch, and layered client synchronizer are implemented and now default
+to frontend `on` by product decision. Progress payload validation, token-race
+handling, and disabled/404 capability pause are also implemented. Explicit
+frontend `off` and backend capability false remain rollback switches. The
+historical recommendations below are retained as design provenance.
 
 ## Confirmed Current Behavior
 

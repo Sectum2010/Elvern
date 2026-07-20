@@ -5,11 +5,12 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { useCommittedLibrarySearch } from "./useCommittedLibrarySearch.js";
 
 
-function useHarness() {
+function useHarness({ floatingEnabled = true } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
   const search = useCommittedLibrarySearch({
     committedQuery: new URLSearchParams(location.search).get("q") || "",
+    floatingEnabled,
     location,
     navigate,
   });
@@ -103,5 +104,57 @@ describe("committed Library search controller", () => {
 
     const next = renderHook(useHarness, { wrapper });
     expect(next.result.current.search.floatingExpanded).toBe(true);
+  });
+
+  test("collapsing a floating draft restores committed q and releases the static input", () => {
+    const { result } = renderHook(useHarness, { wrapper });
+
+    act(() => result.current.search.toggleFloatingExpanded());
+    act(() => result.current.search.updateDraft("floating", "hidden draft"));
+    expect(result.current.search.isSourceLocked("static")).toBe(true);
+
+    act(() => result.current.search.toggleFloatingExpanded());
+
+    expect(result.current.search.floatingExpanded).toBe(false);
+    expect(result.current.search.floatingDraft).toBe("akira");
+    expect(result.current.search.activeDraftSource).toBe(null);
+    expect(result.current.search.isSourceLocked("static")).toBe(false);
+    expect(result.current.location.search).toBe("?category=anime&q=akira");
+  });
+
+  test("floating collapse without ownership preserves committed q and static ownership", () => {
+    const { result } = renderHook(useHarness, { wrapper });
+
+    act(() => result.current.search.updateDraft("static", "arrival"));
+    act(() => result.current.search.toggleFloatingExpanded());
+    expect(result.current.search.floatingExpanded).toBe(true);
+    expect(result.current.search.activeDraftSource).toBe("static");
+    expect(result.current.search.isSourceLocked("floating")).toBe(true);
+
+    act(() => result.current.search.toggleFloatingExpanded());
+
+    expect(result.current.search.floatingExpanded).toBe(false);
+    expect(result.current.search.staticDraft).toBe("arrival");
+    expect(result.current.search.activeDraftSource).toBe("static");
+    expect(result.current.location.search).toBe("?category=anime&q=akira");
+  });
+
+  test("disabling floating search reverts a hidden floating draft and releases its lock", () => {
+    let floatingEnabled = true;
+    const { result, rerender } = renderHook(
+      () => useHarness({ floatingEnabled }),
+      { wrapper },
+    );
+
+    act(() => result.current.search.toggleFloatingExpanded());
+    act(() => result.current.search.updateDraft("floating", "hidden draft"));
+    floatingEnabled = false;
+    rerender();
+
+    expect(result.current.search.floatingExpanded).toBe(false);
+    expect(result.current.search.floatingDraft).toBe("akira");
+    expect(result.current.search.activeDraftSource).toBe(null);
+    expect(result.current.search.isSourceLocked("static")).toBe(false);
+    expect(result.current.location.search).toBe("?category=anime&q=akira");
   });
 });

@@ -2,7 +2,8 @@
 
 **Current status / superseded by:** v2 is now the default for non-search Root,
 Local, and Cloud views. Formal search remains v1. Phase 7B does not change this
-contract; it only hardens the optional cross-device revision layer around it.
+contract. Phase 7C leaves v2 and formal-search routing unchanged while the
+cross-device revision layer now defaults to frontend `on`.
 
 ## Status and scope
 

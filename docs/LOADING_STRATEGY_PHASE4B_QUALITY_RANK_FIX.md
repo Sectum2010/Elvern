@@ -3,6 +3,7 @@
 **Current status / superseded by:** the quality-rank authority and v2 activation
 remain current. The old Local/Cloud debounce-era wording is superseded by Phase
 7 Enter-only committed search. Phase 7B preserves this rank contract unchanged.
+Phase 7C also leaves quality authority unchanged while revision defaults on.
 
 ## Scope
 

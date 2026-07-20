@@ -6,6 +6,12 @@ or CI behavior. Phase 7B replaces fixed ports/prefixes with a dynamic runner,
 derives the installed Playwright version, and retains opt-in-only browser
 execution. See `LOADING_STRATEGY_PHASE7B_REVISION_HARDENING.md`.
 
+**Current status (Phase 7C):** the production harness remains local opt-in and
+is extended for Root/Local/Cloud static-search interaction and Floating-lock
+regression coverage. Firefox/WebKit are still excluded from ordinary CI and
+GitHub Actions. The historical WebKit host dependency limitation remains
+explicit rather than being reported as a pass.
+
 ## Confirmed Current State
 
 - `@playwright/test` is pinned through the frontend lockfile at 1.60.0.

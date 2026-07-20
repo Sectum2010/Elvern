@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer } from "react";
 
 
 const FLOATING_SEARCH_EXPANDED_STORAGE_PREFIX = "elvern:floating-library-search-expanded:v1:";
 const SEARCH_DRAFT_SOURCES = new Set(["static", "floating"]);
 
 
-function createSearchDraftState(committedQuery) {
+function createSearchDraftState(committedQuery, floatingExpanded = false) {
   return {
     staticDraft: committedQuery,
     floatingDraft: committedQuery,
     activeDraftSource: null,
+    floatingExpanded: Boolean(floatingExpanded),
   };
 }
 
@@ -25,7 +26,7 @@ export function committedLibrarySearchReducer(state, action) {
     case "URL_SYNC":
     case "COMMIT":
     case "CLEAR":
-      return createSearchDraftState(String(action.query || ""));
+      return createSearchDraftState(String(action.query || ""), state.floatingExpanded);
     case "UPDATE_DRAFT":
       if (!sourceOwnsDraft(state, action.source)) return state;
       return {
@@ -35,10 +36,24 @@ export function committedLibrarySearchReducer(state, action) {
       };
     case "REVERT":
       if (!sourceOwnsDraft(state, action.source)) return state;
-      return createSearchDraftState(String(action.query || ""));
+      return createSearchDraftState(String(action.query || ""), state.floatingExpanded);
     case "RELEASE_LOCK":
       if (!sourceOwnsDraft(state, action.source)) return state;
       return { ...state, activeDraftSource: null };
+    case "EXPAND_FLOATING":
+      return { ...state, floatingExpanded: true };
+    case "COLLAPSE_FLOATING":
+      if (state.activeDraftSource !== "floating") {
+        return { ...state, floatingExpanded: false };
+      }
+      return {
+        ...state,
+        floatingDraft: String(action.query || ""),
+        activeDraftSource: null,
+        floatingExpanded: false,
+      };
+    case "SYNC_FLOATING_EXPANDED":
+      return { ...state, floatingExpanded: Boolean(action.expanded) };
     default:
       return state;
   }
@@ -96,6 +111,7 @@ export function shouldCommitLibrarySearchKey(event) {
 
 export function useCommittedLibrarySearch({
   committedQuery,
+  floatingEnabled = true,
   location,
   navigate,
   storage = globalThis?.sessionStorage,
@@ -104,18 +120,29 @@ export function useCommittedLibrarySearch({
   const pathname = String(location?.pathname || "/library");
   const [draftState, dispatchDraft] = useReducer(
     committedLibrarySearchReducer,
-    normalizedCommittedQuery,
-    createSearchDraftState,
+    {
+      committedQuery: normalizedCommittedQuery,
+      floatingExpanded: readExpanded(storage, pathname),
+    },
+    (initial) => createSearchDraftState(initial.committedQuery, initial.floatingExpanded),
   );
-  const [floatingExpanded, setFloatingExpanded] = useState(() => readExpanded(storage, pathname));
 
   useEffect(() => {
     dispatchDraft({ type: "URL_SYNC", query: normalizedCommittedQuery });
   }, [location?.search, normalizedCommittedQuery]);
 
   useEffect(() => {
-    setFloatingExpanded(readExpanded(storage, pathname));
+    dispatchDraft({
+      type: "SYNC_FLOATING_EXPANDED",
+      expanded: readExpanded(storage, pathname),
+    });
   }, [pathname, storage]);
+
+  useEffect(() => {
+    if (floatingEnabled) return;
+    writeExpanded(storage, pathname, false);
+    dispatchDraft({ type: "COLLAPSE_FLOATING", query: normalizedCommittedQuery });
+  }, [floatingEnabled, normalizedCommittedQuery, pathname, storage]);
 
   const replaceCommittedQuery = useCallback((source, nextQuery, actionType = "COMMIT") => {
     if (!sourceOwnsDraft(draftState, source)) {
@@ -151,12 +178,14 @@ export function useCommittedLibrarySearch({
   }, [replaceCommittedQuery]);
 
   const toggleFloatingExpanded = useCallback(() => {
-    setFloatingExpanded((current) => {
-      const next = !current;
-      writeExpanded(storage, pathname, next);
-      return next;
-    });
-  }, [pathname, storage]);
+    if (draftState.floatingExpanded) {
+      writeExpanded(storage, pathname, false);
+      dispatchDraft({ type: "COLLAPSE_FLOATING", query: normalizedCommittedQuery });
+      return;
+    }
+    writeExpanded(storage, pathname, true);
+    dispatchDraft({ type: "EXPAND_FLOATING" });
+  }, [draftState.floatingExpanded, normalizedCommittedQuery, pathname, storage]);
 
   return useMemo(() => ({
     activeDraftSource: draftState.activeDraftSource,
@@ -164,7 +193,7 @@ export function useCommittedLibrarySearch({
     commit,
     committedQuery: normalizedCommittedQuery,
     floatingDraft: draftState.floatingDraft,
-    floatingExpanded,
+    floatingExpanded: draftState.floatingExpanded,
     isSourceLocked: (source) => Boolean(
       draftState.activeDraftSource && draftState.activeDraftSource !== source
     ),
@@ -176,7 +205,6 @@ export function useCommittedLibrarySearch({
     clear,
     commit,
     draftState,
-    floatingExpanded,
     normalizedCommittedQuery,
     revert,
     toggleFloatingExpanded,
