@@ -37,6 +37,7 @@ describe("StartupConnectionGate", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
+    delete window.__elvernRuntimeReady;
   });
 
   afterEach(() => {
@@ -44,6 +45,7 @@ describe("StartupConnectionGate", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    delete window.__elvernRuntimeReady;
     document.body.innerHTML = "";
   });
 
@@ -128,6 +130,22 @@ describe("StartupConnectionGate", () => {
     expect(document.getElementById("elvern-connection-shell").dataset.state).toBe("connecting");
 
     act(() => window.dispatchEvent(new CustomEvent(STARTUP_APPLICATION_READY_EVENT)));
+    expect(document.getElementById("elvern-connection-shell")).toHaveClass("elvern-connection-shell--ready");
+  });
+
+  test("honors an application-ready signal that arrived before the gate listener", async () => {
+    const container = installShellFixture();
+    const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      requireApplicationReady: true,
+    });
+    window.__elvernRuntimeReady = true;
+
+    render(<StartupConnectionGate controller={controller}><p>Auth already ready</p></StartupConnectionGate>, { container });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    expect(screen.getByText("Auth already ready")).toBeInTheDocument();
     expect(document.getElementById("elvern-connection-shell")).toHaveClass("elvern-connection-shell--ready");
   });
 
@@ -250,7 +268,7 @@ describe("StartupConnectionGate", () => {
     )).toBeInTheDocument();
   });
 
-  test("an offline login attempt waits 60 seconds before showing the offline Oops shell", async () => {
+  test("an explicit offline login attempt shows the offline Oops shell immediately", async () => {
     const container = installShellFixture();
     const navigatorObject = { onLine: true };
     const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
@@ -263,11 +281,7 @@ describe("StartupConnectionGate", () => {
       detail: { path: "/api/auth/login" },
     })));
 
-    await act(() => vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1));
-    expect(document.getElementById("elvern-connection-shell")).toHaveAttribute("data-state", "connecting");
-    expect(screen.getByText("Login state")).toBeInTheDocument();
-
-    await act(() => vi.advanceTimersByTimeAsync(1));
+    await act(() => vi.advanceTimersByTimeAsync(0));
     expect(document.getElementById("elvern-connection-shell")).toHaveAttribute("data-state", "unreachable");
     expect(document.querySelector("[data-connection-oops-copy]")).toHaveTextContent(CONNECTION_OFFLINE_OOPS_COPY);
     expect(screen.getByText("Login state")).toBeInTheDocument();
@@ -276,7 +290,7 @@ describe("StartupConnectionGate", () => {
   test("rotates familiar and waiting word in discrete seven second steps", async () => {
     const container = installShellFixture();
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError("offline"));
-    const controller = createStartupConnectionController({ fetchImpl });
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
     render(<StartupConnectionGate controller={controller}><p>App ready</p></StartupConnectionGate>, { container });
 
     await act(() => vi.advanceTimersByTimeAsync(CONNECTION_FAMILIAR_ROTATION_MS));

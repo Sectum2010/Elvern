@@ -16,6 +16,7 @@ export const IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX = 64;
 export const IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO = 0.08;
 export const IOS_POST_KEYBOARD_QUARANTINE_MS = 700;
 export const IOS_VIEWPORT_SETTLE_MAX_MS = 1_500;
+export const IOS_UNVERIFIED_REVALIDATION_DELAYS_MS = Object.freeze([500, 1_500]);
 export const IOS_VIEWPORT_EVIDENCE_SOURCES = Object.freeze({
   cleanStableSamples: "clean_stable_samples",
   persistedGeometry: "persisted_geometry",
@@ -245,6 +246,8 @@ export function createIOSViewportCoordinator({
   let pendingFrame = 0;
   let stableSampleTimer = 0;
   let settleFallbackTimer = 0;
+  const unverifiedRevalidationTimers = new Set();
+  let unverifiedRevalidationGeneration = 0;
   let orientationTimer = 0;
   let resetRestoreTimer = 0;
   let resetGeneration = 0;
@@ -430,6 +433,34 @@ export function createIOSViewportCoordinator({
     }
   }
 
+  function clearUnverifiedRevalidation() {
+    unverifiedRevalidationGeneration += 1;
+    unverifiedRevalidationTimers.forEach((timerId) => windowObject?.clearTimeout?.(timerId));
+    unverifiedRevalidationTimers.clear();
+  }
+
+  function scheduleUnverifiedRevalidation() {
+    clearUnverifiedRevalidation();
+    const generation = unverifiedRevalidationGeneration;
+    IOS_UNVERIFIED_REVALIDATION_DELAYS_MS.forEach((delayMs, index) => {
+      const timerId = windowObject?.setTimeout?.(() => {
+        unverifiedRevalidationTimers.delete(timerId);
+        if (
+          !started
+          || generation !== unverifiedRevalidationGeneration
+          || snapshot.trustedLayoutVerified
+          || snapshot.layoutVerificationState !== "paint_ready_layout_unverified"
+        ) {
+          return;
+        }
+        sample(`unverified_revalidation_${index + 1}`);
+      }, delayMs) || 0;
+      if (timerId) {
+        unverifiedRevalidationTimers.add(timerId);
+      }
+    });
+  }
+
   function setProvisionalLayout(viewport, reason, eventType) {
     provisionalViewport = {
       width: Math.max(0, Math.round(toFinite(viewport?.width, 0))),
@@ -462,6 +493,11 @@ export function createIOSViewportCoordinator({
     };
     applyRootMetrics(next);
     emit(next);
+    if (reason === "paint_ready_layout_unverified") {
+      scheduleUnverifiedRevalidation();
+    } else {
+      clearUnverifiedRevalidation();
+    }
     debug(eventType);
   }
 
@@ -494,6 +530,7 @@ export function createIOSViewportCoordinator({
       stableSampleTimer = 0;
     }
     clearSettleFallback();
+    clearUnverifiedRevalidation();
     const next = {
       ...snapshot,
       stableViewport: viewport,
@@ -960,6 +997,7 @@ export function createIOSViewportCoordinator({
     windowObject?.clearTimeout?.(settleFallbackTimer);
     windowObject?.clearTimeout?.(orientationTimer);
     windowObject?.clearTimeout?.(resetRestoreTimer);
+    clearUnverifiedRevalidation();
     pendingFrame = 0;
     stableSampleTimer = 0;
     settleFallbackTimer = 0;

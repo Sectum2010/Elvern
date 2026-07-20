@@ -8,7 +8,9 @@ import {
   CONNECTIVITY_INTERNET_OFFLINE,
   createStartupConnectionController,
   DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS,
+  FAST_OOPS_CONFIRMATION_DELAY_MS,
   STARTUP_HEALTH_PROBE_INTERVAL_MS,
+  STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "./startupConnection.js";
 
@@ -124,6 +126,12 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_BACKEND_UNREACHABLE);
+    expect(controller.getSnapshot().status).toBe("connecting");
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "unreachable",
+      oopsEvidenceReason: "conclusive_backend_unreachable",
+    });
     controller.stop();
   });
 
@@ -154,10 +162,46 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE);
+    expect(controller.getSnapshot().status).toBe("connecting");
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS - 1);
+    expect(controller.getSnapshot().status).toBe("connecting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "unreachable",
+      oopsEvidenceReason: "conclusive_frontend_unreachable",
+    });
     controller.stop();
   });
 
-  test("requires two public probe failures before classifying frontend failure as offline", async () => {
+  test("does not latch when a hard frontend failure recovers in the confirmation round", async () => {
+    let frontendAttempts = 0;
+    const publicUrl = "https://probe.operator.example/connectivity";
+    const fetchImpl = vi.fn((path) => {
+      if (path === publicUrl) return Promise.resolve(new Response(null, { status: 204 }));
+      if (path === "/_elvern/frontend-health") {
+        frontendAttempts += 1;
+        return frontendAttempts === 1
+          ? Promise.reject(new TypeError("frontend unavailable"))
+          : Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    const controller = createStartupConnectionController({
+      fetchImpl,
+      publicConnectivityProbeUrl: publicUrl,
+    });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "connected",
+      oopsLatched: false,
+    });
+    controller.stop();
+  });
+
+  test("two untrusted public probe failures remain insufficient evidence", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError("unavailable"));
     const controller = createStartupConnectionController({
       fetchImpl,
@@ -173,8 +217,9 @@ describe("startup connection controller", () => {
     expect(controller.getSnapshot().classification).not.toBe(CONNECTIVITY_INTERNET_OFFLINE);
 
     await vi.advanceTimersByTimeAsync(1);
-    expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_INTERNET_OFFLINE);
-    expect(controller.getSnapshot().publicEvidenceReason).toBe("probe_failure_trusted");
+    await Promise.resolve();
+    expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_EVIDENCE_INSUFFICIENT);
+    expect(controller.getSnapshot().publicEvidenceReason).toBe("probe_failure_unverified");
     expect(fetchImpl.mock.calls.filter(([path]) => path === "https://probe.operator.example/connectivity"))
       .toHaveLength(2);
     controller.stop();
@@ -222,21 +267,19 @@ describe("startup connection controller", () => {
     }
   });
 
-  test("browser offline is classified immediately and shows Oops after 60 seconds", async () => {
+  test("browser offline is classified and latched immediately before runtime readiness", async () => {
     const navigatorObject = { onLine: false };
     const fetchImpl = vi.fn();
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject, publicConnectivityProbes: [] });
 
     controller.start();
-    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1);
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(controller.getSnapshot().classification).toBe(CONNECTIVITY_INTERNET_OFFLINE);
     expect(controller.getSnapshot().publicEvidenceReason).toBe("browser_explicit_offline");
-    expect(controller.getSnapshot().status).toBe("connecting");
-    expect(fetchImpl.mock.calls.every(([path]) => path === "/_elvern/frontend-health")).toBe(true);
-
-    await vi.advanceTimersByTimeAsync(1);
     expect(controller.getSnapshot().status).toBe("unreachable");
+    expect(controller.getSnapshot().oopsEvidenceReason).toBe("conclusive_browser_offline");
+    expect(fetchImpl.mock.calls.every(([path]) => path === "/_elvern/frontend-health")).toBe(true);
     controller.stop();
   });
 
@@ -293,7 +336,7 @@ describe("startup connection controller", () => {
     controller.stop();
   });
 
-  test("an offline login failure uses the 60 second offline Oops path", async () => {
+  test("an explicit offline login failure latches the offline Oops immediately", async () => {
     const navigatorObject = { onLine: true };
     const fetchImpl = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
     const controller = createStartupConnectionController({ fetchImpl, navigatorObject, publicConnectivityProbes: [] });
@@ -303,25 +346,22 @@ describe("startup connection controller", () => {
     navigatorObject.onLine = false;
     await controller.reportFailure({ forceOfflineOops: true });
 
-    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS - 1);
     expect(controller.getSnapshot()).toMatchObject({
       classification: CONNECTIVITY_INTERNET_OFFLINE,
       offlineOopsRequired: true,
       runtimeReady: true,
-      status: "connecting",
+      status: "unreachable",
+      oopsEvidenceReason: "conclusive_browser_offline",
     });
-
-    await vi.advanceTimersByTimeAsync(1);
-    expect(controller.getSnapshot().status).toBe("unreachable");
     controller.stop();
   });
 
-  test("an offline login failure confirmed by previously trusted public evidence also uses offline Oops", async () => {
+  test("a trusted public failure plus hard origin failure confirms offline Oops early", async () => {
     const navigatorObject = { onLine: true };
     const publicUrl = "https://probe.operator.example/connectivity";
     let publicReachable = true;
     const fetchImpl = vi.fn((path) => {
-      if (path === publicUrl && publicReachable) {
+      if (publicReachable) {
         return Promise.resolve({ status: 204, ok: true });
       }
       return Promise.reject(new TypeError("unavailable"));
@@ -339,16 +379,17 @@ describe("startup connection controller", () => {
     publicReachable = false;
     const failureProbe = controller.reportFailure({ forceOfflineOops: true });
     await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(10);
     await failureProbe;
 
     expect(controller.getSnapshot()).toMatchObject({
       classification: CONNECTIVITY_INTERNET_OFFLINE,
       offlineOopsRequired: true,
       runtimeReady: true,
-      status: "connecting",
+      status: "unreachable",
+      oopsEvidenceReason: "conclusive_trusted_public_failure",
     });
-    await vi.advanceTimersByTimeAsync(STARTUP_UNREACHABLE_DELAY_MS);
-    expect(controller.getSnapshot().status).toBe("unreachable");
     controller.stop();
   });
 
@@ -536,6 +577,56 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
     expect(controller.getSnapshot().internetOutageLatched).toBe(true);
     controller.stop();
+  });
+
+  test("consumes one verified manual service recovery across reload when public probes are blocked", async () => {
+    const publicUrl = "https://probe.operator.example/connectivity";
+    const values = new Map();
+    const storage = {
+      getItem: (key) => values.get(key) ?? null,
+      removeItem: (key) => values.delete(key),
+      setItem: (key, value) => values.set(key, String(value)),
+    };
+    let publicReachable = true;
+    const fetchImpl = vi.fn((path) => {
+      if (path === publicUrl) {
+        return publicReachable
+          ? Promise.resolve({ status: 204, ok: true })
+          : Promise.reject(new TypeError("public probe blocked"));
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const firstController = createStartupConnectionController({
+      fetchImpl,
+      publicConnectivityProbeUrl: publicUrl,
+      publicProbeConfirmationDelayMs: 0,
+      publicProbeStorage: storage,
+      recoveryStorage: storage,
+    });
+    firstController.start();
+    await vi.advanceTimersByTimeAsync(0);
+    firstController.stop();
+
+    storage.setItem(STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY, "1");
+    publicReachable = false;
+    const recoveredController = createStartupConnectionController({
+      fetchImpl,
+      publicConnectivityProbeUrl: publicUrl,
+      publicProbeConfirmationDelayMs: 0,
+      publicProbeStorage: storage,
+      recoveryStorage: storage,
+    });
+    recoveredController.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(storage.getItem(STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY)).toBeNull();
+    expect(recoveredController.getSnapshot()).toMatchObject({
+      serviceReachable: true,
+      runtimeReady: true,
+      offlineOopsRequired: false,
+      status: "connected",
+    });
+    recoveredController.stop();
   });
 
   test("navigator online only triggers evidence collection and cannot clear the public outage latch", async () => {

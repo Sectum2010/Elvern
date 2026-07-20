@@ -240,6 +240,53 @@ function patchLibrarySummaryV2Progress(payload, itemId, progressFields) {
 }
 
 
+function readProgressFromPayload(payload, queryKey, itemId) {
+  if (isLibraryV2QueryKey(queryKey)) {
+    return payload?.items_by_id?.[String(itemId)] || null;
+  }
+  return findItemInV1Payload(payload, itemId);
+}
+
+
+export async function patchLibraryProgressStateCaches(progressState) {
+  const items = Array.isArray(progressState?.items) ? progressState.items : [];
+  let patchedQueryCount = 0;
+  let membershipMayHaveChanged = false;
+  queryClient.getQueryCache().findAll().forEach((query) => {
+    if (!isLibraryQueryKey(query.queryKey) || query.state.data === undefined) return;
+    let nextPayload = query.state.data;
+    for (const item of items) {
+      const itemId = Number(item?.id);
+      if (!Number.isFinite(itemId) || itemId <= 0) continue;
+      const currentItem = readProgressFromPayload(nextPayload, query.queryKey, itemId);
+      if (!currentItem) continue;
+      const progressFields = {
+        progress_seconds: Number(item.progress_seconds || 0),
+        progress_duration_seconds: item.progress_duration_seconds ?? null,
+        completed: Boolean(item.completed),
+      };
+      if (
+        Boolean(currentItem.completed) !== progressFields.completed
+        || (Number(currentItem.progress_seconds || 0) <= 0 && progressFields.progress_seconds > 0)
+      ) {
+        membershipMayHaveChanged = true;
+      }
+      nextPayload = isLibraryV2QueryKey(query.queryKey)
+        ? patchLibrarySummaryV2Progress(nextPayload, itemId, progressFields)
+        : patchLibraryPayloadProgress(nextPayload, itemId, progressFields);
+    }
+    if (nextPayload !== query.state.data) {
+      patchedQueryCount += 1;
+      queryClient.setQueryData(query.queryKey, nextPayload);
+    }
+  });
+  if (membershipMayHaveChanged) {
+    await markLibraryQueriesStale({ refetchType: "active" });
+  }
+  return { patchedQueryCount, membershipMayHaveChanged };
+}
+
+
 export async function patchLibraryProgressCaches(
   progressPayload,
   { refetchActiveOnCompletion = false } = {},

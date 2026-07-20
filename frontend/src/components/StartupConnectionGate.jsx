@@ -207,6 +207,9 @@ export function StartupConnectionGate({ children, controller: providedController
       controller.reportApplicationReady();
     }
     window.addEventListener(STARTUP_APPLICATION_READY_EVENT, handleApplicationReady);
+    if (window.__elvernRuntimeReady) {
+      handleApplicationReady();
+    }
     return () => window.removeEventListener(STARTUP_APPLICATION_READY_EVENT, handleApplicationReady);
   }, [controller]);
 

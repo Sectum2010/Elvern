@@ -4,7 +4,9 @@ import {
   CONNECTION_RUNTIME_CONTRACT,
   createConnectivityRuntime,
   createOfflineDocumentStateMachine,
+  deriveFastOopsCandidate,
   getRecoveryDecision,
+  matchesFastOopsCandidates,
 } from "./connectivityRuntimeCore.js";
 
 
@@ -83,6 +85,27 @@ describe("offline document deadline state machine", () => {
     expect(second.getSnapshot().oopsDeadlineAt).not.toBe(first.getSnapshot().oopsDeadlineAt);
   });
 
+  test("a conclusive Oops latches once without returning to connecting", () => {
+    const machine = createOfflineDocumentStateMachine({ documentStartedAt: 100, now: () => 200 });
+
+    machine.latchOops({
+      classification: CONNECTION_RUNTIME_CONTRACT.classifications.frontendOrVpnUnreachable,
+      evidenceReason: CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.frontendUnreachable,
+      confidence: "confirmed",
+    });
+    machine.latchOops({
+      classification: CONNECTION_RUNTIME_CONTRACT.classifications.backendUnreachable,
+      evidenceReason: CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.backendUnreachable,
+    });
+
+    expect(machine.getSnapshot()).toMatchObject({
+      visibleState: "oops_latched",
+      oopsClassification: CONNECTION_RUNTIME_CONTRACT.classifications.frontendOrVpnUnreachable,
+      oopsEvidenceReason: CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.frontendUnreachable,
+      oopsConfidence: "confirmed",
+    });
+  });
+
   test("same-host frontend and backend health cannot recover an offline document", () => {
     let now = 0;
     const machine = createOfflineDocumentStateMachine({ documentStartedAt: 0, now: () => now });
@@ -103,6 +126,42 @@ describe("offline document deadline state machine", () => {
       visibleState: "oops_latched",
       oopsLatched: true,
     });
+  });
+});
+
+
+describe("Fast Oops evidence contract", () => {
+  const health = CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons;
+  const publicReasons = CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons;
+
+  test("recognizes hard frontend and backend evidence but not timeouts or maintenance", () => {
+    expect(deriveFastOopsCandidate({
+      publicEvidence: { internetState: "online", publicEvidenceReason: publicReasons.endpointSuccess },
+      frontendHealth: { reason: health.networkError },
+    })).toMatchObject({ evidenceReason: "conclusive_frontend_unreachable" });
+    expect(deriveFastOopsCandidate({
+      frontendHealth: { reason: health.httpSuccess },
+      backendHealth: { reason: health.httpUnhealthy, status: 503 },
+    })).toMatchObject({ evidenceReason: "conclusive_backend_unreachable" });
+    expect(deriveFastOopsCandidate({
+      publicEvidence: { internetState: "online", publicEvidenceReason: publicReasons.endpointSuccess },
+      frontendHealth: { reason: health.timeout },
+    })).toBeNull();
+    expect(deriveFastOopsCandidate({
+      frontendHealth: { reason: health.httpSuccess },
+      backendHealth: { reason: health.httpUnhealthy, status: 503, maintenance: true },
+    })).toBeNull();
+  });
+
+  test("requires the same candidate in both confirmation rounds", () => {
+    expect(matchesFastOopsCandidates(
+      { classification: "vpn", evidenceReason: "network" },
+      { classification: "vpn", evidenceReason: "network" },
+    )).toBe(true);
+    expect(matchesFastOopsCandidates(
+      { classification: "vpn", evidenceReason: "network" },
+      { classification: "server", evidenceReason: "http" },
+    )).toBe(false);
   });
 });
 

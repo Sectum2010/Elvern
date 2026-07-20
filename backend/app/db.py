@@ -773,7 +773,69 @@ TABLE_STATEMENTS = (
         FOREIGN KEY (linked_action_request_id) REFERENCES assistant_action_requests (id) ON DELETE SET NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS library_revision_counters (
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('global', 'user')),
+        scope_id INTEGER NOT NULL,
+        layer TEXT NOT NULL CHECK (layer IN ('catalog', 'presentation', 'permission', 'user_overlay', 'progress')),
+        counter INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope_kind, scope_id, layer)
+    )
+    """,
 )
+
+
+def _library_revision_trigger_statements() -> tuple[str, ...]:
+    trigger_specs = [
+        ("media_items", "catalog", "global", "0", None),
+        ("media_item_technical_metadata", "catalog", "global", "0", None),
+        ("media_genre_groups", "catalog", "global", "0", None),
+        ("library_sources", "catalog", "global", "0", None),
+        ("library_sources", "permission", "global", "0", None),
+        ("media_age_requirements", "permission", "global", "0", None),
+        ("media_age_manual_group_links", "permission", "global", "0", None),
+        ("global_hidden_media_items", "permission", "global", "0", None),
+        ("global_hidden_movie_keys", "permission", "global", "0", None),
+        ("users", "permission", "user", "{alias}.id", None),
+        (
+            "user_settings",
+            "presentation",
+            "user",
+            "{alias}.user_id",
+            "{alias}.key IN ('hide_duplicate_movies', 'hide_recently_added', 'poster_card_appearance', 'poster_card_display_max_width')",
+        ),
+        ("user_hidden_library_sources", "user_overlay", "user", "{alias}.user_id", None),
+        ("user_hidden_media_items", "user_overlay", "user", "{alias}.user_id", None),
+        ("user_hidden_movie_keys", "user_overlay", "user", "{alias}.user_id", None),
+        ("playback_progress", "progress", "user", "{alias}.user_id", None),
+    ]
+    statements: list[str] = []
+    for table, layer, scope_kind, scope_template, condition_template in trigger_specs:
+        for operation, alias in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            scope_id = scope_template.format(alias=alias)
+            condition = condition_template.format(alias=alias) if condition_template else None
+            trigger_name = f"trg_library_revision_{table}_{layer}_{operation.lower()}"
+            when_clause = f"WHEN {condition}" if condition else ""
+            statements.append(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {trigger_name}
+                AFTER {operation} ON {table}
+                {when_clause}
+                BEGIN
+                    INSERT INTO library_revision_counters (
+                        scope_kind, scope_id, layer, counter, updated_at
+                    ) VALUES ('{scope_kind}', {scope_id}, '{layer}', 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(scope_kind, scope_id, layer) DO UPDATE SET
+                        counter = counter + 1,
+                        updated_at = CURRENT_TIMESTAMP;
+                END
+                """
+            )
+    return tuple(statements)
+
+
+LIBRARY_REVISION_TRIGGER_STATEMENTS = _library_revision_trigger_statements()
 
 
 INDEX_STATEMENTS = (
@@ -891,6 +953,8 @@ def init_db(settings: Settings) -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     with get_connection(settings) as connection:
         for statement in TABLE_STATEMENTS:
+            connection.execute(statement)
+        for statement in LIBRARY_REVISION_TRIGGER_STATEMENTS:
             connection.execute(statement)
         _run_schema_migrations(connection, settings=settings)
         for statement in INDEX_STATEMENTS:

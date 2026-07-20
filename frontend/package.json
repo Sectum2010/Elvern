@@ -10,6 +10,10 @@
     "test:watch": "vitest",
     "ui:qa": "playwright test",
     "ui:qa:headed": "playwright test --headed",
+    "playwright:install:extra": "node scripts/install-playwright-extra-browsers.mjs",
+    "test:e2e:firefox": "VITE_ELVERN_LIBRARY_REVISION_MODE=on npm run build && playwright test --config playwright.cross-browser.config.js --project firefox-desktop-production",
+    "test:e2e:webkit": "VITE_ELVERN_LIBRARY_REVISION_MODE=on npm run build && playwright test --config playwright.cross-browser.config.js --project webkit-desktop-production",
+    "test:e2e:cross-browser": "VITE_ELVERN_LIBRARY_REVISION_MODE=on npm run build && playwright test --config playwright.cross-browser.config.js",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "serve": "node server.mjs"
   },

@@ -69,6 +69,11 @@ import {
 } from "../lib/iosViewportCoordinator";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
+import {
+  shouldCommitLibrarySearchKey,
+  useCommittedLibrarySearch,
+} from "../lib/useCommittedLibrarySearch";
+import { LIBRARY_REVISION_CHECK_EVENT } from "../lib/libraryRevisionQueries.js";
 
 
 export const LIBRARY_CATEGORY_OPTIONS = [
@@ -115,7 +120,6 @@ const DEFAULT_LIBRARY_ARRANGE = {
   sort: "smart",
 };
 const SCROLLABLE_ARRANGE_DEVICE_CLASSES = new Set(["phone", "tablet"]);
-export const LIBRARY_SEARCH_DEBOUNCE_MS = 300;
 const EMPTY_LIBRARY_PAYLOAD = Object.freeze({
   items: [],
   series_rails: [],
@@ -663,7 +667,11 @@ export function LibraryPage() {
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
   const userSettingsQuery = useUserSettingsQuery(user);
   const settings = resolveUserSettings(userSettingsQuery.data);
-  const [query, setQuery] = useState(() => activeLibraryQuery);
+  const committedSearch = useCommittedLibrarySearch({
+    committedQuery: activeLibraryQuery,
+    location,
+    navigate,
+  });
   const [rescanPending, setRescanPending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -699,6 +707,7 @@ export function LibraryPage() {
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const clientPlatform = detectClientPlatform();
   const clientDeviceClass = detectClientDeviceClass();
+  const compactSearchOnly = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryArrangeDeviceClass = clientPlatform === "ipad"
     ? "tablet"
@@ -887,30 +896,6 @@ export function LibraryPage() {
   }
 
   useEffect(() => {
-    setQuery(activeLibraryQuery);
-  }, [activeLibraryQuery]);
-
-  useEffect(() => {
-    const normalizedQuery = query.trim();
-    if (normalizedQuery === activeLibraryQuery) {
-      return undefined;
-    }
-    const timerId = window.setTimeout(() => {
-      navigate(
-        {
-          pathname: location.pathname,
-          search: buildLibraryQuerySearch(location.search, normalizedQuery),
-          hash: location.hash,
-        },
-        { replace: true },
-      );
-    }, LIBRARY_SEARCH_DEBOUNCE_MS);
-    return () => {
-      window.clearTimeout(timerId);
-    };
-  }, [activeLibraryQuery, location.hash, location.pathname, location.search, navigate, query]);
-
-  useEffect(() => {
     if (user?.role !== "admin") {
       setMaintenanceModeActive(false);
       return undefined;
@@ -949,6 +934,7 @@ export function LibraryPage() {
     }
     const scanRunning = Boolean(libraryQuery.data.scan_in_progress);
     if (scanRunningRef.current && !scanRunning) {
+      window.dispatchEvent(new Event(LIBRARY_REVISION_CHECK_EVENT));
       if (cloudSyncWarningRef.current) {
         setError(formatCompletedRescanWarning(cloudSyncWarningRef.current));
         setNotice("");
@@ -1622,26 +1608,23 @@ export function LibraryPage() {
     }
   }
 
-  function handleFloatingSearchChange(nextValue, details = {}) {
-    const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
-    const nextSearchValue = typeof nextValue === "string" ? nextValue : "";
-
-    if (floatingSearchScrollRestoreEnabled && typeof window !== "undefined") {
-      const previousWasEmpty = previousValue.trim().length === 0;
-      const nextIsEmpty = nextSearchValue.trim().length === 0;
-      if (previousWasEmpty && !nextIsEmpty && floatingSearchScrollYRef.current === null) {
-        floatingSearchScrollYRef.current = window.scrollY;
-      }
-      if (!previousWasEmpty && nextIsEmpty) {
-        if (Number.isFinite(floatingSearchScrollYRef.current)) {
-          pendingFloatingSearchRestoreYRef.current = floatingSearchScrollYRef.current;
-        }
-        floatingSearchScrollYRef.current = null;
-      }
+  const previousCommittedSearchRef = useRef(activeLibraryQuery);
+  useEffect(() => {
+    const previousValue = previousCommittedSearchRef.current;
+    previousCommittedSearchRef.current = activeLibraryQuery;
+    if (!floatingSearchScrollRestoreEnabled || typeof window === "undefined") {
+      return;
     }
-
-    setQuery(nextSearchValue);
-  }
+    if (!previousValue && activeLibraryQuery && floatingSearchScrollYRef.current === null) {
+      floatingSearchScrollYRef.current = window.scrollY;
+    }
+    if (previousValue && !activeLibraryQuery) {
+      if (Number.isFinite(floatingSearchScrollYRef.current)) {
+        pendingFloatingSearchRestoreYRef.current = floatingSearchScrollYRef.current;
+      }
+      floatingSearchScrollYRef.current = null;
+    }
+  }, [activeLibraryQuery, floatingSearchScrollRestoreEnabled]);
 
   function handleCategoryChange(category) {
     if (category === activeLibraryCategory) {
@@ -1693,16 +1676,31 @@ export function LibraryPage() {
             </Link>
             <span className="status-pill">{library.total_items} indexed</span>
           </div>
-          <label className="search-field library-desktop-hero__search library-desktop-hero__search--desktop">
+          {!compactSearchOnly ? <form className="library-search-form" onSubmit={(event) => {
+            event.preventDefault();
+            committedSearch.commit("static");
+          }}><label className="search-field library-desktop-hero__search library-desktop-hero__search--desktop">
             <span className="sr-only">Search library</span>
             <input
-              onChange={(event) => setQuery(event.target.value)}
+              aria-label="Search library"
+              disabled={committedSearch.isSourceLocked("static")}
+              onChange={(event) => committedSearch.updateDraft("static", event.target.value)}
+              onKeyDown={(event) => {
+                if (shouldCommitLibrarySearchKey(event)) {
+                  event.preventDefault();
+                  committedSearch.commit("static");
+                } else if (event.key === "Escape" && !event.isComposing) {
+                  event.preventDefault();
+                  committedSearch.revert("static");
+                }
+              }}
               placeholder="Search title or filename"
               ref={desktopSearchInputRef}
               type="search"
-              value={query}
+              value={committedSearch.staticDraft}
             />
-          </label>
+            {committedSearch.staticDraft ? <button aria-label="Clear search" className="library-search__clear" onClick={() => committedSearch.clear("static")} type="button">X</button> : null}
+          </label></form> : null}
           <RefreshSweepButton
             className="ghost-button"
             disabled={rescanPending}
@@ -1732,27 +1730,45 @@ export function LibraryPage() {
         <p className="library-maintenance-warning-line">Maintenance mode is still turned on</p>
       ) : null}
 
-      <div className="library-mobile-search-card">
+      {!compactSearchOnly ? <div className="library-mobile-search-card">
         <label className="search-field library-desktop-hero__search library-desktop-hero__search--mobile">
           <span className="sr-only">Search library</span>
           <input
-            onChange={(event) => setQuery(event.target.value)}
+            aria-label="Search library"
+            disabled={committedSearch.isSourceLocked("static")}
+            onChange={(event) => committedSearch.updateDraft("static", event.target.value)}
+            onKeyDown={(event) => {
+              if (shouldCommitLibrarySearchKey(event)) {
+                event.preventDefault();
+                committedSearch.commit("static");
+              } else if (event.key === "Escape" && !event.isComposing) {
+                event.preventDefault();
+                committedSearch.revert("static");
+              }
+            }}
             placeholder="Search title or filename"
             ref={mobileSearchInputRef}
             type="search"
-            value={query}
+            value={committedSearch.staticDraft}
           />
+          {committedSearch.staticDraft ? <button aria-label="Clear search" className="library-search__clear" onClick={() => committedSearch.clear("static")} type="button">X</button> : null}
         </label>
-      </div>
+      </div> : null}
 
       <FloatingLibrarySearch
+        expanded={committedSearch.floatingExpanded}
         desktopInteractionMode={floatingSearchDesktopMode}
-        enabled={settings.floating_library_search_enabled !== false}
+        enabled={compactSearchOnly || settings.floating_library_search_enabled !== false}
         label="Search library"
         mainInputRefs={[desktopSearchInputRef, mobileSearchInputRef]}
-        onChange={handleFloatingSearchChange}
+        locked={committedSearch.isSourceLocked("floating")}
+        onChange={(value) => committedSearch.updateDraft("floating", value)}
+        onClear={committedSearch.clear}
+        onCommit={committedSearch.commit}
+        onRevert={committedSearch.revert}
+        onToggleExpanded={committedSearch.toggleFloatingExpanded}
         placeholder="Search title or filename"
-        value={query}
+        value={committedSearch.floatingDraft}
       />
 
       {cloudReconnectPrompt && providerAuthDismissedThisSession ? (

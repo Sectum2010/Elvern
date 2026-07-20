@@ -17,6 +17,7 @@ import { queryClient } from "../lib/queryClient";
 import { buildUserSettingsQueryKey } from "../lib/userSettingsQueries";
 
 const mockAuthState = vi.hoisted(() => ({ role: "standard_user" }));
+const mockPlatformState = vi.hoisted(() => ({ deviceClass: "desktop" }));
 
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({
@@ -30,6 +31,11 @@ vi.mock("../auth/AuthContext", () => ({
 
 vi.mock("../lib/api", () => ({
   apiRequest: vi.fn(),
+}));
+
+vi.mock("../lib/platformDetection", async (importOriginal) => ({
+  ...(await importOriginal()),
+  detectClientDeviceClass: () => mockPlatformState.deviceClass,
 }));
 
 const pagesDir = path.dirname(fileURLToPath(import.meta.url));
@@ -283,6 +289,7 @@ beforeEach(() => {
   queryClient.clear();
   apiRequest.mockReset();
   mockAuthState.role = "standard_user";
+  mockPlatformState.deviceClass = "desktop";
   window.localStorage.clear();
 });
 
@@ -345,6 +352,13 @@ describe("SettingsPage Display background controls", () => {
 
     expect(screen.getByText("Dynamic search button")).toBeInTheDocument();
     expect(screen.queryByText("Floating library search")).not.toBeInTheDocument();
+  });
+
+  test("phone hides the desktop-only dynamic search setting", async () => {
+    mockPlatformState.deviceClass = "phone";
+    await renderDisplaySettings();
+
+    expect(screen.queryByText("Dynamic search button")).not.toBeInTheDocument();
   });
 
   test("interface settings no longer expose a floating island position control", async () => {

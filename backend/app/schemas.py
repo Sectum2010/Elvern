@@ -382,6 +382,29 @@ class LibrarySummaryV2Response(BaseModel):
     scan_in_progress: bool = False
 
 
+class LibraryRevisionResponse(BaseModel):
+    schema_version: Literal["library-revision-v1"] = "library-revision-v1"
+    catalog: str
+    presentation: str
+    permission: str
+    user_overlay: str
+    progress: str
+    combined_library: str
+
+
+class LibraryProgressStateItem(BaseModel):
+    id: int
+    progress_seconds: float = 0
+    progress_duration_seconds: float | None = None
+    completed: bool = False
+
+
+class LibraryProgressStateResponse(BaseModel):
+    schema_version: Literal["library-progress-state-v1"] = "library-progress-state-v1"
+    progress_revision: str
+    items: list[LibraryProgressStateItem] = Field(default_factory=list)
+
+
 class UserSettingsResponse(BaseModel):
     hide_duplicate_movies: bool = True
     hide_recently_added: bool = False

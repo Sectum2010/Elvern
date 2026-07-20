@@ -5,6 +5,7 @@ export const CONNECTION_RUNTIME_CONTRACT = Object.freeze({
   healthProbeTimeoutMs: 5_000,
   publicProbeAttemptTimeoutMs: 2_000,
   publicProbeConfirmationDelayMs: 500,
+  fastOopsConfirmationDelayMs: 750,
   publicProbeTrustMaxAgeMs: 7 * 24 * 60 * 60 * 1000,
   publicProbeTrustStorageKey: "elvern_public_probe_trust_v1",
   publicProbeEndpointFailureThreshold: 3,
@@ -15,6 +16,7 @@ export const CONNECTION_RUNTIME_CONTRACT = Object.freeze({
   recoveryNavigationArmMaxRecords: 32,
   recoveryNavigationArmDatabaseName: "elvern-service-worker-state-v1",
   recoveryNavigationArmStoreName: "recovery_arms",
+  manualServiceRecoveryStorageKey: "elvern-manual-service-recovery-v1",
   appShellHeader: "X-Elvern-App-Shell",
   offlineShellHeader: "X-Elvern-Offline-Shell",
   recoveryMessageType: "ELVERN_ARM_RECOVERY_NAVIGATION",
@@ -36,6 +38,21 @@ export const CONNECTION_RUNTIME_CONTRACT = Object.freeze({
     probeFailureUnverified: "probe_failure_unverified",
     probesDisabled: "probes_disabled",
     aborted: "aborted",
+  }),
+  healthEvidenceReasons: Object.freeze({
+    httpSuccess: "http_success",
+    httpUnhealthy: "http_unhealthy",
+    networkError: "network_error",
+    timeout: "timeout",
+    aborted: "aborted",
+    markerMissing: "marker_missing",
+  }),
+  fastOopsReasons: Object.freeze({
+    deadlineTimeout: "deadline_timeout",
+    browserOffline: "conclusive_browser_offline",
+    frontendUnreachable: "conclusive_frontend_unreachable",
+    backendUnreachable: "conclusive_backend_unreachable",
+    trustedPublicFailure: "conclusive_trusted_public_failure",
   }),
   familiarRotationMs: 7_000,
   statusWords: Object.freeze([
@@ -99,6 +116,67 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
     return contract.copy.generic;
   }
 
+  function deriveFastOopsCandidate({
+    navigatorOnline = true,
+    publicEvidence,
+    frontendHealth,
+    backendHealth,
+    localhostServicesHealthy = false,
+  } = {}) {
+    const classifications = contract.classifications;
+    const reasons = contract.publicEvidenceReasons;
+    const healthReasons = contract.healthEvidenceReasons;
+    const fastReasons = contract.fastOopsReasons;
+    if (navigatorOnline === false || publicEvidence?.publicEvidenceReason === reasons.browserExplicitOffline) {
+      return {
+        classification: classifications.internetOffline,
+        evidenceReason: fastReasons.browserOffline,
+      };
+    }
+    if (
+      publicEvidence?.internetState === "online"
+      && frontendHealth?.reason === healthReasons.networkError
+    ) {
+      return {
+        classification: classifications.frontendOrVpnUnreachable,
+        evidenceReason: fastReasons.frontendUnreachable,
+      };
+    }
+    if (
+      frontendHealth?.reason === healthReasons.httpSuccess
+      && backendHealth?.reason === healthReasons.httpUnhealthy
+      && Number(backendHealth.status) >= 500
+      && Number(backendHealth.status) <= 599
+      && backendHealth.maintenance !== true
+    ) {
+      return {
+        classification: classifications.backendUnreachable,
+        evidenceReason: fastReasons.backendUnreachable,
+      };
+    }
+    if (
+      publicEvidence?.internetState === "offline"
+      && publicEvidence?.publicEvidenceReason === reasons.probeFailureTrusted
+      && frontendHealth?.reason === healthReasons.networkError
+      && !localhostServicesHealthy
+    ) {
+      return {
+        classification: classifications.internetOffline,
+        evidenceReason: fastReasons.trustedPublicFailure,
+      };
+    }
+    return null;
+  }
+
+  function matchesFastOopsCandidates(first, second) {
+    return Boolean(
+      first
+      && second
+      && first.classification === second.classification
+      && first.evidenceReason === second.evidenceReason
+    );
+  }
+
   function isVerifiedRecoveryEvidence({
     internetState,
     frontendHealthy,
@@ -152,12 +230,18 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
       : Number(now());
     const oopsDeadlineAt = startedAt + contract.offlineDocumentOopsDelayMs;
     let oopsLatched = false;
+    let oopsClassification = null;
+    let oopsEvidenceReason = null;
+    let oopsConfidence = null;
     let recovered = false;
     let recoveryInFlight = false;
 
     function advanceDeadline() {
       if (!recovered && Number(now()) >= oopsDeadlineAt) {
-        oopsLatched = true;
+        latchOops({
+          evidenceReason: contract.fastOopsReasons.deadlineTimeout,
+          confidence: "deadline",
+        });
       }
       return getSnapshot();
     }
@@ -168,6 +252,9 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
         documentStartedAt: startedAt,
         oopsDeadlineAt,
         oopsLatched,
+        oopsClassification,
+        oopsEvidenceReason,
+        oopsConfidence,
         recovered,
         recoveryInFlight,
         state: recovered ? "recovered" : (recoveryInFlight ? "recovering" : visibleState),
@@ -190,7 +277,16 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
       return getSnapshot();
     }
 
-    return { advanceDeadline, beginRecovery, finishRecovery, getSnapshot };
+    function latchOops({ classification = null, evidenceReason = null, confidence = null } = {}) {
+      if (recovered || oopsLatched) return getSnapshot();
+      oopsLatched = true;
+      oopsClassification = classification;
+      oopsEvidenceReason = evidenceReason;
+      oopsConfidence = confidence;
+      return getSnapshot();
+    }
+
+    return { advanceDeadline, beginRecovery, finishRecovery, getSnapshot, latchOops };
   }
 
   function createPublicProbeCircuit(endpointIds) {
@@ -259,10 +355,12 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
     contract,
     createOfflineDocumentStateMachine,
     createPublicProbeCircuit,
+    deriveFastOopsCandidate,
     deriveConnectivityClassification,
     getRecoveryDecision,
     getConnectionOopsCopy,
     isVerifiedRecoveryEvidence,
+    matchesFastOopsCandidates,
   };
 }
 
@@ -270,9 +368,11 @@ export function createConnectivityRuntime(contract = CONNECTION_RUNTIME_CONTRACT
 const sharedRuntime = createConnectivityRuntime();
 
 export const deriveConnectivityClassification = sharedRuntime.deriveConnectivityClassification;
+export const deriveFastOopsCandidate = sharedRuntime.deriveFastOopsCandidate;
 export const getRuntimeConnectionOopsCopy = sharedRuntime.getConnectionOopsCopy;
 export const getRecoveryDecision = sharedRuntime.getRecoveryDecision;
 export const isVerifiedRecoveryEvidence = sharedRuntime.isVerifiedRecoveryEvidence;
+export const matchesFastOopsCandidates = sharedRuntime.matchesFastOopsCandidates;
 export const createOfflineDocumentStateMachine = sharedRuntime.createOfflineDocumentStateMachine;
 export const createPublicProbeCircuit = sharedRuntime.createPublicProbeCircuit;
 

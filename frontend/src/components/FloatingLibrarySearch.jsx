@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
+
+import { shouldCommitLibrarySearchKey } from "../lib/useCommittedLibrarySearch.js";
 
 
 function isActiveElementInRefs(refs) {
@@ -17,8 +19,13 @@ export function FloatingLibrarySearch({
   label = "Search library",
   mainInputRefs = [],
   desktopInteractionMode = false,
+  expanded = false,
+  locked = false,
+  onClear,
+  onCommit,
+  onRevert,
+  onToggleExpanded,
 }) {
-  const [expanded, setExpanded] = useState(false);
   const containerRef = useRef(null);
   const inputRef = useRef(null);
   const composingRef = useRef(false);
@@ -41,7 +48,7 @@ export function FloatingLibrarySearch({
     if (isActiveElementInRefs(mainInputRefs)) {
       return;
     }
-    setExpanded(true);
+    onToggleExpanded?.();
     window.setTimeout(() => inputRef.current?.focus(), 0);
   }
 
@@ -50,45 +57,20 @@ export function FloatingLibrarySearch({
       handleCompactClick();
       return;
     }
-    if (desktopInteractionMode) {
-      setExpanded(false);
-      return;
-    }
-    if (!value) {
-      setExpanded(false);
-      return;
-    }
-    inputRef.current?.focus({ preventScroll: true });
+    onToggleExpanded?.();
   }
 
   function handleKeyDown(event) {
+    if (shouldCommitLibrarySearchKey(event) && !composingRef.current) {
+      event.preventDefault();
+      onCommit?.("floating");
+      return;
+    }
     if (event.key !== "Escape" || event.isComposing || composingRef.current) {
       return;
     }
     event.preventDefault();
-    if (value) {
-      onChange("", { action: "escape", previousValue: value, source: "floating" });
-      return;
-    }
-    setExpanded(false);
-  }
-
-  function handleBlur(event) {
-    if (desktopInteractionMode) {
-      return;
-    }
-    const nextTarget = event.relatedTarget;
-    if (nextTarget && event.currentTarget.contains(nextTarget)) {
-      return;
-    }
-    window.setTimeout(() => {
-      if (containerRef.current?.contains(document.activeElement)) {
-        return;
-      }
-      if (!value && !composingRef.current) {
-        setExpanded(false);
-      }
-    }, 0);
+    onRevert?.("floating");
   }
 
   return (
@@ -98,19 +80,22 @@ export function FloatingLibrarySearch({
         expanded ? "floating-library-search--expanded" : "floating-library-search--compact",
         desktopInteractionMode ? "floating-library-search--desktop" : "",
       ].join(" ")}
-      onBlur={expanded ? handleBlur : undefined}
       ref={containerRef}
     >
       {expanded ? (
         <form
           className="floating-library-search__capsule"
-          onSubmit={(event) => event.preventDefault()}
+          onSubmit={(event) => {
+            event.preventDefault();
+            onCommit?.("floating");
+          }}
         >
           <label className="floating-library-search__field">
             <span className="sr-only">{label}</span>
             <input
               ref={inputRef}
               autoComplete="off"
+              disabled={locked}
               onChange={(event) => onChange(event.target.value, {
                 action: "input",
                 previousValue: value,
@@ -132,7 +117,7 @@ export function FloatingLibrarySearch({
                 aria-label="Clear search"
                 className="floating-library-search__clear"
                 onClick={() => {
-                  onChange("", { action: "clear", previousValue: value, source: "floating" });
+                  onClear?.("floating");
                   inputRef.current?.focus({ preventScroll: true });
                 }}
                 onMouseDown={(event) => {
@@ -146,7 +131,7 @@ export function FloatingLibrarySearch({
           </label>
           <button
             aria-expanded={expanded}
-            aria-label={desktopInteractionMode || !value ? "Collapse search" : label}
+            aria-label="Collapse search"
             className="floating-library-search__button"
             onClick={handleSearchButtonClick}
             type="button"

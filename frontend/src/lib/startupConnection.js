@@ -4,8 +4,10 @@ import {
 } from "./publicConnectivityProbes.js";
 import {
   CONNECTION_RUNTIME_CONTRACT,
+  deriveFastOopsCandidate,
   deriveConnectivityClassification,
   getRuntimeConnectionOopsCopy,
+  matchesFastOopsCandidates,
 } from "./connectivityRuntimeCore.js";
 import { detectClientPlatform, isDesktopClientPlatform } from "./platformDetection.js";
 
@@ -15,10 +17,12 @@ export const STARTUP_HEALTH_PROBE_INTERVAL_MS = CONNECTION_RUNTIME_CONTRACT.offl
 export const STARTUP_HEALTH_PROBE_TIMEOUT_MS = CONNECTION_RUNTIME_CONTRACT.healthProbeTimeoutMs;
 export const DESKTOP_CONNECTIVITY_WATCHDOG_INTERVAL_MS = 8_000;
 export const PUBLIC_CONNECTIVITY_CONFIRMATION_DELAY_MS = CONNECTION_RUNTIME_CONTRACT.publicProbeConfirmationDelayMs;
+export const FAST_OOPS_CONFIRMATION_DELAY_MS = CONNECTION_RUNTIME_CONTRACT.fastOopsConfirmationDelayMs;
 export const STARTUP_SHELL_REVEAL_DELAY_MS = 400;
 export const NO_INTERNET_REAPPEAR_MS = 10_000;
 export const STARTUP_CONNECTIVITY_FAILURE_EVENT = "elvern:connectivity-failure";
 export const STARTUP_APPLICATION_READY_EVENT = "elvern:application-response";
+export const STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY = CONNECTION_RUNTIME_CONTRACT.manualServiceRecoveryStorageKey;
 export const FRONTEND_HEALTH_PATH = "/_elvern/frontend-health";
 export const BACKEND_HEALTH_PATH = "/health";
 export const CONNECTIVITY_INTERNET_OFFLINE = CONNECTION_RUNTIME_CONTRACT.classifications.internetOffline;
@@ -34,11 +38,6 @@ export const CONNECTION_GENERIC_OOPS_COPY = CONNECTION_RUNTIME_CONTRACT.copy.gen
 export const CONNECTION_STATUS_WORDS = CONNECTION_RUNTIME_CONTRACT.statusWords;
 export const CONNECTION_FAMILIARS = CONNECTION_RUNTIME_CONTRACT.familiars;
 export const CONNECTION_FAMILIAR_ROTATION_MS = CONNECTION_RUNTIME_CONTRACT.familiarRotationMs;
-
-
-function isSuccessfulHealthResponse(response) {
-  return Boolean(response && response.ok);
-}
 
 
 function isDebugEnabled(windowObject) {
@@ -85,6 +84,7 @@ export function createStartupConnectionController({
   publicConnectivityProbeUrl = "",
   publicProbeConfirmationDelayMs = PUBLIC_CONNECTIVITY_CONFIRMATION_DELAY_MS,
   publicProbeStorage = windowObject?.localStorage,
+  recoveryStorage = windowObject?.sessionStorage,
 } = {}) {
   const initiallyOffline = navigatorObject?.onLine === false;
   const probes = publicConnectivityProbes || (publicConnectivityProbeUrl
@@ -107,11 +107,21 @@ export function createStartupConnectionController({
   });
   const initialTrust = publicRunner.getTrustState();
   let applicationReady = !requireApplicationReady;
+  let manualServiceRecoveryAuthorized = false;
+  try {
+    manualServiceRecoveryAuthorized = recoveryStorage?.getItem?.(
+      STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY,
+    ) === "1";
+    recoveryStorage?.removeItem?.(STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY);
+  } catch {
+    manualServiceRecoveryAuthorized = false;
+  }
   let runtimeReady = false;
   let offlineOopsRequired = initiallyOffline;
   let forceOfflineOopsPending = false;
   let started = false;
   let lifecycleGeneration = 0;
+  let browserOfflineEvidenceGeneration = 0;
   let initialProbeCompleted = false;
   let outageStartedAt = Number.isFinite(initialOutageStartedAt) && initialOutageStartedAt > 0
     ? initialOutageStartedAt
@@ -120,6 +130,7 @@ export function createStartupConnectionController({
   let scheduledProbeTimer = 0;
   let inFlightProbe = null;
   const activeHealthControllers = new Set();
+  const activeConfirmationTimers = new Set();
   const listeners = new Set();
   const desktopWatchdogEnabled = isDesktopClientPlatform(platform);
   let snapshot = {
@@ -138,6 +149,8 @@ export function createStartupConnectionController({
     classification: initiallyOffline
       ? CONNECTIVITY_INTERNET_OFFLINE
       : CONNECTIVITY_EVIDENCE_INSUFFICIENT,
+    oopsLatched: false,
+    oopsEvidenceReason: null,
   };
 
   function emit(next = {}) {
@@ -160,6 +173,8 @@ export function createStartupConnectionController({
       "runtimeReady",
       "offlineOopsRequired",
       "classification",
+      "oopsLatched",
+      "oopsEvidenceReason",
     ];
     if (keys.every((key) => snapshot[key] === candidate[key])) {
       return;
@@ -186,6 +201,18 @@ export function createStartupConnectionController({
     return runtimeReady && snapshot.internetOutageLatched && !offlineOopsRequired;
   }
 
+  function latchOops({ classification = snapshot.classification, evidenceReason } = {}) {
+    if (snapshot.status === "connected" || snapshot.oopsLatched) {
+      return;
+    }
+    emit({
+      classification,
+      oopsLatched: true,
+      oopsEvidenceReason: evidenceReason || null,
+      status: "unreachable",
+    });
+  }
+
   function scheduleUnreachable() {
     if (unreachableTimer || shouldSuppressRuntimeOops()) {
       return;
@@ -194,7 +221,7 @@ export function createStartupConnectionController({
     unreachableTimer = windowObject?.setTimeout?.(() => {
       unreachableTimer = 0;
       if (!snapshot.serviceReachable || !applicationReady || offlineOopsRequired) {
-        emit({ status: "unreachable" });
+        latchOops({ evidenceReason: CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.deadlineTimeout });
       }
     }, remaining) || 0;
   }
@@ -224,6 +251,9 @@ export function createStartupConnectionController({
     initialCycle = false,
     publicEvidenceReason = CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
   } = {}) {
+    if (!outageStartedAt) {
+      outageStartedAt = Date.now();
+    }
     if (initialCycle || forceOfflineOopsPending) {
       offlineOopsRequired = true;
     }
@@ -241,6 +271,16 @@ export function createStartupConnectionController({
       return;
     }
     emit({ status: snapshot.status === "unreachable" ? "unreachable" : "connecting" });
+    if (
+      (!runtimeReady || offlineOopsRequired)
+      && publicEvidenceReason === CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline
+    ) {
+      latchOops({
+        classification: CONNECTIVITY_INTERNET_OFFLINE,
+        evidenceReason: CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.browserOffline,
+      });
+      return;
+    }
     scheduleUnreachable();
   }
 
@@ -309,50 +349,105 @@ export function createStartupConnectionController({
     }
   }
 
+  function createHealthResult({ reachable, reason, status = null }) {
+    return {
+      reachable,
+      reason,
+      status: Number.isFinite(Number(status)) ? Number(status) : null,
+      completedAt: Date.now(),
+    };
+  }
+
   async function requestHealth(path, generation) {
     const abortController = new AbortController();
+    let timedOut = false;
     activeHealthControllers.add(abortController);
-    const timeoutId = windowObject?.setTimeout?.(
-      () => abortController.abort(),
-      STARTUP_HEALTH_PROBE_TIMEOUT_MS,
-    ) || 0;
+    const timeoutId = windowObject?.setTimeout?.(() => {
+      timedOut = true;
+      abortController.abort();
+    }, STARTUP_HEALTH_PROBE_TIMEOUT_MS) || 0;
     try {
       const response = await fetchImpl(path, {
         cache: "no-store",
         credentials: "same-origin",
         signal: abortController.signal,
       });
-      return generation === lifecycleGeneration && isSuccessfulHealthResponse(response);
-    } catch {
-      return false;
-    } finally {
-      if (timeoutId) {
-        windowObject?.clearTimeout?.(timeoutId);
+      if (generation !== lifecycleGeneration) {
+        return createHealthResult({
+          reachable: false,
+          reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.aborted,
+        });
       }
+      const status = Number(response?.status);
+      if (status >= 500 && status <= 599) {
+        return createHealthResult({
+          reachable: false,
+          reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.httpUnhealthy,
+          status,
+        });
+      }
+      if (response) {
+        return createHealthResult({
+          reachable: true,
+          reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.httpSuccess,
+          status,
+        });
+      }
+      return createHealthResult({
+        reachable: false,
+        reason: CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.networkError,
+      });
+    } catch (error) {
+      const activelyCancelled = generation !== lifecycleGeneration || !started;
+      return createHealthResult({
+        reachable: false,
+        reason: timedOut
+          ? CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.timeout
+          : (activelyCancelled || error?.name === "AbortError"
+            ? CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.aborted
+            : CONNECTION_RUNTIME_CONTRACT.healthEvidenceReasons.networkError),
+      });
+    } finally {
+      if (timeoutId) windowObject?.clearTimeout?.(timeoutId);
       activeHealthControllers.delete(abortController);
     }
   }
 
   async function collectServiceEvidence(generation) {
-    const frontendReachable = await requestHealth(FRONTEND_HEALTH_PATH, generation);
-    if (!frontendReachable) {
-      return { frontendState: "unreachable", backendState: "unknown" };
+    const frontendHealth = await requestHealth(FRONTEND_HEALTH_PATH, generation);
+    if (!frontendHealth.reachable) {
+      return {
+        frontendHealth,
+        backendHealth: null,
+        frontendState: "unreachable",
+        backendState: "unknown",
+      };
     }
-    const backendReachable = await requestHealth(BACKEND_HEALTH_PATH, generation);
+    const backendHealth = await requestHealth(BACKEND_HEALTH_PATH, generation);
     return {
+      frontendHealth,
+      backendHealth,
       frontendState: "reachable",
-      backendState: backendReachable ? "reachable" : "unreachable",
+      backendState: backendHealth.reachable ? "reachable" : "unreachable",
     };
   }
 
-  function probe() {
-    if (inFlightProbe || typeof fetchImpl !== "function") {
-      return inFlightProbe || Promise.resolve(false);
-    }
-    clearScheduledProbe();
-    const generation = lifecycleGeneration;
-    const initialCycle = !initialProbeCompleted;
-    const publicEvidence = navigatorObject?.onLine === false
+  function waitForFastOopsConfirmation(generation) {
+    return new Promise((resolve) => {
+      const timerId = windowObject?.setTimeout?.(() => {
+        activeConfirmationTimers.delete(timerId);
+        resolve(started && generation === lifecycleGeneration);
+      }, FAST_OOPS_CONFIRMATION_DELAY_MS) || 0;
+      if (!timerId) {
+        resolve(false);
+        return;
+      }
+      activeConfirmationTimers.add(timerId);
+    });
+  }
+
+  function collectInternetEvidence() {
+    return navigatorObject?.onLine === false
       ? Promise.resolve({
         internetState: "offline",
         publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
@@ -361,31 +456,90 @@ export function createStartupConnectionController({
         rounds: 0,
       })
       : publicRunner.probeConfirmed({ confirmationDelayMs: publicProbeConfirmationDelayMs });
-    const serviceEvidence = collectServiceEvidence(generation);
+  }
 
-    const publicOperation = publicEvidence.then((result) => {
-      if (started && generation === lifecycleGeneration) {
-        applyInternetEvidence(result, { initialCycle });
-      }
-      return result;
-    });
-    const serviceOperation = serviceEvidence.then((result) => {
-      if (!started || generation !== lifecycleGeneration) {
-        return result;
-      }
-      if (result.frontendState === "reachable" && result.backendState === "reachable") {
-        markServiceHealthy();
-      } else {
-        markServiceFailure(result);
-      }
-      return result;
-    });
+  async function collectProbeEvidence(generation) {
+    const [internet, service] = await Promise.all([
+      collectInternetEvidence(),
+      collectServiceEvidence(generation),
+    ]);
+    return { internet, service };
+  }
 
-    const operation = Promise.all([publicOperation, serviceOperation]).then(([internet, service]) => (
-      internet.internetState === "online"
-      && service.frontendState === "reachable"
-      && service.backendState === "reachable"
-    ));
+  function applyProbeEvidence({ internet, service }, { initialCycle = false } = {}) {
+    const serviceHealthy = service.frontendState === "reachable" && service.backendState === "reachable";
+    if (
+      initialCycle
+      && manualServiceRecoveryAuthorized
+      && navigatorObject?.onLine !== false
+      && serviceHealthy
+    ) {
+      manualServiceRecoveryAuthorized = false;
+      offlineOopsRequired = false;
+      forceOfflineOopsPending = false;
+      clearUnreachableTimer();
+      emit({
+        internetState: "unknown",
+        internetOutageLatched: false,
+        publicEvidenceReason: internet.publicEvidenceReason,
+        publicProbeTrusted: Boolean(internet.trusted),
+      });
+      markServiceHealthy();
+      return;
+    }
+    if (initialCycle) {
+      manualServiceRecoveryAuthorized = false;
+    }
+    applyInternetEvidence(internet, { initialCycle });
+    if (serviceHealthy) {
+      markServiceHealthy();
+    } else {
+      markServiceFailure(service);
+    }
+  }
+
+  function fastOopsCandidateFor(evidence) {
+    return deriveFastOopsCandidate({
+      navigatorOnline: navigatorObject?.onLine !== false,
+      publicEvidence: evidence.internet,
+      frontendHealth: evidence.service.frontendHealth,
+      backendHealth: evidence.service.backendHealth,
+      localhostServicesHealthy: evidence.service.frontendState === "reachable"
+        && evidence.service.backendState === "reachable",
+    });
+  }
+
+  function probe() {
+    if (inFlightProbe || typeof fetchImpl !== "function") {
+      return inFlightProbe || Promise.resolve(false);
+    }
+    clearScheduledProbe();
+    const generation = lifecycleGeneration;
+    const offlineGeneration = browserOfflineEvidenceGeneration;
+    const initialCycle = !initialProbeCompleted;
+    const transactionIsCurrent = () => started
+      && generation === lifecycleGeneration
+      && offlineGeneration === browserOfflineEvidenceGeneration;
+    const operation = collectProbeEvidence(generation).then(async (firstEvidence) => {
+      if (!transactionIsCurrent()) return false;
+      applyProbeEvidence(firstEvidence, { initialCycle });
+      const firstCandidate = fastOopsCandidateFor(firstEvidence);
+      if (firstCandidate?.evidenceReason === CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.browserOffline) {
+        if (!runtimeReady || offlineOopsRequired) latchOops(firstCandidate);
+      } else if (firstCandidate && await waitForFastOopsConfirmation(generation) && transactionIsCurrent()) {
+        const secondEvidence = await collectProbeEvidence(generation);
+        if (!transactionIsCurrent()) return false;
+        applyProbeEvidence(secondEvidence);
+        const secondCandidate = fastOopsCandidateFor(secondEvidence);
+        if (matchesFastOopsCandidates(firstCandidate, secondCandidate)) {
+          latchOops(secondCandidate);
+        }
+        firstEvidence = secondEvidence;
+      }
+      return firstEvidence.internet.internetState === "online"
+        && firstEvidence.service.frontendState === "reachable"
+        && firstEvidence.service.backendState === "reachable";
+    });
     const tracked = operation.finally(() => {
       if (generation === lifecycleGeneration) {
         initialProbeCompleted = true;
@@ -414,6 +568,7 @@ export function createStartupConnectionController({
   }
 
   function handleOffline() {
+    browserOfflineEvidenceGeneration += 1;
     markInternetOffline({
       initialCycle: !initialProbeCompleted,
       publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
@@ -453,6 +608,8 @@ export function createStartupConnectionController({
     clearScheduledProbe();
     activeHealthControllers.forEach((controller) => controller.abort());
     activeHealthControllers.clear();
+    activeConfirmationTimers.forEach((timerId) => windowObject?.clearTimeout?.(timerId));
+    activeConfirmationTimers.clear();
     publicRunner.abort();
     inFlightProbe = null;
     windowObject?.removeEventListener?.("online", handleOnline);

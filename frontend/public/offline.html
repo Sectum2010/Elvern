@@ -89,13 +89,33 @@
         })();
         const publicCircuit = runtime.createPublicProbeCircuit(publicProbes.map((probe) => probe.id));
         const activeControllers = new Set();
+        const confirmationTimers = new Set();
         let inFlight = null;
         let manualRetryQueued = false;
         let lastRecoveryMode = null;
+        let lifecycleGeneration = 1;
+        let browserOfflineEvidenceGeneration = 0;
         let rotationIndex = 0;
         let lastClassification = navigator.onLine === false
           ? contract.classifications.internetOffline
           : contract.classifications.evidenceInsufficient;
+        if (navigator.onLine === false) {
+          machine.latchOops({
+            classification: contract.classifications.internetOffline,
+            evidenceReason: contract.fastOopsReasons.browserOffline,
+            confidence: "explicit",
+          });
+        }
+
+        function waitForFastOopsConfirmation() {
+          return new Promise((resolve) => {
+            const timerId = window.setTimeout(() => {
+              confirmationTimers.delete(timerId);
+              resolve();
+            }, contract.fastOopsConfirmationDelayMs);
+            confirmationTimers.add(timerId);
+          });
+        }
 
         function registryHash() {
           const value = JSON.stringify(publicProbes.map((probe) => [probe.id, probe.url, probe.expectedStatuses]));
@@ -233,19 +253,35 @@
           };
         }
 
+        function healthResult(reachable, reason, status = null) {
+          return { reachable, reason, status, completedAt: Date.now() };
+        }
+
         async function requestHealth(url) {
           const controller = new AbortController();
           activeControllers.add(controller);
-          const timeout = window.setTimeout(() => controller.abort(), contract.healthProbeTimeoutMs);
+          let timedOut = false;
+          const timeout = window.setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, contract.healthProbeTimeoutMs);
           try {
             const response = await fetch(url, {
               cache: "no-store",
               credentials: "same-origin",
               signal: controller.signal,
             });
-            return Boolean(response.ok);
-          } catch {
-            return false;
+            const status = Number(response.status);
+            if (status >= 500 && status <= 599) {
+              return healthResult(false, contract.healthEvidenceReasons.httpUnhealthy, status);
+            }
+            return healthResult(true, contract.healthEvidenceReasons.httpSuccess, status);
+          } catch (error) {
+            return healthResult(false, timedOut
+              ? contract.healthEvidenceReasons.timeout
+              : (error?.name === "AbortError"
+                ? contract.healthEvidenceReasons.aborted
+                : contract.healthEvidenceReasons.networkError));
           } finally {
             window.clearTimeout(timeout);
             activeControllers.delete(controller);
@@ -268,11 +304,20 @@
               headers: { "Accept": "text/html", "X-Elvern-Recovery-Probe": "1" },
               signal: controller.signal,
             });
-            return Boolean(response.ok)
-              && response.headers.get(contract.appShellHeader) === "1"
+            if (!response.ok) {
+              return healthResult(false, Number(response.status) >= 500
+                ? contract.healthEvidenceReasons.httpUnhealthy
+                : contract.healthEvidenceReasons.markerMissing, response.status);
+            }
+            const markerPresent = response.headers.get(contract.appShellHeader) === "1"
               && response.headers.get(contract.offlineShellHeader) !== "1";
-          } catch {
-            return false;
+            return healthResult(markerPresent, markerPresent
+              ? contract.healthEvidenceReasons.httpSuccess
+              : contract.healthEvidenceReasons.markerMissing, response.status);
+          } catch (error) {
+            return healthResult(false, error?.name === "AbortError"
+              ? contract.healthEvidenceReasons.timeout
+              : contract.healthEvidenceReasons.networkError);
           } finally {
             window.clearTimeout(timeout);
             activeControllers.delete(controller);
@@ -327,11 +372,46 @@
           });
         }
 
-        async function enterRecoveredApp() {
+        function recoveryTransactionIsCurrent(transaction) {
+          return transaction.lifecycleGeneration === lifecycleGeneration
+            && transaction.browserOfflineEvidenceGeneration === browserOfflineEvidenceGeneration
+            && navigator.onLine !== false;
+        }
+
+        async function enterRecoveredApp(transaction) {
+          if (!recoveryTransactionIsCurrent(transaction)) return false;
           if (!await armRecoveryNavigation()) return false;
+          if (!recoveryTransactionIsCurrent(transaction)) return false;
+          try {
+            sessionStorage.setItem(contract.manualServiceRecoveryStorageKey, "1");
+          } catch { /* Recovery remains safe when tab storage is unavailable. */ }
           machine.finishRecovery(true);
           window.location.reload();
           return true;
+        }
+
+        async function collectEvidenceRound() {
+          const publicResultPromise = probePublicInternet();
+          const frontendHealth = await requestHealth(FRONTEND_HEALTH_URL);
+          const backendHealth = frontendHealth.reachable
+            ? await requestHealth(BACKEND_HEALTH_URL)
+            : null;
+          return {
+            publicResult: await publicResultPromise,
+            frontendHealth,
+            backendHealth,
+          };
+        }
+
+        function classifyEvidence(evidence) {
+          return runtime.deriveConnectivityClassification({
+            internetState: evidence.publicResult.internetState,
+            internetOutageLatched: evidence.publicResult.internetState === "offline",
+            frontendState: evidence.frontendHealth.reachable ? "reachable" : "unreachable",
+            backendState: evidence.backendHealth?.reachable
+              ? "reachable"
+              : (evidence.frontendHealth.reachable ? "unreachable" : "unknown"),
+          });
         }
 
         async function runRecoveryTransaction(trigger = contract.recoveryTriggers.automatic) {
@@ -341,40 +421,83 @@
           }
           renderState();
           inFlight = (async () => {
-            const publicResultPromise = probePublicInternet();
-            const frontendHealthy = await requestHealth(FRONTEND_HEALTH_URL);
-            const backendHealthy = frontendHealthy
-              ? await requestHealth(BACKEND_HEALTH_URL)
-              : false;
-            const publicResult = await publicResultPromise;
-            lastClassification = runtime.deriveConnectivityClassification({
-              internetState: publicResult.internetState,
-              internetOutageLatched: publicResult.internetState === "offline",
-              frontendState: frontendHealthy ? "reachable" : "unreachable",
-              backendState: backendHealthy ? "reachable" : (frontendHealthy ? "unreachable" : "unknown"),
+            const transaction = {
+              lifecycleGeneration,
+              browserOfflineEvidenceGeneration,
+            };
+            let evidence = await collectEvidenceRound();
+            if (transaction.lifecycleGeneration !== lifecycleGeneration) {
+              machine.finishRecovery(false);
+              return false;
+            }
+            lastClassification = classifyEvidence(evidence);
+            const firstCandidate = runtime.deriveFastOopsCandidate({
+              navigatorOnline: navigator.onLine !== false,
+              publicEvidence: evidence.publicResult,
+              frontendHealth: evidence.frontendHealth,
+              backendHealth: evidence.backendHealth,
+              localhostServicesHealthy: evidence.frontendHealth.reachable && evidence.backendHealth?.reachable,
             });
-            const mayVerifyAppShell = publicResult.internetState === "online"
+            if (firstCandidate?.evidenceReason === contract.fastOopsReasons.browserOffline) {
+              machine.latchOops({ ...firstCandidate, confidence: "explicit" });
+            } else if (firstCandidate) {
+              await waitForFastOopsConfirmation();
+              if (recoveryTransactionIsCurrent(transaction)) {
+                const secondEvidence = await collectEvidenceRound();
+                const secondCandidate = runtime.deriveFastOopsCandidate({
+                  navigatorOnline: navigator.onLine !== false,
+                  publicEvidence: secondEvidence.publicResult,
+                  frontendHealth: secondEvidence.frontendHealth,
+                  backendHealth: secondEvidence.backendHealth,
+                  localhostServicesHealthy: secondEvidence.frontendHealth.reachable
+                    && secondEvidence.backendHealth?.reachable,
+                });
+                evidence = secondEvidence;
+                lastClassification = classifyEvidence(evidence);
+                if (runtime.matchesFastOopsCandidates(firstCandidate, secondCandidate)) {
+                  machine.latchOops({ ...secondCandidate, confidence: "confirmed" });
+                }
+              }
+            }
+            renderState();
+            const mayVerifyAppShell = evidence.publicResult.internetState === "online"
               || (
                 trigger === contract.recoveryTriggers.manualRetry
-                && publicResult.publicEvidenceReason !== contract.publicEvidenceReasons.browserExplicitOffline
+                && evidence.publicResult.publicEvidenceReason !== contract.publicEvidenceReasons.browserExplicitOffline
               );
-            const appShellHealthy = mayVerifyAppShell
-              && frontendHealthy
-              && backendHealthy
-              && await verifyActualAppShell();
+            if (!recoveryTransactionIsCurrent(transaction)) {
+              machine.finishRecovery(false);
+              renderState();
+              return false;
+            }
+            const appShellHealth = mayVerifyAppShell
+              && evidence.frontendHealth.reachable
+              && evidence.backendHealth?.reachable
+              ? await verifyActualAppShell()
+              : null;
+            if (!recoveryTransactionIsCurrent(transaction)) {
+              machine.finishRecovery(false);
+              renderState();
+              return false;
+            }
             const decision = runtime.getRecoveryDecision({
               trigger,
-              internetState: publicResult.internetState,
-              publicEvidenceReason: publicResult.publicEvidenceReason,
-              frontendHealthy,
-              backendHealthy,
-              appShellHealthy,
+              internetState: evidence.publicResult.internetState,
+              publicEvidenceReason: evidence.publicResult.publicEvidenceReason,
+              frontendHealthy: evidence.frontendHealth.reachable,
+              backendHealthy: evidence.backendHealth?.reachable === true,
+              appShellHealthy: appShellHealth?.reachable === true,
             });
+            if (!recoveryTransactionIsCurrent(transaction)) {
+              machine.finishRecovery(false);
+              renderState();
+              return false;
+            }
             if (decision.accepted) {
               lastRecoveryMode = decision.recoveryMode;
               shell.dataset.recoveryMode = lastRecoveryMode;
             }
-            if (decision.accepted && await enterRecoveredApp()) {
+            if (decision.accepted && await enterRecoveredApp(transaction)) {
               return true;
             }
             machine.finishRecovery(false);
@@ -409,7 +532,13 @@
         const handleRetry = () => { void runRecoveryTransaction(contract.recoveryTriggers.manualRetry); };
         const handleOnline = () => { void runRecoveryTransaction(contract.recoveryTriggers.onlineEvent); };
         const handleOffline = () => {
+          browserOfflineEvidenceGeneration += 1;
           lastClassification = contract.classifications.internetOffline;
+          machine.latchOops({
+            classification: lastClassification,
+            evidenceReason: contract.fastOopsReasons.browserOffline,
+            confidence: "explicit",
+          });
           renderState();
         };
         const handleVisibility = () => {
@@ -425,10 +554,13 @@
         setWaitingWord(WORDS[0]);
         renderState();
         window.addEventListener("pagehide", () => {
+          lifecycleGeneration += 1;
           window.clearTimeout(deadlineTimer);
           window.clearInterval(probeInterval);
           window.clearInterval(rotationInterval);
           activeControllers.forEach((controller) => controller.abort());
+          confirmationTimers.forEach((timerId) => window.clearTimeout(timerId));
+          confirmationTimers.clear();
           retry.removeEventListener("click", handleRetry);
           window.removeEventListener("online", handleOnline);
           window.removeEventListener("offline", handleOffline);

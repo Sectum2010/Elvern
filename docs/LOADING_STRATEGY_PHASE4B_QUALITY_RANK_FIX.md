@@ -69,7 +69,8 @@ The Phase 4 focused audit confirmed:
 - progress patches mark caches stale and do not manufacture a new v2 revision;
 - completion refetch targets active render queries, excluding shadow-only queries;
 - root formal search remains v1;
-- Local/Cloud `q` remains URL-backed, debounced, client-side source filtering;
+- Local/Cloud `q` remains URL-backed with client-side source filtering. Phase 7
+  superseded the earlier debounce with explicit Enter/Clear commit semantics;
 - the v2 adapter preserves section arrays and duplicate visual instances;
 - desktop return restore and mobile orientation implementations are untouched;
 - standard/admin redaction and the backend kill switch remain intact.

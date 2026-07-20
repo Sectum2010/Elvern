@@ -205,6 +205,7 @@ class Settings:
     poster_prewarm_first_items: int
     poster_prewarm_recent_items: int
     library_summary_v2_enabled: bool
+    library_revision_enabled: bool
     library_plan_timing_enabled: bool
     max_concurrent_transcodes: int
     max_concurrent_mobile_workers: int
@@ -332,6 +333,7 @@ def load_settings() -> Settings:
         poster_prewarm_first_items=_get_positive_int("ELVERN_POSTER_PREWARM_FIRST_ITEMS", 12),
         poster_prewarm_recent_items=_get_positive_int("ELVERN_POSTER_PREWARM_RECENT_ITEMS", 6),
         library_summary_v2_enabled=_get_bool("ELVERN_LIBRARY_SUMMARY_V2_ENABLED", True),
+        library_revision_enabled=_get_bool("ELVERN_LIBRARY_REVISION_ENABLED", True),
         library_plan_timing_enabled=_get_bool("ELVERN_LIBRARY_PLAN_TIMING_ENABLED", False),
         max_concurrent_transcodes=_get_int("ELVERN_MAX_CONCURRENT_TRANSCODES", 1),
         max_concurrent_mobile_workers=_get_int("ELVERN_MAX_CONCURRENT_MOBILE_WORKERS", 2),

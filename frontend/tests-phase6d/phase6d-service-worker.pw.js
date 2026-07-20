@@ -8,27 +8,6 @@ const PUBLIC_PROBES = [
 ];
 
 
-async function verifyRecoveryArmHandshake(page) {
-  return page.evaluate(() => new Promise((resolve) => {
-    const channel = new MessageChannel();
-    const nonce = "playwright-phase6d-recovery-arm";
-    const timeout = window.setTimeout(() => resolve(null), 2_000);
-    channel.port1.onmessage = (event) => {
-      window.clearTimeout(timeout);
-      channel.port1.close();
-      resolve(event.data);
-    };
-    channel.port1.start();
-    navigator.serviceWorker.controller.postMessage({
-      type: "ELVERN_ARM_RECOVERY_NAVIGATION",
-      schema_version: 1,
-      nonce,
-      expires_at: Date.now() + 15_000,
-    }, [channel.port2]);
-  }));
-}
-
-
 async function installConnectedRoutes(page) {
   for (const [url, status] of PUBLIC_PROBES) {
     await page.route(url, (route) => route.fulfill({ status, body: "" }));
@@ -64,15 +43,11 @@ test("production worker falls back offline and verified recovery returns to the 
   await page.goto("library?category=anime#return-target", { waitUntil: "domcontentloaded" });
   const shell = page.locator("#elvern-connection-shell");
   await expect(shell).toBeVisible();
-  await expect(shell).toHaveAttribute("data-state", "connecting");
+  await expect(shell).toHaveAttribute("data-state", "unreachable");
+  await expect(shell.locator("[data-connection-oops-copy]")).toHaveText(
+    "It looks like you're offline. Please check your connection and try again.",
+  );
   expect(page.url()).toMatch(/\/abcd2345\/library\?category=anime#return-target$/);
-
-  await expect(verifyRecoveryArmHandshake(page)).resolves.toMatchObject({
-    type: "ELVERN_RECOVERY_NAVIGATION_ARMED",
-    nonce: "playwright-phase6d-recovery-arm",
-    accepted: true,
-    durability: "durable",
-  });
 
   await context.setOffline(false);
   const recoveredDeepLinkRequest = page.waitForRequest((request) => (
@@ -119,7 +94,7 @@ test("blocked public probes require Retry before service-only recovery", async (
 
   await context.setOffline(true);
   await page.goto("library?category=anime#manual-retry", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("#elvern-connection-shell")).toHaveAttribute("data-state", "connecting");
+  await expect(page.locator("#elvern-connection-shell")).toHaveAttribute("data-state", "unreachable");
 
   publicReachable = false;
   await context.setOffline(false);

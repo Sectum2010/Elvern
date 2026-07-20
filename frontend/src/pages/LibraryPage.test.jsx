@@ -554,6 +554,7 @@ describe("LibraryPage category switching", () => {
     fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
       target: { value: "akira" },
     });
+    fireEvent.keyDown(screen.getAllByRole("searchbox", { name: "Search library" })[0], { key: "Enter" });
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
@@ -575,7 +576,7 @@ describe("LibraryPage category switching", () => {
     });
   });
 
-  test("debounces search requests and replaces the current history entry", async () => {
+  test("keeps draft local until Enter commits and replaces the current history entry", async () => {
     const { locations, navigationTypes } = renderLibrary("/library?category=movies");
     await screen.findByRole("tab", { name: "Movies" });
     await waitFor(() => {
@@ -587,11 +588,16 @@ describe("LibraryPage category switching", () => {
       target: { value: "matrix" },
     });
 
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
     expect(apiRequest).not.toHaveBeenCalledWith(
       expect.stringContaining("/api/library/search"),
       expect.any(Object),
     );
     expect(locations.at(-1)).toBe("/library?category=movies");
+
+    fireEvent.keyDown(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
+      key: "Enter",
+    });
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
@@ -613,9 +619,9 @@ describe("LibraryPage category switching", () => {
     });
     apiRequest.mockClear();
 
-    fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
-      target: { value: "" },
-    });
+    const input = screen.getAllByRole("searchbox", { name: "Search library" })[0];
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
@@ -649,6 +655,17 @@ describe("LibraryPage category switching", () => {
     });
   });
 
+  test("phone hides static search and keeps floating search enabled when the preference is false", async () => {
+    mockPlatformState.deviceClass = "phone";
+    mockPlatformState.platform = "android";
+    renderLibrary("/library");
+    await screen.findByRole("tab", { name: "Movies" });
+
+    expect(screen.queryByRole("searchbox", { name: "Search library" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Search library" }));
+    expect(screen.getByRole("searchbox", { name: "Search library" })).toBeInTheDocument();
+  });
+
   test("view changes do not reload user settings or maintenance status", async () => {
     mockAuthState.role = "admin";
     const user = userEvent.setup();
@@ -664,6 +681,7 @@ describe("LibraryPage category switching", () => {
     fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
       target: { value: "akira" },
     });
+    fireEvent.keyDown(screen.getAllByRole("searchbox", { name: "Search library" })[0], { key: "Enter" });
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
         "/api/library/search?q=akira&category=anime",
@@ -846,6 +864,7 @@ describe("LibraryPage category switching", () => {
     fireEvent.change(screen.getAllByRole("searchbox", { name: "Search library" })[0], {
       target: { value: "akira" },
     });
+    fireEvent.keyDown(screen.getAllByRole("searchbox", { name: "Search library" })[0], { key: "Enter" });
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(

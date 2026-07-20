@@ -1,7 +1,8 @@
 # Loading Strategy Phase 7: Cross-Device Opaque Revision Audit
 
-Status: audit only. No endpoint, polling, database counter, or migration is
-implemented by Phase 6E.
+Status: historical Phase 6E audit. The recommended endpoint, layered opaque
+revision counters, client polling, and progress-state patch were implemented
+by Phase 7. See `LOADING_STRATEGY_PHASE7_COMMITTED_SEARCH_FAST_OOPS_REVISION.md`.
 
 ## Confirmed Current Behavior
 

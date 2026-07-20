@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   createIOSViewportCoordinator,
   IOS_POST_KEYBOARD_QUARANTINE_MS,
+  IOS_UNVERIFIED_REVALIDATION_DELAYS_MS,
   IOS_VIEWPORT_COORDINATOR_API_KEY,
   IOS_VIEWPORT_RESET_CONTENT,
   IOS_VIEWPORT_STABLE_EVENT,
@@ -182,6 +183,7 @@ describe("iOS viewport coordinator", () => {
     expect(IOS_POST_KEYBOARD_QUARANTINE_MS).toBeLessThanOrEqual(800);
     expect(IOS_VIEWPORT_SUSPICIOUS_SHRINK_MIN_PX).toBe(64);
     expect(IOS_VIEWPORT_SUSPICIOUS_SHRINK_RATIO).toBe(0.08);
+    expect(IOS_UNVERIFIED_REVALIDATION_DELAYS_MS).toEqual([500, 1500]);
   });
 
   test("rejects paint, screen, and provisional evidence at the trusted promotion boundary", () => {
@@ -518,5 +520,33 @@ describe("iOS viewport coordinator", () => {
     expect(stableEvent).not.toHaveBeenCalled();
     await expect(authSettled).resolves.toBe(false);
     window.removeEventListener(IOS_VIEWPORT_STABLE_EVENT, stableEvent);
+  });
+
+  test("paint-ready unverified layout gets only two bounded clean revalidation attempts", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query) => ({ matches: query === "(display-mode: standalone)" })));
+    const visualViewport = installViewport({ height: 600, screenHeight: 844 });
+    const coordinator = createIOSViewportCoordinator({
+      windowObject: window,
+      documentObject: document,
+      platform: "iphone",
+      settleTimeoutMs: 100,
+      stableSampleCount: 1,
+    });
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(120);
+    expect(coordinator.getSnapshot().layoutVerificationState).toBe("paint_ready_layout_unverified");
+
+    Object.defineProperty(document.documentElement, "clientHeight", { configurable: true, value: 844 });
+    visualViewport.update({ height: 844, scale: 1, offsetTop: 0 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(coordinator.getSnapshot()).toMatchObject({
+      trustedLayoutVerified: true,
+      restoreGateOpen: true,
+      stableViewport: expect.objectContaining({ height: 844 }),
+    });
+
+    coordinator.stop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(coordinator.getSnapshot().stableViewport.height).toBe(844);
   });
 });

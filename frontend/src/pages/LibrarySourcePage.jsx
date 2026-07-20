@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState } from "../components/EmptyState";
@@ -30,10 +30,13 @@ import {
   selectLibraryReturnRestoreTarget,
 } from "../lib/viewportAnchor";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
+import {
+  shouldCommitLibrarySearchKey,
+  useCommittedLibrarySearch,
+} from "../lib/useCommittedLibrarySearch";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 
 
-export const LIBRARY_SOURCE_SEARCH_DEBOUNCE_MS = 300;
 const EMPTY_SOURCE_LIBRARY_PAYLOAD = Object.freeze({
   items: [],
   series_rails: [],
@@ -165,8 +168,11 @@ export function LibrarySourcePage({ sourceKind }) {
     () => `${location.pathname}${location.search || ""}`,
     [location.pathname, location.search],
   );
-  const [query, setQuery] = useState(() => activeSourceQuery);
-  const deferredQuery = useDeferredValue(query);
+  const committedSearch = useCommittedLibrarySearch({
+    committedQuery: activeSourceQuery,
+    location,
+    navigate,
+  });
   const [error, setError] = useState("");
   const userSettingsQuery = useUserSettingsQuery(user);
   const settings = resolveUserSettings(userSettingsQuery.data);
@@ -180,6 +186,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const copy = SOURCE_PAGE_COPY[resolvedSourceKind];
   const clientPlatform = detectClientPlatform();
   const clientDeviceClass = detectClientDeviceClass();
+  const compactSearchOnly = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
   const libraryDeviceClass = clientDeviceClass === "phone" ? "phone" : undefined;
   const floatingSearchDesktopMode = clientDeviceClass === "desktop" && clientPlatform !== "ipad";
@@ -244,7 +251,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const seriesRails = resolvedSourceKind === "cloud"
     ? (library.cloud_series_rails || [])
     : (library.series_rails || []);
-  const normalizedQuery = deferredQuery.trim().toLowerCase();
+  const normalizedQuery = activeSourceQuery.trim().toLowerCase();
   const visibleSeriesRails = useMemo(
     () => seriesRails
       .map((rail) => {
@@ -284,30 +291,6 @@ export function LibrarySourcePage({ sourceKind }) {
   );
   const sourceVisibleCount = items.length;
   const hasVisibleContent = visibleSeriesRails.length > 0 || filteredItems.length > 0;
-
-  useEffect(() => {
-    setQuery(activeSourceQuery);
-  }, [activeSourceQuery]);
-
-  useEffect(() => {
-    const normalizedQuery = query.trim();
-    if (normalizedQuery === activeSourceQuery) {
-      return undefined;
-    }
-    const timerId = window.setTimeout(() => {
-      navigate(
-        {
-          pathname: location.pathname,
-          search: buildLibrarySourceQuerySearch(location.search, normalizedQuery),
-          hash: location.hash,
-        },
-        { replace: true },
-      );
-    }, LIBRARY_SOURCE_SEARCH_DEBOUNCE_MS);
-    return () => {
-      window.clearTimeout(timerId);
-    };
-  }, [activeSourceQuery, location.hash, location.pathname, location.search, navigate, query]);
 
   useEffect(() => {
     setError("");
@@ -421,26 +404,23 @@ export function LibrarySourcePage({ sourceKind }) {
     seriesRails,
   ]);
 
-  function handleFloatingSearchChange(nextValue, details = {}) {
-    const previousValue = typeof details.previousValue === "string" ? details.previousValue : query;
-    const nextSearchValue = typeof nextValue === "string" ? nextValue : "";
-
-    if (floatingSearchScrollRestoreEnabled && typeof window !== "undefined") {
-      const previousWasEmpty = previousValue.trim().length === 0;
-      const nextIsEmpty = nextSearchValue.trim().length === 0;
-      if (previousWasEmpty && !nextIsEmpty && floatingSearchScrollYRef.current === null) {
-        floatingSearchScrollYRef.current = window.scrollY;
-      }
-      if (!previousWasEmpty && nextIsEmpty) {
-        if (Number.isFinite(floatingSearchScrollYRef.current)) {
-          pendingFloatingSearchRestoreYRef.current = floatingSearchScrollYRef.current;
-        }
-        floatingSearchScrollYRef.current = null;
-      }
+  const previousCommittedSearchRef = useRef(activeSourceQuery);
+  useEffect(() => {
+    const previousValue = previousCommittedSearchRef.current;
+    previousCommittedSearchRef.current = activeSourceQuery;
+    if (!floatingSearchScrollRestoreEnabled || typeof window === "undefined") {
+      return;
     }
-
-    setQuery(nextSearchValue);
-  }
+    if (!previousValue && activeSourceQuery && floatingSearchScrollYRef.current === null) {
+      floatingSearchScrollYRef.current = window.scrollY;
+    }
+    if (previousValue && !activeSourceQuery) {
+      if (Number.isFinite(floatingSearchScrollYRef.current)) {
+        pendingFloatingSearchRestoreYRef.current = floatingSearchScrollYRef.current;
+      }
+      floatingSearchScrollYRef.current = null;
+    }
+  }, [activeSourceQuery, floatingSearchScrollRestoreEnabled]);
 
   return (
     <section
@@ -485,27 +465,45 @@ export function LibrarySourcePage({ sourceKind }) {
         </div>
       </div>
 
-      <div className="library-focus-search-card">
+      {!compactSearchOnly ? <div className="library-focus-search-card">
         <label className="search-field">
           <span className="sr-only">Search {copy.title}</span>
           <input
-            onChange={(event) => setQuery(event.target.value)}
+            aria-label={`Search ${copy.title}`}
+            disabled={committedSearch.isSourceLocked("static")}
+            onChange={(event) => committedSearch.updateDraft("static", event.target.value)}
+            onKeyDown={(event) => {
+              if (shouldCommitLibrarySearchKey(event)) {
+                event.preventDefault();
+                committedSearch.commit("static");
+              } else if (event.key === "Escape" && !event.isComposing) {
+                event.preventDefault();
+                committedSearch.revert("static");
+              }
+            }}
             placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
             ref={sourceSearchInputRef}
             type="search"
-            value={query}
+            value={committedSearch.staticDraft}
           />
+          {committedSearch.staticDraft ? <button aria-label="Clear search" className="library-search__clear" onClick={() => committedSearch.clear("static")} type="button">X</button> : null}
         </label>
-      </div>
+      </div> : null}
 
       <FloatingLibrarySearch
+        expanded={committedSearch.floatingExpanded}
         desktopInteractionMode={floatingSearchDesktopMode}
-        enabled={settings.floating_library_search_enabled !== false}
+        enabled={compactSearchOnly || settings.floating_library_search_enabled !== false}
         label={`Search ${copy.title}`}
         mainInputRefs={[sourceSearchInputRef]}
-        onChange={handleFloatingSearchChange}
+        locked={committedSearch.isSourceLocked("floating")}
+        onChange={(value) => committedSearch.updateDraft("floating", value)}
+        onClear={committedSearch.clear}
+        onCommit={committedSearch.commit}
+        onRevert={committedSearch.revert}
+        onToggleExpanded={committedSearch.toggleFloatingExpanded}
         placeholder={`Search ${copy.eyebrow.toLowerCase()} movies`}
-        value={query}
+        value={committedSearch.floatingDraft}
       />
 
       {error ? <p className="form-error">{error}</p> : null}
@@ -556,8 +554,8 @@ export function LibrarySourcePage({ sourceKind }) {
           </>
         ) : (
           <EmptyState
-            title={deferredQuery.trim() ? "No matches yet" : copy.emptyTitle}
-            description={deferredQuery.trim()
+            title={activeSourceQuery.trim() ? "No matches yet" : copy.emptyTitle}
+            description={activeSourceQuery.trim()
               ? `Try a different title fragment or filename in ${copy.title.toLowerCase()}.`
               : copy.emptyDescription}
           />

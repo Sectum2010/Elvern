@@ -239,11 +239,13 @@
         }
         const handleOffline = () => {
           lastClassification = "internet_offline";
-          if (shell.dataset.state === "unreachable") showOops();
+          if (window.__elvernRuntimeReady !== true) showOops();
+          else if (shell.dataset.state === "unreachable") showOops();
         };
         window.addEventListener("offline", handleOffline);
         const revealTimer = window.setTimeout(() => shell.classList.add("elvern-connection-shell--visible"), SHELL_REVEAL_DELAY_MS);
-        unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
+        if (navigator.onLine === false) showOops();
+        else unreachableTimer = window.setTimeout(showOops, UNREACHABLE_DELAY_MS);
         const rotationInterval = window.matchMedia("(prefers-reduced-motion: reduce)").matches
           ? 0
           : window.setInterval(() => {

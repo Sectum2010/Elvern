@@ -8313,3 +8313,15 @@ html[data-device-shell="iphone"] .app-shell--floating-island-bottom {
   height: 100dvh;
   min-height: 100dvh;
 }
+.library-search-form {
+  display: contents;
+}
+
+.library-search__clear {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 0.25rem;
+}

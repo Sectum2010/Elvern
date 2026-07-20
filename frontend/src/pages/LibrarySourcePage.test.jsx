@@ -333,17 +333,21 @@ describe("LibrarySourcePage cached source views", () => {
     expect(screen.queryByText("Background refresh failed")).not.toBeInTheDocument();
   });
 
-  test("q initializes from URL, debounces with replace, clears, and never refetches the base payload", async () => {
+  test("q initializes from URL, commits on Enter, clears, and never refetches the base payload", async () => {
     const { locations, navigationTypes } = renderSource({ initialEntry: "/library/local?q=akira" });
     const input = await screen.findByRole("searchbox", { name: "Search Local Library" });
     expect(input).toHaveValue("akira");
 
     fireEvent.change(input, { target: { value: "arrival" } });
     expect(locations.at(-1)).toBe("/library/local?q=akira");
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(locations.at(-1)).toBe("/library/local?q=akira");
+    fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(locations.at(-1)).toBe("/library/local?q=arrival"));
     expect(navigationTypes.at(-1)).toBe("REPLACE");
 
     fireEvent.change(input, { target: { value: "" } });
+    fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(locations.at(-1)).toBe("/library/local"));
     expect(apiRequest.mock.calls.filter(([path]) => path.includes("/api/library?"))).toHaveLength(1);
   });

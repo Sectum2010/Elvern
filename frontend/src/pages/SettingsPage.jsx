@@ -24,6 +24,7 @@ import {
 } from "../lib/persistedPanelState";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { normalizePosterDisplayWidth } from "../lib/posterUrls";
+import { detectClientDeviceClass } from "../lib/platformDetection";
 import {
   resolveUserSettings,
   setUserSettingsQueryData,
@@ -1043,6 +1044,7 @@ export function SettingsPage() {
   const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const librarySearchSettingVisible = !["phone", "tablet"].includes(detectClientDeviceClass());
   const userSettingsQuery = useUserSettingsQuery(user);
   const settingsHydratedIdentityRef = useRef("");
   const [settings, setSettings] = useState({
@@ -2562,7 +2564,7 @@ export function SettingsPage() {
               <p className="page-subnote">Loading interface preferences...</p>
             ) : (
               <div className="settings-card-stack">
-                <label className="settings-toggle">
+                {librarySearchSettingVisible ? <label className="settings-toggle">
                   <span>
                     <strong>Dynamic search button</strong>
                     <small>Show the compact search button on Library pages.</small>
@@ -2573,7 +2575,7 @@ export function SettingsPage() {
                     onChange={handleFloatingLibrarySearchToggle}
                     type="checkbox"
                   />
-                </label>
+                </label> : null}
               </div>
             )}
           </section>

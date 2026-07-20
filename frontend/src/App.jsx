@@ -22,6 +22,7 @@ import { AssistantAttachmentViewerPage } from "./pages/AssistantAttachmentViewer
 import { InstallPage } from "./pages/DesktopPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { queryClient } from "./lib/queryClient";
+import { LibraryRevisionSynchronizer } from "./lib/libraryRevisionQueries.js";
 
 
 function ProtectedShell() {
@@ -40,6 +41,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <StartupConnectionGate>
         <AuthProvider>
+          <LibraryRevisionSynchronizer />
           <ProviderAuthProvider>
             <CanonicalSpaRouteGuard>
           <Routes>

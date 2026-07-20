@@ -10,6 +10,8 @@ from ..auth import CurrentAdmin, CurrentUser, resolve_client_ip
 from ..progress import refresh_recent_tracking
 from ..schemas import (
     LibraryListResponse,
+    LibraryProgressStateResponse,
+    LibraryRevisionResponse,
     LibrarySummaryV2Response,
     MediaAgeManualGroupLinkRequest,
     MediaAgeRequirementUpdateRequest,
@@ -28,6 +30,7 @@ from ..services.library_service import (
     normalize_library_category,
     search_library,
 )
+from ..services.library_revision_service import get_library_progress_state, get_library_revision
 from ..services.media_technical_metadata_service import run_one_media_item_technical_metadata_enrichment
 from ..services.account_access_service import is_item_download_allowed
 from ..services.media_age_access_service import (
@@ -56,6 +59,18 @@ from ..services.security_event_service import log_security_event
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 logger = logging.getLogger(__name__)
+
+
+def _require_library_revision_capability(request: Request) -> None:
+    if request.app.state.settings.library_revision_enabled:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "library_revision_disabled",
+            "message": "Library revision synchronization is disabled by the server capability switch.",
+        },
+    )
 
 
 def _prewarm_library_card_posters(
@@ -269,6 +284,30 @@ def get_library(
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
     payload = _redact_library_list_payload_for_role(payload, user=user)
     return LibraryListResponse(**payload)
+
+
+@router.get("/v2/revision", response_model=LibraryRevisionResponse)
+def get_library_revision_state(
+    request: Request,
+    response: Response,
+    user=CurrentUser,
+) -> LibraryRevisionResponse:
+    _require_library_revision_capability(request)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Cookie"
+    return LibraryRevisionResponse(**get_library_revision(request.app.state.settings, user=user))
+
+
+@router.get("/v2/progress-state", response_model=LibraryProgressStateResponse)
+def get_library_progress_state_snapshot(
+    request: Request,
+    response: Response,
+    user=CurrentUser,
+) -> LibraryProgressStateResponse:
+    _require_library_revision_capability(request)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Cookie"
+    return LibraryProgressStateResponse(**get_library_progress_state(request.app.state.settings, user=user))
 
 
 @router.get("/v2/summary", response_model=LibrarySummaryV2Response)

@@ -41,9 +41,12 @@ test("production service worker returns offline shell for a deep-link navigation
   const deepLink = `${baseURL}library/42`;
   await page.goto(deepLink, { waitUntil: "domcontentloaded" });
   await expect(page.locator("#elvern-connection-shell")).toBeVisible();
-  await expect(page.locator("#elvern-connection-shell")).toHaveAttribute("data-state", "connecting");
+  await expect(page.locator("#elvern-connection-shell")).toHaveAttribute("data-state", "unreachable");
+  await expect(page.locator("[data-connection-oops-copy]")).toHaveText(
+    "It looks like you're offline. Please check your connection and try again.",
+  );
   await expect(page.locator("[data-connection-retry]")).toBeAttached();
-  await expect(page.locator("[data-connection-retry]")).toBeHidden();
+  await expect(page.locator("[data-connection-retry]")).toBeVisible();
   expect(page.url()).toBe(deepLink);
 
   healthReachable = true;
