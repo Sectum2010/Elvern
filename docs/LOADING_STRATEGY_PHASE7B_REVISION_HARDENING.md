@@ -2,13 +2,18 @@
 
 ## Status
 
-**Current status (Phase 7C):** Cross-device revision now defaults to frontend
+**Current status (Phase 7D):** Cross-device revision defaults to frontend
 `on` by explicit product decision. An unset or empty
 `VITE_ELVERN_LIBRARY_REVISION_MODE` resolves to `on`; explicit `off` remains the
 immediate frontend rollback and every other non-empty value fails closed to
-`off`. The Phase 7B `ready-for-canary` decision and Gate A-F evidence below are
-retained as historical validation, including the unresolved WebKit host and
-real-device limitations; they are not rewritten as tests that never occurred.
+`off`. Phase 7D gives each revision operation one identity-scoped summary
+refresh decision, isolates progress patches by user ID and role, separates a
+missing progress-state sub-capability from the revision endpoint, and enforces
+an exact revision payload allowlist. See
+`docs/LOADING_STRATEGY_PHASE7D_REVISION_ORCHESTRATION.md`. The Phase 7B
+`ready-for-canary` decision and Gate A-F evidence below remain historical,
+including unresolved WebKit host and real-device limitations; they are not
+rewritten as tests that never occurred.
 
 This phase does not change View Plan hidden/dedupe behavior, formal search
 ranking, v1 availability, pagination, virtualization, resource adaptation,
@@ -39,11 +44,13 @@ source, globally hidden, or denied by age policy. Reset paths retain an upserted
 zero row; the only progress-row deletion found is cloud duplicate consolidation,
 which first merges state into the surviving canonical item.
 
-The frontend patches every existing v1 visual instance and the v2
+The frontend patches every existing current-identity v1 visual instance and v2
 `items_by_id` entity. A transition in either `has progress` or `completed`
-membership triggers one active silent Library invalidation so Continue Watching
-can be rebuilt. Numeric progress-only changes patch in place. No Loading or
-Refreshing UI is introduced and the v2 summary revision is not forged.
+membership is reported to the revision operation, which combines that reason
+with catalog/presentation/permission/overlay reasons and performs at most one
+active silent Library invalidation. Numeric progress-only changes patch in
+place. The patch helper never refetches on its own. No Loading or Refreshing UI
+is introduced and the v2 summary revision is not forged.
 
 ## Revision Off Means Zero Writes
 
@@ -223,16 +230,22 @@ at most two immediate retries; continued races return to the 60-second/focus
 cadence. Malformed or transiently failed progress snapshots keep the same
 progress baseline but wait for normal cadence instead of spinning.
 
-### Capability pause
+### Capability boundaries
 
-An exact 503 `library_revision_disabled` response or endpoint 404 marks revision
-capability unavailable for the current authenticated identity lifecycle. The
-visible timer and focus/pageshow/online/manual-check requests stop for that
-identity and document without clearing Library cache or showing an error UI.
-Full reload or user/role/permission identity change creates a new lifecycle and
-probes once again. Authentication responses, ordinary 500 responses, timeouts,
-network failures, and malformed payloads do not permanently disable probing;
-they retain the normal retry cadence.
+A revision endpoint 404 or exact 503 `library_revision_disabled` response marks
+the whole revision capability unavailable for the current authenticated
+identity lifecycle. The visible timer and focus/pageshow/online/manual-check
+requests stop without clearing Library cache or showing an error UI.
+
+A progress-state 404 instead disables only that sub-capability. Revision polling
+and non-progress layers continue; each new progress token silently falls back
+to one current-identity full summary refresh and advances, so the same token is
+not retried every 60 seconds. A global `library_revision_disabled` response from
+progress-state still stops the whole synchronizer. Authentication responses,
+ordinary 500 responses, timeouts, network failures, and malformed payloads do
+not permanently disable either capability. Reload or identity change probes
+capabilities again. Exact revision snapshots now reject missing or additional
+top-level fields before baseline or cache mutation.
 
 ## Opt-In Browser Harness
 

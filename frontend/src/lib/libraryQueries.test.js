@@ -5,9 +5,11 @@ import {
   buildLibraryShadowV2QueryKey,
   buildLibraryV2QueryKey,
   invalidateLibraryQueries,
+  invalidateLibraryQueriesForIdentity,
   isLibraryQueryKey,
   LIBRARY_QUERY_GC_TIME_MS,
   LIBRARY_QUERY_STALE_TIME_MS,
+  matchesLibraryQueryProtectedIdentity,
   normalizeLibraryQueryIdentity,
   patchLibraryProgressCaches,
   patchLibraryProgressStateCaches,
@@ -186,6 +188,29 @@ describe("library query identity", () => {
     });
   });
 
+  test("protected identity matching requires exact normalized user and role", () => {
+    const key = buildLibraryV2QueryKey({ userId: " 7 ", role: " Standard_User " });
+
+    expect(matchesLibraryQueryProtectedIdentity(key, { userId: 7, role: "standard_user" })).toBe(true);
+    expect(matchesLibraryQueryProtectedIdentity(key, { userId: 8, role: "standard_user" })).toBe(false);
+    expect(matchesLibraryQueryProtectedIdentity(key, { userId: 7, role: "admin" })).toBe(false);
+    expect(matchesLibraryQueryProtectedIdentity(key, { userId: "", role: "standard_user" })).toBe(false);
+    expect(matchesLibraryQueryProtectedIdentity(["library", "v2", {}], { userId: 7, role: "standard_user" })).toBe(false);
+    expect(matchesLibraryQueryProtectedIdentity(["other"], { userId: 7, role: "standard_user" })).toBe(false);
+  });
+
+  test("identity-scoped invalidation leaves another user's cache untouched", async () => {
+    const userAKey = buildLibraryV2QueryKey({ userId: 7, role: "user", category: "movies" });
+    const userBKey = buildLibraryV2QueryKey({ userId: 8, role: "user", category: "movies" });
+    queryClient.setQueryData(userAKey, { marker: "a" });
+    queryClient.setQueryData(userBKey, { marker: "b" });
+
+    await invalidateLibraryQueriesForIdentity({ userId: 7, role: "user", refetchType: "none" });
+
+    expect(queryClient.getQueryState(userAKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(userBKey)?.isInvalidated).toBe(false);
+  });
+
   test("completion may perform one explicit silent active refetch", async () => {
     const key = buildLibraryQueryKey({ userId: 1, role: "user", category: "movies" });
     queryClient.setQueryData(key, { items: [{ id: 42, title: "Akira" }] });
@@ -206,36 +231,78 @@ describe("library query identity", () => {
     });
   });
 
-  test("authoritative positive-to-zero reset patches all entities and silently refreshes membership", async () => {
-    const v1Key = buildLibraryQueryKey({ userId: 1, role: "user", category: "movies" });
-    const v2Key = buildLibraryV2QueryKey({ userId: 1, role: "user", category: "movies" });
-    queryClient.setQueryData(v1Key, {
+  test("authoritative progress patch is identity-scoped and never refreshes summaries itself", async () => {
+    const userAV1Key = buildLibraryQueryKey({ userId: 1, role: "user", category: "movies" });
+    const userAV2Key = buildLibraryV2QueryKey({ userId: 1, role: "user", category: "movies" });
+    const userAShadowKey = buildLibraryShadowV2QueryKey({ userId: 1, role: "user", category: "movies" });
+    const userBV1Key = buildLibraryQueryKey({ userId: 2, role: "user", category: "movies" });
+    const userBV2Key = buildLibraryV2QueryKey({ userId: 2, role: "user", category: "movies" });
+    const userBV1Payload = {
+      items: [{ id: 42, progress_seconds: 31, progress_duration_seconds: 900, completed: false }],
+      continue_watching: [{ id: 42, progress_seconds: 31, progress_duration_seconds: 900, completed: false }],
+    };
+    const userBV2Payload = {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 31, progress_duration_seconds: 900, completed: false } },
+      sections: { item_ids: [42], continue_watching_item_ids: [42] },
+    };
+    queryClient.setQueryData(userAV1Key, {
       items: [{ id: 42, progress_seconds: 120, progress_duration_seconds: 900, completed: false }],
       continue_watching: [{ id: 42, progress_seconds: 120, progress_duration_seconds: 900, completed: false }],
     });
-    queryClient.setQueryData(v2Key, {
+    queryClient.setQueryData(userAV2Key, {
       schema_version: "library-summary-v2",
       items_by_id: { "42": { id: 42, progress_seconds: 120, progress_duration_seconds: 900, completed: true } },
       sections: { item_ids: [42], continue_watching_item_ids: [42] },
     });
-    const refetchSpy = vi.spyOn(queryClient, "refetchQueries").mockResolvedValue();
+    queryClient.setQueryData(userAShadowKey, {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 120, progress_duration_seconds: 900, completed: false } },
+      sections: { item_ids: [42], continue_watching_item_ids: [42] },
+    });
+    queryClient.setQueryData(userBV1Key, userBV1Payload, { updatedAt: 1111 });
+    queryClient.setQueryData(userBV2Key, userBV2Payload, { updatedAt: 2222 });
+    const userBV1UpdatedAt = queryClient.getQueryState(userBV1Key)?.dataUpdatedAt;
+    const userBV2UpdatedAt = queryClient.getQueryState(userBV2Key)?.dataUpdatedAt;
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const result = await patchLibraryProgressStateCaches({
       items: [{ id: 42, progress_seconds: 0, progress_duration_seconds: 901, completed: false }],
-    });
+    }, { userId: 1, role: "user" });
 
-    expect(result).toEqual({ patchedQueryCount: 2, membershipMayHaveChanged: true });
-    expect(queryClient.getQueryData(v1Key).items[0]).toMatchObject({
+    expect(result).toEqual({ patchedQueryCount: 3, membershipMayHaveChanged: true });
+    expect(queryClient.getQueryData(userAV1Key).items[0]).toMatchObject({
       progress_seconds: 0,
       progress_duration_seconds: 901,
       completed: false,
     });
-    expect(queryClient.getQueryData(v1Key).continue_watching[0].progress_seconds).toBe(0);
-    expect(queryClient.getQueryData(v2Key).items_by_id["42"]).toMatchObject({
+    expect(queryClient.getQueryData(userAV1Key).continue_watching[0].progress_seconds).toBe(0);
+    expect(queryClient.getQueryData(userAV2Key).items_by_id["42"]).toMatchObject({
       progress_seconds: 0,
       progress_duration_seconds: 901,
       completed: false,
     });
-    expect(refetchSpy).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryData(userAShadowKey).items_by_id["42"].progress_seconds).toBe(0);
+    expect(queryClient.getQueryData(userBV1Key)).toBe(userBV1Payload);
+    expect(queryClient.getQueryData(userBV2Key)).toBe(userBV2Payload);
+    expect(queryClient.getQueryState(userBV1Key)?.dataUpdatedAt).toBe(userBV1UpdatedAt);
+    expect(queryClient.getQueryState(userBV2Key)?.dataUpdatedAt).toBe(userBV2UpdatedAt);
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+
+  test("authoritative progress patch refuses to mutate caches without a complete identity", async () => {
+    const key = buildLibraryV2QueryKey({ userId: 1, role: "user", category: "movies" });
+    const payload = {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 120, completed: false } },
+      sections: { item_ids: [42] },
+    };
+    queryClient.setQueryData(key, payload);
+
+    await expect(patchLibraryProgressStateCaches({
+      items: [{ id: 42, progress_seconds: 0, progress_duration_seconds: 900, completed: false }],
+    })).resolves.toEqual({ patchedQueryCount: 0, membershipMayHaveChanged: false });
+
+    expect(queryClient.getQueryData(key)).toBe(payload);
   });
 });

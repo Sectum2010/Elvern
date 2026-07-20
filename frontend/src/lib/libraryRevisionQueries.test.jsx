@@ -5,13 +5,17 @@ import { apiRequest } from "./api.js";
 import {
   applyLibraryRevisionChange,
   buildLibraryRevisionQueryKey,
-  isLibraryRevisionCapabilityUnavailableError,
+  isLibraryProgressStateSubCapabilityUnavailableError,
+  isLibraryRevisionEndpointCapabilityUnavailableError,
+  isLibraryRevisionGloballyDisabledError,
   LibraryRevisionSynchronizer,
   LibraryProgressRevisionRaceError,
   LibraryProgressStateContractError,
+  LibraryRevisionContractError,
   LIBRARY_PROGRESS_REVISION_IMMEDIATE_RETRY_MAX,
   LIBRARY_REVISION_VISIBLE_INTERVAL_MS,
   resolveLibraryRevisionMode,
+  validateLibraryRevisionPayload,
   validateLibraryProgressStatePayload,
 } from "./libraryRevisionQueries.js";
 import { buildLibraryV2QueryKey } from "./libraryQueries.js";
@@ -59,6 +63,9 @@ function apiError(status, payload = null) {
   error.detail = payload?.detail ?? null;
   return error;
 }
+
+
+const protectedIdentity = Object.freeze({ userId: 7, role: "standard_user" });
 
 
 async function flushAsyncWork() {
@@ -126,6 +133,63 @@ describe("Library revision synchronization", () => {
     ]);
   });
 
+  test("revision validator enforces the exact ordinary-object allowlist", () => {
+    const valid = revision();
+    const withoutField = (field) => Object.fromEntries(
+      Object.entries(valid).filter(([key]) => key !== field),
+    );
+    expect(validateLibraryRevisionPayload(valid)).toBe(valid);
+
+    const invalidPayloads = [
+      null,
+      [],
+      new Date(),
+      withoutField("schema_version"),
+      withoutField("catalog"),
+      withoutField("presentation"),
+      withoutField("permission"),
+      withoutField("user_overlay"),
+      withoutField("progress"),
+      withoutField("combined_library"),
+      { ...valid, title: "private" },
+      { ...valid, raw_counter: 42 },
+      { ...valid, schema_version: "wrong" },
+      { ...valid, catalog: token("A") },
+      { ...valid, catalog: "a".repeat(63) },
+      { ...valid, catalog: "a".repeat(65) },
+      { ...valid, catalog: 123 },
+      { ...valid, catalog: null },
+      { ...valid, catalog: "" },
+      { ...valid, catalog: ` ${token("a")}` },
+    ];
+
+    invalidPayloads.forEach((payload) => {
+      expect(() => validateLibraryRevisionPayload(payload)).toThrow(LibraryRevisionContractError);
+    });
+  });
+
+  test("malformed revision stays on normal cadence without mutating Library cache or baseline", async () => {
+    const libraryKey = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    const cachedLibrary = { schema_version: "library-summary-v2", items_by_id: {}, sections: {} };
+    queryClient.setQueryData(libraryKey, cachedLibrary);
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    apiRequest
+      .mockResolvedValueOnce({ ...revision({ catalog: token("8") }), title: "private" })
+      .mockResolvedValueOnce(revision())
+      .mockResolvedValueOnce(revision({ catalog: token("8") }));
+    render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+
+    await act(() => vi.advanceTimersByTimeAsync(LIBRARY_REVISION_VISIBLE_INTERVAL_MS));
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(libraryKey)).toBe(cachedLibrary);
+
+    await act(() => vi.advanceTimersByTimeAsync(LIBRARY_REVISION_VISIBLE_INTERVAL_MS));
+    expect(apiRequest).toHaveBeenCalledTimes(3);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+  });
+
   test("first fetch establishes a baseline and visible polling is non-overlapping", async () => {
     let resolveFirst;
     apiRequest.mockReturnValueOnce(new Promise((resolve) => {
@@ -172,6 +236,7 @@ describe("Library revision synchronization", () => {
       previous: revision(),
       current: revision({ catalog: token("8"), progress: token("9"), combined_library: token("7") }),
       refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
     });
 
     expect(result.changedLayers).toEqual(expect.arrayContaining(["catalog", "progress", "combined_library"]));
@@ -182,6 +247,100 @@ describe("Library revision synchronization", () => {
       completed: false,
     });
     expect(invalidateSpy).toHaveBeenCalled();
+  });
+
+  test("catalog plus progress membership change performs exactly one identity-scoped summary refresh", async () => {
+    const userAKey = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    const userBKey = buildLibraryV2QueryKey({ userId: 8, role: "standard_user", category: "movies" });
+    queryClient.setQueryData(userAKey, {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 120, completed: false } },
+      sections: { item_ids: [42], continue_watching_item_ids: [42] },
+    });
+    const userBPayload = {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 80, completed: false } },
+      sections: { item_ids: [42], continue_watching_item_ids: [42] },
+    };
+    queryClient.setQueryData(userBKey, userBPayload);
+    apiRequest.mockResolvedValueOnce({
+      schema_version: "library-progress-state-v1",
+      progress_revision: token("9"),
+      items: [{ id: 42, progress_seconds: 0, progress_duration_seconds: 100, completed: false }],
+    });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const result = await applyLibraryRevisionChange({
+      previous: revision(),
+      current: revision({ catalog: token("8"), progress: token("9"), combined_library: token("7") }),
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
+
+    expect(result.summaryRefreshRequired).toBe(true);
+    expect(result.summaryRefreshReasons).toEqual(["catalog", "progress_membership"]);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryData(userAKey).items_by_id["42"].progress_seconds).toBe(0);
+    expect(queryClient.getQueryData(userBKey)).toBe(userBPayload);
+    expect(queryClient.getQueryState(userAKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(userBKey)?.isInvalidated).toBe(false);
+  });
+
+  test("progress numeric-only change patches entities without a full summary refresh", async () => {
+    const key = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    queryClient.setQueryData(key, {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 120, completed: false } },
+      sections: { item_ids: [42], continue_watching_item_ids: [42] },
+    });
+    apiRequest.mockResolvedValueOnce({
+      schema_version: "library-progress-state-v1",
+      progress_revision: token("9"),
+      items: [{ id: 42, progress_seconds: 150, progress_duration_seconds: 1000, completed: false }],
+    });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const result = await applyLibraryRevisionChange({
+      previous: revision(),
+      current: revision({ progress: token("9") }),
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
+
+    expect(result.summaryRefreshRequired).toBe(false);
+    expect(result.summaryRefreshReasons).toEqual([]);
+    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(key).items_by_id["42"].progress_seconds).toBe(150);
+  });
+
+  test("presentation permission and progress membership share one Library summary refresh", async () => {
+    const key = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    queryClient.setQueryData(key, {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 0, completed: false } },
+      sections: { item_ids: [42], continue_watching_item_ids: [] },
+    });
+    apiRequest.mockResolvedValueOnce({
+      schema_version: "library-progress-state-v1",
+      progress_revision: token("9"),
+      items: [{ id: 42, progress_seconds: 12, progress_duration_seconds: 100, completed: false }],
+    });
+    mockAuth.refreshAuth.mockResolvedValue(true);
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const result = await applyLibraryRevisionChange({
+      previous: revision(),
+      current: revision({ presentation: token("7"), permission: token("8"), progress: token("9") }),
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
+
+    const libraryInvalidations = invalidateSpy.mock.calls.filter(([options]) => (
+      typeof options?.predicate === "function" && options.predicate({ queryKey: key })
+    ));
+    expect(mockAuth.refreshAuth).toHaveBeenCalledTimes(1);
+    expect(result.summaryRefreshReasons).toEqual(["presentation", "permission", "progress_membership"]);
+    expect(libraryInvalidations).toHaveLength(1);
   });
 
   test("strict progress-state validator accepts only the minimal authoritative contract", () => {
@@ -232,7 +391,12 @@ describe("Library revision synchronization", () => {
     const previous = revision();
     const current = revision({ catalog: token("8"), progress: token("9"), combined_library: token("7") });
 
-    const result = await applyLibraryRevisionChange({ previous, current, refreshAuth: mockAuth.refreshAuth });
+    const result = await applyLibraryRevisionChange({
+      previous,
+      current,
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
 
     expect(result.progressError).toBeInstanceOf(LibraryProgressStateContractError);
     expect(result.immediateRetryRequired).toBe(false);
@@ -257,7 +421,12 @@ describe("Library revision synchronization", () => {
     const previous = revision();
     const current = revision({ catalog: token("7"), progress: token("9"), combined_library: token("6") });
 
-    const result = await applyLibraryRevisionChange({ previous, current, refreshAuth: mockAuth.refreshAuth });
+    const result = await applyLibraryRevisionChange({
+      previous,
+      current,
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
 
     expect(result.progressError).toBeInstanceOf(LibraryProgressRevisionRaceError);
     expect(result.immediateRetryRequired).toBe(true);
@@ -266,16 +435,239 @@ describe("Library revision synchronization", () => {
     expect(queryClient.getQueryData(key).items_by_id["42"].progress_seconds).toBe(10);
   });
 
-  test("capability helper matches only endpoint missing and explicit disabled payload", () => {
-    expect(isLibraryRevisionCapabilityUnavailableError(apiError(404))).toBe(true);
-    expect(isLibraryRevisionCapabilityUnavailableError(apiError(503, {
+  test("capability helpers distinguish revision endpoint, progress sub-capability, and global disable", () => {
+    expect(isLibraryRevisionEndpointCapabilityUnavailableError(apiError(404))).toBe(true);
+    expect(isLibraryProgressStateSubCapabilityUnavailableError(apiError(404))).toBe(true);
+    expect(isLibraryRevisionGloballyDisabledError(apiError(404))).toBe(false);
+    const globallyDisabled = apiError(503, {
       detail: { code: "library_revision_disabled" },
+    });
+    expect(isLibraryRevisionGloballyDisabledError(globallyDisabled)).toBe(true);
+    expect(isLibraryRevisionEndpointCapabilityUnavailableError(globallyDisabled)).toBe(true);
+    expect(isLibraryProgressStateSubCapabilityUnavailableError(globallyDisabled)).toBe(false);
+    expect(isLibraryProgressStateSubCapabilityUnavailableError(apiError(503, {
+      detail: { code: "library_progress_state_disabled" },
     }))).toBe(true);
-    expect(isLibraryRevisionCapabilityUnavailableError(apiError(503, {
+    expect(isLibraryRevisionEndpointCapabilityUnavailableError(apiError(503, {
       detail: { code: "maintenance_mode" },
     }))).toBe(false);
-    expect(isLibraryRevisionCapabilityUnavailableError(apiError(500))).toBe(false);
-    expect(isLibraryRevisionCapabilityUnavailableError(new TypeError("network"))).toBe(false);
+    expect(isLibraryProgressStateSubCapabilityUnavailableError(apiError(500))).toBe(false);
+    expect(isLibraryRevisionEndpointCapabilityUnavailableError(new TypeError("network"))).toBe(false);
+  });
+
+  test("progress-state 404 falls back once without disabling revision synchronization", async () => {
+    const key = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    queryClient.setQueryData(key, {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 120, completed: false } },
+      sections: { item_ids: [42], continue_watching_item_ids: [42] },
+    });
+    apiRequest.mockRejectedValueOnce(apiError(404));
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const current = revision({ progress: token("9") });
+
+    const result = await applyLibraryRevisionChange({
+      previous: revision(),
+      current,
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
+
+    expect(result.progressCapabilityUnavailable).toBe(true);
+    expect(result.revisionCapabilityUnavailable).toBe(false);
+    expect(result.nextBaseline.progress).toBe(current.progress);
+    expect(result.summaryRefreshReasons).toEqual(["progress_capability_fallback"]);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryData(key).items_by_id["42"].progress_seconds).toBe(120);
+  });
+
+  test("known-missing progress sub-capability uses one summary fallback per new token", async () => {
+    const key = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    queryClient.setQueryData(key, {
+      schema_version: "library-summary-v2",
+      items_by_id: {},
+      sections: {},
+    });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const current = revision({ progress: token("9") });
+
+    const result = await applyLibraryRevisionChange({
+      previous: revision(),
+      current,
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+      progressStateCapabilityUnavailable: true,
+    });
+
+    expect(apiRequest).not.toHaveBeenCalled();
+    expect(result.nextBaseline.progress).toBe(current.progress);
+    expect(result.summaryRefreshReasons).toEqual(["progress_capability_fallback"]);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("global disable from progress-state stops the whole revision capability", async () => {
+    apiRequest.mockRejectedValueOnce(apiError(503, {
+      detail: { code: "library_revision_disabled" },
+    }));
+
+    const result = await applyLibraryRevisionChange({
+      previous: revision(),
+      current: revision({ progress: token("9") }),
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
+
+    expect(result.revisionCapabilityUnavailable).toBe(true);
+    expect(result.progressCapabilityUnavailable).toBe(false);
+    expect(result.nextBaseline.progress).toBe(revision().progress);
+    expect(result.summaryRefreshRequired).toBe(false);
+  });
+
+  test.each([
+    ["unauthorized", apiError(401)],
+    ["forbidden", apiError(403)],
+    ["server error", apiError(500)],
+    ["network error", new TypeError("network")],
+  ])("progress-state %s preserves the old progress baseline and every capability", async (_label, error) => {
+    apiRequest.mockRejectedValueOnce(error);
+    const previous = revision();
+
+    const result = await applyLibraryRevisionChange({
+      previous,
+      current: revision({ progress: token("9") }),
+      refreshAuth: mockAuth.refreshAuth,
+      identity: protectedIdentity,
+    });
+
+    expect(result.nextBaseline.progress).toBe(previous.progress);
+    expect(result.progressCapabilityUnavailable).toBe(false);
+    expect(result.revisionCapabilityUnavailable).toBe(false);
+    expect(result.immediateRetryRequired).toBe(false);
+    expect(result.summaryRefreshRequired).toBe(false);
+  });
+
+  test("progress-state 404 keeps revision polling and later catalog synchronization alive", async () => {
+    let currentRevision = revision();
+    let progressCalls = 0;
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/library/v2/revision") return Promise.resolve(currentRevision);
+      if (path === "/api/library/v2/progress-state") {
+        progressCalls += 1;
+        return Promise.reject(apiError(404));
+      }
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
+    const key = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    queryClient.setQueryData(key, { schema_version: "library-summary-v2", items_by_id: {}, sections: {} });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+
+    currentRevision = revision({ progress: token("9") });
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+    expect(progressCalls).toBe(1);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+    expect(progressCalls).toBe(1);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+
+    currentRevision = revision({ catalog: token("8"), progress: token("9"), combined_library: token("7") });
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+    expect(apiRequest.mock.calls.filter(([path]) => path === "/api/library/v2/revision")).toHaveLength(4);
+    expect(progressCalls).toBe(1);
+    expect(invalidateSpy).toHaveBeenCalledTimes(2);
+  });
+
+  test("progress-state global disable stops timers and lifecycle polling", async () => {
+    let revisionCalls = 0;
+    let progressCalls = 0;
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/library/v2/revision") {
+        revisionCalls += 1;
+        return Promise.resolve(revisionCalls === 1 ? revision() : revision({ progress: token("9") }));
+      }
+      if (path === "/api/library/v2/progress-state") {
+        progressCalls += 1;
+        return Promise.reject(apiError(503, { detail: { code: "library_revision_disabled" } }));
+      }
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
+    render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("pageshow"));
+      window.dispatchEvent(new Event("online"));
+    });
+    await act(() => vi.advanceTimersByTimeAsync(LIBRARY_REVISION_VISIBLE_INTERVAL_MS * 2));
+
+    expect(revisionCalls).toBe(2);
+    expect(progressCalls).toBe(1);
+  });
+
+  test("identity change resets a missing progress sub-capability and probes it again", async () => {
+    let currentRevision = revision();
+    let progressCalls = 0;
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/library/v2/revision") return Promise.resolve(currentRevision);
+      if (path === "/api/library/v2/progress-state") {
+        progressCalls += 1;
+        return Promise.reject(apiError(404));
+      }
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
+    const view = render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+    currentRevision = revision({ progress: token("9") });
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+    expect(progressCalls).toBe(1);
+
+    mockAuth.user = { ...mockAuth.user, id: 8 };
+    currentRevision = revision();
+    view.rerender(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+    currentRevision = revision({ progress: token("8") });
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+
+    expect(progressCalls).toBe(2);
+  });
+
+  test("a remounted synchronizer probes a previously missing progress sub-capability again", async () => {
+    let currentRevision = revision();
+    let progressCalls = 0;
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/library/v2/revision") return Promise.resolve(currentRevision);
+      if (path === "/api/library/v2/progress-state") {
+        progressCalls += 1;
+        return Promise.reject(apiError(404));
+      }
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
+    const firstView = render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+    currentRevision = revision({ progress: token("9") });
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+    expect(progressCalls).toBe(1);
+
+    firstView.unmount();
+    const secondView = render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+    currentRevision = revision({ progress: token("8") });
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+
+    expect(progressCalls).toBe(2);
+    secondView.unmount();
   });
 
   test.each([
@@ -350,6 +742,100 @@ describe("Library revision synchronization", () => {
       resolveFirst(revision());
       await Promise.resolve();
     });
+  });
+
+  test("identity change rejects an old progress response before patch or invalidation", async () => {
+    let revisionCalls = 0;
+    let resolveProgress;
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/library/v2/revision") {
+        revisionCalls += 1;
+        return Promise.resolve(revisionCalls === 2
+          ? revision({ progress: token("9") })
+          : revision());
+      }
+      if (path === "/api/library/v2/progress-state") {
+        return new Promise((resolve) => {
+          resolveProgress = resolve;
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path: ${path}`));
+    });
+    const userAKey = buildLibraryV2QueryKey({ userId: 7, role: "standard_user", category: "movies" });
+    const userBKey = buildLibraryV2QueryKey({ userId: 8, role: "standard_user", category: "movies" });
+    const userAPayload = {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 10, completed: false } },
+      sections: {},
+    };
+    const userBPayload = {
+      schema_version: "library-summary-v2",
+      items_by_id: { "42": { id: 42, progress_seconds: 20, completed: false } },
+      sections: {},
+    };
+    queryClient.setQueryData(userAKey, userAPayload);
+    queryClient.setQueryData(userBKey, userBPayload);
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const view = render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+    expect(resolveProgress).toBeTypeOf("function");
+
+    mockAuth.user = { ...mockAuth.user, id: 8 };
+    view.rerender(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+    await act(async () => {
+      resolveProgress({
+        schema_version: "library-progress-state-v1",
+        progress_revision: token("9"),
+        items: [{ id: 42, progress_seconds: 99, progress_duration_seconds: 100, completed: false }],
+      });
+      await Promise.resolve();
+    });
+    await flushAsyncWork();
+
+    expect(queryClient.getQueryData(userAKey)).toBe(userAPayload);
+    expect(queryClient.getQueryData(userBKey)).toBe(userBPayload);
+    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(revisionCalls).toBe(3);
+  });
+
+  test("identity change after auth refresh starts prevents old permission invalidation", async () => {
+    let revisionCalls = 0;
+    let resolveRefresh;
+    apiRequest.mockImplementation((path) => {
+      if (path !== "/api/library/v2/revision") {
+        return Promise.reject(new Error(`Unexpected path: ${path}`));
+      }
+      revisionCalls += 1;
+      return Promise.resolve(revisionCalls === 2
+        ? revision({ permission: token("9") })
+        : revision());
+    });
+    mockAuth.refreshAuth.mockReturnValue(new Promise((resolve) => {
+      resolveRefresh = resolve;
+    }));
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const view = render(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flushAsyncWork();
+    expect(resolveRefresh).toBeTypeOf("function");
+
+    mockAuth.user = { ...mockAuth.user, id: 8 };
+    view.rerender(<LibraryRevisionSynchronizer />);
+    await flushAsyncWork();
+    await act(async () => {
+      resolveRefresh(true);
+      await Promise.resolve();
+    });
+    await flushAsyncWork();
+
+    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(revisionCalls).toBe(3);
   });
 
   test("progress revision races retry immediately at most twice without overlap", async () => {

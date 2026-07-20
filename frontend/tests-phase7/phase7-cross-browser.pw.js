@@ -124,12 +124,13 @@ async function installFixture(page, requests, state = {}) {
     const path = url.pathname.replace(/^\/[^/]+(?=\/api\/)/, "");
     requests.push(`${path}${url.search}`);
     let payload = {};
+    let status = 200;
     if (path === "/api/auth/me") {
       payload = { user: {
-        id: 7,
-        username: "phase7-browser",
-        display_name: "Phase 7 Browser",
-        role: "standard_user",
+        id: Number(state.userId || 7),
+        username: state.username || "phase7-browser",
+        display_name: state.displayName || "Phase 7 Browser",
+        role: state.role || "standard_user",
         assistant_beta_enabled: false,
         age_credential: 18,
       } };
@@ -158,18 +159,22 @@ async function installFixture(page, requests, state = {}) {
         user_overlay: opaqueToken(1, 4),
         progress: state.progressToken || opaqueToken(1, 5),
         combined_library: opaqueToken(1, 6),
+        ...(state.revisionExtraFields || {}),
       };
     } else if (path === "/api/library/v2/progress-state") {
-      payload = {
-        schema_version: "library-progress-state-v1",
-        progress_revision: state.progressToken || opaqueToken(1, 5),
-        items: [{
-          id: 1,
-          progress_seconds: Number(state.progressSeconds || 0),
-          progress_duration_seconds: Number(state.progressDuration || 7200),
-          completed: Boolean(state.completed),
-        }],
-      };
+      status = Number(state.progressStateStatus || 200);
+      payload = status === 200
+        ? {
+            schema_version: "library-progress-state-v1",
+            progress_revision: state.progressToken || opaqueToken(1, 5),
+            items: [{
+              id: 1,
+              progress_seconds: Number(state.progressSeconds || 0),
+              progress_duration_seconds: Number(state.progressDuration || 7200),
+              completed: Boolean(state.completed),
+            }],
+          }
+        : { detail: state.progressStateErrorDetail || "Not found" };
     } else if (path === "/api/progress/1" && route.request().method() === "POST") {
       const progress = route.request().postDataJSON();
       state.progressSeconds = Number(progress.position_seconds || 0);
@@ -240,7 +245,7 @@ async function installFixture(page, requests, state = {}) {
       };
     }
     await route.fulfill({
-      status: 200,
+      status,
       contentType: "application/json",
       body: JSON.stringify(payload),
     });
@@ -325,6 +330,115 @@ test("revision change silently refreshes the active Library without a loading re
 });
 
 
+test("catalog plus progress membership revision performs one summary refresh", async ({ page }) => {
+  const requests = [];
+  const state = {
+    catalogToken: opaqueToken(1, 1),
+    progressToken: opaqueToken(1, 5),
+    progressSeconds: 120,
+    progressDuration: 7200,
+    completed: false,
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await page.goto("library");
+  await expect(page.getByRole("heading", { name: "Continue watching" })).toBeVisible();
+  await expect(page.locator(".media-card__progress")).not.toHaveCount(0);
+  await expect.poll(() => requests.filter((request) => request === "/api/library/v2/revision").length)
+    .toBeGreaterThan(0);
+  const summaryCallsBefore = requests.filter((request) => request.startsWith("/api/library/v2/summary")).length;
+  const progressCallsBefore = requests.filter((request) => request === "/api/library/v2/progress-state").length;
+
+  state.catalogToken = opaqueToken(2, 1);
+  state.progressToken = opaqueToken(2, 5);
+  state.progressSeconds = 0;
+  state.titleSuffix = " Single Refresh";
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+  await expect(page.getByText("Phase Seven Alpha Single Refresh", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Continue watching" })).toHaveCount(0);
+  await expect(page.locator(".media-card__progress")).toHaveCount(0);
+  await expect.poll(() => requests.filter((request) => request === "/api/library/v2/progress-state").length)
+    .toBe(progressCallsBefore + 1);
+  await expect.poll(() => requests.filter((request) => request.startsWith("/api/library/v2/summary")).length)
+    .toBe(summaryCallsBefore + 1);
+  await page.waitForTimeout(250);
+  expect(requests.filter((request) => request.startsWith("/api/library/v2/summary"))).toHaveLength(summaryCallsBefore + 1);
+  await expect(page.getByText("Loading library...")).toHaveCount(0);
+});
+
+
+test("progress-state 404 falls back to summary while later catalog revisions continue", async ({ page }) => {
+  const requests = [];
+  const state = {
+    catalogToken: opaqueToken(1, 1),
+    progressToken: opaqueToken(1, 5),
+    progressSeconds: 0,
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await page.goto("library");
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+  await expect.poll(() => requests.filter((request) => request === "/api/library/v2/revision").length)
+    .toBeGreaterThan(0);
+  const summaryCallsBefore = requests.filter((request) => request.startsWith("/api/library/v2/summary")).length;
+
+  state.progressStateStatus = 404;
+  state.progressToken = opaqueToken(2, 5);
+  state.progressSeconds = 120;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByRole("heading", { name: "Continue watching" })).toBeVisible();
+  await expect.poll(() => requests.filter((request) => request === "/api/library/v2/progress-state").length).toBe(1);
+  await expect.poll(() => requests.filter((request) => request.startsWith("/api/library/v2/summary")).length)
+    .toBe(summaryCallsBefore + 1);
+
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => requests.filter((request) => request === "/api/library/v2/revision").length)
+    .toBeGreaterThanOrEqual(3);
+  expect(requests.filter((request) => request === "/api/library/v2/progress-state")).toHaveLength(1);
+  expect(requests.filter((request) => request.startsWith("/api/library/v2/summary"))).toHaveLength(summaryCallsBefore + 1);
+
+  state.catalogToken = opaqueToken(2, 1);
+  state.titleSuffix = " Catalog Still Syncs";
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("Phase Seven Alpha Catalog Still Syncs", { exact: true }).first()).toBeVisible();
+  expect(requests.filter((request) => request === "/api/library/v2/progress-state")).toHaveLength(1);
+  await expect.poll(() => requests.filter((request) => request.startsWith("/api/library/v2/summary")).length)
+    .toBe(summaryCallsBefore + 2);
+  await expect(page.getByText("Loading library...")).toHaveCount(0);
+});
+
+
+test("extra revision fields preserve old cache until a valid response arrives", async ({ page }) => {
+  const requests = [];
+  const state = { catalogToken: opaqueToken(1, 1), titleSuffix: "" };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await page.goto("library");
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+  await expect.poll(() => requests.filter((request) => request === "/api/library/v2/revision").length)
+    .toBeGreaterThan(0);
+  const summaryCallsBefore = requests.filter((request) => request.startsWith("/api/library/v2/summary")).length;
+
+  state.catalogToken = opaqueToken(2, 1);
+  state.titleSuffix = " Validated";
+  state.revisionExtraFields = { title: "must-be-rejected" };
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => requests.filter((request) => request === "/api/library/v2/revision").length)
+    .toBeGreaterThanOrEqual(2);
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+  await expect(page.getByText("Phase Seven Alpha Validated", { exact: true })).toHaveCount(0);
+  expect(requests.filter((request) => request.startsWith("/api/library/v2/summary"))).toHaveLength(summaryCallsBefore);
+
+  state.revisionExtraFields = null;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("Phase Seven Alpha Validated", { exact: true })).toBeVisible();
+  await expect.poll(() => requests.filter((request) => request.startsWith("/api/library/v2/summary")).length)
+    .toBe(summaryCallsBefore + 1);
+  await expect(page.getByText("Loading library...")).toHaveCount(0);
+});
+
+
 test("desktop poster context menu remains available", async ({ page }) => {
   await page.goto("library");
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
@@ -385,6 +499,51 @@ test("two independent same-account contexts apply progress reset and catalog rev
     await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
     await expect(pageB.getByText("Phase Seven Alpha Scan 1", { exact: true })).toBeVisible();
     await expect(pageB.getByText("Loading library...")).toHaveCount(0);
+  } finally {
+    await Promise.all([contextA.close(), contextB.close()]);
+  }
+});
+
+
+test("two different identity contexts keep same-item progress UI isolated", async ({ browser, baseURL }) => {
+  const stateA = {
+    userId: 7,
+    username: "phase7-user-a",
+    progressToken: opaqueToken(1, 5),
+    progressSeconds: 0,
+  };
+  const stateB = {
+    userId: 8,
+    username: "phase7-user-b",
+    progressToken: opaqueToken(1, 5),
+    progressSeconds: 0,
+  };
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+  const requestsA = [];
+  const requestsB = [];
+  await installFixture(pageA, requestsA, stateA);
+  await installFixture(pageB, requestsB, stateB);
+  try {
+    await Promise.all([pageA.goto(`${baseURL}library`), pageB.goto(`${baseURL}library`)]);
+    await expect(pageA.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+    await expect(pageB.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+    await expect.poll(() => requestsA.filter((request) => request === "/api/library/v2/revision").length)
+      .toBeGreaterThan(0);
+    await expect.poll(() => requestsB.filter((request) => request === "/api/library/v2/revision").length)
+      .toBeGreaterThan(0);
+
+    stateA.progressToken = opaqueToken(2, 5);
+    stateA.progressSeconds = 120;
+    await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(pageA.getByRole("heading", { name: "Continue watching" })).toBeVisible();
+    await expect(pageA.locator(".media-card__progress")).not.toHaveCount(0);
+
+    await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(pageB.getByRole("heading", { name: "Continue watching" })).toHaveCount(0);
+    await expect(pageB.locator(".media-card__progress")).toHaveCount(0);
   } finally {
     await Promise.all([contextA.close(), contextB.close()]);
   }

@@ -81,9 +81,64 @@ export function isLibraryRenderQueryKey(queryKey) {
 }
 
 
+function normalizeLibraryProtectedIdentity({ userId, role } = {}) {
+  const userIdType = typeof userId;
+  if (
+    !["string", "number"].includes(userIdType)
+    || (userIdType === "number" && !Number.isFinite(userId))
+    || typeof role !== "string"
+  ) {
+    return null;
+  }
+  const normalizedUserId = normalizeString(userId);
+  const normalizedRole = normalizeString(role).toLowerCase();
+  return normalizedUserId && normalizedRole
+    ? { userId: normalizedUserId, role: normalizedRole }
+    : null;
+}
+
+
+export function matchesLibraryQueryProtectedIdentity(queryKey, identity) {
+  if (!isLibraryQueryKey(queryKey)) return false;
+  const normalizedIdentity = normalizeLibraryProtectedIdentity(identity);
+  const queryIdentity = queryKey[2];
+  if (
+    !normalizedIdentity
+    || !queryIdentity
+    || typeof queryIdentity !== "object"
+    || Array.isArray(queryIdentity)
+  ) {
+    return false;
+  }
+  if (
+    !["string", "number"].includes(typeof queryIdentity.userId)
+    || (typeof queryIdentity.userId === "number" && !Number.isFinite(queryIdentity.userId))
+    || typeof queryIdentity.role !== "string"
+  ) {
+    return false;
+  }
+  const normalizedQueryIdentity = normalizeLibraryProtectedIdentity(queryIdentity);
+  return Boolean(normalizedQueryIdentity)
+    && normalizedQueryIdentity.userId === normalizedIdentity.userId
+    && normalizedQueryIdentity.role === normalizedIdentity.role;
+}
+
+
 export function invalidateLibraryQueries({ refetchType = "active" } = {}) {
   return queryClient.invalidateQueries({
     queryKey: LIBRARY_ALL_QUERY_PREFIX,
+    refetchType,
+  });
+}
+
+
+export function invalidateLibraryQueriesForIdentity({ userId, role, refetchType = "active" } = {}) {
+  const identity = normalizeLibraryProtectedIdentity({ userId, role });
+  if (!identity) {
+    return Promise.resolve();
+  }
+  return queryClient.invalidateQueries({
+    predicate: (query) => matchesLibraryQueryProtectedIdentity(query.queryKey, identity),
     refetchType,
   });
 }
@@ -248,12 +303,15 @@ function readProgressFromPayload(payload, queryKey, itemId) {
 }
 
 
-export async function patchLibraryProgressStateCaches(progressState) {
+export async function patchLibraryProgressStateCaches(progressState, identity) {
   const items = Array.isArray(progressState?.items) ? progressState.items : [];
   let patchedQueryCount = 0;
   let membershipMayHaveChanged = false;
   queryClient.getQueryCache().findAll().forEach((query) => {
-    if (!isLibraryQueryKey(query.queryKey) || query.state.data === undefined) return;
+    if (
+      !matchesLibraryQueryProtectedIdentity(query.queryKey, identity)
+      || query.state.data === undefined
+    ) return;
     let nextPayload = query.state.data;
     for (const item of items) {
       const itemId = Number(item?.id);
@@ -282,9 +340,6 @@ export async function patchLibraryProgressStateCaches(progressState) {
       queryClient.setQueryData(query.queryKey, nextPayload);
     }
   });
-  if (membershipMayHaveChanged) {
-    await markLibraryQueriesStale({ refetchType: "active" });
-  }
   return { patchedQueryCount, membershipMayHaveChanged };
 }
 

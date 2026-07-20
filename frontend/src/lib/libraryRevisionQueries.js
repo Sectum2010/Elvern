@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react";
 import { useAuth } from "../auth/AuthContext.jsx";
 import { apiRequest } from "./api.js";
 import {
-  invalidateLibraryQueries,
+  invalidateLibraryQueriesForIdentity,
   LIBRARY_QUERY_GC_TIME_MS,
   patchLibraryProgressStateCaches,
 } from "./libraryQueries.js";
@@ -22,7 +22,8 @@ const PROGRESS_STATE_ITEM_FIELDS = new Set([
   "progress_duration_seconds",
   "completed",
 ]);
-const REVISION_FIELDS = Object.freeze([
+export const REVISION_PAYLOAD_FIELDS = Object.freeze([
+  "schema_version",
   "catalog",
   "presentation",
   "permission",
@@ -30,6 +31,22 @@ const REVISION_FIELDS = Object.freeze([
   "progress",
   "combined_library",
 ]);
+const REVISION_TOKEN_FIELDS = REVISION_PAYLOAD_FIELDS.filter((field) => field !== "schema_version");
+const REVISION_FIELDS = REVISION_TOKEN_FIELDS;
+const SUMMARY_REFRESH_LAYER_FIELDS = Object.freeze([
+  "catalog",
+  "presentation",
+  "permission",
+  "user_overlay",
+]);
+
+
+export class LibraryRevisionContractError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LibraryRevisionContractError";
+  }
+}
 
 
 export class LibraryProgressStateContractError extends Error {
@@ -44,6 +61,14 @@ export class LibraryProgressRevisionRaceError extends Error {
   constructor() {
     super("Library progress revision changed while the progress snapshot was loading");
     this.name = "LibraryProgressRevisionRaceError";
+  }
+}
+
+
+export class LibraryRevisionOperationStaleError extends Error {
+  constructor() {
+    super("Library revision operation no longer belongs to the current identity");
+    this.name = "LibraryRevisionOperationStaleError";
   }
 }
 
@@ -71,12 +96,28 @@ export function buildLibraryRevisionQueryKey(user) {
 
 
 export function validateLibraryRevisionPayload(payload) {
-  if (payload?.schema_version !== "library-revision-v1") {
-    throw new Error("Invalid Library revision schema");
+  if (
+    !payload
+    || typeof payload !== "object"
+    || Array.isArray(payload)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(payload))
+  ) {
+    throw new LibraryRevisionContractError("Invalid Library revision payload");
   }
-  for (const field of REVISION_FIELDS) {
-    if (!OPAQUE_REVISION_TOKEN_PATTERN.test(payload[field])) {
-      throw new Error(`Invalid Library revision field: ${field}`);
+  const payloadFields = Object.keys(payload);
+  if (
+    payloadFields.length !== REVISION_PAYLOAD_FIELDS.length
+    || !REVISION_PAYLOAD_FIELDS.every((field) => Object.hasOwn(payload, field))
+    || !payloadFields.every((field) => REVISION_PAYLOAD_FIELDS.includes(field))
+  ) {
+    throw new LibraryRevisionContractError("Invalid Library revision field set");
+  }
+  if (payload?.schema_version !== "library-revision-v1") {
+    throw new LibraryRevisionContractError("Invalid Library revision schema");
+  }
+  for (const field of REVISION_TOKEN_FIELDS) {
+    if (typeof payload[field] !== "string" || !OPAQUE_REVISION_TOKEN_PATTERN.test(payload[field])) {
+      throw new LibraryRevisionContractError(`Invalid Library revision field: ${field}`);
     }
   }
   return payload;
@@ -137,67 +178,150 @@ export function validateLibraryProgressStatePayload(payload) {
 }
 
 
-export function isLibraryRevisionCapabilityUnavailableError(error) {
-  const status = Number(error?.status);
-  if (status === 404) return true;
-  if (status !== 503) return false;
+function errorDetailCode(error) {
   const detail = error?.detail ?? error?.payload?.detail;
-  return detail?.code === "library_revision_disabled";
+  return detail?.code;
 }
 
 
-export async function applyLibraryRevisionChange({ previous, current, refreshAuth }) {
+export function isLibraryRevisionGloballyDisabledError(error) {
+  return Number(error?.status) === 503 && errorDetailCode(error) === "library_revision_disabled";
+}
+
+
+export function isLibraryRevisionEndpointCapabilityUnavailableError(error) {
+  return Number(error?.status) === 404 || isLibraryRevisionGloballyDisabledError(error);
+}
+
+
+export function isLibraryProgressStateSubCapabilityUnavailableError(error) {
+  if (Number(error?.status) === 404) return true;
+  return Number(error?.status) === 503 && errorDetailCode(error) === "library_progress_state_disabled";
+}
+
+
+function assertOperationCurrent(isOperationCurrent) {
+  if (!isOperationCurrent()) throw new LibraryRevisionOperationStaleError();
+}
+
+
+function buildApplyResult({
+  baseline = false,
+  changedLayers = [],
+  nextBaseline,
+  immediateRetryRequired = false,
+  progressError = null,
+  progressCapabilityUnavailable = false,
+  revisionCapabilityUnavailable = false,
+  summaryRefreshReasons = [],
+}) {
+  return {
+    baseline,
+    changedLayers,
+    nextBaseline,
+    immediateRetryRequired,
+    progressError,
+    progressCapabilityUnavailable,
+    revisionCapabilityUnavailable,
+    summaryRefreshRequired: summaryRefreshReasons.length > 0,
+    summaryRefreshReasons,
+  };
+}
+
+
+export async function applyLibraryRevisionChange({
+  previous,
+  current,
+  refreshAuth,
+  identity,
+  progressStateCapabilityUnavailable = false,
+  isOperationCurrent = () => true,
+}) {
+  assertOperationCurrent(isOperationCurrent);
   if (!previous) {
-    return {
+    return buildApplyResult({
       baseline: true,
-      changedLayers: [],
       nextBaseline: current,
-      immediateRetryRequired: false,
-      progressError: null,
-      capabilityUnavailable: false,
-    };
+      progressCapabilityUnavailable: progressStateCapabilityUnavailable,
+    });
   }
   const changedLayers = REVISION_FIELDS.filter((field) => previous[field] !== current[field]);
+  const summaryRefreshReasons = SUMMARY_REFRESH_LAYER_FIELDS.filter((field) => changedLayers.includes(field));
   let progressState = null;
   let progressError = null;
+  let progressCapabilityUnavailable = progressStateCapabilityUnavailable;
+  let revisionCapabilityUnavailable = false;
   if (changedLayers.includes("progress")) {
-    try {
-      progressState = validateLibraryProgressStatePayload(
-        await apiRequest("/api/library/v2/progress-state", { cache: "no-store" }),
-      );
-      if (progressState.progress_revision !== current.progress) {
-        throw new LibraryProgressRevisionRaceError();
+    if (progressStateCapabilityUnavailable) {
+      summaryRefreshReasons.push("progress_capability_fallback");
+    } else {
+      try {
+        const progressPayload = await apiRequest("/api/library/v2/progress-state", { cache: "no-store" });
+        assertOperationCurrent(isOperationCurrent);
+        progressState = validateLibraryProgressStatePayload(progressPayload);
+        if (progressState.progress_revision !== current.progress) {
+          throw new LibraryProgressRevisionRaceError();
+        }
+      } catch (error) {
+        if (error instanceof LibraryRevisionOperationStaleError) throw error;
+        progressState = null;
+        progressError = error;
+        if (isLibraryRevisionGloballyDisabledError(error)) {
+          revisionCapabilityUnavailable = true;
+        } else if (isLibraryProgressStateSubCapabilityUnavailableError(error)) {
+          progressCapabilityUnavailable = true;
+          summaryRefreshReasons.push("progress_capability_fallback");
+        }
       }
-    } catch (error) {
-      progressState = null;
-      progressError = error;
     }
   }
 
+  if (revisionCapabilityUnavailable) {
+    const nextBaseline = { ...current, progress: previous.progress };
+    return buildApplyResult({
+      changedLayers,
+      nextBaseline,
+      progressError,
+      progressCapabilityUnavailable: false,
+      revisionCapabilityUnavailable: true,
+    });
+  }
+
   if (changedLayers.includes("permission")) {
+    assertOperationCurrent(isOperationCurrent);
     await refreshAuth?.({ notifyOnFailure: true });
+    assertOperationCurrent(isOperationCurrent);
   }
   if (changedLayers.includes("presentation")) {
+    assertOperationCurrent(isOperationCurrent);
     await queryClient.invalidateQueries({ queryKey: ["user-settings"], refetchType: "active" });
-  }
-  if (changedLayers.some((field) => ["catalog", "presentation", "permission", "user_overlay"].includes(field))) {
-    await invalidateLibraryQueries({ refetchType: "active" });
+    assertOperationCurrent(isOperationCurrent);
   }
   if (progressState) {
-    await patchLibraryProgressStateCaches(progressState);
+    assertOperationCurrent(isOperationCurrent);
+    const patchResult = await patchLibraryProgressStateCaches(progressState, identity);
+    assertOperationCurrent(isOperationCurrent);
+    if (patchResult.membershipMayHaveChanged) {
+      summaryRefreshReasons.push("progress_membership");
+    }
+  }
+  if (summaryRefreshReasons.length > 0) {
+    assertOperationCurrent(isOperationCurrent);
+    await invalidateLibraryQueriesForIdentity({ ...identity, refetchType: "active" });
+    assertOperationCurrent(isOperationCurrent);
   }
   const nextBaseline = { ...current };
-  if (progressError) {
+  if (progressError && !progressCapabilityUnavailable) {
     nextBaseline.progress = previous.progress;
   }
-  return {
-    baseline: false,
+  return buildApplyResult({
     changedLayers,
     nextBaseline,
     immediateRetryRequired: progressError instanceof LibraryProgressRevisionRaceError,
     progressError,
-    capabilityUnavailable: isLibraryRevisionCapabilityUnavailableError(progressError),
-  };
+    progressCapabilityUnavailable,
+    summaryRefreshReasons,
+  });
 }
 
 
@@ -206,17 +330,28 @@ export function LibraryRevisionSynchronizer() {
   const baselineRef = useRef(null);
   const inFlightRef = useRef(null);
   const timerRef = useRef(0);
+  const lifecycleGenerationRef = useRef(0);
   const mode = resolveLibraryRevisionMode();
   const identity = user ? JSON.stringify(buildLibraryRevisionQueryKey(user)[2]) : "";
 
   useEffect(() => {
+    const lifecycleGeneration = lifecycleGenerationRef.current + 1;
+    lifecycleGenerationRef.current = lifecycleGeneration;
     baselineRef.current = null;
     inFlightRef.current = null;
     if (mode !== "on" || !user) return undefined;
 
     let active = true;
-    let capabilityUnavailable = false;
+    let revisionCapabilityUnavailable = false;
+    let progressStateCapabilityUnavailable = false;
     const queryKey = buildLibraryRevisionQueryKey(user);
+    const protectedIdentity = {
+      userId: queryKey[2].userId,
+      role: queryKey[2].role,
+    };
+    const isOperationCurrent = () => (
+      active && lifecycleGenerationRef.current === lifecycleGeneration
+    );
 
     function clearTimer() {
       if (timerRef.current) window.clearTimeout(timerRef.current);
@@ -225,7 +360,7 @@ export function LibraryRevisionSynchronizer() {
 
     function schedule() {
       clearTimer();
-      if (!active || capabilityUnavailable || document.visibilityState === "hidden") return;
+      if (!isOperationCurrent() || revisionCapabilityUnavailable || document.visibilityState === "hidden") return;
       timerRef.current = window.setTimeout(() => {
         timerRef.current = 0;
         void check();
@@ -233,43 +368,55 @@ export function LibraryRevisionSynchronizer() {
     }
 
     async function check(immediateRetryAttempt = 0) {
-      if (!active || capabilityUnavailable || document.visibilityState === "hidden") return false;
+      if (!isOperationCurrent() || revisionCapabilityUnavailable || document.visibilityState === "hidden") return false;
       if (inFlightRef.current) return inFlightRef.current;
       let retryImmediately = false;
       const operation = (async () => {
         try {
-          const current = await queryClient.fetchQuery({
-            queryKey,
-            queryFn: ({ signal }) => apiRequest("/api/library/v2/revision", { signal, cache: "no-store" })
-              .then(validateLibraryRevisionPayload),
-            staleTime: 0,
-            gcTime: LIBRARY_QUERY_GC_TIME_MS,
-            retry: false,
-          });
-          if (!active) return false;
+          let current;
+          try {
+            current = await queryClient.fetchQuery({
+              queryKey,
+              queryFn: ({ signal }) => apiRequest("/api/library/v2/revision", { signal, cache: "no-store" })
+                .then(validateLibraryRevisionPayload),
+              staleTime: 0,
+              gcTime: LIBRARY_QUERY_GC_TIME_MS,
+              retry: false,
+            });
+          } catch (error) {
+            if (isLibraryRevisionEndpointCapabilityUnavailableError(error)) {
+              revisionCapabilityUnavailable = true;
+              clearTimer();
+            }
+            return false;
+          }
+          if (!isOperationCurrent()) return false;
           const result = await applyLibraryRevisionChange({
             previous: baselineRef.current,
             current,
             refreshAuth,
+            identity: protectedIdentity,
+            progressStateCapabilityUnavailable,
+            isOperationCurrent,
           });
-          baselineRef.current = result.nextBaseline;
-          if (result.capabilityUnavailable) {
-            capabilityUnavailable = true;
+          if (!isOperationCurrent()) return false;
+          progressStateCapabilityUnavailable = result.progressCapabilityUnavailable;
+          if (result.revisionCapabilityUnavailable) {
+            revisionCapabilityUnavailable = true;
             clearTimer();
             return false;
           }
+          if (!isOperationCurrent()) return false;
+          baselineRef.current = result.nextBaseline;
           retryImmediately = result.immediateRetryRequired
             && immediateRetryAttempt < LIBRARY_PROGRESS_REVISION_IMMEDIATE_RETRY_MAX;
           return true;
         } catch (error) {
-          if (isLibraryRevisionCapabilityUnavailableError(error)) {
-            capabilityUnavailable = true;
-            clearTimer();
-          }
+          if (error instanceof LibraryRevisionOperationStaleError) return false;
           return false;
         } finally {
           if (inFlightRef.current === operation) inFlightRef.current = null;
-          if (retryImmediately && active && !capabilityUnavailable) {
+          if (retryImmediately && isOperationCurrent() && !revisionCapabilityUnavailable) {
             void Promise.resolve().then(() => check(immediateRetryAttempt + 1));
           } else {
             schedule();
