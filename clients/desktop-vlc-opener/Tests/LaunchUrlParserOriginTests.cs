@@ -62,4 +62,23 @@ public sealed class LaunchUrlParserOriginTests
 
         Assert.Equal(AllowedOrigin, context.ApiOrigin);
     }
+
+    [Theory]
+    [InlineData("https://user@elvern.example.com")]
+    [InlineData("https://elvern.example.com/path")]
+    [InlineData("https://elvern.example.com?query=1")]
+    [InlineData("https://elvern.example.com/#fragment")]
+    public void OriginPolicy_RejectsValuesThatAreNotExactOrigins(string value)
+    {
+        Assert.Null(HelperOriginPolicy.NormalizeOrigin(value));
+    }
+
+    [Theory]
+    [InlineData("HTTPS://ELVERN.EXAMPLE.COM:443/", "https://elvern.example.com")]
+    [InlineData("http://ELVERN.EXAMPLE.COM:80", "http://elvern.example.com")]
+    [InlineData("https://elvern.example.com:8443", "https://elvern.example.com:8443")]
+    public void OriginPolicy_CanonicalizesAuthority(string value, string expected)
+    {
+        Assert.Equal(expected, HelperOriginPolicy.NormalizeOrigin(value));
+    }
 }

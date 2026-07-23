@@ -19,6 +19,7 @@ import {
   validateLibraryProgressStatePayload,
 } from "./libraryRevisionQueries.js";
 import { buildLibraryV2QueryKey } from "./libraryQueries.js";
+import { PAGE_RESUME_EVENT } from "./pageResume.js";
 import { queryClient } from "./queryClient.js";
 
 
@@ -32,7 +33,8 @@ vi.mock("../auth/AuthContext.jsx", () => ({
   useAuth: () => mockAuth,
 }));
 
-vi.mock("./api.js", () => ({
+vi.mock("./api.js", async (importOriginal) => ({
+  ...(await importOriginal()),
   apiRequest: vi.fn(),
 }));
 
@@ -112,8 +114,7 @@ describe("Library revision synchronization", () => {
     await act(() => Promise.resolve());
 
     act(() => {
-      window.dispatchEvent(new Event("focus"));
-      window.dispatchEvent(new Event("pageshow"));
+      window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT));
       window.dispatchEvent(new Event("online"));
     });
     await act(() => vi.advanceTimersByTimeAsync(LIBRARY_REVISION_VISIBLE_INTERVAL_MS * 2));
@@ -199,7 +200,7 @@ describe("Library revision synchronization", () => {
     await act(() => Promise.resolve());
     expect(apiRequest).toHaveBeenCalledTimes(1);
 
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await act(() => Promise.resolve());
     expect(apiRequest).toHaveBeenCalledTimes(1);
 
@@ -240,7 +241,10 @@ describe("Library revision synchronization", () => {
     });
 
     expect(result.changedLayers).toEqual(expect.arrayContaining(["catalog", "progress", "combined_library"]));
-    expect(apiRequest).toHaveBeenCalledWith("/api/library/v2/progress-state", { cache: "no-store" });
+    expect(apiRequest).toHaveBeenCalledWith("/api/library/v2/progress-state", {
+      abortOnPageHide: true,
+      cache: "no-store",
+    });
     expect(queryClient.getQueryData(key).items_by_id["42"]).toMatchObject({
       progress_seconds: 25,
       progress_duration_seconds: 100,
@@ -564,18 +568,18 @@ describe("Library revision synchronization", () => {
     await flushAsyncWork();
 
     currentRevision = revision({ progress: token("9") });
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
     expect(progressCalls).toBe(1);
     expect(invalidateSpy).toHaveBeenCalledTimes(1);
 
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
     expect(progressCalls).toBe(1);
     expect(invalidateSpy).toHaveBeenCalledTimes(1);
 
     currentRevision = revision({ catalog: token("8"), progress: token("9"), combined_library: token("7") });
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
     expect(apiRequest.mock.calls.filter(([path]) => path === "/api/library/v2/revision")).toHaveLength(4);
     expect(progressCalls).toBe(1);
@@ -598,12 +602,11 @@ describe("Library revision synchronization", () => {
     });
     render(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
 
     act(() => {
-      window.dispatchEvent(new Event("focus"));
-      window.dispatchEvent(new Event("pageshow"));
+      window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT));
       window.dispatchEvent(new Event("online"));
     });
     await act(() => vi.advanceTimersByTimeAsync(LIBRARY_REVISION_VISIBLE_INTERVAL_MS * 2));
@@ -626,7 +629,7 @@ describe("Library revision synchronization", () => {
     const view = render(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
     currentRevision = revision({ progress: token("9") });
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
     expect(progressCalls).toBe(1);
 
@@ -635,7 +638,7 @@ describe("Library revision synchronization", () => {
     view.rerender(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
     currentRevision = revision({ progress: token("8") });
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
 
     expect(progressCalls).toBe(2);
@@ -655,7 +658,7 @@ describe("Library revision synchronization", () => {
     const firstView = render(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
     currentRevision = revision({ progress: token("9") });
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
     expect(progressCalls).toBe(1);
 
@@ -663,7 +666,7 @@ describe("Library revision synchronization", () => {
     const secondView = render(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
     currentRevision = revision({ progress: token("8") });
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
 
     expect(progressCalls).toBe(2);
@@ -683,8 +686,7 @@ describe("Library revision synchronization", () => {
     expect(apiRequest).toHaveBeenCalledTimes(1);
 
     act(() => {
-      window.dispatchEvent(new Event("focus"));
-      window.dispatchEvent(new Event("pageshow"));
+      window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT));
       window.dispatchEvent(new Event("online"));
       window.dispatchEvent(new Event("elvern:library-revision-check"));
     });
@@ -779,7 +781,7 @@ describe("Library revision synchronization", () => {
     const view = render(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
 
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
     expect(resolveProgress).toBeTypeOf("function");
 
@@ -821,7 +823,7 @@ describe("Library revision synchronization", () => {
     const view = render(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
 
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
     expect(resolveRefresh).toBeTypeOf("function");
 
@@ -859,7 +861,7 @@ describe("Library revision synchronization", () => {
     render(<LibraryRevisionSynchronizer />);
     await flushAsyncWork();
 
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT)));
     await flushAsyncWork();
 
     expect(revisionCalls).toBe(2 + LIBRARY_PROGRESS_REVISION_IMMEDIATE_RETRY_MAX);

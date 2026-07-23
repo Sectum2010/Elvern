@@ -9,6 +9,10 @@ import { SeriesRail } from "../components/SeriesRail";
 import { StaticLibrarySearch } from "../components/StaticLibrarySearch";
 import { useActiveBrowserPlaybackItemId } from "../lib/browserPlayback";
 import {
+  isAbortError,
+  isTransientNetworkError,
+} from "../lib/api";
+import {
   isDesktopLibraryReturnPlatform,
   useDesktopLibraryReturnRestore,
 } from "../lib/desktopLibraryReturnRestore";
@@ -33,6 +37,7 @@ import {
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { useCommittedLibrarySearch } from "../lib/useCommittedLibrarySearch";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 
 
 const EMPTY_SOURCE_LIBRARY_PAYLOAD = Object.freeze({
@@ -184,6 +189,7 @@ export function LibrarySourcePage({ sourceKind }) {
   const pendingFloatingSearchRestoreYRef = useRef(null);
   const librarySectionRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
+  const libraryRecoveryGenerationRef = useRef(0);
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const resolvedSourceKind = sourceKind === "cloud" ? "cloud" : "local";
   const copy = SOURCE_PAGE_COPY[resolvedSourceKind];
@@ -227,6 +233,10 @@ export function LibrarySourcePage({ sourceKind }) {
   const libraryQueryKey = libraryQuery.activeQueryKey;
   const library = libraryQuery.data || EMPTY_SOURCE_LIBRARY_PAYLOAD;
   const loading = !libraryQuery.data && libraryQuery.isPending;
+  const libraryReconnecting = isTransientNetworkError(libraryQuery.error);
+  const libraryUnavailable = Boolean(
+    !libraryQuery.data && isTransientNetworkError(libraryQuery.error),
+  );
   useDesktopLibraryReturnRestore({
     enabled: true,
     currentListPath: currentLibraryListPath,
@@ -297,8 +307,14 @@ export function LibrarySourcePage({ sourceKind }) {
   }, [libraryQueryKey]);
 
   useEffect(() => {
+    if (libraryQuery.data && !libraryQuery.error) {
+      setError("");
+    }
+  }, [libraryQuery.data, libraryQuery.error]);
+
+  useEffect(() => {
     const requestError = libraryQuery.error;
-    if (!requestError || requestError.name === "AbortError") {
+    if (!requestError || isAbortError(requestError)) {
       return;
     }
     if (requestError.status === 401) {
@@ -312,6 +328,24 @@ export function LibrarySourcePage({ sourceKind }) {
       setError(requestError.message || "Failed to load library section");
     }
   }, [libraryQuery.data, libraryQuery.error, refreshAuth]);
+
+  useEffect(() => {
+    function handleConnectivityRecovered(event) {
+      const generation = Number(event.detail?.generation || 0);
+      if (
+        generation <= libraryRecoveryGenerationRef.current
+        || !isTransientNetworkError(libraryQuery.error)
+      ) {
+        return;
+      }
+      libraryRecoveryGenerationRef.current = generation;
+      void libraryQuery.refetch();
+    }
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    return () => {
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    };
+  }, [libraryQuery.error, libraryQuery.refetch]);
 
   useEffect(() => {
     if (
@@ -490,6 +524,12 @@ export function LibrarySourcePage({ sourceKind }) {
       />
 
       {error ? <p className="form-error">{error}</p> : null}
+      {libraryReconnecting ? <p className="page-subnote">Reconnecting…</p> : null}
+      {libraryUnavailable ? (
+        <button className="ghost-button ghost-button--inline" onClick={() => libraryQuery.refetch()} type="button">
+          Retry
+        </button>
+      ) : null}
       {loading ? <LoadingView label={`Loading ${copy.title.toLowerCase()}...`} /> : null}
 
       {!loading ? (

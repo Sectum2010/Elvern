@@ -10,7 +10,12 @@ import { MediaCard } from "../components/MediaCard";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { SeriesRail } from "../components/SeriesRail";
 import { StaticLibrarySearch } from "../components/StaticLibrarySearch";
-import { apiRequest, isMaintenanceModeError } from "../lib/api";
+import {
+  apiRequest,
+  isAbortError,
+  isMaintenanceModeError,
+  isTransientNetworkError,
+} from "../lib/api";
 import {
   getProviderAuthPassiveNoticeMessage,
   shouldUseProviderAuthPassiveNotice,
@@ -69,6 +74,7 @@ import {
   isIOSViewportRestoreGateOpen,
 } from "../lib/iosViewportCoordinator";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { useCommittedLibrarySearch } from "../lib/useCommittedLibrarySearch";
 import { LIBRARY_REVISION_CHECK_EVENT } from "../lib/libraryRevisionQueries.js";
@@ -705,6 +711,7 @@ export function LibraryPage() {
   const floatingSearchScrollYRef = useRef(null);
   const pendingFloatingSearchRestoreYRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
+  const libraryRecoveryGenerationRef = useRef(0);
   const [floatingSearchViewportOrientation, setFloatingSearchViewportOrientation] = useState(() => getFloatingSearchViewportOrientation());
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
@@ -780,6 +787,10 @@ export function LibraryPage() {
   const libraryQueryKey = libraryQuery.activeQueryKey;
   const library = libraryQuery.data || EMPTY_LIBRARY_PAYLOAD;
   const loading = !libraryQuery.data && libraryQuery.isPending;
+  const libraryReconnecting = isTransientNetworkError(libraryQuery.error);
+  const libraryUnavailable = Boolean(
+    !libraryQuery.data && isTransientNetworkError(libraryQuery.error),
+  );
   useDesktopLibraryReturnRestore({
     enabled: true,
     currentListPath: currentLibraryListPath,
@@ -884,7 +895,10 @@ export function LibraryPage() {
 
   async function loadMaintenanceModeStatus({ signal } = {}) {
     try {
-      const payload = await apiRequest("/api/admin/maintenance-mode", { signal });
+      const payload = await apiRequest("/api/admin/maintenance-mode", {
+        signal,
+        abortOnPageHide: true,
+      });
       setMaintenanceModeActive(Boolean(payload?.enabled || payload?.maintenance_mode?.enabled));
     } catch (requestError) {
       if (requestError.name === "AbortError") {
@@ -911,8 +925,14 @@ export function LibraryPage() {
   }, [libraryQueryKey]);
 
   useEffect(() => {
+    if (libraryQuery.data && !libraryQuery.error) {
+      setError("");
+    }
+  }, [libraryQuery.data, libraryQuery.error]);
+
+  useEffect(() => {
     const requestError = libraryQuery.error;
-    if (!requestError || requestError.name === "AbortError" || isMaintenanceModeError(requestError)) {
+    if (!requestError || isAbortError(requestError) || isMaintenanceModeError(requestError)) {
       return;
     }
     if (requestError.status === 401) {
@@ -926,6 +946,24 @@ export function LibraryPage() {
       setError(requestError.message || "Failed to load library");
     }
   }, [libraryQuery.data, libraryQuery.error, refreshAuth]);
+
+  useEffect(() => {
+    function handleConnectivityRecovered(event) {
+      const generation = Number(event.detail?.generation || 0);
+      if (
+        generation <= libraryRecoveryGenerationRef.current
+        || !isTransientNetworkError(libraryQuery.error)
+      ) {
+        return;
+      }
+      libraryRecoveryGenerationRef.current = generation;
+      void libraryQuery.refetch();
+    }
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    return () => {
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    };
+  }, [libraryQuery.error, libraryQuery.refetch]);
 
   useEffect(() => {
     if (!libraryQuery.data) {
@@ -1752,6 +1790,12 @@ export function LibraryPage() {
 
       {notice ? <p className="page-note">{notice}</p> : null}
       {error ? <p className="form-error">{error}</p> : null}
+      {libraryReconnecting ? <p className="page-subnote">Reconnecting…</p> : null}
+      {libraryUnavailable ? (
+        <button className="ghost-button ghost-button--inline" onClick={() => libraryQuery.refetch()} type="button">
+          Retry
+        </button>
+      ) : null}
 
       {loading ? <LoadingView label="Loading library..." /> : null}
 

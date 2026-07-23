@@ -19,6 +19,8 @@ from ..db import get_connection, utcnow_iso
 from ..security import generate_session_token, hash_session_token, hash_token_hmac
 from .desktop_helper_manifest_service import (
     DesktopHelperManifestError,
+    DesktopHelperManifestOriginMismatch,
+    desktop_helper_release_manifest_exists,
     get_desktop_helper_manifest_record_by_id,
     list_desktop_helper_manifest_records,
 )
@@ -49,6 +51,9 @@ RELEASE_NAME_PATTERN = re.compile(
 )
 logger = logging.getLogger(__name__)
 DESKTOP_HELPER_VERIFICATION_ACCESS_HASH_PURPOSE = "desktop.helper.verification.access"
+DESKTOP_HELPER_ORIGIN_MISMATCH_NOTE = (
+    "The available Helper package was built for a different Elvern server origin."
+)
 
 
 def _desktop_helper_verification_access_token_hash(settings: Settings, access_token: str) -> str:
@@ -93,8 +98,12 @@ def import_helper_release_artifacts(
     sources: Iterable[str | Path],
     *,
     channel: str | None = None,
+    runtime_requirement: str,
 ) -> list[dict[str, object]]:
     normalized_channel = _normalize_channel(channel or settings.helper_default_channel)
+    normalized_runtime_requirement = runtime_requirement.strip()
+    if not re.fullmatch(r"[1-9][0-9]*\.x", normalized_runtime_requirement):
+        raise ValueError("Legacy helper runtime requirement must use the form <major>.x")
     imported: list[dict[str, object]] = []
     for source in sources:
         source_path = Path(source).expanduser().resolve()
@@ -105,6 +114,7 @@ def import_helper_release_artifacts(
                 settings,
                 source_path,
                 channel=normalized_channel,
+                runtime_requirement=normalized_runtime_requirement,
             )
         )
     return imported
@@ -166,13 +176,34 @@ def build_desktop_helper_release_payloads(
     channel: str | None = None,
     helper_arch: str | None = None,
 ) -> list[dict[str, object]]:
+    payloads, _origin_mismatch = _build_desktop_helper_release_payloads_with_diagnostics(
+        settings,
+        platform=platform,
+        channel=channel,
+        helper_arch=helper_arch,
+    )
+    return payloads
+
+
+def _build_desktop_helper_release_payloads_with_diagnostics(
+    settings: Settings,
+    *,
+    platform: str,
+    channel: str | None = None,
+    helper_arch: str | None = None,
+) -> tuple[list[dict[str, object]], bool]:
     normalized_platform = normalize_desktop_helper_platform(platform)
     recommended_runtime_id = determine_recommended_runtime_id(normalized_platform, helper_arch=helper_arch)
-    manifest_releases = _list_helper_releases_from_manifest(
-        settings,
-        platform=normalized_platform,
-        channel=channel,
-    )
+    origin_mismatch = False
+    try:
+        manifest_releases = _list_helper_releases_from_manifest(
+            settings,
+            platform=normalized_platform,
+            channel=channel,
+        )
+    except DesktopHelperManifestOriginMismatch:
+        manifest_releases = []
+        origin_mismatch = True
     release_source = manifest_releases
     if release_source is None:
         release_source = list_helper_releases(settings, platform=normalized_platform, channel=channel)
@@ -188,7 +219,7 @@ def build_desktop_helper_release_payloads(
             package_releases,
             key=lambda row: (_version_key(str(row["version"])), str(row["published_at"])),
         )
-        return [_build_release_payload(latest_package, recommended=True)]
+        return [_build_release_payload(latest_package, recommended=True)], origin_mismatch
 
     latest_by_runtime = _latest_release_by_runtime(release_source)
     payloads: list[dict[str, object]] = []
@@ -197,7 +228,7 @@ def build_desktop_helper_release_payloads(
         if row is None:
             continue
         payloads.append(_build_release_payload(row, recommended=runtime_id == recommended_runtime_id))
-    return payloads
+    return payloads, origin_mismatch
 
 
 def _build_release_payload(row: dict[str, object], *, recommended: bool) -> dict[str, object]:
@@ -225,6 +256,17 @@ def _build_release_payload(row: dict[str, object], *, recommended: bool) -> dict
             if row.get("installer_manifest_sha256")
             else None
         ),
+        "installer_tree_manifest_path": (
+            str(row["installer_tree_manifest_path"])
+            if row.get("installer_tree_manifest_path")
+            else None
+        ),
+        "installer_tree_manifest_sha256": (
+            str(row["installer_tree_manifest_sha256"])
+            if row.get("installer_tree_manifest_sha256")
+            else None
+        ),
+        "package_binding": str(row.get("package_binding") or "legacy_unverified"),
         "published_at": str(row["published_at"]),
         "dotnet_runtime_required": (
             str(row["dotnet_runtime_required"])
@@ -268,36 +310,15 @@ def get_desktop_helper_status(
             browser_user_agent=browser_user_agent,
             ip_address=source_ip,
         )
-    latest_releases = build_desktop_helper_release_payloads(
-        settings,
-        platform=normalized_platform,
-        helper_arch=str(device_row["helper_arch"]) if device_row and device_row.get("helper_arch") else None,
-    )
-    runtime_included = bool(latest_releases) and all(
-        release.get("external_runtime_required") is False for release in latest_releases
-    )
-    external_runtime_required = next(
-        (
-            str(release["dotnet_runtime_required"])
-            for release in latest_releases
-            if release.get("dotnet_runtime_required")
-        ),
-        None,
-    )
 
     notes: list[str] = []
-    vlc_detection = _resolve_vlc_detection(
-        settings,
-        normalized_platform,
-        device_row,
-        linux_same_host=bool(same_host),
-    )
-    recommended_runtime_id = determine_recommended_runtime_id(
-        normalized_platform,
-        helper_arch=str(device_row["helper_arch"]) if device_row and device_row["helper_arch"] else None,
-    )
-
     if normalized_platform == "linux" and same_host:
+        vlc_detection = _resolve_vlc_detection(
+            settings,
+            normalized_platform,
+            device_row,
+            linux_same_host=True,
+        )
         notes.append("Linux same-host playback does not require the desktop helper. Open in VLC launches installed VLC directly on the Elvern host.")
         notes.append("Keep using the same DGX Elvern URL for library browsing; browser playback remains a fallback only.")
         return {
@@ -321,8 +342,39 @@ def get_desktop_helper_status(
             "notes": notes,
         }
 
+    latest_releases, origin_mismatch = _build_desktop_helper_release_payloads_with_diagnostics(
+        settings,
+        platform=normalized_platform,
+        helper_arch=str(device_row["helper_arch"]) if device_row and device_row.get("helper_arch") else None,
+    )
+    runtime_included = bool(latest_releases) and all(
+        release.get("external_runtime_required") is False for release in latest_releases
+    )
+    external_runtime_required = next(
+        (
+            str(release["dotnet_runtime_required"])
+            for release in latest_releases
+            if release.get("dotnet_runtime_required")
+        ),
+        None,
+    )
+    vlc_detection = _resolve_vlc_detection(
+        settings,
+        normalized_platform,
+        device_row,
+        linux_same_host=False,
+    )
+    recommended_runtime_id = determine_recommended_runtime_id(
+        normalized_platform,
+        helper_arch=str(device_row["helper_arch"]) if device_row and device_row["helper_arch"] else None,
+    )
+
     if not latest_releases:
-        notes.append("No official helper package is imported for this platform yet.")
+        notes.append(
+            DESKTOP_HELPER_ORIGIN_MISMATCH_NOTE
+            if origin_mismatch
+            else "No official helper package is imported for this platform yet."
+        )
         return {
             "device_id": normalized_device_id,
             "platform": normalized_platform,
@@ -423,13 +475,16 @@ def _list_helper_releases_from_manifest(
         manifest_releases = list_desktop_helper_manifest_records(
             platform=platform,
             channel=normalized_channel,
+            expected_bound_origin_sha256=_desktop_backend_origin_sha256(settings),
         )
+    except DesktopHelperManifestOriginMismatch:
+        raise
     except DesktopHelperManifestError as exc:
         logger.warning(
-            "Desktop helper manifest unavailable for release listing; falling back to DB catalog: %s",
-            exc,
+            "Desktop helper manifest validation failed for release listing (%s)",
+            type(exc).__name__,
         )
-        return None
+        return [] if desktop_helper_release_manifest_exists() else None
     if not manifest_releases:
         return None
     _ensure_no_manifest_db_release_collisions(settings, manifest_releases)
@@ -441,12 +496,25 @@ def _get_helper_release_from_manifest(
     release_id: int,
 ) -> dict[str, object] | None:
     try:
-        manifest_release = get_desktop_helper_manifest_record_by_id(release_id)
+        manifest_release = get_desktop_helper_manifest_record_by_id(
+            release_id,
+            expected_bound_origin_sha256=_desktop_backend_origin_sha256(settings),
+        )
+    except DesktopHelperManifestOriginMismatch as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=DESKTOP_HELPER_ORIGIN_MISMATCH_NOTE,
+        ) from exc
     except DesktopHelperManifestError as exc:
         logger.warning(
-            "Desktop helper manifest unavailable for release download; falling back to DB catalog: %s",
-            exc,
+            "Desktop helper manifest validation failed for release download (%s)",
+            type(exc).__name__,
         )
+        if desktop_helper_release_manifest_exists():
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="Desktop helper release is unavailable because its package verification failed",
+            ) from exc
         return None
     if manifest_release is None:
         return None
@@ -837,6 +905,7 @@ def _import_helper_release_artifact(
     source_path: Path,
     *,
     channel: str,
+    runtime_requirement: str,
 ) -> dict[str, object]:
     metadata = _parse_release_artifact_name(source_path.name)
     version = metadata["version"]
@@ -906,7 +975,7 @@ def _import_helper_release_artifact(
                 relative_path,
                 sha256,
                 size_bytes,
-                "8.x",
+                runtime_requirement,
                 published_at,
                 created_at,
             ),
@@ -1239,6 +1308,37 @@ def _desktop_backend_origin(settings: Settings) -> str:
     if host in {"", "0.0.0.0", "::", "[::]"}:  # nosec B104 - intentional bind for Tailscale/LAN access
         host = "127.0.0.1"
     return f"http://{host}:{settings.port}"
+
+
+def canonicalize_desktop_helper_origin(value: str) -> str:
+    candidate = (value or "").strip()
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Desktop helper origin is invalid") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Desktop helper origin must be an absolute HTTP(S) origin")
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 80 if scheme == "http" else 443
+    authority = host if port in {None, default_port} else f"{host}:{port}"
+    return f"{scheme}://{authority}"
+
+
+def _desktop_backend_origin_sha256(settings: Settings) -> str:
+    canonical_origin = canonicalize_desktop_helper_origin(_desktop_backend_origin(settings))
+    return hashlib.sha256(canonical_origin.encode("utf-8")).hexdigest()
 
 
 def _desktop_helper_supported(settings: Settings) -> bool:

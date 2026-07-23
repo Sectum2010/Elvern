@@ -8,6 +8,7 @@ import {
   patchLibraryProgressStateCaches,
 } from "./libraryQueries.js";
 import { queryClient } from "./queryClient.js";
+import { PAGE_RESUME_EVENT } from "./pageResume.js";
 
 
 export const LIBRARY_REVISION_VISIBLE_INTERVAL_MS = 60_000;
@@ -256,7 +257,10 @@ export async function applyLibraryRevisionChange({
       summaryRefreshReasons.push("progress_capability_fallback");
     } else {
       try {
-        const progressPayload = await apiRequest("/api/library/v2/progress-state", { cache: "no-store" });
+        const progressPayload = await apiRequest("/api/library/v2/progress-state", {
+          cache: "no-store",
+          abortOnPageHide: true,
+        });
         assertOperationCurrent(isOperationCurrent);
         progressState = validateLibraryProgressStatePayload(progressPayload);
         if (progressState.progress_revision !== current.progress) {
@@ -377,7 +381,11 @@ export function LibraryRevisionSynchronizer() {
           try {
             current = await queryClient.fetchQuery({
               queryKey,
-              queryFn: ({ signal }) => apiRequest("/api/library/v2/revision", { signal, cache: "no-store" })
+              queryFn: ({ signal }) => apiRequest("/api/library/v2/revision", {
+                signal,
+                cache: "no-store",
+                abortOnPageHide: true,
+              })
                 .then(validateLibraryRevisionPayload),
               staleTime: 0,
               gcTime: LIBRARY_QUERY_GC_TIME_MS,
@@ -436,8 +444,7 @@ export function LibraryRevisionSynchronizer() {
       else void check();
     }
 
-    window.addEventListener("focus", checkWhenVisible);
-    window.addEventListener("pageshow", checkWhenVisible);
+    window.addEventListener(PAGE_RESUME_EVENT, checkWhenVisible);
     window.addEventListener("online", checkWhenVisible);
     window.addEventListener(LIBRARY_REVISION_CHECK_EVENT, checkWhenVisible);
     document.addEventListener("visibilitychange", handleVisibility);
@@ -447,8 +454,7 @@ export function LibraryRevisionSynchronizer() {
       active = false;
       clearTimer();
       void queryClient.cancelQueries({ queryKey });
-      window.removeEventListener("focus", checkWhenVisible);
-      window.removeEventListener("pageshow", checkWhenVisible);
+      window.removeEventListener(PAGE_RESUME_EVENT, checkWhenVisible);
       window.removeEventListener("online", checkWhenVisible);
       window.removeEventListener(LIBRARY_REVISION_CHECK_EVENT, checkWhenVisible);
       document.removeEventListener("visibilitychange", handleVisibility);

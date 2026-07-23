@@ -8,12 +8,17 @@ PROPS_FILE="${PROJECT_DIR}/Directory.Build.props"
 PACKAGING_DIR="${PROJECT_DIR}/packaging"
 METADATA_FILE="${PACKAGING_DIR}/helper-release.env"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
-PACKAGES_DIR="${ARTIFACTS_DIR}/packages"
+ACTIVE_DIR="${ARTIFACTS_DIR}/packages"
+STAGING_ROOT="${ARTIFACTS_DIR}/staging"
 COMMON_README="${PACKAGING_DIR}/common/README.txt"
 SELECTORS="${PACKAGING_DIR}/common/platform-selectors.sh"
-PUBLISH_MODE="self-contained"
 NUGET_SOURCE="${ELVERN_DOTNET_NUGET_SOURCE:-https://api.nuget.org/v3/index.json}"
 GENERATED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+PUBLISH_MODE="self-contained"
+ACTIVATE=0
+ALLOW_PARTIAL_ACTIVATE=0
+TARGETS_EXPLICIT=0
+ACTIVATION_LOCK_DIR=""
 declare -a TARGETS=("windows" "macos" "linux")
 declare -a WINDOWS_RIDS=("win-x64")
 declare -a MACOS_RIDS=("osx-arm64" "osx-x64")
@@ -21,42 +26,58 @@ declare -a LINUX_RIDS=("linux-x64" "linux-arm64" "linux-musl-x64" "linux-musl-ar
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/publish-bundles.sh [--platform windows|macos|linux]
+Usage: ./scripts/publish-bundles.sh [options]
 
-Standard publishing is always self-contained and non-trimmed. With no options,
-the script builds Windows x64, macOS dual-architecture, and Linux universal packages.
-Repeat --platform to build a selected set. A failed RID aborts the entire publish.
+Options:
+  --platform windows|macos|linux  Build one selected platform (repeatable).
+  --windows | --macos | --linux  Shorthand platform selectors.
+  --activate                     Verify all standard packages, then atomically
+                                 publish their immutable artifacts and manifest.
+  --allow-partial-activate       Dangerous recovery option. Allows --activate
+                                 with an incomplete platform set.
+
+Without --activate, every build remains under artifacts/staging and cannot
+affect the active release manifest. Standard builds are self-contained,
+single-file, non-trimmed .NET 10 packages.
 EOF
 }
 
-if [[ $# -gt 0 ]]; then
-  TARGETS=()
-fi
+select_target() {
+  if [[ ${TARGETS_EXPLICIT} -eq 0 ]]; then
+    TARGETS=()
+    TARGETS_EXPLICIT=1
+  fi
+  TARGETS+=("$1")
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --platform)
       [[ $# -ge 2 ]] || { echo "Missing value for --platform." >&2; exit 1; }
       case "$2" in
-        windows|macos|linux) TARGETS+=("$2") ;;
+        windows|macos|linux) select_target "$2" ;;
         *) echo "Unsupported platform target: $2" >&2; exit 1 ;;
       esac
       shift 2
       ;;
-    --windows) TARGETS+=("windows"); shift ;;
-    --macos) TARGETS+=("macos"); shift ;;
-    --linux) TARGETS+=("linux"); shift ;;
+    --windows) select_target "windows"; shift ;;
+    --macos) select_target "macos"; shift ;;
+    --linux) select_target "linux"; shift ;;
+    --activate) ACTIVATE=1; shift ;;
+    --allow-partial-activate) ALLOW_PARTIAL_ACTIVATE=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 [[ ${#TARGETS[@]} -gt 0 ]] || { echo "At least one platform target is required." >&2; exit 1; }
+mapfile -t TARGETS < <(printf '%s\n' "${TARGETS[@]}" | awk '!seen[$0]++')
 
 for required_file in "${PROJECT_FILE}" "${PROPS_FILE}" "${METADATA_FILE}" "${COMMON_README}" "${SELECTORS}"; do
   [[ -f "${required_file}" ]] || { echo "Missing required file: ${required_file}" >&2; exit 1; }
 done
-command -v python3 >/dev/null 2>&1 || { echo "python3 is required for deterministic manifest generation." >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "python3 is required on the release build host." >&2; exit 1; }
 command -v zip >/dev/null 2>&1 || { echo "zip is required to create helper packages." >&2; exit 1; }
-command -v dotnet >/dev/null 2>&1 || { echo "dotnet SDK 10 is required to publish helper packages." >&2; exit 1; }
+command -v dotnet >/dev/null 2>&1 || { echo ".NET SDK 10 is required to publish helper packages." >&2; exit 1; }
 dotnet --list-sdks | awk '{print $1}' | grep -Eq '^10\.' || {
   echo ".NET SDK 10 is required to publish self-contained helper packages." >&2
   exit 1
@@ -67,11 +88,41 @@ source "${METADATA_FILE}"
 for required_key in HELPER_CHANNEL PACKAGE_NAME_PREFIX MACOS_MINIMUM_VERSION; do
   [[ -n "${!required_key:-}" ]] || { echo "Missing ${required_key} in ${METADATA_FILE}." >&2; exit 1; }
 done
-if [[ -z "${ELVERN_BACKEND_ORIGIN:-}" || ! "${ELVERN_BACKEND_ORIGIN}" =~ ^https?://[^/]+/?$ ]]; then
-  echo "Set ELVERN_BACKEND_ORIGIN to the exact absolute http(s) backend origin before publishing." >&2
-  exit 1
-fi
-ELVERN_BACKEND_ORIGIN="${ELVERN_BACKEND_ORIGIN%/}"
+
+mapfile -t ORIGIN_PROPERTIES < <(python3 - "${ELVERN_BACKEND_ORIGIN:-}" <<'PY'
+import hashlib
+import sys
+from urllib.parse import urlsplit
+
+value = sys.argv[1].strip()
+try:
+    parsed = urlsplit(value)
+    port = parsed.port
+except ValueError as exc:
+    raise SystemExit("ELVERN_BACKEND_ORIGIN is invalid") from exc
+if (
+    parsed.scheme.lower() not in {"http", "https"}
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.path not in {"", "/"}
+    or parsed.query
+    or parsed.fragment
+):
+    raise SystemExit("Set ELVERN_BACKEND_ORIGIN to an exact absolute HTTP(S) origin")
+scheme = parsed.scheme.lower()
+host = parsed.hostname.lower()
+if ":" in host:
+    host = f"[{host}]"
+default_port = 80 if scheme == "http" else 443
+origin = f"{scheme}://{host}" + ("" if port in {None, default_port} else f":{port}")
+print(origin)
+print(hashlib.sha256(origin.encode()).hexdigest())
+PY
+)
+[[ ${#ORIGIN_PROPERTIES[@]} -eq 2 ]] || { echo "Could not normalize ELVERN_BACKEND_ORIGIN." >&2; exit 1; }
+ELVERN_BACKEND_ORIGIN="${ORIGIN_PROPERTIES[0]}"
+BOUND_ORIGIN_SHA256="${ORIGIN_PROPERTIES[1]}"
 
 mapfile -t BUILD_PROPERTIES < <(python3 - "${PROPS_FILE}" <<'PY'
 import sys
@@ -79,28 +130,37 @@ import xml.etree.ElementTree as ET
 
 root = ET.parse(sys.argv[1]).getroot()
 values = {child.tag: (child.text or "").strip() for group in root.findall("PropertyGroup") for child in group}
-version = values.get("ElvernHelperVersion", "")
-framework = values.get("TargetFramework", "")
-if not version or not framework:
-    raise SystemExit("Directory.Build.props must define ElvernHelperVersion and TargetFramework")
-print(version)
-print(framework)
+print(values.get("ElvernHelperVersion", ""))
+print(values.get("TargetFramework", ""))
 PY
 )
-[[ ${#BUILD_PROPERTIES[@]} -eq 2 ]] || { echo "Could not read helper build properties." >&2; exit 1; }
-HELPER_VERSION="${BUILD_PROPERTIES[0]}"
-TARGET_FRAMEWORK="${BUILD_PROPERTIES[1]}"
-[[ "${TARGET_FRAMEWORK}" == "net10.0" ]] || { echo "Standard helper publishing requires net10.0, found ${TARGET_FRAMEWORK}." >&2; exit 1; }
+HELPER_VERSION="${BUILD_PROPERTIES[0]:-}"
+TARGET_FRAMEWORK="${BUILD_PROPERTIES[1]:-}"
+[[ -n "${HELPER_VERSION}" && "${TARGET_FRAMEWORK}" == "net10.0" ]] || {
+  echo "Directory.Build.props must define a helper version and TargetFramework net10.0." >&2
+  exit 1
+}
 RUNTIME_FAMILY="10.0"
-
-mkdir -p "${ARTIFACTS_DIR}" "${PACKAGES_DIR}"
-WORK_DIR="$(mktemp -d "${ARTIFACTS_DIR}/.package-build.XXXXXX")"
-trap 'rm -rf "${WORK_DIR}"' EXIT
+BUILD_ID="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(12))
+PY
+)"
+STAGING_DIR="${STAGING_ROOT}/${BUILD_ID}"
+WORK_DIR="${STAGING_DIR}/.work"
+OUTPUT_DIR="${STAGING_DIR}/output"
 PUBLISH_ROOT="${WORK_DIR}/publish"
 PACKAGE_ROOT="${WORK_DIR}/packages"
 RECORDS_FILE="${WORK_DIR}/package-records.jsonl"
-mkdir -p "${PUBLISH_ROOT}" "${PACKAGE_ROOT}"
+mkdir -p "${PUBLISH_ROOT}" "${PACKAGE_ROOT}" "${OUTPUT_DIR}" "${ACTIVE_DIR}"
 : > "${RECORDS_FILE}"
+cleanup() {
+  rm -rf "${WORK_DIR}"
+  if [[ -n "${ACTIVATION_LOCK_DIR}" ]]; then
+    rmdir "${ACTIVATION_LOCK_DIR}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 compute_sha256() {
   sha256sum "$1" | awk '{print $1}'
@@ -141,46 +201,96 @@ copy_payloads() {
   done
 }
 
-write_inner_manifest() {
-  local manifest_path="$1"
+write_inner_manifests() {
+  local private_dir="$1"
   local package_target="$2"
-  local private_dir="$3"
-  shift 3
-  python3 - "${manifest_path}" "${HELPER_VERSION}" "${package_target}" "${private_dir}" "$@" <<'PY'
+  shift 2
+  python3 - "${private_dir}" "${HELPER_VERSION}" "${package_target}" "${BOUND_ORIGIN_SHA256}" "$@" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-manifest_path = pathlib.Path(sys.argv[1])
-version = sys.argv[2]
-package_target = sys.argv[3]
-private_dir = pathlib.Path(sys.argv[4])
+private_dir = pathlib.Path(sys.argv[1])
+version, package_target, origin_hash = sys.argv[2:5]
 rids = sys.argv[5:]
 payloads = []
+tsv_lines = [
+    "meta\tschema_version\tdesktop-helper-installer-manifest-v2",
+    f"meta\thelper_version\t{version}",
+    "meta\ttarget_framework\tnet10.0",
+    "meta\truntime_family\t10.0",
+    "meta\tdeployment_mode\tself_contained",
+    f"meta\tpackage_target\t{package_target}",
+    f"meta\tbound_origin_sha256\t{origin_hash}",
+]
 for rid in rids:
     executable = "Elvern.VlcOpener.exe" if rid.startswith("win-") else "Elvern.VlcOpener"
     relative = pathlib.PurePosixPath("payloads") / rid / executable
     path = private_dir / pathlib.Path(relative)
     data = path.read_bytes()
-    payloads.append({
+    record = {
         "runtime_id": rid,
         "relative_path": relative.as_posix(),
         "sha256": hashlib.sha256(data).hexdigest(),
         "size_bytes": len(data),
         "executable_name": executable,
-    })
+    }
+    payloads.append(record)
+    tsv_lines.append(
+        "\t".join((
+            "payload",
+            record["runtime_id"],
+            record["relative_path"],
+            record["sha256"],
+            str(record["size_bytes"]),
+            record["executable_name"],
+        ))
+    )
 manifest = {
-    "schema_version": "desktop-helper-installer-manifest-v1",
+    "schema_version": "desktop-helper-installer-manifest-v2",
     "helper_version": version,
     "target_framework": "net10.0",
     "runtime_family": "10.0",
     "deployment_mode": "self_contained",
     "external_runtime_required": False,
     "package_target": package_target,
+    "bound_origin_sha256": origin_hash,
     "payloads": payloads,
 }
-manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+(private_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+(private_dir / "installer-manifest.tsv").write_text("\n".join(tsv_lines) + "\n", encoding="utf-8")
+PY
+}
+
+write_tree_manifest() {
+  local root="$1"
+  python3 - "${root}" <<'PY'
+import hashlib
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+tree_path = root / ".elvern" / "tree-manifest.tsv"
+lines = ["path\tsize_bytes\tsha256\tfile_class"]
+for path in sorted(root.rglob("*")):
+    if path == tree_path:
+        continue
+    if path.is_symlink():
+        raise SystemExit(f"Package tree contains an unsupported entry: {path.relative_to(root)}")
+    if path.is_dir():
+        continue
+    if not path.is_file():
+        raise SystemExit(f"Package tree contains an unsupported entry: {path.relative_to(root)}")
+    relative = path.relative_to(root).as_posix()
+    if relative.startswith("/") or ".." in pathlib.PurePosixPath(relative).parts or "\t" in relative:
+        raise SystemExit("Package tree contains an unsafe path")
+    data = path.read_bytes()
+    mode = path.stat().st_mode
+    file_class = "executable" if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) else "data"
+    lines.append(f"{relative}\t{len(data)}\t{hashlib.sha256(data).hexdigest()}\t{file_class}")
+tree_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 
@@ -192,8 +302,20 @@ write_package_readme() {
     echo
     echo "Package version: ${HELPER_VERSION}"
     echo "${detail}"
-    echo "The helper is bound to: ${ELVERN_BACKEND_ORIGIN}"
+    echo "This package includes its .NET runtime and is cryptographically bound to the Elvern server that built it."
   } >> "${path}"
+}
+
+zip_package() {
+  local package_root_name="$1"
+  local target_slug="$2"
+  local provisional="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-${target_slug}.zip"
+  (cd "${PACKAGE_ROOT}" && zip -qry "${provisional}" "${package_root_name}")
+  local digest
+  digest="$(compute_sha256 "${PACKAGE_ROOT}/${provisional}")"
+  local immutable="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-${target_slug}-${digest:0:12}.zip"
+  mv "${PACKAGE_ROOT}/${provisional}" "${OUTPUT_DIR}/${immutable}"
+  printf '%s\n' "${immutable}"
 }
 
 register_package() {
@@ -204,9 +326,10 @@ register_package() {
   local installer_entrypoint="$5"
   local minimum_os_version="$6"
   shift 6
-  local artifact_path="${PACKAGE_ROOT}/${filename}"
+  local artifact_path="${OUTPUT_DIR}/${filename}"
   local inner_manifest="${PACKAGE_ROOT}/${package_root_name}/.elvern/manifest.json"
-  python3 - "${RECORDS_FILE}" "${package_target}" "${platform}" "${filename}" "${package_root_name}" "${installer_entrypoint}" "${minimum_os_version}" "${artifact_path}" "${inner_manifest}" "${GENERATED_AT_UTC}" "$@" <<'PY'
+  local tree_manifest="${PACKAGE_ROOT}/${package_root_name}/.elvern/tree-manifest.tsv"
+  python3 - "${RECORDS_FILE}" "${package_target}" "${platform}" "${filename}" "${package_root_name}" "${installer_entrypoint}" "${minimum_os_version}" "${artifact_path}" "${inner_manifest}" "${tree_manifest}" "${GENERATED_AT_UTC}" "${BOUND_ORIGIN_SHA256}" "$@" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -214,12 +337,9 @@ import sys
 
 records_path = pathlib.Path(sys.argv[1])
 package_target, platform, filename, package_root, installer, minimum_os = sys.argv[2:8]
-artifact = pathlib.Path(sys.argv[8])
-inner_manifest = pathlib.Path(sys.argv[9])
-generated_at = sys.argv[10]
-rids = sys.argv[11:]
-artifact_data = artifact.read_bytes()
-manifest_data = inner_manifest.read_bytes()
+artifact, inner_manifest, tree_manifest = map(pathlib.Path, sys.argv[8:11])
+generated_at, origin_hash = sys.argv[11:13]
+rids = sys.argv[13:]
 record = {
     "package_target": package_target,
     "platform": platform,
@@ -230,9 +350,12 @@ record = {
     "installer_entrypoint": installer,
     "supported_runtime_ids": rids,
     "external_runtime_required": False,
-    "size_bytes": len(artifact_data),
-    "sha256": hashlib.sha256(artifact_data).hexdigest(),
-    "installer_manifest_sha256": hashlib.sha256(manifest_data).hexdigest(),
+    "size_bytes": artifact.stat().st_size,
+    "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+    "installer_manifest_sha256": hashlib.sha256(inner_manifest.read_bytes()).hexdigest(),
+    "installer_tree_manifest_path": ".elvern/tree-manifest.tsv",
+    "installer_tree_manifest_sha256": hashlib.sha256(tree_manifest.read_bytes()).hexdigest(),
+    "bound_origin_sha256": origin_hash,
     "generated_at_utc": generated_at,
 }
 if minimum_os:
@@ -247,27 +370,22 @@ PY
   echo "  SHA-256: $(compute_sha256 "${artifact_path}")"
 }
 
-zip_package() {
-  local package_root_name="$1"
-  local filename="$2"
-  (cd "${PACKAGE_ROOT}" && zip -qry "${filename}" "${package_root_name}")
-}
-
 build_windows() {
   local rid
   for rid in "${WINDOWS_RIDS[@]}"; do publish_rid "${rid}"; done
   local root_name="Elvern VLC Opener Windows Installer"
   local root="${PACKAGE_ROOT}/${root_name}"
   local private="${root}/.elvern"
-  local filename="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-windows-x64.zip"
   mkdir -p "${private}/uninstall"
   cp "${PACKAGING_DIR}/windows/Install-ElvernVlcOpener.cmd" "${root}/"
   cp "${PACKAGING_DIR}/windows/Install-ElvernVlcOpener.ps1" "${private}/"
   cp "${PACKAGING_DIR}/windows/Uninstall-ElvernVlcOpener.ps1" "${private}/uninstall/"
   write_package_readme "${root}/README.txt" "Includes the self-contained Windows x64 helper."
   copy_payloads "${private}" "${WINDOWS_RIDS[@]}"
-  write_inner_manifest "${private}/manifest.json" "windows-x64" "${private}" "${WINDOWS_RIDS[@]}"
-  zip_package "${root_name}" "${filename}"
+  write_inner_manifests "${private}" "windows-x64" "${WINDOWS_RIDS[@]}"
+  write_tree_manifest "${root}"
+  local filename
+  filename="$(zip_package "${root_name}" "windows-x64")"
   register_package "windows-x64" "windows" "${filename}" "${root_name}" "Install-ElvernVlcOpener.cmd" "" "${WINDOWS_RIDS[@]}"
 }
 
@@ -277,7 +395,6 @@ build_macos() {
   local root_name="Elvern VLC Opener Installer"
   local root="${PACKAGE_ROOT}/${root_name}"
   local private="${root}/.elvern"
-  local filename="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-macos-dual-arch.zip"
   mkdir -p "${private}/bridge" "${private}/uninstall" "${private}/lib"
   cp "${PACKAGING_DIR}/macos/Install-ElvernVlcOpener.command" "${root}/"
   chmod 755 "${root}/Install-ElvernVlcOpener.command"
@@ -287,8 +404,10 @@ build_macos() {
   cp "${SELECTORS}" "${private}/lib/"
   write_package_readme "${root}/README.txt" "Includes Apple Silicon and Intel payloads. The installer selects locally and requires macOS ${MACOS_MINIMUM_VERSION} or newer."
   copy_payloads "${private}" "${MACOS_RIDS[@]}"
-  write_inner_manifest "${private}/manifest.json" "macos-dual-arch" "${private}" "${MACOS_RIDS[@]}"
-  zip_package "${root_name}" "${filename}"
+  write_inner_manifests "${private}" "macos-dual-arch" "${MACOS_RIDS[@]}"
+  write_tree_manifest "${root}"
+  local filename
+  filename="$(zip_package "${root_name}" "macos-dual-arch")"
   register_package "macos-dual-arch" "mac" "${filename}" "${root_name}" "Install-ElvernVlcOpener.command" "${MACOS_MINIMUM_VERSION}" "${MACOS_RIDS[@]}"
 }
 
@@ -298,16 +417,17 @@ build_linux() {
   local root_name="Elvern VLC Opener Linux Installer"
   local root="${PACKAGE_ROOT}/${root_name}"
   local private="${root}/.elvern"
-  local filename="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-linux-universal.zip"
   mkdir -p "${private}/uninstall" "${private}/lib"
   cp "${PACKAGING_DIR}/linux/Install-ElvernVlcOpener.sh" "${root}/"
   chmod 755 "${root}/Install-ElvernVlcOpener.sh"
   cp "${PACKAGING_DIR}/linux/Uninstall-ElvernVlcOpener.sh" "${private}/uninstall/"
   cp "${SELECTORS}" "${private}/lib/"
-  write_package_readme "${root}/README.txt" "Includes x64 and ARM64 payloads for glibc and musl. The installer selects locally. Flatpak VLC is not supported in this release."
+  write_package_readme "${root}/README.txt" "Includes x64 and ARM64 payloads for glibc and musl. The installer selects locally. Flatpak VLC is not supported."
   copy_payloads "${private}" "${LINUX_RIDS[@]}"
-  write_inner_manifest "${private}/manifest.json" "linux-universal" "${private}" "${LINUX_RIDS[@]}"
-  zip_package "${root_name}" "${filename}"
+  write_inner_manifests "${private}" "linux-universal" "${LINUX_RIDS[@]}"
+  write_tree_manifest "${root}"
+  local filename
+  filename="$(zip_package "${root_name}" "linux-universal")"
   register_package "linux-universal" "linux" "${filename}" "${root_name}" "Install-ElvernVlcOpener.sh" "" "${LINUX_RIDS[@]}"
 }
 
@@ -319,7 +439,7 @@ for target in "${TARGETS[@]}"; do
   esac
 done
 
-python3 - "${RECORDS_FILE}" "${PACKAGE_ROOT}/release-manifest.json" "${HELPER_VERSION}" "${HELPER_CHANNEL}" "${TARGET_FRAMEWORK}" "${RUNTIME_FAMILY}" "${GENERATED_AT_UTC}" <<'PY'
+python3 - "${RECORDS_FILE}" "${OUTPUT_DIR}/release-manifest.json" "${HELPER_VERSION}" "${HELPER_CHANNEL}" "${TARGET_FRAMEWORK}" "${RUNTIME_FAMILY}" "${GENERATED_AT_UTC}" "${BOUND_ORIGIN_SHA256}" <<'PY'
 import json
 import pathlib
 import sys
@@ -334,22 +454,176 @@ manifest = {
     "runtime_family": sys.argv[6],
     "deployment_mode": "self_contained",
     "generated_at_utc": sys.argv[7],
+    "bound_origin_sha256": sys.argv[8],
     "packages": records,
 }
 output_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
 
-# Only publish finished ZIPs, then replace the manifest after every requested RID succeeds.
-find "${PACKAGE_ROOT}" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
-for path in "${PACKAGE_ROOT}"/*.zip; do
-  name="$(basename "${path}")"
-  rm -f "${PACKAGES_DIR:?}/${name}"
-  mv "${path}" "${PACKAGES_DIR}/${name}"
-done
-mv "${PACKAGE_ROOT}/release-manifest.json" "${PACKAGES_DIR}/release-manifest.json"
+TARGETS_CSV="$(IFS=,; printf '%s' "${TARGETS[*]}")"
+python3 - "${OUTPUT_DIR}" "${BOUND_ORIGIN_SHA256}" "${TARGETS_CSV}" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+import zipfile
+
+output = pathlib.Path(sys.argv[1])
+origin_hash = sys.argv[2]
+requested_platforms = set(sys.argv[3].split(","))
+manifest = json.loads((output / "release-manifest.json").read_text())
+packages = manifest["packages"]
+target_for_platform = {
+    "windows": "windows-x64",
+    "macos": "macos-dual-arch",
+    "linux": "linux-universal",
+}
+required = {target_for_platform[platform] for platform in requested_platforms}
+targets = {record["package_target"] for record in packages}
+if targets != required:
+    raise SystemExit(f"Release set does not match requested targets: found {sorted(targets)}")
+for record in packages:
+    archive = output / record["relative_path"]
+    data = archive.read_bytes()
+    if len(data) != record["size_bytes"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
+        raise SystemExit("Outer package verification failed")
+    if record["bound_origin_sha256"] != origin_hash:
+        raise SystemExit("Package origin binding mismatch")
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+        for name in names:
+            path = pathlib.PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts:
+                raise SystemExit("ZIP contains an unsafe path")
+        root = record["package_root"].rstrip("/") + "/"
+        files = {name: bundle.read(name) for name in names if not name.endswith("/")}
+        visible = {
+            name[len(root):]
+            for name in files
+            if name.startswith(root) and "/" not in name[len(root):]
+        }
+        expected_visible = {"README.txt", record["installer_entrypoint"]}
+        if visible != expected_visible:
+            raise SystemExit("Package root contains unexpected visible files")
+        inner_name = root + ".elvern/manifest.json"
+        tree_name = root + record["installer_tree_manifest_path"]
+        if hashlib.sha256(files[inner_name]).hexdigest() != record["installer_manifest_sha256"]:
+            raise SystemExit("Inner installer manifest verification failed")
+        if hashlib.sha256(files[tree_name]).hexdigest() != record["installer_tree_manifest_sha256"]:
+            raise SystemExit("Installer tree manifest verification failed")
+        tree_lines = files[tree_name].decode().splitlines()
+        expected_files = set()
+        for line in tree_lines[1:]:
+            relative, size, digest, _file_class = line.split("\t")
+            member = root + relative
+            expected_files.add(member)
+            payload = files.get(member)
+            if payload is None or len(payload) != int(size) or hashlib.sha256(payload).hexdigest() != digest:
+                raise SystemExit("Installer tree file verification failed")
+        actual_files = {
+            name
+            for name in files
+            if name != tree_name and pathlib.PurePosixPath(name).name != ".DS_Store"
+        }
+        if actual_files != expected_files:
+            raise SystemExit("Installer tree contains missing or extra files")
+PY
+
+python3 - "${OUTPUT_DIR}/release-manifest.json" "${OUTPUT_DIR}/build-report.json" "${OUTPUT_DIR}/build-report.md" "${BUILD_ID}" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest_path, json_path, markdown_path = map(pathlib.Path, sys.argv[1:4])
+manifest = json.loads(manifest_path.read_text())
+report = {
+    "build_id": sys.argv[4],
+    "status": "verified_staging",
+    "helper_version": manifest["helper_version"],
+    "target_framework": manifest["target_framework"],
+    "deployment_mode": manifest["deployment_mode"],
+    "bound_origin_sha256": manifest["bound_origin_sha256"],
+    "packages": manifest["packages"],
+}
+json_path.write_text(json.dumps(report, indent=2) + "\n")
+lines = [
+    "# Desktop Helper Staging Build",
+    "",
+    f"- Build ID: `{report['build_id']}`",
+    f"- Helper version: `{report['helper_version']}`",
+    f"- Target framework: `{report['target_framework']}`",
+    "- Deployment: self-contained",
+    f"- Origin identity: `{report['bound_origin_sha256']}`",
+    "",
+    "## Packages",
+]
+for package in report["packages"]:
+    lines.extend([
+        "",
+        f"- `{package['package_target']}`: `{package['filename']}`",
+        f"  - RIDs: {', '.join(package['supported_runtime_ids'])}",
+        f"  - Size: {package['size_bytes']} bytes",
+        f"  - SHA-256: `{package['sha256']}`",
+    ])
+markdown_path.write_text("\n".join(lines) + "\n")
+PY
+
+FINAL_BUILD_DIR="${OUTPUT_DIR}"
+
+activate_release() {
+  if [[ ${#TARGETS[@]} -ne 3 && ${ALLOW_PARTIAL_ACTIVATE} -ne 1 ]]; then
+    echo "Activation requires Windows, macOS, and Linux. Use --allow-partial-activate only for explicit emergency rollback work." >&2
+    exit 1
+  fi
+  if [[ ${ALLOW_PARTIAL_ACTIVATE} -eq 1 ]]; then
+    echo "WARNING: activating an incomplete desktop helper release set." >&2
+  fi
+  local lock_dir="${ARTIFACTS_DIR}/.activation.lock"
+  if ! mkdir "${lock_dir}" 2>/dev/null; then
+    echo "Another desktop helper activation is already running." >&2
+    exit 1
+  fi
+  ACTIVATION_LOCK_DIR="${lock_dir}"
+  local package
+  for package in "${FINAL_BUILD_DIR}"/*.zip; do
+    local name temp_path
+    name="$(basename "${package}")"
+    if [[ -e "${ACTIVE_DIR}/${name}" ]]; then
+      [[ -f "${ACTIVE_DIR}/${name}" ]] || {
+        echo "Active artifact path is not a regular file: ${name}" >&2
+        exit 1
+      }
+      [[ "$(compute_sha256 "${ACTIVE_DIR}/${name}")" == "$(compute_sha256 "${package}")" ]] || {
+        echo "Immutable active artifact collision: ${name}" >&2
+        exit 1
+      }
+      continue
+    fi
+    temp_path="${ACTIVE_DIR}/.${name}.new.$$"
+    cp "${package}" "${temp_path}"
+    sync -f "${temp_path}" 2>/dev/null || sync
+    mv "${temp_path}" "${ACTIVE_DIR}/${name}"
+  done
+  local manifest_temp="${ACTIVE_DIR}/.release-manifest.json.new.$$"
+  cp "${FINAL_BUILD_DIR}/release-manifest.json" "${manifest_temp}"
+  sync -f "${manifest_temp}" 2>/dev/null || sync
+  mv "${manifest_temp}" "${ACTIVE_DIR}/release-manifest.json"
+  sync -f "${ACTIVE_DIR}" 2>/dev/null || sync
+  rmdir "${lock_dir}"
+  ACTIVATION_LOCK_DIR=""
+  echo "Activated verified desktop helper release manifest."
+}
+
+if [[ ${ACTIVATE} -eq 1 ]]; then
+  activate_release
+else
+  echo "Build verified and retained in staging history; active releases were not changed."
+fi
 
 echo
-echo "Desktop helper packages published successfully."
+echo "Desktop helper package build completed."
+echo "Build ID: ${BUILD_ID}"
 echo "Helper version: ${HELPER_VERSION}"
 echo "Target framework: ${TARGET_FRAMEWORK}"
-echo "Release manifest: ${PACKAGES_DIR}/release-manifest.json"
+echo "Verified build: ${FINAL_BUILD_DIR}"
+echo "Active manifest: ${ACTIVE_DIR}/release-manifest.json"

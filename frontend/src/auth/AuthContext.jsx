@@ -8,6 +8,7 @@ import {
 } from "../lib/api";
 import { clearProtectedQueryCache } from "../lib/queryClient";
 import { prepareAuthViewportExit } from "../lib/authViewportNavigation.js";
+import { PAGE_RESUME_EVENT } from "../lib/pageResume.js";
 
 
 const AuthContext = createContext(null);
@@ -208,23 +209,15 @@ export function AuthProvider({ children }) {
       void heartbeatAuth({ notifyOnFailure: true });
     }, SESSION_HEARTBEAT_MS);
 
-    function handleVisibilityChange() {
-      if (document.visibilityState === "visible") {
-        void refreshAuth({ notifyOnFailure: true });
-      }
-    }
-
-    function handleWindowFocus() {
+    function handlePageResume() {
       void refreshAuth({ notifyOnFailure: true });
     }
 
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener(PAGE_RESUME_EVENT, handlePageResume);
 
     return () => {
       window.clearInterval(intervalId);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener(PAGE_RESUME_EVENT, handlePageResume);
     };
   }, [heartbeatAuth, refreshAuth, user]);
 

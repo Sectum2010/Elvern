@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app.schemas import DesktopHelperReleaseResponse, DesktopHelperStatusResponse
 from backend.app.services import desktop_helper_manifest_service as manifest_service
@@ -14,6 +19,9 @@ from backend.app.routes import desktop_helper as desktop_helper_route
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+BOUND_ORIGIN_SHA256 = _sha256(b"https://elvern.example")
 
 
 def _write_manifest(
@@ -36,6 +44,7 @@ def _write_manifest(
         "runtime_family": "10.0",
         "deployment_mode": "self_contained",
         "generated_at_utc": "2026-07-22T00:00:00Z",
+        "bound_origin_sha256": BOUND_ORIGIN_SHA256,
         "packages": [
             {
                 "package_target": "macos-dual-arch",
@@ -50,6 +59,9 @@ def _write_manifest(
                 "size_bytes": len(b"desktop-helper-package"),
                 "sha256": _sha256(b"desktop-helper-package"),
                 "installer_manifest_sha256": "a" * 64,
+                "installer_tree_manifest_path": ".elvern/tree-manifest.tsv",
+                "installer_tree_manifest_sha256": "b" * 64,
+                "bound_origin_sha256": BOUND_ORIGIN_SHA256,
                 "minimum_os_version": "14.0",
                 "generated_at_utc": "2026-07-22T00:00:00Z",
             }
@@ -59,6 +71,7 @@ def _write_manifest(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     monkeypatch.setattr(manifest_service, "HELPER_RELEASE_MANIFEST_PATH", manifest_path)
     monkeypatch.setattr(manifest_service, "HELPER_RELEASE_PACKAGES_DIR", packages_dir)
+    manifest_service.reset_desktop_helper_manifest_cache()
     return manifest
 
 
@@ -77,7 +90,17 @@ def test_manifest_v2_normalizes_one_package_with_self_contained_metadata(monkeyp
     assert record["runtime_family"] == "10.0"
     assert record["target_framework"] == "net10.0"
     assert record["installer_manifest_sha256"] == "a" * 64
+    assert record["installer_tree_manifest_path"] == ".elvern/tree-manifest.tsv"
+    assert record["installer_tree_manifest_sha256"] == "b" * 64
+    assert record["bound_origin_sha256"] == BOUND_ORIGIN_SHA256
     assert record["minimum_os_version"] == "14.0"
+    assert record["package_binding"] == "unverified"
+
+    bound_records = manifest_service.list_desktop_helper_manifest_records(
+        platform="mac",
+        expected_bound_origin_sha256=BOUND_ORIGIN_SHA256,
+    )
+    assert bound_records[0]["package_binding"] == "compatible"
 
 
 def test_manifest_v2_rejects_package_path_traversal(monkeypatch, tmp_path) -> None:
@@ -94,6 +117,262 @@ def test_manifest_v2_rejects_wrong_runtime_contract(monkeypatch, tmp_path) -> No
 
     with pytest.raises(manifest_service.DesktopHelperManifestError, match="package contract mismatch"):
         manifest_service.list_desktop_helper_manifest_records()
+
+
+def test_manifest_hash_verification_is_single_flight_for_concurrent_requests(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    original_sha256 = manifest_service._sha256_for_file
+    hash_calls = 0
+    hash_lock = threading.Lock()
+
+    def counted_sha256(path: Path) -> str:
+        nonlocal hash_calls
+        with hash_lock:
+            hash_calls += 1
+        time.sleep(0.01)
+        return original_sha256(path)
+
+    monkeypatch.setattr(manifest_service, "_sha256_for_file", counted_sha256)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(
+            lambda _index: manifest_service.list_desktop_helper_manifest_records(
+                platform="mac",
+                expected_bound_origin_sha256=BOUND_ORIGIN_SHA256,
+            ),
+            range(20),
+        ))
+
+    assert all(len(records) == 1 for records in results)
+    assert hash_calls == 1
+
+
+def test_manifest_snapshot_rebuilds_when_manifest_is_replaced(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    first = manifest_service.list_desktop_helper_manifest_records(platform="mac")
+    assert first[0]["version"] == "0.9.0"
+
+    manifest["helper_version"] = "0.9.1"
+    replacement = manifest_service.HELPER_RELEASE_MANIFEST_PATH.with_suffix(".replacement")
+    replacement.write_text(json.dumps(manifest), encoding="utf-8")
+    replacement.replace(manifest_service.HELPER_RELEASE_MANIFEST_PATH)
+
+    second = manifest_service.list_desktop_helper_manifest_records(platform="mac")
+
+    assert second[0]["version"] == "0.9.1"
+    assert second[0]["id"] != first[0]["id"]
+
+
+def test_manifest_only_hashes_artifacts_for_the_requested_platform(monkeypatch, tmp_path) -> None:
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    windows_payload = b"windows-package"
+    windows_artifact = manifest_service.HELPER_RELEASE_PACKAGES_DIR / "windows.zip"
+    windows_artifact.write_bytes(windows_payload)
+    manifest["packages"].append({
+        "package_target": "windows-x64",
+        "platform": "windows",
+        "artifact_kind": "zip",
+        "filename": windows_artifact.name,
+        "relative_path": windows_artifact.name,
+        "package_root": "Elvern VLC Opener Windows Installer",
+        "installer_entrypoint": "Install-ElvernVlcOpener.cmd",
+        "supported_runtime_ids": ["win-x64"],
+        "external_runtime_required": False,
+        "size_bytes": len(windows_payload),
+        "sha256": _sha256(windows_payload),
+        "installer_manifest_sha256": "c" * 64,
+        "installer_tree_manifest_path": ".elvern/tree-manifest.tsv",
+        "installer_tree_manifest_sha256": "d" * 64,
+        "bound_origin_sha256": BOUND_ORIGIN_SHA256,
+        "generated_at_utc": "2026-07-22T00:00:00Z",
+    })
+    manifest_service.HELPER_RELEASE_MANIFEST_PATH.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    manifest_service.reset_desktop_helper_manifest_cache()
+    hashed_paths: list[Path] = []
+    original_sha256 = manifest_service._sha256_for_file
+
+    def record_sha256(path: Path) -> str:
+        hashed_paths.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(manifest_service, "_sha256_for_file", record_sha256)
+
+    records = manifest_service.list_desktop_helper_manifest_records(
+        platform="mac",
+        expected_bound_origin_sha256=BOUND_ORIGIN_SHA256,
+    )
+
+    assert len(records) == 1
+    assert [path.name for path in hashed_paths] == [
+        "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    ]
+
+
+def test_manifest_rehashes_an_artifact_replaced_with_same_size_and_mtime(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    artifact = (
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    )
+    original_stat = artifact.stat()
+    original_sha256 = manifest_service._sha256_for_file
+    hash_calls = 0
+
+    def counted_sha256(path: Path) -> str:
+        nonlocal hash_calls
+        hash_calls += 1
+        return original_sha256(path)
+
+    monkeypatch.setattr(manifest_service, "_sha256_for_file", counted_sha256)
+    manifest_service.list_desktop_helper_manifest_records(platform="mac")
+    artifact.write_bytes(b"x" * original_stat.st_size)
+    os.utime(artifact, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    with pytest.raises(
+        manifest_service.DesktopHelperManifestError,
+        match="artifact SHA-256 mismatch",
+    ):
+        manifest_service.list_desktop_helper_manifest_records(platform="mac")
+
+    assert hash_calls == 2
+
+
+def test_release_download_rechecks_artifact_fingerprint_and_rejects_corruption(
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "_desktop_backend_origin_sha256",
+        lambda _settings: BOUND_ORIGIN_SHA256,
+    )
+    release = manifest_service.list_desktop_helper_manifest_records(
+        platform="mac",
+        expected_bound_origin_sha256=BOUND_ORIGIN_SHA256,
+    )[0]
+    first = desktop_helper_service.get_helper_release_download_path(
+        initialized_settings,
+        int(release["id"]),
+    )
+    assert first["file_path"].is_file()
+
+    artifact = Path(first["file_path"])
+    original_stat = artifact.stat()
+    artifact.write_bytes(b"x" * original_stat.st_size)
+    os.utime(artifact, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    with pytest.raises(HTTPException) as exc_info:
+        desktop_helper_service.get_helper_release_download_path(
+            initialized_settings,
+            int(release["id"]),
+        )
+
+    assert exc_info.value.status_code == 410
+    assert "verification failed" in str(exc_info.value.detail)
+
+
+def test_manifest_origin_mismatch_fails_before_artifact_hash(monkeypatch, tmp_path) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        manifest_service,
+        "_sha256_for_file",
+        lambda _path: pytest.fail("incompatible artifacts must not be hashed"),
+    )
+
+    with pytest.raises(manifest_service.DesktopHelperManifestOriginMismatch):
+        manifest_service.list_desktop_helper_manifest_records(
+            platform="mac",
+            expected_bound_origin_sha256="f" * 64,
+        )
+
+
+def test_origin_mismatch_never_falls_back_to_the_legacy_db(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "_list_helper_releases_from_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            manifest_service.DesktopHelperManifestOriginMismatch("mismatch")
+        ),
+    )
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "list_helper_releases",
+        lambda *_args, **_kwargs: pytest.fail("origin mismatch must not use the DB fallback"),
+    )
+
+    releases = desktop_helper_service.build_desktop_helper_release_payloads(
+        initialized_settings,
+        platform="mac",
+    )
+
+    assert releases == []
+
+
+def test_origin_mismatch_status_uses_the_safe_exact_note(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "_build_desktop_helper_release_payloads_with_diagnostics",
+        lambda *_args, **_kwargs: ([], True),
+    )
+
+    payload = desktop_helper_service.get_desktop_helper_status(
+        initialized_settings,
+        user_id=1,
+        platform="mac",
+        device_id=None,
+        browser_user_agent="Macintosh",
+        source_ip="203.0.113.8",
+        same_host=False,
+        same_host_detection_source="client_ip_not_local",
+    )
+
+    assert payload["state"] == "release_unavailable"
+    assert payload["latest_releases"] == []
+    assert payload["notes"] == [
+        "The available Helper package was built for a different Elvern server origin."
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://user@example.test",
+        "https://example.test/prefix",
+        "https://example.test?query=1",
+        "https://example.test/#fragment",
+    ],
+)
+def test_desktop_helper_origin_rejects_non_origin_components(value: str) -> None:
+    with pytest.raises(ValueError, match="absolute HTTP"):
+        desktop_helper_service.canonicalize_desktop_helper_origin(value)
+
+
+def test_desktop_helper_origin_canonicalizes_case_and_default_ports() -> None:
+    assert (
+        desktop_helper_service.canonicalize_desktop_helper_origin(
+            "HTTPS://ELVERN.EXAMPLE:443/"
+        )
+        == "https://elvern.example"
+    )
 
 
 def test_legacy_manifest_remains_available_as_framework_dependent_fallback(
@@ -126,6 +405,7 @@ def test_legacy_manifest_remains_available_as_framework_dependent_fallback(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     monkeypatch.setattr(manifest_service, "HELPER_RELEASE_MANIFEST_PATH", manifest_path)
     monkeypatch.setattr(manifest_service, "HELPER_RELEASE_PACKAGES_DIR", packages_dir)
+    manifest_service.reset_desktop_helper_manifest_cache()
 
     records = manifest_service.list_desktop_helper_manifest_records(platform="mac")
 
@@ -150,6 +430,9 @@ def test_package_release_and_status_schemas_accept_linux_self_contained_contract
         size_bytes=123,
         sha256="b" * 64,
         installer_manifest_sha256="c" * 64,
+        installer_tree_manifest_path=".elvern/tree-manifest.tsv",
+        installer_tree_manifest_sha256="d" * 64,
+        package_binding="compatible",
         published_at="2026-07-22T00:00:00Z",
         download_url="/api/desktop-helper/releases/12/download",
         deployment_mode="self_contained",
@@ -180,8 +463,8 @@ def test_package_release_and_status_schemas_accept_linux_self_contained_contract
 def test_linux_same_host_status_does_not_offer_helper(initialized_settings, monkeypatch) -> None:
     monkeypatch.setattr(
         desktop_helper_service,
-        "build_desktop_helper_release_payloads",
-        lambda *_args, **_kwargs: [{"package_target": "linux-universal"}],
+        "_build_desktop_helper_release_payloads_with_diagnostics",
+        lambda *_args, **_kwargs: pytest.fail("same-host Linux must not read helper packages"),
     )
 
     payload = desktop_helper_service.get_desktop_helper_status(
@@ -228,8 +511,8 @@ def test_linux_remote_status_offers_universal_helper_without_host_vlc_detection(
     }
     monkeypatch.setattr(
         desktop_helper_service,
-        "build_desktop_helper_release_payloads",
-        lambda *_args, **_kwargs: [release],
+        "_build_desktop_helper_release_payloads_with_diagnostics",
+        lambda *_args, **_kwargs: ([release], False),
     )
     monkeypatch.setattr(
         desktop_helper_service,
@@ -381,8 +664,8 @@ def test_package_level_version_drives_universal_update_state(initialized_setting
     }
     monkeypatch.setattr(
         desktop_helper_service,
-        "build_desktop_helper_release_payloads",
-        lambda *_args, **_kwargs: [release],
+        "_build_desktop_helper_release_payloads_with_diagnostics",
+        lambda *_args, **_kwargs: ([release], False),
     )
     monkeypatch.setattr(
         desktop_helper_service,

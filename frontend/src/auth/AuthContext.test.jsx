@@ -9,6 +9,7 @@ import { ProtectedRoute } from "../components/ProtectedRoute";
 import { apiRequest, MAINTENANCE_MODE_MESSAGE } from "../lib/api";
 import { buildLibraryQueryKey } from "../lib/libraryQueries";
 import { queryClient } from "../lib/queryClient";
+import { PAGE_RESUME_EVENT } from "../lib/pageResume";
 import { buildUserSettingsQueryKey } from "../lib/userSettingsQueries";
 import { LoginPage } from "../pages/LoginPage";
 
@@ -202,7 +203,7 @@ describe("AuthProvider maintenance mode handling", () => {
     queryClient.setQueryData(userASettingsKey, { poster_card_display_max_width: "800" });
     expect(queryClient.getQueryData(userALibraryKey)).toBeDefined();
 
-    fireEvent.focus(window);
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
 
     expect(await screen.findByText("Signed in as second-viewer")).toBeInTheDocument();
     expect(queryClient.getQueryData(userALibraryKey)).toBeUndefined();
@@ -266,8 +267,7 @@ describe("AuthProvider maintenance mode handling", () => {
       value: "visible",
     });
 
-    fireEvent(document, new Event("visibilitychange"));
-    fireEvent.focus(window);
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
 
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
     expect(queryClient.getQueryData(libraryKey)).toEqual({ items: [{ id: 42 }] });
@@ -296,7 +296,7 @@ describe("AuthProvider maintenance mode handling", () => {
     });
     queryClient.setQueryData(libraryKey, { items: [{ id: 42 }] });
 
-    fireEvent.focus(window);
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
 
     await waitFor(() => expect(authMeCalls).toBe(2));
     expect(queryClient.getQueryData(libraryKey)).toBeUndefined();
@@ -325,7 +325,7 @@ describe("AuthProvider maintenance mode handling", () => {
     });
     queryClient.setQueryData(libraryKey, { items: [{ id: 42 }] });
 
-    fireEvent.focus(window);
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
 
     await waitFor(() => expect(authMeCalls).toBe(2));
     expect(queryClient.getQueryData(libraryKey)).toBeUndefined();

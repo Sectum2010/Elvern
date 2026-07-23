@@ -15,4 +15,6 @@ Notes:
 - VLC must already be installed on this client machine.
 - Elvern must remain reachable at the configured server origin.
 - The standard package is self-contained. No separate .NET installation is required.
-- Package payloads are selected locally and verified with SHA-256 before installation.
+- The installer does not require Python.
+- The package tree and selected payload are verified with SHA-256 before installation.
+- If the package was built for another Elvern server origin, Elvern will not offer it.

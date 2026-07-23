@@ -111,6 +111,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Release channel to import into. Defaults to ELVERN_HELPER_DEFAULT_CHANNEL.",
     )
     helper_parser.add_argument(
+        "--runtime-requirement",
+        required=True,
+        help=(
+            "Explicit external runtime requirement for rollback-only legacy "
+            "framework-dependent artifacts, for example 8.x."
+        ),
+    )
+    helper_parser.add_argument(
         "sources",
         nargs="+",
         help="Package files or directories to import",
@@ -459,6 +467,7 @@ def main() -> None:
             settings,
             (Path(source) for source in args.sources),
             channel=args.channel,
+            runtime_requirement=args.runtime_requirement,
         )
         print(json.dumps(payload, indent=2))
         return

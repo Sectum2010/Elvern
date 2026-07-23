@@ -9,10 +9,19 @@ import {
   clampPosterContextMenuPosition,
   PosterContextMenuProvider,
 } from "./PosterContextMenu";
+import {
+  POSTER_RECOVERY_COOLDOWN_MS,
+  resetPosterRecoveryStateForTests,
+} from "../lib/posterRecovery";
+import {
+  CONNECTIVITY_RECOVERED_EVENT,
+  STARTUP_CONNECTIVITY_FAILURE_EVENT,
+} from "../lib/startupConnection";
 
 
 const smartPosterMocks = vi.hoisted(() => ({
   register: vi.fn(),
+  retry: vi.fn(),
   subscribe: vi.fn(() => () => {}),
 }));
 
@@ -24,6 +33,7 @@ vi.mock("../lib/smartPosterLoading", () => ({
   markSmartPosterCardLoaded: vi.fn(),
   POSTER_MODE_ATTACH: "attach",
   registerSmartPosterCard: smartPosterMocks.register,
+  retrySmartPosterCard: smartPosterMocks.retry,
   subscribeSmartPosterCard: smartPosterMocks.subscribe,
   unregisterSmartPosterCard: vi.fn(),
 }));
@@ -64,7 +74,9 @@ describe("MediaCard poster loading", () => {
   });
 
   beforeEach(() => {
+    resetPosterRecoveryStateForTests();
     smartPosterMocks.register.mockClear();
+    smartPosterMocks.retry.mockClear();
     smartPosterMocks.subscribe.mockClear();
   });
 
@@ -154,6 +166,68 @@ describe("MediaCard poster loading", () => {
       "src",
       "/api/library/item/42/poster?v=second&variant=card&display_width=1400",
     ));
+  });
+
+  test("retries a transport-failed poster once after connectivity recovers", async () => {
+    vi.useFakeTimers();
+    try {
+      const image = renderCard({ deviceShell: "iphone" });
+      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
+        detail: { classification: "transport" },
+      }));
+      fireEvent.error(image);
+
+      expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
+
+      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+        detail: { generation: 7 },
+      }));
+      await vi.advanceTimersByTimeAsync(499);
+      expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(document.querySelector(".media-card__poster-image")).toHaveAttribute(
+        "src",
+        "/api/library/item/42/poster?v=cache-token&variant=card&display_width=1400#poster",
+      );
+      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
+
+      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
+        detail: { classification: "transport" },
+      }));
+      fireEvent.error(document.querySelector(".media-card__poster-image"));
+      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+        detail: { generation: 8 },
+      }));
+      await vi.advanceTimersByTimeAsync(500);
+      expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
+      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("retries a non-scheduler poster once without changing its URL", async () => {
+    vi.useFakeTimers();
+    try {
+      const image = renderCard();
+      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
+        detail: { classification: "transport" },
+      }));
+      fireEvent.error(image);
+      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+        detail: { generation: 8 },
+      }));
+      await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
+
+      expect(document.querySelector(".media-card__poster-image")).toHaveAttribute(
+        "src",
+        "/api/library/item/42/poster?v=cache-token&variant=card&display_width=1400#poster",
+      );
+      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("changing display width creates a new src and resets loaded state", async () => {

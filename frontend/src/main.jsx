@@ -9,11 +9,13 @@ import {
 } from "./lib/canonicalSpaPath.js";
 import { registerElvernServiceWorker } from "./lib/serviceWorkerRegistration.js";
 import { installIOSViewportCoordinator } from "./lib/iosViewportCoordinator.js";
+import { installPageResumeCoordinator } from "./lib/pageResume.js";
 
 
 window.__elvernAppBootstrapStarted = true;
 window.__elvernBootstrapPhase = "module_bootstrap_started";
 installIOSViewportCoordinator();
+installPageResumeCoordinator();
 
 const basename = detectSpaBasename();
 applyInitialSpaCanonicalization(window, { basename });

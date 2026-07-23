@@ -22,9 +22,13 @@ public static class HelperOriginPolicy
 
     public static string? NormalizeOrigin(string? value)
     {
-        var candidate = (value ?? string.Empty).Trim().TrimEnd('/');
+        var candidate = (value ?? string.Empty).Trim();
         if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || (uri.AbsolutePath != "/" && !string.IsNullOrEmpty(uri.AbsolutePath))
+            || !string.IsNullOrEmpty(uri.Query)
+            || !string.IsNullOrEmpty(uri.Fragment))
         {
             return null;
         }

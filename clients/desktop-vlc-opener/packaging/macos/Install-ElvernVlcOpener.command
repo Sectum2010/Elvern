@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PRIVATE_DIR="${SCRIPT_DIR}/.elvern"
-MANIFEST_PATH="${PRIVATE_DIR}/manifest.json"
+MANIFEST_TSV="${PRIVATE_DIR}/installer-manifest.tsv"
+TREE_MANIFEST="${PRIVATE_DIR}/tree-manifest.tsv"
 SELECTORS="${PRIVATE_DIR}/lib/platform-selectors.sh"
 APPLESCRIPT_SOURCE="${PRIVATE_DIR}/bridge/ElvernVlcOpener.applescript"
 RUNNER_TEMPLATE="${PRIVATE_DIR}/bridge/run-helper.sh.template"
@@ -27,18 +28,18 @@ show_error() {
 }
 
 cleanup() {
-  if [[ -n "${STAGE_ROOT}" && -d "${STAGE_ROOT}" ]]; then
-    rm -rf "${STAGE_ROOT}"
-  fi
+  [[ -n "${STAGE_ROOT}" && -d "${STAGE_ROOT}" ]] && rm -rf "${STAGE_ROOT}"
   if [[ ${INSTALL_SUCCEEDED} -eq 0 && ${REPLACEMENT_STARTED} -eq 1 ]]; then
     [[ -d "${DEST_APP}" ]] && rm -rf "${DEST_APP}"
     if [[ -n "${BACKUP_APP}" && -d "${BACKUP_APP}" ]]; then
       mv "${BACKUP_APP}" "${DEST_APP}" || true
+      "${LSREGISTER}" -f "${DEST_APP}" >/dev/null 2>&1 || true
     fi
   fi
   if [[ ${INSTALL_SUCCEEDED} -eq 1 && -n "${BACKUP_APP}" && -d "${BACKUP_APP}" ]]; then
     rm -rf "${BACKUP_APP}"
   fi
+  return 0
 }
 trap cleanup EXIT
 
@@ -47,74 +48,120 @@ fail() {
   exit 1
 }
 
-[[ -f "${MANIFEST_PATH}" ]] || fail "The installer manifest is missing. Download a fresh Elvern package."
-[[ -f "${SELECTORS}" ]] || fail "The platform selector is missing."
-[[ -f "${APPLESCRIPT_SOURCE}" ]] || fail "The macOS URL bridge is missing."
-[[ -f "${RUNNER_TEMPLATE}" ]] || fail "The helper runner is missing."
+safe_relative_path() {
+  local value="$1"
+  [[ -n "${value}" && "${value}" != /* && "${value}" != *\\* ]] || return 1
+  case "/${value}/" in
+    */../*|*/./*) return 1 ;;
+  esac
+  return 0
+}
+
+verify_package_tree() {
+  [[ -f "${TREE_MANIFEST}" && ! -L "${TREE_MANIFEST}" ]] || fail "The installer tree manifest is missing."
+  if find "${SCRIPT_DIR}" -type l -print -quit | grep -q .; then
+    fail "The installer package contains an unsafe link."
+  fi
+  local expected actual path size digest file_class extra full actual_size actual_digest
+  expected="$(mktemp)"
+  actual="$(mktemp)"
+  while IFS=$'\t' read -r path size digest file_class extra; do
+    [[ "${path}" == "path" ]] && continue
+    [[ -z "${extra:-}" ]] || { rm -f "${expected}" "${actual}"; fail "The installer tree manifest has an invalid row."; }
+    safe_relative_path "${path}" || { rm -f "${expected}" "${actual}"; fail "The installer tree manifest contains an unsafe path."; }
+    [[ "${size}" =~ ^[0-9]+$ && "${digest}" =~ ^[0-9a-f]{64}$ && "${file_class}" =~ ^(data|executable)$ ]] \
+      || { rm -f "${expected}" "${actual}"; fail "The installer tree manifest contains invalid metadata."; }
+    full="${SCRIPT_DIR}/${path}"
+    [[ -f "${full}" && ! -L "${full}" ]] || { rm -f "${expected}" "${actual}"; fail "An installer file is missing or unsafe."; }
+    actual_size="$(wc -c < "${full}" | tr -d '[:space:]')"
+    actual_digest="$(/usr/bin/shasum -a 256 "${full}" | /usr/bin/awk '{print $1}')"
+    [[ "${actual_size}" == "${size}" && "${actual_digest}" == "${digest}" ]] \
+      || { rm -f "${expected}" "${actual}"; fail "An installer file failed integrity verification."; }
+    printf '%s\n' "${path}" >> "${expected}"
+  done < "${TREE_MANIFEST}"
+  while IFS= read -r full; do
+    path="${full#"${SCRIPT_DIR}/"}"
+    [[ "${path}" == ".elvern/tree-manifest.tsv" || "${path##*/}" == ".DS_Store" ]] && continue
+    printf '%s\n' "${path}" >> "${actual}"
+  done < <(find "${SCRIPT_DIR}" -type f -print)
+  LC_ALL=C sort -o "${expected}" "${expected}"
+  LC_ALL=C sort -o "${actual}" "${actual}"
+  cmp -s "${expected}" "${actual}" || { rm -f "${expected}" "${actual}"; fail "The installer package contains a missing or unexpected file."; }
+  rm -f "${expected}" "${actual}"
+}
+
+verify_quarantine_cleared() {
+  local root="$1"
+  local entry
+  while IFS= read -r entry; do
+    if xattr -p com.apple.quarantine "${entry}" >/dev/null 2>&1; then
+      fail "macOS quarantine is still present on the verified Helper App."
+    fi
+  done < <(find "${root}" -print)
+}
+
 [[ -x "${OSACOMPILE}" ]] || fail "macOS could not find osacompile."
 [[ -x "${PLISTBUDDY}" ]] || fail "macOS could not find PlistBuddy."
-command -v python3 >/dev/null 2>&1 || fail "python3 is required to validate the signed installer manifest."
-command -v shasum >/dev/null 2>&1 || fail "shasum is required to verify the helper payload."
+[[ -x "${LSREGISTER}" ]] || fail "macOS could not find Launch Services registration."
+command -v shasum >/dev/null 2>&1 || fail "shasum is required to verify the installer."
 command -v codesign >/dev/null 2>&1 || fail "codesign is required to build the local Helper App."
+command -v xattr >/dev/null 2>&1 || fail "xattr is required to prepare the local Helper App."
+verify_package_tree
+
+[[ -f "${MANIFEST_TSV}" && ! -L "${MANIFEST_TSV}" ]] || fail "The verified installer manifest is missing."
+[[ -f "${SELECTORS}" && ! -L "${SELECTORS}" ]] || fail "The verified platform selector is missing."
+[[ -f "${APPLESCRIPT_SOURCE}" && ! -L "${APPLESCRIPT_SOURCE}" ]] || fail "The verified macOS URL bridge is missing."
+[[ -f "${RUNNER_TEMPLATE}" && ! -L "${RUNNER_TEMPLATE}" ]] || fail "The verified Helper runner is missing."
 
 MACOS_VERSION="$(sw_vers -productVersion 2>/dev/null || true)"
 MACOS_MAJOR="${MACOS_VERSION%%.*}"
 [[ "${MACOS_MAJOR}" =~ ^[0-9]+$ ]] || fail "The macOS version could not be determined."
 (( MACOS_MAJOR >= 14 )) || fail "macOS 14 or newer is required."
 
+# The selector was covered by the verified package tree before execution.
 # shellcheck disable=SC1090
 source "${SELECTORS}"
 TRANSLATED="$(sysctl -in sysctl.proc_translated 2>/dev/null || printf '0')"
 RUNTIME_ID="$(select_macos_runtime "${TRANSLATED}" "$(uname -m)")" || fail "This Mac CPU is not supported."
 
-MANIFEST_OUTPUT="$(python3 - "${MANIFEST_PATH}" "${RUNTIME_ID}" <<'PY'
-import json
-import pathlib
-import sys
-
-manifest_path = pathlib.Path(sys.argv[1])
-runtime_id = sys.argv[2]
-payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-if payload.get("schema_version") != "desktop-helper-installer-manifest-v1":
-    raise SystemExit("Unsupported installer manifest schema")
-if payload.get("deployment_mode") != "self_contained":
-    raise SystemExit("Installer payload is not self-contained")
-version = payload.get("helper_version")
-if not isinstance(version, str) or not version.strip():
-    raise SystemExit("Missing helper version")
-matches = [entry for entry in payload.get("payloads", []) if entry.get("runtime_id") == runtime_id]
-if len(matches) != 1:
-    raise SystemExit(f"Missing unique payload for {runtime_id}")
-entry = matches[0]
-relative = pathlib.PurePosixPath(str(entry.get("relative_path", "")))
-if relative.is_absolute() or ".." in relative.parts or not relative.parts:
-    raise SystemExit("Unsafe payload path")
-sha256 = str(entry.get("sha256", ""))
-size = entry.get("size_bytes")
-if len(sha256) != 64 or not all(character in "0123456789abcdef" for character in sha256.lower()):
-    raise SystemExit("Invalid payload hash")
-if not isinstance(size, int) or size <= 0:
-    raise SystemExit("Invalid payload size")
-print(version)
-print(relative.as_posix())
-print(sha256.lower())
-print(size)
-PY
-)" || fail "The installer manifest is invalid."
-
-[[ "$(printf '%s\n' "${MANIFEST_OUTPUT}" | wc -l | tr -d '[:space:]')" == "4" ]] || fail "The installer manifest did not return a valid payload."
-HELPER_VERSION="$(printf '%s\n' "${MANIFEST_OUTPUT}" | sed -n '1p')"
-PAYLOAD_RELATIVE_PATH="$(printf '%s\n' "${MANIFEST_OUTPUT}" | sed -n '2p')"
-EXPECTED_SHA256="$(printf '%s\n' "${MANIFEST_OUTPUT}" | sed -n '3p')"
-EXPECTED_SIZE="$(printf '%s\n' "${MANIFEST_OUTPUT}" | sed -n '4p')"
+SCHEMA=""
+HELPER_VERSION=""
+DEPLOYMENT_MODE=""
+PACKAGE_TARGET=""
+PAYLOAD_RELATIVE_PATH=""
+EXPECTED_SHA256=""
+EXPECTED_SIZE=""
+PAYLOAD_EXECUTABLE=""
+while IFS=$'\t' read -r kind field value fourth fifth sixth extra; do
+  [[ -z "${extra:-}" ]] || fail "The verified installer manifest has an invalid row."
+  if [[ "${kind}" == "meta" ]]; then
+    case "${field}" in
+      schema_version) SCHEMA="${value}" ;;
+      helper_version) HELPER_VERSION="${value}" ;;
+      deployment_mode) DEPLOYMENT_MODE="${value}" ;;
+      package_target) PACKAGE_TARGET="${value}" ;;
+    esac
+  elif [[ "${kind}" == "payload" && "${field}" == "${RUNTIME_ID}" ]]; then
+    [[ -z "${PAYLOAD_RELATIVE_PATH}" ]] || fail "The verified installer manifest repeats this Mac payload."
+    PAYLOAD_RELATIVE_PATH="${value}"
+    EXPECTED_SHA256="${fourth}"
+    EXPECTED_SIZE="${fifth}"
+    PAYLOAD_EXECUTABLE="${sixth}"
+  fi
+done < "${MANIFEST_TSV}"
+[[ "${SCHEMA}" == "desktop-helper-installer-manifest-v2" ]] || fail "The verified installer manifest schema is unsupported."
+[[ "${DEPLOYMENT_MODE}" == "self_contained" && "${PACKAGE_TARGET}" == "macos-dual-arch" ]] \
+  || fail "This is not the standard self-contained macOS package."
+[[ "${HELPER_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "The verified installer manifest has an invalid version."
+safe_relative_path "${PAYLOAD_RELATIVE_PATH}" || fail "The selected payload path is unsafe."
+[[ "${EXPECTED_SHA256}" =~ ^[0-9a-f]{64}$ && "${EXPECTED_SIZE}" =~ ^[0-9]+$ ]] \
+  || fail "The selected payload metadata is invalid."
+[[ "${PAYLOAD_EXECUTABLE}" == "Elvern.VlcOpener" ]] || fail "The selected payload executable is invalid."
 SOURCE_PAYLOAD="${PRIVATE_DIR}/${PAYLOAD_RELATIVE_PATH}"
-[[ -f "${SOURCE_PAYLOAD}" ]] || fail "The ${RUNTIME_ID} payload is missing."
-ACTUAL_SIZE="$(wc -c < "${SOURCE_PAYLOAD}" | tr -d '[:space:]')"
-[[ "${ACTUAL_SIZE}" == "${EXPECTED_SIZE}" ]] || fail "The helper payload size does not match its manifest."
-ACTUAL_SHA256="$(/usr/bin/shasum -a 256 "${SOURCE_PAYLOAD}" | awk '{print $1}')"
-[[ "${ACTUAL_SHA256}" == "${EXPECTED_SHA256}" ]] || fail "The helper payload SHA-256 check failed."
-chmod 755 "${SOURCE_PAYLOAD}"
-"${SOURCE_PAYLOAD}" --version >/dev/null || fail "The selected helper payload did not pass its version check."
+[[ -f "${SOURCE_PAYLOAD}" && ! -L "${SOURCE_PAYLOAD}" ]] || fail "The ${RUNTIME_ID} payload is missing."
+[[ "$(wc -c < "${SOURCE_PAYLOAD}" | tr -d '[:space:]')" == "${EXPECTED_SIZE}" ]] || fail "The Helper payload size check failed."
+[[ "$(/usr/bin/shasum -a 256 "${SOURCE_PAYLOAD}" | /usr/bin/awk '{print $1}')" == "${EXPECTED_SHA256}" ]] \
+  || fail "The Helper payload SHA-256 check failed."
 
 mkdir -p "${DEST_DIR}"
 STAGE_ROOT="$(mktemp -d "${DEST_DIR}/.elvern-vlc-opener-stage.XXXXXX")"
@@ -149,10 +196,17 @@ plist_set "LSMinimumSystemVersion" string "14.0"
 "${PLISTBUDDY}" -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "${INFO_PLIST}"
 "${PLISTBUDDY}" -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string elvern-vlc" "${INFO_PLIST}"
 
-codesign --force --deep --sign - "${STAGED_APP}" >/dev/null || fail "The local App could not be structurally signed."
-codesign --verify --deep --strict "${STAGED_APP}" >/dev/null 2>&1 || fail "The local App signature verification failed."
-xattr -dr com.apple.quarantine "${STAGED_APP}" >/dev/null 2>&1 || true
-"${APP_PAYLOAD_DIR}/Elvern.VlcOpener" --version >/dev/null || fail "The staged helper failed its version check."
+codesign --force --sign - "${APP_PAYLOAD_DIR}/Elvern.VlcOpener" >/dev/null \
+  || fail "The staged Helper executable could not be structurally signed."
+codesign --force --sign - "${STAGED_APP}" >/dev/null \
+  || fail "The local App could not be structurally signed."
+codesign --verify --deep --strict "${STAGED_APP}" >/dev/null 2>&1 \
+  || fail "The local App signature verification failed."
+xattr -dr com.apple.quarantine "${STAGED_APP}" \
+  || fail "macOS quarantine could not be removed from the verified staged Helper App."
+verify_quarantine_cleared "${STAGED_APP}"
+"${APP_PAYLOAD_DIR}/Elvern.VlcOpener" --version >/dev/null \
+  || fail "The staged Helper failed its version check."
 
 REPLACEMENT_STARTED=1
 if [[ -d "${DEST_APP}" ]]; then
@@ -160,13 +214,15 @@ if [[ -d "${DEST_APP}" ]]; then
   mv "${DEST_APP}" "${BACKUP_APP}" || fail "The existing Helper App could not be staged for upgrade."
 fi
 mv "${STAGED_APP}" "${DEST_APP}" || fail "The new Helper App could not replace the existing installation."
-xattr -dr com.apple.quarantine "${DEST_APP}" >/dev/null 2>&1 || true
-if [[ -x "${LSREGISTER}" ]]; then
-  "${LSREGISTER}" -f "${DEST_APP}" >/dev/null 2>&1 || true
-fi
-"${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener" --version >/dev/null || fail "The installed helper failed its final version check."
+xattr -dr com.apple.quarantine "${DEST_APP}" \
+  || fail "macOS quarantine could not be removed from the verified installed Helper App."
+verify_quarantine_cleared "${DEST_APP}"
+"${LSREGISTER}" -f "${DEST_APP}" >/dev/null 2>&1 \
+  || fail "Launch Services could not register the installed Helper App."
+"${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener" --version >/dev/null \
+  || fail "The installed Helper failed its final version check."
 touch "${DEST_APP}"
+open -R "${DEST_APP}" >/dev/null 2>&1 || fail "Finder could not reveal the installed Helper App."
 INSTALL_SUCCEEDED=1
-open -R "${DEST_APP}" >/dev/null 2>&1 || true
 echo "Installed ${APP_NAME} ${HELPER_VERSION} into ${DEST_APP}"
 echo "The App uses a local ad-hoc structural signature; it is not Developer ID signed or notarized."

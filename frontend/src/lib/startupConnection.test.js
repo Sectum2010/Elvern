@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
+  CONNECTIVITY_RECOVERED_EVENT,
   CONNECTIVITY_BACKEND_UNREACHABLE,
   CONNECTIVITY_FRONTEND_OR_VPN_UNREACHABLE,
   CONNECTIVITY_EVIDENCE_INSUFFICIENT,
@@ -193,6 +194,45 @@ describe("startup connection controller", () => {
     expect(controller.getSnapshot()).toMatchObject({ status: "unreachable", oopsLatched: true });
     expect(controller.getSnapshot().outageGeneration).toBe(firstGeneration + 1);
     controller.stop();
+  });
+
+  test("dispatches one sanitized recovery event per real runtime outage generation", async () => {
+    let backendHealthy = true;
+    const recoveryEvents = [];
+    const handleRecovered = (event) => recoveryEvents.push(event.detail);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleRecovered);
+    const fetchImpl = vi.fn((path) => Promise.resolve(
+      path === "/health" && !backendHealthy
+        ? healthResponse(path, 503)
+        : healthResponse(path)
+    ));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    try {
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(recoveryEvents).toEqual([]);
+
+      backendHealthy = false;
+      const outage = controller.reportFailure();
+      await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+      await outage;
+      const outageGeneration = controller.getSnapshot().outageGeneration;
+
+      backendHealthy = true;
+      await controller.retry();
+      await controller.retry();
+
+      expect(recoveryEvents).toEqual([{
+        generation: outageGeneration,
+        previousClassification: "service_unreachable",
+      }]);
+      expect(recoveryEvents[0]).not.toHaveProperty("url");
+      expect(recoveryEvents[0]).not.toHaveProperty("user");
+    } finally {
+      controller.stop();
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleRecovered);
+    }
   });
 
   test("a VPN-style outage can recover before an independent backend outage", async () => {

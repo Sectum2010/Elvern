@@ -28,7 +28,7 @@ function scanPollingInterval(queryState) {
 
 
 async function requestLibrarySummaryV2(path, signal) {
-  const payload = await apiRequest(path, { signal });
+  const payload = await apiRequest(path, { signal, abortOnPageHide: true });
   return validateLibrarySummaryV2Payload(payload);
 }
 
@@ -64,7 +64,7 @@ export function useLibraryViewQuery({
     && isLibrarySummaryV2CapabilityFailure(v2Query.error);
   const v1Query = useQuery({
     queryKey: v1QueryKey,
-    queryFn: ({ signal }) => apiRequest(v1RequestPath, { signal }),
+    queryFn: ({ signal }) => apiRequest(v1RequestPath, { signal, abortOnPageHide: true }),
     enabled: Boolean(enabled) && (
       mode === LIBRARY_SUMMARY_V2_MODE_OFF
       || mode === LIBRARY_SUMMARY_V2_MODE_SHADOW

@@ -57,7 +57,10 @@ export function resolveUserSettings(payload) {
 export function useUserSettingsQuery(user) {
   return useQuery({
     queryKey: buildUserSettingsQueryKey({ userId: user?.id, role: user?.role }),
-    queryFn: ({ signal }) => apiRequest("/api/user-settings", { signal }),
+    queryFn: ({ signal }) => apiRequest("/api/user-settings", {
+      signal,
+      abortOnPageHide: true,
+    }),
     enabled: Boolean(user?.id),
     staleTime: USER_SETTINGS_QUERY_STALE_TIME_MS,
     gcTime: USER_SETTINGS_QUERY_GC_TIME_MS,

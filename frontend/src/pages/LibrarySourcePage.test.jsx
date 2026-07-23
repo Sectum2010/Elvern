@@ -10,10 +10,11 @@ import {
 } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { apiRequest } from "../lib/api";
+import { ApiNetworkError, apiRequest } from "../lib/api";
 import { buildLibraryQueryKey, LIBRARY_QUERY_STALE_TIME_MS } from "../lib/libraryQueries";
 import { readLibraryReturnTarget } from "../lib/libraryNavigation";
 import { queryClient } from "../lib/queryClient";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 import { LibrarySourcePage } from "./LibrarySourcePage";
 
 
@@ -24,7 +25,8 @@ vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({ user: currentUser, refreshAuth: vi.fn() }),
 }));
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...(await importOriginal()),
   apiRequest: vi.fn(),
 }));
 
@@ -331,6 +333,59 @@ describe("LibrarySourcePage cached source views", () => {
     ));
     expect(screen.queryByText("Loading local library...")).not.toBeInTheDocument();
     expect(screen.queryByText("Background refresh failed")).not.toBeInTheDocument();
+  });
+
+  test("cached transport failure stays visible and refetches once for one recovery generation", async () => {
+    const payload = sourcePayload();
+    const cacheKey = buildLibraryQueryKey({
+      userId: currentUser.id,
+      role: currentUser.role,
+      category: "movies",
+      source: "local",
+      genre: "",
+      quality: "all",
+      sort: "smart",
+      query: "",
+    });
+    queryClient.setQueryData(cacheKey, payload, {
+      updatedAt: Date.now() - LIBRARY_QUERY_STALE_TIME_MS - 1,
+    });
+    let sourceCalls = 0;
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/user-settings") {
+        return Promise.resolve({ floating_library_search_enabled: true });
+      }
+      if (path === "/api/library?category=movies&source=local") {
+        sourceCalls += 1;
+        return sourceCalls === 1
+          ? Promise.reject(new ApiNetworkError())
+          : Promise.resolve(payload);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library/local"]}>
+          <LibrarySourcePage sourceKind="local" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+    expect(screen.queryByText("Loading local library...")).not.toBeInTheDocument();
+
+    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: { generation: 21 },
+    });
+    fireEvent(window, recoveryEvent);
+    await waitFor(() => expect(sourceCalls).toBe(2));
+    await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
+
+    fireEvent(window, recoveryEvent);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(sourceCalls).toBe(2);
   });
 
   test("q initializes from URL, commits on Enter, clears, and never refetches the base payload", async () => {

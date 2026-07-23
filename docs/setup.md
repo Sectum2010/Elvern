@@ -207,40 +207,64 @@ Then verify:
 
 Windows one-time setup:
 
-1. On the DGX server, build the Windows helper package:
+1. On the Elvern server, validate the Windows package in staging:
 
 ```bash
 cd "$ELVERN_ROOT/clients/desktop-vlc-opener"
+export ELVERN_BACKEND_ORIGIN="https://the-effective-helper-backend-origin.example"
 ./scripts/publish-bundles.sh --platform windows
 ```
 
-2. Copy `clients/desktop-vlc-opener/artifacts/packages/elvern-vlc-opener-<version>-windows-x64.zip` to the Windows machine.
+This does not publish or replace the active release manifest. Normal release
+activation builds all three platform packages together:
+
+```bash
+./scripts/publish-bundles.sh --activate
+```
+
+2. Download the active Windows package from Elvern's Install page.
 3. Unzip it.
-4. Double-click `Install-ElvernVlcOpener.cmd`. The package includes its runtime and installs per user.
+4. Double-click `Install-ElvernVlcOpener.cmd`. The verified package includes its
+   runtime and installs per user.
 
 macOS one-time setup:
 
-1. On the DGX server, build the macOS helper package:
+1. On the Elvern server, validate the macOS package in staging:
 
 ```bash
 cd "$ELVERN_ROOT/clients/desktop-vlc-opener"
+export ELVERN_BACKEND_ORIGIN="https://the-effective-helper-backend-origin.example"
 ./scripts/publish-bundles.sh --platform macos
 ```
 
-2. Copy `clients/desktop-vlc-opener/artifacts/packages/elvern-vlc-opener-<version>-macos-dual-arch.zip` to the Mac.
+This does not publish or replace the active release manifest. Use a complete
+`./scripts/publish-bundles.sh --activate` release before ordinary users download it.
+
+2. Download the active macOS package from Elvern's Install page.
 3. Unzip it.
-4. Double-click `Install-ElvernVlcOpener.command`. It selects Apple Silicon or Intel locally and installs to `~/Applications` without `sudo`.
+4. Double-click `Install-ElvernVlcOpener.command`. It verifies the complete package
+   tree, selects Apple Silicon or Intel locally, and installs to `~/Applications`
+   without Python, a separate .NET Runtime, or `sudo`.
 
 Remote Linux one-time setup:
 
 ```bash
 cd "$ELVERN_ROOT/clients/desktop-vlc-opener"
+export ELVERN_BACKEND_ORIGIN="https://the-effective-helper-backend-origin.example"
 ./scripts/publish-bundles.sh --platform linux
 ```
 
-Copy the Linux universal ZIP to the remote desktop, unzip it, and run `./Install-ElvernVlcOpener.sh`. It selects x64/ARM64 and glibc/musl locally, installs under `~/.local`, and does not use `sudo`. Linux sessions on the Elvern host itself continue to use host VLC directly and do not need the Helper. Flatpak VLC is not supported in this release.
+This validates a Linux universal ZIP in staging without publishing it. After a
+complete `--activate` release, download the active Linux package from Elvern,
+unzip it, and run `./Install-ElvernVlcOpener.sh`. It verifies the complete package
+tree, selects x64/ARM64 and glibc/musl locally, installs under `~/.local`, and needs
+neither Python, a separate .NET Runtime, nor `sudo`. Linux sessions on the Elvern
+host itself continue to use host VLC directly and do not need the Helper. Flatpak
+VLC is not supported in this release.
 
 All standard packages are self-contained .NET 10 packages. Publishing fails rather than silently producing incomplete packages when an SDK or RID runtime pack is unavailable.
+The release manifest also binds packages to the canonical effective backend origin;
+the server fails closed instead of offering a package built for another origin.
 
 Temporary manual testing path if you are not packaging yet:
 

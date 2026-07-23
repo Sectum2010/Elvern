@@ -15,13 +15,14 @@ import {
 } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { apiRequest } from "../lib/api";
+import { ApiNetworkError, apiRequest } from "../lib/api";
 import { readLibraryReturnTarget, rememberLibraryReturnTarget } from "../lib/libraryNavigation";
 import {
   buildLibraryQueryKey,
   LIBRARY_QUERY_STALE_TIME_MS,
 } from "../lib/libraryQueries";
 import { queryClient } from "../lib/queryClient";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 import { LibraryPage } from "./LibraryPage";
 
 const MAINTENANCE_MODE_MESSAGE = "The server is currently under construction, please try again later";
@@ -56,12 +57,9 @@ vi.mock("../auth/ProviderAuthContext", () => ({
   }),
 }));
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...(await importOriginal()),
   apiRequest: vi.fn(),
-  isMaintenanceModeError: (error) => (
-    error?.status === 503
-    && error?.message === "The server is currently under construction, please try again later"
-  ),
 }));
 
 vi.mock("../lib/browserPlayback", () => ({
@@ -1264,6 +1262,128 @@ describe("LibraryPage category switching", () => {
 
     expect(window.scrollTo).toHaveBeenCalledTimes(restoreCallCount);
     rectSpy.mockRestore();
+  });
+
+  test("cached transport failure stays visible and refetches once for one recovery generation", async () => {
+    const payload = libraryPayload({
+      items: [libraryItem({ id: 42, title: "Akira" })],
+      total_items: 1,
+    });
+    const cacheKey = buildLibraryQueryKey({
+      userId: 2,
+      role: "standard_user",
+      category: "movies",
+      source: "all",
+      genre: "",
+      quality: "all",
+      sort: "smart",
+      query: "",
+    });
+    queryClient.setQueryData(cacheKey, payload, {
+      updatedAt: Date.now() - LIBRARY_QUERY_STALE_TIME_MS - 1,
+    });
+    let libraryCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/library?category=movies") {
+        libraryCalls += 1;
+        return libraryCalls === 1
+          ? Promise.reject(new ApiNetworkError())
+          : Promise.resolve(payload);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library?category=movies"]}>
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+    expect(screen.queryByText("Loading library...")).not.toBeInTheDocument();
+
+    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: { generation: 12 },
+    });
+    fireEvent(window, recoveryEvent);
+    await waitFor(() => expect(libraryCalls).toBe(2));
+    await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
+
+    fireEvent(window, recoveryEvent);
+    await act(async () => Promise.resolve());
+    expect(libraryCalls).toBe(2);
+  });
+
+  test("initial transport failure has a stable manual retry without changing the view", async () => {
+    const payload = libraryPayload({
+      items: [libraryItem({ id: 42, title: "Akira" })],
+      total_items: 1,
+    });
+    let libraryCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/library?category=movies") {
+        libraryCalls += 1;
+        return libraryCalls === 1
+          ? Promise.reject(new ApiNetworkError(undefined, {
+            cause: new TypeError("NetworkError when attempting to fetch resource"),
+          }))
+          : Promise.resolve(payload);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library?category=movies"]}>
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByText("Reconnecting…")).toBeInTheDocument();
+    expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
+    expect(libraryCalls).toBe(2);
+  });
+
+  test.each([401, 403])("HTTP %s is not retried by connectivity recovery", async (statusCode) => {
+    let libraryCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/library?category=movies") {
+        libraryCalls += 1;
+        const error = new Error("HTTP access failure");
+        error.status = statusCode;
+        return Promise.reject(error);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library?category=movies"]}>
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(libraryCalls).toBe(1));
+    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: { generation: 33 },
+    }));
+    await act(async () => Promise.resolve());
+    expect(libraryCalls).toBe(1);
   });
 });
 

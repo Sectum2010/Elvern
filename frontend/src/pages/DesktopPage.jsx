@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiRequest } from "../lib/api";
+import {
+  apiRequest,
+  isAbortError,
+  isTransientNetworkError,
+} from "../lib/api";
 import { getOrCreateDeviceId } from "../lib/device";
 import {
   buildMacTerminalInstallCommand,
@@ -10,6 +14,8 @@ import {
   detectClientPlatform,
   isDesktopClientPlatform,
 } from "../lib/platformDetection";
+import { PAGE_RESUME_EVENT } from "../lib/pageResume.js";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection.js";
 
 
 const IOS_APP_LINKS = {
@@ -474,8 +480,14 @@ export function InstallPage() {
   const [desktopVerifyPending, setDesktopVerifyPending] = useState(false);
   const [desktopVerifyFeedback, setDesktopVerifyFeedback] = useState("");
   const [terminalCommandFeedback, setTerminalCommandFeedback] = useState("");
+  const [reconnecting, setReconnecting] = useState(false);
   const passiveRefreshInFlightRef = useRef(false);
-  const passiveRefreshAtRef = useRef(0);
+  const statusRequestControllerRef = useRef(null);
+  const statusRequestGenerationRef = useRef(0);
+  const statusRef = useRef(null);
+  const verifyPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const lastRecoveryGenerationRef = useRef(0);
   const [mobileAppStatus, setMobileAppStatus] = useState(() => ({
     "ios-vlc": readMobileAppStatus("ios-vlc"),
     "ios-infuse": readMobileAppStatus("ios-infuse"),
@@ -491,24 +503,67 @@ export function InstallPage() {
     if (showLoading) {
       setLoading(true);
     }
-    setError("");
+    const requestGeneration = statusRequestGenerationRef.current + 1;
+    statusRequestGenerationRef.current = requestGeneration;
+    statusRequestControllerRef.current?.abort();
+    const controller = new AbortController();
+    statusRequestControllerRef.current = controller;
     try {
       const params = new URLSearchParams({ platform });
       if (deviceId) {
         params.set("device_id", deviceId);
       }
-      const payload = await apiRequest(`/api/desktop-helper/status?${params.toString()}`);
+      const payload = await apiRequest(`/api/desktop-helper/status?${params.toString()}`, {
+        signal: controller.signal,
+        abortOnPageHide: true,
+      });
+      if (!mountedRef.current || statusRequestGenerationRef.current !== requestGeneration) {
+        return null;
+      }
       setStatus(payload);
+      setError("");
+      setReconnecting(false);
       return payload;
     } catch (requestError) {
-      setError(requestError.message || "Failed to load install status");
+      if (
+        isAbortError(requestError)
+        || !mountedRef.current
+        || statusRequestGenerationRef.current !== requestGeneration
+      ) {
+        return null;
+      }
+      if (isTransientNetworkError(requestError)) {
+        setReconnecting(true);
+        setError((current) => (statusRef.current ? current : "Elvern could not load Helper status."));
+      } else {
+        setError(requestError.message || "Failed to load install status");
+      }
       return null;
     } finally {
-      if (showLoading) {
+      if (
+        statusRequestControllerRef.current === controller
+        && statusRequestGenerationRef.current === requestGeneration
+      ) {
+        statusRequestControllerRef.current = null;
+      }
+      if (mountedRef.current && statusRequestGenerationRef.current === requestGeneration) {
         setLoading(false);
       }
     }
   }, [deviceId, isDesktop, platform]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      statusRequestGenerationRef.current += 1;
+      statusRequestControllerRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     if (!isDesktop) {
@@ -536,15 +591,13 @@ export function InstallPage() {
     }
 
     const refreshStatus = async () => {
-      const now = Date.now();
       if (
         document.visibilityState === "hidden"
         || passiveRefreshInFlightRef.current
-        || now - passiveRefreshAtRef.current < 500
+        || verifyPendingRef.current
       ) {
         return;
       }
-      passiveRefreshAtRef.current = now;
       passiveRefreshInFlightRef.current = true;
       try {
         await loadDesktopStatus({ showLoading: false });
@@ -552,15 +605,31 @@ export function InstallPage() {
         passiveRefreshInFlightRef.current = false;
       }
     };
-    window.addEventListener("focus", refreshStatus);
-    window.addEventListener("pageshow", refreshStatus);
-    document.addEventListener("visibilitychange", refreshStatus);
+    window.addEventListener(PAGE_RESUME_EVENT, refreshStatus);
     return () => {
-      window.removeEventListener("focus", refreshStatus);
-      window.removeEventListener("pageshow", refreshStatus);
-      document.removeEventListener("visibilitychange", refreshStatus);
+      window.removeEventListener(PAGE_RESUME_EVENT, refreshStatus);
     };
   }, [isDesktop, loadDesktopStatus]);
+
+  useEffect(() => {
+    function handleConnectivityRecovered(event) {
+      const generation = Number(event.detail?.generation || 0);
+      if (
+        !isDesktop
+        || !reconnecting
+        || verifyPendingRef.current
+        || generation <= lastRecoveryGenerationRef.current
+      ) {
+        return;
+      }
+      lastRecoveryGenerationRef.current = generation;
+      void loadDesktopStatus({ showLoading: false });
+    }
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    return () => {
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    };
+  }, [isDesktop, loadDesktopStatus, reconnecting]);
 
   const requiredSection = useMemo(() => buildRequiredSection(platform, status), [platform, status]);
   const showRequiredSection = !requiredSection.empty;
@@ -588,7 +657,7 @@ export function InstallPage() {
 
   function handleRecommendedAppAction(app) {
     if (!app.mobile_status_key && !isDesktop) {
-      window.location.href = app.primary_url;
+      window.open(app.primary_url, "_blank", "noopener,noreferrer");
       return;
     }
     if (platform === "iphone" || platform === "ipad") {
@@ -600,7 +669,7 @@ export function InstallPage() {
       });
       return;
     }
-    window.location.href = app.primary_url;
+    window.open(app.primary_url, "_blank", "noopener,noreferrer");
   }
 
   async function handleDesktopVlcVerify() {
@@ -608,6 +677,9 @@ export function InstallPage() {
       return;
     }
     setDesktopVerifyPending(true);
+    verifyPendingRef.current = true;
+    statusRequestGenerationRef.current += 1;
+    statusRequestControllerRef.current?.abort();
     setError("");
     setDesktopVerifyFeedback("");
     const previousCheckedAt = status?.vlc_detection_checked_at || "";
@@ -662,6 +734,7 @@ export function InstallPage() {
       setError(requestError.message || "Failed to verify VLC");
     } finally {
       setDesktopVerifyPending(false);
+      verifyPendingRef.current = false;
     }
   }
 
@@ -699,7 +772,17 @@ export function InstallPage() {
         </div>
       </div>
 
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? (
+        <div>
+          <p className="form-error">{error}</p>
+          {!status ? (
+            <button className="ghost-button ghost-button--inline" onClick={() => loadDesktopStatus()} type="button">
+              Retry
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {reconnecting ? <p className="page-subnote">Reconnecting…</p> : null}
 
       {showRequiredSection ? (
         <section className="page-section">
@@ -740,7 +823,12 @@ export function InstallPage() {
                 {desktopVerifyPending ? "Checking..." : desktopHelperTestButtonLabel(platform, status)}
               </button>
               {desktopRecommendedApp ? (
-                <a className="ghost-button ghost-button--inline" href={desktopRecommendedApp.primary_url}>
+                <a
+                  className="ghost-button ghost-button--inline"
+                  href={desktopRecommendedApp.primary_url}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
                   Download VLC
                 </a>
               ) : null}
@@ -791,6 +879,16 @@ export function InstallPage() {
               <div className="status-row"><span>Reported architecture</span><strong>{status?.last_seen_helper_arch || "Unknown"}</strong></div>
               <div className="status-row"><span>Package target</span><strong>{requiredSection.recommendedRelease?.package_target || "Unavailable"}</strong></div>
               <div className="status-row"><span>Runtime</span><strong>{status?.runtime_included ? "Included" : "Not reported"}</strong></div>
+              <div className="status-row">
+                <span>Package binding</span>
+                <strong>
+                  {requiredSection.recommendedRelease?.package_binding === "compatible"
+                    ? "Compatible"
+                    : requiredSection.recommendedRelease?.package_binding === "incompatible"
+                      ? "Incompatible"
+                      : "Legacy unverified"}
+                </strong>
+              </div>
               <div className="status-row"><span>Device ID</span><strong>{status?.device_id || deviceId || "Unknown"}</strong></div>
               {status?.notes?.map((note) => <p className="page-subnote" key={note}>{note}</p>)}
             </details>
@@ -848,6 +946,8 @@ export function InstallPage() {
                         <a
                           className="ghost-button ghost-button--inline"
                           href={app.primary_url}
+                          rel="noopener noreferrer"
+                          target="_blank"
                         >
                           App Store
                         </a>
@@ -855,10 +955,21 @@ export function InstallPage() {
                         <a
                           className="ghost-button ghost-button--inline"
                           href={app.primary_url}
+                          rel="noopener noreferrer"
+                          target="_blank"
                         >
                           Download
                         </a>
-                      ) : null}
+                      ) : (
+                        <a
+                          className="ghost-button ghost-button--inline"
+                          href={app.primary_url}
+                          rel="noopener noreferrer"
+                          target="_blank"
+                        >
+                          Google Play
+                        </a>
+                      )}
                     </div>
                     {app.mobile_status_key ? (
                       <p className="page-subnote">

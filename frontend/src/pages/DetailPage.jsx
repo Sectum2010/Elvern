@@ -4,7 +4,11 @@ import { Link, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useProviderAuth } from "../auth/ProviderAuthContext";
 import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
-import { apiRequest } from "../lib/api";
+import {
+  apiRequest,
+  isAbortError,
+  isTransientNetworkError,
+} from "../lib/api";
 import {
   getSessionModeEstimateSeconds,
   isIOSMobileBrowser,
@@ -66,6 +70,7 @@ import {
   buildActivePlaybackConflictPrompt,
   getActivePlaybackWorkerConflict,
 } from "../lib/playbackWorkerOwnership";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 
 
 const SEEK_HEADROOM_SECONDS = 2;
@@ -568,6 +573,7 @@ export function DetailPage() {
     role: user?.role,
   }), [itemId, user?.id, user?.role]);
   const [item, setItem] = useState(() => cachedDetailPreview);
+  const itemRef = useRef(cachedDetailPreview);
   const [progress, setProgress] = useState(null);
   const progressRef = useRef(null);
   const [error, setError] = useState("");
@@ -644,6 +650,10 @@ export function DetailPage() {
   const [globalHiddenActionMessage, setGlobalHiddenActionMessage] = useState("");
   const [globalHiddenActionError, setGlobalHiddenActionError] = useState("");
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
+  const [detailReconnecting, setDetailReconnecting] = useState(false);
+  const detailLoadGenerationRef = useRef(0);
+  const detailSoftRefreshRef = useRef(false);
+  const detailRecoveryGenerationRef = useRef(0);
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
   const [downloadState, setDownloadState] = useState(() => ({ ...INITIAL_DOWNLOAD_STATE }));
   const downloadSamplesRef = useRef([]);
@@ -669,6 +679,10 @@ export function DetailPage() {
     [iosMobile, itemId],
   );
   const isAdmin = user?.role === "admin";
+
+  useEffect(() => {
+    itemRef.current = item;
+  }, [item]);
 
   useLayoutEffect(() => {
     const nextItemId = String(itemId || "");
@@ -1035,12 +1049,15 @@ export function DetailPage() {
 
   async function loadCloudLibrariesHealth({ signal } = {}) {
     try {
-      const payload = await apiRequest("/api/cloud-libraries", { signal });
+      const payload = await apiRequest("/api/cloud-libraries", {
+        signal,
+        abortOnPageHide: true,
+      });
       setCloudLibraries(payload);
       setCloudLibrariesLoaded(true);
       return payload;
     } catch (requestError) {
-      if (requestError?.name === "AbortError") {
+      if (isAbortError(requestError)) {
         return null;
       }
       return null;
@@ -1267,6 +1284,7 @@ export function DetailPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const abortController = new AbortController();
 
     async function loadMediaLibraryReferenceInfo() {
       if (!user) {
@@ -1278,7 +1296,10 @@ export function DetailPage() {
 
       try {
         if (user.role === "admin") {
-          const payload = await apiRequest("/api/admin/media-library-reference");
+          const payload = await apiRequest("/api/admin/media-library-reference", {
+            signal: abortController.signal,
+            abortOnPageHide: true,
+          });
           if (!cancelled) {
             setMediaLibraryReferenceInfo({
               sharedDefault: payload.effective_value || payload.default_value || "Not set",
@@ -1319,6 +1340,7 @@ export function DetailPage() {
     loadMediaLibraryReferenceInfo();
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [user?.id, user?.role, userSettingsQuery.data, userSettingsQuery.error]);
 
@@ -1393,49 +1415,62 @@ export function DetailPage() {
   useEffect(() => {
     let cancelled = false;
     const abortController = new AbortController();
+    const loadGeneration = detailLoadGenerationRef.current + 1;
+    detailLoadGenerationRef.current = loadGeneration;
+    const softRefresh = detailSoftRefreshRef.current;
+    detailSoftRefreshRef.current = false;
+    const isCurrentLoad = () => (
+      !cancelled && detailLoadGenerationRef.current === loadGeneration
+    );
 
     async function loadDetails() {
-      prepareControllerForLoad(itemId);
-      setLoading(true);
-      setItem(cachedDetailPreview);
-      setProgress(null);
-      setError("");
-      setProgressLoadError("");
-      setPlaybackCapabilityError("");
-      if (!iosExternalAppCallback) {
-        resetIosExternalAppState();
+      if (!softRefresh) {
+        prepareControllerForLoad(itemId);
+        setLoading(true);
+        itemRef.current = cachedDetailPreview;
+        setItem(cachedDetailPreview);
+        setProgress(null);
+        setError("");
+        setProgressLoadError("");
+        setPlaybackCapabilityError("");
+        if (!iosExternalAppCallback) {
+          resetIosExternalAppState();
+        }
+        setGlobalHiddenActionMessage("");
+        setGlobalHiddenActionError("");
+        setDesktopPlayback(null);
+        setVlcLaunchPending(false);
+        setVlcLaunchMessage("");
+        setVlcLaunchError("");
+        setBrowserResumeModalOpen(false);
+        setBrowserResumePromptPosition(0);
+        setBrowserStopModalOpen(false);
+        setPlaybackConflictModal(null);
+        setPlaybackConflictPending(false);
+        setInfoModalOpen(false);
+        setDownloadModalOpen(false);
+        setDownloadState({
+          pending: false,
+          receivedBytes: 0,
+          totalBytes: 0,
+          etaSeconds: null,
+          error: "",
+          message: "",
+          sessionToken: "",
+          blocked: false,
+        });
       }
-      setGlobalHiddenActionMessage("");
-      setGlobalHiddenActionError("");
-      setDesktopPlayback(null);
-      setVlcLaunchPending(false);
-      setVlcLaunchMessage("");
-      setVlcLaunchError("");
-      setBrowserResumeModalOpen(false);
-      setBrowserResumePromptPosition(0);
-      setBrowserStopModalOpen(false);
-      setPlaybackConflictModal(null);
-      setPlaybackConflictPending(false);
-      setInfoModalOpen(false);
-      setDownloadModalOpen(false);
-      setDownloadState({
-        pending: false,
-        receivedBytes: 0,
-        totalBytes: 0,
-        etaSeconds: null,
-        error: "",
-        message: "",
-        sessionToken: "",
-        blocked: false,
-      });
       try {
         const itemPayload = await apiRequest(`/api/library/item/${itemId}`, {
           signal: abortController.signal,
+          abortOnPageHide: true,
         });
-        if (cancelled) {
+        if (!isCurrentLoad()) {
           return;
         }
         setItem(itemPayload);
+        setError("");
+        setDetailReconnecting(false);
         markDetailPerformance(DETAIL_PERFORMANCE_MARKS.metadataReceived);
         setLoading(false);
         if (itemPayload.hidden_globally) {
@@ -1449,55 +1484,59 @@ export function DetailPage() {
 
         const progressRequest = apiRequest(`/api/progress/${itemId}`, {
           signal: abortController.signal,
+          abortOnPageHide: true,
         }).then((progressPayload) => {
-          if (!cancelled) {
+          if (isCurrentLoad()) {
             setProgress(progressPayload);
             markDetailPerformance(DETAIL_PERFORMANCE_MARKS.progressReceived);
           }
         }).catch((progressError) => {
-          if (!cancelled && progressError?.name !== "AbortError") {
+          if (isCurrentLoad() && !isAbortError(progressError)) {
             setProgressLoadError(progressError.message || "Progress is temporarily unavailable.");
           }
         });
 
-        const playbackRequest = iosMobile
+        const playbackRequest = softRefresh || iosMobile
           ? Promise.resolve()
           : apiRequest(`/api/playback/${itemId}`, {
             signal: abortController.signal,
+            abortOnPageHide: true,
           }).then((playbackPayload) => {
-            if (!cancelled) {
+            if (isCurrentLoad()) {
               syncPlaybackState(playbackPayload);
               markDetailPerformance(DETAIL_PERFORMANCE_MARKS.playbackCapabilityReceived);
             }
           }).catch((requestError) => {
-            if (!cancelled && requestError?.name !== "AbortError") {
+            if (isCurrentLoad() && !isAbortError(requestError)) {
               setPlaybackCapabilityError(requestError.message || "Browser playback is temporarily unavailable.");
             }
           });
 
-        const desktopRequest = desktopPlatform
+        const desktopRequest = !softRefresh && desktopPlatform
           ? apiRequest(
             `/api/desktop-playback/${itemId}?platform=${desktopPlatform}&same_host=${localDevLoopback ? "1" : "0"}`,
-            { signal: abortController.signal },
+            { signal: abortController.signal, abortOnPageHide: true },
           ).then((desktopPayload) => {
-            if (!cancelled) {
+            if (isCurrentLoad()) {
               setDesktopPlayback(desktopPayload);
               markDetailPerformance(DETAIL_PERFORMANCE_MARKS.desktopCapabilityReceived);
             }
           }).catch((desktopError) => {
-            if (!cancelled && desktopError?.name !== "AbortError") {
+            if (isCurrentLoad() && !isAbortError(desktopError)) {
               setVlcLaunchError(desktopError.message || "Failed to resolve desktop VLC playback");
             }
           })
           : Promise.resolve();
 
-        const activeSessionRequest = Promise.resolve()
-          .then(() => restoreActiveBrowserPlaybackSession())
-          .catch((restoreError) => {
-            if (!cancelled && restoreError?.name !== "AbortError") {
-              setPlaybackCapabilityError(restoreError.message || "Active playback restore is temporarily unavailable.");
-            }
-          });
+        const activeSessionRequest = softRefresh
+          ? Promise.resolve()
+          : Promise.resolve()
+            .then(() => restoreActiveBrowserPlaybackSession())
+            .catch((restoreError) => {
+              if (isCurrentLoad() && !isAbortError(restoreError)) {
+                setPlaybackCapabilityError(restoreError.message || "Active playback restore is temporarily unavailable.");
+              }
+            });
 
         await Promise.allSettled([
           progressRequest,
@@ -1505,15 +1544,22 @@ export function DetailPage() {
           desktopRequest,
           activeSessionRequest,
         ]);
-        if (!cancelled) {
+        if (isCurrentLoad()) {
           markDetailPerformance(DETAIL_PERFORMANCE_MARKS.interactiveReady);
         }
       } catch (requestError) {
-        if (!cancelled && requestError?.name !== "AbortError") {
-          setError(requestError.message || "Failed to load media item");
+        if (isCurrentLoad() && !isAbortError(requestError)) {
+          if (isTransientNetworkError(requestError)) {
+            setDetailReconnecting(true);
+            if (!itemRef.current) {
+              setError("Elvern could not load this media item.");
+            }
+          } else {
+            setError(requestError.message || "Failed to load media item");
+          }
         }
       } finally {
-        if (!cancelled) {
+        if (isCurrentLoad()) {
           setLoading(false);
         }
       }
@@ -1523,10 +1569,28 @@ export function DetailPage() {
     return () => {
       cancelled = true;
       abortController.abort();
-      clearPlaybackResources();
-      resetMobilePlaybackState();
+      if (!detailSoftRefreshRef.current) {
+        clearPlaybackResources();
+        resetMobilePlaybackState();
+      }
     };
   }, [cachedDetailPreview, desktopPlatform, iosExternalAppCallback, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
+
+  useEffect(() => {
+    function handleConnectivityRecovered(event) {
+      const generation = Number(event.detail?.generation || 0);
+      if (!detailReconnecting || generation <= detailRecoveryGenerationRef.current) {
+        return;
+      }
+      detailRecoveryGenerationRef.current = generation;
+      detailSoftRefreshRef.current = true;
+      setDetailRefreshKey((current) => current + 1);
+    }
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    return () => {
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    };
+  }, [detailReconnecting]);
 
   useEffect(() => {
     if (!item?.id) {
@@ -1548,13 +1612,17 @@ export function DetailPage() {
     }
     trackScanRequestKeyRef.current = requestKey;
     let cancelled = false;
+    const abortController = new AbortController();
     async function requestTrackScan() {
       try {
         await apiRequest(`/api/library/item/${item.id}/track-scan`, { method: "POST" });
         if (cancelled) {
           return;
         }
-        const refreshedItem = await apiRequest(`/api/library/item/${item.id}`);
+        const refreshedItem = await apiRequest(`/api/library/item/${item.id}`, {
+          signal: abortController.signal,
+          abortOnPageHide: true,
+        });
         if (!cancelled) {
           setItem(refreshedItem);
           void invalidateLibraryQueries();
@@ -1566,6 +1634,7 @@ export function DetailPage() {
     requestTrackScan();
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [item]);
 
@@ -2861,6 +2930,19 @@ export function DetailPage() {
           <div aria-hidden="true" className="detail-progressive-skeleton detail-progressive-skeleton--progress" />
         </div>
         {error ? <p className="form-error">{error}</p> : null}
+        {detailReconnecting ? <p className="page-subnote">Reconnecting…</p> : null}
+        {!loading && detailReconnecting ? (
+          <button
+            className="ghost-button ghost-button--inline"
+            onClick={() => {
+              detailSoftRefreshRef.current = true;
+              setDetailRefreshKey((current) => current + 1);
+            }}
+            type="button"
+          >
+            Retry
+          </button>
+        ) : null}
       </section>
     );
   }
@@ -3371,6 +3453,7 @@ export function DetailPage() {
 	  return (
 	    <section className="page-section page-section--detail">
       {error ? <p className="form-error">{error}</p> : null}
+      {detailReconnecting ? <p className="page-subnote">Reconnecting…</p> : null}
       <ProviderReconnectModal
         allowReconnect={providerReconnectModal.allowReconnect}
         errorMessage={providerReconnectModal.errorMessage}

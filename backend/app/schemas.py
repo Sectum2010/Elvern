@@ -1401,6 +1401,11 @@ class DesktopHelperReleaseResponse(BaseModel):
     sha256: str
     published_at: str
     installer_manifest_sha256: str | None = None
+    installer_tree_manifest_path: str | None = None
+    installer_tree_manifest_sha256: str | None = None
+    package_binding: Literal["compatible", "incompatible", "legacy_unverified", "unverified"] = (
+        "legacy_unverified"
+    )
     dotnet_runtime_required: str | None = None
     download_url: str
     deployment_mode: Literal["self_contained", "framework_dependent"] = "framework_dependent"

@@ -1,13 +1,18 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-import { apiRequest } from "../lib/api";
+import { ApiNetworkError, apiRequest } from "../lib/api";
+import { PAGE_RESUME_EVENT } from "../lib/pageResume";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 import { InstallPage } from "./DesktopPage.jsx";
 
 
 const platformState = vi.hoisted(() => ({ value: "mac" }));
 
-vi.mock("../lib/api", () => ({ apiRequest: vi.fn() }));
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...(await importOriginal()),
+  apiRequest: vi.fn(),
+}));
 vi.mock("../lib/device", () => ({ getOrCreateDeviceId: () => "device-test" }));
 vi.mock("../lib/platformDetection", async (importOriginal) => ({
   ...(await importOriginal()),
@@ -28,6 +33,9 @@ function release(overrides = {}) {
     size_bytes: 1234,
     sha256: "a".repeat(64),
     installer_manifest_sha256: "b".repeat(64),
+    installer_tree_manifest_path: ".elvern/tree-manifest.tsv",
+    installer_tree_manifest_sha256: "c".repeat(64),
+    package_binding: "compatible",
     published_at: "2026-07-22T00:00:00Z",
     download_url: "/api/desktop-helper/releases/1/download",
     deployment_mode: "self_contained",
@@ -75,6 +83,41 @@ describe("desktop helper install page", () => {
     expect(screen.getByText(/Runtime included/i)).toBeInTheDocument();
     expect(screen.queryByText(/\.NET 8 Required/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/More options/i)).not.toBeInTheDocument();
+  });
+
+  test("third-party VLC opens in a new tab while the Helper ZIP remains a same-page download", async () => {
+    render(<InstallPage />);
+
+    const helperDownload = await screen.findByRole("link", { name: "Download for macOS" });
+    const vlcDownload = screen.getByRole("link", { name: "Download VLC" });
+
+    expect(helperDownload).not.toHaveAttribute("target");
+    expect(helperDownload).toHaveAttribute(
+      "href",
+      "/api/desktop-helper/releases/1/download",
+    );
+    expect(vlcDownload).toHaveAttribute("target", "_blank");
+    expect(vlcDownload).toHaveAttribute("rel", expect.stringContaining("noopener"));
+    expect(vlcDownload).toHaveAttribute("href", expect.stringMatching(/^https:\/\//));
+  });
+
+  test.each([
+    ["iphone", "App Store"],
+    ["ipad", "App Store"],
+    ["android", "Google Play"],
+  ])("%s third-party store links open independently from Elvern", (platform, linkName) => {
+    platformState.value = platform;
+    render(<InstallPage />);
+
+    const storeLinks = screen.getAllByRole("link", { name: linkName });
+    expect(storeLinks.length).toBeGreaterThan(0);
+    storeLinks.forEach((storeLink) => {
+      expect(storeLink).toHaveAttribute("target", "_blank");
+      expect(storeLink).toHaveAttribute("rel", expect.stringContaining("noopener"));
+      expect(storeLink).toHaveAttribute("rel", expect.stringContaining("noreferrer"));
+      expect(storeLink).toHaveAttribute("href", expect.stringMatching(/^https:\/\//));
+    });
+    expect(apiRequest).not.toHaveBeenCalled();
   });
 
   test("remote Linux shows one universal helper while same-host Linux hides it", async () => {
@@ -175,11 +218,61 @@ describe("desktop helper install page", () => {
     render(<InstallPage />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
-    fireEvent.focus(window);
-    fireEvent(window, new Event("pageshow"));
-    fireEvent(document, new Event("visibilitychange"));
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(2));
 
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+  });
+
+  test("a stale status response cannot overwrite a newer resume refresh", async () => {
+    let resolveInitial;
+    let resolveResume;
+    apiRequest
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveInitial = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveResume = resolve;
+      }));
+    render(<InstallPage />);
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(2));
+    resolveResume(status({ state: "up_to_date" }));
+    resolveInitial(status({ state: "release_unavailable", latest_releases: [] }));
+
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByText("Installer unavailable")).not.toBeInTheDocument();
+  });
+
+  test("a Firefox transport error is shown with stable copy, not the raw browser message", async () => {
+    apiRequest.mockRejectedValueOnce(new ApiNetworkError(undefined, {
+      cause: new TypeError("NetworkError when attempting to fetch resource"),
+    }));
+    render(<InstallPage />);
+
+    expect(await screen.findByText("Elvern could not load Helper status.")).toBeInTheDocument();
+    expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  test("confirmed recovery retries a transient status failure once per generation", async () => {
+    apiRequest
+      .mockRejectedValueOnce(new ApiNetworkError())
+      .mockResolvedValueOnce(status({ state: "up_to_date" }));
+    render(<InstallPage />);
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+
+    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: { generation: 9 },
+    });
+    fireEvent(window, recoveryEvent);
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+
+    fireEvent(window, recoveryEvent);
     await new Promise((resolve) => window.setTimeout(resolve, 20));
     expect(apiRequest).toHaveBeenCalledTimes(2);
   });

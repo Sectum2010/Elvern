@@ -47,6 +47,9 @@ function v2Summary(source = "all", state = {}) {
   const visible = sourceItems.map((entry) => ({
     ...entry,
     title: `${entry.title}${state.titleSuffix || ""}`,
+    poster_url: state.posterRecoveryEnabled
+      ? `/api/posters/${entry.id}?cache_token=${opaqueToken(entry.id, 9)}`
+      : entry.poster_url,
     ...(entry.id === 1 ? {
       progress_seconds: Number(state.progressSeconds || 0),
       progress_duration_seconds: Number(state.progressDuration || 7200),
@@ -106,6 +109,26 @@ function v1SearchPayload(query) {
 }
 
 
+function desktopHelperStatus(state = {}) {
+  return {
+    device_id: "phase7-desktop",
+    platform: "linux",
+    helper_required: false,
+    state: "helper_not_required",
+    same_host: true,
+    same_host_detection_source: "loopback_client_ip",
+    last_seen_helper_version: null,
+    vlc_detection_state: "installed",
+    vlc_detection_path: "/usr/bin/vlc",
+    vlc_detection_checked_at: "2026-07-22T00:00:00Z",
+    runtime_included: true,
+    latest_releases: [],
+    notes: [],
+    ...(state.desktopHelperStatus || {}),
+  };
+}
+
+
 async function installFixture(page, requests, state = {}) {
   for (const probe of PUBLIC_PROBES) {
     await page.route(probe, (route) => route.fulfill({ status: 204, body: "" }));
@@ -123,6 +146,24 @@ async function installFixture(page, requests, state = {}) {
     const url = new URL(route.request().url());
     const path = url.pathname.replace(/^\/[^/]+(?=\/api\/)/, "");
     requests.push(`${path}${url.search}`);
+    if (path.startsWith("/api/posters/")) {
+      state.posterRequestCounts ||= {};
+      state.posterRequestCounts[path] = Number(state.posterRequestCounts[path] || 0) + 1;
+      if (
+        state.posterRecoveryEnabled
+        && path === "/api/posters/1"
+        && state.posterRequestCounts[path] === 1
+      ) {
+        await route.fulfill({ status: 503, body: "" });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "image/svg+xml",
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="15"><rect width="10" height="15" fill="#222"/></svg>',
+      });
+      return;
+    }
     let payload = {};
     let status = 200;
     if (path === "/api/auth/me") {
@@ -175,6 +216,17 @@ async function installFixture(page, requests, state = {}) {
             }],
           }
         : { detail: state.progressStateErrorDetail || "Not found" };
+    } else if (path === "/api/desktop-helper/status") {
+      state.desktopStatusRequestCount = Number(state.desktopStatusRequestCount || 0) + 1;
+      const delay = Number(
+        state.desktopStatusRequestDelays?.[state.desktopStatusRequestCount - 1]
+        || state.desktopStatusDelayMs
+        || 0,
+      );
+      if (delay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      payload = desktopHelperStatus(state);
     } else if (path === "/api/progress/1" && route.request().method() === "POST") {
       const progress = route.request().postDataJSON();
       state.progressSeconds = Number(progress.position_seconds || 0);
@@ -599,13 +651,23 @@ test("collapsing an uncommitted Floating draft immediately unlocks Static search
   const floatingSearch = page.locator(".floating-library-search input");
   await floatingSearch.fill("uncommitted floating value");
   await expect(staticSearch).toBeDisabled();
-  const requestCount = requests.length;
+  const summaryRequestCount = requests.filter(
+    (request) => request.startsWith("/api/library/v2/summary"),
+  ).length;
+  const searchRequestCount = requests.filter(
+    (request) => request.startsWith("/api/library/search"),
+  ).length;
 
   await page.getByRole("button", { name: "Collapse search" }).click();
 
   await expect(staticSearch).toBeEnabled();
   await expect(staticSearch).toHaveValue("");
-  expect(requests.length).toBe(requestCount);
+  expect(requests.filter(
+    (request) => request.startsWith("/api/library/v2/summary"),
+  )).toHaveLength(summaryRequestCount);
+  expect(requests.filter(
+    (request) => request.startsWith("/api/library/search"),
+  )).toHaveLength(searchRequestCount);
   await staticSearch.fill("Beta");
   await page.waitForTimeout(500);
   expect(requests.filter((request) => request.includes("uncommitted"))).toHaveLength(0);
@@ -664,4 +726,106 @@ test("offline document uses the immediate explicit-offline Oops contract", async
     "It looks like you're offline. Please check your connection and try again.",
   );
   await expect(page.locator("[data-connection-retry]")).toBeVisible();
+});
+
+
+test("third-party VLC stays in a separate tab while the Elvern route remains healthy", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  const requests = [];
+  const state = { desktopStatusDelayMs: 400 };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await context.route("https://www.videolan.org/**", (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html",
+    body: "<!doctype html><title>Mock VLC download</title><p>Mock VLC download</p>",
+  }));
+
+  await page.goto("install");
+  const originalUrl = `${baseURL}install`;
+  await expect(page).toHaveURL(originalUrl);
+  const vlcLink = page.getByRole("link", { name: "Download VLC" });
+  await expect(vlcLink).toHaveAttribute("target", "_blank");
+  await expect(vlcLink).toHaveAttribute("rel", /noopener/);
+  await expect(vlcLink).toHaveAttribute("rel", /noreferrer/);
+
+  const popupPromise = context.waitForEvent("page");
+  await vlcLink.click();
+  const popup = await popupPromise;
+  await popup.waitForLoadState("domcontentloaded");
+  await expect(popup).toHaveTitle("Mock VLC download");
+  await expect(page).toHaveURL(originalUrl);
+  await popup.close();
+
+  await expect(page.getByText("Not required on this Elvern host")).toBeVisible();
+  await expect(page.getByText(/NetworkError when attempting to fetch resource/i)).toHaveCount(0);
+  await page.goto("library");
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+  await page.locator(".media-card__poster-link").first().click();
+  await expect(page).toHaveURL(`${baseURL}library/1`);
+  await expect(page.getByRole("heading", { name: "Phase Seven Alpha" })).toBeVisible();
+  await expect(page.getByText(/NetworkError when attempting to fetch resource/i)).toHaveCount(0);
+});
+
+
+test("pagehide abort followed by persisted pageshow cannot let stale Helper status overwrite recovery", async ({
+  page,
+}) => {
+  const requests = [];
+  const state = {
+    desktopStatusRequestDelays: [2_000, 0],
+    desktopHelperStatus: {
+      state: "up_to_date",
+      helper_required: true,
+      same_host: false,
+      same_host_detection_source: "client_ip_not_local",
+      vlc_detection_state: "installed",
+    },
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await page.goto("install");
+  await expect.poll(() => state.desktopStatusRequestCount || 0).toBe(1);
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+
+  await expect.poll(() => state.desktopStatusRequestCount || 0).toBe(2);
+  await expect(page.getByText("Ready")).toBeVisible();
+  await page.waitForTimeout(2_100);
+  await expect(page.getByText("Ready")).toBeVisible();
+  await expect(page.getByText(/NetworkError when attempting to fetch resource/i)).toHaveCount(0);
+  expect(requests.filter((request) => request.startsWith("/api/desktop-helper/status"))).toHaveLength(2);
+});
+
+
+test("a poster failed during an outage retries once after confirmed recovery", async ({ page }) => {
+  const requests = [];
+  const state = { posterRecoveryEnabled: true };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await page.goto("library");
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+  await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent("elvern:connectivity-failure", {
+      detail: { classification: "transport" },
+    }));
+    window.dispatchEvent(new CustomEvent("elvern:connectivity-recovered", {
+      detail: { generation: 1, previousClassification: "service_unreachable" },
+    }));
+  });
+
+  await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(2);
+  await expect(page.locator(".media-card__poster-image--loaded").first()).toBeVisible();
+  await page.waitForTimeout(700);
+  expect(state.posterRequestCounts["/api/posters/1"]).toBe(2);
 });

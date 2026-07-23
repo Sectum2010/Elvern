@@ -1177,6 +1177,26 @@ function createScheduler() {
     queueRecompute();
   }
 
+  function retryCard(id) {
+    const card = cards.get(id);
+    if (!card) {
+      return;
+    }
+    detachCard(card);
+    card.loadedBefore = false;
+    if (card.posterUrl) {
+      loadedPosterUrls.delete(card.posterUrl);
+    }
+    commitCardSnapshot(card, {
+      mode: POSTER_MODE_DEFER,
+      isMounted: card.isMounted,
+      inFlight: card.inFlight,
+      loadedBefore: false,
+    });
+    refreshCandidateMembership(card);
+    queueRecompute();
+  }
+
   function getSnapshot(id) {
     return getCardSnapshot(cards.get(id));
   }
@@ -1222,6 +1242,7 @@ function createScheduler() {
     getSnapshot,
     markCardLoaded,
     markCardError,
+    retryCard,
   };
 }
 
@@ -1281,4 +1302,12 @@ export function markSmartPosterCardError(id) {
     return;
   }
   scheduler.markCardError(id);
+}
+
+export function retrySmartPosterCard(id) {
+  const scheduler = getScheduler();
+  if (!scheduler) {
+    return;
+  }
+  scheduler.retryCard(id);
 }

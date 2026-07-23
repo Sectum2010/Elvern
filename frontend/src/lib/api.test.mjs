@@ -2,6 +2,7 @@ import { afterEach, test, vi } from "vitest";
 import assert from "node:assert/strict";
 
 import {
+  ApiNetworkError,
   apiRequest,
   AUTH_REVALIDATION_REQUESTED_EVENT,
   extractApiErrorMessage,
@@ -9,6 +10,7 @@ import {
   MAINTENANCE_MODE_BLOCKED_EVENT,
   MAINTENANCE_MODE_MESSAGE,
 } from "./api.js";
+import { resetPageLifecycleForTests } from "./pageLifecycle.js";
 import {
   buildLibraryQueryKey,
   buildLibraryShadowV2QueryKey,
@@ -22,6 +24,7 @@ import {
 } from "./startupConnection.js";
 
 afterEach(() => {
+  resetPageLifecycleForTests();
   queryClient.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -200,21 +203,76 @@ test("auth verification 403 does not recursively request another auth revalidati
 
 test("network failure requests startup connection recovery but AbortError does not", async () => {
   const events = [];
-  const handleFailure = (event) => events.push(event.detail?.path);
+  const handleFailure = (event) => events.push(event.detail?.classification);
   window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
   try {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValueOnce(new TypeError("offline")));
     await assert.rejects(() => apiRequest("/api/auth/me"));
-    assert.deepEqual(events, ["/api/auth/me"]);
+    assert.deepEqual(events, ["transport"]);
 
     const abortError = new Error("cancelled");
     abortError.name = "AbortError";
     globalThis.fetch.mockRejectedValueOnce(abortError);
     await assert.rejects(() => apiRequest("/api/library"));
-    assert.deepEqual(events, ["/api/auth/me"]);
+    assert.deepEqual(events, ["transport"]);
   } finally {
     window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
   }
+});
+
+test("pagehide abort normalizes Firefox NetworkError without reporting connectivity failure", async () => {
+  const events = [];
+  const handleFailure = () => events.push("failure");
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  vi.stubGlobal("fetch", vi.fn((_path, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener("abort", () => {
+      reject(new TypeError("NetworkError when attempting to fetch resource"));
+    }, { once: true });
+  })));
+
+  try {
+    const request = apiRequest("/api/library", { abortOnPageHide: true });
+    window.dispatchEvent(new Event("pagehide"));
+    await assert.rejects(request, (error) => {
+      assert.equal(error.name, "AbortError");
+      assert.doesNotMatch(error.message, /NetworkError/);
+      return true;
+    });
+    assert.deepEqual(events, []);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  }
+});
+
+test("real Firefox-style NetworkError becomes a stable ApiNetworkError", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockRejectedValue(new TypeError("NetworkError when attempting to fetch resource")),
+  );
+
+  await assert.rejects(() => apiRequest("/api/library"), (error) => {
+    assert.equal(error instanceof ApiNetworkError, true);
+    assert.equal(error.name, "ApiNetworkError");
+    assert.equal(error.category, "transport");
+    assert.doesNotMatch(error.message, /NetworkError/);
+    return true;
+  });
+});
+
+test("apiRequest forwards the allowed cache option without spreading unknown options", async () => {
+  const fetchMock = vi.fn(async () => new Response(
+    JSON.stringify({ ok: true }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  ));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await apiRequest("/health", {
+    cache: "no-store",
+    unknownPrivateOption: "must-not-leak",
+  });
+
+  assert.equal(fetchMock.mock.calls[0][1].cache, "no-store");
+  assert.equal("unknownPrivateOption" in fetchMock.mock.calls[0][1], false);
 });
 
 test("an HTTP 401 proves the application responded instead of reporting a connection failure", async () => {

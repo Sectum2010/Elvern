@@ -3,7 +3,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { apiRequest } from "../lib/api";
+import { ApiNetworkError, apiRequest } from "../lib/api";
 import {
   readLibraryReturnTarget,
   rememberLibraryReturnTarget,
@@ -11,6 +11,7 @@ import {
 import { DetailPage, iosExternalAppNavigator } from "./DetailPage";
 import { queryClient } from "../lib/queryClient";
 import { buildLibraryV2QueryKey } from "../lib/libraryQueries";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 
 
 const mockAuthState = vi.hoisted(() => ({
@@ -66,7 +67,8 @@ vi.mock("../auth/ProviderAuthContext", () => ({
   }),
 }));
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...(await importOriginal()),
   apiRequest: vi.fn(),
 }));
 
@@ -437,6 +439,138 @@ describe("DetailPage source metadata privacy", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Authoritative Movie" })).toBeInTheDocument();
   });
 
+  test("keeps a cached preview through a transport failure and retries once on recovery", async () => {
+    queryClient.setQueryData(buildLibraryV2QueryKey({
+      userId: 2,
+      role: "standard_user",
+      category: "movies",
+      source: "all",
+      quality: "all",
+      sort: "smart",
+    }), {
+      schema_version: "library-summary-v2",
+      items_by_id: {
+        "42": {
+          id: 42,
+          title: "Cached Preview Movie",
+          year: 2025,
+          source_kind: "local",
+        },
+      },
+    });
+    let itemCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        itemCalls += 1;
+        return itemCalls === 1
+          ? Promise.reject(new ApiNetworkError(undefined, {
+            cause: new TypeError("NetworkError when attempting to fetch resource"),
+          }))
+          : Promise.resolve(detailItem({ title: "Recovered Movie", parsed_title: null }));
+      }
+      if (requestPath === "/api/progress/42") {
+        return Promise.resolve({
+          position_seconds: 0,
+          duration_seconds: 1200,
+          completed: false,
+        });
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { level: 1, name: "Cached Preview Movie" })).toBeInTheDocument();
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+    expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
+
+    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: { generation: 21 },
+    });
+    fireEvent(window, recoveryEvent);
+    expect(await screen.findByRole("heading", { level: 1, name: "Recovered Movie" })).toBeInTheDocument();
+    expect(itemCalls).toBe(2);
+
+    fireEvent(window, recoveryEvent);
+    await act(async () => Promise.resolve());
+    expect(itemCalls).toBe(2);
+  });
+
+  test("initial detail transport failure exposes a stable manual retry", async () => {
+    let itemCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        itemCalls += 1;
+        return itemCalls === 1
+          ? Promise.reject(new ApiNetworkError())
+          : Promise.resolve(detailItem());
+      }
+      if (requestPath === "/api/progress/42") {
+        return Promise.resolve({
+          position_seconds: 0,
+          duration_seconds: 1200,
+          completed: false,
+        });
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByText("Reconnecting…")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Privacy Movie" })).toBeInTheDocument();
+    expect(itemCalls).toBe(2);
+  });
+
+  test.each([403, 404])("HTTP %s metadata failure is not retried after connectivity recovery", async (statusCode) => {
+    let itemCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        itemCalls += 1;
+        const error = new Error("Detail is unavailable");
+        error.status = statusCode;
+        return Promise.reject(error);
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Detail is unavailable")).toBeInTheDocument();
+    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: { generation: 42 },
+    }));
+    await act(async () => Promise.resolve());
+    expect(itemCalls).toBe(1);
+  });
+
   test("aborts the previous metadata request when the item changes", async () => {
     const itemSignals = [];
     apiRequest.mockImplementation((requestPath, options = {}) => {
@@ -575,7 +709,10 @@ describe("DetailPage source metadata privacy", () => {
 
     expect(screen.getByText("Source file")).toBeInTheDocument();
     expect(screen.getByText("Privacy.Movie.2026.Source.Release.mkv")).toBeInTheDocument();
-    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith("/api/admin/media-library-reference"));
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/admin/media-library-reference",
+      expect.objectContaining({ abortOnPageHide: true }),
+    ));
   });
 
   test("Infuse callback restores fallback URL into React state and clears sessionStorage", async () => {

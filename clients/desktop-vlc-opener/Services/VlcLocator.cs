@@ -34,7 +34,7 @@ internal static class VlcLocator
         }
         if (!string.IsNullOrWhiteSpace(fromEnv))
         {
-            checkedLocations.Add($"ELVERN_VLC_PATH={fromEnv}");
+            checkedLocations.Add("ELVERN_VLC_PATH");
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -74,15 +74,15 @@ internal static class VlcLocator
             var linuxResult = FindLinuxVlc(
                 fromEnv,
                 Environment.GetEnvironmentVariable("PATH"),
-                candidate =>
-                {
-                    checkedLocations.Add(candidate);
-                    return IsExecutableFile(candidate);
-                });
+                IsExecutableFile);
             if (!string.IsNullOrWhiteSpace(linuxResult))
             {
                 return linuxResult;
             }
+            checkedLocations.Add("PATH/vlc");
+            checkedLocations.Add("/usr/bin/vlc");
+            checkedLocations.Add("/usr/local/bin/vlc");
+            checkedLocations.Add("/snap/bin/vlc");
         }
 
         throw new InvalidOperationException(

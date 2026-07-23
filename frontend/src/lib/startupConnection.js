@@ -22,6 +22,7 @@ export const STARTUP_SHELL_REVEAL_DELAY_MS = 400;
 export const NO_INTERNET_REAPPEAR_MS = 10_000;
 export const STARTUP_CONNECTIVITY_FAILURE_EVENT = "elvern:connectivity-failure";
 export const STARTUP_APPLICATION_READY_EVENT = "elvern:application-response";
+export const CONNECTIVITY_RECOVERED_EVENT = "elvern:connectivity-recovered";
 export const STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY = CONNECTION_RUNTIME_CONTRACT.manualServiceRecoveryStorageKey;
 export const FRONTEND_HEALTH_PATH = "/_elvern/frontend-health";
 export const BACKEND_HEALTH_PATH = "/health";
@@ -153,6 +154,8 @@ export function createStartupConnectionController({
   let outageGeneration = 1;
   let oopsLatchedGeneration = 0;
   let outageActive = true;
+  let runtimeOutageGeneration = 0;
+  let recoveredOutageGeneration = 0;
   let browserOfflineEvidenceGeneration = 0;
   let initialProbeCompleted = false;
   let outageStartedAt = Number.isFinite(initialOutageStartedAt) && initialOutageStartedAt > 0
@@ -249,6 +252,9 @@ export function createStartupConnectionController({
     if (outageActive) return;
     outageActive = true;
     outageGeneration += 1;
+    if (runtimeReady) {
+      runtimeOutageGeneration = outageGeneration;
+    }
     outageStartedAt = Date.now();
     cancelConfirmationTimers();
     emit({
@@ -269,6 +275,7 @@ export function createStartupConnectionController({
     ) {
       return;
     }
+    const recoveredGeneration = outageGeneration;
     outageActive = false;
     oopsLatchedGeneration = 0;
     clearUnreachableTimer();
@@ -280,6 +287,19 @@ export function createStartupConnectionController({
       oopsLatchedGeneration: 0,
       oopsEvidenceReason: null,
     });
+    if (
+      runtimeOutageGeneration === recoveredGeneration
+      && recoveredOutageGeneration !== recoveredGeneration
+      && typeof windowObject?.dispatchEvent === "function"
+    ) {
+      recoveredOutageGeneration = recoveredGeneration;
+      windowObject.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+        detail: {
+          generation: recoveredGeneration,
+          previousClassification: "service_unreachable",
+        },
+      }));
+    }
   }
 
   function latchOops({ classification = snapshot.classification, evidenceReason } = {}) {

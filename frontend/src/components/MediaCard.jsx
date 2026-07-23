@@ -14,9 +14,15 @@ import {
   markSmartPosterCardLoaded,
   POSTER_MODE_ATTACH,
   registerSmartPosterCard,
+  retrySmartPosterCard,
   subscribeSmartPosterCard,
   unregisterSmartPosterCard,
 } from "../lib/smartPosterLoading";
+import {
+  getPosterRecoveryCandidate,
+  POSTER_RECOVERY_COOLDOWN_MS,
+  subscribePosterRecoveryEvents,
+} from "../lib/posterRecovery";
 
 
 function toFiniteNumber(value, fallback = null) {
@@ -112,6 +118,14 @@ export function MediaCard({
   });
   const [rankTooltipOpen, setRankTooltipOpen] = useState(false);
   const posterRef = useRef(null);
+  const posterLoadStateRef = useRef(posterLoadState);
+  const posterRecoveryRef = useRef({
+    url: null,
+    eligible: false,
+    failureSequence: 0,
+    attempted: false,
+  });
+  const posterRecoveryTimerRef = useRef(0);
   const posterInstanceId = useId();
   const smartPosterCardId = useMemo(
     () => `poster-${item.id}-${posterInstanceId}`,
@@ -196,12 +210,69 @@ export function MediaCard({
   }
 
   useEffect(() => {
+    posterLoadStateRef.current = posterLoadState;
+  }, [posterLoadState]);
+
+  useEffect(() => {
     setPosterLoadState((current) => (
       current.url === resolvedPosterUrl
         ? current
         : { url: resolvedPosterUrl, loaded: false, failed: false }
     ));
+    posterRecoveryRef.current = {
+      url: resolvedPosterUrl,
+      eligible: false,
+      failureSequence: 0,
+      attempted: false,
+    };
+    window.clearTimeout(posterRecoveryTimerRef.current);
   }, [resolvedPosterUrl]);
+
+  useEffect(() => subscribePosterRecoveryEvents(({ kind, detail }) => {
+    const loadState = posterLoadStateRef.current;
+    if (kind === "failure") {
+      if (loadState.url === resolvedPosterUrl && loadState.failed) {
+        posterRecoveryRef.current = {
+          ...posterRecoveryRef.current,
+          url: resolvedPosterUrl,
+          eligible: true,
+          failureSequence: detail.failureSequence,
+        };
+      }
+      return;
+    }
+    const recoveryGeneration = Number(detail.generation || 0);
+    const recovery = posterRecoveryRef.current;
+    if (
+      kind !== "recovered"
+      || recoveryGeneration <= 0
+      || recovery.url !== resolvedPosterUrl
+      || !recovery.eligible
+      || recovery.attempted
+      || loadState.url !== resolvedPosterUrl
+      || !loadState.failed
+    ) {
+      return;
+    }
+    recovery.attempted = true;
+    window.clearTimeout(posterRecoveryTimerRef.current);
+    posterRecoveryTimerRef.current = window.setTimeout(() => {
+      const current = posterLoadStateRef.current;
+      if (current.url !== resolvedPosterUrl || !current.failed) {
+        return;
+      }
+      retrySmartPosterCard(smartPosterCardId);
+      setPosterLoadState({
+        url: resolvedPosterUrl,
+        loaded: false,
+        failed: false,
+      });
+    }, POSTER_RECOVERY_COOLDOWN_MS);
+  }), [resolvedPosterUrl, smartPosterCardId]);
+
+  useEffect(() => () => {
+    window.clearTimeout(posterRecoveryTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!smartPosterSchedulerActive) {
@@ -272,6 +343,13 @@ export function MediaCard({
               fetchPriority={smartPosterSchedulerActive ? undefined : "low"}
               loading={smartPosterSchedulerActive ? "eager" : "lazy"}
               onError={() => {
+                const recoveryCandidate = getPosterRecoveryCandidate();
+                posterRecoveryRef.current = {
+                  ...posterRecoveryRef.current,
+                  url: resolvedPosterUrl,
+                  eligible: recoveryCandidate.eligible,
+                  failureSequence: recoveryCandidate.failureSequence,
+                };
                 if (smartPosterSchedulerActive) {
                   markSmartPosterCardError(smartPosterCardId);
                 }

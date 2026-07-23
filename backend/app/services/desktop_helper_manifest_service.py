@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import threading
+import time
 from pathlib import Path, PurePosixPath
 
 from ..config import PROJECT_ROOT
@@ -26,6 +29,7 @@ MANIFEST_PLATFORM_FAMILY_MAP = {
 }
 RELEASE_MANIFEST_V2_SCHEMA = "desktop-helper-release-manifest-v2"
 SELF_CONTAINED_MODE = "self_contained"
+logger = logging.getLogger(__name__)
 PACKAGE_RUNTIME_CONTRACTS = {
     "windows-x64": ("windows", ("win-x64",)),
     "macos-dual-arch": ("mac", ("osx-arm64", "osx-x64")),
@@ -40,50 +44,177 @@ class DesktopHelperManifestError(RuntimeError):
     """Raised when the desktop helper release manifest cannot be used safely."""
 
 
+class DesktopHelperManifestOriginMismatch(DesktopHelperManifestError):
+    """Raised when an otherwise valid package belongs to another Elvern origin."""
+
+
+_snapshot_lock = threading.RLock()
+_snapshot_fingerprint: tuple[object, ...] | None = None
+_snapshot_payload: dict[str, object] | None = None
+_snapshot_records: list[dict[str, object]] | None = None
+_verified_artifacts: dict[
+    tuple[str, tuple[object, ...], int, str],
+    bool,
+] = {}
+
+
+def desktop_helper_release_manifest_exists() -> bool:
+    return HELPER_RELEASE_MANIFEST_PATH.is_file()
+
+
+def reset_desktop_helper_manifest_cache() -> None:
+    global _snapshot_fingerprint, _snapshot_payload, _snapshot_records
+    with _snapshot_lock:
+        _snapshot_fingerprint = None
+        _snapshot_payload = None
+        _snapshot_records = None
+        _verified_artifacts.clear()
+
+
 def list_desktop_helper_manifest_records(
     *,
     platform: str | None = None,
     channel: str | None = None,
+    expected_bound_origin_sha256: str | None = None,
 ) -> list[dict[str, object]]:
-    normalized_records = _normalize_manifest_records(_load_manifest_document())
-    return [
-        dict(record)
-        for record in normalized_records
-        if (platform is None or record["platform"] == platform)
-        and (channel is None or record["channel"] == channel)
-    ]
+    with _snapshot_lock:
+        normalized_records = _select_and_verify_records_locked(
+            _load_normalized_manifest_records_locked(),
+            platform=platform,
+            channel=channel,
+            expected_bound_origin_sha256=expected_bound_origin_sha256,
+        )
+    return [dict(record) for record in normalized_records]
 
 
-def get_desktop_helper_manifest_record_by_id(release_id: int) -> dict[str, object] | None:
-    for record in _normalize_manifest_records(_load_manifest_document()):
-        if int(record["id"]) == release_id:
-            return dict(record)
+def get_desktop_helper_manifest_record_by_id(
+    release_id: int,
+    *,
+    expected_bound_origin_sha256: str | None = None,
+) -> dict[str, object] | None:
+    with _snapshot_lock:
+        for record in _select_and_verify_records_locked(
+            _load_normalized_manifest_records_locked(),
+            release_id=release_id,
+            expected_bound_origin_sha256=expected_bound_origin_sha256,
+        ):
+            if int(record["id"]) == release_id:
+                return dict(record)
     return None
 
 
-def _load_manifest_document() -> dict[str, object]:
-    if not HELPER_RELEASE_MANIFEST_PATH.exists():
-        raise DesktopHelperManifestError(
-            f"Desktop helper release manifest is missing: {HELPER_RELEASE_MANIFEST_PATH}"
-        )
+def _load_manifest_document_locked() -> dict[str, object]:
+    global _snapshot_fingerprint, _snapshot_payload, _snapshot_records
+    try:
+        fingerprint = _file_fingerprint(HELPER_RELEASE_MANIFEST_PATH)
+    except OSError as exc:
+        raise DesktopHelperManifestError("Desktop helper release manifest is unavailable") from exc
+    if _snapshot_payload is not None and fingerprint == _snapshot_fingerprint:
+        return _snapshot_payload
     try:
         payload = json.loads(HELPER_RELEASE_MANIFEST_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DesktopHelperManifestError(
-            f"Desktop helper release manifest could not be read: {HELPER_RELEASE_MANIFEST_PATH}"
+            "Desktop helper release manifest could not be read"
         ) from exc
     if not isinstance(payload, dict):
         raise DesktopHelperManifestError("Desktop helper release manifest root must be an object")
+    _snapshot_fingerprint = fingerprint
+    _snapshot_payload = payload
+    _snapshot_records = None
+    _verified_artifacts.clear()
     return payload
 
 
-def _normalize_manifest_records(payload: dict[str, object]) -> list[dict[str, object]]:
+def _load_normalized_manifest_records_locked() -> list[dict[str, object]]:
+    global _snapshot_records
+    payload = _load_manifest_document_locked()
+    if _snapshot_records is None:
+        _snapshot_records = _normalize_manifest_records(
+            payload,
+            verify_artifacts=False,
+        )
+    return _snapshot_records
+
+
+def _select_and_verify_records_locked(
+    records: list[dict[str, object]],
+    *,
+    platform: str | None = None,
+    channel: str | None = None,
+    release_id: int | None = None,
+    expected_bound_origin_sha256: str | None = None,
+) -> list[dict[str, object]]:
+    selected = [
+        record
+        for record in records
+        if (platform is None or record["platform"] == platform)
+        and (channel is None or record["channel"] == channel)
+        and (release_id is None or int(record["id"]) == release_id)
+    ]
+    if expected_bound_origin_sha256 is not None and any(
+        record.get("bound_origin_sha256") is not None
+        and record["bound_origin_sha256"] != expected_bound_origin_sha256
+        for record in selected
+    ):
+        raise DesktopHelperManifestOriginMismatch(
+            "Desktop helper package origin binding is incompatible"
+        )
+    verified: list[dict[str, object]] = []
+    for record in selected:
+        file_path = _resolve_package_file(
+            str(record["relative_path"]),
+            str(record["filename"]),
+        )
+        _verify_artifact(
+            file_path,
+            size_bytes=int(record["size_bytes"]),
+            sha256=str(record["sha256"]),
+            package_target=str(record["package_target"]),
+        )
+        package_binding = str(record.get("package_binding") or "legacy_unverified")
+        if expected_bound_origin_sha256 is not None and record.get("bound_origin_sha256"):
+            package_binding = "compatible"
+        verified.append({
+            **record,
+            "file_path": file_path,
+            "package_binding": package_binding,
+        })
+    return verified
+
+
+def _normalize_manifest_records(
+    payload: dict[str, object],
+    *,
+    platform: str | None = None,
+    release_id: int | None = None,
+    expected_bound_origin_sha256: str | None = None,
+    verify_artifacts: bool = True,
+) -> list[dict[str, object]]:
     if payload.get("schema_version") == RELEASE_MANIFEST_V2_SCHEMA:
-        return _normalize_v2_manifest_records(payload)
-    return _normalize_legacy_manifest_records(payload)
+        return _normalize_v2_manifest_records(
+            payload,
+            platform=platform,
+            release_id=release_id,
+            expected_bound_origin_sha256=expected_bound_origin_sha256,
+            verify_artifacts=verify_artifacts,
+        )
+    return _normalize_legacy_manifest_records(
+        payload,
+        platform=platform,
+        release_id=release_id,
+        verify_artifacts=verify_artifacts,
+    )
 
 
-def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str, object]]:
+def _normalize_v2_manifest_records(
+    payload: dict[str, object],
+    *,
+    platform: str | None,
+    release_id: int | None,
+    expected_bound_origin_sha256: str | None,
+    verify_artifacts: bool,
+) -> list[dict[str, object]]:
     helper_version = _require_non_empty_string(payload.get("helper_version"), "helper_version")
     channel = _require_non_empty_string(payload.get("channel"), "channel")
     target_framework = _require_non_empty_string(payload.get("target_framework"), "target_framework")
@@ -96,6 +227,10 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
     if deployment_mode != SELF_CONTAINED_MODE:
         raise DesktopHelperManifestError("Desktop helper v2 standard releases must be self_contained")
     created_at = _require_non_empty_string(payload.get("generated_at_utc"), "generated_at_utc")
+    manifest_origin_hash = _require_sha256(
+        payload.get("bound_origin_sha256"),
+        "bound_origin_sha256",
+    )
     raw_packages = payload.get("packages")
     if not isinstance(raw_packages, list):
         raise DesktopHelperManifestError("Desktop helper release manifest packages must be a list")
@@ -103,19 +238,20 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
     records: list[dict[str, object]] = []
     seen_targets: set[tuple[str, str]] = set()
     seen_ids: set[int] = set()
+    selected_origin_mismatch = False
     for index, raw_record in enumerate(raw_packages):
         if not isinstance(raw_record, dict):
             raise DesktopHelperManifestError(
                 f"Desktop helper release manifest package at index {index} must be an object"
             )
         package_target = _require_non_empty_string(raw_record.get("package_target"), "package_target")
-        platform = _normalize_platform_family(
+        record_platform = _normalize_platform_family(
             _require_non_empty_string(raw_record.get("platform"), "platform")
         )
-        identity = (platform, package_target)
+        identity = (record_platform, package_target)
         if identity in seen_targets:
             raise DesktopHelperManifestError(
-                f"Desktop helper v2 manifest repeats package target {package_target} for {platform}"
+                f"Desktop helper v2 manifest repeats package target {package_target} for {record_platform}"
             )
         seen_targets.add(identity)
         artifact_kind = _require_non_empty_string(raw_record.get("artifact_kind"), "artifact_kind")
@@ -135,6 +271,22 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
             raw_record.get("installer_manifest_sha256"),
             "installer_manifest_sha256",
         )
+        tree_manifest_path = _require_safe_relative_path(
+            raw_record.get("installer_tree_manifest_path"),
+            "installer_tree_manifest_path",
+        )
+        tree_manifest_sha256 = _require_sha256(
+            raw_record.get("installer_tree_manifest_sha256"),
+            "installer_tree_manifest_sha256",
+        )
+        package_origin_hash = _require_sha256(
+            raw_record.get("bound_origin_sha256"),
+            "bound_origin_sha256",
+        )
+        if package_origin_hash != manifest_origin_hash:
+            raise DesktopHelperManifestError(
+                "Desktop helper package origin identity does not match its release manifest"
+            )
         supported_runtime_ids = _require_string_list(
             raw_record.get("supported_runtime_ids"),
             "supported_runtime_ids",
@@ -148,7 +300,7 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
                 f"Unsupported desktop helper v2 package target: {package_target}"
             )
         expected_platform, expected_runtime_ids = expected_contract
-        if platform != expected_platform or tuple(supported_runtime_ids) != expected_runtime_ids:
+        if record_platform != expected_platform or tuple(supported_runtime_ids) != expected_runtime_ids:
             raise DesktopHelperManifestError(
                 f"Desktop helper v2 package contract mismatch for {package_target}"
             )
@@ -156,8 +308,7 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
             raise DesktopHelperManifestError(
                 "Desktop helper macOS package minimum_os_version must be 14.0"
             )
-        external_runtime_required = raw_record.get("external_runtime_required")
-        if external_runtime_required is not False:
+        if raw_record.get("external_runtime_required") is not False:
             raise DesktopHelperManifestError(
                 "Desktop helper v2 standard package external_runtime_required must be false"
             )
@@ -166,33 +317,44 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
             raw_record.get("generated_at_utc"),
             "generated_at_utc",
         )
-
-        file_path = _resolve_package_file(relative_path, filename)
-        if file_path.stat().st_size != size_bytes:
-            raise DesktopHelperManifestError(
-                f"Desktop helper release manifest size mismatch for {relative_path}"
-            )
-        if _sha256_for_file(file_path) != sha256:
-            raise DesktopHelperManifestError(
-                f"Desktop helper release manifest SHA-256 mismatch for {relative_path}"
-            )
-        release_id = _generate_stable_release_id(
+        stable_release_id = _generate_stable_release_id(
             channel=channel,
             package_target=package_target,
             version=helper_version,
             filename=filename,
         )
-        if release_id in seen_ids:
+        if stable_release_id in seen_ids:
             raise DesktopHelperManifestError(
-                f"Desktop helper release manifest ID collision detected for release_id={release_id}"
+                f"Desktop helper release manifest ID collision detected for release_id={stable_release_id}"
             )
-        seen_ids.add(release_id)
+        seen_ids.add(stable_release_id)
+        selected = (
+            (platform is None or record_platform == platform)
+            and (release_id is None or stable_release_id == release_id)
+        )
+        if not selected:
+            continue
+        if (
+            expected_bound_origin_sha256 is not None
+            and package_origin_hash != expected_bound_origin_sha256
+        ):
+            selected_origin_mismatch = True
+            continue
+        file_path = None
+        if verify_artifacts:
+            file_path = _resolve_package_file(relative_path, filename)
+            _verify_artifact(
+                file_path,
+                size_bytes=size_bytes,
+                sha256=sha256,
+                package_target=package_target,
+            )
         records.append(
             {
-                "id": release_id,
+                "id": stable_release_id,
                 "channel": channel,
                 "runtime_id": package_target,
-                "platform": platform,
+                "platform": record_platform,
                 "package_target": package_target,
                 "version": helper_version,
                 "filename": filename,
@@ -201,6 +363,10 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
                 "installer_entrypoint": installer_entrypoint,
                 "sha256": sha256,
                 "installer_manifest_sha256": installer_manifest_sha256,
+                "installer_tree_manifest_path": tree_manifest_path,
+                "installer_tree_manifest_sha256": tree_manifest_sha256,
+                "bound_origin_sha256": package_origin_hash,
+                "package_binding": "compatible" if expected_bound_origin_sha256 else "unverified",
                 "size_bytes": size_bytes,
                 "published_at": published_at,
                 "created_at": created_at,
@@ -215,10 +381,20 @@ def _normalize_v2_manifest_records(payload: dict[str, object]) -> list[dict[str,
                 "dotnet_runtime_required": None,
             }
         )
+    if selected_origin_mismatch:
+        raise DesktopHelperManifestOriginMismatch(
+            "Desktop helper package origin binding is incompatible"
+        )
     return records
 
 
-def _normalize_legacy_manifest_records(payload: dict[str, object]) -> list[dict[str, object]]:
+def _normalize_legacy_manifest_records(
+    payload: dict[str, object],
+    *,
+    platform: str | None,
+    release_id: int | None,
+    verify_artifacts: bool,
+) -> list[dict[str, object]]:
     helper_version = _require_non_empty_string(payload.get("helper_version"), "helper_version")
     channel = _require_non_empty_string(payload.get("channel"), "channel")
     dotnet_runtime_major = _require_non_empty_string(
@@ -237,7 +413,7 @@ def _normalize_legacy_manifest_records(payload: dict[str, object]) -> list[dict[
                 f"Desktop helper release manifest package at index {index} must be an object"
             )
         runtime_id = _require_non_empty_string(raw_record.get("runtime"), "runtime")
-        platform = _normalize_platform_family(
+        record_platform = _normalize_platform_family(
             _require_non_empty_string(raw_record.get("platform_family"), "platform_family")
         )
         filename = _require_non_empty_string(raw_record.get("filename"), "filename")
@@ -246,18 +422,32 @@ def _normalize_legacy_manifest_records(payload: dict[str, object]) -> list[dict[
         size_bytes = _require_non_negative_int(raw_record.get("size_bytes"), "size_bytes")
         published_at = _require_non_empty_string(raw_record.get("generated_at_utc"), "generated_at_utc")
         artifact_kind = _require_non_empty_string(raw_record.get("artifact_kind"), "artifact_kind")
-        file_path = _resolve_package_file(relative_path, filename)
+        stable_release_id = _generate_stable_release_id(
+            channel=channel,
+            package_target=runtime_id,
+            version=helper_version,
+            filename=filename,
+        )
+        if (
+            (platform is not None and record_platform != platform)
+            or (release_id is not None and stable_release_id != release_id)
+        ):
+            continue
+        file_path = None
+        if verify_artifacts:
+            file_path = _resolve_package_file(relative_path, filename)
+            _verify_artifact(
+                file_path,
+                size_bytes=size_bytes,
+                sha256=sha256,
+                package_target=runtime_id,
+            )
         records.append(
             {
-                "id": _generate_stable_release_id(
-                    channel=channel,
-                    package_target=runtime_id,
-                    version=helper_version,
-                    filename=filename,
-                ),
+                "id": stable_release_id,
                 "channel": channel,
                 "runtime_id": runtime_id,
-                "platform": platform,
+                "platform": record_platform,
                 "package_target": runtime_id,
                 "version": helper_version,
                 "filename": filename,
@@ -266,6 +456,10 @@ def _normalize_legacy_manifest_records(payload: dict[str, object]) -> list[dict[
                 "installer_entrypoint": "",
                 "sha256": sha256,
                 "installer_manifest_sha256": None,
+                "installer_tree_manifest_path": None,
+                "installer_tree_manifest_sha256": None,
+                "bound_origin_sha256": None,
+                "package_binding": "legacy_unverified",
                 "size_bytes": size_bytes,
                 "published_at": published_at,
                 "created_at": created_at,
@@ -283,6 +477,56 @@ def _normalize_legacy_manifest_records(payload: dict[str, object]) -> list[dict[
     return records
 
 
+def _file_fingerprint(path: Path) -> tuple[object, ...]:
+    stat_result = path.stat()
+    return (
+        str(path.resolve()),
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
+    )
+
+
+def _verify_artifact(
+    file_path: Path,
+    *,
+    size_bytes: int,
+    sha256: str,
+    package_target: str,
+) -> None:
+    try:
+        fingerprint = _file_fingerprint(file_path)
+    except OSError as exc:
+        raise DesktopHelperManifestError(
+            "Desktop helper release artifact is unavailable"
+        ) from exc
+    if fingerprint[3] != size_bytes:
+        raise DesktopHelperManifestError("Desktop helper release artifact size mismatch")
+    cache_key = (str(file_path.resolve()), fingerprint, size_bytes, sha256)
+    if _verified_artifacts.get(cache_key):
+        logger.debug(
+            "Desktop helper package verification package_target=%s cache=hit result=valid",
+            package_target,
+        )
+        return
+    started_at = time.monotonic()
+    if _sha256_for_file(file_path) != sha256:
+        logger.warning(
+            "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=invalid",
+            package_target,
+            round((time.monotonic() - started_at) * 1000),
+        )
+        raise DesktopHelperManifestError("Desktop helper release artifact SHA-256 mismatch")
+    _verified_artifacts[cache_key] = True
+    logger.debug(
+        "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=valid",
+        package_target,
+        round((time.monotonic() - started_at) * 1000),
+    )
+
+
 def _resolve_package_file(relative_path: str, filename: str) -> Path:
     file_path = (HELPER_RELEASE_PACKAGES_DIR / relative_path).resolve()
     try:
@@ -295,10 +539,8 @@ def _resolve_package_file(relative_path: str, filename: str) -> Path:
         raise DesktopHelperManifestError(
             f"Desktop helper release manifest filename mismatch for {relative_path}"
         )
-    if not file_path.exists() or not file_path.is_file():
-        raise DesktopHelperManifestError(
-            f"Desktop helper release manifest artifact is missing: {file_path}"
-        )
+    if not file_path.is_file():
+        raise DesktopHelperManifestError("Desktop helper release artifact is missing")
     return file_path
 
 

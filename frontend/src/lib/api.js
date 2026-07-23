@@ -3,6 +3,10 @@ import {
   dispatchStartupApplicationReady,
   dispatchStartupConnectivityFailure,
 } from "./startupConnection.js";
+import {
+  combineAbortSignals,
+  getPageLifecycleSignal,
+} from "./pageLifecycle.js";
 
 
 function joinMessages(values) {
@@ -15,6 +19,41 @@ function joinMessages(values) {
 export const MAINTENANCE_MODE_MESSAGE = "The server is currently under construction, please try again later";
 export const MAINTENANCE_MODE_BLOCKED_EVENT = "elvern:maintenance-mode-blocked";
 export const AUTH_REVALIDATION_REQUESTED_EVENT = "elvern:auth-revalidation-requested";
+
+
+export class ApiNetworkError extends Error {
+  constructor(message = "Elvern could not complete the request.", { cause } = {}) {
+    super(message, { cause });
+    this.name = "ApiNetworkError";
+    this.transient = true;
+    this.category = "transport";
+  }
+}
+
+
+export function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+
+export function isTransientNetworkError(error) {
+  return error instanceof ApiNetworkError || error?.transient === true;
+}
+
+
+export function isHttpError(error) {
+  return Number.isInteger(Number(error?.status));
+}
+
+
+function createAbortError() {
+  if (typeof DOMException === "function") {
+    return new DOMException("The request was aborted.", "AbortError");
+  }
+  const error = new Error("The request was aborted.");
+  error.name = "AbortError";
+  return error;
+}
 
 function isAuthRequestPath(path) {
   const pathname = String(path || "").split("?", 1)[0];
@@ -126,8 +165,23 @@ function dispatchMaintenanceModeBlocked(error) {
 }
 
 export async function apiRequest(path, options = {}) {
-  const { data, headers = {}, signal, method = "GET" } = options;
+  const {
+    abortOnPageHide = false,
+    cache,
+    data,
+    headers = {},
+    keepalive,
+    method = "GET",
+    mode,
+    redirect,
+    referrerPolicy,
+    signal,
+  } = options;
   const requestHeaders = { ...headers };
+  const combinedSignal = combineAbortSignals([
+    signal,
+    abortOnPageHide ? getPageLifecycleSignal() : null,
+  ]);
 
   let body;
   if (data !== undefined) {
@@ -145,14 +199,22 @@ export async function apiRequest(path, options = {}) {
       method,
       headers: requestHeaders,
       body,
-      signal,
+      signal: combinedSignal.signal,
       credentials: "include",
+      ...(cache === undefined ? {} : { cache }),
+      ...(keepalive === undefined ? {} : { keepalive }),
+      ...(mode === undefined ? {} : { mode }),
+      ...(redirect === undefined ? {} : { redirect }),
+      ...(referrerPolicy === undefined ? {} : { referrerPolicy }),
     });
   } catch (error) {
-    if (error?.name !== "AbortError") {
-      dispatchStartupConnectivityFailure({ path });
+    if (combinedSignal.signal?.aborted || isAbortError(error)) {
+      throw createAbortError();
     }
-    throw error;
+    dispatchStartupConnectivityFailure({ classification: "transport" });
+    throw new ApiNetworkError(undefined, { cause: error });
+  } finally {
+    combinedSignal.cleanup();
   }
   dispatchStartupApplicationReady();
 

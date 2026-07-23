@@ -10,21 +10,32 @@ The normal release is self-contained, non-trimmed .NET 10. Users do not install 
 separate .NET Runtime. `Directory.Build.props` is the single source for the helper
 version and target framework.
 
-From the helper directory, set the exact public backend origin compiled into the
-helper, then publish all packages:
+From the helper directory, set the exact effective backend origin used by Helper
+handoffs, then build all packages into an ignored staging directory:
 
 ```bash
 export ELVERN_BACKEND_ORIGIN="https://your-elvern-origin.example"
 ./scripts/publish-bundles.sh
 ```
 
-Build one platform when needed:
+Build one platform for isolated validation:
 
 ```bash
 ./scripts/publish-bundles.sh --platform windows
 ./scripts/publish-bundles.sh --platform macos
 ./scripts/publish-bundles.sh --platform linux
 ```
+
+These commands never change the active release manifest. After all three platforms
+have been built and verified together, publish them explicitly:
+
+```bash
+./scripts/publish-bundles.sh --activate
+```
+
+Activation copies immutable, content-hash-named ZIPs first and atomically replaces
+the active manifest last. A lock prevents concurrent activation. The dangerous
+`--allow-partial-activate` option exists only for explicit rollback/recovery work.
 
 Publishing requires the .NET 10 SDK and every requested RID runtime pack. Any
 missing RID fails the entire selected publish; the script never substitutes a
@@ -41,7 +52,12 @@ The standard output is:
 - `linux-universal`: self-contained `linux-x64`, `linux-arm64`,
   `linux-musl-x64`, and `linux-musl-arm64` payloads in one ZIP.
 - `release-manifest.json`: package-level release manifest v2 with outer ZIP and
-  inner installer-manifest SHA-256 values.
+  inner installer-manifest, full tree-manifest, and server-origin binding hashes.
+
+The backend verifies only the requested platform package and caches unchanged
+artifact validation by filesystem identity. A package built for a different
+effective backend origin is withheld rather than falling back to an incompatible
+v2 download.
 
 The macOS package is not a universal Mach-O. It is one installer package containing
 two real RID payloads; the installer selects locally. The Linux package likewise
@@ -66,11 +82,12 @@ signature, and installs to:
 ~/Applications/Elvern VLC Opener.app
 ```
 
-No `sudo` or administrator password is used. Finder reveals the installed App when
-the install succeeds. The App is not Developer ID signed or notarized, so macOS or
-managed-device policy may still require a one-time confirmation. Do not disable
-Gatekeeper. Elvern's Terminal fallback verifies the exact ZIP or inner manifest
-before removing quarantine from that exact Elvern package tree.
+No `sudo`, administrator password, Python installation, or separate .NET Runtime is
+used. Finder reveals the installed App when the install succeeds. The App is not
+Developer ID signed or notarized, so macOS or managed-device policy may still
+require a one-time confirmation. Do not disable Gatekeeper. Elvern's Terminal
+fallback verifies the exact ZIP, tree manifest, and every listed file before
+removing quarantine from those exact verified Elvern files.
 
 ### Linux remote desktop
 
@@ -80,10 +97,11 @@ Unzip the Linux package and run:
 ./Install-ElvernVlcOpener.sh
 ```
 
-The installer detects x64/ARM64 and glibc/musl, verifies the selected payload,
-installs under `~/.local/lib/elvern-vlc-opener`, and registers the protocol with
-`xdg-mime`. It does not use `sudo` or modify `/usr`. `--runtime <rid>` exists only
-for advanced troubleshooting and must match the signed manifest allowlist.
+The installer detects x64/ARM64 and glibc/musl, verifies the complete package tree
+and selected payload, installs under `~/.local/lib/elvern-vlc-opener`, and registers
+the protocol with `xdg-mime`. It does not need Python, use `sudo`, or modify `/usr`.
+`--runtime <rid>` exists only for advanced troubleshooting and must match the
+verified manifest allowlist.
 
 VLC discovery checks `ELVERN_VLC_PATH`, executable `vlc` entries on `PATH`,
 `/usr/bin/vlc`, `/usr/local/bin/vlc`, and `/snap/bin/vlc`. Flatpak VLC is not
@@ -106,6 +124,20 @@ dotnet build
 
 Equivalent development scripts exist for Windows and macOS. Standard users should
 use the self-contained packages instead.
+
+The backend `import-helper-releases` CLI is a rollback-only import path for legacy
+framework-dependent artifacts. It requires an explicit
+`--runtime-requirement <major>.x`; package-level v2 releases are published through
+the manifest lifecycle above.
+
+## Browser return behavior
+
+Third-party VLC and app-store HTTP(S) links open in a separate tab with
+`noopener noreferrer`. Helper ZIP links remain ordinary same-tab file downloads,
+and custom protocol checks remain explicit user actions. Page-owned status requests
+are cancelled on `pagehide`, then one coalesced resume event refreshes status after
+return. This prevents a cancelled Firefox request from surfacing its raw
+`NetworkError` or overwriting a newer result.
 
 ## Validation
 
