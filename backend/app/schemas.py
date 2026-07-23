@@ -1391,14 +1391,23 @@ class DesktopHelperReleaseResponse(BaseModel):
     id: int
     channel: str
     runtime_id: str
-    platform: Literal["windows", "mac"]
+    platform: DesktopPlatform
+    package_target: str
     version: str
     filename: str
+    package_root: str = ""
+    installer_entrypoint: str = ""
     size_bytes: int
     sha256: str
     published_at: str
-    dotnet_runtime_required: str
+    installer_manifest_sha256: str | None = None
+    dotnet_runtime_required: str | None = None
     download_url: str
+    deployment_mode: Literal["self_contained", "framework_dependent"] = "framework_dependent"
+    external_runtime_required: bool = True
+    runtime_family: str = ""
+    supported_runtime_ids: list[str] = Field(default_factory=list)
+    minimum_os_version: str | None = None
     recommended: bool = False
 
 
@@ -1412,6 +1421,8 @@ class DesktopHelperStatusResponse(BaseModel):
     platform: DesktopPlatform
     helper_required: bool = True
     state: DesktopHelperStatusState
+    same_host: bool = False
+    same_host_detection_source: str | None = None
     vlc_detection_state: DesktopVlcDetectionState = "detection_unavailable"
     vlc_detection_path: str | None = None
     vlc_detection_checked_at: str | None = None
@@ -1421,6 +1432,7 @@ class DesktopHelperStatusResponse(BaseModel):
     last_seen_helper_arch: str | None = None
     last_seen_helper_at: str | None = None
     dotnet_runtime_required: str | None = None
+    runtime_included: bool = False
     latest_releases: list[DesktopHelperReleaseResponse] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 

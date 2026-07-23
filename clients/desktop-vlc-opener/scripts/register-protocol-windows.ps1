@@ -22,12 +22,12 @@ function Resolve-DotnetPath {
         return $dotnetCommand.Source
     }
 
-    throw "Could not find dotnet.exe. Install the .NET 8 SDK or .NET 8 Runtime on this Windows machine first."
+    throw "Could not find dotnet.exe. This development-only registration path requires the .NET 10 SDK or Runtime."
 }
 
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if (-not $HelperDllPath) {
-    $HelperDllPath = Join-Path $projectRoot "bin\Debug\net8.0\Elvern.VlcOpener.dll"
+    $HelperDllPath = Join-Path $projectRoot "bin\Debug\net10.0\Elvern.VlcOpener.dll"
 }
 
 $resolvedPath = (Resolve-Path $HelperDllPath).Path

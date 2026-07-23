@@ -12,7 +12,7 @@ Elvern is not meant to replace VLC as the desktop playback engine. The desktop p
 
 - `backend/`: FastAPI app, route modules, services, SQLite-backed state, playback/transcode control, auth, library scanning, cloud/library integrations, and tests under `backend/tests/`.
 - `frontend/`: React 18 + Vite PWA with `react-router-dom`, `hls.js`, Vitest tests, and production serving through `server.mjs`.
-- `clients/desktop-vlc-opener/`: .NET 8 desktop helper that resolves short-lived Elvern handoffs and launches the user's installed VLC.
+- `clients/desktop-vlc-opener/`: .NET 10 desktop helper that resolves short-lived Elvern handoffs and launches the user's installed VLC.
 - `scripts/`: local operations, diagnostics, lifecycle helpers, backup helpers, and CI mirror scripts.
 - `deploy/` and `docker-compose.yml`: deployment/environment scaffolding and container launch configuration.
 - `docs/`: project documentation and regression notes.

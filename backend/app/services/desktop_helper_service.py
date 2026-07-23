@@ -28,14 +28,24 @@ RUNTIME_TO_PLATFORM = {
     "win-x64": "windows",
     "osx-arm64": "mac",
     "osx-x64": "mac",
+    "linux-x64": "linux",
+    "linux-arm64": "linux",
+    "linux-musl-x64": "linux",
+    "linux-musl-arm64": "linux",
 }
 PLATFORM_RUNTIME_ORDER = {
     "windows": ("win-x64",),
     "mac": ("osx-arm64", "osx-x64"),
+    "linux": ("linux-x64", "linux-arm64", "linux-musl-x64", "linux-musl-arm64"),
+}
+PLATFORM_PACKAGE_TARGET = {
+    "windows": "windows-x64",
+    "mac": "macos-dual-arch",
+    "linux": "linux-universal",
 }
 SUPPORTED_HELPER_PLATFORMS = frozenset({"windows", "mac", "linux"})
 RELEASE_NAME_PATTERN = re.compile(
-    r"^elvern-vlc-opener-(?P<version>.+)-(?P<runtime>win-x64|osx-arm64|osx-x64)(?:\.zip)?$"
+    r"^elvern-vlc-opener-(?P<version>.+)-(?P<runtime>win-x64|osx-arm64|osx-x64|linux-x64|linux-arm64|linux-musl-x64|linux-musl-arm64)(?:\.zip)?$"
 )
 logger = logging.getLogger(__name__)
 DESKTOP_HELPER_VERIFICATION_ACCESS_HASH_PURPOSE = "desktop.helper.verification.access"
@@ -166,29 +176,73 @@ def build_desktop_helper_release_payloads(
     release_source = manifest_releases
     if release_source is None:
         release_source = list_helper_releases(settings, platform=normalized_platform, channel=channel)
+    package_target = PLATFORM_PACKAGE_TARGET[normalized_platform]
+    package_releases = [
+        row
+        for row in release_source
+        if str(row.get("deployment_mode") or "") == "self_contained"
+        and str(row.get("package_target") or row.get("runtime_id") or "") == package_target
+    ]
+    if package_releases:
+        latest_package = max(
+            package_releases,
+            key=lambda row: (_version_key(str(row["version"])), str(row["published_at"])),
+        )
+        return [_build_release_payload(latest_package, recommended=True)]
+
     latest_by_runtime = _latest_release_by_runtime(release_source)
     payloads: list[dict[str, object]] = []
     for runtime_id in PLATFORM_RUNTIME_ORDER.get(normalized_platform, ()):
         row = latest_by_runtime.get(runtime_id)
         if row is None:
             continue
-        payloads.append(
-            {
-                "id": int(row["id"]),
-                "channel": str(row["channel"]),
-                "runtime_id": str(row["runtime_id"]),
-                "platform": str(row["platform"]),
-                "version": str(row["version"]),
-                "filename": str(row["filename"]),
-                "size_bytes": int(row["size_bytes"]),
-                "sha256": str(row["sha256"]),
-                "published_at": str(row["published_at"]),
-                "dotnet_runtime_required": str(row["dotnet_runtime_required"]),
-                "download_url": f"/api/desktop-helper/releases/{int(row['id'])}/download",
-                "recommended": runtime_id == recommended_runtime_id,
-            }
-        )
+        payloads.append(_build_release_payload(row, recommended=runtime_id == recommended_runtime_id))
     return payloads
+
+
+def _build_release_payload(row: dict[str, object], *, recommended: bool) -> dict[str, object]:
+    runtime_id = str(row["runtime_id"])
+    package_target = str(row.get("package_target") or runtime_id)
+    external_runtime_required = bool(row.get("external_runtime_required", True))
+    deployment_mode = str(
+        row.get("deployment_mode")
+        or ("framework_dependent" if external_runtime_required else "self_contained")
+    )
+    return {
+        "id": int(row["id"]),
+        "channel": str(row["channel"]),
+        "runtime_id": runtime_id,
+        "platform": str(row["platform"]),
+        "package_target": package_target,
+        "version": str(row["version"]),
+        "filename": str(row["filename"]),
+        "package_root": str(row.get("package_root") or ""),
+        "installer_entrypoint": str(row.get("installer_entrypoint") or ""),
+        "size_bytes": int(row["size_bytes"]),
+        "sha256": str(row["sha256"]),
+        "installer_manifest_sha256": (
+            str(row["installer_manifest_sha256"])
+            if row.get("installer_manifest_sha256")
+            else None
+        ),
+        "published_at": str(row["published_at"]),
+        "dotnet_runtime_required": (
+            str(row["dotnet_runtime_required"])
+            if row.get("dotnet_runtime_required")
+            else None
+        ),
+        "download_url": f"/api/desktop-helper/releases/{int(row['id'])}/download",
+        "deployment_mode": deployment_mode,
+        "external_runtime_required": external_runtime_required,
+        "runtime_family": str(row.get("runtime_family") or ""),
+        "supported_runtime_ids": list(row.get("supported_runtime_ids") or [runtime_id]),
+        "minimum_os_version": (
+            str(row["minimum_os_version"])
+            if row.get("minimum_os_version")
+            else None
+        ),
+        "recommended": recommended,
+    }
 
 
 def get_desktop_helper_status(
@@ -199,6 +253,8 @@ def get_desktop_helper_status(
     device_id: str | None,
     browser_user_agent: str | None,
     source_ip: str | None,
+    same_host: bool = False,
+    same_host_detection_source: str = "not_evaluated",
 ) -> dict[str, object]:
     normalized_platform = normalize_desktop_helper_platform(platform)
     normalized_device_id = normalize_device_id(device_id)
@@ -217,15 +273,31 @@ def get_desktop_helper_status(
         platform=normalized_platform,
         helper_arch=str(device_row["helper_arch"]) if device_row and device_row.get("helper_arch") else None,
     )
+    runtime_included = bool(latest_releases) and all(
+        release.get("external_runtime_required") is False for release in latest_releases
+    )
+    external_runtime_required = next(
+        (
+            str(release["dotnet_runtime_required"])
+            for release in latest_releases
+            if release.get("dotnet_runtime_required")
+        ),
+        None,
+    )
 
     notes: list[str] = []
-    vlc_detection = _resolve_vlc_detection(settings, normalized_platform, device_row)
+    vlc_detection = _resolve_vlc_detection(
+        settings,
+        normalized_platform,
+        device_row,
+        linux_same_host=bool(same_host),
+    )
     recommended_runtime_id = determine_recommended_runtime_id(
         normalized_platform,
         helper_arch=str(device_row["helper_arch"]) if device_row and device_row["helper_arch"] else None,
     )
 
-    if normalized_platform == "linux":
+    if normalized_platform == "linux" and same_host:
         notes.append("Linux same-host playback does not require the desktop helper. Open in VLC launches installed VLC directly on the Elvern host.")
         notes.append("Keep using the same DGX Elvern URL for library browsing; browser playback remains a fallback only.")
         return {
@@ -233,6 +305,8 @@ def get_desktop_helper_status(
             "platform": normalized_platform,
             "helper_required": False,
             "state": "helper_not_required",
+            "same_host": True,
+            "same_host_detection_source": same_host_detection_source,
             "vlc_detection_state": vlc_detection["state"],
             "vlc_detection_path": vlc_detection["path"],
             "vlc_detection_checked_at": vlc_detection["checked_at"],
@@ -242,18 +316,20 @@ def get_desktop_helper_status(
             "last_seen_helper_arch": device_row["helper_arch"] if device_row else None,
             "last_seen_helper_at": device_row["helper_last_seen_at"] if device_row else None,
             "dotnet_runtime_required": None,
+            "runtime_included": False,
             "latest_releases": [],
             "notes": notes,
         }
 
     if not latest_releases:
         notes.append("No official helper package is imported for this platform yet.")
-        notes.append("Windows and macOS helpers require .NET 8 Runtime on the client machine.")
         return {
             "device_id": normalized_device_id,
             "platform": normalized_platform,
             "helper_required": True,
             "state": "release_unavailable",
+            "same_host": bool(same_host),
+            "same_host_detection_source": same_host_detection_source,
             "vlc_detection_state": vlc_detection["state"],
             "vlc_detection_path": vlc_detection["path"],
             "vlc_detection_checked_at": vlc_detection["checked_at"],
@@ -262,7 +338,8 @@ def get_desktop_helper_status(
             "last_seen_helper_platform": device_row["helper_platform"] if device_row else None,
             "last_seen_helper_arch": device_row["helper_arch"] if device_row else None,
             "last_seen_helper_at": device_row["helper_last_seen_at"] if device_row else None,
-            "dotnet_runtime_required": ".NET 8 Runtime required",
+            "dotnet_runtime_required": None,
+            "runtime_included": False,
             "latest_releases": latest_releases,
             "notes": notes,
         }
@@ -287,13 +364,18 @@ def get_desktop_helper_status(
             state = "update_available"
             notes.append("A newer helper package is available for this desktop platform.")
 
-    notes.append("Windows and macOS helpers require .NET 8 Runtime on the client machine.")
+    if runtime_included:
+        notes.append("The standard desktop helper package includes its runtime.")
+    else:
+        notes.append("Legacy compatibility packages may require an external runtime.")
 
     return {
         "device_id": normalized_device_id,
         "platform": normalized_platform,
         "helper_required": True,
         "state": state,
+        "same_host": bool(same_host),
+        "same_host_detection_source": same_host_detection_source,
         "vlc_detection_state": vlc_detection["state"],
         "vlc_detection_path": vlc_detection["path"],
         "vlc_detection_checked_at": vlc_detection["checked_at"],
@@ -302,7 +384,8 @@ def get_desktop_helper_status(
         "last_seen_helper_platform": last_seen_helper_platform,
         "last_seen_helper_arch": last_seen_helper_arch,
         "last_seen_helper_at": last_seen_helper_at,
-        "dotnet_runtime_required": ".NET 8 Runtime required",
+        "dotnet_runtime_required": external_runtime_required,
+        "runtime_included": runtime_included,
         "latest_releases": latest_releases,
         "notes": notes,
     }
@@ -544,6 +627,8 @@ def create_desktop_helper_verification(
     device_id: str | None,
     browser_user_agent: str | None,
     source_ip: str | None,
+    same_host: bool = False,
+    same_host_detection_source: str = "not_evaluated",
 ) -> dict[str, object]:
     normalized_platform = normalize_desktop_helper_platform(platform)
     normalized_device_id = normalize_device_id(device_id)
@@ -562,7 +647,7 @@ def create_desktop_helper_verification(
         ip_address=source_ip,
     )
 
-    if normalized_platform == "linux":
+    if normalized_platform == "linux" and same_host:
         detection = _probe_linux_vlc_detection(settings)
         _record_helper_device_detection(
             settings,
@@ -582,6 +667,8 @@ def create_desktop_helper_verification(
             device_id=normalized_device_id,
             browser_user_agent=browser_user_agent,
             source_ip=source_ip,
+            same_host=True,
+            same_host_detection_source=same_host_detection_source,
         )
         return {
             "mode": "host",
@@ -940,8 +1027,10 @@ def _resolve_vlc_detection(
     settings: Settings,
     platform: str,
     device_row: dict[str, object] | None,
+    *,
+    linux_same_host: bool,
 ) -> dict[str, str | None]:
-    if platform == "linux":
+    if platform == "linux" and linux_same_host:
         return _probe_linux_vlc_detection(settings)
 
     detection_state = _normalize_optional_vlc_detection_state(

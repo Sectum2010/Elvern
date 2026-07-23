@@ -1,14 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Elvern.VlcOpener</AssemblyName>
     <RootNamespace>Elvern.VlcOpener</RootNamespace>
-    <Version>0.8.0</Version>
-    <FileVersion>0.8.0.0</FileVersion>
-    <InformationalVersion>0.8.0</InformationalVersion>
+    <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
   <ItemGroup Condition="'$(ElvernAllowedOrigin)' != ''">
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
@@ -18,5 +15,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Tests/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Elvern.VlcOpener.Tests" />
   </ItemGroup>
 </Project>

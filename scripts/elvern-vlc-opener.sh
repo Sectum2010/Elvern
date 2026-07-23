@@ -5,8 +5,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/elvern-common.sh"
 
 HELPER_DLL=""
 for candidate in \
-  "${ELVERN_PROJECT_ROOT}/clients/desktop-vlc-opener/bin/Debug/net8.0/Elvern.VlcOpener.dll" \
-  "${ELVERN_PROJECT_ROOT}/clients/desktop-vlc-opener/bin/Release/net8.0/Elvern.VlcOpener.dll"
+  "${ELVERN_PROJECT_ROOT}/clients/desktop-vlc-opener/bin/Debug/net10.0/Elvern.VlcOpener.dll" \
+  "${ELVERN_PROJECT_ROOT}/clients/desktop-vlc-opener/bin/Release/net10.0/Elvern.VlcOpener.dll"
 do
   if [[ -f "${candidate}" ]]; then
     HELPER_DLL="${candidate}"

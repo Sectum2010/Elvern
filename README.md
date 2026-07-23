@@ -240,7 +240,7 @@ The handoff itself is a tightly-engineered piece of plumbing:
 
 1. You click **Open in VLC** in the browser.
 2. The frontend asks the backend to mint a short-lived signed `elvern-vlc://` handoff URL (default TTL: 5 minutes).
-3. Your OS hands the URL to the registered Elvern helper — a tiny .NET 8 application that ships as a portable bundle for **Windows (`win-x64`)**, **macOS (`osx-arm64` / `osx-x64`)**, and **Linux**.
+3. Your OS hands the URL to the registered Elvern helper — a self-contained .NET 10 application packaged once for Windows x64, once for macOS (Apple Silicon + Intel payloads), and once for remote Linux (x64/ARM64 + glibc/musl payloads). Same-host Linux launches VLC directly and needs no Helper.
 4. The helper probes for installed VLC (`/usr/bin/vlc`, `C:\Program Files\VideoLAN\VLC\vlc.exe`, `/Applications/VLC.app`, etc.).
 5. The helper resolves the handoff against `ELVERN_BACKEND_ORIGIN` and gets back **either a mapped direct filesystem path** (reference quality, zero transcoding) **or a short-lived backend URL fallback** (when no path mapping exists for that platform).
 6. VLC launches with the resolved target, and the helper reports the launch state back to Elvern so the UI can update.
@@ -535,19 +535,23 @@ Build the helper bundles on the Elvern host:
 ```bash
 cd /opt/elvern/clients/desktop-vlc-opener
 ./scripts/publish-bundles.sh                     # all default targets
-./scripts/publish-bundles.sh --runtime win-x64   # Windows only
-./scripts/publish-bundles.sh --runtime osx-arm64 # Apple Silicon Mac
+./scripts/publish-bundles.sh --platform windows  # Windows only
+./scripts/publish-bundles.sh --platform macos    # macOS dual-architecture package
+./scripts/publish-bundles.sh --platform linux    # Linux CPU/libc package
 ```
 
-Distributable bundles land under `clients/desktop-vlc-opener/artifacts/packages/`. Copy the right one to each desktop, install the .NET 8 runtime if it's not already there, and run the install script:
+Distributable self-contained bundles land under `clients/desktop-vlc-opener/artifacts/packages/`. Users do not install .NET separately. Each macOS or Linux installer selects its local payload after verifying the package manifest:
 
 | Platform | Install command |
 |---|---|
 | **Windows** | Double-click `Install-ElvernVlcOpener.cmd` |
 | **macOS** | Double-click `Install-ElvernVlcOpener.command` |
-| **Linux** | `./scripts/register-protocol-linux.sh` |
+| **Linux remote desktop** | Run `./Install-ElvernVlcOpener.sh` |
+| **Linux same-host** | No Helper required; use the host VLC check in Elvern |
 
 After that, **Open in VLC** Just Works™ from any browser tab on that desktop.
+
+See [Desktop Helper Self-Contained Install](docs/DESKTOP_HELPER_SELF_CONTAINED_INSTALL.md) for package contracts, trust boundaries, rollback, and the real-device validation matrix.
 
 <br/>
 
@@ -642,7 +646,7 @@ All runtime config lives in `deploy/env/elvern.env`. Below are the knobs that ma
 flowchart TB
     subgraph Clients["👥 Family devices on the tailnet"]
         Browser[Browser PWA<br/>React 18 · Vite 6]
-        VlcHelper[VLC Opener<br/>.NET 8 helper]
+        VlcHelper[VLC Opener<br/>self-contained .NET 10 helper]
         VlcApp[Installed VLC]
     end
 
@@ -787,24 +791,37 @@ Each request supports up to **8 MB of attachments** (screenshots, log snippets) 
 
 Elvern is at **0.8.0** and actively iterating. The current direction:
 
-### Near-term
+### Near term
 
-- 🐳 Docker polish — clearer first-run experience, more robust container path
-- 📖 Setup-doc and onboarding refinement so first-time self-hosted users get running faster
-- 🧪 Broader backend test coverage around auth, media safety, and playback contracts
-- 🛠️ Helper-installation ergonomics, especially for the desktop VLC opener flow on Windows/macOS
+- 🔐 Establish an elevated Owner identity and a safer Owner/Developer setup flow
+- ▶️ Research cache-assisted VLC handoff across desktop and mobile platforms
+- 🧹 Improve title normalization and faster local, cloud, and poster discovery
+- 🎛️ Mature multi-track audio/subtitle switching and safely activate direct-copy playback
+- 💾 Simplify recovery with one guarded, guided restore entry point
 
-### Later
+### Medium term
 
-- ✍️ Signed helper packaging for desktop clients
-- 🔍 Better playback diagnostics for desktop handoff, browser readiness, and route selection
-- 💾 Backup and restore documentation for SQLite state
-- 🛡️ Additional deployment hardening for self-hosted environments
-- 📱 Native mobile clients reusing the existing fallback playback-session contract
+- 🎬 Combine Lite and Full into one browser playback container with an Auto mode
+- 📲 Improve native-player handoff design, capability detection, and adapter-based app support
+- 💻 Publish and maintain a clear Apple, Microsoft, and Linux capability matrix
+
+### Long term
+
+- ⚡ Add device-aware loading, virtual Library rendering, and measured rotation/scroll refinements
+- 📊 Build richer title ranking, a reviewed poster adoption pack, and a 100+ title ATC research dataset
+- 📺 Investigate VLC-to-AirPlay stability and a signed, rollback-safe update pipeline
+- 👥 Mature shared delivery so concurrent viewers can safely reuse prepared output
+- 🤖 Research an optional, permission-bounded assistant using hosted or local models
+
+### Next major phase
+
+- 🎭 **Virtual Theatre** — private, encrypted, synchronized viewing with low-latency comments
+
+See the [full roadmap](docs/ROADMAP.md) for dependencies, completion criteria, and safety boundaries.
 
 ### Explicitly out of scope
 
-Elvern is **not** trying to become a public streaming service, a content-sharing or piracy platform, or a feature-for-feature Plex/Jellyfin replacement. The target is a *smaller, sharper* private control plane optimized for the family-server use case.
+Elvern is **not** trying to become a public streaming service, a content-sharing or piracy platform, a feature-for-feature Plex/Jellyfin replacement, or an unrestricted autonomous LLM. The target is a *smaller, sharper* private control plane optimized for the family-server use case.
 
 <br/>
 

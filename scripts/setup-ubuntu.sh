@@ -63,7 +63,7 @@ if (( INSTALL_PACKAGES )); then
     nodejs \
     npm \
     curl \
-    dotnet-sdk-8.0 \
+    dotnet-sdk-10.0 \
     vlc \
     libvlc5 \
     libvlc-dev \

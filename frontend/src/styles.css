@@ -2710,6 +2710,33 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   gap: 0.55rem;
 }
 
+.install-card__actions--inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.desktop-helper-card__feedback:empty {
+  display: none;
+}
+
+.desktop-helper-card__details {
+  padding-top: 0.7rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.desktop-helper-card__details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.desktop-helper-card__details[open] summary {
+  margin-bottom: 0.75rem;
+  color: var(--text-main);
+}
+
 .native-handoff__label {
   color: var(--text-muted);
   font-size: 0.9rem;

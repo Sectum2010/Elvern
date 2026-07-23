@@ -2,7 +2,9 @@
 set -euo pipefail
 
 HELPER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER_DLL="${1:-${HELPER_ROOT}/bin/Debug/net8.0/Elvern.VlcOpener.dll}"
+HELPER_DLL="${1:-${HELPER_ROOT}/bin/Debug/net10.0/Elvern.VlcOpener.dll}"
+HELPER_VERSION="$(sed -n 's:.*<ElvernHelperVersion>\([^<]*\)</ElvernHelperVersion>.*:\1:p' "${HELPER_ROOT}/Directory.Build.props" | head -n 1)"
+[[ -n "${HELPER_VERSION}" ]] || { echo "Could not read ElvernHelperVersion from Directory.Build.props." >&2; exit 1; }
 APP_DIR="${HOME}/Applications/Elvern VLC Opener.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
@@ -51,6 +53,7 @@ DOTNET_CMD=""
 DOTNET_ROOT_DIR=""
 declare -a CHECKED_DOTNET_PATHS=(
   "/usr/local/share/dotnet/dotnet"
+  "/usr/local/share/dotnet/x64/dotnet"
   "/opt/homebrew/share/dotnet/dotnet"
   "/usr/local/bin/dotnet"
   "/opt/homebrew/bin/dotnet"
@@ -62,6 +65,9 @@ for candidate in "\${CHECKED_DOTNET_PATHS[@]}"; do
     case "\${candidate}" in
       /usr/local/share/dotnet/dotnet)
         DOTNET_ROOT_DIR="/usr/local/share/dotnet"
+        ;;
+      /usr/local/share/dotnet/x64/dotnet)
+        DOTNET_ROOT_DIR="/usr/local/share/dotnet/x64"
         ;;
       /opt/homebrew/share/dotnet/dotnet)
         DOTNET_ROOT_DIR="/opt/homebrew/share/dotnet"
@@ -116,8 +122,12 @@ if [[ -x "${PLISTBUDDY}" ]]; then
     "${PLISTBUDDY}" -c "Add :CFBundleName string Elvern VLC Opener" "${INFO_PLIST}"
   "${PLISTBUDDY}" -c "Set :CFBundleDisplayName Elvern VLC Opener" "${INFO_PLIST}" >/dev/null 2>&1 || \
     "${PLISTBUDDY}" -c "Add :CFBundleDisplayName string Elvern VLC Opener" "${INFO_PLIST}"
-  "${PLISTBUDDY}" -c "Set :CFBundleShortVersionString 1.0" "${INFO_PLIST}" >/dev/null 2>&1 || \
-    "${PLISTBUDDY}" -c "Add :CFBundleShortVersionString string 1.0" "${INFO_PLIST}"
+  "${PLISTBUDDY}" -c "Set :CFBundleShortVersionString ${HELPER_VERSION}" "${INFO_PLIST}" >/dev/null 2>&1 || \
+    "${PLISTBUDDY}" -c "Add :CFBundleShortVersionString string ${HELPER_VERSION}" "${INFO_PLIST}"
+  "${PLISTBUDDY}" -c "Set :CFBundleVersion ${HELPER_VERSION}" "${INFO_PLIST}" >/dev/null 2>&1 || \
+    "${PLISTBUDDY}" -c "Add :CFBundleVersion string ${HELPER_VERSION}" "${INFO_PLIST}"
+  "${PLISTBUDDY}" -c "Set :LSMinimumSystemVersion 14.0" "${INFO_PLIST}" >/dev/null 2>&1 || \
+    "${PLISTBUDDY}" -c "Add :LSMinimumSystemVersion string 14.0" "${INFO_PLIST}"
   "${PLISTBUDDY}" -c "Delete :CFBundleURLTypes" "${INFO_PLIST}" >/dev/null 2>&1 || true
   "${PLISTBUDDY}" -c "Add :CFBundleURLTypes array" "${INFO_PLIST}"
   "${PLISTBUDDY}" -c "Add :CFBundleURLTypes:0 dict" "${INFO_PLIST}"

@@ -211,13 +211,12 @@ Windows one-time setup:
 
 ```bash
 cd "$ELVERN_ROOT/clients/desktop-vlc-opener"
-./scripts/publish-bundles.sh --runtime win-x64
+./scripts/publish-bundles.sh --platform windows
 ```
 
-2. Copy `clients/desktop-vlc-opener/artifacts/packages/elvern-vlc-opener-<version>-win-x64.zip` to the Windows machine.
+2. Copy `clients/desktop-vlc-opener/artifacts/packages/elvern-vlc-opener-<version>-windows-x64.zip` to the Windows machine.
 3. Unzip it.
-4. Install the `.NET 8 Runtime` on that Windows machine if it is not already present.
-5. Double-click `Install-ElvernVlcOpener.cmd`.
+4. Double-click `Install-ElvernVlcOpener.cmd`. The package includes its runtime and installs per user.
 
 macOS one-time setup:
 
@@ -225,24 +224,27 @@ macOS one-time setup:
 
 ```bash
 cd "$ELVERN_ROOT/clients/desktop-vlc-opener"
-./scripts/publish-bundles.sh --runtime osx-arm64
+./scripts/publish-bundles.sh --platform macos
 ```
 
-2. Copy `clients/desktop-vlc-opener/artifacts/packages/elvern-vlc-opener-<version>-osx-arm64.zip` to the Mac.
+2. Copy `clients/desktop-vlc-opener/artifacts/packages/elvern-vlc-opener-<version>-macos-dual-arch.zip` to the Mac.
 3. Unzip it.
-4. Install the `.NET 8 Runtime` on that Mac if it is not already present.
-5. Double-click `Install-ElvernVlcOpener.command`.
+4. Double-click `Install-ElvernVlcOpener.command`. It selects Apple Silicon or Intel locally and installs to `~/Applications` without `sudo`.
 
-The default package path is now portable/framework-dependent because that is much more reliable to build from the DGX Linux host. If you intentionally want to try a self-contained same-RID package, use:
+Remote Linux one-time setup:
 
 ```bash
 cd "$ELVERN_ROOT/clients/desktop-vlc-opener"
-./scripts/publish-bundles.sh --runtime osx-arm64 --self-contained
+./scripts/publish-bundles.sh --platform linux
 ```
 
-That self-contained path may still fail when RID-specific runtime packs are unavailable on the DGX host.
+Copy the Linux universal ZIP to the remote desktop, unzip it, and run `./Install-ElvernVlcOpener.sh`. It selects x64/ARM64 and glibc/musl locally, installs under `~/.local`, and does not use `sudo`. Linux sessions on the Elvern host itself continue to use host VLC directly and do not need the Helper. Flatpak VLC is not supported in this release.
+
+All standard packages are self-contained .NET 10 packages. Publishing fails rather than silently producing incomplete packages when an SDK or RID runtime pack is unavailable.
 
 Temporary manual testing path if you are not packaging yet:
+
+These repository-checkout commands are development-only and require the .NET 10 SDK. They are not the normal user install path.
 
 Windows:
 
@@ -260,7 +262,7 @@ dotnet build
 ./scripts/register-protocol-macos.sh
 ```
 
-Linux helper registration is recommended too, because the standard daily-use model is one shared DGX Elvern URL plus local VLC handoff on every desktop client:
+Linux repository-checkout registration is only for development. Normal remote Linux users should use the universal package; same-host Linux needs no Helper:
 
 ```bash
 cd "$ELVERN_ROOT/clients/desktop-vlc-opener"

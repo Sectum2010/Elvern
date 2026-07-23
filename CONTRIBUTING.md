@@ -60,7 +60,7 @@ npm test
 npm run build
 ```
 
-**Desktop helper (.NET 8) — only if you touched [clients/desktop-vlc-opener/](clients/desktop-vlc-opener/):**
+**Desktop helper (.NET 10) — only if you touched [clients/desktop-vlc-opener/](clients/desktop-vlc-opener/):**
 ```bash
 dotnet build clients/desktop-vlc-opener/Elvern.VlcOpener.csproj --configuration Release
 ```

@@ -28,7 +28,7 @@ internal static class VlcLocator
     {
         var checkedLocations = new List<string>();
         var fromEnv = Environment.GetEnvironmentVariable("ELVERN_VLC_PATH");
-        if (!string.IsNullOrWhiteSpace(fromEnv) && File.Exists(fromEnv))
+        if (!string.IsNullOrWhiteSpace(fromEnv) && IsExecutableFile(fromEnv))
         {
             return fromEnv;
         }
@@ -48,7 +48,7 @@ internal static class VlcLocator
             foreach (var candidate in BuildWindowsCandidates())
             {
                 checkedLocations.Add(candidate);
-                if (File.Exists(candidate))
+                if (IsExecutableFile(candidate))
                 {
                     return candidate;
                 }
@@ -63,7 +63,7 @@ internal static class VlcLocator
                      })
             {
                 checkedLocations.Add(candidate);
-                if (File.Exists(candidate))
+                if (IsExecutableFile(candidate))
                 {
                     return candidate;
                 }
@@ -71,23 +71,87 @@ internal static class VlcLocator
         }
         else
         {
-            var linuxCandidates = new[]
-            {
-                "/usr/bin/vlc",
-                "/usr/local/bin/vlc",
-            };
-            foreach (var candidate in linuxCandidates)
-            {
-                checkedLocations.Add(candidate);
-                if (File.Exists(candidate))
+            var linuxResult = FindLinuxVlc(
+                fromEnv,
+                Environment.GetEnvironmentVariable("PATH"),
+                candidate =>
                 {
-                    return candidate;
-                }
+                    checkedLocations.Add(candidate);
+                    return IsExecutableFile(candidate);
+                });
+            if (!string.IsNullOrWhiteSpace(linuxResult))
+            {
+                return linuxResult;
             }
         }
 
         throw new InvalidOperationException(
             $"Installed VLC was not found. Set ELVERN_VLC_PATH or install VLC first. Checked: {string.Join(", ", checkedLocations)}");
+    }
+
+    internal static IReadOnlyList<string> BuildLinuxCandidates(string? envOverride, string? pathValue)
+    {
+        var candidates = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Add(string? candidate)
+        {
+            if (!string.IsNullOrWhiteSpace(candidate) && seen.Add(candidate))
+            {
+                candidates.Add(candidate);
+            }
+        }
+
+        Add(envOverride);
+        foreach (var entry in (pathValue ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            Add(Path.Combine(entry, "vlc"));
+        }
+        Add("/usr/bin/vlc");
+        Add("/usr/local/bin/vlc");
+        Add("/snap/bin/vlc");
+        return candidates;
+    }
+
+    internal static string? FindLinuxVlc(
+        string? envOverride,
+        string? pathValue,
+        Func<string, bool> isExecutable)
+    {
+        foreach (var candidate in BuildLinuxCandidates(envOverride, pathValue))
+        {
+            if (isExecutable(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static bool IsExecutableFile(string candidate)
+    {
+        if (!File.Exists(candidate))
+        {
+            return false;
+        }
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return true;
+        }
+        try
+        {
+            var mode = File.GetUnixFileMode(candidate);
+            return (mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
+        }
+        catch (PlatformNotSupportedException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     [SupportedOSPlatform("windows")]

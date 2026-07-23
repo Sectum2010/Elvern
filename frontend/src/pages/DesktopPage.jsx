@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest } from "../lib/api";
 import { getOrCreateDeviceId } from "../lib/device";
+import {
+  buildMacTerminalInstallCommand,
+  copyTextToClipboard,
+  isPackageLevelDesktopHelperRelease,
+} from "../lib/desktopHelperInstall";
 import {
   detectClientPlatform,
   isDesktopClientPlatform,
@@ -27,8 +32,7 @@ const MOBILE_APP_STATUS_PREFIX = "elvern-install-app-status:";
 
 
 function detectInstallPlatform() {
-  const platform = detectClientPlatform();
-  return platform === "unknown" ? "linux" : platform;
+  return detectClientPlatform();
 }
 
 function detectIosStoreRegion() {
@@ -61,12 +65,23 @@ function platformLabel(platform) {
       return "Windows";
     case "mac":
       return "macOS";
-    default:
+    case "linux":
       return "Linux";
+    default:
+      return "Unknown";
   }
 }
 
 function releaseLabel(release) {
+  if (release.package_target === "windows-x64") {
+    return "Windows x64";
+  }
+  if (release.package_target === "macos-dual-arch") {
+    return "macOS";
+  }
+  if (release.package_target === "linux-universal") {
+    return "Linux";
+  }
   if (release.runtime_id === "win-x64") {
     return "Windows x64";
   }
@@ -96,16 +111,26 @@ function formatBytes(value) {
 function stateCopy(state) {
   switch (state) {
     case "helper_not_required":
-      return "Not required on this Linux desktop";
+      return "Not required on this Elvern host";
     case "up_to_date":
-      return "Helper verified";
+      return "Ready";
     case "update_available":
       return "Helper update available";
     case "release_unavailable":
-      return "Installer package unavailable";
+      return "Installer unavailable";
     default:
       return "Helper not verified";
   }
+}
+
+function helperStatusCopy(status) {
+  if (!status) {
+    return "Could not verify";
+  }
+  if (status.vlc_detection_state === "not_detected") {
+    return "VLC not found";
+  }
+  return stateCopy(status.state);
 }
 
 function normalizeMobileAppInstallState(value) {
@@ -227,48 +252,32 @@ function desktopVlcStatus(status, platform) {
     return {
       label: "VLC detected",
       copy: detectionPath
-        ? `Verified by a grounded ${platform === "linux" ? "host-side" : "desktop helper"} VLC lookup at ${detectionPath}.`
-        : `Verified by a grounded ${platform === "linux" ? "host-side" : "desktop helper"} VLC lookup.`,
+        ? `Verified by a grounded ${platform === "linux" && status?.same_host ? "host-side" : "desktop helper"} VLC lookup at ${detectionPath}.`
+        : `Verified by a grounded ${platform === "linux" && status?.same_host ? "host-side" : "desktop helper"} VLC lookup.`,
     };
   }
   if (detectionState === "not_detected") {
     return {
       label: "Not detected",
-      copy: platform === "linux"
+      copy: platform === "linux" && status?.same_host
         ? "Elvern could not find VLC on this Linux host."
         : "The desktop helper last reported that VLC was not detected on this device.",
     };
   }
   return {
     label: "VLC not verified",
-    copy: platform === "linux"
+    copy: platform === "linux" && status?.same_host
       ? "Run the host check below to confirm whether Elvern can see VLC on this Linux machine."
       : "Run the helper test below. Elvern only knows local VLC state after the client-side helper calls back from this device.",
   };
 }
 
-function desktopHelperSummaryCopy(platform, status) {
-  if (platform === "linux") {
-    return "Linux same-host Open in VLC uses the VLC binary on the Elvern host. No client-side helper install is required for the supported Linux baseline.";
-  }
-  if (status?.state === "release_unavailable") {
-    return "Windows and macOS use the client-side Elvern VLC Opener for Open in VLC, but this server does not currently expose an imported helper package for this platform.";
-  }
-  if (status?.state === "up_to_date") {
-    return "This device has completed a real helper callback. Use the test below any time Open in VLC feels stale or misconfigured.";
-  }
-  if (status?.state === "update_available") {
-    return "A helper callback was seen from this device before, but Elvern now has a newer package available for this platform.";
-  }
-  return "Windows and macOS use the client-side Elvern VLC Opener for Open in VLC. Server install does not register the protocol handler on this device.";
+function desktopHelperTestButtonLabel(platform, status) {
+  return platform === "linux" && status?.same_host ? "Check VLC on this host" : "Test helper";
 }
 
-function desktopHelperTestButtonLabel(platform) {
-  return platform === "linux" ? "Check VLC on this host" : "Test desktop helper";
-}
-
-function desktopHelperTestCopy(platform) {
-  if (platform === "linux") {
+function desktopHelperTestCopy(platform, status) {
+  if (platform === "linux" && status?.same_host) {
     return "This is a host-side VLC lookup only. It does not install or register anything.";
   }
   return "Test desktop helper opens a short-lived elvern-vlc:// verify link and waits briefly for the helper to call back to Elvern.";
@@ -278,7 +287,7 @@ function desktopHelperFeedbackForStatus(platform, status) {
   if (!status) {
     return "";
   }
-  if (platform === "linux") {
+  if (platform === "linux" && status?.same_host) {
     if (status.vlc_detection_state === "installed") {
       return "Elvern confirmed VLC on this Linux host.";
     }
@@ -287,6 +296,7 @@ function desktopHelperFeedbackForStatus(platform, status) {
     }
     return "Elvern refreshed the Linux host VLC check.";
   }
+
   if (status.vlc_detection_state === "installed") {
     return "The desktop helper called back to Elvern and reported VLC detection on this device.";
   }
@@ -332,6 +342,10 @@ function buildRecommendedApps(platform, iosStoreRegion) {
     ];
   }
 
+  if (platform === "unknown") {
+    return [];
+  }
+
   return [
     {
       id: `vlc-${platform}`,
@@ -352,23 +366,21 @@ function buildRequiredSection(platform, status) {
     };
   }
 
-  if (platform === "linux") {
-    return {
-      empty: true,
-      description: "Nothing is required for this setup.",
-      recommendedRelease: null,
-    };
-  }
-
-  const recommendedRelease = status?.latest_releases?.find((release) => release.recommended)
+  const packageRelease = status?.latest_releases?.find(isPackageLevelDesktopHelperRelease) || null;
+  const recommendedRelease = packageRelease
+    || status?.latest_releases?.find((release) => release.recommended)
     || status?.latest_releases?.[0]
     || null;
   return {
     empty: false,
-    description: platform === "linux"
-      ? "Linux same-host playback keeps using installed VLC directly. No helper install is required for the supported Linux baseline."
-      : "Elvern VLC Opener keeps desktop VLC handoff working cleanly on this platform.",
+    description: status?.helper_required === false
+      ? "Open in VLC uses the Elvern host directly on this same-host Linux session."
+      : "Elvern VLC Opener receives secure handoffs and opens installed VLC on this device.",
     recommendedRelease,
+    packageRelease,
+    legacyReleases: packageRelease
+      ? []
+      : (status?.latest_releases || []).filter((release) => release.id !== recommendedRelease?.id),
   };
 }
 
@@ -461,7 +473,9 @@ export function InstallPage() {
   const [appCheckPendingKey, setAppCheckPendingKey] = useState("");
   const [desktopVerifyPending, setDesktopVerifyPending] = useState(false);
   const [desktopVerifyFeedback, setDesktopVerifyFeedback] = useState("");
-  const [requiredPanelExpanded, setRequiredPanelExpanded] = useState(false);
+  const [terminalCommandFeedback, setTerminalCommandFeedback] = useState("");
+  const passiveRefreshInFlightRef = useRef(false);
+  const passiveRefreshAtRef = useRef(0);
   const [mobileAppStatus, setMobileAppStatus] = useState(() => ({
     "ios-vlc": readMobileAppStatus("ios-vlc"),
     "ios-infuse": readMobileAppStatus("ios-infuse"),
@@ -516,33 +530,41 @@ export function InstallPage() {
     };
   }, [isDesktop, loadDesktopStatus]);
 
-  const requiredSection = useMemo(() => buildRequiredSection(platform, status), [platform, status]);
-  const showRequiredSection = !requiredSection.empty;
-  const showHelperSetupSection = isDesktop && platform !== "linux";
-  const recommendedApps = useMemo(() => buildRecommendedApps(platform, iosStoreRegion), [iosStoreRegion, platform]);
-  const helperSetupNotes = useMemo(() => {
+  useEffect(() => {
     if (!isDesktop) {
-      return [];
-    }
-    if (platform === "linux") {
-      return [
-        "Linux same-host Open in VLC uses the host-side VLC binary, not a client-side protocol handler.",
-        "Use the check below to confirm whether Elvern can see VLC on this Linux machine.",
-      ];
+      return undefined;
     }
 
-    const notes = [
-      "Helper verification is client-side. Server install does not register the protocol handler on this device.",
-      status?.latest_releases?.length
-        ? "Download the package that matches this desktop, run its installer or registration step, then come back here and use Test desktop helper."
-        : "This server does not currently expose a helper download for this platform, so this page can only show the expected client-side readiness state.",
-      "The test requires a real helper callback. If nothing opens or this page never updates, the protocol handler is probably missing, misregistered, or blocked by the browser.",
-    ];
-    if (status?.vlc_detection_state === "not_detected") {
-      notes.push("The helper has reached Elvern before, but local VLC was not detected on this device.");
-    }
-    return notes;
-  }, [isDesktop, platform, status]);
+    const refreshStatus = async () => {
+      const now = Date.now();
+      if (
+        document.visibilityState === "hidden"
+        || passiveRefreshInFlightRef.current
+        || now - passiveRefreshAtRef.current < 500
+      ) {
+        return;
+      }
+      passiveRefreshAtRef.current = now;
+      passiveRefreshInFlightRef.current = true;
+      try {
+        await loadDesktopStatus({ showLoading: false });
+      } finally {
+        passiveRefreshInFlightRef.current = false;
+      }
+    };
+    window.addEventListener("focus", refreshStatus);
+    window.addEventListener("pageshow", refreshStatus);
+    document.addEventListener("visibilitychange", refreshStatus);
+    return () => {
+      window.removeEventListener("focus", refreshStatus);
+      window.removeEventListener("pageshow", refreshStatus);
+      document.removeEventListener("visibilitychange", refreshStatus);
+    };
+  }, [isDesktop, loadDesktopStatus]);
+
+  const requiredSection = useMemo(() => buildRequiredSection(platform, status), [platform, status]);
+  const showRequiredSection = !requiredSection.empty;
+  const recommendedApps = useMemo(() => buildRecommendedApps(platform, iosStoreRegion), [iosStoreRegion, platform]);
   const desktopVlc = useMemo(
     () => (isDesktop ? desktopVlcStatus(status, platform) : null),
     [isDesktop, platform, status],
@@ -643,194 +665,136 @@ export function InstallPage() {
     }
   }
 
+  async function handleCopyMacTerminalCommand() {
+    if (!requiredSection.packageRelease) {
+      return;
+    }
+    setTerminalCommandFeedback("");
+    try {
+      const command = buildMacTerminalInstallCommand(requiredSection.packageRelease);
+      await copyTextToClipboard(command);
+      setTerminalCommandFeedback("Copied");
+    } catch (copyError) {
+      setTerminalCommandFeedback(copyError.message || "Could not copy the Terminal install command.");
+    }
+  }
+
+  const helperDownloadLabel = platform === "mac"
+    ? "Download for macOS"
+    : platform === "linux"
+      ? "Download for Linux"
+      : "Download for Windows";
+
   return (
     <section className="page-section">
       <div className="section-header">
         <div>
           <p className="eyebrow">Install</p>
-          <h1>{platform === "linux" ? "Install apps for this device" : "Install apps and helper for this device"}</h1>
+          <h1>{isDesktop ? "Install apps and helper for this device" : "Install apps for this device"}</h1>
           <p className="page-subnote">
-            Detected platform: {platformLabel(platform)}
+            {platform === "unknown"
+              ? "Platform could not be detected."
+              : `Detected platform: ${platformLabel(platform)}`}
           </p>
         </div>
       </div>
 
       {error ? <p className="form-error">{error}</p> : null}
 
-      {showHelperSetupSection ? (
-        <section className="page-section">
-          <article className="settings-card install-section-card settings-card--wide">
-            <div className="install-section-card__header">
-              <h2>Desktop helper setup</h2>
-              <p className="page-subnote">
-                {desktopHelperSummaryCopy(platform, status)}
-              </p>
-            </div>
-            <div className="desktop-playback-notes">
-              {helperSetupNotes.map((note) => (
-                <p className="page-subnote" key={note}>
-                  {note}
-                </p>
-              ))}
-            </div>
-            {desktopVerifyFeedback ? <p className="page-note">{desktopVerifyFeedback}</p> : null}
-          </article>
-        </section>
-      ) : null}
-
       {showRequiredSection ? (
         <section className="page-section">
-          <details
-            className="settings-card install-section-card settings-card--wide settings-disclosure"
-            open={requiredPanelExpanded}
-            onToggle={(event) => setRequiredPanelExpanded(event.currentTarget.open)}
-          >
-            <summary className="settings-disclosure__summary">
-              <div className="settings-disclosure__header">
-                <span className="settings-disclosure__title">Desktop helper</span>
-                {requiredSection.description ? (
-                  <span className="settings-disclosure__copy">{requiredSection.description}</span>
+          <article className="settings-card install-section-card settings-card--wide desktop-helper-card">
+            <div className="install-card__header">
+              <div>
+                <h2>Elvern VLC Opener</h2>
+                <p className="page-subnote">{requiredSection.description}</p>
+              </div>
+              <span className="status-pill">{loading ? "Checking" : helperStatusCopy(status)}</span>
+            </div>
+
+            {requiredSection.recommendedRelease && status?.helper_required !== false ? (
+              <div className="install-card__actions">
+                <a className="primary-button" href={requiredSection.recommendedRelease.download_url}>
+                  {helperDownloadLabel}
+                </a>
+                <p className="page-subnote">
+                  Version {requiredSection.recommendedRelease.version} · {formatBytes(requiredSection.recommendedRelease.size_bytes)}
+                  {requiredSection.packageRelease ? " · Runtime included" : ""}
+                </p>
+                {platform === "mac" && requiredSection.packageRelease ? (
+                  <p className="page-subnote">Includes Apple Silicon and Intel versions. The installer selects automatically.</p>
+                ) : null}
+                {platform === "linux" && requiredSection.packageRelease ? (
+                  <p className="page-subnote">Includes x64 and ARM64 builds for glibc and musl. The installer selects automatically.</p>
                 ) : null}
               </div>
-              <div className="settings-disclosure__summary-meta">
-                <span className="status-pill">
-                  {loading ? "Checking..." : stateCopy(status?.state)}
-                </span>
-              </div>
-            </summary>
+            ) : null}
 
-            <div className="install-list">
-              <article className="install-card install-card--wide">
-                <div className="install-card__copy">
-                  <h3>Elvern VLC Opener</h3>
-                  {loading ? <p className="page-note">Checking install status…</p> : null}
-                  {status ? (
-                    <>
-                      <div className="status-row">
-                        <span>Status</span>
-                        <strong>{stateCopy(status.state)}</strong>
-                      </div>
-                      <div className="status-row">
-                        <span>Detected platform</span>
-                        <strong>{status.platform}</strong>
-                      </div>
-                      <div className="status-row">
-                        <span>Last seen helper version</span>
-                        <strong>{status.last_seen_helper_version || "Unknown"}</strong>
-                      </div>
-                      <div className="status-row">
-                        <span>Device ID</span>
-                        <strong>{status.device_id || deviceId || "Unknown"}</strong>
-                      </div>
-                      <div className="status-row">
-                        <span>Runtime</span>
-                        <strong>{status.dotnet_runtime_required || "Unknown"}</strong>
-                      </div>
-                    </>
-                  ) : null}
-                  {requiredSection.recommendedRelease ? (
-                    <div className="install-card__actions">
-                      <a
-                        className="primary-button"
-                        href={requiredSection.recommendedRelease.download_url}
-                      >
-                        {status?.state === "update_available" ? "Download update" : "Download installer"}
-                      </a>
-                      <p className="page-subnote">
-                        {releaseLabel(requiredSection.recommendedRelease)} · Version {requiredSection.recommendedRelease.version} · {formatBytes(requiredSection.recommendedRelease.size_bytes)}
-                      </p>
-                    </div>
-                  ) : null}
-                  {status?.latest_releases?.length > 1 ? (
-                    <div className="install-card__notes">
-                      <p className="page-subnote">Available downloads</p>
-                      <div className="desktop-helper-list">
-                        {status.latest_releases.map((release) => (
-                          <article className="desktop-helper-release" key={release.id}>
-                            <div className="desktop-helper-release__meta">
-                              <h3>{releaseLabel(release)}{release.recommended ? " (Recommended)" : ""}</h3>
-                              <p className="page-subnote">
-                                Version {release.version} · {formatBytes(release.size_bytes)} · {release.dotnet_runtime_required}
-                              </p>
-                            </div>
-                            <a
-                              className="ghost-button ghost-button--inline desktop-helper-release__download"
-                              href={release.download_url}
-                            >
-                              Download
-                            </a>
-                          </article>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                  {status?.notes?.length ? (
-                    <div className="install-card__notes">
-                      {status.notes.map((note) => (
-                        <p className="page-subnote" key={note}>
-                          {note}
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              </article>
+            <div className="install-card__actions install-card__actions--inline">
+              <button
+                className="primary-button"
+                disabled={desktopVerifyPending}
+                onClick={handleDesktopVlcVerify}
+                type="button"
+              >
+                {desktopVerifyPending ? "Checking..." : desktopHelperTestButtonLabel(platform, status)}
+              </button>
+              {desktopRecommendedApp ? (
+                <a className="ghost-button ghost-button--inline" href={desktopRecommendedApp.primary_url}>
+                  Download VLC
+                </a>
+              ) : null}
             </div>
-          </details>
-        </section>
-      ) : null}
+            <p className="page-subnote">{desktopHelperTestCopy(platform, status)}</p>
+            <p className="page-subnote">{desktopVlc?.copy}</p>
+            <p className="page-subnote">Last checked: {formatLastChecked(status?.vlc_detection_checked_at)}</p>
+            <p aria-live="polite" className="page-note desktop-helper-card__feedback" role="status">
+              {desktopVerifyFeedback}
+            </p>
 
-      {isDesktop && desktopRecommendedApp ? (
-        <section className="page-section">
-          <div className="section-header section-header--compact">
-            <div>
-              <h2>Recommended apps</h2>
-              <p className="page-subnote">
-                {platform === "linux"
-                  ? "Check whether Elvern can see VLC on this Linux host."
-                  : "Check whether the client-side helper can call back, then whether VLC was detected on this device."}
-              </p>
-            </div>
-          </div>
+            {requiredSection.legacyReleases.length ? (
+              <details className="desktop-helper-card__details">
+                <summary>More options...</summary>
+                <div className="desktop-helper-list">
+                  {requiredSection.legacyReleases.map((release) => (
+                    <article className="desktop-helper-release" key={release.id}>
+                      <div className="desktop-helper-release__meta">
+                        <h3>{releaseLabel(release)}{release.recommended ? " (Recommended)" : ""}</h3>
+                        <p className="page-subnote">Version {release.version} · {formatBytes(release.size_bytes)}</p>
+                      </div>
+                      <a className="ghost-button ghost-button--inline" href={release.download_url}>Download</a>
+                    </article>
+                  ))}
+                </div>
+              </details>
+            ) : null}
 
-          <div className="install-vlc-card-row">
-            <article className="install-card install-card--vlc">
-              <div className="install-card__copy">
-                <div className="install-card__header">
-                  <h3>{desktopRecommendedApp.name}</h3>
-                  <span className="status-pill">
-                    {desktopVlc?.label || "Install status unavailable"}
-                  </span>
-                </div>
-                <p className="page-note">{desktopRecommendedApp.description}</p>
-                <p className="page-subnote">
-                  {desktopVlc?.copy || "Browsers cannot verify local install state here."}
-                </p>
-                <div className="install-card__actions">
-                  <button
-                    className="primary-button"
-                    disabled={desktopVerifyPending}
-                    onClick={handleDesktopVlcVerify}
-                    type="button"
-                  >
-                    {desktopVerifyPending ? "Checking..." : desktopHelperTestButtonLabel(platform)}
-                  </button>
-                  <a
-                    className="ghost-button ghost-button--inline"
-                    href={desktopRecommendedApp.primary_url}
-                  >
-                    Download
-                  </a>
-                </div>
-                <p className="page-subnote">
-                  {desktopHelperTestCopy(platform)}
-                </p>
-                <p className="page-subnote">
-                  Last checked: {formatLastChecked(status?.vlc_detection_checked_at)}
-                </p>
-              </div>
-            </article>
-          </div>
+            {platform === "mac" && requiredSection.packageRelease ? (
+              <details className="desktop-helper-card__details">
+                <summary>Installation help</summary>
+                <p className="page-subnote">The app installs to ~/Applications/Elvern VLC Opener.app without administrator access.</p>
+                <button className="ghost-button ghost-button--inline" onClick={handleCopyMacTerminalCommand} type="button">
+                  Copy Terminal install command
+                </button>
+                {terminalCommandFeedback ? (
+                  <p aria-live="polite" className="page-subnote" role="status">{terminalCommandFeedback}</p>
+                ) : null}
+                <p className="page-subnote">If macOS still blocks the verified installer, use System Settings → Privacy &amp; Security → Open Anyway.</p>
+              </details>
+            ) : null}
+
+            <details className="desktop-helper-card__details">
+              <summary>Details</summary>
+              <div className="status-row"><span>Package version</span><strong>{requiredSection.recommendedRelease?.version || "Unavailable"}</strong></div>
+              <div className="status-row"><span>Last seen helper version</span><strong>{status?.last_seen_helper_version || "Unknown"}</strong></div>
+              <div className="status-row"><span>Last callback</span><strong>{formatLastChecked(status?.last_seen_helper_at)}</strong></div>
+              <div className="status-row"><span>Reported architecture</span><strong>{status?.last_seen_helper_arch || "Unknown"}</strong></div>
+              <div className="status-row"><span>Package target</span><strong>{requiredSection.recommendedRelease?.package_target || "Unavailable"}</strong></div>
+              <div className="status-row"><span>Runtime</span><strong>{status?.runtime_included ? "Included" : "Not reported"}</strong></div>
+              <div className="status-row"><span>Device ID</span><strong>{status?.device_id || deviceId || "Unknown"}</strong></div>
+              {status?.notes?.map((note) => <p className="page-subnote" key={note}>{note}</p>)}
+            </details>
+          </article>
         </section>
       ) : null}
 

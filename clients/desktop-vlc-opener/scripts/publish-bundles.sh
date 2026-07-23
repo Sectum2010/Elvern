@@ -4,479 +4,352 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_FILE="${PROJECT_DIR}/Elvern.VlcOpener.csproj"
+PROPS_FILE="${PROJECT_DIR}/Directory.Build.props"
 PACKAGING_DIR="${PROJECT_DIR}/packaging"
 METADATA_FILE="${PACKAGING_DIR}/helper-release.env"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
-PUBLISH_DIR="${ARTIFACTS_DIR}/publish"
 PACKAGES_DIR="${ARTIFACTS_DIR}/packages"
-RELEASE_MANIFEST_FILE="${PACKAGES_DIR}/release-manifest.json"
-COMMON_README="${PROJECT_DIR}/packaging/common/README.txt"
-WINDOWS_INSTALLER_DIR="${PROJECT_DIR}/packaging/windows"
-MACOS_INSTALLER_DIR="${PROJECT_DIR}/packaging/macos"
-MACOS_BRIDGE_SOURCE="${MACOS_INSTALLER_DIR}/ElvernVlcOpener.applescript"
-MACOS_RUNNER_TEMPLATE="${MACOS_INSTALLER_DIR}/run-helper.sh.template"
-
-declare -a DEFAULT_RUNTIMES=("win-x64" "osx-arm64" "osx-x64")
-declare -a RUNTIMES=()
-PUBLISH_MODE="portable"
-ZIP_OUTPUT=1
-CUSTOM_RUNTIMES=0
-MANIFEST_GENERATED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-declare -a MANIFEST_PACKAGE_RECORDS=()
-
-if [[ ! -f "${METADATA_FILE}" ]]; then
-  echo "Missing helper packaging metadata: ${METADATA_FILE}" >&2
-  exit 1
-fi
-
-# shellcheck disable=SC1090
-source "${METADATA_FILE}"
-
-for required_key in HELPER_VERSION HELPER_CHANNEL DOTNET_RUNTIME_MAJOR DOTNET_RUNTIME_DISPLAY PACKAGE_NAME_PREFIX; do
-  if [[ -z "${!required_key:-}" ]]; then
-    echo "Missing ${required_key} in ${METADATA_FILE}" >&2
-    exit 1
-  fi
-done
-
-if [[ -z "${ELVERN_BACKEND_ORIGIN:-}" ]]; then
-  echo "Set ELVERN_BACKEND_ORIGIN before publishing helper bundles." >&2
-  exit 1
-fi
-
-case "${ELVERN_BACKEND_ORIGIN}" in
-  http://*|https://*)
-    ;;
-  *)
-    echo "ELVERN_BACKEND_ORIGIN must be an absolute http(s) origin." >&2
-    exit 1
-    ;;
-esac
+COMMON_README="${PACKAGING_DIR}/common/README.txt"
+SELECTORS="${PACKAGING_DIR}/common/platform-selectors.sh"
+PUBLISH_MODE="self-contained"
+NUGET_SOURCE="${ELVERN_DOTNET_NUGET_SOURCE:-https://api.nuget.org/v3/index.json}"
+GENERATED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+declare -a TARGETS=("windows" "macos" "linux")
+declare -a WINDOWS_RIDS=("win-x64")
+declare -a MACOS_RIDS=("osx-arm64" "osx-x64")
+declare -a LINUX_RIDS=("linux-x64" "linux-arm64" "linux-musl-x64" "linux-musl-arm64")
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/publish-bundles.sh [options]
+Usage: ./scripts/publish-bundles.sh [--platform windows|macos|linux]
 
-Build client-installable packages for Elvern VLC Opener.
-
-Default behavior:
-  - portable/framework-dependent publish
-  - no RID-specific runtime-pack restore
-  - packages for win-x64, osx-arm64, osx-x64
-
-Options:
-  --runtime <rid>       Build only the given package runtime. Repeatable.
-  --portable            Force the default portable/framework-dependent mode.
-  --self-contained      Attempt RID-specific self-contained publish instead.
-  --no-zip              Leave package directories only; skip zip archives.
-  --help                Show this help.
-
-Examples:
-  ./scripts/publish-bundles.sh
-  ./scripts/publish-bundles.sh --runtime osx-arm64
-  ./scripts/publish-bundles.sh --runtime win-x64 --runtime osx-arm64
-  ./scripts/publish-bundles.sh --runtime win-x64 --self-contained
+Standard publishing is always self-contained and non-trimmed. With no options,
+the script builds Windows x64, macOS dual-architecture, and Linux universal packages.
+Repeat --platform to build a selected set. A failed RID aborts the entire publish.
 EOF
 }
 
+if [[ $# -gt 0 ]]; then
+  TARGETS=()
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --runtime)
-      if [[ $# -lt 2 ]]; then
-        echo "Missing value for --runtime" >&2
-        exit 1
-      fi
-      if [[ ${CUSTOM_RUNTIMES} -eq 0 ]]; then
-        RUNTIMES=()
-        CUSTOM_RUNTIMES=1
-      fi
-      RUNTIMES+=("$2")
+    --platform)
+      [[ $# -ge 2 ]] || { echo "Missing value for --platform." >&2; exit 1; }
+      case "$2" in
+        windows|macos|linux) TARGETS+=("$2") ;;
+        *) echo "Unsupported platform target: $2" >&2; exit 1 ;;
+      esac
       shift 2
       ;;
-    --portable)
-      PUBLISH_MODE="portable"
-      shift
-      ;;
-    --self-contained)
-      PUBLISH_MODE="self-contained"
-      shift
-      ;;
-    --no-zip)
-      ZIP_OUTPUT=0
-      shift
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      usage >&2
-      exit 1
-      ;;
+    --windows) TARGETS+=("windows"); shift ;;
+    --macos) TARGETS+=("macos"); shift ;;
+    --linux) TARGETS+=("linux"); shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+[[ ${#TARGETS[@]} -gt 0 ]] || { echo "At least one platform target is required." >&2; exit 1; }
 
-if [[ ${#RUNTIMES[@]} -eq 0 ]]; then
-  RUNTIMES=("${DEFAULT_RUNTIMES[@]}")
-fi
+for required_file in "${PROJECT_FILE}" "${PROPS_FILE}" "${METADATA_FILE}" "${COMMON_README}" "${SELECTORS}"; do
+  [[ -f "${required_file}" ]] || { echo "Missing required file: ${required_file}" >&2; exit 1; }
+done
+command -v python3 >/dev/null 2>&1 || { echo "python3 is required for deterministic manifest generation." >&2; exit 1; }
+command -v zip >/dev/null 2>&1 || { echo "zip is required to create helper packages." >&2; exit 1; }
+command -v dotnet >/dev/null 2>&1 || { echo "dotnet SDK 10 is required to publish helper packages." >&2; exit 1; }
+dotnet --list-sdks | awk '{print $1}' | grep -Eq '^10\.' || {
+  echo ".NET SDK 10 is required to publish self-contained helper packages." >&2
+  exit 1
+}
 
-if [[ ! -f "${PROJECT_FILE}" ]]; then
-  echo "Missing project file: ${PROJECT_FILE}" >&2
+# shellcheck disable=SC1090
+source "${METADATA_FILE}"
+for required_key in HELPER_CHANNEL PACKAGE_NAME_PREFIX MACOS_MINIMUM_VERSION; do
+  [[ -n "${!required_key:-}" ]] || { echo "Missing ${required_key} in ${METADATA_FILE}." >&2; exit 1; }
+done
+if [[ -z "${ELVERN_BACKEND_ORIGIN:-}" || ! "${ELVERN_BACKEND_ORIGIN}" =~ ^https?://[^/]+/?$ ]]; then
+  echo "Set ELVERN_BACKEND_ORIGIN to the exact absolute http(s) backend origin before publishing." >&2
   exit 1
 fi
+ELVERN_BACKEND_ORIGIN="${ELVERN_BACKEND_ORIGIN%/}"
 
-VERSION="${HELPER_VERSION}"
+mapfile -t BUILD_PROPERTIES < <(python3 - "${PROPS_FILE}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
 
-mkdir -p "${PUBLISH_DIR}" "${PACKAGES_DIR}"
+root = ET.parse(sys.argv[1]).getroot()
+values = {child.tag: (child.text or "").strip() for group in root.findall("PropertyGroup") for child in group}
+version = values.get("ElvernHelperVersion", "")
+framework = values.get("TargetFramework", "")
+if not version or not framework:
+    raise SystemExit("Directory.Build.props must define ElvernHelperVersion and TargetFramework")
+print(version)
+print(framework)
+PY
+)
+[[ ${#BUILD_PROPERTIES[@]} -eq 2 ]] || { echo "Could not read helper build properties." >&2; exit 1; }
+HELPER_VERSION="${BUILD_PROPERTIES[0]}"
+TARGET_FRAMEWORK="${BUILD_PROPERTIES[1]}"
+[[ "${TARGET_FRAMEWORK}" == "net10.0" ]] || { echo "Standard helper publishing requires net10.0, found ${TARGET_FRAMEWORK}." >&2; exit 1; }
+RUNTIME_FAMILY="10.0"
 
-json_escape() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
-  printf '%s' "${value}"
-}
-
-resolve_platform_family() {
-  local runtime="$1"
-  case "${runtime}" in
-    win-*)
-      printf 'windows'
-      ;;
-    osx-*)
-      printf 'macos'
-      ;;
-    linux-*)
-      printf 'linux'
-      ;;
-    *)
-      printf 'unknown'
-      ;;
-  esac
-}
+mkdir -p "${ARTIFACTS_DIR}" "${PACKAGES_DIR}"
+WORK_DIR="$(mktemp -d "${ARTIFACTS_DIR}/.package-build.XXXXXX")"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+PUBLISH_ROOT="${WORK_DIR}/publish"
+PACKAGE_ROOT="${WORK_DIR}/packages"
+RECORDS_FILE="${WORK_DIR}/package-records.jsonl"
+mkdir -p "${PUBLISH_ROOT}" "${PACKAGE_ROOT}"
+: > "${RECORDS_FILE}"
 
 compute_sha256() {
-  local file_path="$1"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "${file_path}" | awk '{print $1}'
-    return
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "${file_path}" | awk '{print $1}'
-    return
-  fi
-  echo "Missing sha256 tool (sha256sum or shasum)." >&2
-  exit 1
+  sha256sum "$1" | awk '{print $1}'
 }
 
-register_release_package() {
-  local runtime="$1"
-  local artifact_path="$2"
-  local package_name="$3"
-  local artifact_kind="$4"
-  local generated_at_utc="$5"
-  local filename
-  local relative_path
-  local size_bytes
-  local sha256
-  local platform_family
-
-  if [[ ! -f "${artifact_path}" ]]; then
-    return
-  fi
-
-  filename="$(basename "${artifact_path}")"
-  relative_path="${artifact_path#${PACKAGES_DIR}/}"
-  size_bytes="$(wc -c < "${artifact_path}" | tr -d '[:space:]')"
-  sha256="$(compute_sha256 "${artifact_path}")"
-  platform_family="$(resolve_platform_family "${runtime}")"
-
-  MANIFEST_PACKAGE_RECORDS+=("    {
-      \"runtime\": \"$(json_escape "${runtime}")\",
-      \"platform_family\": \"$(json_escape "${platform_family}")\",
-      \"artifact_kind\": \"$(json_escape "${artifact_kind}")\",
-      \"package_name\": \"$(json_escape "${package_name}")\",
-      \"filename\": \"$(json_escape "${filename}")\",
-      \"relative_path\": \"$(json_escape "${relative_path}")\",
-      \"size_bytes\": ${size_bytes},
-      \"sha256\": \"$(json_escape "${sha256}")\",
-      \"generated_at_utc\": \"$(json_escape "${generated_at_utc}")\"
-    }")
-}
-
-write_release_manifest() {
-  {
-    printf '{\n'
-    printf '  "helper_version": "%s",\n' "$(json_escape "${HELPER_VERSION}")"
-    printf '  "channel": "%s",\n' "$(json_escape "${HELPER_CHANNEL}")"
-    printf '  "dotnet_runtime_major": "%s",\n' "$(json_escape "${DOTNET_RUNTIME_MAJOR}")"
-    printf '  "dotnet_runtime_display": "%s",\n' "$(json_escape "${DOTNET_RUNTIME_DISPLAY}")"
-    printf '  "package_name_prefix": "%s",\n' "$(json_escape "${PACKAGE_NAME_PREFIX}")"
-    printf '  "publish_mode": "%s",\n' "$(json_escape "${PUBLISH_MODE}")"
-    printf '  "generated_at_utc": "%s",\n' "$(json_escape "${MANIFEST_GENERATED_AT_UTC}")"
-    printf '  "packages": ['
-    if [[ ${#MANIFEST_PACKAGE_RECORDS[@]} -gt 0 ]]; then
-      printf '\n'
-      local index
-      local last_index=$(( ${#MANIFEST_PACKAGE_RECORDS[@]} - 1 ))
-      for index in "${!MANIFEST_PACKAGE_RECORDS[@]}"; do
-        printf '%s' "${MANIFEST_PACKAGE_RECORDS[${index}]}"
-        if [[ ${index} -lt ${last_index} ]]; then
-          printf ',\n'
-        else
-          printf '\n'
-        fi
-      done
-    fi
-    printf '  ]\n'
-    printf '}\n'
-  } > "${RELEASE_MANIFEST_FILE}"
-}
-
-prepare_portable_publish() {
-  local output_dir="${PUBLISH_DIR}/portable"
-  rm -rf "${output_dir}"
+publish_rid() {
+  local rid="$1"
+  local output_dir="${PUBLISH_ROOT}/${rid}"
   mkdir -p "${output_dir}"
-  echo "Publishing portable/framework-dependent helper..." >&2
-  dotnet restore "${PROJECT_FILE}" >&2
+  echo "Publishing self-contained ${rid}..."
   dotnet publish "${PROJECT_FILE}" \
-    -c Release \
-    --no-restore \
-    --self-contained false \
-    -p:UseAppHost=false \
-    -p:PublishSingleFile=false \
-    -p:PublishTrimmed=false \
-    -p:ElvernAllowedOrigin="${ELVERN_BACKEND_ORIGIN}" \
-    -o "${output_dir}" >&2
-  echo "${output_dir}"
-}
-
-prepare_self_contained_publish() {
-  local runtime="$1"
-  local output_dir="${PUBLISH_DIR}/${runtime}"
-  rm -rf "${output_dir}"
-  mkdir -p "${output_dir}"
-  echo "Publishing self-contained helper for ${runtime}..." >&2
-  dotnet publish "${PROJECT_FILE}" \
-    -c Release \
-    -r "${runtime}" \
+    --configuration Release \
+    --runtime "${rid}" \
     --self-contained true \
     -p:PublishSingleFile=true \
     -p:IncludeNativeLibrariesForSelfExtract=true \
     -p:PublishTrimmed=false \
+    -p:DebugType=None \
     -p:ElvernAllowedOrigin="${ELVERN_BACKEND_ORIGIN}" \
-    -o "${output_dir}" >&2
-  echo "${output_dir}"
+    --source "${NUGET_SOURCE}" \
+    --output "${output_dir}"
+  local executable="Elvern.VlcOpener"
+  [[ "${rid}" == win-* ]] && executable="Elvern.VlcOpener.exe"
+  [[ -f "${output_dir}/${executable}" ]] || { echo "Publish for ${rid} did not create ${executable}." >&2; exit 1; }
+  [[ ! -f "${output_dir}/Elvern.VlcOpener.dll" ]] || { echo "Publish for ${rid} unexpectedly produced a loose framework DLL." >&2; exit 1; }
+}
+
+copy_payloads() {
+  local private_dir="$1"
+  shift
+  local rid executable
+  for rid in "$@"; do
+    executable="Elvern.VlcOpener"
+    [[ "${rid}" == win-* ]] && executable="Elvern.VlcOpener.exe"
+    mkdir -p "${private_dir}/payloads/${rid}"
+    cp "${PUBLISH_ROOT}/${rid}/${executable}" "${private_dir}/payloads/${rid}/${executable}"
+    chmod 755 "${private_dir}/payloads/${rid}/${executable}" 2>/dev/null || true
+  done
+}
+
+write_inner_manifest() {
+  local manifest_path="$1"
+  local package_target="$2"
+  local private_dir="$3"
+  shift 3
+  python3 - "${manifest_path}" "${HELPER_VERSION}" "${package_target}" "${private_dir}" "$@" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+version = sys.argv[2]
+package_target = sys.argv[3]
+private_dir = pathlib.Path(sys.argv[4])
+rids = sys.argv[5:]
+payloads = []
+for rid in rids:
+    executable = "Elvern.VlcOpener.exe" if rid.startswith("win-") else "Elvern.VlcOpener"
+    relative = pathlib.PurePosixPath("payloads") / rid / executable
+    path = private_dir / pathlib.Path(relative)
+    data = path.read_bytes()
+    payloads.append({
+        "runtime_id": rid,
+        "relative_path": relative.as_posix(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size_bytes": len(data),
+        "executable_name": executable,
+    })
+manifest = {
+    "schema_version": "desktop-helper-installer-manifest-v1",
+    "helper_version": version,
+    "target_framework": "net10.0",
+    "runtime_family": "10.0",
+    "deployment_mode": "self_contained",
+    "external_runtime_required": False,
+    "package_target": package_target,
+    "payloads": payloads,
+}
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
 }
 
 write_package_readme() {
-  local package_dir="$1"
-  local runtime="$2"
-  local mode="$3"
-  local readme_path="${package_dir}/README.txt"
-
-  cp "${COMMON_README}" "${readme_path}"
+  local path="$1"
+  local detail="$2"
+  cp "${COMMON_README}" "${path}"
   {
     echo
-    echo "Package details:"
-    echo "- Runtime target label: ${runtime}"
-    echo "- Packaging mode: ${mode}"
-    echo "- Bound backend origin: ${ELVERN_BACKEND_ORIGIN}"
-    echo "- If the backend domain or port changes, republish and redistribute the helper bundle."
-    if [[ "${mode}" == "portable" ]]; then
-      echo "- This package is framework-dependent."
-      echo "- Install the ${DOTNET_RUNTIME_DISPLAY} on the client machine before first use."
-    else
-      echo "- This package is self-contained for ${runtime}."
-    fi
-  } >> "${readme_path}"
+    echo "Package version: ${HELPER_VERSION}"
+    echo "${detail}"
+    echo "The helper is bound to: ${ELVERN_BACKEND_ORIGIN}"
+  } >> "${path}"
 }
 
-build_windows_package() {
-  local runtime="$1"
-  local source_publish_dir="$2"
-  local mode="$3"
-  local package_name="${PACKAGE_NAME_PREFIX}-${VERSION}-${runtime}"
-  local package_dir="${PACKAGES_DIR}/${package_name}"
-  local artifact_generated_at_utc=""
+register_package() {
+  local package_target="$1"
+  local platform="$2"
+  local filename="$3"
+  local package_root_name="$4"
+  local installer_entrypoint="$5"
+  local minimum_os_version="$6"
+  shift 6
+  local artifact_path="${PACKAGE_ROOT}/${filename}"
+  local inner_manifest="${PACKAGE_ROOT}/${package_root_name}/.elvern/manifest.json"
+  python3 - "${RECORDS_FILE}" "${package_target}" "${platform}" "${filename}" "${package_root_name}" "${installer_entrypoint}" "${minimum_os_version}" "${artifact_path}" "${inner_manifest}" "${GENERATED_AT_UTC}" "$@" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
 
-  rm -rf "${package_dir}"
-  mkdir -p "${package_dir}/app"
-  cp -R "${source_publish_dir}/." "${package_dir}/app/"
-  cp "${WINDOWS_INSTALLER_DIR}/Install-ElvernVlcOpener.ps1" "${package_dir}/"
-  cp "${WINDOWS_INSTALLER_DIR}/Install-ElvernVlcOpener.cmd" "${package_dir}/"
-  cp "${WINDOWS_INSTALLER_DIR}/Uninstall-ElvernVlcOpener.ps1" "${package_dir}/"
-  cp "${WINDOWS_INSTALLER_DIR}/Uninstall-ElvernVlcOpener.cmd" "${package_dir}/"
-  write_package_readme "${package_dir}" "${runtime}" "${mode}"
-
-  if [[ ${ZIP_OUTPUT} -eq 1 ]] && command -v zip >/dev/null 2>&1; then
-    rm -f "${PACKAGES_DIR}/${package_name}.zip"
-    (cd "${PACKAGES_DIR}" && zip -qry "${package_name}.zip" "${package_name}")
-    artifact_generated_at_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    register_release_package "${runtime}" "${PACKAGES_DIR}/${package_name}.zip" "${package_name}" "zip" "${artifact_generated_at_utc}"
-  fi
+records_path = pathlib.Path(sys.argv[1])
+package_target, platform, filename, package_root, installer, minimum_os = sys.argv[2:8]
+artifact = pathlib.Path(sys.argv[8])
+inner_manifest = pathlib.Path(sys.argv[9])
+generated_at = sys.argv[10]
+rids = sys.argv[11:]
+artifact_data = artifact.read_bytes()
+manifest_data = inner_manifest.read_bytes()
+record = {
+    "package_target": package_target,
+    "platform": platform,
+    "artifact_kind": "zip",
+    "filename": filename,
+    "relative_path": filename,
+    "package_root": package_root,
+    "installer_entrypoint": installer,
+    "supported_runtime_ids": rids,
+    "external_runtime_required": False,
+    "size_bytes": len(artifact_data),
+    "sha256": hashlib.sha256(artifact_data).hexdigest(),
+    "installer_manifest_sha256": hashlib.sha256(manifest_data).hexdigest(),
+    "generated_at_utc": generated_at,
+}
+if minimum_os:
+    record["minimum_os_version"] = minimum_os
+with records_path.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+PY
+  echo "Package: ${filename}"
+  echo "  target: ${package_target}"
+  echo "  RIDs: $*"
+  echo "  compressed size: $(wc -c < "${artifact_path}" | tr -d '[:space:]') bytes"
+  echo "  SHA-256: $(compute_sha256 "${artifact_path}")"
 }
 
-build_macos_package() {
-  local runtime="$1"
-  local source_publish_dir="$2"
-  local mode="$3"
-  local package_name="${PACKAGE_NAME_PREFIX}-${VERSION}-${runtime}"
-  local package_dir="${PACKAGES_DIR}/${package_name}"
-  local artifact_generated_at_utc=""
-  local app_dir="${package_dir}/Elvern VLC Opener.app"
-  local contents_dir="${app_dir}/Contents"
-  local macos_dir="${contents_dir}/MacOS"
-  local resources_dir="${contents_dir}/Resources"
-  local app_payload_dir="${resources_dir}/app"
-  local launcher_path="${macos_dir}/Elvern VLC Opener"
-  local plist_path="${contents_dir}/Info.plist"
-
-  rm -rf "${package_dir}"
-  mkdir -p "${macos_dir}" "${app_payload_dir}"
-  cp -R "${source_publish_dir}/." "${app_payload_dir}/"
-  sed "s/__VERSION__/${VERSION}/g" "${MACOS_INSTALLER_DIR}/Info.plist.template" > "${plist_path}"
-
-  cat > "${launcher_path}" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONTENTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-APP_DIR="${CONTENTS_DIR}/Resources/app"
-SELF_CONTAINED_BIN="${APP_DIR}/Elvern.VlcOpener"
-FRAMEWORK_DLL="${APP_DIR}/Elvern.VlcOpener.dll"
-DOTNET_CMD=""
-DOTNET_ROOT_DIR=""
-declare -a CHECKED_DOTNET_PATHS=(
-  "/usr/local/share/dotnet/dotnet"
-  "/opt/homebrew/share/dotnet/dotnet"
-  "/usr/local/bin/dotnet"
-  "/opt/homebrew/bin/dotnet"
-)
-
-if [[ -x "${SELF_CONTAINED_BIN}" ]]; then
-  exec "${SELF_CONTAINED_BIN}" "$@"
-fi
-
-if [[ -f "${FRAMEWORK_DLL}" ]]; then
-  for candidate in "${CHECKED_DOTNET_PATHS[@]}"; do
-    if [[ -x "${candidate}" ]]; then
-      DOTNET_CMD="${candidate}"
-      case "${candidate}" in
-        /usr/local/share/dotnet/dotnet)
-          DOTNET_ROOT_DIR="/usr/local/share/dotnet"
-          ;;
-        /opt/homebrew/share/dotnet/dotnet)
-          DOTNET_ROOT_DIR="/opt/homebrew/share/dotnet"
-          ;;
-        /usr/local/bin/dotnet)
-          DOTNET_ROOT_DIR="/usr/local/share/dotnet"
-          ;;
-        /opt/homebrew/bin/dotnet)
-          DOTNET_ROOT_DIR="/opt/homebrew/share/dotnet"
-          ;;
-      esac
-      break
-    fi
-  done
-
-  if [[ -z "${DOTNET_CMD}" ]] && command -v dotnet >/dev/null 2>&1; then
-    DOTNET_CMD="$(command -v dotnet)"
-    case "${DOTNET_CMD}" in
-      */share/dotnet/dotnet)
-        DOTNET_ROOT_DIR="$(dirname "${DOTNET_CMD}")"
-        ;;
-      */bin/dotnet)
-        DOTNET_ROOT_DIR="$(cd "$(dirname "${DOTNET_CMD}")/.." && pwd)"
-        ;;
-      *)
-        DOTNET_ROOT_DIR="$(dirname "${DOTNET_CMD}")"
-        ;;
-    esac
-  fi
-
-  if [[ -z "${DOTNET_CMD}" ]]; then
-    CHECKED_SUMMARY="$(printf '%s\n' "${CHECKED_DOTNET_PATHS[@]}")"
-    if command -v osascript >/dev/null 2>&1; then
-      osascript -e 'display alert "__DOTNET_RUNTIME_ALERT_TITLE__" message "Elvern VLC Opener could not find dotnet. Checked /usr/local/share/dotnet/dotnet, /opt/homebrew/share/dotnet/dotnet, /usr/local/bin/dotnet, /opt/homebrew/bin/dotnet, then PATH."' >/dev/null 2>&1 || true
-    fi
-    echo "Elvern VLC Opener could not find dotnet." >&2
-    echo "Checked these paths:" >&2
-    echo "${CHECKED_SUMMARY}" >&2
-    echo "Checked PATH lookup: dotnet" >&2
-    exit 1
-  fi
-
-  if [[ -n "${DOTNET_ROOT_DIR}" ]]; then
-    export DOTNET_ROOT="${DOTNET_ROOT_DIR}"
-  fi
-
-  exec "${DOTNET_CMD}" "${FRAMEWORK_DLL}" "$@"
-fi
-
-echo "Missing Elvern VLC Opener payload." >&2
-exit 1
-EOF
-  sed -i \
-    -e "s/__DOTNET_RUNTIME_ALERT_TITLE__/.NET ${DOTNET_RUNTIME_MAJOR} Runtime Required/g" \
-    "${launcher_path}"
-  chmod +x "${launcher_path}"
-  cp "${MACOS_INSTALLER_DIR}/Install-ElvernVlcOpener.command" "${package_dir}/"
-  cp "${MACOS_INSTALLER_DIR}/Uninstall-ElvernVlcOpener.command" "${package_dir}/"
-  cp "${MACOS_BRIDGE_SOURCE}" "${package_dir}/"
-  cp "${MACOS_RUNNER_TEMPLATE}" "${package_dir}/"
-  write_package_readme "${package_dir}" "${runtime}" "${mode}"
-
-  if [[ ${ZIP_OUTPUT} -eq 1 ]] && command -v zip >/dev/null 2>&1; then
-    rm -f "${PACKAGES_DIR}/${package_name}.zip"
-    (cd "${PACKAGES_DIR}" && zip -qry "${package_name}.zip" "${package_name}")
-    artifact_generated_at_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    register_release_package "${runtime}" "${PACKAGES_DIR}/${package_name}.zip" "${package_name}" "zip" "${artifact_generated_at_utc}"
-  fi
+zip_package() {
+  local package_root_name="$1"
+  local filename="$2"
+  (cd "${PACKAGE_ROOT}" && zip -qry "${filename}" "${package_root_name}")
 }
 
-if [[ "${PUBLISH_MODE}" == "portable" ]]; then
-  PORTABLE_PUBLISH_DIR="$(prepare_portable_publish)"
-  for runtime in "${RUNTIMES[@]}"; do
-    case "${runtime}" in
-      win-*)
-        build_windows_package "${runtime}" "${PORTABLE_PUBLISH_DIR}" "portable"
-        ;;
-      osx-*)
-        build_macos_package "${runtime}" "${PORTABLE_PUBLISH_DIR}" "portable"
-        ;;
-      *)
-        echo "Unsupported package runtime: ${runtime}" >&2
-        exit 1
-        ;;
-    esac
-  done
-else
-  echo "Self-contained publish remains available, but it may fail on the DGX host if RID runtime packs are unavailable."
-  for runtime in "${RUNTIMES[@]}"; do
-    SC_PUBLISH_DIR="$(prepare_self_contained_publish "${runtime}")"
-    case "${runtime}" in
-      win-*)
-        build_windows_package "${runtime}" "${SC_PUBLISH_DIR}" "self-contained"
-        ;;
-      osx-*)
-        build_macos_package "${runtime}" "${SC_PUBLISH_DIR}" "self-contained"
-        ;;
-      *)
-        echo "Unsupported package runtime: ${runtime}" >&2
-        exit 1
-        ;;
-    esac
-  done
-fi
+build_windows() {
+  local rid
+  for rid in "${WINDOWS_RIDS[@]}"; do publish_rid "${rid}"; done
+  local root_name="Elvern VLC Opener Windows Installer"
+  local root="${PACKAGE_ROOT}/${root_name}"
+  local private="${root}/.elvern"
+  local filename="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-windows-x64.zip"
+  mkdir -p "${private}/uninstall"
+  cp "${PACKAGING_DIR}/windows/Install-ElvernVlcOpener.cmd" "${root}/"
+  cp "${PACKAGING_DIR}/windows/Install-ElvernVlcOpener.ps1" "${private}/"
+  cp "${PACKAGING_DIR}/windows/Uninstall-ElvernVlcOpener.ps1" "${private}/uninstall/"
+  write_package_readme "${root}/README.txt" "Includes the self-contained Windows x64 helper."
+  copy_payloads "${private}" "${WINDOWS_RIDS[@]}"
+  write_inner_manifest "${private}/manifest.json" "windows-x64" "${private}" "${WINDOWS_RIDS[@]}"
+  zip_package "${root_name}" "${filename}"
+  register_package "windows-x64" "windows" "${filename}" "${root_name}" "Install-ElvernVlcOpener.cmd" "" "${WINDOWS_RIDS[@]}"
+}
 
-write_release_manifest
+build_macos() {
+  local rid
+  for rid in "${MACOS_RIDS[@]}"; do publish_rid "${rid}"; done
+  local root_name="Elvern VLC Opener Installer"
+  local root="${PACKAGE_ROOT}/${root_name}"
+  local private="${root}/.elvern"
+  local filename="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-macos-dual-arch.zip"
+  mkdir -p "${private}/bridge" "${private}/uninstall" "${private}/lib"
+  cp "${PACKAGING_DIR}/macos/Install-ElvernVlcOpener.command" "${root}/"
+  chmod 755 "${root}/Install-ElvernVlcOpener.command"
+  cp "${PACKAGING_DIR}/macos/ElvernVlcOpener.applescript" "${private}/bridge/"
+  cp "${PACKAGING_DIR}/macos/run-helper.sh.template" "${private}/bridge/"
+  cp "${PACKAGING_DIR}/macos/Uninstall-ElvernVlcOpener.command" "${private}/uninstall/"
+  cp "${SELECTORS}" "${private}/lib/"
+  write_package_readme "${root}/README.txt" "Includes Apple Silicon and Intel payloads. The installer selects locally and requires macOS ${MACOS_MINIMUM_VERSION} or newer."
+  copy_payloads "${private}" "${MACOS_RIDS[@]}"
+  write_inner_manifest "${private}/manifest.json" "macos-dual-arch" "${private}" "${MACOS_RIDS[@]}"
+  zip_package "${root_name}" "${filename}"
+  register_package "macos-dual-arch" "mac" "${filename}" "${root_name}" "Install-ElvernVlcOpener.command" "${MACOS_MINIMUM_VERSION}" "${MACOS_RIDS[@]}"
+}
+
+build_linux() {
+  local rid
+  for rid in "${LINUX_RIDS[@]}"; do publish_rid "${rid}"; done
+  local root_name="Elvern VLC Opener Linux Installer"
+  local root="${PACKAGE_ROOT}/${root_name}"
+  local private="${root}/.elvern"
+  local filename="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-linux-universal.zip"
+  mkdir -p "${private}/uninstall" "${private}/lib"
+  cp "${PACKAGING_DIR}/linux/Install-ElvernVlcOpener.sh" "${root}/"
+  chmod 755 "${root}/Install-ElvernVlcOpener.sh"
+  cp "${PACKAGING_DIR}/linux/Uninstall-ElvernVlcOpener.sh" "${private}/uninstall/"
+  cp "${SELECTORS}" "${private}/lib/"
+  write_package_readme "${root}/README.txt" "Includes x64 and ARM64 payloads for glibc and musl. The installer selects locally. Flatpak VLC is not supported in this release."
+  copy_payloads "${private}" "${LINUX_RIDS[@]}"
+  write_inner_manifest "${private}/manifest.json" "linux-universal" "${private}" "${LINUX_RIDS[@]}"
+  zip_package "${root_name}" "${filename}"
+  register_package "linux-universal" "linux" "${filename}" "${root_name}" "Install-ElvernVlcOpener.sh" "" "${LINUX_RIDS[@]}"
+}
+
+for target in "${TARGETS[@]}"; do
+  case "${target}" in
+    windows) build_windows ;;
+    macos) build_macos ;;
+    linux) build_linux ;;
+  esac
+done
+
+python3 - "${RECORDS_FILE}" "${PACKAGE_ROOT}/release-manifest.json" "${HELPER_VERSION}" "${HELPER_CHANNEL}" "${TARGET_FRAMEWORK}" "${RUNTIME_FAMILY}" "${GENERATED_AT_UTC}" <<'PY'
+import json
+import pathlib
+import sys
+
+records_path, output_path = map(pathlib.Path, sys.argv[1:3])
+records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+manifest = {
+    "schema_version": "desktop-helper-release-manifest-v2",
+    "helper_version": sys.argv[3],
+    "channel": sys.argv[4],
+    "target_framework": sys.argv[5],
+    "runtime_family": sys.argv[6],
+    "deployment_mode": "self_contained",
+    "generated_at_utc": sys.argv[7],
+    "packages": records,
+}
+output_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+
+# Only publish finished ZIPs, then replace the manifest after every requested RID succeeds.
+find "${PACKAGE_ROOT}" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+for path in "${PACKAGE_ROOT}"/*.zip; do
+  name="$(basename "${path}")"
+  rm -f "${PACKAGES_DIR:?}/${name}"
+  mv "${path}" "${PACKAGES_DIR}/${name}"
+done
+mv "${PACKAGE_ROOT}/release-manifest.json" "${PACKAGES_DIR}/release-manifest.json"
 
 echo
-echo "Done."
-echo "Publish output: ${PUBLISH_DIR}"
-echo "Package output: ${PACKAGES_DIR}"
+echo "Desktop helper packages published successfully."
+echo "Helper version: ${HELPER_VERSION}"
+echo "Target framework: ${TARGET_FRAMEWORK}"
+echo "Release manifest: ${PACKAGES_DIR}/release-manifest.json"

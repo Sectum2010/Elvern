@@ -20,6 +20,7 @@ from ..services.desktop_helper_service import (
     normalize_desktop_helper_platform,
     resolve_desktop_helper_verification,
 )
+from ..services.desktop_playback_service import resolve_same_host_request
 
 
 router = APIRouter(prefix="/api/desktop-helper", tags=["desktop-helper"])
@@ -32,13 +33,23 @@ def desktop_helper_status(
     device_id: str | None = Query(default=None),
     user=CurrentUser,
 ) -> DesktopHelperStatusResponse:
+    client_ip = resolve_client_ip(request)
+    same_host_context = resolve_same_host_request(
+        request.app.state.settings,
+        platform=normalize_desktop_helper_platform(platform),
+        client_ip=client_ip,
+        request_host=request.url.hostname,
+        explicit_same_host=False,
+    )
     payload = get_desktop_helper_status(
         request.app.state.settings,
         user_id=user.id,
         platform=platform,
         device_id=device_id,
         browser_user_agent=request.headers.get("user-agent"),
-        source_ip=resolve_client_ip(request),
+        source_ip=client_ip,
+        same_host=bool(same_host_context["same_host"]),
+        same_host_detection_source=str(same_host_context["detection_source"]),
     )
     return DesktopHelperStatusResponse(**payload)
 
@@ -49,13 +60,23 @@ def desktop_helper_verify_start(
     request: Request,
     user=CurrentUser,
 ) -> DesktopHelperVerificationResponse:
+    client_ip = resolve_client_ip(request)
+    same_host_context = resolve_same_host_request(
+        request.app.state.settings,
+        platform=payload.platform,
+        client_ip=client_ip,
+        request_host=request.url.hostname,
+        explicit_same_host=False,
+    )
     verification = create_desktop_helper_verification(
         request.app.state.settings,
         user_id=user.id,
         platform=payload.platform,
         device_id=payload.device_id,
         browser_user_agent=request.headers.get("user-agent"),
-        source_ip=resolve_client_ip(request),
+        source_ip=client_ip,
+        same_host=bool(same_host_context["same_host"]),
+        same_host_detection_source=str(same_host_context["detection_source"]),
     )
     return DesktopHelperVerificationResponse(**verification)
 
@@ -87,8 +108,6 @@ def desktop_helper_releases(
     user=CurrentUser,
 ) -> DesktopHelperReleaseListResponse:
     normalized_platform = normalize_desktop_helper_platform(platform)
-    if normalized_platform not in {"windows", "mac"}:
-        return DesktopHelperReleaseListResponse(platform=normalized_platform, releases=[])
     releases = build_desktop_helper_release_payloads(
         request.app.state.settings,
         platform=normalized_platform,
@@ -118,6 +137,7 @@ def desktop_helper_release_download(
         details={
             "platform": release["platform"],
             "runtime_id": release["runtime_id"],
+            "package_target": release.get("package_target"),
             "version": release["version"],
             "channel": release["channel"],
         },
