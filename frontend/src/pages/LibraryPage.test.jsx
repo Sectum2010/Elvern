@@ -1356,6 +1356,34 @@ describe("LibraryPage category switching", () => {
     expect(libraryCalls).toBe(2);
   });
 
+  test("a no-cache transient failure shows the unavailable state and never a successful-empty state", async () => {
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/library?category=movies") {
+        return Promise.reject(new ApiNetworkError(undefined, {
+          cause: new TypeError("NetworkError when attempting to fetch resource"),
+        }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library?category=movies"]}>
+          <LibraryPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByTestId("library-unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No media indexed yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("No matches yet")).not.toBeInTheDocument();
+    expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
+    expect(document.querySelector(".form-error")).toBeNull();
+  });
+
   test.each([401, 403])("HTTP %s is not retried by connectivity recovery", async (statusCode) => {
     let libraryCalls = 0;
     apiRequest.mockImplementation((requestPath) => {

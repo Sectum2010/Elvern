@@ -571,6 +571,133 @@ describe("DetailPage source metadata privacy", () => {
     expect(itemCalls).toBe(1);
   });
 
+  test("recovers a transient progress failure by retrying only progress, not healthy metadata or playback", async () => {
+    let itemCalls = 0;
+    let progressCalls = 0;
+    let playbackCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        itemCalls += 1;
+        return Promise.resolve(detailItem());
+      }
+      if (requestPath === "/api/progress/42") {
+        progressCalls += 1;
+        return progressCalls === 1
+          ? Promise.reject(new ApiNetworkError(undefined, {
+            cause: new TypeError("NetworkError when attempting to fetch resource"),
+          }))
+          : Promise.resolve({ position_seconds: 42, duration_seconds: 1200, completed: false });
+      }
+      if (requestPath === "/api/playback/42") {
+        playbackCalls += 1;
+        return Promise.resolve({ status: "ready", reason: "", mode: "direct" });
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Privacy Movie" })).toBeInTheDocument();
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+    expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
+
+    const recovery = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 7 } });
+    fireEvent(window, recovery);
+    await waitFor(() => expect(progressCalls).toBe(2));
+    await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
+    // Metadata and the healthy playback capability are not re-fetched.
+    expect(itemCalls).toBe(1);
+    expect(playbackCalls).toBe(1);
+
+    fireEvent(window, recovery);
+    await act(async () => Promise.resolve());
+    expect(progressCalls).toBe(2);
+  });
+
+  test("recovers a transient playback-capability failure by retrying it once on recovery", async () => {
+    let itemCalls = 0;
+    let playbackCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        itemCalls += 1;
+        return Promise.resolve(detailItem());
+      }
+      if (requestPath === "/api/progress/42") {
+        return Promise.resolve({ position_seconds: 0, duration_seconds: 1200, completed: false });
+      }
+      if (requestPath === "/api/playback/42") {
+        playbackCalls += 1;
+        return playbackCalls === 1
+          ? Promise.reject(new ApiNetworkError())
+          : Promise.resolve({ status: "ready", reason: "", mode: "direct" });
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Privacy Movie" })).toBeInTheDocument();
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+
+    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 9 } }));
+    await waitFor(() => expect(playbackCalls).toBe(2));
+    await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
+    expect(itemCalls).toBe(1);
+  });
+
+  test("an HTTP business error on an auxiliary read is never treated as a network recovery", async () => {
+    let progressCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        return Promise.resolve(detailItem());
+      }
+      if (requestPath === "/api/progress/42") {
+        progressCalls += 1;
+        const error = new Error("Progress is forbidden");
+        error.status = 403;
+        return Promise.reject(error);
+      }
+      if (requestPath === "/api/playback/42") {
+        return Promise.resolve({ status: "ready", reason: "", mode: "direct" });
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Privacy Movie" })).toBeInTheDocument();
+    await waitFor(() => expect(progressCalls).toBe(1));
+    expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument();
+
+    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 11 } }));
+    await act(async () => Promise.resolve());
+    expect(progressCalls).toBe(1);
+  });
+
   test("aborts the previous metadata request when the item changes", async () => {
     const itemSignals = [];
     apiRequest.mockImplementation((requestPath, options = {}) => {

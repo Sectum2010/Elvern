@@ -712,7 +712,16 @@ export function InstallPage() {
       let callbackSeen = false;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 900));
+        // Stop polling immediately if the page was unmounted or navigated away
+        // so an obsolete verification lifecycle cannot keep firing requests or
+        // updating state.
+        if (!mountedRef.current) {
+          return;
+        }
         const refreshed = await loadDesktopStatus({ showLoading: false });
+        if (!mountedRef.current) {
+          return;
+        }
         if (!refreshed) {
           continue;
         }
@@ -725,16 +734,20 @@ export function InstallPage() {
           break;
         }
       }
-      if (!callbackSeen) {
+      if (!callbackSeen && mountedRef.current) {
         setDesktopVerifyFeedback(
           "No helper check-back reached Elvern yet. If nothing opened, install or re-register the helper on this device and try again.",
         );
       }
     } catch (requestError) {
-      setError(requestError.message || "Failed to verify VLC");
+      if (mountedRef.current) {
+        setError(requestError.message || "Failed to verify VLC");
+      }
     } finally {
-      setDesktopVerifyPending(false);
       verifyPendingRef.current = false;
+      if (mountedRef.current) {
+        setDesktopVerifyPending(false);
+      }
     }
   }
 

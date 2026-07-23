@@ -324,6 +324,11 @@ export function LibrarySourcePage({ sourceKind }) {
     if (requestError.status === 403) {
       return;
     }
+    if (isTransientNetworkError(requestError)) {
+      // A transient transport failure surfaces only as the non-blocking
+      // Reconnecting/unavailable state, never as a red business-error banner.
+      return;
+    }
     if (!libraryQuery.data) {
       setError(requestError.message || "Failed to load library section");
     }
@@ -532,7 +537,17 @@ export function LibrarySourcePage({ sourceKind }) {
       ) : null}
       {loading ? <LoadingView label={`Loading ${copy.title.toLowerCase()}...`} /> : null}
 
-      {!loading ? (
+      {libraryUnavailable ? (
+        <div className="content-stack" data-testid="library-source-unavailable">
+          <h2>{copy.title} unavailable</h2>
+          <p className="page-subnote">
+            Elvern is reconnecting to your library. This will refresh automatically once the
+            connection returns, or you can retry above.
+          </p>
+        </div>
+      ) : null}
+
+      {!loading && !libraryUnavailable ? (
         hasVisibleContent ? (
           <>
             {packedSeriesRailRows.map((row) => (

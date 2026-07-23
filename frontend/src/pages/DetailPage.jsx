@@ -651,6 +651,18 @@ export function DetailPage() {
   const [globalHiddenActionError, setGlobalHiddenActionError] = useState("");
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const [detailReconnecting, setDetailReconnecting] = useState(false);
+  // Tracks which idempotent auxiliary Detail reads failed transiently while the
+  // primary metadata is present, so a confirmed recovery retries only those.
+  const [auxiliaryReconnecting, setAuxiliaryReconnecting] = useState(false);
+  const auxiliaryReconnectRef = useRef({
+    progress: false,
+    playback: false,
+    desktop: false,
+    activeSession: false,
+  });
+  // True only while the primary metadata read itself failed transiently, so a
+  // soft refresh re-fetches metadata only when it actually needs recovery.
+  const metadataFailedRef = useRef(false);
   const detailLoadGenerationRef = useRef(0);
   const detailSoftRefreshRef = useRef(false);
   const detailRecoveryGenerationRef = useRef(0);
@@ -1423,6 +1435,16 @@ export function DetailPage() {
       !cancelled && detailLoadGenerationRef.current === loadGeneration
     );
 
+    const markAuxiliary = (name, failed) => {
+      if (!isCurrentLoad()) {
+        return;
+      }
+      auxiliaryReconnectRef.current[name] = failed;
+      setAuxiliaryReconnecting(
+        Object.values(auxiliaryReconnectRef.current).some(Boolean),
+      );
+    };
+
     async function loadDetails() {
       if (!softRefresh) {
         prepareControllerForLoad(itemId);
@@ -1433,6 +1455,14 @@ export function DetailPage() {
         setError("");
         setProgressLoadError("");
         setPlaybackCapabilityError("");
+        auxiliaryReconnectRef.current = {
+          progress: false,
+          playback: false,
+          desktop: false,
+          activeSession: false,
+        };
+        metadataFailedRef.current = false;
+        setAuxiliaryReconnecting(false);
         if (!iosExternalAppCallback) {
           resetIosExternalAppState();
         }
@@ -1461,44 +1491,65 @@ export function DetailPage() {
         });
       }
       try {
-        const itemPayload = await apiRequest(`/api/library/item/${itemId}`, {
-          signal: abortController.signal,
-          abortOnPageHide: true,
-        });
-        if (!isCurrentLoad()) {
-          return;
-        }
-        setItem(itemPayload);
-        setError("");
-        setDetailReconnecting(false);
-        markDetailPerformance(DETAIL_PERFORMANCE_MARKS.metadataReceived);
-        setLoading(false);
-        if (itemPayload.hidden_globally) {
-          setProgress(null);
-          return;
-        }
-        if (itemPayload.hidden_for_user) {
-          setProgress(null);
-          return;
+        let itemPayload;
+        if (softRefresh && !metadataFailedRef.current && itemRef.current) {
+          // Metadata is already present and healthy — recover only the failed
+          // auxiliary reads without re-fetching or clearing the current item.
+          itemPayload = itemRef.current;
+        } else {
+          itemPayload = await apiRequest(`/api/library/item/${itemId}`, {
+            signal: abortController.signal,
+            abortOnPageHide: true,
+          });
+          if (!isCurrentLoad()) {
+            return;
+          }
+          setItem(itemPayload);
+          itemRef.current = itemPayload;
+          setError("");
+          setDetailReconnecting(false);
+          metadataFailedRef.current = false;
+          markDetailPerformance(DETAIL_PERFORMANCE_MARKS.metadataReceived);
+          setLoading(false);
+          if (itemPayload.hidden_globally) {
+            setProgress(null);
+            return;
+          }
+          if (itemPayload.hidden_for_user) {
+            setProgress(null);
+            return;
+          }
         }
 
-        const progressRequest = apiRequest(`/api/progress/${itemId}`, {
-          signal: abortController.signal,
-          abortOnPageHide: true,
-        }).then((progressPayload) => {
-          if (isCurrentLoad()) {
-            setProgress(progressPayload);
-            markDetailPerformance(DETAIL_PERFORMANCE_MARKS.progressReceived);
-          }
-        }).catch((progressError) => {
-          if (isCurrentLoad() && !isAbortError(progressError)) {
-            setProgressLoadError(progressError.message || "Progress is temporarily unavailable.");
-          }
-        });
+        // On a soft refresh (recovery), retry an idempotent auxiliary read only
+        // when it previously failed transiently — never re-run a healthy read,
+        // and never recreate playback/session unnecessarily.
+        const aux = auxiliaryReconnectRef.current;
+        const shouldFetchProgress = !softRefresh || aux.progress;
+        const shouldFetchPlayback = !iosMobile && (!softRefresh || aux.playback);
+        const shouldFetchDesktop = Boolean(desktopPlatform) && (!softRefresh || aux.desktop);
+        const shouldRestoreSession = !softRefresh || aux.activeSession;
 
-        const playbackRequest = softRefresh || iosMobile
-          ? Promise.resolve()
-          : apiRequest(`/api/playback/${itemId}`, {
+        const progressRequest = shouldFetchProgress
+          ? apiRequest(`/api/progress/${itemId}`, {
+            signal: abortController.signal,
+            abortOnPageHide: true,
+          }).then((progressPayload) => {
+            if (isCurrentLoad()) {
+              setProgress(progressPayload);
+              markDetailPerformance(DETAIL_PERFORMANCE_MARKS.progressReceived);
+            }
+            markAuxiliary("progress", false);
+          }).catch((progressError) => {
+            if (isCurrentLoad() && !isAbortError(progressError)) {
+              setProgressLoadError(progressError.message || "Progress is temporarily unavailable.");
+              markAuxiliary("progress", isTransientNetworkError(progressError));
+            }
+          })
+          : Promise.resolve();
+
+        const playbackRequest = shouldFetchPlayback
+          ? apiRequest(`/api/playback/${itemId}`, {
             signal: abortController.signal,
             abortOnPageHide: true,
           }).then((playbackPayload) => {
@@ -1506,13 +1557,16 @@ export function DetailPage() {
               syncPlaybackState(playbackPayload);
               markDetailPerformance(DETAIL_PERFORMANCE_MARKS.playbackCapabilityReceived);
             }
+            markAuxiliary("playback", false);
           }).catch((requestError) => {
             if (isCurrentLoad() && !isAbortError(requestError)) {
               setPlaybackCapabilityError(requestError.message || "Browser playback is temporarily unavailable.");
+              markAuxiliary("playback", isTransientNetworkError(requestError));
             }
-          });
+          })
+          : Promise.resolve();
 
-        const desktopRequest = !softRefresh && desktopPlatform
+        const desktopRequest = shouldFetchDesktop
           ? apiRequest(
             `/api/desktop-playback/${itemId}?platform=${desktopPlatform}&same_host=${localDevLoopback ? "1" : "0"}`,
             { signal: abortController.signal, abortOnPageHide: true },
@@ -1521,22 +1575,26 @@ export function DetailPage() {
               setDesktopPlayback(desktopPayload);
               markDetailPerformance(DETAIL_PERFORMANCE_MARKS.desktopCapabilityReceived);
             }
+            markAuxiliary("desktop", false);
           }).catch((desktopError) => {
             if (isCurrentLoad() && !isAbortError(desktopError)) {
               setVlcLaunchError(desktopError.message || "Failed to resolve desktop VLC playback");
+              markAuxiliary("desktop", isTransientNetworkError(desktopError));
             }
           })
           : Promise.resolve();
 
-        const activeSessionRequest = softRefresh
+        const activeSessionRequest = shouldRestoreSession
           ? Promise.resolve()
-          : Promise.resolve()
             .then(() => restoreActiveBrowserPlaybackSession())
+            .then(() => markAuxiliary("activeSession", false))
             .catch((restoreError) => {
               if (isCurrentLoad() && !isAbortError(restoreError)) {
                 setPlaybackCapabilityError(restoreError.message || "Active playback restore is temporarily unavailable.");
+                markAuxiliary("activeSession", isTransientNetworkError(restoreError));
               }
-            });
+            })
+          : Promise.resolve();
 
         await Promise.allSettled([
           progressRequest,
@@ -1550,6 +1608,7 @@ export function DetailPage() {
       } catch (requestError) {
         if (isCurrentLoad() && !isAbortError(requestError)) {
           if (isTransientNetworkError(requestError)) {
+            metadataFailedRef.current = true;
             setDetailReconnecting(true);
             if (!itemRef.current) {
               setError("Elvern could not load this media item.");
@@ -1579,9 +1638,15 @@ export function DetailPage() {
   useEffect(() => {
     function handleConnectivityRecovered(event) {
       const generation = Number(event.detail?.generation || 0);
-      if (!detailReconnecting || generation <= detailRecoveryGenerationRef.current) {
+      if (
+        (!detailReconnecting && !auxiliaryReconnecting)
+        || generation <= detailRecoveryGenerationRef.current
+      ) {
         return;
       }
+      // One soft refresh per recovery generation. A soft refresh preserves the
+      // current item, active playback, and any valid progress, retrying only the
+      // primary metadata (if it failed) and the auxiliary reads that failed.
       detailRecoveryGenerationRef.current = generation;
       detailSoftRefreshRef.current = true;
       setDetailRefreshKey((current) => current + 1);
@@ -1590,7 +1655,7 @@ export function DetailPage() {
     return () => {
       window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
     };
-  }, [detailReconnecting]);
+  }, [detailReconnecting, auxiliaryReconnecting]);
 
   useEffect(() => {
     if (!item?.id) {
@@ -3453,7 +3518,9 @@ export function DetailPage() {
 	  return (
 	    <section className="page-section page-section--detail">
       {error ? <p className="form-error">{error}</p> : null}
-      {detailReconnecting ? <p className="page-subnote">Reconnecting…</p> : null}
+      {detailReconnecting || auxiliaryReconnecting ? (
+        <p className="page-subnote">Reconnecting…</p>
+      ) : null}
       <ProviderReconnectModal
         allowReconnect={providerReconnectModal.allowReconnect}
         errorMessage={providerReconnectModal.errorMessage}

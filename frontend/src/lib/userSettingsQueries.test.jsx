@@ -2,8 +2,9 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { apiRequest } from "./api";
+import { ApiNetworkError, apiRequest } from "./api";
 import { clearProtectedQueryCache, queryClient } from "./queryClient";
+import { CONNECTIVITY_RECOVERED_EVENT } from "./startupConnection";
 import {
   buildUserSettingsQueryKey,
   resolveUserSettings,
@@ -14,9 +15,10 @@ import {
 } from "./userSettingsQueries";
 
 
-vi.mock("./api", () => ({
-  apiRequest: vi.fn(),
-}));
+vi.mock("./api", async () => {
+  const actual = await vi.importActual("./api");
+  return { ...actual, apiRequest: vi.fn() };
+});
 
 
 function SettingsProbe({ label, user }) {
@@ -91,6 +93,55 @@ describe("user settings query", () => {
     setUserSettingsQueryData(userA, { poster_card_display_max_width: "2200" });
     expect(await screen.findByText("a:2200")).toBeInTheDocument();
     expect(screen.getByText("b:1400")).toBeInTheDocument();
+  });
+
+  test("preserves cached settings when a transient refetch fails", async () => {
+    apiRequest.mockResolvedValueOnce({ poster_card_display_max_width: "800" });
+    const user = { id: 7, role: "standard_user" };
+    renderProbes(<SettingsProbe label="s" user={user} />);
+    expect(await screen.findByText("s:800")).toBeInTheDocument();
+
+    apiRequest.mockRejectedValueOnce(new ApiNetworkError());
+    await queryClient.refetchQueries({
+      queryKey: buildUserSettingsQueryKey({ userId: user.id, role: user.role }),
+    });
+
+    // The transient refetch error must not drop the cached settings.
+    expect(screen.getByText("s:800")).toBeInTheDocument();
+  });
+
+  test("recovers a transient-failed settings query once per connectivity generation", async () => {
+    apiRequest
+      .mockRejectedValueOnce(new ApiNetworkError())
+      .mockResolvedValue({ poster_card_display_max_width: "1600" });
+    const user = { id: 7, role: "standard_user" };
+    const settingsKey = buildUserSettingsQueryKey({ userId: user.id, role: user.role });
+    renderProbes(<SettingsProbe label="s" user={user} />);
+
+    // Initial transient failure keeps defaults usable; wait until the query has
+    // actually settled into the error state (defaults render during loading too).
+    await waitFor(() => expect(queryClient.getQueryState(settingsKey)?.status).toBe("error"));
+    expect(screen.getByText("s:1400")).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 3 } }));
+    expect(await screen.findByText("s:1600")).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+  });
+
+  test("does not refetch a settings query failed by an HTTP business error on connectivity recovery", async () => {
+    const httpError = new Error("Forbidden");
+    httpError.status = 403;
+    apiRequest.mockRejectedValue(httpError);
+    const user = { id: 7, role: "standard_user" };
+    renderProbes(<SettingsProbe label="s" user={user} />);
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 9 } }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(apiRequest).toHaveBeenCalledTimes(1);
   });
 
   test("protected cache clearing removes library and user settings data", () => {

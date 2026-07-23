@@ -154,6 +154,13 @@ export function createStartupConnectionController({
   let outageGeneration = 1;
   let oopsLatchedGeneration = 0;
   let outageActive = true;
+  // A transport incident is a bounded recovery generation that is independent
+  // from the full-screen outage/Oops machinery. It opens when a genuine
+  // ApiNetworkError is reported while the visible application is still healthy,
+  // shares the monotonic `outageGeneration` space so recovery generations stay
+  // globally strictly-increasing, and never mutates the visible status, the
+  // Oops deadline, or the paint surface.
+  let transportIncidentActive = false;
   let runtimeOutageGeneration = 0;
   let recoveredOutageGeneration = 0;
   let browserOfflineEvidenceGeneration = 0;
@@ -251,9 +258,16 @@ export function createStartupConnectionController({
   function beginOutage() {
     if (outageActive) return;
     outageActive = true;
-    outageGeneration += 1;
-    if (runtimeReady) {
-      runtimeOutageGeneration = outageGeneration;
+    if (transportIncidentActive) {
+      // Escalate an already-open lightweight transport incident into a full
+      // outage, reusing the generation it has already issued so a single
+      // incident never consumes two recovery generations.
+      transportIncidentActive = false;
+    } else {
+      outageGeneration += 1;
+      if (runtimeReady) {
+        runtimeOutageGeneration = outageGeneration;
+      }
     }
     outageStartedAt = Date.now();
     cancelConfirmationTimers();
@@ -263,6 +277,46 @@ export function createStartupConnectionController({
       oopsLatchedGeneration: 0,
       oopsEvidenceReason: null,
     });
+  }
+
+  function openTransportIncident() {
+    // Join the current incident when one is already open (coalesce overlapping
+    // transport failures), and never open one while the full-screen outage
+    // machinery already owns recovery.
+    if (outageActive || transportIncidentActive) return;
+    transportIncidentActive = true;
+    outageGeneration += 1;
+    if (runtimeReady) {
+      runtimeOutageGeneration = outageGeneration;
+    }
+  }
+
+  function endTransportIncidentIfRecovered() {
+    if (
+      !transportIncidentActive
+      || !started
+      || !snapshot.serviceReachable
+      || !applicationReady
+      || snapshot.internetOutageLatched
+      || offlineOopsRequired
+    ) {
+      return;
+    }
+    const recoveredGeneration = outageGeneration;
+    transportIncidentActive = false;
+    if (
+      runtimeOutageGeneration === recoveredGeneration
+      && recoveredOutageGeneration !== recoveredGeneration
+      && typeof windowObject?.dispatchEvent === "function"
+    ) {
+      recoveredOutageGeneration = recoveredGeneration;
+      windowObject.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+        detail: {
+          generation: recoveredGeneration,
+          previousClassification: "service_unreachable",
+        },
+      }));
+    }
   }
 
   function endOutageIfRecovered() {
@@ -436,6 +490,7 @@ export function createStartupConnectionController({
       status: canConnect ? "connected" : (snapshot.status === "unreachable" ? "unreachable" : "connecting"),
     });
     endOutageIfRecovered();
+    endTransportIncidentIfRecovered();
   }
 
   function markServiceFailure({ frontendState, backendState }) {
@@ -702,6 +757,9 @@ export function createStartupConnectionController({
     }
     started = false;
     lifecycleGeneration += 1;
+    // Abandon any pending transport incident so a stopped/obsolete lifecycle
+    // can never emit a late recovery event.
+    transportIncidentActive = false;
     clearUnreachableTimer();
     clearScheduledProbe();
     activeHealthControllers.forEach((controller) => controller.abort());
@@ -730,6 +788,12 @@ export function createStartupConnectionController({
       markInternetOffline();
     } else if (!snapshot.serviceReachable) {
       markServiceFailure({ frontendState: snapshot.frontendState, backendState: snapshot.backendState });
+    } else {
+      // A genuine transport failure while the last health snapshot is still
+      // reachable: open a bounded incident so the immediate health probe below
+      // can confirm recovery and emit CONNECTIVITY_RECOVERED_EVENT even though
+      // serviceReachable was already true.
+      openTransportIncident();
     }
     return probe();
   }

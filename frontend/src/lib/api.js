@@ -31,6 +31,27 @@ export class ApiNetworkError extends Error {
 }
 
 
+export class ApiResponseError extends Error {
+  constructor(status, { cause } = {}) {
+    super("Elvern received an unreadable response from the server.", { cause });
+    this.name = "ApiResponseError";
+    this.transient = false;
+    this.category = "protocol";
+    this.responseStatus = Number.isInteger(status) ? status : null;
+  }
+}
+
+
+// A malformed body surfaces as a SyntaxError (JSON.parse) — the server DID
+// respond, so this is a protocol/response failure, never a transport outage
+// and never an abort. Everything else thrown while consuming the body stream
+// (Firefox "NetworkError when attempting to fetch resource", DOMException,
+// TypeError) is a genuine transport failure.
+function isMalformedBodyError(error) {
+  return error?.name === "SyntaxError";
+}
+
+
 export function isAbortError(error) {
   return error?.name === "AbortError";
 }
@@ -193,60 +214,92 @@ export async function apiRequest(path, options = {}) {
     }
   }
 
+  // One error boundary spans the complete request transaction: fetch, header
+  // receipt, body read/parse, and HTTP classification. AbortSignal listeners
+  // are cleaned up in `finally` only after every stage (including body reading)
+  // has settled, so a listener is never removed while the body is still being
+  // consumed.
   let response;
+  let payload;
   try {
-    response = await fetch(path, {
-      method,
-      headers: requestHeaders,
-      body,
-      signal: combinedSignal.signal,
-      credentials: "include",
-      ...(cache === undefined ? {} : { cache }),
-      ...(keepalive === undefined ? {} : { keepalive }),
-      ...(mode === undefined ? {} : { mode }),
-      ...(redirect === undefined ? {} : { redirect }),
-      ...(referrerPolicy === undefined ? {} : { referrerPolicy }),
-    });
-  } catch (error) {
-    if (combinedSignal.signal?.aborted || isAbortError(error)) {
-      throw createAbortError();
+    // Stage 1-3: construct the request, execute fetch, receive headers.
+    try {
+      response = await fetch(path, {
+        method,
+        headers: requestHeaders,
+        body,
+        signal: combinedSignal.signal,
+        credentials: "include",
+        ...(cache === undefined ? {} : { cache }),
+        ...(keepalive === undefined ? {} : { keepalive }),
+        ...(mode === undefined ? {} : { mode }),
+        ...(redirect === undefined ? {} : { redirect }),
+        ...(referrerPolicy === undefined ? {} : { referrerPolicy }),
+      });
+    } catch (error) {
+      if (combinedSignal.signal?.aborted || isAbortError(error)) {
+        throw createAbortError();
+      }
+      dispatchStartupConnectivityFailure({ classification: "transport" });
+      throw new ApiNetworkError(undefined, { cause: error });
     }
-    dispatchStartupConnectivityFailure({ classification: "transport" });
-    throw new ApiNetworkError(undefined, { cause: error });
+
+    // Headers have arrived: an actual HTTP response exists. The application is
+    // proven reachable even if the body later fails to read or parse.
+    dispatchStartupApplicationReady();
+
+    const contentType = response.headers.get("content-type") || "";
+    if (response.headers.get("x-elvern-totp-setup-required") === "true" && typeof window !== "undefined") {
+      const segments = window.location.pathname.split("/").filter(Boolean);
+      const prefixCandidate = segments[0] || "";
+      const base = /^[a-hjkmnp-z2-9]{8,24}$/.test(prefixCandidate) ? `/${prefixCandidate}` : "";
+      if (!window.location.pathname.endsWith("/setup/totp")) {
+        window.location.assign(`${window.location.origin}${base}/setup/totp`);
+      }
+    }
+
+    // Stage 4-5: consume and parse the body inside the same boundary so a
+    // body-stream failure is classified rather than escaping as a raw browser
+    // error.
+    try {
+      payload = contentType.includes("application/json")
+        ? await response.json()
+        : await response.text();
+    } catch (error) {
+      if (combinedSignal.signal?.aborted || isAbortError(error)) {
+        throw createAbortError();
+      }
+      if (isMalformedBodyError(error)) {
+        // The server responded but the body is unreadable: a protocol/response
+        // failure, not a transport outage and not an abort.
+        throw new ApiResponseError(response.status, { cause: error });
+      }
+      dispatchStartupConnectivityFailure({ classification: "transport" });
+      throw new ApiNetworkError(undefined, { cause: error });
+    }
+
+    // Stage 6: classify HTTP status now that the full body is available.
+    if (!response.ok) {
+      const detail =
+        typeof payload === "object" && payload && "detail" in payload
+          ? payload.detail
+          : null;
+      const message = extractApiErrorMessage(payload);
+      const error = new Error(message);
+      error.status = response.status;
+      error.payload = payload;
+      error.detail = detail;
+      if (response.status === 401) {
+        clearProtectedQueryCache();
+      }
+      dispatchAuthRevalidationRequested(path, response.status);
+      dispatchMaintenanceModeBlocked(error);
+      throw error;
+    }
   } finally {
+    // Stage 7: remove the combined AbortSignal listeners only after all body
+    // work has completed.
     combinedSignal.cleanup();
-  }
-  dispatchStartupApplicationReady();
-
-  const contentType = response.headers.get("content-type") || "";
-  if (response.headers.get("x-elvern-totp-setup-required") === "true" && typeof window !== "undefined") {
-    const segments = window.location.pathname.split("/").filter(Boolean);
-    const prefixCandidate = segments[0] || "";
-    const base = /^[a-hjkmnp-z2-9]{8,24}$/.test(prefixCandidate) ? `/${prefixCandidate}` : "";
-    if (!window.location.pathname.endsWith("/setup/totp")) {
-      window.location.assign(`${window.location.origin}${base}/setup/totp`);
-    }
-  }
-  const payload = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
-
-  if (!response.ok) {
-    const detail =
-      typeof payload === "object" && payload && "detail" in payload
-        ? payload.detail
-        : null;
-    const message = extractApiErrorMessage(payload);
-    const error = new Error(message);
-    error.status = response.status;
-    error.payload = payload;
-    error.detail = detail;
-    if (response.status === 401) {
-      clearProtectedQueryCache();
-    }
-    dispatchAuthRevalidationRequested(path, response.status);
-    dispatchMaintenanceModeBlocked(error);
-    throw error;
   }
 
   return payload;

@@ -128,12 +128,12 @@ def test_manifest_hash_verification_is_single_flight_for_concurrent_requests(
     hash_calls = 0
     hash_lock = threading.Lock()
 
-    def counted_sha256(path: Path) -> str:
+    def counted_sha256(path: Path, *, handle=None) -> str:
         nonlocal hash_calls
         with hash_lock:
             hash_calls += 1
         time.sleep(0.01)
-        return original_sha256(path)
+        return original_sha256(path, handle=handle)
 
     monkeypatch.setattr(manifest_service, "_sha256_for_file", counted_sha256)
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -199,9 +199,9 @@ def test_manifest_only_hashes_artifacts_for_the_requested_platform(monkeypatch, 
     hashed_paths: list[Path] = []
     original_sha256 = manifest_service._sha256_for_file
 
-    def record_sha256(path: Path) -> str:
+    def record_sha256(path: Path, *, handle=None) -> str:
         hashed_paths.append(path)
-        return original_sha256(path)
+        return original_sha256(path, handle=handle)
 
     monkeypatch.setattr(manifest_service, "_sha256_for_file", record_sha256)
 
@@ -229,10 +229,10 @@ def test_manifest_rehashes_an_artifact_replaced_with_same_size_and_mtime(
     original_sha256 = manifest_service._sha256_for_file
     hash_calls = 0
 
-    def counted_sha256(path: Path) -> str:
+    def counted_sha256(path: Path, *, handle=None) -> str:
         nonlocal hash_calls
         hash_calls += 1
-        return original_sha256(path)
+        return original_sha256(path, handle=handle)
 
     monkeypatch.setattr(manifest_service, "_sha256_for_file", counted_sha256)
     manifest_service.list_desktop_helper_manifest_records(platform="mac")
@@ -284,12 +284,130 @@ def test_release_download_rechecks_artifact_fingerprint_and_rejects_corruption(
     assert "verification failed" in str(exc_info.value.detail)
 
 
+def test_verified_handle_streams_original_inode_after_path_replacement(monkeypatch, tmp_path) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    artifact = (
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    )
+    original = artifact.read_bytes()
+    handle = manifest_service.open_verified_artifact(
+        artifact,
+        size_bytes=len(original),
+        sha256=_sha256(original),
+        package_target="macos-dual-arch",
+    )
+    try:
+        # Atomically replace the path with a different inode AFTER verification.
+        tampered = artifact.with_name("tampered.zip")
+        tampered.write_bytes(b"z" * len(original))
+        os.replace(tampered, artifact)
+
+        streamed = handle.read()
+    finally:
+        handle.close()
+
+    # The streamed bytes come from the verified open handle, not a path reopen.
+    assert streamed == original
+    assert artifact.read_bytes() != original
+
+
+def test_open_verified_artifact_fails_closed_when_changed_during_hashing(monkeypatch, tmp_path) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    artifact = (
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    )
+    original = artifact.read_bytes()
+    real_hash = manifest_service._sha256_for_file
+
+    def mutating_hash(path: Path, *, handle=None) -> str:
+        result = real_hash(path, handle=handle)
+        # Bump the inode's ctime so the post-hash fstat differs every attempt.
+        os.utime(path, ns=(0, 0))
+        return result
+
+    monkeypatch.setattr(manifest_service, "_sha256_for_file", mutating_hash)
+
+    with pytest.raises(
+        manifest_service.DesktopHelperManifestError,
+        match="changed during verification",
+    ):
+        manifest_service.open_verified_artifact(
+            artifact,
+            size_bytes=len(original),
+            sha256=_sha256(original),
+            package_target="macos-dual-arch",
+        )
+
+
+def test_open_verified_artifact_refuses_a_symlink(monkeypatch, tmp_path) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    artifact = (
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    )
+    original = artifact.read_bytes()
+    link = manifest_service.HELPER_RELEASE_PACKAGES_DIR / "link.zip"
+    link.symlink_to(artifact)
+
+    with pytest.raises(manifest_service.DesktopHelperManifestError):
+        manifest_service.open_verified_artifact(
+            link,
+            size_bytes=len(original),
+            sha256=_sha256(original),
+            package_target="macos-dual-arch",
+        )
+
+
+def test_download_stream_generator_closes_handle_on_success_and_disconnect() -> None:
+    class FakeHandle:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = list(chunks)
+            self.closed = False
+
+        def read(self, _size: int) -> bytes:
+            return self._chunks.pop(0) if self._chunks else b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    # Full consumption closes the handle.
+    consumed = FakeHandle([b"a", b"b"])
+    assert b"".join(desktop_helper_route._stream_and_close(consumed)) == b"ab"
+    assert consumed.closed is True
+
+    # Early termination (client disconnect) closes the handle.
+    disconnected = FakeHandle([b"a", b"b", b"c"])
+    generator = desktop_helper_route._stream_and_close(disconnected)
+    assert next(generator) == b"a"
+    generator.close()
+    assert disconnected.closed is True
+
+
+def test_download_stream_generator_closes_handle_on_read_error() -> None:
+    class FailingHandle:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def read(self, _size: int) -> bytes:
+            raise OSError("stream read failure")
+
+        def close(self) -> None:
+            self.closed = True
+
+    handle = FailingHandle()
+    with pytest.raises(OSError):
+        list(desktop_helper_route._stream_and_close(handle))
+    assert handle.closed is True
+
+
 def test_manifest_origin_mismatch_fails_before_artifact_hash(monkeypatch, tmp_path) -> None:
     _write_manifest(monkeypatch, tmp_path)
     monkeypatch.setattr(
         manifest_service,
         "_sha256_for_file",
-        lambda _path: pytest.fail("incompatible artifacts must not be hashed"),
+        lambda _path, **_kwargs: pytest.fail("incompatible artifacts must not be hashed"),
     )
 
     with pytest.raises(manifest_service.DesktopHelperManifestOriginMismatch):

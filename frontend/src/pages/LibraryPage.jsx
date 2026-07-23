@@ -942,6 +942,11 @@ export function LibraryPage() {
     if (requestError.status === 403) {
       return;
     }
+    if (isTransientNetworkError(requestError)) {
+      // A transient transport failure surfaces only as the non-blocking
+      // Reconnecting/unavailable state, never as a red business-error banner.
+      return;
+    }
     if (!libraryQuery.data) {
       setError(requestError.message || "Failed to load library");
     }
@@ -1799,7 +1804,17 @@ export function LibraryPage() {
 
       {loading ? <LoadingView label="Loading library..." /> : null}
 
-      {!loading && isSearching ? (
+      {libraryUnavailable ? (
+        <div className="content-stack" data-testid="library-unavailable">
+          <h2>Library unavailable</h2>
+          <p className="page-subnote">
+            Elvern is reconnecting to your library. This will refresh automatically once the
+            connection returns, or you can retry above.
+          </p>
+        </div>
+      ) : null}
+
+      {!loading && !libraryUnavailable && isSearching ? (
         library.items.length > 0 ? (
           <div className="content-stack">
             <div className="section-header section-header--compact">
@@ -1821,7 +1836,7 @@ export function LibraryPage() {
         )
       ) : null}
 
-      {!loading && !isSearching && isFlatSortedView ? (
+      {!loading && !libraryUnavailable && !isSearching && isFlatSortedView ? (
         library.items.length > 0 ? (
           <div className="content-stack">
             <MediaGrid
@@ -1840,7 +1855,7 @@ export function LibraryPage() {
         )
       ) : null}
 
-      {!loading && !isSearching && !isFlatSortedView ? (
+      {!loading && !libraryUnavailable && !isSearching && !isFlatSortedView ? (
         <div className="content-stack">
           {showContinueWatchingSection ? (
             <section className="content-section">

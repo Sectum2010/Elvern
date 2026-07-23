@@ -122,7 +122,7 @@ export function MediaCard({
   const posterRecoveryRef = useRef({
     url: null,
     eligible: false,
-    failureSequence: 0,
+    incident: 0,
     attempted: false,
   });
   const posterRecoveryTimerRef = useRef(0);
@@ -222,33 +222,28 @@ export function MediaCard({
     posterRecoveryRef.current = {
       url: resolvedPosterUrl,
       eligible: false,
-      failureSequence: 0,
+      incident: 0,
       attempted: false,
     };
     window.clearTimeout(posterRecoveryTimerRef.current);
   }, [resolvedPosterUrl]);
 
   useEffect(() => subscribePosterRecoveryEvents(({ kind, detail }) => {
-    const loadState = posterLoadStateRef.current;
-    if (kind === "failure") {
-      if (loadState.url === resolvedPosterUrl && loadState.failed) {
-        posterRecoveryRef.current = {
-          ...posterRecoveryRef.current,
-          url: resolvedPosterUrl,
-          eligible: true,
-          failureSequence: detail.failureSequence,
-        };
-      }
+    // A failure event never retroactively marks an already-failed poster
+    // eligible: eligibility is decided only at the poster's own onError, bound
+    // to the incident that was open at that moment.
+    if (kind !== "recovered") {
       return;
     }
-    const recoveryGeneration = Number(detail.generation || 0);
+    const loadState = posterLoadStateRef.current;
     const recovery = posterRecoveryRef.current;
+    const recoveredIncident = Number(detail.incident || 0);
     if (
-      kind !== "recovered"
-      || recoveryGeneration <= 0
+      recoveredIncident <= 0
       || recovery.url !== resolvedPosterUrl
       || !recovery.eligible
       || recovery.attempted
+      || recovery.incident !== recoveredIncident
       || loadState.url !== resolvedPosterUrl
       || !loadState.failed
     ) {
@@ -345,10 +340,10 @@ export function MediaCard({
               onError={() => {
                 const recoveryCandidate = getPosterRecoveryCandidate();
                 posterRecoveryRef.current = {
-                  ...posterRecoveryRef.current,
                   url: resolvedPosterUrl,
                   eligible: recoveryCandidate.eligible,
-                  failureSequence: recoveryCandidate.failureSequence,
+                  incident: recoveryCandidate.incident,
+                  attempted: false,
                 };
                 if (smartPosterSchedulerActive) {
                   markSmartPosterCardError(smartPosterCardId);
@@ -363,6 +358,14 @@ export function MediaCard({
                 if (smartPosterSchedulerActive) {
                   markSmartPosterCardLoaded(smartPosterCardId);
                 }
+                // A successful load resets incident/attempt state so the poster
+                // starts clean for any future incident.
+                posterRecoveryRef.current = {
+                  url: resolvedPosterUrl,
+                  eligible: false,
+                  incident: 0,
+                  attempted: false,
+                };
                 setPosterLoadState({
                   url: resolvedPosterUrl,
                   loaded: true,

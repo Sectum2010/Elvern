@@ -276,4 +276,38 @@ describe("desktop helper install page", () => {
     await new Promise((resolve) => window.setTimeout(resolve, 20));
     expect(apiRequest).toHaveBeenCalledTimes(2);
   });
+
+  test("helper verification polling stops and issues no further requests after unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      apiRequest.mockImplementation((path) => {
+        if (path.startsWith("/api/desktop-helper/status")) {
+          return Promise.resolve(status({ vlc_detection_state: "detection_unavailable" }));
+        }
+        if (path === "/api/desktop-helper/verify") {
+          return Promise.resolve({ protocol_url: "elvern-vlc-opener://verify" });
+        }
+        return Promise.reject(new Error(`Unexpected request: ${path}`));
+      });
+      const rendered = render(<InstallPage />);
+      await vi.advanceTimersByTimeAsync(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Test helper" }));
+      // Resolve the verify POST and start the polling loop.
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Let the polling loop take its first status tick.
+      await vi.advanceTimersByTimeAsync(900);
+      const callsBeforeUnmount = apiRequest.mock.calls.length;
+      expect(callsBeforeUnmount).toBeGreaterThan(1);
+
+      rendered.unmount();
+      await vi.advanceTimersByTimeAsync(3000);
+
+      // No status requests fire after the page unmounts.
+      expect(apiRequest.mock.calls.length).toBe(callsBeforeUnmount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

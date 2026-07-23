@@ -388,6 +388,35 @@ describe("LibrarySourcePage cached source views", () => {
     expect(sourceCalls).toBe(2);
   });
 
+  test("a no-cache source transient failure shows the unavailable state and never a successful-empty state", async () => {
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/user-settings") {
+        return Promise.resolve({ floating_library_search_enabled: true });
+      }
+      if (path === "/api/library?category=movies&source=local") {
+        return Promise.reject(new ApiNetworkError(undefined, {
+          cause: new TypeError("NetworkError when attempting to fetch resource"),
+        }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/library/local"]}>
+          <LibrarySourcePage sourceKind="local" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByTestId("library-source-unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No local movies yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("No matches yet")).not.toBeInTheDocument();
+    expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
+    expect(document.querySelector(".form-error")).toBeNull();
+  });
+
   test("q initializes from URL, commits on Enter, clears, and never refetches the base payload", async () => {
     const { locations, navigationTypes } = renderSource({ initialEntry: "/library/local?q=akira" });
     const input = await screen.findByRole("searchbox", { name: "Search Local Library" });

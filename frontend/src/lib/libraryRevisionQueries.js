@@ -440,8 +440,10 @@ export function LibraryRevisionSynchronizer() {
     }
 
     function handleVisibility() {
+      // Only pause the scheduled poll while hidden. Visible returns are handled
+      // by the coalesced PAGE_RESUME_EVENT so a single return never performs the
+      // revision check twice.
       if (document.visibilityState === "hidden") clearTimer();
-      else void check();
     }
 
     window.addEventListener(PAGE_RESUME_EVENT, checkWhenVisible);

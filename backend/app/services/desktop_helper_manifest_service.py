@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path, PurePosixPath
@@ -489,6 +490,145 @@ def _file_fingerprint(path: Path) -> tuple[object, ...]:
     )
 
 
+# Bounded retries when the artifact is observed to change during hashing.
+_MAX_ARTIFACT_VERIFY_ATTEMPTS = 3
+
+
+def _open_artifact_no_follow(file_path: Path):
+    """Open the artifact exactly once, refusing to follow a final-component symlink.
+
+    The returned handle is the single file description that is fstat'd, hashed,
+    and streamed, closing the TOCTOU window between verifying a path and later
+    reopening it.
+    """
+    flags = os.O_RDONLY
+    for flag_name in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
+        flags |= getattr(os, flag_name, 0)
+    fd = os.open(file_path, flags)
+    try:
+        return os.fdopen(fd, "rb", buffering=1024 * 1024)
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _fingerprint_from_stat(stat_result: os.stat_result, resolved_path: str) -> tuple[object, ...]:
+    return (
+        resolved_path,
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
+    )
+
+
+def _hash_open_handle(handle, file_path: Path) -> str:
+    # Hash the exact opened, fstat'd file description — never a re-open by path.
+    return _sha256_for_file(file_path, handle=handle)
+
+
+def _verify_open_handle(
+    handle,
+    file_path: Path,
+    *,
+    size_bytes: int,
+    sha256: str,
+    package_target: str,
+) -> tuple[object, ...]:
+    """Verify an already-open handle and return its confirmed fingerprint.
+
+    Hashing reads the same file description that was fstat'd. A second fstat after
+    hashing fails closed (with a small bounded retry) if the underlying object
+    changed mid-read, and the verification cache is keyed by the complete
+    fingerprint so any change forces a rehash.
+    """
+    resolved_path = str(file_path.resolve())
+    for attempt in range(1, _MAX_ARTIFACT_VERIFY_ATTEMPTS + 1):
+        before = _fingerprint_from_stat(os.fstat(handle.fileno()), resolved_path)
+        if before[3] != size_bytes:
+            raise DesktopHelperManifestError("Desktop helper release artifact size mismatch")
+        cache_key = (resolved_path, before, size_bytes, sha256)
+        if _verified_artifacts.get(cache_key):
+            logger.debug(
+                "Desktop helper package verification package_target=%s cache=hit result=valid",
+                package_target,
+            )
+            return before
+        started_at = time.monotonic()
+        digest = _hash_open_handle(handle, file_path)
+        after = _fingerprint_from_stat(os.fstat(handle.fileno()), resolved_path)
+        if after != before:
+            # The artifact changed underneath the open handle while hashing.
+            if attempt < _MAX_ARTIFACT_VERIFY_ATTEMPTS:
+                continue
+            raise DesktopHelperManifestError(
+                "Desktop helper release artifact changed during verification"
+            )
+        if digest != sha256:
+            logger.warning(
+                "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=invalid",
+                package_target,
+                round((time.monotonic() - started_at) * 1000),
+            )
+            raise DesktopHelperManifestError("Desktop helper release artifact SHA-256 mismatch")
+        _verified_artifacts[cache_key] = True
+        logger.debug(
+            "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=valid",
+            package_target,
+            round((time.monotonic() - started_at) * 1000),
+        )
+        return before
+    raise DesktopHelperManifestError(
+        "Desktop helper release artifact changed during verification"
+    )
+
+
+def _open_verified_handle(
+    file_path: Path,
+    *,
+    size_bytes: int,
+    sha256: str,
+    package_target: str,
+):
+    """Open, verify, and return a read handle positioned at the start of the file."""
+    try:
+        handle = _open_artifact_no_follow(file_path)
+    except OSError as exc:
+        raise DesktopHelperManifestError(
+            "Desktop helper release artifact is unavailable"
+        ) from exc
+    try:
+        _verify_open_handle(
+            handle,
+            file_path,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            package_target=package_target,
+        )
+    except BaseException:
+        handle.close()
+        raise
+    handle.seek(0)
+    return handle
+
+
+def open_verified_artifact(
+    file_path: Path,
+    *,
+    size_bytes: int,
+    sha256: str,
+    package_target: str,
+):
+    """Public entry point returning an open, verified handle for streaming."""
+    return _open_verified_handle(
+        file_path,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        package_target=package_target,
+    )
+
+
 def _verify_artifact(
     file_path: Path,
     *,
@@ -496,35 +636,13 @@ def _verify_artifact(
     sha256: str,
     package_target: str,
 ) -> None:
-    try:
-        fingerprint = _file_fingerprint(file_path)
-    except OSError as exc:
-        raise DesktopHelperManifestError(
-            "Desktop helper release artifact is unavailable"
-        ) from exc
-    if fingerprint[3] != size_bytes:
-        raise DesktopHelperManifestError("Desktop helper release artifact size mismatch")
-    cache_key = (str(file_path.resolve()), fingerprint, size_bytes, sha256)
-    if _verified_artifacts.get(cache_key):
-        logger.debug(
-            "Desktop helper package verification package_target=%s cache=hit result=valid",
-            package_target,
-        )
-        return
-    started_at = time.monotonic()
-    if _sha256_for_file(file_path) != sha256:
-        logger.warning(
-            "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=invalid",
-            package_target,
-            round((time.monotonic() - started_at) * 1000),
-        )
-        raise DesktopHelperManifestError("Desktop helper release artifact SHA-256 mismatch")
-    _verified_artifacts[cache_key] = True
-    logger.debug(
-        "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=valid",
-        package_target,
-        round((time.monotonic() - started_at) * 1000),
+    handle = _open_verified_handle(
+        file_path,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        package_target=package_target,
     )
+    handle.close()
 
 
 def _resolve_package_file(relative_path: str, filename: str) -> Path:
@@ -619,9 +737,15 @@ def _require_non_empty_string(value: object, field_name: str) -> str:
     return normalized
 
 
-def _sha256_for_file(file_path: Path) -> str:
+def _sha256_for_file(file_path: Path, *, handle=None) -> str:
     digest = hashlib.sha256()
-    with file_path.open("rb") as handle:
+    if handle is not None:
+        # Hash the already-open verified handle, reading from its start.
+        handle.seek(0)
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        return digest.hexdigest()
+    with file_path.open("rb") as opened:
+        for chunk in iter(lambda: opened.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()

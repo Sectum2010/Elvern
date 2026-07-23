@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 
 from ..auth import CurrentUser, resolve_client_ip
 from ..schemas import (
@@ -16,10 +16,26 @@ from ..services.desktop_helper_service import (
     build_desktop_helper_release_payloads,
     create_desktop_helper_verification,
     get_desktop_helper_status,
-    get_helper_release_download_path,
     normalize_desktop_helper_platform,
+    open_helper_release_download,
     resolve_desktop_helper_verification,
 )
+
+
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+def _stream_and_close(handle, chunk_size: int = _DOWNLOAD_CHUNK_SIZE):
+    """Stream the verified handle and always close it — on success, error, or
+    client disconnect (Starlette closes the generator, running this finally)."""
+    try:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        handle.close()
 from ..services.desktop_playback_service import resolve_same_host_request
 
 
@@ -121,29 +137,38 @@ def desktop_helper_release_download(
     request: Request,
     user=CurrentUser,
 ):
-    release = get_helper_release_download_path(request.app.state.settings, release_id)
-    log_audit_event(
-        request.app.state.settings,
-        action="desktop_helper.download",
-        outcome="success",
-        user_id=user.id,
-        username=user.username,
-        role=user.role,
-        session_id=user.session_id,
-        target_type="desktop_helper_release",
-        target_id=release_id,
-        ip_address=resolve_client_ip(request),
-        user_agent=request.headers.get("user-agent"),
-        details={
-            "platform": release["platform"],
-            "runtime_id": release["runtime_id"],
-            "package_target": release.get("package_target"),
-            "version": release["version"],
-            "channel": release["channel"],
-        },
-    )
-    return FileResponse(
-        path=release["file_path"],
-        filename=release["filename"],
+    release = open_helper_release_download(request.app.state.settings, release_id)
+    handle = release["handle"]
+    try:
+        log_audit_event(
+            request.app.state.settings,
+            action="desktop_helper.download",
+            outcome="success",
+            user_id=user.id,
+            username=user.username,
+            role=user.role,
+            session_id=user.session_id,
+            target_type="desktop_helper_release",
+            target_id=release_id,
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            details={
+                "platform": release["platform"],
+                "runtime_id": release["runtime_id"],
+                "package_target": release.get("package_target"),
+                "version": release["version"],
+                "channel": release["channel"],
+            },
+        )
+    except BaseException:
+        handle.close()
+        raise
+    filename = str(release["filename"])
+    return StreamingResponse(
+        _stream_and_close(handle),
         media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(int(release["size_bytes"])),
+        },
     )

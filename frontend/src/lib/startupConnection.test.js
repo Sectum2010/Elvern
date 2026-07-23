@@ -235,6 +235,174 @@ describe("startup connection controller", () => {
     }
   });
 
+  test("a transport incident with green health emits exactly one recovery event even when serviceReachable was already true", async () => {
+    const recoveryEvents = [];
+    const handler = (event) => recoveryEvents.push(event.detail);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    try {
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(controller.getSnapshot()).toMatchObject({
+        status: "connected",
+        serviceReachable: true,
+        runtimeReady: true,
+      });
+      expect(recoveryEvents).toEqual([]);
+
+      await controller.reportFailure();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(recoveryEvents).toHaveLength(1);
+      expect(recoveryEvents[0].previousClassification).toBe("service_unreachable");
+      expect(recoveryEvents[0].generation).toBeGreaterThan(0);
+      expect(Object.keys(recoveryEvents[0]).sort()).toEqual(["generation", "previousClassification"]);
+    } finally {
+      controller.stop();
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    }
+  });
+
+  test("three overlapping transport failures coalesce into one recovery event", async () => {
+    const recoveryEvents = [];
+    const handler = (event) => recoveryEvents.push(event.detail);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    try {
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const first = controller.reportFailure();
+      const second = controller.reportFailure();
+      const third = controller.reportFailure();
+      await Promise.all([first, second, third]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(recoveryEvents).toHaveLength(1);
+    } finally {
+      controller.stop();
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    }
+  });
+
+  test("a probe cycle without any reported transport failure never opens an incident or emits recovery", async () => {
+    const recoveryEvents = [];
+    const handler = (event) => recoveryEvents.push(event.detail);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    try {
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await controller.probe();
+      await controller.probe();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(recoveryEvents).toEqual([]);
+    } finally {
+      controller.stop();
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    }
+  });
+
+  test("a second independent transport incident receives a strictly newer generation", async () => {
+    const recoveryEvents = [];
+    const handler = (event) => recoveryEvents.push(event.detail);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    const fetchImpl = vi.fn((path) => Promise.resolve(healthResponse(path)));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    try {
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await controller.reportFailure();
+      await vi.advanceTimersByTimeAsync(0);
+      await controller.reportFailure();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(recoveryEvents).toHaveLength(2);
+      expect(recoveryEvents[1].generation).toBeGreaterThan(recoveryEvents[0].generation);
+    } finally {
+      controller.stop();
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    }
+  });
+
+  test("an unhealthy probe after a transport incident escalates into the existing outage behavior without a premature recovery", async () => {
+    let backendHealthy = true;
+    const recoveryEvents = [];
+    const handler = (event) => recoveryEvents.push(event.detail);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    const fetchImpl = vi.fn((path) => Promise.resolve(
+      path === "/health" && !backendHealthy ? healthResponse(path, 503) : healthResponse(path),
+    ));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    try {
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      backendHealthy = false;
+      const outage = controller.reportFailure();
+      await vi.advanceTimersByTimeAsync(FAST_OOPS_CONFIRMATION_DELAY_MS);
+      await outage;
+
+      expect(controller.getSnapshot()).toMatchObject({
+        classification: CONNECTIVITY_BACKEND_UNREACHABLE,
+        oopsLatched: true,
+      });
+      expect(recoveryEvents).toEqual([]);
+
+      backendHealthy = true;
+      await controller.retry();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(recoveryEvents).toHaveLength(1);
+      expect(recoveryEvents[0].previousClassification).toBe("service_unreachable");
+    } finally {
+      controller.stop();
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    }
+  });
+
+  test("a transport incident abandoned by stop() cannot emit a late recovery event", async () => {
+    const recoveryEvents = [];
+    const handler = (event) => recoveryEvents.push(event.detail);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    let releaseHealth = null;
+    const fetchImpl = vi.fn((path) => {
+      if (releaseHealth) {
+        return new Promise((resolve) => {
+          releaseHealth = () => resolve(healthResponse(path));
+        });
+      }
+      return Promise.resolve(healthResponse(path));
+    });
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    try {
+      controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      releaseHealth = () => {};
+      const pending = controller.reportFailure();
+      controller.stop();
+      if (typeof releaseHealth === "function") releaseHealth();
+      await pending;
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(recoveryEvents).toEqual([]);
+    } finally {
+      controller.stop();
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);
+    }
+  });
+
   test("a VPN-style outage can recover before an independent backend outage", async () => {
     const publicUrl = "https://probe.operator.example/connectivity";
     let frontendHealthy = true;

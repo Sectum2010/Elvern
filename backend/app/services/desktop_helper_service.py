@@ -23,6 +23,7 @@ from .desktop_helper_manifest_service import (
     desktop_helper_release_manifest_exists,
     get_desktop_helper_manifest_record_by_id,
     list_desktop_helper_manifest_records,
+    open_verified_artifact,
 )
 
 
@@ -462,6 +463,45 @@ def get_helper_release_download_path(settings: Settings, release_id: int) -> dic
         )
     payload["file_path"] = file_path
     return payload
+
+
+def open_helper_release_download(settings: Settings, release_id: int) -> dict[str, object]:
+    """Resolve a release, then open and verify its artifact via a single handle.
+
+    The returned ``handle`` is the exact verified file description that must be
+    streamed to the client, so the bytes served are guaranteed to be the ones
+    that were hashed — the path is never reopened after verification.
+    """
+    record = get_helper_release_download_path(settings, release_id)
+    file_path = Path(record["file_path"])
+    try:
+        size_bytes = int(record["size_bytes"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Desktop helper release file is missing from the server",
+        ) from exc
+    package_target = str(
+        record.get("package_target") or record.get("runtime_id") or "unknown"
+    )
+    try:
+        handle = open_verified_artifact(
+            file_path,
+            size_bytes=size_bytes,
+            sha256=str(record["sha256"]),
+            package_target=package_target,
+        )
+    except DesktopHelperManifestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Desktop helper release is unavailable because its package verification failed",
+        ) from exc
+    return {
+        **record,
+        "handle": handle,
+        "size_bytes": size_bytes,
+        "package_target": record.get("package_target"),
+    }
 
 
 def _list_helper_releases_from_manifest(

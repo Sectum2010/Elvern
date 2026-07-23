@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   ApiNetworkError,
+  ApiResponseError,
   apiRequest,
   AUTH_REVALIDATION_REQUESTED_EVENT,
   extractApiErrorMessage,
@@ -273,6 +274,139 @@ test("apiRequest forwards the allowed cache option without spreading unknown opt
 
   assert.equal(fetchMock.mock.calls[0][1].cache, "no-store");
   assert.equal("unknownPrivateOption" in fetchMock.mock.calls[0][1], false);
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function fakeResponse({ status = 200, contentType = "application/json", ok, json, text } = {}) {
+  const headers = new Map();
+  if (contentType) {
+    headers.set("content-type", contentType);
+  }
+  return {
+    ok: ok === undefined ? status >= 200 && status < 300 : ok,
+    status,
+    headers: { get: (name) => headers.get(String(name).toLowerCase()) ?? null },
+    json: json || (async () => ({})),
+    text: text || (async () => ""),
+  };
+}
+
+test("body reader rejecting with a Firefox NetworkError becomes ApiNetworkError with one connectivity failure", async () => {
+  const failures = [];
+  const readyEvents = [];
+  const handleFailure = () => failures.push("failure");
+  const handleReady = () => readyEvents.push("ready");
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  window.addEventListener(STARTUP_APPLICATION_READY_EVENT, handleReady);
+  vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({
+    json: () => Promise.reject(new TypeError("NetworkError when attempting to fetch resource")),
+  })));
+
+  try {
+    await assert.rejects(() => apiRequest("/api/library"), (error) => {
+      assert.equal(error instanceof ApiNetworkError, true);
+      assert.equal(error.category, "transport");
+      assert.equal(error.transient, true);
+      assert.doesNotMatch(error.message, /NetworkError/);
+      return true;
+    });
+    // Headers arrived, so the application is proven reachable, and the body
+    // transport failure is reported exactly once.
+    assert.deepEqual(readyEvents, ["ready"]);
+    assert.deepEqual(failures, ["failure"]);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+    window.removeEventListener(STARTUP_APPLICATION_READY_EVENT, handleReady);
+  }
+});
+
+test("pagehide abort while response.json() is pending normalizes to AbortError without connectivity failure", async () => {
+  const failures = [];
+  const handleFailure = () => failures.push("failure");
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  const body = deferred();
+  vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({ json: () => body.promise })));
+
+  try {
+    const request = apiRequest("/api/library", { abortOnPageHide: true });
+    await Promise.resolve();
+    window.dispatchEvent(new Event("pagehide"));
+    body.reject(new TypeError("NetworkError when attempting to fetch resource"));
+    await assert.rejects(request, (error) => {
+      assert.equal(error.name, "AbortError");
+      assert.doesNotMatch(error.message, /NetworkError/);
+      return true;
+    });
+    assert.deepEqual(failures, []);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  }
+});
+
+test("caller abort while response.text() is pending normalizes to AbortError", async () => {
+  const failures = [];
+  const handleFailure = () => failures.push("failure");
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  const controller = new AbortController();
+  const body = deferred();
+  vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({
+    contentType: "text/plain",
+    text: () => body.promise,
+  })));
+
+  try {
+    const request = apiRequest("/api/library", { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    body.reject(new TypeError("NetworkError when attempting to fetch resource"));
+    await assert.rejects(request, (error) => {
+      assert.equal(error.name, "AbortError");
+      return true;
+    });
+    assert.deepEqual(failures, []);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  }
+});
+
+test("malformed JSON produces a sanitized ApiResponseError, not a raw SyntaxError or abort", async () => {
+  const failures = [];
+  const readyEvents = [];
+  const handleFailure = () => failures.push("failure");
+  const handleReady = () => readyEvents.push("ready");
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  window.addEventListener(STARTUP_APPLICATION_READY_EVENT, handleReady);
+  vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({
+    json: () => Promise.reject(new SyntaxError("Unexpected token < in JSON at position 0")),
+  })));
+
+  try {
+    await assert.rejects(() => apiRequest("/api/library"), (error) => {
+      assert.equal(error instanceof ApiResponseError, true);
+      assert.equal(error.name, "ApiResponseError");
+      assert.equal(error.category, "protocol");
+      assert.equal(error.transient, false);
+      assert.notEqual(error.name, "AbortError");
+      assert.doesNotMatch(error.message, /SyntaxError|Unexpected token|NetworkError/);
+      return true;
+    });
+    // The server responded (headers arrived), so a body parse failure still
+    // proves reachability and never reports a transport outage.
+    assert.deepEqual(readyEvents, ["ready"]);
+    assert.deepEqual(failures, []);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+    window.removeEventListener(STARTUP_APPLICATION_READY_EVENT, handleReady);
+  }
 });
 
 test("an HTTP 401 proves the application responded instead of reporting a connection failure", async () => {

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { apiRequest } from "./api";
+import { useBoundedQueryRecovery } from "./boundedQueryRecovery";
 import { queryClient } from "./queryClient";
 import { DEFAULT_BACKGROUND_SETTINGS } from "./userBackground";
 
@@ -55,7 +56,7 @@ export function resolveUserSettings(payload) {
 
 
 export function useUserSettingsQuery(user) {
-  return useQuery({
+  const query = useQuery({
     queryKey: buildUserSettingsQueryKey({ userId: user?.id, role: user?.role }),
     queryFn: ({ signal }) => apiRequest("/api/user-settings", {
       signal,
@@ -66,6 +67,11 @@ export function useUserSettingsQuery(user) {
     gcTime: USER_SETTINGS_QUERY_GC_TIME_MS,
     retry: false,
   });
+  // A transient transport failure keeps cached settings (or defaults) usable and
+  // recovers once per confirmed connectivity generation without duplicating the
+  // initial request or reacting to unrelated Library URL changes.
+  useBoundedQueryRecovery(query);
+  return query;
 }
 
 
