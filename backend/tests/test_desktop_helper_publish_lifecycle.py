@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from clients.desktop_helper_package_contract import (
+from elvern_shared.desktop_helper_package_contract import (
     PACKAGE_NAME_PREFIX,
     expected_package_filename,
 )
@@ -32,10 +32,7 @@ def _create_publish_workspace(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     workspace = clients_root / "desktop-vlc-opener"
     (workspace / "scripts").mkdir(parents=True)
     clients_root.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(
-        ROOT / "clients" / "desktop_helper_package_contract.py",
-        clients_root / "desktop_helper_package_contract.py",
-    )
+    shutil.copytree(ROOT / "elvern_shared", tmp_path / "elvern_shared")
     shutil.copy2(
         HELPER_ROOT / "scripts" / "publish-bundles.sh",
         workspace / "scripts" / "publish-bundles.sh",
@@ -104,6 +101,9 @@ chmod 755 "$OUTPUT/$NAME"
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "ELVERN_BACKEND_ORIGIN": "https://elvern.example.test/",
+        "ELVERN_HELPER_RELEASES_DIR": str(
+            workspace / "artifacts" / "packages"
+        ),
         "PATH": f"{fake_bin}:/usr/bin:/bin",
     }
     return workspace, env
@@ -720,7 +720,7 @@ def test_activation_lock_is_fail_closed_and_reports_owner_without_changing_activ
     active_dir.mkdir(parents=True)
     active_manifest = active_dir / "release-manifest.json"
     active_manifest.write_text('{"active":"old"}\n', encoding="utf-8")
-    lock_dir = workspace / "artifacts" / ".activation.lock"
+    lock_dir = active_dir / ".activation.lock"
     lock_dir.mkdir()
     (lock_dir / "owner").write_text(
         "pid=123\nstarted_at=2026-07-23T00:00:00Z\nbuild_id=existing\n",
@@ -733,7 +733,72 @@ def test_activation_lock_is_fail_closed_and_reports_owner_without_changing_activ
     assert "activation is already running" in result.stderr
     assert "pid=123" in result.stderr
     assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
-    assert lock_dir.is_dir()
+
+
+def test_activation_requires_an_explicit_runtime_active_directory(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    env.pop("ELVERN_HELPER_RELEASES_DIR")
+
+    result = _run_publisher(workspace, env, "--activate")
+
+    assert result.returncode != 0
+    assert "--activate requires --active-dir or ELVERN_HELPER_RELEASES_DIR" in result.stderr
+
+
+def test_activation_cli_active_directory_overrides_environment(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    environment_active = tmp_path / "environment-active"
+    cli_active = tmp_path / "docker-data" / "helper_releases"
+    env["ELVERN_HELPER_RELEASES_DIR"] = str(environment_active)
+
+    result = _run_publisher(
+        workspace,
+        env,
+        "--activate",
+        "--active-dir",
+        str(cli_active),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (cli_active / "release-manifest.json").is_file()
+    assert not (environment_active / "release-manifest.json").exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["relative", "symlink", "symlink-parent"])
+def test_activation_rejects_unsafe_active_directory(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    if unsafe_kind == "relative":
+        active_dir = Path("relative/helper_releases")
+    elif unsafe_kind == "symlink":
+        target = tmp_path / "active-target"
+        target.mkdir()
+        active_dir = tmp_path / "active-link"
+        active_dir.symlink_to(target, target_is_directory=True)
+    else:
+        target = tmp_path / "active-parent-target"
+        target.mkdir()
+        parent_link = tmp_path / "active-parent-link"
+        parent_link.symlink_to(target, target_is_directory=True)
+        active_dir = parent_link / "helper_releases"
+
+    result = _run_publisher(
+        workspace,
+        env,
+        "--activate",
+        "--active-dir",
+        str(active_dir),
+    )
+
+    assert result.returncode != 0
+    assert "Active release directory" in result.stderr
+    assert _staged_manifests(workspace) == []
 
 
 def test_partial_activation_requires_explicit_dangerous_flag(

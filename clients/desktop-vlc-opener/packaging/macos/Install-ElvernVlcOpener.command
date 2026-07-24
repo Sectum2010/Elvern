@@ -19,6 +19,8 @@ STAGE_ROOT=""
 BACKUP_APP=""
 FAILED_NEW_APP=""
 LOCK_DIR=""
+LOCK_HELD=0
+INSTALL_NONCE="$$-$(date -u +%Y%m%dT%H%M%SZ)"
 STAGING_CREATED=0
 OLD_INSTALL_EXISTED=0
 OLD_INSTALL_BACKED_UP=0
@@ -87,7 +89,7 @@ cleanup() {
   ]]; then
     rm -rf "${BACKUP_APP}"
   fi
-  if [[ -n "${LOCK_DIR}" && -d "${LOCK_DIR}" ]]; then
+  if [[ ${LOCK_HELD} -eq 1 && -d "${LOCK_DIR}" ]]; then
     rm -f "${LOCK_DIR}/owner"
     rmdir "${LOCK_DIR}"
   fi
@@ -290,9 +292,12 @@ SOURCE_PAYLOAD="${PRIVATE_DIR}/${PAYLOAD_RELATIVE_PATH}"
 mkdir -p "${DEST_DIR}"
 LOCK_DIR="${DEST_DIR}/.elvern-vlc-opener-install.lock"
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-  fail "Another Helper install may be running. Remove ${LOCK_DIR} manually only after confirming no installer is active."
+  fail "Another Helper install or uninstall may be running. Remove ${LOCK_DIR} manually only after confirming no transaction is active."
 fi
-printf 'pid=%s\nstarted_at=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${LOCK_DIR}/owner"
+LOCK_HELD=1
+printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
+  "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INSTALL_NONCE}" \
+  > "${LOCK_DIR}/owner"
 chmod 644 "${LOCK_DIR}/owner"
 STAGE_ROOT="$(mktemp -d "${DEST_DIR}/.elvern-vlc-opener-stage.XXXXXX")"
 STAGING_CREATED=1
@@ -327,6 +332,27 @@ plist_set "LSMinimumSystemVersion" string "14.0"
 "${PLISTBUDDY}" -c "Add :CFBundleURLTypes:0:CFBundleURLName string Elvern VLC Opener" "${INFO_PLIST}"
 "${PLISTBUDDY}" -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "${INFO_PLIST}"
 "${PLISTBUDDY}" -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string elvern-vlc" "${INFO_PLIST}"
+
+INSTALL_STATE="${RESOURCES_DIR}/install-state.plist"
+cat > "${INSTALL_STATE}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>schema_version</key>
+  <string>elvern-desktop-helper-install-state-v1</string>
+  <key>helper_version</key>
+  <string>${HELPER_VERSION}</string>
+  <key>product_id</key>
+  <string>local.elvern.vlcopener</string>
+  <key>package_target</key>
+  <string>${PACKAGE_TARGET}</string>
+  <key>transaction_nonce</key>
+  <string>${INSTALL_NONCE}</string>
+</dict>
+</plist>
+EOF
+chmod 644 "${INSTALL_STATE}"
 
 codesign --force --sign - "${APP_PAYLOAD_DIR}/Elvern.VlcOpener" >/dev/null \
   || fail "The staged Helper executable could not be structurally signed."

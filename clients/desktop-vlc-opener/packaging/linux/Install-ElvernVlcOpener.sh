@@ -24,6 +24,7 @@ PREVIOUS_PROTOCOL_DEFAULT=""
 TRANSACTION_DIR=""
 MIME_STATE_FILE=""
 LOCK_DIR=""
+LOCK_HELD=0
 VERIFY_EXPECTED=""
 VERIFY_ACTUAL=""
 VERIFY_SEEN=""
@@ -37,6 +38,7 @@ NEW_INSTALL_PLACED=0
 OLD_REGISTRATION_CAPTURED=0
 REGISTRATION_MODIFIED=0
 INSTALL_COMMITTED=0
+INSTALL_NONCE="$$-$(date -u +%Y%m%dT%H%M%SZ)"
 TAB=$(printf '\t')
 CR=$(printf '\r')
 LF='
@@ -225,7 +227,7 @@ cleanup() {
     && { [ "${INSTALL_COMMITTED}" -eq 1 ] || [ "${rollback_failed}" -eq 0 ]; }; then
     rm -rf "${TRANSACTION_DIR}"
   fi
-  if [ -n "${LOCK_DIR}" ] && [ -d "${LOCK_DIR}" ]; then
+  if [ "${LOCK_HELD}" -eq 1 ] && [ -d "${LOCK_DIR}" ]; then
     rm -f "${LOCK_DIR}/owner"
     rmdir "${LOCK_DIR}" 2>/dev/null || :
   fi
@@ -469,9 +471,11 @@ mkdir -p "${INSTALL_PARENT}" "${DESKTOP_DIR}" "${XDG_CONFIG_ROOT}" \
   || fail "the user-level installation directories could not be created."
 LOCK_DIR="${INSTALL_PARENT}/.elvern-vlc-opener-install.lock"
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-  fail "another Helper install may be running. Remove ${LOCK_DIR} manually only after confirming no installer is active."
+  fail "another Helper install or uninstall may be running. Remove ${LOCK_DIR} manually only after confirming no transaction is active."
 fi
-printf 'pid=%s\nstarted_at=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+LOCK_HELD=1
+printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
+  "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INSTALL_NONCE}" \
   > "${LOCK_DIR}/owner"
 chmod 644 "${LOCK_DIR}/owner"
 TRANSACTION_DIR=$(mktemp -d "${INSTALL_PARENT}/.elvern-vlc-opener-transaction.XXXXXX") \
@@ -490,6 +494,21 @@ chmod 755 "${STAGE_DIR}/Uninstall-ElvernVlcOpener.sh"
   || fail "the staged payload failed its version check."
 
 PREVIOUS_PROTOCOL_DEFAULT=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || :)
+SAFE_PREVIOUS_PROTOCOL_DEFAULT=""
+if [ -n "${PREVIOUS_PROTOCOL_DEFAULT}" ] \
+  && printf '%s\n' "${PREVIOUS_PROTOCOL_DEFAULT}" \
+    | grep -E '^[A-Za-z0-9._-]+\.desktop$' >/dev/null 2>&1; then
+  SAFE_PREVIOUS_PROTOCOL_DEFAULT=${PREVIOUS_PROTOCOL_DEFAULT}
+fi
+cat > "${STAGE_DIR}/install-state.tsv" <<EOF
+schema_version	elvern-desktop-helper-install-state-v1
+helper_version	${HELPER_VERSION}
+product_id	elvern-vlc-opener
+package_target	${PACKAGE_TARGET}
+transaction_nonce	${INSTALL_NONCE}
+previous_protocol_default	${SAFE_PREVIOUS_PROTOCOL_DEFAULT}
+EOF
+chmod 644 "${STAGE_DIR}/install-state.tsv"
 backup_mime_path "${MIME_CONFIG_FILE}" 0
 backup_mime_path "${MIME_DATA_FILE}" 1
 if [ -f "${DESKTOP_FILE}" ]; then

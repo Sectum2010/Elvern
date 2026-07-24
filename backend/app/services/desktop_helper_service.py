@@ -526,6 +526,7 @@ def _list_helper_releases_from_manifest(
     normalized_channel = _normalize_channel(channel) if channel else None
     try:
         manifest_releases = list_desktop_helper_manifest_records(
+            settings.helper_releases_dir,
             platform=platform,
             channel=normalized_channel,
             expected_bound_origin_sha256=_desktop_backend_origin_sha256(settings),
@@ -537,7 +538,11 @@ def _list_helper_releases_from_manifest(
             "Desktop helper manifest validation failed for release listing (%s)",
             type(exc).__name__,
         )
-        return [] if desktop_helper_release_manifest_exists() else None
+        return (
+            []
+            if desktop_helper_release_manifest_exists(settings.helper_releases_dir)
+            else None
+        )
     if not manifest_releases:
         return None
     _ensure_no_manifest_db_release_collisions(settings, manifest_releases)
@@ -550,6 +555,7 @@ def _get_helper_release_from_manifest(
 ) -> dict[str, object] | None:
     try:
         manifest_release = get_desktop_helper_manifest_record_by_id(
+            settings.helper_releases_dir,
             release_id,
             expected_bound_origin_sha256=_desktop_backend_origin_sha256(settings),
         )
@@ -563,7 +569,7 @@ def _get_helper_release_from_manifest(
             "Desktop helper manifest validation failed for release download (%s)",
             type(exc).__name__,
         )
-        if desktop_helper_release_manifest_exists():
+        if desktop_helper_release_manifest_exists(settings.helper_releases_dir):
             raise HTTPException(
                 status_code=status.HTTP_410_GONE,
                 detail="Desktop helper release is unavailable because its package verification failed",

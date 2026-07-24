@@ -124,23 +124,33 @@ def _read_default_handler(state: Path) -> str:
 def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     package_root = tmp_path / "Elvern VLC Opener Linux Installer"
     private = package_root / ".elvern"
-    payload = private / "payloads" / "linux-x64" / "Elvern.VlcOpener"
     selector = private / "lib" / "platform-selectors.sh"
     uninstaller = private / "uninstall" / "Uninstall-ElvernVlcOpener.sh"
-    payload.parent.mkdir(parents=True)
     selector.parent.mkdir(parents=True)
     uninstaller.parent.mkdir(parents=True)
     shutil.copy2(LINUX_INSTALLER, package_root / "Install-ElvernVlcOpener.sh")
     shutil.copy2(PLATFORM_SELECTORS, selector)
     shutil.copy2(LINUX_UNINSTALLER, uninstaller)
     (package_root / "README.txt").write_text("Elvern test package\n", encoding="utf-8")
-    _write_executable(
-        payload,
-        "#!/bin/sh\n"
-        "set -eu\n"
-        "[ \"${1:-}\" = \"--version\" ] && { echo 0.9.0; exit 0; }\n"
-        "exit 0\n",
-    )
+    payloads: dict[str, Path] = {}
+    for runtime_id in (
+        "linux-x64",
+        "linux-arm64",
+        "linux-musl-x64",
+        "linux-musl-arm64",
+    ):
+        payload = private / "payloads" / runtime_id / "Elvern.VlcOpener"
+        payload.parent.mkdir(parents=True)
+        _write_executable(
+            payload,
+            "#!/bin/sh\n"
+            "set -eu\n"
+            f"runtime_id='{runtime_id}'\n"
+            "[ \"${1:-}\" = \"--version\" ] && { echo 0.9.0; exit 0; }\n"
+            "[ \"${1:-}\" = \"--runtime-id\" ] && { echo \"$runtime_id\"; exit 0; }\n"
+            "exit 0\n",
+        )
+        payloads[runtime_id] = payload
     manifest = private / "installer-manifest.tsv"
     manifest.write_text(
         "\n".join([
@@ -151,7 +161,13 @@ def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
             "meta\tdeployment_mode\tself_contained",
             "meta\tpackage_target\tlinux-universal",
             f"meta\tbound_origin_sha256\t{'a' * 64}",
-            f"payload\tlinux-x64\tpayloads/linux-x64/Elvern.VlcOpener\t{_sha256(payload)}\t{payload.stat().st_size}\tElvern.VlcOpener",
+            *[
+                (
+                    f"payload\t{runtime_id}\tpayloads/{runtime_id}/Elvern.VlcOpener"
+                    f"\t{_sha256(payload)}\t{payload.stat().st_size}\tElvern.VlcOpener"
+                )
+                for runtime_id, payload in payloads.items()
+            ],
         ]) + "\n",
         encoding="utf-8",
     )
@@ -269,6 +285,7 @@ def _run_installer(
     env: dict[str, str],
     *,
     fail_at: str | None = None,
+    runtime_id: str | None = "linux-x64",
 ) -> subprocess.CompletedProcess[str]:
     run_env = dict(env)
     if fail_at:
@@ -276,13 +293,126 @@ def _run_installer(
             "ELVERN_INSTALL_TEST_MODE": "1",
             "ELVERN_INSTALL_TEST_FAIL_AT": fail_at,
         })
+    command = ["/bin/sh", str(package_root / "Install-ElvernVlcOpener.sh")]
+    if runtime_id is not None:
+        command.extend(["--runtime", runtime_id])
     return subprocess.run(
-        [
-            "/bin/sh",
-            str(package_root / "Install-ElvernVlcOpener.sh"),
-            "--runtime",
-            "linux-x64",
-        ],
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=run_env,
+    )
+
+
+@pytest.mark.parametrize(
+    ("machine", "getconf_mode", "ldd_output", "expected_runtime"),
+    [
+        ("x86_64", "glibc", "", "linux-x64"),
+        ("amd64", "glibc", "", "linux-x64"),
+        ("aarch64", "glibc", "", "linux-arm64"),
+        ("arm64", "glibc", "", "linux-arm64"),
+        ("x86_64", "fail", "musl libc", "linux-musl-x64"),
+        ("aarch64", "fail", "musl libc", "linux-musl-arm64"),
+        ("x86_64", "missing", "GNU libc", "linux-x64"),
+    ],
+)
+def test_linux_installer_auto_selects_cpu_and_libc_payload(
+    tmp_path: Path,
+    machine: str,
+    getconf_mode: str,
+    ldd_output: str,
+    expected_runtime: str,
+) -> None:
+    package_root, _state, env = _create_linux_package(tmp_path)
+    fake_bin = Path(env["PATH"].split(":", 1)[0])
+    _write_executable(fake_bin / "uname", f"#!/bin/sh\nprintf '%s\\n' '{machine}'\n")
+    if getconf_mode != "missing":
+        exit_code = 0 if getconf_mode == "glibc" else 1
+        _write_executable(
+            fake_bin / "getconf",
+            f"#!/bin/sh\n[ {exit_code} -eq 0 ] && echo 'glibc 2.36'\nexit {exit_code}\n",
+        )
+    if ldd_output:
+        _write_executable(
+            fake_bin / "ldd",
+            f"#!/bin/sh\nprintf '%s\\n' '{ldd_output}'\n",
+        )
+
+    result = _run_installer(package_root, env, runtime_id=None)
+
+    assert result.returncode == 0, result.stderr
+    installed = (
+        Path(env["HOME"])
+        / ".local"
+        / "lib"
+        / "elvern-vlc-opener"
+        / "Elvern.VlcOpener"
+    )
+    selected = subprocess.run(
+        [str(installed), "--runtime-id"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert selected.returncode == 0
+    assert selected.stdout.strip() == expected_runtime
+
+
+@pytest.mark.parametrize(
+    ("machine", "getconf_mode", "ldd_output", "message"),
+    [
+        ("x86_64", "fail", "unknown libc", "libc could not be identified"),
+        ("ppc64", "glibc", "", "CPU or libc is unsupported"),
+    ],
+)
+def test_linux_installer_auto_selection_fails_closed(
+    tmp_path: Path,
+    machine: str,
+    getconf_mode: str,
+    ldd_output: str,
+    message: str,
+) -> None:
+    package_root, _state, env = _create_linux_package(tmp_path)
+    fake_bin = Path(env["PATH"].split(":", 1)[0])
+    _write_executable(fake_bin / "uname", f"#!/bin/sh\nprintf '%s\\n' '{machine}'\n")
+    _write_executable(
+        fake_bin / "getconf",
+        f"#!/bin/sh\n[ '{getconf_mode}' = 'glibc' ] && echo 'glibc 2.36'\n"
+        f"[ '{getconf_mode}' = 'glibc' ]\n",
+    )
+    _write_executable(fake_bin / "ldd", f"#!/bin/sh\nprintf '%s\\n' '{ldd_output}'\n")
+
+    result = _run_installer(package_root, env, runtime_id=None)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not (
+        Path(env["HOME"]) / ".local" / "lib" / "elvern-vlc-opener"
+    ).exists()
+
+
+def _run_uninstaller(
+    env: dict[str, str],
+    *,
+    fail_at: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    run_env = dict(env)
+    if fail_at:
+        run_env.update({
+            "ELVERN_UNINSTALL_TEST_MODE": "1",
+            "ELVERN_UNINSTALL_TEST_FAIL_AT": fail_at,
+        })
+    uninstaller = (
+        Path(env["HOME"])
+        / ".local"
+        / "lib"
+        / "elvern-vlc-opener"
+        / "Uninstall-ElvernVlcOpener.sh"
+    )
+    return subprocess.run(
+        ["/bin/sh", str(uninstaller)],
         check=False,
         capture_output=True,
         text=True,
@@ -309,12 +439,142 @@ def test_linux_installer_is_user_scoped_and_idempotent(tmp_path: Path) -> None:
     )
     assert (install_dir / "Elvern.VlcOpener").is_file()
     assert (install_dir / "Uninstall-ElvernVlcOpener.sh").is_file()
+    assert (install_dir / "install-state.tsv").is_file()
     assert desktop_file.is_file()
     assert _read_default_handler(state) == "elvern-vlc-opener.desktop"
     assert stat.S_IMODE(install_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE((install_dir / "Elvern.VlcOpener").stat().st_mode) == 0o755
     assert stat.S_IMODE((install_dir / "Uninstall-ElvernVlcOpener.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((install_dir / "install-state.tsv").stat().st_mode) == 0o644
     assert stat.S_IMODE(desktop_file.stat().st_mode) == 0o644
+
+
+def test_linux_uninstaller_restores_owned_previous_handler(tmp_path: Path) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    desktop_dir = Path(env["XDG_DATA_HOME"]) / "applications"
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+    (desktop_dir / "old-handler.desktop").write_text(
+        "[Desktop Entry]\nName=Old handler\n",
+        encoding="utf-8",
+    )
+    installed = _run_installer(package_root, env)
+    assert installed.returncode == 0, installed.stderr
+
+    result = _run_uninstaller(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _read_default_handler(state) == "old-handler.desktop"
+    assert "image/png=keep-viewer.desktop" in state.read_text(encoding="utf-8")
+    assert not (
+        Path(env["HOME"]) / ".local" / "lib" / "elvern-vlc-opener"
+    ).exists()
+    assert not (desktop_dir / "elvern-vlc-opener.desktop").exists()
+
+
+def test_linux_uninstaller_preserves_handler_changed_after_install(tmp_path: Path) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    installed = _run_installer(package_root, env)
+    assert installed.returncode == 0, installed.stderr
+    desktop_dir = Path(env["XDG_DATA_HOME"]) / "applications"
+    (desktop_dir / "third-party.desktop").write_text(
+        "[Desktop Entry]\nName=Third party\n",
+        encoding="utf-8",
+    )
+    changed = subprocess.run(
+        [
+            str(Path(env["PATH"].split(":", 1)[0]) / "xdg-mime"),
+            "default",
+            "third-party.desktop",
+            "x-scheme-handler/elvern-vlc",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert changed.returncode == 0, changed.stderr
+
+    result = _run_uninstaller(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _read_default_handler(state) == "third-party.desktop"
+
+
+@pytest.mark.parametrize("fail_at", ["mime_update", "desktop_delete", "default_validation"])
+def test_linux_uninstaller_rolls_back_registration_and_install(
+    tmp_path: Path,
+    fail_at: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    installed = _run_installer(package_root, env)
+    assert installed.returncode == 0, installed.stderr
+    before_mime = state.read_bytes()
+    install_dir = Path(env["HOME"]) / ".local" / "lib" / "elvern-vlc-opener"
+    desktop_file = Path(env["XDG_DATA_HOME"]) / "applications" / "elvern-vlc-opener.desktop"
+
+    result = _run_uninstaller(env, fail_at=fail_at)
+
+    assert result.returncode != 0
+    assert install_dir.is_dir()
+    assert desktop_file.is_file()
+    assert state.read_bytes() == before_mime
+    assert _read_default_handler(state) == "elvern-vlc-opener.desktop"
+
+
+def test_linux_uninstaller_uses_the_installer_lock_without_damage(tmp_path: Path) -> None:
+    package_root, _state, env = _create_linux_package(tmp_path)
+    installed = _run_installer(package_root, env)
+    assert installed.returncode == 0, installed.stderr
+    install_dir = Path(env["HOME"]) / ".local" / "lib" / "elvern-vlc-opener"
+    lock_dir = install_dir.parent / ".elvern-vlc-opener-install.lock"
+    lock_dir.mkdir()
+    (lock_dir / "owner").write_text(
+        "pid=123\nstarted_at=2026-07-23T00:00:00Z\ntransaction_nonce=test\n",
+        encoding="utf-8",
+    )
+
+    result = _run_uninstaller(env)
+
+    assert result.returncode != 0
+    assert install_dir.is_dir()
+    assert lock_dir.is_dir()
+
+
+def test_linux_installer_rejects_the_uninstaller_lock_without_damage(
+    tmp_path: Path,
+) -> None:
+    package_root, _state, env = _create_linux_package(tmp_path)
+    install_parent = Path(env["HOME"]) / ".local" / "lib"
+    install_parent.mkdir(parents=True, exist_ok=True)
+    install_dir = install_parent / "elvern-vlc-opener"
+    lock_dir = install_parent / ".elvern-vlc-opener-install.lock"
+    lock_dir.mkdir()
+    owner = lock_dir / "owner"
+    owner.write_text(
+        "pid=456\nstarted_at=2026-07-23T00:00:00Z\ntransaction_nonce=uninstall\n",
+        encoding="utf-8",
+    )
+
+    result = _run_installer(package_root, env)
+
+    assert result.returncode != 0
+    assert "install or uninstall may be running" in result.stderr
+    assert not install_dir.exists()
+    assert owner.is_file()
+
+
+def test_linux_uninstaller_supports_legacy_install_without_state(tmp_path: Path) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    installed = _run_installer(package_root, env)
+    assert installed.returncode == 0, installed.stderr
+    install_dir = Path(env["HOME"]) / ".local" / "lib" / "elvern-vlc-opener"
+    (install_dir / "install-state.tsv").unlink()
+
+    result = _run_uninstaller(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _read_default_handler(state) != "elvern-vlc-opener.desktop"
+    assert not install_dir.exists()
 
 
 def test_linux_installer_environment_ignores_polluted_parent_state(

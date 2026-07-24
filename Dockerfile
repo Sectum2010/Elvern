@@ -26,6 +26,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend ./backend
+COPY elvern_shared ./elvern_shared
 COPY frontend/server.mjs ./frontend/server.mjs
 COPY frontend/package.json ./frontend/package.json
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

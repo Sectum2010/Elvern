@@ -27,12 +27,17 @@ Build one platform for isolated validation:
 ```
 
 These commands never change the active release manifest. After all three platforms
-have been built and verified together, publish them explicitly:
+have been built and verified together, publish them explicitly to the Backend's
+configured runtime release directory:
 
 ```bash
-./scripts/publish-bundles.sh --activate
+./scripts/publish-bundles.sh \
+  --activate \
+  --active-dir "/opt/elvern/backend/data/helper_releases"
 ```
 
+`--active-dir` takes precedence over `ELVERN_HELPER_RELEASES_DIR`; one of them is
+required for activation. Docker deployments use `/data/helper_releases`.
 Activation copies immutable, content-hash-named ZIPs first, flushes package bytes
 and directory metadata, and atomically replaces the active manifest last. A lock
 with non-sensitive owner diagnostics prevents concurrent activation. Failure
@@ -64,9 +69,11 @@ The standard output is:
 
 The backend opens every package path component relative to the trusted package
 directory without following symlinks. It verifies only the requested platform
-package, uses per-artifact single-flight hashing and a bounded cache, and rehashes
-the exact opened file handle for every download. The same verified handle is used
-for GET, HEAD, and single-range streaming. A package built for a different
+package and uses per-artifact single-flight hashing with a bounded verification
+cache. A complete matching fingerprint can reuse a prior hash result; a cache miss
+or changed fingerprint rehashes the exact safely opened file. GET, HEAD, and
+single-range streaming use that same opened handle, and path traversal or symlinks
+fail closed. A package built for a different
 effective backend origin is withheld rather than falling back to an incompatible
 v2 download.
 
@@ -119,6 +126,14 @@ Upgrade is transactional. The old install is not considered backed up until its
 move succeeds, and a failed registration or final validation restores the old
 install, desktop entry, both user `mimeapps.list` locations byte-for-byte, and
 their original modes. The installer never uses `xdg-mime uninstall` as rollback.
+Uninstall uses the same per-user lock and transaction model. It restores a recorded
+safe previous handler only when Elvern is still the current default and the
+previous desktop entry still exists. If the user selected another handler after
+installation, uninstall leaves that newer choice untouched.
+
+Windows and macOS uninstallers also use the installers' per-user locks and stage
+registration/install backups before removal. A failed rollback preserves recovery
+materials instead of reporting a false success.
 
 VLC discovery checks `ELVERN_VLC_PATH`, executable `vlc` entries on `PATH`,
 `/usr/bin/vlc`, `/usr/local/bin/vlc`, and `/snap/bin/vlc`. Flatpak VLC is not

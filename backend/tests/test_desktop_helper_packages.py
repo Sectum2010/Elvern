@@ -7,12 +7,13 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
-from clients.desktop_helper_package_contract import (
+from elvern_shared.desktop_helper_package_contract import (
     PACKAGE_NAME_PREFIX,
     expected_package_filename,
 )
@@ -20,6 +21,9 @@ from backend.app.schemas import DesktopHelperReleaseResponse, DesktopHelperStatu
 from backend.app.services import desktop_helper_manifest_service as manifest_service
 from backend.app.services import desktop_helper_service
 from backend.app.routes import desktop_helper as desktop_helper_route
+
+_LIST_MANIFEST_RECORDS = manifest_service.list_desktop_helper_manifest_records
+_RESET_MANIFEST_CACHE = manifest_service.reset_desktop_helper_manifest_cache
 
 
 def _sha256(payload: bytes) -> str:
@@ -49,9 +53,10 @@ def _write_manifest(
     tmp_path: Path,
     *,
     relative_path: str | None = None,
+    release_root: Path | None = None,
 ) -> dict[str, object]:
-    packages_dir = tmp_path / "packages"
-    packages_dir.mkdir()
+    packages_dir = release_root or tmp_path / "packages"
+    packages_dir.mkdir(parents=True, exist_ok=True)
     package_payload = b"desktop-helper-package"
     package_sha256 = _sha256(package_payload)
     filename = expected_package_filename(
@@ -99,9 +104,29 @@ def _write_manifest(
     }
     manifest_path = packages_dir / "release-manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    monkeypatch.setattr(manifest_service, "HELPER_RELEASE_MANIFEST_PATH", manifest_path)
-    monkeypatch.setattr(manifest_service, "HELPER_RELEASE_PACKAGES_DIR", packages_dir)
-    manifest_service.reset_desktop_helper_manifest_cache()
+    monkeypatch.setattr(
+        manifest_service,
+        "HELPER_RELEASE_MANIFEST_PATH",
+        manifest_path,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        manifest_service,
+        "HELPER_RELEASE_PACKAGES_DIR",
+        packages_dir,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        manifest_service,
+        "list_desktop_helper_manifest_records",
+        lambda **kwargs: _LIST_MANIFEST_RECORDS(packages_dir, **kwargs),
+    )
+    monkeypatch.setattr(
+        manifest_service,
+        "reset_desktop_helper_manifest_cache",
+        lambda: _RESET_MANIFEST_CACHE(packages_dir),
+    )
+    _RESET_MANIFEST_CACHE(packages_dir)
     return manifest
 
 
@@ -136,6 +161,85 @@ def test_manifest_v2_normalizes_one_package_with_self_contained_metadata(monkeyp
         expected_bound_origin_sha256=BOUND_ORIGIN_SHA256,
     )
     assert bound_records[0]["package_binding"] == "compatible"
+
+
+def test_manifest_cache_isolated_by_explicit_release_root(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    root_a = tmp_path / "runtime-a"
+    manifest_a = _write_manifest(
+        monkeypatch,
+        tmp_path / "fixture-a",
+        release_root=root_a,
+    )
+    root_b = tmp_path / "runtime-b"
+    manifest_b = _write_manifest(
+        monkeypatch,
+        tmp_path / "fixture-b",
+        release_root=root_b,
+    )
+    manifest_b["channel"] = "beta"
+    (root_b / "release-manifest.json").write_text(
+        json.dumps(manifest_b),
+        encoding="utf-8",
+    )
+    _RESET_MANIFEST_CACHE()
+
+    records_a = _LIST_MANIFEST_RECORDS(root_a, platform="mac")
+    records_b = _LIST_MANIFEST_RECORDS(root_b, platform="mac")
+    records_a_again = _LIST_MANIFEST_RECORDS(root_a, platform="mac")
+
+    assert manifest_a["channel"] == "stable"
+    assert records_a[0]["channel"] == "stable"
+    assert records_b[0]["channel"] == "beta"
+    assert records_a_again[0]["channel"] == "stable"
+    assert records_a[0]["artifact_root"] == root_a
+    assert records_b[0]["artifact_root"] == root_b
+
+
+def test_service_uses_each_settings_runtime_release_root(
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    root_a = tmp_path / "docker-a" / "helper_releases"
+    _write_manifest(
+        monkeypatch,
+        tmp_path / "fixture-a",
+        release_root=root_a,
+    )
+    root_b = tmp_path / "docker-b" / "helper_releases"
+    manifest_b = _write_manifest(
+        monkeypatch,
+        tmp_path / "fixture-b",
+        release_root=root_b,
+    )
+    manifest_b["channel"] = "beta"
+    (root_b / "release-manifest.json").write_text(
+        json.dumps(manifest_b),
+        encoding="utf-8",
+    )
+    _RESET_MANIFEST_CACHE()
+    settings_a = replace(initialized_settings, helper_releases_dir=root_a)
+    settings_b = replace(initialized_settings, helper_releases_dir=root_b)
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "_desktop_backend_origin_sha256",
+        lambda _settings: BOUND_ORIGIN_SHA256,
+    )
+
+    records_a = desktop_helper_service._list_helper_releases_from_manifest(
+        settings_a,
+        platform="mac",
+    )
+    records_b = desktop_helper_service._list_helper_releases_from_manifest(
+        settings_b,
+        platform="mac",
+    )
+
+    assert records_a is not None and records_a[0]["channel"] == "stable"
+    assert records_b is not None and records_b[0]["channel"] == "beta"
 
 
 @pytest.mark.parametrize(
@@ -343,7 +447,9 @@ def test_manifest_snapshot_uses_open_inode_then_observes_atomic_replacement(
         )
 
     monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", replacing_open)
-    manifest_bytes, _fingerprint = manifest_service._read_manifest_snapshot()
+    manifest_bytes, _fingerprint = manifest_service._read_manifest_snapshot(
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+    )
 
     assert json.loads(manifest_bytes)["channel"] == "beta"
     assert replaced is True
@@ -400,7 +506,9 @@ def test_manifest_snapshot_retries_same_inode_rewrite_even_when_mtime_is_restore
         )
 
     monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", mutating_open)
-    manifest_bytes, _fingerprint = manifest_service._read_manifest_snapshot()
+    manifest_bytes, _fingerprint = manifest_service._read_manifest_snapshot(
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+    )
 
     assert json.loads(manifest_bytes)["channel"] == "staple"
     assert open_count == 2
@@ -457,7 +565,9 @@ def test_manifest_snapshot_fails_closed_and_closes_handles_during_continuous_cti
         manifest_service.DesktopHelperManifestError,
         match="changed during reading",
     ):
-        manifest_service._read_manifest_snapshot()
+        manifest_service._read_manifest_snapshot(
+            manifest_service.HELPER_RELEASE_PACKAGES_DIR
+        )
 
     assert closed == manifest_service._MAX_MANIFEST_READ_ATTEMPTS
 
@@ -474,7 +584,9 @@ def test_manifest_snapshot_stable_read_opens_once(monkeypatch, tmp_path) -> None
 
     monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", counted_open)
 
-    manifest_service._read_manifest_snapshot()
+    manifest_service._read_manifest_snapshot(
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+    )
 
     assert open_count == 1
 
@@ -622,7 +734,11 @@ def test_release_download_rechecks_artifact_fingerprint_and_rejects_corruption(
     monkeypatch,
     tmp_path,
 ) -> None:
-    _write_manifest(monkeypatch, tmp_path)
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        release_root=initialized_settings.helper_releases_dir,
+    )
     monkeypatch.setattr(
         desktop_helper_service,
         "_desktop_backend_origin_sha256",
@@ -659,6 +775,7 @@ def test_verified_handle_streams_original_inode_after_path_replacement(monkeypat
     original = artifact.read_bytes()
     handle = manifest_service.open_verified_artifact(
         artifact,
+        root_dir=manifest_service.HELPER_RELEASE_PACKAGES_DIR,
         size_bytes=len(original),
         sha256=_sha256(original),
         package_target="macos-dual-arch",
@@ -698,6 +815,7 @@ def test_open_verified_artifact_fails_closed_when_changed_during_hashing(monkeyp
     ):
         manifest_service.open_verified_artifact(
             artifact,
+            root_dir=manifest_service.HELPER_RELEASE_PACKAGES_DIR,
             size_bytes=len(original),
             sha256=_sha256(original),
             package_target="macos-dual-arch",
@@ -714,6 +832,7 @@ def test_open_verified_artifact_refuses_a_symlink(monkeypatch, tmp_path) -> None
     with pytest.raises(manifest_service.DesktopHelperManifestError):
         manifest_service.open_verified_artifact(
             link,
+            root_dir=manifest_service.HELPER_RELEASE_PACKAGES_DIR,
             size_bytes=len(original),
             sha256=_sha256(original),
             package_target="macos-dual-arch",
@@ -861,7 +980,11 @@ def test_repeated_download_opens_do_not_rehash_unchanged_artifact(
     monkeypatch,
     tmp_path,
 ) -> None:
-    _write_manifest(monkeypatch, tmp_path)
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        release_root=initialized_settings.helper_releases_dir,
+    )
     monkeypatch.setattr(
         desktop_helper_service,
         "_desktop_backend_origin_sha256",
@@ -1229,9 +1352,29 @@ def test_legacy_manifest_remains_available_as_framework_dependent_fallback(
     }
     manifest_path = packages_dir / "release-manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    monkeypatch.setattr(manifest_service, "HELPER_RELEASE_MANIFEST_PATH", manifest_path)
-    monkeypatch.setattr(manifest_service, "HELPER_RELEASE_PACKAGES_DIR", packages_dir)
-    manifest_service.reset_desktop_helper_manifest_cache()
+    monkeypatch.setattr(
+        manifest_service,
+        "HELPER_RELEASE_MANIFEST_PATH",
+        manifest_path,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        manifest_service,
+        "HELPER_RELEASE_PACKAGES_DIR",
+        packages_dir,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        manifest_service,
+        "list_desktop_helper_manifest_records",
+        lambda **kwargs: _LIST_MANIFEST_RECORDS(packages_dir, **kwargs),
+    )
+    monkeypatch.setattr(
+        manifest_service,
+        "reset_desktop_helper_manifest_cache",
+        lambda: _RESET_MANIFEST_CACHE(packages_dir),
+    )
+    _RESET_MANIFEST_CACHE(packages_dir)
 
     records = manifest_service.list_desktop_helper_manifest_records(platform="mac")
 

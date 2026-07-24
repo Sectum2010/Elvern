@@ -27,13 +27,17 @@ are absolute, traverse a parent directory, or disagree with the artifact filenam
 
 The build command writes a verified build under `artifacts/staging/<build-id>/` by
 default. A platform-only build never changes active releases. Explicit `--activate`
-requires Windows, macOS, and Linux, verifies the full staged set, copies immutable
-content-hash-named ZIPs, and atomically replaces the active manifest last. A simple
-activation lock prevents concurrent publishers. Existing immutable files are
-reused only when their content hash matches. Package bytes and directory metadata
-are flushed before the read-only manifest is atomically renamed. Failure injection
-at artifact copy or manifest rename leaves the old manifest authoritative and
-cleans temporary active files; same-name/different-content collisions fail closed.
+requires Windows, macOS, and Linux plus an absolute runtime destination supplied by
+`--active-dir` or `ELVERN_HELPER_RELEASES_DIR`. The CLI value wins. Activation
+verifies the full staged set, copies immutable content-hash-named ZIPs, and
+atomically replaces the active manifest last. Its lock lives in that same runtime
+directory, preventing two publishers from targeting one authority concurrently.
+Existing immutable files are reused only when their content hash matches. Package
+bytes and directory metadata are flushed before the read-only manifest is
+atomically renamed. Failure injection at artifact copy or manifest rename leaves
+the old manifest authoritative and cleans temporary active files;
+same-name/different-content collisions fail closed. Docker's runtime destination is
+`/data/helper_releases`.
 
 An existing active manifest that is unreadable, malformed, unsafe, or invalid
 causes activation to fail before any new artifact is copied. The explicit
@@ -56,13 +60,15 @@ rejected even when it points back inside the package directory. Per-artifact loc
 allow different packages to hash concurrently, while concurrent readers of one
 package share one validation. The verification cache is a bounded LRU.
 
-Listings may reuse a matching fingerprint. Downloads always rehash the exact open
-file description, compare `fstat` before and after hashing, and stream that same
-verified handle. A bounded retry handles a concurrently changing inode; an
-unstable package fails closed. GET, HEAD, `Content-Length`, one RFC byte range, and
-safe `Content-Disposition` filename handling are preserved. Audit records
-distinguish started, completed, and interrupted downloads without recording query
-tokens.
+Listings and downloads may reuse a prior hash only when the complete artifact
+fingerprint matches an entry in the bounded verification cache. A cache miss or
+changed fingerprint hashes the exact safely opened file description and compares
+`fstat` before and after hashing. The request streams that same opened handle, so a
+path replacement after verification cannot substitute different bytes. A bounded
+retry handles a concurrently changing inode; an unstable package fails closed.
+GET, HEAD, `Content-Length`, one RFC byte range, and safe `Content-Disposition`
+filename handling are preserved. Audit records distinguish started, completed,
+and interrupted downloads without recording query tokens.
 
 The backend prefers package manifest v2. A platform gets at most one v2 primary
 package. Legacy manifest or database releases remain a rollback fallback only when
@@ -140,6 +146,24 @@ Linux snapshots both user-level `mimeapps.list` locations, their existence and
 modes, the prior desktop entry, and the prior default handler before modification.
 Rollback restores those files byte-for-byte and verifies the effective handler; it
 does not use `xdg-mime uninstall`.
+
+All uninstallers take the same per-user exclusive lock as their installer. They
+validate install ownership, stage same-filesystem backups, remove only exact
+Elvern-owned registration, verify the result, and roll back on failure. A rollback
+failure preserves recovery materials and returns a non-zero result.
+
+Linux records only a safe previous handler basename. During uninstall, it restores
+that handler only when Elvern is still the current default and the previous desktop
+entry still exists. Without a valid previous handler it edits only the
+`x-scheme-handler/elvern-vlc` entry in each user-level `[Default Applications]`
+section. If the user selected a third-party handler after installing Elvern, that
+new choice is not overwritten. Legacy installs without state remove only an active
+Elvern mapping and never guess a previous handler.
+
+macOS treats an exact Launch Services unregister failure as transactional failure
+and restores/re-registers the App. Windows runs its uninstaller from a temporary
+bootstrap when necessary, uses the same exclusive file lock, and removes protocol
+or uninstall registry keys only when their values still identify the owned install.
 
 ## macOS trust boundary
 

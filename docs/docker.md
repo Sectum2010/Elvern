@@ -77,7 +77,26 @@ That directory stores:
 
 - `elvern.db`
 - transcode cache data
-- helper release metadata
+- active desktop Helper packages and `release-manifest.json` under
+  `/data/helper_releases` inside the container
+
+The Backend reads Helper releases only from
+`ELVERN_HELPER_RELEASES_DIR=/data/helper_releases`. Package source staging under
+`clients/desktop-vlc-opener/artifacts/staging` is not a runtime release authority
+and is not copied into the image. To publish verified staged packages for this
+Docker deployment, target the host side of the persistent `/data` mount explicitly:
+
+```bash
+cd "$ELVERN_ROOT/clients/desktop-vlc-opener"
+export ELVERN_BACKEND_ORIGIN="https://the-effective-helper-backend-origin.example"
+./scripts/publish-bundles.sh \
+  --activate \
+  --active-dir "$ELVERN_ROOT/docker-data/data/helper_releases"
+```
+
+The standard packages and their per-user uninstallers are transactional. On Linux,
+uninstall restores a recorded safe previous protocol handler only when Elvern is
+still the active handler; it never overwrites a handler the user selected later.
 
 ## 3. Launch
 
@@ -111,5 +130,7 @@ The app is then available at:
 
 - This is an all-in-one container on purpose. It does not split backend and frontend into separate services yet.
 - This path does not package VLC or the desktop helper into the container.
+- The image copies the small shared Helper package contract needed by the Backend,
+  but not generated Helper ZIPs, staging output, or the desktop Helper source tree.
 - If you publish Elvern behind Tailscale Serve or another reverse proxy, keep `ELVERN_PUBLIC_APP_ORIGIN` and `ELVERN_BACKEND_ORIGIN` aligned with the real private URLs clients will use.
 - The simplest persisted state path is `./docker-data/data`; you can replace it with another bind mount or a named volume later if you prefer.

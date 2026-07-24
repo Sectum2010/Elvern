@@ -5,6 +5,14 @@ import re
 
 
 PACKAGE_NAME_PREFIX = "elvern-vlc-opener"
+PACKAGE_RUNTIME_CONTRACTS = {
+    "windows-x64": ("windows", ("win-x64",)),
+    "macos-dual-arch": ("mac", ("osx-arm64", "osx-x64")),
+    "linux-universal": (
+        "linux",
+        ("linux-x64", "linux-arm64", "linux-musl-x64", "linux-musl-arm64"),
+    ),
+}
 _SAFE_COMPONENT = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -29,14 +37,13 @@ def expected_package_filename(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("prefix")
     parser.add_argument("helper_version")
     parser.add_argument("package_target")
     parser.add_argument("sha256")
     args = parser.parse_args()
     try:
         filename = expected_package_filename(
-            args.prefix,
+            PACKAGE_NAME_PREFIX,
             args.helper_version,
             args.package_target,
             args.sha256,

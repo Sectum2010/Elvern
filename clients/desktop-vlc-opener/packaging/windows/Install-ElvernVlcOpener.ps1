@@ -273,7 +273,7 @@ try {
     catch [System.IO.IOException] {
         $lockErrorCode = Get-Win32ErrorCode $_.Exception
         if ($lockErrorCode -eq 32 -or $lockErrorCode -eq 33) {
-            throw "Another Elvern VLC Opener install is already running for this user."
+            throw "Another Elvern VLC Opener install or uninstall is already running for this user."
         }
         throw "Elvern could not create its per-user installation lock."
     }
@@ -350,6 +350,19 @@ try {
     Copy-Item -LiteralPath $sourceExe -Destination $stagedExe -Force
     $stagedUninstaller = Join-Path $stagingRoot "Uninstall-ElvernVlcOpener.ps1"
     Copy-Item -LiteralPath $uninstallSource -Destination $stagedUninstaller -Force
+    $installStatePath = Join-Path $stagingRoot "install-state.json"
+    $installState = [ordered]@{
+        schema_version = "elvern-desktop-helper-install-state-v1"
+        helper_version = $helperVersion
+        product_id = "ElvernVlcOpener"
+        package_target = "windows-x64"
+        transaction_nonce = $transactionNonce
+    }
+    [IO.File]::WriteAllText(
+        $installStatePath,
+        ($installState | ConvertTo-Json -Depth 2),
+        (New-Object Text.UTF8Encoding($false))
+    )
     Unblock-File -LiteralPath $stagedExe
     Unblock-File -LiteralPath $stagedUninstaller
     & $stagedExe --version | Out-Null

@@ -219,8 +219,15 @@ This does not publish or replace the active release manifest. Normal release
 activation builds all three platform packages together:
 
 ```bash
-./scripts/publish-bundles.sh --activate
+./scripts/publish-bundles.sh \
+  --activate \
+  --active-dir "$ELVERN_ROOT/backend/data/helper_releases"
 ```
+
+Use the exact directory configured as `ELVERN_HELPER_RELEASES_DIR`; for Docker this
+is the host-mounted `"$ELVERN_ROOT/docker-data/data/helper_releases"`, corresponding
+to `/data/helper_releases` inside the container. Staging output is never the runtime
+release authority.
 
 2. Download the active Windows package from Elvern's Install page.
 3. Unzip it.
@@ -238,7 +245,9 @@ export ELVERN_BACKEND_ORIGIN="https://the-effective-helper-backend-origin.exampl
 ```
 
 This does not publish or replace the active release manifest. Use a complete
-`./scripts/publish-bundles.sh --activate` release before ordinary users download it.
+`./scripts/publish-bundles.sh --activate --active-dir
+"$ELVERN_ROOT/backend/data/helper_releases"` release, or the equivalent configured
+runtime directory, before ordinary users download it.
 
 2. Download the active macOS package from Elvern's Install page.
 3. Unzip it.
@@ -261,6 +270,11 @@ tree, selects x64/ARM64 and glibc/musl locally, installs under `~/.local`, and n
 neither Python, a separate .NET Runtime, nor `sudo`. Linux sessions on the Elvern
 host itself continue to use host VLC directly and do not need the Helper. Flatpak
 VLC is not supported in this release.
+
+Helper uninstall is per-user and transactional on Windows, macOS, and Linux. Linux
+restores a recorded safe previous `elvern-vlc://` handler only if Elvern remains the
+current default and that previous desktop entry still exists. If the user selected
+another handler later, uninstall leaves that choice untouched.
 
 All standard packages are self-contained .NET 10 packages. Publishing fails rather than silently producing incomplete packages when an SDK or RID runtime pack is unavailable.
 The release manifest also binds packages to the canonical effective backend origin;

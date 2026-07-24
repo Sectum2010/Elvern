@@ -13,11 +13,15 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 for candidate_root in Path(__file__).resolve().parents:
-    if (candidate_root / "clients" / "desktop_helper_package_contract.py").is_file():
+    if (
+        candidate_root
+        / "elvern_shared"
+        / "desktop_helper_package_contract.py"
+    ).is_file():
         sys.path.insert(0, str(candidate_root))
         break
 
-from clients.desktop_helper_package_contract import (  # noqa: E402
+from elvern_shared.desktop_helper_package_contract import (  # noqa: E402
     PACKAGE_NAME_PREFIX,
     expected_package_filename,
 )

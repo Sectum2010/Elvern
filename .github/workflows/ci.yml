@@ -134,3 +134,68 @@ jobs:
       - name: Run npm audit (high severity)
         working-directory: frontend
         run: npm audit --audit-level=high
+
+  docker_smoke:
+    name: Production Docker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run production Docker smoke
+        run: ./scripts/docker-smoke.sh
+
+  production_browser_tests:
+    name: Production Chromium and Firefox
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Read locked Playwright version
+        id: playwright-version
+        working-directory: frontend
+        run: echo "version=$(node -p 'require("./node_modules/@playwright/test/package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install matching Chromium and Firefox
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: Build production frontend
+        working-directory: frontend
+        run: VITE_ELVERN_LIBRARY_REVISION_MODE=on npm run build
+
+      - name: Run isolated production browser regression
+        working-directory: frontend
+        run: >-
+          node scripts/run-cross-browser-playwright.mjs
+          --project chromium-desktop-production
+          --project firefox-desktop-production
+
+      - name: Upload sanitized browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-browser-failure-${{ github.run_id }}
+          path: tmp/playwright-phase7-*
+          if-no-files-found: warn
+          retention-days: 7

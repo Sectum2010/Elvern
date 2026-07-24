@@ -11,23 +11,13 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
-from clients.desktop_helper_package_contract import (
+from elvern_shared.desktop_helper_package_contract import (
     PACKAGE_NAME_PREFIX,
+    PACKAGE_RUNTIME_CONTRACTS,
     expected_package_filename,
 )
 
-from ..config import PROJECT_ROOT
-
-
-HELPER_RELEASE_MANIFEST_PATH = (
-    PROJECT_ROOT
-    / "clients"
-    / "desktop-vlc-opener"
-    / "artifacts"
-    / "packages"
-    / "release-manifest.json"
-)
-HELPER_RELEASE_PACKAGES_DIR = HELPER_RELEASE_MANIFEST_PATH.parent
+HELPER_RELEASE_MANIFEST_NAME = "release-manifest.json"
 JS_SAFE_INTEGER_MASK = (1 << 53) - 1
 SUPPORTED_DISTRIBUTABLE_ARTIFACT_KINDS = frozenset({"zip"})
 MANIFEST_PLATFORM_FAMILY_MAP = {
@@ -39,14 +29,6 @@ MANIFEST_PLATFORM_FAMILY_MAP = {
 RELEASE_MANIFEST_V2_SCHEMA = "desktop-helper-release-manifest-v2"
 SELF_CONTAINED_MODE = "self_contained"
 logger = logging.getLogger(__name__)
-PACKAGE_RUNTIME_CONTRACTS = {
-    "windows-x64": ("windows", ("win-x64",)),
-    "macos-dual-arch": ("mac", ("osx-arm64", "osx-x64")),
-    "linux-universal": (
-        "linux",
-        ("linux-x64", "linux-arm64", "linux-musl-x64", "linux-musl-arm64"),
-    ),
-}
 
 
 class DesktopHelperManifestError(RuntimeError):
@@ -58,9 +40,9 @@ class DesktopHelperManifestOriginMismatch(DesktopHelperManifestError):
 
 
 _snapshot_lock = threading.RLock()
-_snapshot_fingerprint: tuple[object, ...] | None = None
-_snapshot_payload: dict[str, object] | None = None
-_snapshot_records: list[dict[str, object]] | None = None
+_snapshot_fingerprints: dict[str, tuple[object, ...]] = {}
+_snapshot_payloads: dict[str, dict[str, object]] = {}
+_snapshot_records: dict[str, list[dict[str, object]]] = {}
 _artifact_cache_lock = threading.RLock()
 _verified_artifacts: OrderedDict[
     str,
@@ -72,31 +54,52 @@ _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_MANIFEST_READ_ATTEMPTS = 3
 
 
-def desktop_helper_release_manifest_exists() -> bool:
-    return HELPER_RELEASE_MANIFEST_PATH.is_file()
+def _canonical_release_root(release_root: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(release_root)))
 
 
-def reset_desktop_helper_manifest_cache() -> None:
-    global _snapshot_fingerprint, _snapshot_payload, _snapshot_records
+def desktop_helper_release_manifest_exists(release_root: Path) -> bool:
+    return (_canonical_release_root(release_root) / HELPER_RELEASE_MANIFEST_NAME).is_file()
+
+
+def reset_desktop_helper_manifest_cache(release_root: Path | None = None) -> None:
     with _snapshot_lock:
-        _snapshot_fingerprint = None
-        _snapshot_payload = None
-        _snapshot_records = None
+        if release_root is None:
+            _snapshot_fingerprints.clear()
+            _snapshot_payloads.clear()
+            _snapshot_records.clear()
+        else:
+            root_key = str(_canonical_release_root(release_root))
+            _snapshot_fingerprints.pop(root_key, None)
+            _snapshot_payloads.pop(root_key, None)
+            _snapshot_records.pop(root_key, None)
     with _artifact_cache_lock:
-        _verified_artifacts.clear()
-        _artifact_locks.clear()
+        if release_root is None:
+            _verified_artifacts.clear()
+            _artifact_locks.clear()
+        else:
+            artifact_prefix = f"{_canonical_release_root(release_root)}::"
+            for identity in tuple(_verified_artifacts):
+                if identity.startswith(artifact_prefix):
+                    _verified_artifacts.pop(identity, None)
 
 
 def list_desktop_helper_manifest_records(
+    release_root: Path,
     *,
     platform: str | None = None,
     channel: str | None = None,
     expected_bound_origin_sha256: str | None = None,
 ) -> list[dict[str, object]]:
+    normalized_root = _canonical_release_root(release_root)
     with _snapshot_lock:
-        records = [dict(record) for record in _load_normalized_manifest_records_locked()]
+        records = [
+            dict(record)
+            for record in _load_normalized_manifest_records_locked(normalized_root)
+        ]
     normalized_records = _select_and_verify_records(
         records,
+        release_root=normalized_root,
         platform=platform,
         channel=channel,
         expected_bound_origin_sha256=expected_bound_origin_sha256,
@@ -105,14 +108,20 @@ def list_desktop_helper_manifest_records(
 
 
 def get_desktop_helper_manifest_record_by_id(
+    release_root: Path,
     release_id: int,
     *,
     expected_bound_origin_sha256: str | None = None,
 ) -> dict[str, object] | None:
+    normalized_root = _canonical_release_root(release_root)
     with _snapshot_lock:
-        records = [dict(record) for record in _load_normalized_manifest_records_locked()]
+        records = [
+            dict(record)
+            for record in _load_normalized_manifest_records_locked(normalized_root)
+        ]
     for record in _select_and_verify_records(
         records,
+        release_root=normalized_root,
         release_id=release_id,
         expected_bound_origin_sha256=expected_bound_origin_sha256,
     ):
@@ -121,18 +130,21 @@ def get_desktop_helper_manifest_record_by_id(
     return None
 
 
-def _load_manifest_document_locked() -> dict[str, object]:
-    global _snapshot_fingerprint, _snapshot_payload, _snapshot_records
+def _load_manifest_document_locked(release_root: Path) -> dict[str, object]:
+    root_key = str(release_root)
     try:
-        manifest_bytes, fingerprint = _read_manifest_snapshot()
+        manifest_bytes, fingerprint = _read_manifest_snapshot(release_root)
     except DesktopHelperManifestError:
         raise
     except OSError as exc:
         raise DesktopHelperManifestError(
             "Desktop helper release manifest is unavailable"
         ) from exc
-    if _snapshot_payload is not None and fingerprint == _snapshot_fingerprint:
-        return _snapshot_payload
+    if (
+        root_key in _snapshot_payloads
+        and fingerprint == _snapshot_fingerprints.get(root_key)
+    ):
+        return _snapshot_payloads[root_key]
     try:
         manifest_text = manifest_bytes.decode("utf-8")
         payload = json.loads(manifest_text)
@@ -142,34 +154,42 @@ def _load_manifest_document_locked() -> dict[str, object]:
         ) from exc
     if not isinstance(payload, dict):
         raise DesktopHelperManifestError("Desktop helper release manifest root must be an object")
-    _snapshot_fingerprint = fingerprint
-    _snapshot_payload = payload
-    _snapshot_records = None
+    _snapshot_fingerprints[root_key] = fingerprint
+    _snapshot_payloads[root_key] = payload
+    _snapshot_records.pop(root_key, None)
     with _artifact_cache_lock:
-        _verified_artifacts.clear()
+        artifact_prefix = f"{release_root}::"
+        for identity in tuple(_verified_artifacts):
+            if identity.startswith(artifact_prefix):
+                _verified_artifacts.pop(identity, None)
     return payload
 
 
-def _load_normalized_manifest_records_locked() -> list[dict[str, object]]:
-    global _snapshot_records
-    payload = _load_manifest_document_locked()
-    if _snapshot_records is None:
-        _snapshot_records = _normalize_manifest_records(
+def _load_normalized_manifest_records_locked(
+    release_root: Path,
+) -> list[dict[str, object]]:
+    root_key = str(release_root)
+    payload = _load_manifest_document_locked(release_root)
+    if root_key not in _snapshot_records:
+        _snapshot_records[root_key] = _normalize_manifest_records(
             payload,
+            release_root=release_root,
             verify_artifacts=False,
         )
-    return _snapshot_records
+    return _snapshot_records[root_key]
 
 
-def _read_manifest_snapshot() -> tuple[bytes, tuple[object, ...]]:
-    relative_path = HELPER_RELEASE_MANIFEST_PATH.name
+def _read_manifest_snapshot(
+    release_root: Path,
+) -> tuple[bytes, tuple[object, ...]]:
+    relative_path = HELPER_RELEASE_MANIFEST_NAME
     identity = _artifact_identity(
-        HELPER_RELEASE_PACKAGES_DIR,
+        release_root,
         relative_path,
     )
     for attempt in range(1, _MAX_MANIFEST_READ_ATTEMPTS + 1):
         handle = _open_artifact_no_follow(
-            HELPER_RELEASE_PACKAGES_DIR,
+            release_root,
             relative_path,
         )
         try:
@@ -218,6 +238,7 @@ def _manifest_read_identity(stat_result: os.stat_result) -> tuple[int, ...]:
 def _select_and_verify_records(
     records: list[dict[str, object]],
     *,
+    release_root: Path,
     platform: str | None = None,
     channel: str | None = None,
     release_id: int | None = None,
@@ -241,12 +262,13 @@ def _select_and_verify_records(
     verified: list[dict[str, object]] = []
     for record in selected:
         file_path = _resolve_package_file(
+            release_root,
             str(record["relative_path"]),
             str(record["filename"]),
         )
         _verify_artifact(
             file_path,
-            root_dir=HELPER_RELEASE_PACKAGES_DIR,
+            root_dir=release_root,
             relative_path=str(record["relative_path"]),
             size_bytes=int(record["size_bytes"]),
             sha256=str(record["sha256"]),
@@ -258,7 +280,7 @@ def _select_and_verify_records(
         verified.append({
             **record,
             "file_path": file_path,
-            "artifact_root": HELPER_RELEASE_PACKAGES_DIR,
+            "artifact_root": release_root,
             "artifact_relative_path": str(record["relative_path"]),
             "package_binding": package_binding,
         })
@@ -268,6 +290,7 @@ def _select_and_verify_records(
 def _normalize_manifest_records(
     payload: dict[str, object],
     *,
+    release_root: Path,
     platform: str | None = None,
     release_id: int | None = None,
     expected_bound_origin_sha256: str | None = None,
@@ -276,6 +299,7 @@ def _normalize_manifest_records(
     if payload.get("schema_version") == RELEASE_MANIFEST_V2_SCHEMA:
         return _normalize_v2_manifest_records(
             payload,
+            release_root=release_root,
             platform=platform,
             release_id=release_id,
             expected_bound_origin_sha256=expected_bound_origin_sha256,
@@ -283,6 +307,7 @@ def _normalize_manifest_records(
         )
     return _normalize_legacy_manifest_records(
         payload,
+        release_root=release_root,
         platform=platform,
         release_id=release_id,
         verify_artifacts=verify_artifacts,
@@ -292,6 +317,7 @@ def _normalize_manifest_records(
 def _normalize_v2_manifest_records(
     payload: dict[str, object],
     *,
+    release_root: Path,
     platform: str | None,
     release_id: int | None,
     expected_bound_origin_sha256: str | None,
@@ -439,10 +465,10 @@ def _normalize_v2_manifest_records(
             continue
         file_path = None
         if verify_artifacts:
-            file_path = _resolve_package_file(relative_path, filename)
+            file_path = _resolve_package_file(release_root, relative_path, filename)
             _verify_artifact(
                 file_path,
-                root_dir=HELPER_RELEASE_PACKAGES_DIR,
+                root_dir=release_root,
                 relative_path=relative_path,
                 size_bytes=size_bytes,
                 sha256=sha256,
@@ -490,6 +516,7 @@ def _normalize_v2_manifest_records(
 def _normalize_legacy_manifest_records(
     payload: dict[str, object],
     *,
+    release_root: Path,
     platform: str | None,
     release_id: int | None,
     verify_artifacts: bool,
@@ -534,10 +561,10 @@ def _normalize_legacy_manifest_records(
             continue
         file_path = None
         if verify_artifacts:
-            file_path = _resolve_package_file(relative_path, filename)
+            file_path = _resolve_package_file(release_root, relative_path, filename)
             _verify_artifact(
                 file_path,
-                root_dir=HELPER_RELEASE_PACKAGES_DIR,
+                root_dir=release_root,
                 relative_path=relative_path,
                 size_bytes=size_bytes,
                 sha256=sha256,
@@ -773,7 +800,7 @@ def _open_verified_handle(
 def open_verified_artifact(
     file_path: Path,
     *,
-    root_dir: Path | None = None,
+    root_dir: Path,
     relative_path: str | None = None,
     size_bytes: int,
     sha256: str,
@@ -781,7 +808,7 @@ def open_verified_artifact(
     force_hash: bool = False,
 ):
     """Public entry point returning an open, verified handle for streaming."""
-    root = root_dir or HELPER_RELEASE_PACKAGES_DIR
+    root = _canonical_release_root(root_dir)
     if relative_path is None:
         try:
             relative_path = file_path.relative_to(root).as_posix()
@@ -820,9 +847,13 @@ def _verify_artifact(
     handle.close()
 
 
-def _resolve_package_file(relative_path: str, filename: str) -> Path:
+def _resolve_package_file(
+    release_root: Path,
+    relative_path: str,
+    filename: str,
+) -> Path:
     safe_relative_path = _require_safe_relative_path(relative_path, "relative_path")
-    file_path = HELPER_RELEASE_PACKAGES_DIR / safe_relative_path
+    file_path = release_root / safe_relative_path
     if file_path.name != filename:
         raise DesktopHelperManifestError(
             f"Desktop helper release manifest filename mismatch for {relative_path}"

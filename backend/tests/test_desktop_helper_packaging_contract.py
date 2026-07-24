@@ -201,7 +201,10 @@ def test_windows_installer_uses_a_powershell_51_exclusive_per_user_file_lock() -
     assert "[System.IO.FileAccess]::ReadWrite" in source
     assert "[System.IO.FileShare]::None" in source
     assert "[System.IO.FileOptions]::DeleteOnClose" in source
-    assert "Another Elvern VLC Opener install is already running for this user." in source
+    assert (
+        "Another Elvern VLC Opener install or uninstall is already running for this user."
+        in source
+    )
     assert "Get-Win32ErrorCode" in source
     assert "$lockErrorCode -eq 32 -or $lockErrorCode -eq 33" in source
     assert (
@@ -258,6 +261,9 @@ def test_macos_transaction_commits_before_finder_reveal_and_backup_flag_is_safe(
     assert '/bin/cp -a "${BACKUP_APP}" "${DEST_APP}"' in source
     assert "lsregister -kill" not in source.lower()
     assert "Preserved rollback workspace:" in source
+    assert "LOCK_HELD=0" in source
+    assert "LOCK_HELD=1" in source
+    assert 'if [[ ${LOCK_HELD} -eq 1 && -d "${LOCK_DIR}" ]]' in source
 
 
 def test_linux_installer_uses_one_xdg_data_root_and_preserves_failed_rollback_materials() -> None:
@@ -270,6 +276,9 @@ def test_linux_installer_uses_one_xdg_data_root_and_preserves_failed_rollback_ma
     assert 'DESKTOP_DIR="${HOME}/.local/share/applications"' not in source
     assert "Preserved MIME and desktop registration backups:" in source
     assert 'cp -a "${BACKUP_DIR}" "${INSTALL_DIR}"' in source
+    assert "LOCK_HELD=0" in source
+    assert "LOCK_HELD=1" in source
+    assert 'if [ "${LOCK_HELD}" -eq 1 ] && [ -d "${LOCK_DIR}" ]' in source
 
 
 def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> None:
@@ -279,8 +288,14 @@ def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> 
     assert '--activate' in source
     assert 'ALLOW_PARTIAL_ACTIVATE=0' in source
     assert '--allow-partial-activate' in source
-    assert 'PACKAGE_CONTRACT="${PROJECT_DIR}/../desktop_helper_package_contract.py"' in source
-    assert 'python3 "${PACKAGE_CONTRACT}"' in source
+    assert (
+        'PACKAGE_CONTRACT="${REPO_ROOT}/elvern_shared/desktop_helper_package_contract.py"'
+        in source
+    )
+    assert 'PYTHONPATH="${REPO_ROOT}" python3 "${PACKAGE_CONTRACT}"' in source
+    assert "--active-dir" in source
+    assert 'ACTIVE_DIR="${ACTIVE_DIR_CLI:-${ELVERN_HELPER_RELEASES_DIR:-}}"' in source
+    assert "--activate requires --active-dir or ELVERN_HELPER_RELEASES_DIR." in source
     assert "--replace-corrupt-active-manifest" in source
     assert "Active desktop helper manifest is invalid; activation was not attempted." in source
     assert "release-manifest.corrupt-${corrupt_digest:0:12}.json" in source
@@ -289,3 +304,126 @@ def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> 
     assert 'mkdir "${lock_dir}"' in source
     assert 'ACTIVATION_LOCK_DIR="${lock_dir}"' in source
     assert 'rmdir "${ACTIVATION_LOCK_DIR}" 2>/dev/null || true' in source
+
+
+def test_shared_package_prefix_has_one_runtime_authority() -> None:
+    shared = (
+        ROOT / "elvern_shared" / "desktop_helper_package_contract.py"
+    ).read_text(encoding="utf-8")
+    metadata = (
+        HELPER_ROOT / "packaging" / "helper-release.env"
+    ).read_text(encoding="utf-8")
+    backend = (
+        ROOT
+        / "backend"
+        / "app"
+        / "services"
+        / "desktop_helper_manifest_service.py"
+    ).read_text(encoding="utf-8")
+    validator = (
+        HELPER_ROOT / "scripts" / "validate-package.py"
+    ).read_text(encoding="utf-8")
+    publisher = (
+        HELPER_ROOT / "scripts" / "publish-bundles.sh"
+    ).read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert 'PACKAGE_NAME_PREFIX = "elvern-vlc-opener"' in shared
+    assert "PACKAGE_NAME_PREFIX" not in metadata
+    assert "from elvern_shared.desktop_helper_package_contract import" in backend
+    assert "from elvern_shared.desktop_helper_package_contract import" in validator
+    assert "from elvern_shared.desktop_helper_package_contract import PACKAGE_NAME_PREFIX" in publisher
+    assert "COPY elvern_shared ./elvern_shared" in dockerfile
+    assert not (ROOT / "clients" / "desktop_helper_package_contract.py").exists()
+
+
+def test_uninstallers_share_installer_locks_and_transaction_boundaries() -> None:
+    linux = (
+        HELPER_ROOT / "packaging" / "linux" / "Uninstall-ElvernVlcOpener.sh"
+    ).read_text(encoding="utf-8")
+    mac = (
+        HELPER_ROOT / "packaging" / "macos" / "Uninstall-ElvernVlcOpener.command"
+    ).read_text(encoding="utf-8")
+    windows = (
+        HELPER_ROOT / "packaging" / "windows" / "Uninstall-ElvernVlcOpener.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '.elvern-vlc-opener-install.lock"' in linux
+    assert '.elvern-vlc-opener-install.lock"' in mac
+    assert '"Elvern VLC Opener.install.lock"' in windows
+    assert "install-state.tsv" in linux
+    assert "install-state.plist" in mac
+    assert "install-state.json" in windows
+    assert 'package_target) package_target=${value}' in linux
+    assert '[ "${package_target}" = "linux-universal" ]' in linux
+    assert 'STATE_PACKAGE_TARGET="$("${PLISTBUDDY}"' in mac
+    assert '"macos-dual-arch"' in mac
+    assert '$state.package_target -cne "windows-x64"' in windows
+    assert "$protocolMutationStarted" in windows
+    assert "$uninstallMutationStarted" in windows
+    assert "xdg-mime uninstall" not in linux
+    assert "CURRENT_DEFAULT" in linux and "PREVIOUS_DEFAULT" in linux
+    assert 'rm -rf "${INSTALL_DIR}"' not in linux
+    assert '"${LSREGISTER}" -u "${DEST_APP}"' in mac
+    assert '|| true' not in mac
+    assert "lsregister -kill" not in mac.lower()
+    assert "[System.IO.FileShare]::None" in windows
+    assert "powershell.exe" in windows
+    assert "Import-RegistryKey" in windows
+    assert "[IO.Path]::GetRelativePath" not in windows
+    assert "pwsh" not in windows.lower()
+
+
+def test_docker_runtime_copies_shared_contract_and_mounts_helper_releases() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8")
+    smoke = (ROOT / "scripts" / "docker-smoke.sh").read_text(encoding="utf-8")
+
+    assert "COPY elvern_shared ./elvern_shared" in dockerfile
+    assert "COPY clients" not in dockerfile
+    assert "ELVERN_HELPER_RELEASES_DIR: /data/helper_releases" in compose
+    assert "./docker-data/data:/data" in compose
+    assert 'mkdir -p "${ELVERN_HELPER_RELEASES_DIR}"' in entrypoint
+    assert 'docker build --tag "${IMAGE}" "${PROJECT_ROOT}"' in smoke
+    assert "import backend.app.main" in smoke
+    assert "elvern_shared.desktop_helper_package_contract" in smoke
+    assert "/data/helper_releases" in smoke
+    assert "/health" in smoke
+    assert "/_elvern/frontend-health" in smoke
+    assert "The empty Helper release mount was unexpectedly modified." in smoke
+    assert "trap cleanup EXIT" in smoke
+    assert "--env-file" not in smoke
+
+
+def test_ci_keeps_docker_and_production_browser_jobs_independent() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    browser_config = (
+        ROOT / "frontend" / "playwright.cross-browser.config.js"
+    ).read_text(encoding="utf-8")
+    browser_fixture = (
+        ROOT / "frontend" / "tests-phase7" / "phase7-cross-browser.pw.js"
+    ).read_text(encoding="utf-8")
+
+    docker_job = workflow.split("  docker_smoke:", 1)[1].split(
+        "  production_browser_tests:", 1
+    )[0]
+    browser_job = workflow.split("  production_browser_tests:", 1)[1]
+    assert "needs:" not in docker_job
+    assert "needs:" not in browser_job
+    assert "./scripts/docker-smoke.sh" in docker_job
+    assert "npx playwright install --with-deps chromium firefox" in browser_job
+    assert "--project chromium-desktop-production" in browser_job
+    assert "--project firefox-desktop-production" in browser_job
+    assert "tmp/playwright-phase7-*" in browser_job
+    assert 'name: "chromium-desktop-production"' in browser_config
+    assert 'name: "firefox-desktop-production"' in browser_config
+    for public_probe in (
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "https://api64.ipify.org/",
+        "https://httpbin.org/status/204",
+    ):
+        assert public_probe in browser_fixture
+    assert "await page.route(probe" in browser_fixture
