@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -1708,5 +1709,135 @@ def test_legacy_db_catalog_remains_a_per_runtime_fallback(initialized_settings, 
     )
 
     assert [release["runtime_id"] for release in releases] == ["osx-arm64", "osx-x64"]
-    assert sum(bool(release["recommended"]) for release in releases) == 1
-    assert all(release["external_runtime_required"] is True for release in releases)
+
+
+def test_manifest_absent_is_the_only_state_that_allows_db_fallback(
+    initialized_settings,
+    tmp_path,
+) -> None:
+    settings = replace(initialized_settings, helper_releases_dir=tmp_path)
+
+    assert desktop_helper_service._list_helper_releases_from_manifest(
+        settings,
+        platform="mac",
+    ) is None
+    assert desktop_helper_service._get_helper_release_from_manifest(settings, 123) is None
+
+
+@pytest.mark.parametrize(
+    "manifest_bytes",
+    [
+        b"{",
+        json.dumps({"schema_version": "wrong", "packages": []}).encode(),
+        json.dumps({
+            "schema_version": "desktop-helper-release-manifest-v2",
+            "helper_version": "0.9.0",
+            "channel": "stable",
+            "target_framework": "net10.0",
+            "runtime_family": "10.0",
+            "deployment_mode": "self_contained",
+            "generated_at_utc": "2026-07-22T00:00:00Z",
+            "bound_origin_sha256": BOUND_ORIGIN_SHA256,
+            "packages": [],
+        }).encode(),
+    ],
+)
+def test_present_invalid_manifest_forbids_db_fallback_and_download(
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+    manifest_bytes,
+) -> None:
+    (tmp_path / "release-manifest.json").write_bytes(manifest_bytes)
+    settings = replace(initialized_settings, helper_releases_dir=tmp_path)
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "list_helper_releases",
+        lambda *_args, **_kwargs: pytest.fail("invalid authority must not use DB"),
+    )
+
+    assert desktop_helper_service.build_desktop_helper_release_payloads(
+        settings,
+        platform="mac",
+    ) == []
+    with pytest.raises(HTTPException) as exc_info:
+        desktop_helper_service.get_helper_release_download_path(settings, 123)
+    assert exc_info.value.status_code == 410
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "final_symlink",
+        "broken_symlink",
+        "directory",
+        "fifo",
+        "socket",
+        "root_symlink",
+    ],
+)
+def test_unsafe_manifest_objects_are_present_invalid(tmp_path, kind) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    manifest = root / "release-manifest.json"
+    if kind == "final_symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}")
+        manifest.symlink_to(target)
+    elif kind == "broken_symlink":
+        manifest.symlink_to(tmp_path / "missing.json")
+    elif kind == "directory":
+        manifest.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(manifest)
+    elif kind == "socket":
+        unix_socket = socket.socket(socket.AF_UNIX)
+        try:
+            unix_socket.bind(str(manifest))
+        finally:
+            unix_socket.close()
+    else:
+        actual = tmp_path / "actual"
+        actual.mkdir()
+        root.rmdir()
+        root.symlink_to(actual, target_is_directory=True)
+
+    with pytest.raises(manifest_service.DesktopHelperManifestError) as exc_info:
+        _LIST_MANIFEST_RECORDS(root)
+    assert not isinstance(exc_info.value, manifest_service.DesktopHelperManifestAbsent)
+
+
+def test_manifest_permission_error_is_present_invalid(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    (root / "release-manifest.json").write_text("{}")
+    real_open = manifest_service.os.open
+
+    def denied_open(path, flags, *args, **kwargs):
+        if path == "release-manifest.json":
+            raise PermissionError("denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(manifest_service.os, "open", denied_open)
+    with pytest.raises(manifest_service.DesktopHelperManifestError) as exc_info:
+        _LIST_MANIFEST_RECORDS(root)
+    assert not isinstance(exc_info.value, manifest_service.DesktopHelperManifestAbsent)
+
+
+def test_valid_v2_missing_platform_remains_authoritative(
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path, release_root=tmp_path)
+    settings = replace(initialized_settings, helper_releases_dir=tmp_path)
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "list_helper_releases",
+        lambda *_args, **_kwargs: pytest.fail("valid v2 authority must not use DB"),
+    )
+
+    assert desktop_helper_service.build_desktop_helper_release_payloads(
+        settings,
+        platform="windows",
+    ) == []

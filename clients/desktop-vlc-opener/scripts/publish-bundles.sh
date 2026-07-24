@@ -30,9 +30,9 @@ ACTIVE_CREATED_ARTIFACTS=()
 ACTIVATION_COMMITTED=0
 declare -A OLD_ACTIVE_REFERENCES=()
 declare -a TARGETS=("windows" "macos" "linux")
-declare -a WINDOWS_RIDS=("win-x64")
-declare -a MACOS_RIDS=("osx-arm64" "osx-x64")
-declare -a LINUX_RIDS=("linux-x64" "linux-arm64" "linux-musl-x64" "linux-musl-arm64")
+declare -a WINDOWS_RIDS=()
+declare -a MACOS_RIDS=()
+declare -a LINUX_RIDS=()
 
 usage() {
   cat <<'EOF'
@@ -152,12 +152,32 @@ source "${METADATA_FILE}"
 for required_key in HELPER_CHANNEL MACOS_MINIMUM_VERSION; do
   [[ -n "${!required_key:-}" ]] || { echo "Missing ${required_key} in ${METADATA_FILE}." >&2; exit 1; }
 done
+PACKAGE_CONTRACT_JSON="$(
+  PYTHONPATH="${REPO_ROOT}" python3 -m \
+    elvern_shared.desktop_helper_package_contract --json
+)"
 PACKAGE_NAME_PREFIX="$(
-  PYTHONPATH="${REPO_ROOT}" python3 -c \
-    'from elvern_shared.desktop_helper_package_contract import PACKAGE_NAME_PREFIX; print(PACKAGE_NAME_PREFIX)'
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["prefix"])' \
+    <<<"${PACKAGE_CONTRACT_JSON}"
 )"
 [[ -n "${PACKAGE_NAME_PREFIX}" ]] || {
   echo "Shared desktop helper package prefix is unavailable." >&2
+  exit 1
+}
+mapfile -t WINDOWS_RIDS < <(
+  python3 -c 'import json,sys; print(*json.load(sys.stdin)["packages"]["windows-x64"]["rids"], sep="\n")' \
+    <<<"${PACKAGE_CONTRACT_JSON}"
+)
+mapfile -t MACOS_RIDS < <(
+  python3 -c 'import json,sys; print(*json.load(sys.stdin)["packages"]["macos-dual-arch"]["rids"], sep="\n")' \
+    <<<"${PACKAGE_CONTRACT_JSON}"
+)
+mapfile -t LINUX_RIDS < <(
+  python3 -c 'import json,sys; print(*json.load(sys.stdin)["packages"]["linux-universal"]["rids"], sep="\n")' \
+    <<<"${PACKAGE_CONTRACT_JSON}"
+)
+[[ ${#WINDOWS_RIDS[@]} -gt 0 && ${#MACOS_RIDS[@]} -gt 0 && ${#LINUX_RIDS[@]} -gt 0 ]] || {
+  echo "Shared desktop helper runtime contracts are unavailable." >&2
   exit 1
 }
 

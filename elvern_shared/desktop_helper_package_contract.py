@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 
 
@@ -37,10 +38,28 @@ def expected_package_filename(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("helper_version")
-    parser.add_argument("package_target")
-    parser.add_argument("sha256")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("helper_version", nargs="?")
+    parser.add_argument("package_target", nargs="?")
+    parser.add_argument("sha256", nargs="?")
     args = parser.parse_args()
+    if args.json:
+        if any((args.helper_version, args.package_target, args.sha256)):
+            parser.error("--json does not accept filename arguments")
+        print(json.dumps({
+            "prefix": PACKAGE_NAME_PREFIX,
+            "packages": {
+                package_target: {
+                    "platform": platform,
+                    "rids": list(runtime_ids),
+                }
+                for package_target, (platform, runtime_ids)
+                in PACKAGE_RUNTIME_CONTRACTS.items()
+            },
+        }, separators=(",", ":"), sort_keys=True))
+        return 0
+    if not all((args.helper_version, args.package_target, args.sha256)):
+        parser.error("helper_version, package_target, and sha256 are required")
     try:
         filename = expected_package_filename(
             PACKAGE_NAME_PREFIX,

@@ -101,7 +101,8 @@ def test_publish_script_keeps_standard_packages_self_contained() -> None:
     assert "PublishTrimmed=false" in source
     assert "ELVERN_DOTNET_NUGET_SOURCE" in source
     assert '--source "${NUGET_SOURCE}"' in source
-    assert "linux-musl-arm64" in source
+    assert "linux-musl-arm64" not in source
+    assert "desktop_helper_package_contract --json" in source
     assert "desktop-helper-release-manifest-v2" in source
 
 
@@ -332,7 +333,10 @@ def test_shared_package_prefix_has_one_runtime_authority() -> None:
     assert "PACKAGE_NAME_PREFIX" not in metadata
     assert "from elvern_shared.desktop_helper_package_contract import" in backend
     assert "from elvern_shared.desktop_helper_package_contract import" in validator
-    assert "from elvern_shared.desktop_helper_package_contract import PACKAGE_NAME_PREFIX" in publisher
+    assert "desktop_helper_package_contract --json" in publisher
+    assert "PACKAGE_RUNTIME_CONTRACTS" in validator
+    assert "linux-musl-arm64" not in validator
+    assert "linux-musl-arm64" not in publisher
     assert "COPY elvern_shared ./elvern_shared" in dockerfile
     assert not (ROOT / "clients" / "desktop_helper_package_contract.py").exists()
 
@@ -346,6 +350,9 @@ def test_uninstallers_share_installer_locks_and_transaction_boundaries() -> None
     ).read_text(encoding="utf-8")
     windows = (
         HELPER_ROOT / "packaging" / "windows" / "Uninstall-ElvernVlcOpener.ps1"
+    ).read_text(encoding="utf-8")
+    mac_installer = (
+        HELPER_ROOT / "packaging" / "macos" / "Install-ElvernVlcOpener.command"
     ).read_text(encoding="utf-8")
 
     assert '.elvern-vlc-opener-install.lock"' in linux
@@ -369,9 +376,25 @@ def test_uninstallers_share_installer_locks_and_transaction_boundaries() -> None
     assert "lsregister -kill" not in mac.lower()
     assert "[System.IO.FileShare]::None" in windows
     assert "powershell.exe" in windows
+    assert "SourceInstallRoot" not in windows
+    assert "Protected uninstall bootstrap authorization is required." in windows
+    assert "elvern-uninstall-bootstrap-v1" in windows
+    assert "installed_uninstaller_sha256" in windows
+    assert "$uninstallCommitted = $true" in windows
+    assert windows.index("$uninstallCommitted = $true") < windows.index(
+        'Invoke-InjectedFailure "backup_delete"'
+    )
     assert "Import-RegistryKey" in windows
     assert "[IO.Path]::GetRelativePath" not in windows
     assert "pwsh" not in windows.lower()
+    assert 'UNINSTALL_SOURCE="${PRIVATE_DIR}/uninstall/Uninstall-ElvernVlcOpener.command"' in mac_installer
+    assert 'cp "${UNINSTALL_SOURCE}" "${RESOURCES_DIR}/Uninstall-ElvernVlcOpener.command"' in mac_installer
+    assert mac_installer.index('cp "${UNINSTALL_SOURCE}"') < mac_installer.index(
+        'codesign --force --sign - "${STAGED_APP}"'
+    )
+    assert mac.index("UNINSTALL_COMMITTED=1") < mac.index(
+        'rm -rf "${BACKUP_APP}"'
+    )
 
 
 def test_docker_runtime_copies_shared_contract_and_mounts_helper_releases() -> None:
@@ -379,6 +402,7 @@ def test_docker_runtime_copies_shared_contract_and_mounts_helper_releases() -> N
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     entrypoint = (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8")
     smoke = (ROOT / "scripts" / "docker-smoke.sh").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 
     assert "COPY elvern_shared ./elvern_shared" in dockerfile
     assert "COPY clients" not in dockerfile
@@ -394,6 +418,14 @@ def test_docker_runtime_copies_shared_contract_and_mounts_helper_releases() -> N
     assert "The empty Helper release mount was unexpectedly modified." in smoke
     assert "trap cleanup EXIT" in smoke
     assert "--env-file" not in smoke
+    for ignored in (
+        "tmp/",
+        "frontend/test-results/",
+        "frontend/playwright-report/",
+        "frontend/blob-report/",
+        "frontend/tmp/",
+    ):
+        assert ignored in dockerignore
 
 
 def test_ci_keeps_docker_and_production_browser_jobs_independent() -> None:
@@ -417,9 +449,12 @@ def test_ci_keeps_docker_and_production_browser_jobs_independent() -> None:
     assert "npx playwright install --with-deps chromium firefox" in browser_job
     assert "--project chromium-desktop-production" in browser_job
     assert "--project firefox-desktop-production" in browser_job
+    assert "VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=on" in browser_job
+    assert "VITE_ELVERN_LIBRARY_REVISION_MODE=on" in browser_job
     assert "tmp/playwright-phase7-*" in browser_job
     assert 'name: "chromium-desktop-production"' in browser_config
     assert 'name: "firefox-desktop-production"' in browser_config
+    assert 'serviceWorkers: "block"' in browser_config
     for public_probe in (
         "https://www.cloudflare.com/cdn-cgi/trace",
         "https://api64.ipify.org/",
@@ -427,3 +462,7 @@ def test_ci_keeps_docker_and_production_browser_jobs_independent() -> None:
     ):
         assert public_probe in browser_fixture
     assert "await page.route(probe" in browser_fixture
+    assert "installExternalNetworkGuard" in browser_fixture
+    assert "registerInterceptedExternalFixture" in browser_fixture
+    assert 'route.abort("blockedbyclient")' in browser_fixture
+    assert "externalRequests" in browser_fixture

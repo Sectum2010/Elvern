@@ -50,6 +50,12 @@ artifact. An operator may explicitly pair `--replace-corrupt-active-manifest` wi
 unreadable authority as an immutable SHA-named backup and does not infer or delete
 any artifacts from it.
 
+To inspect or migrate an older source-tree authority without activating or deleting
+it, use `scripts/desktop-helper-runtime-releases.py` from the repository root.
+`inspect` succeeds only for a valid runtime authority. `migrate` is a dry-run unless
+`--apply` is supplied, requires absolute non-symlink paths and the expected origin
+hash, validates all three packages, and writes the manifest last.
+
 Publishing requires the .NET 10 SDK and every requested RID runtime pack. Any
 missing RID fails the entire selected publish; the script never substitutes a
 framework-dependent DLL or omits an architecture.
@@ -107,6 +113,12 @@ require a one-time confirmation. Do not disable Gatekeeper. Elvern's Terminal
 fallback verifies the exact ZIP, tree manifest, and every listed file before
 removing quarantine from those exact verified Elvern files.
 
+The installed transactional uninstaller is:
+
+```bash
+"$HOME/Applications/Elvern VLC Opener.app/Contents/Resources/Uninstall-ElvernVlcOpener.command"
+```
+
 ### Linux remote desktop
 
 Unzip the Linux package and run:
@@ -126,10 +138,11 @@ Upgrade is transactional. The old install is not considered backed up until its
 move succeeds, and a failed registration or final validation restores the old
 install, desktop entry, both user `mimeapps.list` locations byte-for-byte, and
 their original modes. The installer never uses `xdg-mime uninstall` as rollback.
-Uninstall uses the same per-user lock and transaction model. It restores a recorded
-safe previous handler only when Elvern is still the current default and the
-previous desktop entry still exists. If the user selected another handler after
-installation, uninstall leaves that newer choice untouched.
+Uninstall uses the same per-user lock and transaction model. Repeated upgrades keep
+the original previous handler unless the user explicitly selects a new third-party
+handler. Restoration searches `XDG_DATA_HOME` and ordered `XDG_DATA_DIRS`. Cleanup
+removes only the exact Elvern token from user `mimeapps.list` values, and it can
+repair stale mappings even if the installed files were manually removed.
 
 Windows and macOS uninstallers also use the installers' per-user locks and stage
 registration/install backups before removal. A failed rollback preserves recovery

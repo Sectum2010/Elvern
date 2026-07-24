@@ -1,16 +1,16 @@
 param(
     [switch]$Transaction,
-    [string]$SourceInstallRoot
+    [string]$BootstrapState,
+    [string]$BootstrapNonce
 )
 
 $ErrorActionPreference = "Stop"
-$installRoot = if ($SourceInstallRoot) {
-    [IO.Path]::GetFullPath($SourceInstallRoot)
-} else {
-    Join-Path $env:LocalAppData "Programs\Elvern VLC Opener"
-}
+$installRoot = [IO.Path]::GetFullPath(
+    (Join-Path $env:LocalAppData "Programs\Elvern VLC Opener")
+)
 $installParent = Split-Path -Parent $installRoot
 $installedExe = Join-Path $installRoot "Elvern.VlcOpener.exe"
+$installedUninstaller = Join-Path $installRoot "Uninstall-ElvernVlcOpener.ps1"
 $statePath = Join-Path $installRoot "install-state.json"
 $protocolKey = "Registry::HKEY_CURRENT_USER\Software\Classes\elvern-vlc"
 $commandKey = "$protocolKey\shell\open\command"
@@ -70,30 +70,105 @@ function Import-RegistryKey([string]$InputPath) {
 if (-not $Transaction) {
     $currentScript = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
     $rootPrefix = $installRoot.TrimEnd("\") + "\"
-    if ($currentScript.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-        $bootstrapRoot = Join-Path $env:TEMP "elvern-vlc-opener-uninstall-bootstrap-$transactionNonce"
-        New-Item -ItemType Directory -Path $bootstrapRoot -Force | Out-Null
-        $bootstrapScript = Join-Path $bootstrapRoot "Uninstall-ElvernVlcOpener.ps1"
-        Copy-Item -LiteralPath $currentScript -Destination $bootstrapScript -Force
-        try {
-            $process = Start-Process -FilePath "powershell.exe" -ArgumentList @(
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-File", "`"$bootstrapScript`"",
-                "-Transaction",
-                "-SourceInstallRoot", "`"$installRoot`""
-            ) -Wait -PassThru
-            exit $process.ExitCode
-        }
-        finally {
-            try { Remove-Item -LiteralPath $bootstrapRoot -Recurse -Force }
-            catch { Write-Warning "The temporary uninstaller copy could not be removed: $bootstrapRoot" }
-        }
+    if (-not $currentScript.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Run the installed Elvern uninstaller from its canonical per-user installation."
     }
-    $Transaction = $true
+    $bootstrapRoot = Join-Path $env:TEMP "elvern-vlc-opener-uninstall-bootstrap-$transactionNonce"
+    New-Item -ItemType Directory -Path $bootstrapRoot | Out-Null
+    $bootstrapScript = Join-Path $bootstrapRoot "Uninstall-ElvernVlcOpener.ps1"
+    $bootstrapStatePath = Join-Path $bootstrapRoot "bootstrap-state.json"
+    Copy-Item -LiteralPath $currentScript -Destination $bootstrapScript
+    $uninstallerHash = (Get-FileHash -LiteralPath $currentScript -Algorithm SHA256).Hash.ToLowerInvariant()
+    @{
+        schema_version = "elvern-uninstall-bootstrap-v1"
+        nonce = $transactionNonce
+        canonical_install_root = $installRoot
+        installed_uninstaller_sha256 = $uninstallerHash
+        expires_at_utc = [DateTime]::UtcNow.AddMinutes(2).ToString("o")
+    } | ConvertTo-Json | Set-Content -LiteralPath $bootstrapStatePath -Encoding UTF8
+    try {
+        $process = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", "`"$bootstrapScript`"",
+            "-Transaction",
+            "-BootstrapState", "`"$bootstrapStatePath`"",
+            "-BootstrapNonce", "`"$transactionNonce`""
+        ) -Wait -PassThru
+        exit $process.ExitCode
+    }
+    finally {
+        try { Remove-Item -LiteralPath $bootstrapRoot -Recurse -Force }
+        catch { Write-Warning "The temporary uninstaller copy could not be removed: $bootstrapRoot" }
+    }
 }
 
 try {
+    if (-not $BootstrapState -or -not $BootstrapNonce) {
+        throw "Protected uninstall bootstrap authorization is required."
+    }
+    $bootstrapStateFull = [IO.Path]::GetFullPath($BootstrapState)
+    $bootstrapDirectory = Split-Path -Parent $bootstrapStateFull
+    $currentTransactionScript = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
+    if (
+        (Split-Path -Parent $currentTransactionScript) -cne $bootstrapDirectory -or
+        -not $bootstrapDirectory.StartsWith(
+            ([IO.Path]::GetFullPath($env:TEMP).TrimEnd("\") + "\elvern-vlc-opener-uninstall-bootstrap-"),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        throw "The uninstall bootstrap location is invalid."
+    }
+    foreach ($bootstrapPath in @($bootstrapDirectory, $bootstrapStateFull, $currentTransactionScript)) {
+        $bootstrapItem = Get-Item -LiteralPath $bootstrapPath -Force
+        if (($bootstrapItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The uninstall bootstrap contains an unsafe reparse point."
+        }
+    }
+    try {
+        $bootstrap = Get-Content -LiteralPath $bootstrapStateFull -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "The uninstall bootstrap state is invalid."
+    }
+    $expires = [DateTime]::Parse(
+        [string]$bootstrap.expires_at_utc,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+    if (
+        $bootstrap.schema_version -cne "elvern-uninstall-bootstrap-v1" -or
+        [string]$bootstrap.nonce -cne $BootstrapNonce -or
+        [string]$bootstrap.canonical_install_root -cne $installRoot -or
+        $expires -lt [DateTime]::UtcNow -or
+        $expires -gt [DateTime]::UtcNow.AddMinutes(2)
+    ) {
+        throw "The uninstall bootstrap authorization is invalid or expired."
+    }
+    foreach ($ownedPath in @($installedExe, $installedUninstaller)) {
+        if (-not (Test-Path -LiteralPath $ownedPath -PathType Leaf)) {
+            throw "The installed Elvern ownership files are missing."
+        }
+        $ownedItem = Get-Item -LiteralPath $ownedPath -Force
+        if (($ownedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "An installed Elvern ownership file is unsafe."
+        }
+    }
+    $installedUninstallerHash = (
+        Get-FileHash -LiteralPath $installedUninstaller -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if (
+        $installedUninstallerHash -cne [string]$bootstrap.installed_uninstaller_sha256 -or
+        (Get-FileHash -LiteralPath $currentTransactionScript -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$bootstrap.installed_uninstaller_sha256
+    ) {
+        throw "The installed uninstaller does not match its bootstrap authorization."
+    }
+    Remove-Item -LiteralPath $bootstrapStateFull -Force
+    if (Test-Path -LiteralPath $bootstrapStateFull) {
+        throw "The uninstall bootstrap authorization could not be consumed."
+    }
+
     New-Item -ItemType Directory -Path $installParent -Force | Out-Null
     try {
         $installLockHandle = New-Object System.IO.FileStream(
@@ -134,6 +209,7 @@ try {
     ) {
         throw "The installed Elvern path is not a safe directory."
     }
+    $hasValidInstallState = $false
     if (Test-Path -LiteralPath $statePath -PathType Leaf) {
         $stateItem = Get-Item -LiteralPath $statePath -Force
         if (($stateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -156,6 +232,7 @@ try {
         ) {
             throw "The installed ownership state does not belong to Elvern."
         }
+        $hasValidInstallState = $true
     }
 
     $expectedCommand = "`"$installedExe`" `"%1`""
@@ -174,6 +251,9 @@ try {
             $uninstallLocation -ceq $installRoot -and
             $uninstallDisplayName -ceq "Elvern VLC Opener"
         )
+    }
+    if (-not $hasValidInstallState -and -not ($protocolOwned -or $uninstallOwned)) {
+        throw "Legacy Elvern ownership could not be proven. Remove the canonical per-user installation manually."
     }
 
     New-Item -ItemType Directory -Path $recoveryRoot -Force | Out-Null
@@ -207,9 +287,15 @@ try {
         throw "The active Elvern installation path is still present."
     }
     Invoke-InjectedFailure "final_verification"
-    Remove-Item -LiteralPath $backupRoot -Recurse -Force
-    $installMoved = $false
     $uninstallCommitted = $true
+    try {
+        Invoke-InjectedFailure "backup_delete"
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        $installMoved = $false
+    }
+    catch {
+        Write-Warning "The committed uninstall backup could not be removed: $backupRoot"
+    }
     Write-Host "Removed $installRoot"
 }
 catch {

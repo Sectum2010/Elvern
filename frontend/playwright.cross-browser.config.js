@@ -21,7 +21,7 @@ export default defineConfig({
   },
   use: {
     baseURL: `${origin}/${prefix}/`,
-    serviceWorkers: "allow",
+    serviceWorkers: "block",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },

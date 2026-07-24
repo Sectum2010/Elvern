@@ -70,10 +70,12 @@ GET, HEAD, `Content-Length`, one RFC byte range, and safe `Content-Disposition`
 filename handling are preserved. Audit records distinguish started, completed,
 and interrupted downloads without recording query tokens.
 
-The backend prefers package manifest v2. A platform gets at most one v2 primary
-package. Legacy manifest or database releases remain a rollback fallback only when
-the package-level primary is unavailable; they are not expanded from a v2 package.
-No database migration is required.
+The backend treats the runtime manifest as a three-state authority. Only a genuinely
+absent final `release-manifest.json` permits the legacy database fallback. A valid
+v2 manifest remains authoritative even when it has no package for the requested
+platform. A present but malformed, unsafe, unreadable, empty, or contract-invalid
+manifest fails closed and never falls through to the database. Legacy manifest
+format is accepted only when its own legacy fields explicitly identify it.
 
 ## Inner installer manifest
 
@@ -139,8 +141,11 @@ Runtime.
 Windows verifies the source tree, parses the exact TSV installer contract without
 PowerShell 7-only APIs, copies the Helper and required uninstaller into staging,
 and applies `Unblock-File` only to those verified staged files. It remains Windows
-PowerShell 5.1 compatible. Registry state is exported and checked before
-replacement; protocol and uninstall keys are restored and verified on failure.
+PowerShell 5.1 compatible. Its installed uninstaller authorizes a unique temporary
+transaction with a one-time nonce, a two-minute expiry, the canonical
+`%LocalAppData%` product root, and the installed uninstaller SHA-256. Direct
+transaction mode and arbitrary install roots are rejected before locking or
+mutation.
 
 Linux snapshots both user-level `mimeapps.list` locations, their existence and
 modes, the prior desktop entry, and the prior default handler before modification.
@@ -152,18 +157,46 @@ validate install ownership, stage same-filesystem backups, remove only exact
 Elvern-owned registration, verify the result, and roll back on failure. A rollback
 failure preserves recovery materials and returns a non-zero result.
 
-Linux records only a safe previous handler basename. During uninstall, it restores
-that handler only when Elvern is still the current default and the previous desktop
-entry still exists. Without a valid previous handler it edits only the
-`x-scheme-handler/elvern-vlc` entry in each user-level `[Default Applications]`
-section. If the user selected a third-party handler after installing Elvern, that
-new choice is not overwritten. Legacy installs without state remove only an active
-Elvern mapping and never guess a previous handler.
+Linux records only a safe previous handler basename and carries it across repeated
+Elvern upgrades. During uninstall, it restores that handler only when Elvern is
+still the current default and a regular desktop entry exists in `XDG_DATA_HOME` or
+the ordered `XDG_DATA_DIRS`. MIME cleanup removes only the exact
+`elvern-vlc-opener.desktop` token from user `[Default Applications]` values,
+preserving every other token and section. A failed `xdg-mime query` stops before
+install or registration mutation. Stale user MIME tokens can still be removed when
+the installed files were manually deleted.
 
 macOS treats an exact Launch Services unregister failure as transactional failure
-and restores/re-registers the App. Windows runs its uninstaller from a temporary
-bootstrap when necessary, uses the same exclusive file lock, and removes protocol
-or uninstall registry keys only when their values still identify the owned install.
+and restores/re-registers the App. The signed App contains its persistent
+transactional uninstaller at
+`Contents/Resources/Uninstall-ElvernVlcOpener.command`. Windows and macOS mark the
+authoritative uninstall committed before best-effort backup deletion; cleanup
+failure reports the preserved backup without trying to restore a partial backup.
+
+## Runtime authority inspection and migration
+
+Source-tree staging is not the Backend runtime authority. Inspect the configured
+runtime directory without reading the database:
+
+```bash
+python scripts/desktop-helper-runtime-releases.py inspect \
+  --runtime-dir "/absolute/runtime/helper_releases"
+```
+
+Exit `0` means valid, `2` means absent, and `3` means present but invalid. Review a
+migration with:
+
+```bash
+python scripts/desktop-helper-runtime-releases.py migrate \
+  --source-dir "/absolute/old/packages" \
+  --runtime-dir "/absolute/runtime/helper_releases" \
+  --expected-origin-sha256 "<canonical-origin-sha256>"
+```
+
+Add `--apply` only after review. Apply validates all three packages and their inner
+trees, copies read-only content-addressed ZIPs with fsync, and renames the manifest
+last. It never deletes the source, edits env, invokes publisher activation, or
+reads the live database. Docker uses `/data/helper_releases`.
 
 ## macOS trust boundary
 

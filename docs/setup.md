@@ -249,6 +249,21 @@ This does not publish or replace the active release manifest. Use a complete
 "$ELVERN_ROOT/backend/data/helper_releases"` release, or the equivalent configured
 runtime directory, before ordinary users download it.
 
+If an older checkout already has packages under
+`clients/desktop-vlc-opener/artifacts/packages`, inspect the runtime authority and
+dry-run migration before applying anything:
+
+```bash
+python scripts/desktop-helper-runtime-releases.py inspect \
+  --runtime-dir "$ELVERN_ROOT/backend/data/helper_releases"
+python scripts/desktop-helper-runtime-releases.py migrate \
+  --source-dir "$ELVERN_ROOT/clients/desktop-vlc-opener/artifacts/packages" \
+  --runtime-dir "$ELVERN_ROOT/backend/data/helper_releases" \
+  --expected-origin-sha256 "<canonical-origin-sha256>"
+```
+
+The second command is read-only until `--apply` is explicitly added.
+
 2. Download the active macOS package from Elvern's Install page.
 3. Unzip it.
 4. Double-click `Install-ElvernVlcOpener.command`. It verifies the complete package

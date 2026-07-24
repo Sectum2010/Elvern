@@ -50,6 +50,8 @@ const child = spawn(
     cwd: frontendDirectory,
     env: {
       ...process.env,
+      VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE: "on",
+      VITE_ELVERN_LIBRARY_REVISION_MODE: "on",
       ELVERN_PHASE7_BROWSER_PORT: String(port),
       ELVERN_PHASE7_BROWSER_PREFIX: prefix,
       ELVERN_PHASE7_BROWSER_OUTPUT_DIR: outputDirectory,

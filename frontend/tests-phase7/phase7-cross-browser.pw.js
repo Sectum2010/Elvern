@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 
 
@@ -7,6 +8,74 @@ const PUBLIC_PROBES = [
   "https://api64.ipify.org/",
   "https://httpbin.org/status/204",
 ];
+const LOCAL_FAULT_ORIGINS = new Set();
+const NETWORK_GUARD_STATE = new WeakMap();
+
+
+function classifyTestNetworkRequest(rawUrl, allowedOrigins) {
+  const url = new URL(rawUrl);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    return { allowed: true };
+  }
+  if (allowedOrigins.has(url.origin)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    diagnostic: {
+      origin: url.origin,
+      pathname_hash: createHash("sha256").update(url.pathname).digest("hex").slice(0, 12),
+    },
+  };
+}
+
+
+async function installExternalNetworkGuard(context, baseURL) {
+  const state = {
+    externalRequests: [],
+    interceptedExternalUrls: new Set(),
+  };
+  const appOrigin = new URL(baseURL).origin;
+  NETWORK_GUARD_STATE.set(context, state);
+  await context.route("**/*", async (route) => {
+    const allowedOrigins = new Set([appOrigin, ...LOCAL_FAULT_ORIGINS]);
+    const result = classifyTestNetworkRequest(route.request().url(), allowedOrigins);
+    if (result.allowed) {
+      await route.fallback();
+      return;
+    }
+    state.externalRequests.push(result.diagnostic);
+    await route.abort("blockedbyclient");
+  });
+  context.on("request", (request) => {
+    if (
+      PUBLIC_PROBES.includes(request.url())
+      || state.interceptedExternalUrls.has(request.url())
+    ) {
+      return;
+    }
+    const result = classifyTestNetworkRequest(
+      request.url(),
+      new Set([appOrigin, ...LOCAL_FAULT_ORIGINS]),
+    );
+    if (!result.allowed && !state.externalRequests.some(
+      (entry) => entry.origin === result.diagnostic.origin
+        && entry.pathname_hash === result.diagnostic.pathname_hash
+    )) {
+      state.externalRequests.push(result.diagnostic);
+    }
+  });
+}
+
+
+async function registerInterceptedExternalFixture(context, url, response) {
+  const state = NETWORK_GUARD_STATE.get(context);
+  if (!state) {
+    throw new Error("External network guard must be installed before fixtures.");
+  }
+  state.interceptedExternalUrls.add(url);
+  await context.route(url, (route) => route.fulfill(response));
+}
 
 
 function item(id, title, sourceKind = "local") {
@@ -462,19 +531,43 @@ async function startBodyFaultServer() {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
+  const origin = `http://127.0.0.1:${address.port}`;
+  LOCAL_FAULT_ORIGINS.add(origin);
   return {
     get requestCount() {
       return requestCount;
     },
-    url: `http://127.0.0.1:${address.port}/body-fault`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    url: `${origin}/body-fault`,
+    close: () => new Promise((resolve) => server.close(() => {
+      LOCAL_FAULT_ORIGINS.delete(origin);
+      resolve();
+    })),
   };
 }
 
 
-test.beforeEach(async ({ context, page }) => {
+test.beforeEach(async ({ context, page, baseURL }) => {
   await context.clearCookies();
+  await installExternalNetworkGuard(context, baseURL);
   await installFixture(page, []);
+});
+
+test.afterEach(async ({ context }) => {
+  expect(NETWORK_GUARD_STATE.get(context)?.externalRequests || []).toEqual([]);
+});
+
+
+test("external network guard rejects unknown public HTTP without issuing it", async ({ baseURL }) => {
+  const result = classifyTestNetworkRequest(
+    "https://unknown.invalid/private?token=must-not-be-recorded",
+    new Set([new URL(baseURL).origin]),
+  );
+  expect(result.allowed).toBe(false);
+  expect(result.diagnostic).toEqual({
+    origin: "https://unknown.invalid",
+    pathname_hash: expect.stringMatching(/^[0-9a-f]{12}$/),
+  });
+  expect(JSON.stringify(result)).not.toContain("token");
 });
 
 
@@ -905,11 +998,15 @@ test("third-party VLC stays in a separate tab while the Elvern route remains hea
   const state = { desktopStatusDelayMs: 400 };
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, requests, state);
-  await context.route("https://www.videolan.org/**", (route) => route.fulfill({
-    status: 200,
-    contentType: "text/html",
-    body: "<!doctype html><title>Mock VLC download</title><p>Mock VLC download</p>",
-  }));
+  await registerInterceptedExternalFixture(
+    context,
+    "https://www.videolan.org/vlc/",
+    {
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Mock VLC download</title><p>Mock VLC download</p>",
+    },
+  );
 
   await page.goto("install");
   const originalUrl = `${baseURL}install`;

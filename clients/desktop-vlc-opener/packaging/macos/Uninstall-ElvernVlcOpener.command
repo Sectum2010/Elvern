@@ -126,10 +126,14 @@ APP_MOVED=1
 [[ ! -e "${DEST_APP}" ]] \
   || fail "the active Elvern Helper App path is still present."
 inject_failure "final_verification"
-inject_failure "backup_delete"
-rm -rf "${BACKUP_APP}" \
-  || fail "the staged Elvern Helper App could not be removed."
-APP_MOVED=0
-BACKUP_APP=""
 UNINSTALL_COMMITTED=1
+if [[ "${ELVERN_UNINSTALL_TEST_MODE:-0}" == "1" \
+  && "${ELVERN_UNINSTALL_TEST_FAIL_AT:-}" == "backup_delete" ]]; then
+  echo "Warning: the committed App backup could not be removed: ${BACKUP_APP}" >&2
+elif ! rm -rf "${BACKUP_APP}"; then
+  echo "Warning: the committed App backup could not be removed: ${BACKUP_APP}" >&2
+else
+  APP_MOVED=0
+  BACKUP_APP=""
+fi
 echo "Removed ${DEST_APP}"

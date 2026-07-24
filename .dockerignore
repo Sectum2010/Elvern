@@ -17,6 +17,11 @@ backend/tests/
 backend/data/
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/tmp/
+tmp/
 clients/desktop-vlc-opener/artifacts/
 clients/desktop-vlc-opener/**/bin/
 clients/desktop-vlc-opener/**/obj/

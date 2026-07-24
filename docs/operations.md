@@ -245,6 +245,16 @@ If the double-click launcher does not start Elvern:
 4. Confirm `ffmpeg`, `ffprobe`, `node`, and `.venv/bin/uvicorn` exist.
 5. If you are relying on boot-time services, run `./scripts/check-systemd.sh`.
 
+## Desktop Helper release authority
+
+The Backend default runtime authority is
+`backend/data/helper_releases` (`/data/helper_releases` in Docker). If lifecycle
+scripts warn that only an old source-tree authority exists, run
+`python scripts/desktop-helper-runtime-releases.py inspect --runtime-dir <absolute-path>`.
+Use `migrate` without `--apply` for review; add `--apply` only after validating the
+canonical origin hash. Migration does not delete the source or read the live
+database.
+
 If direct play fails for a file that looked safe, the frontend will try to force an HLS fallback automatically. If playback still fails:
 
 1. Confirm `ffmpeg` and `ffprobe` are installed and match the paths in `deploy/env/elvern.env`.

@@ -23,6 +23,7 @@ for candidate_root in Path(__file__).resolve().parents:
 
 from elvern_shared.desktop_helper_package_contract import (  # noqa: E402
     PACKAGE_NAME_PREFIX,
+    PACKAGE_RUNTIME_CONTRACTS,
     expected_package_filename,
 )
 
@@ -95,29 +96,18 @@ META_ORDER = (
     "package_target",
     "bound_origin_sha256",
 )
-CONTRACTS = {
+PACKAGE_LAYOUTS = {
     "windows-x64": {
-        "platform": "windows",
-        "rids": ("win-x64",),
         "package_root": "Elvern VLC Opener Windows Installer",
         "installer": "Install-ElvernVlcOpener.cmd",
         "minimum_os_version": None,
     },
     "macos-dual-arch": {
-        "platform": "mac",
-        "rids": ("osx-arm64", "osx-x64"),
         "package_root": "Elvern VLC Opener Installer",
         "installer": "Install-ElvernVlcOpener.command",
         "minimum_os_version": "14.0",
     },
     "linux-universal": {
-        "platform": "linux",
-        "rids": (
-            "linux-x64",
-            "linux-arm64",
-            "linux-musl-x64",
-            "linux-musl-arm64",
-        ),
         "package_root": "Elvern VLC Opener Linux Installer",
         "installer": "Install-ElvernVlcOpener.sh",
         "minimum_os_version": None,
@@ -318,7 +308,12 @@ def validate_archive(
     manifest: dict[str, object],
 ) -> None:
     target = str(record["package_target"])
-    contract = CONTRACTS[target]
+    platform, runtime_ids = PACKAGE_RUNTIME_CONTRACTS[target]
+    contract = {
+        **PACKAGE_LAYOUTS[target],
+        "platform": platform,
+        "rids": runtime_ids,
+    }
     package_root = str(record["package_root"])
     with zipfile.ZipFile(archive, "r") as bundle:
         files, directories = validate_member_names(bundle, package_root)
@@ -441,13 +436,23 @@ def validate_manifest(
     for raw_record in packages:
         require(isinstance(raw_record, dict), "Release package record is invalid")
         target = str(raw_record.get("package_target") or "")
-        require(target in CONTRACTS and target not in seen_targets, "Release package target is invalid or duplicated")
+        require(
+            target in PACKAGE_RUNTIME_CONTRACTS
+            and target in PACKAGE_LAYOUTS
+            and target not in seen_targets,
+            "Release package target is invalid or duplicated",
+        )
         seen_targets.add(target)
         expected_keys = set(PACKAGE_KEYS)
-        if CONTRACTS[target]["minimum_os_version"] is not None:
+        if PACKAGE_LAYOUTS[target]["minimum_os_version"] is not None:
             expected_keys.add("minimum_os_version")
         require_exact_keys(raw_record, expected_keys, "Release package")
-        contract = CONTRACTS[target]
+        platform, runtime_ids = PACKAGE_RUNTIME_CONTRACTS[target]
+        contract = {
+            **PACKAGE_LAYOUTS[target],
+            "platform": platform,
+            "rids": runtime_ids,
+        }
         filename = str(raw_record["filename"])
         require(
             1 <= len(filename) <= MAX_FILENAME_LENGTH

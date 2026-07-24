@@ -7,6 +7,7 @@ INSTALL_DIR="${INSTALL_PARENT}/elvern-vlc-opener"
 LOCK_DIR="${INSTALL_PARENT}/.elvern-vlc-opener-install.lock"
 XDG_CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}"
 XDG_DATA_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}"
+XDG_DATA_SEARCH_PATH="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 DESKTOP_DIR="${XDG_DATA_ROOT}/applications"
 DESKTOP_FILE="${DESKTOP_DIR}/elvern-vlc-opener.desktop"
 MIME_CONFIG_FILE="${XDG_CONFIG_ROOT}/mimeapps.list"
@@ -48,8 +49,80 @@ require_command() {
     || fail "$1 is required to remove Elvern VLC Opener."
 }
 
+query_default_handler() {
+  output=$(mktemp "${TMPDIR:-/tmp}/elvern-xdg-query.XXXXXX") \
+    || fail "a temporary protocol query file could not be created."
+  if xdg-mime query default x-scheme-handler/elvern-vlc > "${output}" 2>/dev/null; then
+    value=$(cat "${output}")
+    rm -f "${output}"
+  else
+    rm -f "${output}"
+    fail "the current protocol handler could not be queried safely."
+  fi
+  if [ -n "${value}" ] && ! safe_desktop_basename "${value}"; then
+    fail "the current protocol handler is unsafe."
+  fi
+  printf '%s\n' "${value}"
+}
+
+desktop_handler_exists() {
+  handler=$1
+  safe_desktop_basename "${handler}" || return 1
+  if [ -f "${XDG_DATA_ROOT}/applications/${handler}" ] \
+    && [ ! -L "${XDG_DATA_ROOT}/applications/${handler}" ]; then
+    return 0
+  fi
+  old_ifs=${IFS}
+  IFS=:
+  for data_root in ${XDG_DATA_SEARCH_PATH}; do
+    IFS=${old_ifs}
+    [ -n "${data_root}" ] || data_root="${HOME}/.local/share"
+    case "${data_root}" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+    candidate="${data_root}/applications/${handler}"
+    if [ -f "${candidate}" ] && [ ! -L "${candidate}" ]; then
+      return 0
+    fi
+    IFS=:
+  done
+  IFS=${old_ifs}
+  return 1
+}
+
+mime_file_has_elvern_token() {
+  target=$1
+  [ -f "${target}" ] && [ ! -L "${target}" ] || return 1
+  awk '
+    BEGIN { in_default = 0; found = 0 }
+    /^\[/ {
+      in_default = ($0 == "[Default Applications]")
+      next
+    }
+    in_default && /^x-scheme-handler\/elvern-vlc=/ {
+      value = substr($0, index($0, "=") + 1)
+      count = split(value, tokens, ";")
+      for (i = 1; i <= count; i++) {
+        if (tokens[i] == "elvern-vlc-opener.desktop") {
+          found = 1
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "${target}"
+}
+
 safe_desktop_basename() {
-  printf '%s\n' "$1" | grep -E '^[A-Za-z0-9._-]+\.desktop$' >/dev/null 2>&1
+  case "$1" in
+    ""|.desktop|*[!A-Za-z0-9._-]*)
+      return 1
+      ;;
+    *.desktop)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 backup_regular_file() {
@@ -106,7 +179,21 @@ remove_elvern_default_from_file() {
       print
       next
     }
-    in_default && /^x-scheme-handler\/elvern-vlc=/ { next }
+    in_default && /^x-scheme-handler\/elvern-vlc=/ {
+      key = "x-scheme-handler/elvern-vlc="
+      value = substr($0, length(key) + 1)
+      count = split(value, tokens, ";")
+      output = ""
+      for (i = 1; i <= count; i++) {
+        if (tokens[i] != "" && tokens[i] != "elvern-vlc-opener.desktop") {
+          output = output tokens[i] ";"
+        }
+      }
+      if (output != "") {
+        print key output
+      }
+      next
+    }
     { print }
   ' "${target}" > "${temp}" \
     || ! chmod "${mode}" "${temp}" \
@@ -126,6 +213,7 @@ read_installed_state() {
   package_target=""
   state_nonce=""
   seen=""
+  state_count=0
   while IFS="${TAB}" read -r key value extra; do
     [ -z "${extra:-}" ] || fail "the installed ownership state is invalid."
     case "${key}" in
@@ -141,6 +229,7 @@ ${key}
     esac
     seen="${seen}
 ${key}"
+    state_count=$((state_count + 1))
     case "${key}" in
       schema_version) schema=${value} ;;
       helper_version) helper_version=${value} ;;
@@ -150,7 +239,8 @@ ${key}"
       previous_protocol_default) PREVIOUS_DEFAULT=${value} ;;
     esac
   done < "${STATE_FILE}"
-  [ "${schema}" = "elvern-desktop-helper-install-state-v1" ] \
+  [ "${state_count}" -eq 6 ] \
+    && [ "${schema}" = "elvern-desktop-helper-install-state-v1" ] \
     && [ "${product}" = "elvern-vlc-opener" ] \
     && [ "${package_target}" = "linux-universal" ] \
     || fail "the installed ownership state does not belong to Elvern."
@@ -186,8 +276,12 @@ cleanup() {
         INSTALL_MOVED=0
       fi
     fi
-    restored=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || :)
-    [ "${restored}" = "${CURRENT_DEFAULT}" ] || ROLLBACK_FAILED=1
+    if restored=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null) \
+      && { [ -z "${restored}" ] || safe_desktop_basename "${restored}"; }; then
+      [ "${restored}" = "${CURRENT_DEFAULT}" ] || ROLLBACK_FAILED=1
+    else
+      ROLLBACK_FAILED=1
+    fi
   fi
 
   if [ "${UNINSTALL_COMMITTED}" -eq 1 ]; then
@@ -216,7 +310,7 @@ cleanup() {
 trap cleanup 0
 
 for command in \
-  awk chmod cp date dirname grep mkdir mktemp mv rm rmdir stat xdg-mime
+  awk cat chmod cp date dirname grep mkdir mktemp mv rm rmdir stat xdg-mime
 do
   require_command "${command}"
 done
@@ -232,7 +326,15 @@ printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
   > "${LOCK_DIR}/owner"
 chmod 644 "${LOCK_DIR}/owner"
 
-if [ ! -e "${INSTALL_DIR}" ] && [ ! -e "${DESKTOP_FILE}" ]; then
+CURRENT_DEFAULT=$(query_default_handler)
+STALE_MAPPING=0
+if mime_file_has_elvern_token "${MIME_CONFIG_FILE}" \
+  || mime_file_has_elvern_token "${MIME_DATA_FILE}"; then
+  STALE_MAPPING=1
+fi
+if [ ! -e "${INSTALL_DIR}" ] && [ ! -e "${DESKTOP_FILE}" ] \
+  && [ "${STALE_MAPPING}" -eq 0 ] \
+  && [ "${CURRENT_DEFAULT}" != "elvern-vlc-opener.desktop" ]; then
   echo "Elvern VLC Opener is not installed for this user."
   UNINSTALL_COMMITTED=1
   exit 0
@@ -268,7 +370,6 @@ else
   printf '%s\t0\t-\t-\n' "${DESKTOP_FILE}" >> "${MIME_STATE_FILE}"
 fi
 
-CURRENT_DEFAULT=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || :)
 if [ -d "${INSTALL_DIR}" ]; then
   INSTALL_BACKUP=$(mktemp -d "${INSTALL_PARENT}/.elvern-vlc-opener-uninstall-backup.XXXXXX") \
     || fail "the installation backup path could not be reserved."
@@ -280,21 +381,21 @@ if [ -d "${INSTALL_DIR}" ]; then
   INSTALL_MOVED=1
 fi
 
-if [ "${CURRENT_DEFAULT}" = "elvern-vlc-opener.desktop" ]; then
-  if [ -n "${PREVIOUS_DEFAULT}" ] \
-    && [ -f "${DESKTOP_DIR}/${PREVIOUS_DEFAULT}" ] \
-    && [ ! -L "${DESKTOP_DIR}/${PREVIOUS_DEFAULT}" ]; then
+remove_elvern_default_from_file "${MIME_CONFIG_FILE}"
+if [ "${MIME_DATA_FILE}" != "${MIME_CONFIG_FILE}" ]; then
+  remove_elvern_default_from_file "${MIME_DATA_FILE}"
+fi
+MIME_MODIFIED=1
+if [ "${CURRENT_DEFAULT}" = "elvern-vlc-opener.desktop" ] \
+  && [ -n "${PREVIOUS_DEFAULT}" ]; then
+  if desktop_handler_exists "${PREVIOUS_DEFAULT}"; then
     xdg-mime default "${PREVIOUS_DEFAULT}" x-scheme-handler/elvern-vlc \
       || fail "the previous protocol handler could not be restored."
   else
-    remove_elvern_default_from_file "${MIME_CONFIG_FILE}"
-    if [ "${MIME_DATA_FILE}" != "${MIME_CONFIG_FILE}" ]; then
-      remove_elvern_default_from_file "${MIME_DATA_FILE}"
-    fi
+    echo "Warning: the previous protocol handler is no longer installed." >&2
   fi
-  MIME_MODIFIED=1
-  inject_failure "mime_update"
 fi
+inject_failure "mime_update"
 
 if [ -e "${DESKTOP_FILE}" ]; then
   inject_failure "desktop_delete"
@@ -306,15 +407,17 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${DESKTOP_DIR}" >/dev/null 2>&1 || :
 fi
 inject_failure "default_validation"
-AFTER_DEFAULT=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || :)
+AFTER_DEFAULT=$(query_default_handler)
 if [ "${CURRENT_DEFAULT}" = "elvern-vlc-opener.desktop" ]; then
   [ "${AFTER_DEFAULT}" != "elvern-vlc-opener.desktop" ] \
     || fail "Elvern is still the default protocol handler."
   if [ -n "${PREVIOUS_DEFAULT}" ] \
-    && [ -f "${DESKTOP_DIR}/${PREVIOUS_DEFAULT}" ]; then
+    && desktop_handler_exists "${PREVIOUS_DEFAULT}"; then
     [ "${AFTER_DEFAULT}" = "${PREVIOUS_DEFAULT}" ] \
       || fail "the previous protocol handler restore could not be verified."
   fi
+elif [ "${AFTER_DEFAULT}" != "${CURRENT_DEFAULT}" ]; then
+  fail "the current third-party protocol handler changed unexpectedly."
 fi
 
 UNINSTALL_COMMITTED=1

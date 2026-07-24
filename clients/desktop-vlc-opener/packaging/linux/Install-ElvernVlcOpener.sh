@@ -21,6 +21,8 @@ STAGE_DIR=""
 BACKUP_DIR=""
 DESKTOP_BACKUP=""
 PREVIOUS_PROTOCOL_DEFAULT=""
+OLD_PREVIOUS_PROTOCOL_DEFAULT=""
+OLD_STATE_VALID=0
 TRANSACTION_DIR=""
 MIME_STATE_FILE=""
 LOCK_DIR=""
@@ -124,6 +126,96 @@ require_command() {
     || fail "$1 is required to install Elvern VLC Opener."
 }
 
+safe_desktop_basename() {
+  case "$1" in
+    ""|.desktop|*[!A-Za-z0-9._-]*)
+      return 1
+      ;;
+    *.desktop)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+query_default_handler() {
+  query_output_file=$(mktemp "${TMPDIR:-/tmp}/elvern-xdg-query.XXXXXX") \
+    || fail "a temporary protocol query file could not be created."
+  if xdg-mime query default x-scheme-handler/elvern-vlc > "${query_output_file}" 2>/dev/null; then
+    query_value=$(cat "${query_output_file}")
+    rm -f "${query_output_file}"
+  else
+    rm -f "${query_output_file}"
+    fail "the current protocol handler could not be queried safely."
+  fi
+  case "${query_value}" in
+    "") printf '\n' ;;
+    *)
+      safe_desktop_basename "${query_value}" \
+        || fail "the current protocol handler is unsafe."
+      printf '%s\n' "${query_value}"
+      ;;
+  esac
+}
+
+read_previous_install_state() {
+  old_state="${INSTALL_DIR}/install-state.tsv"
+  [ -e "${old_state}" ] || return 0
+  if [ ! -f "${old_state}" ] || [ -L "${old_state}" ]; then
+    echo "Warning: the previous Helper state is invalid; its previous handler was not inherited." >&2
+    return 0
+  fi
+  state_schema=""
+  state_product=""
+  state_target=""
+  state_version=""
+  state_nonce=""
+  state_previous=""
+  state_seen=""
+  state_count=0
+  state_invalid=0
+  while IFS="${TAB}" read -r state_key state_value state_extra; do
+    [ -z "${state_extra:-}" ] || { state_invalid=1; break; }
+    case "${state_key}" in
+      schema_version|helper_version|product_id|package_target|transaction_nonce|previous_protocol_default) ;;
+      *) state_invalid=1; break ;;
+    esac
+    case "
+${state_seen}
+" in
+      *"
+${state_key}
+"*) state_invalid=1; break ;;
+    esac
+    state_seen="${state_seen}
+${state_key}"
+    state_count=$((state_count + 1))
+    case "${state_key}" in
+      schema_version) state_schema=${state_value} ;;
+      helper_version) state_version=${state_value} ;;
+      product_id) state_product=${state_value} ;;
+      package_target) state_target=${state_value} ;;
+      transaction_nonce) state_nonce=${state_value} ;;
+      previous_protocol_default) state_previous=${state_value} ;;
+    esac
+  done < "${old_state}"
+  if [ "${state_invalid}" -ne 0 ] \
+    || [ "${state_count}" -ne 6 ] \
+    || [ "${state_schema}" != "elvern-desktop-helper-install-state-v1" ] \
+    || [ "${state_product}" != "elvern-vlc-opener" ] \
+    || [ "${state_target}" != "linux-universal" ] \
+    || ! printf '%s\n' "${state_version}" | grep -E '^[A-Za-z0-9][A-Za-z0-9._+-]*$' >/dev/null 2>&1 \
+    || ! printf '%s\n' "${state_nonce}" | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' >/dev/null 2>&1 \
+    || { [ -n "${state_previous}" ] && ! safe_desktop_basename "${state_previous}"; }; then
+    echo "Warning: the previous Helper state is invalid; its previous handler was not inherited." >&2
+    return 0
+  fi
+  OLD_STATE_VALID=1
+  if [ "${state_previous}" != "elvern-vlc-opener.desktop" ]; then
+    OLD_PREVIOUS_PROTOCOL_DEFAULT=${state_previous}
+  fi
+}
+
 cleanup() {
   original_status=$?
   trap - 0
@@ -196,13 +288,17 @@ cleanup() {
       if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "${DESKTOP_DIR}" >/dev/null 2>&1 || :
       fi
-      restored_default=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || :)
-      if [ -n "${PREVIOUS_PROTOCOL_DEFAULT}" ]; then
-        [ "${restored_default}" = "${PREVIOUS_PROTOCOL_DEFAULT}" ] \
-          || rollback_failed=1
+      if restored_default=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null) \
+        && { [ -z "${restored_default}" ] || safe_desktop_basename "${restored_default}"; }; then
+        if [ -n "${PREVIOUS_PROTOCOL_DEFAULT}" ]; then
+          [ "${restored_default}" = "${PREVIOUS_PROTOCOL_DEFAULT}" ] \
+            || rollback_failed=1
+        else
+          [ "${restored_default}" != "elvern-vlc-opener.desktop" ] \
+            || rollback_failed=1
+        fi
       else
-        [ "${restored_default}" != "elvern-vlc-opener.desktop" ] \
-          || rollback_failed=1
+        rollback_failed=1
       fi
     fi
   fi
@@ -478,6 +574,19 @@ printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
   "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INSTALL_NONCE}" \
   > "${LOCK_DIR}/owner"
 chmod 644 "${LOCK_DIR}/owner"
+CURRENT_PROTOCOL_DEFAULT=$(query_default_handler)
+read_previous_install_state
+case "${CURRENT_PROTOCOL_DEFAULT}" in
+  "") PREVIOUS_PROTOCOL_DEFAULT="" ;;
+  elvern-vlc-opener.desktop)
+    if [ "${OLD_STATE_VALID}" -eq 1 ]; then
+      PREVIOUS_PROTOCOL_DEFAULT=${OLD_PREVIOUS_PROTOCOL_DEFAULT}
+    else
+      PREVIOUS_PROTOCOL_DEFAULT=""
+    fi
+    ;;
+  *) PREVIOUS_PROTOCOL_DEFAULT=${CURRENT_PROTOCOL_DEFAULT} ;;
+esac
 TRANSACTION_DIR=$(mktemp -d "${INSTALL_PARENT}/.elvern-vlc-opener-transaction.XXXXXX") \
   || fail "the install transaction directory could not be created."
 MIME_STATE_FILE="${TRANSACTION_DIR}/mime-state.tsv"
@@ -493,11 +602,9 @@ chmod 755 "${STAGE_DIR}/Uninstall-ElvernVlcOpener.sh"
 "${STAGE_DIR}/Elvern.VlcOpener" --version >/dev/null \
   || fail "the staged payload failed its version check."
 
-PREVIOUS_PROTOCOL_DEFAULT=$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || :)
 SAFE_PREVIOUS_PROTOCOL_DEFAULT=""
 if [ -n "${PREVIOUS_PROTOCOL_DEFAULT}" ] \
-  && printf '%s\n' "${PREVIOUS_PROTOCOL_DEFAULT}" \
-    | grep -E '^[A-Za-z0-9._-]+\.desktop$' >/dev/null 2>&1; then
+  && safe_desktop_basename "${PREVIOUS_PROTOCOL_DEFAULT}"; then
   SAFE_PREVIOUS_PROTOCOL_DEFAULT=${PREVIOUS_PROTOCOL_DEFAULT}
 fi
 cat > "${STAGE_DIR}/install-state.tsv" <<EOF
@@ -561,7 +668,7 @@ inject_failure "registration"
 xdg-mime default elvern-vlc-opener.desktop x-scheme-handler/elvern-vlc \
   || fail "xdg-mime could not register the protocol handler."
 inject_failure "registration_validation"
-[ "$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || :)" = "elvern-vlc-opener.desktop" ] \
+[ "$(query_default_handler)" = "elvern-vlc-opener.desktop" ] \
   || fail "the registered protocol handler could not be verified."
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${DESKTOP_DIR}" >/dev/null 2>&1 || :

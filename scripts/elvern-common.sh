@@ -569,3 +569,18 @@ elvern_runtime_preflight() {
 
   return "${failed}"
 }
+
+elvern_warn_helper_release_authority_gap() {
+  [[ "${ELVERN_HELPER_AUTHORITY_WARNING_SHOWN:-0}" != "1" ]] || return 0
+  export ELVERN_HELPER_AUTHORITY_WARNING_SHOWN=1
+  local runtime_dir="${ELVERN_HELPER_RELEASES_DIR:-${ELVERN_PROJECT_ROOT}/backend/data/helper_releases}"
+  local legacy_dir="${ELVERN_PROJECT_ROOT}/clients/desktop-vlc-opener/artifacts/packages"
+  if [[ ! -e "${runtime_dir}/release-manifest.json" \
+    && ! -L "${runtime_dir}/release-manifest.json" \
+    && -f "${legacy_dir}/release-manifest.json" ]]; then
+    elvern_log_message WARN "Desktop Helper runtime releases are absent while a legacy source-tree authority exists."
+    elvern_log_message WARN "Inspect with: python scripts/desktop-helper-runtime-releases.py inspect --runtime-dir \"${runtime_dir}\""
+    elvern_log_message WARN "Dry-run migration with: python scripts/desktop-helper-runtime-releases.py migrate --source-dir \"${legacy_dir}\" --runtime-dir \"${runtime_dir}\" --expected-origin-sha256 <sha256>"
+    elvern_log_message WARN "Add --apply only after reviewing the dry-run and origin hash."
+  fi
+}

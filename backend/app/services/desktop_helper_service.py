@@ -14,13 +14,15 @@ from fastapi import HTTPException, status
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 
+from elvern_shared.desktop_helper_package_contract import PACKAGE_NAME_PREFIX
+
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
 from ..security import generate_session_token, hash_session_token, hash_token_hmac
 from .desktop_helper_manifest_service import (
+    DesktopHelperManifestAbsent,
     DesktopHelperManifestError,
     DesktopHelperManifestOriginMismatch,
-    desktop_helper_release_manifest_exists,
     get_desktop_helper_manifest_record_by_id,
     list_desktop_helper_manifest_records,
     open_verified_artifact,
@@ -49,7 +51,9 @@ PLATFORM_PACKAGE_TARGET = {
 }
 SUPPORTED_HELPER_PLATFORMS = frozenset({"windows", "mac", "linux"})
 RELEASE_NAME_PATTERN = re.compile(
-    r"^elvern-vlc-opener-(?P<version>.+)-(?P<runtime>win-x64|osx-arm64|osx-x64|linux-x64|linux-arm64|linux-musl-x64|linux-musl-arm64)(?:\.zip)?$"
+    rf"^{re.escape(PACKAGE_NAME_PREFIX)}-(?P<version>.+)-"
+    r"(?P<runtime>win-x64|osx-arm64|osx-x64|linux-x64|linux-arm64|"
+    r"linux-musl-x64|linux-musl-arm64)(?:\.zip)?$"
 )
 logger = logging.getLogger(__name__)
 DESKTOP_HELPER_VERIFICATION_ACCESS_HASH_PURPOSE = "desktop.helper.verification.access"
@@ -533,18 +537,14 @@ def _list_helper_releases_from_manifest(
         )
     except DesktopHelperManifestOriginMismatch:
         raise
+    except DesktopHelperManifestAbsent:
+        return None
     except DesktopHelperManifestError as exc:
         logger.warning(
             "Desktop helper manifest validation failed for release listing (%s)",
             type(exc).__name__,
         )
-        return (
-            []
-            if desktop_helper_release_manifest_exists(settings.helper_releases_dir)
-            else None
-        )
-    if not manifest_releases:
-        return None
+        return []
     _ensure_no_manifest_db_release_collisions(settings, manifest_releases)
     return manifest_releases
 
@@ -564,19 +564,22 @@ def _get_helper_release_from_manifest(
             status_code=status.HTTP_409_CONFLICT,
             detail=DESKTOP_HELPER_ORIGIN_MISMATCH_NOTE,
         ) from exc
+    except DesktopHelperManifestAbsent:
+        return None
     except DesktopHelperManifestError as exc:
         logger.warning(
             "Desktop helper manifest validation failed for release download (%s)",
             type(exc).__name__,
         )
-        if desktop_helper_release_manifest_exists(settings.helper_releases_dir):
-            raise HTTPException(
-                status_code=status.HTTP_410_GONE,
-                detail="Desktop helper release is unavailable because its package verification failed",
-            ) from exc
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Desktop helper release is unavailable because its package verification failed",
+        ) from exc
     if manifest_release is None:
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Desktop helper release was not found",
+        )
     _ensure_no_manifest_db_release_collisions(settings, [manifest_release])
     return manifest_release
 

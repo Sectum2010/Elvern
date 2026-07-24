@@ -9,6 +9,7 @@ TREE_MANIFEST="${PRIVATE_DIR}/tree-manifest.tsv"
 SELECTORS="${PRIVATE_DIR}/lib/platform-selectors.sh"
 APPLESCRIPT_SOURCE="${PRIVATE_DIR}/bridge/ElvernVlcOpener.applescript"
 RUNNER_TEMPLATE="${PRIVATE_DIR}/bridge/run-helper.sh.template"
+UNINSTALL_SOURCE="${PRIVATE_DIR}/uninstall/Uninstall-ElvernVlcOpener.command"
 DEST_DIR="${HOME}/Applications"
 APP_NAME="Elvern VLC Opener.app"
 DEST_APP="${DEST_DIR}/${APP_NAME}"
@@ -197,6 +198,7 @@ verify_package_tree
 [[ -f "${SELECTORS}" && ! -L "${SELECTORS}" ]] || fail "The verified platform selector is missing."
 [[ -f "${APPLESCRIPT_SOURCE}" && ! -L "${APPLESCRIPT_SOURCE}" ]] || fail "The verified macOS URL bridge is missing."
 [[ -f "${RUNNER_TEMPLATE}" && ! -L "${RUNNER_TEMPLATE}" ]] || fail "The verified Helper runner is missing."
+[[ -f "${UNINSTALL_SOURCE}" && ! -L "${UNINSTALL_SOURCE}" ]] || fail "The verified Helper uninstaller is missing."
 
 MACOS_VERSION="$(sw_vers -productVersion 2>/dev/null || true)"
 MACOS_MAJOR="${MACOS_VERSION%%.*}"
@@ -311,6 +313,8 @@ cp "${SOURCE_PAYLOAD}" "${APP_PAYLOAD_DIR}/Elvern.VlcOpener"
 chmod 755 "${APP_PAYLOAD_DIR}/Elvern.VlcOpener"
 cp "${RUNNER_TEMPLATE}" "${RESOURCES_DIR}/run-helper.sh"
 chmod 755 "${RESOURCES_DIR}/run-helper.sh"
+cp "${UNINSTALL_SOURCE}" "${RESOURCES_DIR}/Uninstall-ElvernVlcOpener.command"
+chmod 755 "${RESOURCES_DIR}/Uninstall-ElvernVlcOpener.command"
 INFO_PLIST="${STAGED_APP}/Contents/Info.plist"
 
 plist_set() {
@@ -383,6 +387,10 @@ chmod 755 "${DEST_APP}" "${DEST_APP}/Contents" "${DEST_APP}/Contents/Resources" 
   || fail "The installed Helper directory permissions could not be secured."
 chmod 755 "${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener" "${DEST_APP}/Contents/Resources/run-helper.sh" \
   || fail "The installed Helper executable permissions could not be secured."
+[[ -f "${DEST_APP}/Contents/Resources/Uninstall-ElvernVlcOpener.command" \
+  && ! -L "${DEST_APP}/Contents/Resources/Uninstall-ElvernVlcOpener.command" \
+  && -x "${DEST_APP}/Contents/Resources/Uninstall-ElvernVlcOpener.command" ]] \
+  || fail "The installed Helper uninstaller is missing or unsafe."
 xattr -dr com.apple.quarantine "${DEST_APP}" \
   || fail "macOS quarantine could not be removed from the verified installed Helper App."
 verify_quarantine_cleared "${DEST_APP}"

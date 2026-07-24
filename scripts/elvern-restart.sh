@@ -43,6 +43,7 @@ if ! elvern_runtime_preflight; then
   elvern_gui_error "Elvern" "Elvern is missing required runtime files. Run ./scripts/setup-ubuntu.sh first."
   exit 1
 fi
+elvern_warn_helper_release_authority_gap
 
 SERVICE_SCOPE="$(elvern_detect_service_scope)"
 BACKEND_HEALTH_URL="$(elvern_local_backend_url)/health"

@@ -94,6 +94,12 @@ export ELVERN_BACKEND_ORIGIN="https://the-effective-helper-backend-origin.exampl
   --active-dir "$ELVERN_ROOT/docker-data/data/helper_releases"
 ```
 
+An existing old source-tree authority can be checked with
+`python scripts/desktop-helper-runtime-releases.py inspect` and dry-run migrated to
+`"$ELVERN_ROOT/docker-data/data/helper_releases"`. Migration never deletes the
+source and requires `--apply`; `/data/helper_releases` remains the container-side
+runtime path.
+
 The standard packages and their per-user uninstallers are transactional. On Linux,
 uninstall restores a recorded safe previous protocol handler only when Elvern is
 still the active handler; it never overwrites a handler the user selected later.

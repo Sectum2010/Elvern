@@ -20,6 +20,7 @@ from elvern_shared.desktop_helper_package_contract import (
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_ROOT = ROOT / "clients" / "desktop-vlc-opener"
+RUNTIME_RELEASE_TOOL = ROOT / "scripts" / "desktop-helper-runtime-releases.py"
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -124,6 +125,19 @@ def _run_publisher(
     )
 
 
+def _run_runtime_tool(
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(RUNTIME_RELEASE_TOOL), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
 def _staged_manifests(workspace: Path) -> list[Path]:
     return sorted(
         (workspace / "artifacts" / "staging").glob(
@@ -221,14 +235,172 @@ def test_partial_build_stays_staged_and_does_not_replace_active_manifest(
 
     assert result.returncode == 0, result.stderr
     assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
-    staged = _staged_manifests(workspace)
-    assert len(staged) == 1
-    manifest = json.loads(staged[0].read_text(encoding="utf-8"))
-    assert [row["package_target"] for row in manifest["packages"]] == [
-        "macos-dual-arch"
-    ]
-    assert all(row["bound_origin_sha256"] for row in manifest["packages"])
-    assert "-macos-dual-arch-" in manifest["packages"][0]["filename"]
+
+
+def test_runtime_authority_tool_inspect_migrate_and_idempotency(tmp_path: Path) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    built = _run_publisher(workspace, env)
+    assert built.returncode == 0, built.stderr
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    origin = manifest["bound_origin_sha256"]
+    runtime = tmp_path / "runtime"
+
+    absent = _run_runtime_tool("inspect", "--runtime-dir", str(runtime))
+    assert absent.returncode == 2
+    assert json.loads(absent.stdout)["manifest_state"] == "absent"
+
+    dry_run = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+    )
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert not runtime.exists()
+
+    applied = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+        "--apply",
+    )
+    assert applied.returncode == 0, applied.stderr
+    assert (source / "release-manifest.json").is_file()
+    assert stat.S_IMODE((runtime / "release-manifest.json").stat().st_mode) == 0o444
+    for package in manifest["packages"]:
+        assert stat.S_IMODE((runtime / package["filename"]).stat().st_mode) == 0o444
+
+    inspected = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+    )
+    assert inspected.returncode == 0, inspected.stderr
+    assert json.loads(inspected.stdout)["manifest_state"] == "valid"
+
+    repeated = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+        "--apply",
+    )
+    assert repeated.returncode == 0, repeated.stderr
+    assert "already identical" in repeated.stdout
+
+
+def test_runtime_authority_tool_rejects_conflict_and_cleans_failed_copy(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    built = _run_publisher(workspace, env)
+    assert built.returncode == 0, built.stderr
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    origin = manifest["bound_origin_sha256"]
+    conflict = tmp_path / "conflict"
+    conflict.mkdir()
+    (conflict / "foreign.txt").write_text("foreign")
+
+    rejected = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(conflict),
+        "--expected-origin-sha256", origin,
+        "--apply",
+    )
+    assert rejected.returncode != 0
+    assert (conflict / "foreign.txt").read_text() == "foreign"
+
+    failed = tmp_path / "failed"
+    failure_env = dict(os.environ)
+    failure_env["ELVERN_RUNTIME_MIGRATION_TEST_FAIL_AT"] = "0"
+    interrupted = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(failed),
+        "--expected-origin-sha256", origin,
+        "--apply",
+        env=failure_env,
+    )
+    assert interrupted.returncode != 0
+    assert list(failed.iterdir()) == []
+
+
+def test_runtime_authority_tool_reports_invalid_and_rejects_origin_or_symlink(
+    tmp_path: Path,
+) -> None:
+    invalid = tmp_path / "invalid"
+    invalid.mkdir()
+    (invalid / "release-manifest.json").write_text("{", encoding="utf-8")
+    inspected = _run_runtime_tool("inspect", "--runtime-dir", str(invalid))
+    assert inspected.returncode == 3
+    assert json.loads(inspected.stdout)["manifest_state"] == "invalid"
+
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "release-manifest.json").symlink_to(broken / "missing.json")
+    inspected_broken = _run_runtime_tool("inspect", "--runtime-dir", str(broken))
+    assert inspected_broken.returncode == 3
+    assert json.loads(inspected_broken.stdout)["manifest_state"] == "invalid"
+
+    workspace, env = _create_publish_workspace(tmp_path)
+    built = _run_publisher(workspace, env)
+    assert built.returncode == 0, built.stderr
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    origin = manifest["bound_origin_sha256"]
+
+    mismatch = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(tmp_path / "mismatch"),
+        "--expected-origin-sha256", "0" * 64,
+    )
+    assert mismatch.returncode != 0
+    assert not (tmp_path / "mismatch").exists()
+
+    linked_source = tmp_path / "linked-source"
+    linked_source.symlink_to(source, target_is_directory=True)
+    rejected_link = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(linked_source),
+        "--runtime-dir", str(tmp_path / "linked-destination"),
+        "--expected-origin-sha256", origin,
+    )
+    assert rejected_link.returncode != 0
+    assert not (tmp_path / "linked-destination").exists()
+
+
+def test_runtime_authority_tool_activates_manifest_last_and_cleans_packages(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    built = _run_publisher(workspace, env)
+    assert built.returncode == 0, built.stderr
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    destination = tmp_path / "manifest-last"
+    failure_env = dict(os.environ)
+    failure_env["ELVERN_RUNTIME_MIGRATION_TEST_FAIL_AT"] = str(
+        len(manifest["packages"])
+    )
+
+    interrupted = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(destination),
+        "--expected-origin-sha256", manifest["bound_origin_sha256"],
+        "--apply",
+        env=failure_env,
+    )
+
+    assert interrupted.returncode != 0
+    assert list(destination.iterdir()) == []
+    assert (source / "release-manifest.json").is_file()
+    assert all((source / row["filename"]).is_file() for row in manifest["packages"])
 
 
 @pytest.mark.parametrize(

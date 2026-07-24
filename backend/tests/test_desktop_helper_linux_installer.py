@@ -247,7 +247,7 @@ args = sys.argv[1:]
 if args == ["query", "default", mime]:
     if os.environ.get("ELVERN_TEST_XDG_QUERY_ERROR") == "1":
         raise SystemExit(42)
-    value = read_default()
+    value = os.environ.get("ELVERN_TEST_XDG_QUERY_VALUE", read_default())
     if (
         os.environ.get("ELVERN_TEST_XDG_ROLLBACK_MISMATCH") == "1"
         and rollback_query_marker.exists()
@@ -575,6 +575,198 @@ def test_linux_uninstaller_supports_legacy_install_without_state(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     assert _read_default_handler(state) != "elvern-vlc-opener.desktop"
     assert not install_dir.exists()
+
+
+@pytest.mark.parametrize("reinstall_count", [2, 3])
+def test_linux_reinstall_preserves_original_handler_for_uninstall(
+    tmp_path: Path,
+    reinstall_count: int,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    desktop_dir = Path(env["XDG_DATA_HOME"]) / "applications"
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+    (desktop_dir / "old-handler.desktop").write_text("[Desktop Entry]\nName=Old\n")
+    for _ in range(reinstall_count):
+        result = _run_installer(package_root, env)
+        assert result.returncode == 0, result.stderr
+
+    removed = _run_uninstaller(env)
+
+    assert removed.returncode == 0, removed.stderr
+    assert _read_default_handler(state) == "old-handler.desktop"
+
+
+def test_linux_upgrade_adopts_user_selected_third_party_handler(tmp_path: Path) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    desktop_dir = Path(env["XDG_DATA_HOME"]) / "applications"
+    (desktop_dir / "third-party.desktop").write_text("[Desktop Entry]\nName=Third\n")
+    fake_xdg = Path(env["PATH"].split(":", 1)[0]) / "xdg-mime"
+    changed = subprocess.run(
+        [str(fake_xdg), "default", "third-party.desktop", "x-scheme-handler/elvern-vlc"],
+        env=env,
+        check=False,
+    )
+    assert changed.returncode == 0
+    assert _run_installer(package_root, env).returncode == 0
+
+    removed = _run_uninstaller(env)
+
+    assert removed.returncode == 0, removed.stderr
+    assert _read_default_handler(state) == "third-party.desktop"
+
+
+def test_linux_reinstall_without_original_handler_leaves_no_elvern_mapping(
+    tmp_path: Path,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    state.write_text("[Default Applications]\n", encoding="utf-8")
+    assert _run_installer(package_root, env).returncode == 0
+    assert _run_installer(package_root, env).returncode == 0
+
+    removed = _run_uninstaller(env)
+
+    assert removed.returncode == 0, removed.stderr
+    assert "elvern-vlc-opener.desktop" not in state.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "old_state",
+    [
+        (
+            "schema_version\telvern-desktop-helper-install-state-v1\n"
+            "helper_version\t0.9.0\n"
+            "product_id\telvern-vlc-opener\n"
+            "package_target\tlinux-universal\n"
+            "transaction_nonce\told-nonce\n"
+            "previous_protocol_default\telvern-vlc-opener.desktop\n"
+        ),
+        "invalid-state\n",
+    ],
+)
+def test_linux_reinstall_does_not_inherit_invalid_or_self_previous_handler(
+    tmp_path: Path,
+    old_state: str,
+) -> None:
+    package_root, _state, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    install_state = (
+        Path(env["HOME"])
+        / ".local/lib/elvern-vlc-opener/install-state.tsv"
+    )
+    install_state.write_text(old_state, encoding="utf-8")
+
+    repeated = _run_installer(package_root, env)
+
+    assert repeated.returncode == 0, repeated.stderr
+    assert (
+        "previous_protocol_default\t\n"
+        in install_state.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        "safe.desktop\nunsafe/path.desktop",
+        "safe.desktop\runsafe.desktop",
+    ],
+)
+def test_linux_xdg_query_rejects_multiline_or_control_output_without_mutation(
+    tmp_path: Path,
+    unsafe_value: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    before = state.read_bytes()
+    env["ELVERN_TEST_XDG_QUERY_VALUE"] = unsafe_value
+
+    result = _run_installer(package_root, env)
+
+    assert result.returncode != 0
+    assert "current protocol handler is unsafe" in result.stderr
+    assert state.read_bytes() == before
+    assert not (
+        Path(env["HOME"]) / ".local/lib/elvern-vlc-opener"
+    ).exists()
+
+
+def test_linux_uninstaller_removes_only_exact_elvern_mime_tokens(tmp_path: Path) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    desktop_dir = Path(env["XDG_DATA_HOME"]) / "applications"
+    (desktop_dir / "third-party.desktop").write_text("[Desktop Entry]\nName=Third\n")
+    state.write_bytes(
+        b"# keep\n[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=third-party.desktop;elvern-vlc-opener.desktop;other.desktop;\n"
+        b"x-scheme-handler/elvern-vlc=elvern-vlc-opener.desktop;last.desktop;\n"
+        b"\n[Added Associations]\n"
+        b"x-scheme-handler/elvern-vlc=elvern-vlc-opener.desktop;keep-added.desktop;\n"
+    )
+
+    removed = _run_uninstaller(env)
+
+    assert removed.returncode == 0, removed.stderr
+    assert state.read_bytes() == (
+        b"# keep\n[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=third-party.desktop;other.desktop;\n"
+        b"x-scheme-handler/elvern-vlc=last.desktop;\n"
+        b"\n[Added Associations]\n"
+        b"x-scheme-handler/elvern-vlc=elvern-vlc-opener.desktop;keep-added.desktop;\n"
+    )
+
+
+def test_linux_uninstaller_restores_handler_from_xdg_data_dirs(tmp_path: Path) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    system_data = tmp_path / "system-data"
+    applications = system_data / "applications"
+    applications.mkdir(parents=True)
+    (applications / "old-handler.desktop").write_text("[Desktop Entry]\nName=System\n")
+    env["XDG_DATA_DIRS"] = str(system_data)
+    assert _run_installer(package_root, env).returncode == 0
+
+    removed = _run_uninstaller(env)
+
+    assert removed.returncode == 0, removed.stderr
+    assert _read_default_handler(state) == "old-handler.desktop"
+
+
+def test_linux_uninstaller_query_error_causes_no_mutation(tmp_path: Path) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    install_dir = Path(env["HOME"]) / ".local/lib/elvern-vlc-opener"
+    desktop_file = Path(env["XDG_DATA_HOME"]) / "applications/elvern-vlc-opener.desktop"
+    before_state = state.read_bytes()
+    before_install = sorted(path.relative_to(install_dir) for path in install_dir.rglob("*"))
+    env["ELVERN_TEST_XDG_QUERY_ERROR"] = "1"
+
+    removed = _run_uninstaller(env)
+
+    assert removed.returncode != 0
+    assert state.read_bytes() == before_state
+    assert desktop_file.is_file()
+    assert sorted(path.relative_to(install_dir) for path in install_dir.rglob("*")) == before_install
+
+
+def test_linux_uninstaller_cleans_stale_mapping_without_app_files(tmp_path: Path) -> None:
+    _package_root, state, env = _create_linux_package(tmp_path)
+    state.write_text(
+        "[Default Applications]\n"
+        "x-scheme-handler/elvern-vlc=third-party.desktop;elvern-vlc-opener.desktop;\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["/bin/sh", str(LINUX_UNINSTALLER)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert state.read_text(encoding="utf-8") == (
+        "[Default Applications]\n"
+        "x-scheme-handler/elvern-vlc=third-party.desktop;\n"
+    )
 
 
 def test_linux_installer_environment_ignores_polluted_parent_state(

@@ -35,6 +35,10 @@ class DesktopHelperManifestError(RuntimeError):
     """Raised when the desktop helper release manifest cannot be used safely."""
 
 
+class DesktopHelperManifestAbsent(DesktopHelperManifestError):
+    """Raised only when the final manifest component is genuinely absent."""
+
+
 class DesktopHelperManifestOriginMismatch(DesktopHelperManifestError):
     """Raised when an otherwise valid package belongs to another Elvern origin."""
 
@@ -56,10 +60,6 @@ _MAX_MANIFEST_READ_ATTEMPTS = 3
 
 def _canonical_release_root(release_root: Path) -> Path:
     return Path(os.path.abspath(os.fspath(release_root)))
-
-
-def desktop_helper_release_manifest_exists(release_root: Path) -> bool:
-    return (_canonical_release_root(release_root) / HELPER_RELEASE_MANIFEST_NAME).is_file()
 
 
 def reset_desktop_helper_manifest_cache(release_root: Path | None = None) -> None:
@@ -296,7 +296,8 @@ def _normalize_manifest_records(
     expected_bound_origin_sha256: str | None = None,
     verify_artifacts: bool = True,
 ) -> list[dict[str, object]]:
-    if payload.get("schema_version") == RELEASE_MANIFEST_V2_SCHEMA:
+    schema_version = payload.get("schema_version")
+    if schema_version == RELEASE_MANIFEST_V2_SCHEMA:
         return _normalize_v2_manifest_records(
             payload,
             release_root=release_root,
@@ -305,12 +306,24 @@ def _normalize_manifest_records(
             expected_bound_origin_sha256=expected_bound_origin_sha256,
             verify_artifacts=verify_artifacts,
         )
-    return _normalize_legacy_manifest_records(
-        payload,
-        release_root=release_root,
-        platform=platform,
-        release_id=release_id,
-        verify_artifacts=verify_artifacts,
+    legacy_keys = {
+        "helper_version",
+        "channel",
+        "dotnet_runtime_major",
+        "dotnet_runtime_display",
+        "generated_at_utc",
+        "packages",
+    }
+    if schema_version is None and legacy_keys.issubset(payload):
+        return _normalize_legacy_manifest_records(
+            payload,
+            release_root=release_root,
+            platform=platform,
+            release_id=release_id,
+            verify_artifacts=verify_artifacts,
+        )
+    raise DesktopHelperManifestError(
+        "Desktop helper release manifest schema is unsupported"
     )
 
 
@@ -340,8 +353,10 @@ def _normalize_v2_manifest_records(
         "bound_origin_sha256",
     )
     raw_packages = payload.get("packages")
-    if not isinstance(raw_packages, list):
-        raise DesktopHelperManifestError("Desktop helper release manifest packages must be a list")
+    if not isinstance(raw_packages, list) or not raw_packages:
+        raise DesktopHelperManifestError(
+            "Desktop helper v2 release manifest packages must be a non-empty list"
+        )
 
     records: list[dict[str, object]] = []
     seen_targets: set[tuple[str, str]] = set()
@@ -650,7 +665,7 @@ def _open_artifact_no_follow(root_dir: Path, relative_path: str):
         )
 
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
     for flag_name in ("O_CLOEXEC", "O_BINARY"):
         directory_flags |= getattr(os, flag_name, 0)
         file_flags |= getattr(os, flag_name, 0)
@@ -663,7 +678,14 @@ def _open_artifact_no_follow(root_dir: Path, relative_path: str):
             next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
             os.close(directory_fd)
             directory_fd = next_fd
-        file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        try:
+            file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        except FileNotFoundError as exc:
+            if safe_relative_path == HELPER_RELEASE_MANIFEST_NAME:
+                raise DesktopHelperManifestAbsent(
+                    "Desktop helper release manifest is absent"
+                ) from exc
+            raise
     except OSError as exc:
         raise DesktopHelperManifestError(
             "Desktop helper release artifact is unavailable"
