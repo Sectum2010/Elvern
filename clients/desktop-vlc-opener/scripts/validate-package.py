@@ -12,6 +12,16 @@ import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
+for candidate_root in Path(__file__).resolve().parents:
+    if (candidate_root / "clients" / "desktop_helper_package_contract.py").is_file():
+        sys.path.insert(0, str(candidate_root))
+        break
+
+from clients.desktop_helper_package_contract import (  # noqa: E402
+    PACKAGE_NAME_PREFIX,
+    expected_package_filename,
+)
+
 
 MANIFEST_SCHEMA = "desktop-helper-release-manifest-v2"
 INNER_SCHEMA = "desktop-helper-installer-manifest-v2"
@@ -395,6 +405,7 @@ def validate_manifest(
     manifest_path: Path,
     artifacts_dir: Path,
     *,
+    package_name_prefix: str = PACKAGE_NAME_PREFIX,
     expected_origin: str | None = None,
     expected_targets: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
@@ -456,14 +467,33 @@ def validate_manifest(
         require(raw_record["generated_at_utc"] == manifest["generated_at_utc"], "Package timestamp mismatch")
         require(raw_record.get("minimum_os_version") == contract["minimum_os_version"], "Package minimum OS is invalid")
         require(raw_record["installer_tree_manifest_path"] == ".elvern/tree-manifest.tsv", "Tree manifest path is invalid")
-        require_sha(raw_record["sha256"], "Release package SHA-256")
+        package_sha256 = require_sha(
+            raw_record["sha256"],
+            "Release package SHA-256",
+        )
         require_sha(raw_record["installer_manifest_sha256"], "Inner manifest SHA-256")
         require_sha(raw_record["installer_tree_manifest_sha256"], "Tree manifest SHA-256")
         expected_size = require_size(raw_record["size_bytes"], "Release package size")
         archive = artifacts_dir / filename
         require(archive.parent == artifacts_dir and archive.is_file() and not archive.is_symlink(), "Release package is missing or unsafe")
         actual_size, digest = stream_sha256(archive)
-        require(actual_size == expected_size and digest == raw_record["sha256"], "Outer package integrity mismatch")
+        require(actual_size == expected_size and digest == package_sha256, "Outer package integrity mismatch")
+        try:
+            required_filename = expected_package_filename(
+                package_name_prefix,
+                manifest["helper_version"],
+                target,
+                digest,
+            )
+        except ValueError as exc:
+            raise PackageValidationError(
+                "Release package filename contract is invalid"
+            ) from exc
+        require(
+            filename == required_filename
+            and raw_record["relative_path"] == required_filename,
+            "Release package filename does not match its content hash",
+        )
         validate_archive(archive, raw_record, manifest)
         normalized.append(raw_record)
     if expected_targets:
@@ -475,6 +505,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--artifacts-dir", required=True, type=Path)
+    parser.add_argument(
+        "--package-name-prefix",
+        default=PACKAGE_NAME_PREFIX,
+    )
     parser.add_argument("--expected-origin-sha256")
     parser.add_argument("--expected-package-target", action="append", default=[])
     return parser.parse_args()
@@ -486,6 +520,7 @@ def main() -> int:
         packages = validate_manifest(
             args.manifest,
             args.artifacts_dir,
+            package_name_prefix=args.package_name_prefix,
             expected_origin=args.expected_origin_sha256,
             expected_targets=tuple(args.expected_package_target),
         )

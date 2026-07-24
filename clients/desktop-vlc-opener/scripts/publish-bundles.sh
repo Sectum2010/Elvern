@@ -14,11 +14,13 @@ COMMON_README="${PACKAGING_DIR}/common/README.txt"
 SELECTORS="${PACKAGING_DIR}/common/platform-selectors.sh"
 ORIGIN_NORMALIZER="${SCRIPT_DIR}/normalize-origin.py"
 PACKAGE_VALIDATOR="${SCRIPT_DIR}/validate-package.py"
+PACKAGE_CONTRACT="${PROJECT_DIR}/../desktop_helper_package_contract.py"
 NUGET_SOURCE="${ELVERN_DOTNET_NUGET_SOURCE:-https://api.nuget.org/v3/index.json}"
 GENERATED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 PUBLISH_MODE="self-contained"
 ACTIVATE=0
 ALLOW_PARTIAL_ACTIVATE=0
+REPLACE_CORRUPT_ACTIVE_MANIFEST=0
 TARGETS_EXPLICIT=0
 ACTIVATION_LOCK_DIR=""
 ACTIVE_TEMP_FILES=()
@@ -41,6 +43,9 @@ Options:
                                  publish their immutable artifacts and manifest.
   --allow-partial-activate       Dangerous recovery option. Allows --activate
                                  with an incomplete platform set.
+  --replace-corrupt-active-manifest
+                                 Dangerous recovery option. With --activate,
+                                 preserve and replace an invalid active manifest.
 
 Without --activate, every build remains under artifacts/staging and cannot
 affect the active release manifest. Standard builds are self-contained,
@@ -71,14 +76,22 @@ while [[ $# -gt 0 ]]; do
     --linux) select_target "linux"; shift ;;
     --activate) ACTIVATE=1; shift ;;
     --allow-partial-activate) ALLOW_PARTIAL_ACTIVATE=1; shift ;;
+    --replace-corrupt-active-manifest)
+      REPLACE_CORRUPT_ACTIVE_MANIFEST=1
+      shift
+      ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 [[ ${#TARGETS[@]} -gt 0 ]] || { echo "At least one platform target is required." >&2; exit 1; }
+if [[ ${REPLACE_CORRUPT_ACTIVE_MANIFEST} -eq 1 && ${ACTIVATE} -ne 1 ]]; then
+  echo "--replace-corrupt-active-manifest is only valid with --activate." >&2
+  exit 1
+fi
 mapfile -t TARGETS < <(printf '%s\n' "${TARGETS[@]}" | awk '!seen[$0]++')
 
-for required_file in "${PROJECT_FILE}" "${PROPS_FILE}" "${METADATA_FILE}" "${COMMON_README}" "${SELECTORS}" "${ORIGIN_NORMALIZER}" "${PACKAGE_VALIDATOR}"; do
+for required_file in "${PROJECT_FILE}" "${PROPS_FILE}" "${METADATA_FILE}" "${COMMON_README}" "${SELECTORS}" "${ORIGIN_NORMALIZER}" "${PACKAGE_VALIDATOR}" "${PACKAGE_CONTRACT}"; do
   [[ -f "${required_file}" ]] || { echo "Missing required file: ${required_file}" >&2; exit 1; }
 done
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required on the release build host." >&2; exit 1; }
@@ -377,7 +390,14 @@ zip_package() {
   (cd "${PACKAGE_ROOT}" && zip -qry "${provisional}" "${package_root_name}")
   local digest
   digest="$(compute_sha256 "${PACKAGE_ROOT}/${provisional}")"
-  local immutable="${PACKAGE_NAME_PREFIX}-${HELPER_VERSION}-${target_slug}-${digest:0:12}.zip"
+  local immutable
+  immutable="$(
+    python3 "${PACKAGE_CONTRACT}" \
+      "${PACKAGE_NAME_PREFIX}" \
+      "${HELPER_VERSION}" \
+      "${target_slug}" \
+      "${digest}"
+  )"
   mv "${PACKAGE_ROOT}/${provisional}" "${OUTPUT_DIR}/${immutable}"
   printf '%s\n' "${immutable}"
 }
@@ -546,6 +566,7 @@ PY
 VALIDATOR_ARGS=(
   --manifest "${OUTPUT_DIR}/release-manifest.json"
   --artifacts-dir "${OUTPUT_DIR}"
+  --package-name-prefix "${PACKAGE_NAME_PREFIX}"
   --expected-origin-sha256 "${BOUND_ORIGIN_SHA256}"
 )
 for target in "${TARGETS[@]}"; do
@@ -617,18 +638,59 @@ activate_release() {
   printf 'pid=%s\nstarted_at=%s\nbuild_id=%s\n' \
     "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BUILD_ID}" > "${lock_dir}/owner"
   chmod 644 "${lock_dir}/owner"
-  if [[ -f "${ACTIVE_DIR}/release-manifest.json" ]]; then
+  local active_manifest="${ACTIVE_DIR}/release-manifest.json"
+  local active_manifest_valid=0
+  if [[ -e "${active_manifest}" || -L "${active_manifest}" ]]; then
+    if python3 "${PACKAGE_VALIDATOR}" \
+      --manifest "${active_manifest}" \
+      --artifacts-dir "${ACTIVE_DIR}" \
+      --package-name-prefix "${PACKAGE_NAME_PREFIX}" \
+      >/dev/null 2>&1; then
+      active_manifest_valid=1
+    elif [[ ${REPLACE_CORRUPT_ACTIVE_MANIFEST} -ne 1 ]]; then
+      echo "Active desktop helper manifest is invalid; activation was not attempted." >&2
+      exit 1
+    else
+      [[ -f "${active_manifest}" && ! -L "${active_manifest}" ]] || {
+        echo "Active desktop helper manifest is unsafe and cannot be preserved for recovery." >&2
+        exit 1
+      }
+      local corrupt_digest corrupt_backup
+      corrupt_digest="$(compute_sha256 "${active_manifest}")"
+      corrupt_backup="${ACTIVE_DIR}/release-manifest.corrupt-${corrupt_digest:0:12}.json"
+      echo "WARNING: replacing an invalid active desktop helper manifest." >&2
+      echo "The invalid authority will be preserved as ${corrupt_backup}." >&2
+      if [[ -e "${corrupt_backup}" ]]; then
+        [[ -f "${corrupt_backup}" && ! -L "${corrupt_backup}" ]] || {
+          echo "Corrupt manifest backup path is unsafe: ${corrupt_backup}" >&2
+          exit 1
+        }
+        [[ "$(compute_sha256 "${corrupt_backup}")" == "${corrupt_digest}" ]] || {
+          echo "Corrupt manifest backup collision: ${corrupt_backup}" >&2
+          exit 1
+        }
+      else
+        cp "${active_manifest}" "${corrupt_backup}"
+        chmod 0444 "${corrupt_backup}"
+        python3 - "${corrupt_backup}" <<'PY'
+import os
+import sys
+with open(sys.argv[1], "rb") as handle:
+    os.fsync(handle.fileno())
+PY
+        fsync_directory "${ACTIVE_DIR}"
+      fi
+    fi
+  fi
+  if [[ ${active_manifest_valid} -eq 1 ]]; then
     while IFS= read -r old_filename; do
       [[ -n "${old_filename}" ]] && OLD_ACTIVE_REFERENCES["${old_filename}"]=1
-    done < <(python3 - "${ACTIVE_DIR}/release-manifest.json" <<'PY'
+    done < <(python3 - "${active_manifest}" <<'PY'
 import json
 import pathlib
 import sys
 
-try:
-    payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-    payload = {}
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 for package in payload.get("packages", []):
     filename = package.get("filename") if isinstance(package, dict) else None
     if (

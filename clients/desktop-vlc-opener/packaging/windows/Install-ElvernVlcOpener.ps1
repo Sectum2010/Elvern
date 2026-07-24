@@ -39,6 +39,10 @@ function Invoke-InjectedFailure([string]$Point) {
     }
 }
 
+function Get-Win32ErrorCode([Exception]$Exception) {
+    return ($Exception.HResult -band 0xFFFF)
+}
+
 function Test-SafeRelativePath([string]$Value) {
     if (
         [string]::IsNullOrWhiteSpace($Value) -or
@@ -243,11 +247,38 @@ try {
             $installLockPath,
             [System.IO.FileMode]::OpenOrCreate,
             [System.IO.FileAccess]::ReadWrite,
-            [System.IO.FileShare]::None
+            [System.IO.FileShare]::None,
+            4096,
+            [System.IO.FileOptions]::DeleteOnClose
         )
     }
+    catch [System.UnauthorizedAccessException] {
+        throw "Elvern could not create its per-user installation lock because access was denied."
+    }
+    catch [System.Security.SecurityException] {
+        throw "Elvern could not create its per-user installation lock because access was denied."
+    }
+    catch [System.IO.DirectoryNotFoundException] {
+        throw "Elvern could not create its per-user installation lock because the installation path is unavailable."
+    }
+    catch [System.IO.PathTooLongException] {
+        throw "Elvern could not create its per-user installation lock because the installation path is unavailable."
+    }
+    catch [System.ArgumentException] {
+        throw "Elvern could not create its per-user installation lock because the installation path is unavailable."
+    }
+    catch [System.NotSupportedException] {
+        throw "Elvern could not create its per-user installation lock because the installation path is unavailable."
+    }
+    catch [System.IO.IOException] {
+        $lockErrorCode = Get-Win32ErrorCode $_.Exception
+        if ($lockErrorCode -eq 32 -or $lockErrorCode -eq 33) {
+            throw "Another Elvern VLC Opener install is already running for this user."
+        }
+        throw "Elvern could not create its per-user installation lock."
+    }
     catch {
-        throw "Another Elvern VLC Opener install is already running for this user."
+        throw "Elvern could not create its per-user installation lock."
     }
     $lockMetadata = [Text.Encoding]::UTF8.GetBytes(
         "pid=$PID`nstarted_at=$([DateTime]::UtcNow.ToString('o'))`ntransaction_nonce=$transactionNonce`n"

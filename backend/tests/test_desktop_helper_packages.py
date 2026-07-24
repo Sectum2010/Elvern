@@ -12,6 +12,10 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from clients.desktop_helper_package_contract import (
+    PACKAGE_NAME_PREFIX,
+    expected_package_filename,
+)
 from backend.app.schemas import DesktopHelperReleaseResponse, DesktopHelperStatusResponse
 from backend.app.services import desktop_helper_manifest_service as manifest_service
 from backend.app.services import desktop_helper_service
@@ -44,14 +48,24 @@ def _write_manifest(
     monkeypatch,
     tmp_path: Path,
     *,
-    relative_path: str = "elvern-vlc-opener-0.9.0-macos-dual-arch.zip",
+    relative_path: str | None = None,
 ) -> dict[str, object]:
     packages_dir = tmp_path / "packages"
     packages_dir.mkdir()
+    package_payload = b"desktop-helper-package"
+    package_sha256 = _sha256(package_payload)
+    filename = expected_package_filename(
+        PACKAGE_NAME_PREFIX,
+        "0.9.0",
+        "macos-dual-arch",
+        package_sha256,
+    )
+    if relative_path is None:
+        relative_path = filename
     artifact = packages_dir / relative_path
     if ".." not in Path(relative_path).parts:
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_bytes(b"desktop-helper-package")
+        artifact.write_bytes(package_payload)
     manifest = {
         "schema_version": "desktop-helper-release-manifest-v2",
         "helper_version": "0.9.0",
@@ -66,14 +80,14 @@ def _write_manifest(
                 "package_target": "macos-dual-arch",
                 "platform": "mac",
                 "artifact_kind": "zip",
-                "filename": "elvern-vlc-opener-0.9.0-macos-dual-arch.zip",
+                "filename": filename,
                 "relative_path": relative_path,
                 "package_root": "Elvern VLC Opener Installer",
                 "installer_entrypoint": "Install-ElvernVlcOpener.command",
                 "supported_runtime_ids": ["osx-arm64", "osx-x64"],
                 "external_runtime_required": False,
-                "size_bytes": len(b"desktop-helper-package"),
-                "sha256": _sha256(b"desktop-helper-package"),
+                "size_bytes": len(package_payload),
+                "sha256": package_sha256,
                 "installer_manifest_sha256": "a" * 64,
                 "installer_tree_manifest_path": ".elvern/tree-manifest.tsv",
                 "installer_tree_manifest_sha256": "b" * 64,
@@ -89,6 +103,11 @@ def _write_manifest(
     monkeypatch.setattr(manifest_service, "HELPER_RELEASE_PACKAGES_DIR", packages_dir)
     manifest_service.reset_desktop_helper_manifest_cache()
     return manifest
+
+
+def _manifest_artifact_path(manifest: dict[str, object]) -> Path:
+    package = manifest["packages"][0]
+    return manifest_service.HELPER_RELEASE_PACKAGES_DIR / package["relative_path"]
 
 
 def test_manifest_v2_normalizes_one_package_with_self_contained_metadata(monkeypatch, tmp_path) -> None:
@@ -117,6 +136,49 @@ def test_manifest_v2_normalizes_one_package_with_self_contained_metadata(monkeyp
         expected_bound_origin_sha256=BOUND_ORIGIN_SHA256,
     )
     assert bound_records[0]["package_binding"] == "compatible"
+
+
+@pytest.mark.parametrize(
+    "filename_mutator",
+    [
+        lambda filename: (
+            filename[:-5]
+            + ("0" if filename[-5] != "0" else "1")
+            + ".zip"
+        ),
+        lambda filename: filename[:-16] + filename[-16:-4].upper() + ".zip",
+        lambda filename: filename[:-17] + ".zip",
+        lambda filename: filename[:-4] + "0.zip",
+        lambda filename: "renamed-" + filename,
+    ],
+    ids=[
+        "wrong-one-character",
+        "uppercase-hash",
+        "missing-hash",
+        "extra-hash",
+        "renamed-content",
+    ],
+)
+def test_manifest_v2_rejects_filename_not_bound_to_outer_sha256(
+    monkeypatch,
+    tmp_path,
+    filename_mutator,
+) -> None:
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    filename = filename_mutator(manifest["packages"][0]["filename"])
+    manifest["packages"][0]["filename"] = filename
+    manifest["packages"][0]["relative_path"] = filename
+    manifest_service.HELPER_RELEASE_MANIFEST_PATH.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    manifest_service.reset_desktop_helper_manifest_cache()
+
+    with pytest.raises(
+        manifest_service.DesktopHelperManifestError,
+        match="filename does not match its content hash",
+    ):
+        manifest_service.list_desktop_helper_manifest_records(platform="mac")
 
 
 def test_manifest_v2_rejects_package_path_traversal(monkeypatch, tmp_path) -> None:
@@ -171,16 +233,16 @@ def test_manifest_snapshot_rebuilds_when_manifest_is_replaced(
 ) -> None:
     manifest = _write_manifest(monkeypatch, tmp_path)
     first = manifest_service.list_desktop_helper_manifest_records(platform="mac")
-    assert first[0]["version"] == "0.9.0"
+    assert first[0]["channel"] == "stable"
 
-    manifest["helper_version"] = "0.9.1"
+    manifest["channel"] = "beta"
     replacement = manifest_service.HELPER_RELEASE_MANIFEST_PATH.with_suffix(".replacement")
     replacement.write_text(json.dumps(manifest), encoding="utf-8")
     replacement.replace(manifest_service.HELPER_RELEASE_MANIFEST_PATH)
 
     second = manifest_service.list_desktop_helper_manifest_records(platform="mac")
 
-    assert second[0]["version"] == "0.9.1"
+    assert second[0]["channel"] == "beta"
     assert second[0]["id"] != first[0]["id"]
 
 
@@ -245,11 +307,12 @@ def test_manifest_snapshot_uses_open_inode_then_observes_atomic_replacement(
 ) -> None:
     manifest = _write_manifest(monkeypatch, tmp_path)
     manifest_path = manifest_service.HELPER_RELEASE_MANIFEST_PATH
-    manifest["helper_version"] = "0.9.1"
+    manifest["channel"] = "beta"
     replacement = manifest_path.with_name("replacement.json")
     replacement.write_text(json.dumps(manifest), encoding="utf-8")
     real_open = manifest_service._open_artifact_no_follow
     replaced = False
+    open_count = 0
 
     class ReplacingHandle:
         def __init__(self, handle) -> None:
@@ -270,6 +333,8 @@ def test_manifest_snapshot_uses_open_inode_then_observes_atomic_replacement(
             self.handle.close()
 
     def replacing_open(root_dir: Path, relative_path: str):
+        nonlocal open_count
+        open_count += 1
         handle = real_open(root_dir, relative_path)
         return (
             ReplacingHandle(handle)
@@ -278,12 +343,140 @@ def test_manifest_snapshot_uses_open_inode_then_observes_atomic_replacement(
         )
 
     monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", replacing_open)
-    first_bytes, first_fingerprint = manifest_service._read_manifest_snapshot()
-    second_bytes, second_fingerprint = manifest_service._read_manifest_snapshot()
+    manifest_bytes, _fingerprint = manifest_service._read_manifest_snapshot()
 
-    assert json.loads(first_bytes)["helper_version"] == "0.9.0"
-    assert json.loads(second_bytes)["helper_version"] == "0.9.1"
-    assert first_fingerprint != second_fingerprint
+    assert json.loads(manifest_bytes)["channel"] == "beta"
+    assert replaced is True
+    assert open_count == 2
+
+
+def test_manifest_snapshot_retries_same_inode_rewrite_even_when_mtime_is_restored(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    manifest_path = manifest_service.HELPER_RELEASE_MANIFEST_PATH
+    real_open = manifest_service._open_artifact_no_follow
+    mutated = False
+    open_count = 0
+
+    class SameInodeMutatingHandle:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size=-1):
+            nonlocal mutated
+            payload = self.handle.read(size)
+            if not mutated:
+                original_stat = manifest_path.stat()
+                replacement = manifest_path.read_bytes().replace(
+                    b'"stable"',
+                    b'"staple"',
+                    1,
+                )
+                assert len(replacement) == original_stat.st_size
+                manifest_path.write_bytes(replacement)
+                os.utime(
+                    manifest_path,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+                mutated = True
+            return payload
+
+        def close(self):
+            self.handle.close()
+
+    def mutating_open(root_dir: Path, relative_path: str):
+        nonlocal open_count
+        open_count += 1
+        handle = real_open(root_dir, relative_path)
+        return (
+            SameInodeMutatingHandle(handle)
+            if relative_path == manifest_path.name
+            else handle
+        )
+
+    monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", mutating_open)
+    manifest_bytes, _fingerprint = manifest_service._read_manifest_snapshot()
+
+    assert json.loads(manifest_bytes)["channel"] == "staple"
+    assert open_count == 2
+
+
+def test_manifest_snapshot_fails_closed_and_closes_handles_during_continuous_ctime_changes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    manifest_path = manifest_service.HELPER_RELEASE_MANIFEST_PATH
+    real_open = manifest_service._open_artifact_no_follow
+    closed = 0
+
+    class ContinuouslyMutatingHandle:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size=-1):
+            payload = self.handle.read(size)
+            original_stat = manifest_path.stat()
+            current = manifest_path.read_bytes()
+            replacement = (
+                current.replace(b'"stable"', b'"staple"', 1)
+                if b'"stable"' in current
+                else current.replace(b'"staple"', b'"stable"', 1)
+            )
+            manifest_path.write_bytes(replacement)
+            os.utime(
+                manifest_path,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            return payload
+
+        def close(self):
+            nonlocal closed
+            self.handle.close()
+            closed += 1
+
+    def mutating_open(root_dir: Path, relative_path: str):
+        handle = real_open(root_dir, relative_path)
+        return (
+            ContinuouslyMutatingHandle(handle)
+            if relative_path == manifest_path.name
+            else handle
+        )
+
+    monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", mutating_open)
+
+    with pytest.raises(
+        manifest_service.DesktopHelperManifestError,
+        match="changed during reading",
+    ):
+        manifest_service._read_manifest_snapshot()
+
+    assert closed == manifest_service._MAX_MANIFEST_READ_ATTEMPTS
+
+
+def test_manifest_snapshot_stable_read_opens_once(monkeypatch, tmp_path) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    real_open = manifest_service._open_artifact_no_follow
+    open_count = 0
+
+    def counted_open(root_dir: Path, relative_path: str):
+        nonlocal open_count
+        open_count += 1
+        return real_open(root_dir, relative_path)
+
+    monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", counted_open)
+
+    manifest_service._read_manifest_snapshot()
+
+    assert open_count == 1
 
 
 @pytest.mark.parametrize(
@@ -343,7 +536,14 @@ def test_manifest_snapshot_closes_its_read_handle(monkeypatch, tmp_path) -> None
 def test_manifest_only_hashes_artifacts_for_the_requested_platform(monkeypatch, tmp_path) -> None:
     manifest = _write_manifest(monkeypatch, tmp_path)
     windows_payload = b"windows-package"
-    windows_artifact = manifest_service.HELPER_RELEASE_PACKAGES_DIR / "windows.zip"
+    windows_sha256 = _sha256(windows_payload)
+    windows_filename = expected_package_filename(
+        PACKAGE_NAME_PREFIX,
+        "0.9.0",
+        "windows-x64",
+        windows_sha256,
+    )
+    windows_artifact = manifest_service.HELPER_RELEASE_PACKAGES_DIR / windows_filename
     windows_artifact.write_bytes(windows_payload)
     manifest["packages"].append({
         "package_target": "windows-x64",
@@ -356,7 +556,7 @@ def test_manifest_only_hashes_artifacts_for_the_requested_platform(monkeypatch, 
         "supported_runtime_ids": ["win-x64"],
         "external_runtime_required": False,
         "size_bytes": len(windows_payload),
-        "sha256": _sha256(windows_payload),
+        "sha256": windows_sha256,
         "installer_manifest_sha256": "c" * 64,
         "installer_tree_manifest_path": ".elvern/tree-manifest.tsv",
         "installer_tree_manifest_sha256": "d" * 64,
@@ -384,7 +584,7 @@ def test_manifest_only_hashes_artifacts_for_the_requested_platform(monkeypatch, 
 
     assert len(records) == 1
     assert [path.name for path in hashed_paths] == [
-        "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+        manifest["packages"][0]["filename"]
     ]
 
 
@@ -392,11 +592,8 @@ def test_manifest_rehashes_an_artifact_replaced_with_same_size_and_mtime(
     monkeypatch,
     tmp_path,
 ) -> None:
-    _write_manifest(monkeypatch, tmp_path)
-    artifact = (
-        manifest_service.HELPER_RELEASE_PACKAGES_DIR
-        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
-    )
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    artifact = _manifest_artifact_path(manifest)
     original_stat = artifact.stat()
     original_sha256 = manifest_service._sha256_for_file
     hash_calls = 0
@@ -457,11 +654,8 @@ def test_release_download_rechecks_artifact_fingerprint_and_rejects_corruption(
 
 
 def test_verified_handle_streams_original_inode_after_path_replacement(monkeypatch, tmp_path) -> None:
-    _write_manifest(monkeypatch, tmp_path)
-    artifact = (
-        manifest_service.HELPER_RELEASE_PACKAGES_DIR
-        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
-    )
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    artifact = _manifest_artifact_path(manifest)
     original = artifact.read_bytes()
     handle = manifest_service.open_verified_artifact(
         artifact,
@@ -485,11 +679,8 @@ def test_verified_handle_streams_original_inode_after_path_replacement(monkeypat
 
 
 def test_open_verified_artifact_fails_closed_when_changed_during_hashing(monkeypatch, tmp_path) -> None:
-    _write_manifest(monkeypatch, tmp_path)
-    artifact = (
-        manifest_service.HELPER_RELEASE_PACKAGES_DIR
-        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
-    )
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    artifact = _manifest_artifact_path(manifest)
     original = artifact.read_bytes()
     real_hash = manifest_service._sha256_for_file
 
@@ -514,11 +705,8 @@ def test_open_verified_artifact_fails_closed_when_changed_during_hashing(monkeyp
 
 
 def test_open_verified_artifact_refuses_a_symlink(monkeypatch, tmp_path) -> None:
-    _write_manifest(monkeypatch, tmp_path)
-    artifact = (
-        manifest_service.HELPER_RELEASE_PACKAGES_DIR
-        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
-    )
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    artifact = _manifest_artifact_path(manifest)
     original = artifact.read_bytes()
     link = manifest_service.HELPER_RELEASE_PACKAGES_DIR / "link.zip"
     link.symlink_to(artifact)
@@ -538,13 +726,10 @@ def test_manifest_artifact_resolution_rejects_symlinks_in_the_real_relative_path
     tmp_path,
     symlink_component: str,
 ) -> None:
-    _write_manifest(
-        monkeypatch,
-        tmp_path,
-        relative_path="nested/elvern-vlc-opener-0.9.0-macos-dual-arch.zip",
-    )
-    packages_dir = manifest_service.HELPER_RELEASE_PACKAGES_DIR
-    artifact = packages_dir / "nested" / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    packages_dir = tmp_path / "packages"
+    artifact = packages_dir / "nested" / "artifact.zip"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"desktop-helper-package")
     outside = tmp_path / "outside"
     outside.mkdir()
     outside_artifact = outside / artifact.name
@@ -556,13 +741,15 @@ def test_manifest_artifact_resolution_rejects_symlinks_in_the_real_relative_path
     else:
         artifact.unlink()
         artifact.symlink_to(outside_artifact)
-    manifest_service.reset_desktop_helper_manifest_cache()
-
     with pytest.raises(
         manifest_service.DesktopHelperManifestError,
         match="artifact is unavailable",
     ):
-        manifest_service.list_desktop_helper_manifest_records(platform="mac")
+        handle = manifest_service._open_artifact_no_follow(
+            packages_dir,
+            "nested/artifact.zip",
+        )
+        handle.close()
 
 
 def test_different_artifacts_hash_in_parallel_without_a_global_verification_lock(
@@ -644,11 +831,8 @@ def test_download_verification_reuses_an_exact_fingerprint_cache_hit(
     monkeypatch,
     tmp_path,
 ) -> None:
-    _write_manifest(monkeypatch, tmp_path)
-    artifact = (
-        manifest_service.HELPER_RELEASE_PACKAGES_DIR
-        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
-    )
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    artifact = _manifest_artifact_path(manifest)
     original_sha256 = manifest_service._sha256_for_file
     hash_calls = 0
 

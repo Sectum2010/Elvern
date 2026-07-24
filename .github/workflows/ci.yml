@@ -11,8 +11,10 @@ permissions:
   contents: read
 
 jobs:
-  build-and-test:
+  backend_tests:
+    name: Backend tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -28,8 +30,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r backend/requirements-test.txt
 
+      - name: Run Linux installer tests with polluted runner XDG environment
+        run: |
+          mkdir -p "$RUNNER_TEMP/outer-xdg-config" "$RUNNER_TEMP/outer-xdg-data"
+          CI=true \
+          XDG_CONFIG_HOME="$RUNNER_TEMP/outer-xdg-config" \
+          XDG_DATA_HOME="$RUNNER_TEMP/outer-xdg-data" \
+          ELVERN_INSTALL_TEST_FAIL_AT="outside-fixture" \
+          python -m pytest backend/tests/test_desktop_helper_linux_installer.py -q
+
       - name: Run backend tests
         run: python -m pytest
+
+  desktop_helper_tests:
+    name: Desktop helper tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
@@ -40,6 +60,7 @@ jobs:
         run: |
           dotnet --info
           dotnet --list-sdks
+          dotnet --version
 
       - name: Build desktop helper
         run: dotnet build clients/desktop-vlc-opener/Elvern.VlcOpener.csproj --configuration Release
@@ -50,6 +71,7 @@ jobs:
   frontend_tests:
     name: Frontend tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -75,6 +97,7 @@ jobs:
   security_audit:
     name: Security audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

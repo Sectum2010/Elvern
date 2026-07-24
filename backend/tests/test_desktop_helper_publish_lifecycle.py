@@ -12,6 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from clients.desktop_helper_package_contract import (
+    PACKAGE_NAME_PREFIX,
+    expected_package_filename,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_ROOT = ROOT / "clients" / "desktop-vlc-opener"
@@ -23,8 +28,14 @@ def _write_executable(path: Path, source: str) -> None:
 
 
 def _create_publish_workspace(tmp_path: Path) -> tuple[Path, dict[str, str]]:
-    workspace = tmp_path / "desktop-vlc-opener"
+    clients_root = tmp_path / "clients"
+    workspace = clients_root / "desktop-vlc-opener"
     (workspace / "scripts").mkdir(parents=True)
+    clients_root.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        ROOT / "clients" / "desktop_helper_package_contract.py",
+        clients_root / "desktop_helper_package_contract.py",
+    )
     shutil.copy2(
         HELPER_ROOT / "scripts" / "publish-bundles.sh",
         workspace / "scripts" / "publish-bundles.sh",
@@ -83,10 +94,17 @@ printf '#!/usr/bin/env sh\\nprintf "%s\\\\n" "0.9.0"\\n' > "$OUTPUT/$NAME"
 chmod 755 "$OUTPUT/$NAME"
 """,
     )
+    home = tmp_path / "home"
+    temp_dir = tmp_path / "tmp"
+    home.mkdir()
+    temp_dir.mkdir()
     env = {
-        **os.environ,
+        "HOME": str(home),
+        "TMPDIR": str(temp_dir),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         "ELVERN_BACKEND_ORIGIN": "https://elvern.example.test/",
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
     }
     return workspace, env
 
@@ -138,6 +156,17 @@ def _refresh_outer_package_integrity(manifest_path: Path) -> None:
         artifact = manifest_path.parent / package["filename"]
         package["size_bytes"] = artifact.stat().st_size
         package["sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        filename = expected_package_filename(
+            PACKAGE_NAME_PREFIX,
+            manifest["helper_version"],
+            package["package_target"],
+            package["sha256"],
+        )
+        if artifact.name != filename:
+            replacement = artifact.with_name(filename)
+            os.replace(artifact, replacement)
+        package["filename"] = filename
+        package["relative_path"] = filename
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
@@ -245,6 +274,57 @@ def test_strict_package_validator_rejects_non_list_runtime_ids(
     assert validated.returncode != 0
     assert "Release RID order is invalid" in validated.stderr
     assert "Traceback" not in validated.stderr
+
+
+@pytest.mark.parametrize(
+    "filename_mutator",
+    [
+        lambda filename: (
+            filename[:-5]
+            + ("0" if filename[-5] != "0" else "1")
+            + ".zip"
+        ),
+        lambda filename: filename[:-16] + filename[-16:-4].upper() + ".zip",
+        lambda filename: filename[:-17] + ".zip",
+        lambda filename: filename[:-4] + "0.zip",
+        lambda filename: "renamed-" + filename,
+    ],
+    ids=[
+        "wrong-one-character",
+        "uppercase-hash",
+        "missing-hash",
+        "extra-hash",
+        "renamed-content",
+    ],
+)
+def test_strict_package_validator_rejects_filename_not_bound_to_content(
+    tmp_path: Path,
+    filename_mutator,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    published = _run_publisher(workspace, env, "--windows")
+    assert published.returncode == 0, published.stderr
+    manifest_path = _staged_manifests(workspace)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package = manifest["packages"][0]
+    old_archive = manifest_path.parent / package["filename"]
+    renamed_filename = filename_mutator(package["filename"])
+    os.replace(old_archive, old_archive.with_name(renamed_filename))
+    package["filename"] = renamed_filename
+    package["relative_path"] = renamed_filename
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    validated = _run_package_validator(
+        workspace,
+        manifest_path,
+        "windows-x64",
+    )
+
+    assert validated.returncode != 0
+    assert "filename does not match its content hash" in validated.stderr
 
 
 @pytest.mark.parametrize("tamper_kind", ["traversal", "case_collision", "symlink"])
@@ -426,6 +506,99 @@ def test_full_verified_build_activates_three_package_manifest_atomically(
     assert not list(active_dir.glob(".release-manifest.json.new.*"))
 
 
+def test_corrupt_active_manifest_is_rejected_before_any_artifact_copy(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    active_dir = workspace / "artifacts" / "packages"
+    active_dir.mkdir(parents=True)
+    active_manifest = active_dir / "release-manifest.json"
+    active_manifest.write_bytes(b"{corrupt-json")
+
+    result = _run_publisher(workspace, env, "--activate")
+
+    assert result.returncode != 0
+    assert (
+        "Active desktop helper manifest is invalid; activation was not attempted."
+        in result.stderr
+    )
+    assert active_manifest.read_bytes() == b"{corrupt-json"
+    assert not list(active_dir.glob("*.zip"))
+    assert not list(active_dir.glob("release-manifest.corrupt-*.json"))
+
+
+def test_explicit_corrupt_manifest_recovery_preserves_old_authority_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    active_dir = workspace / "artifacts" / "packages"
+    active_dir.mkdir(parents=True)
+    corrupt_payload = b"{corrupt-json"
+    corrupt_digest = hashlib.sha256(corrupt_payload).hexdigest()
+    active_manifest = active_dir / "release-manifest.json"
+    active_manifest.write_bytes(corrupt_payload)
+    old_artifact = active_dir / "preexisting-legacy-artifact.zip"
+    old_artifact.write_bytes(b"must remain")
+
+    result = _run_publisher(
+        workspace,
+        env,
+        "--activate",
+        "--replace-corrupt-active-manifest",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "WARNING: replacing an invalid active" in result.stderr
+    backup = (
+        active_dir
+        / f"release-manifest.corrupt-{corrupt_digest[:12]}.json"
+    )
+    assert backup.read_bytes() == corrupt_payload
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o444
+    assert old_artifact.read_bytes() == b"must remain"
+    replacement = json.loads(active_manifest.read_text(encoding="utf-8"))
+    assert replacement["schema_version"] == "desktop-helper-release-manifest-v2"
+    assert len(replacement["packages"]) == 3
+
+
+def test_corrupt_manifest_recovery_flag_requires_activation(tmp_path: Path) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+
+    result = _run_publisher(
+        workspace,
+        env,
+        "--windows",
+        "--replace-corrupt-active-manifest",
+    )
+
+    assert result.returncode != 0
+    assert "only valid with --activate" in result.stderr
+    assert not (workspace / "artifacts" / "staging").exists()
+
+
+def test_active_manifest_symlink_is_rejected_without_copying_artifacts(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    active_dir = workspace / "artifacts" / "packages"
+    active_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-manifest.json"
+    outside.write_text('{"outside":true}\n', encoding="utf-8")
+    active_manifest = active_dir / "release-manifest.json"
+    active_manifest.symlink_to(outside)
+
+    result = _run_publisher(workspace, env, "--activate")
+
+    assert result.returncode != 0
+    assert (
+        "Active desktop helper manifest is invalid; activation was not attempted."
+        in result.stderr
+    )
+    assert active_manifest.is_symlink()
+    assert outside.read_text(encoding="utf-8") == '{"outside":true}\n'
+    assert not list(active_dir.glob("*.zip"))
+
+
 def test_publish_failure_and_invalid_origin_leave_active_manifest_unchanged(
     tmp_path: Path,
 ) -> None:
@@ -469,6 +642,7 @@ def test_injected_activation_failure_preserves_old_manifest_and_cleans_temp_file
             "ELVERN_PUBLISH_TEST_FAIL_AT": failure_point,
         },
         "--activate",
+        "--replace-corrupt-active-manifest",
     )
 
     assert result.returncode != 0
@@ -496,6 +670,7 @@ def test_activation_cleanup_failure_preserves_old_manifest_and_reports_orphan(
             "ELVERN_PUBLISH_TEST_FAIL_AT": "orphan_cleanup",
         },
         "--activate",
+        "--replace-corrupt-active-manifest",
     )
 
     assert result.returncode != 0
@@ -529,6 +704,7 @@ def test_failed_activation_preserves_preexisting_identical_artifact(
             "ELVERN_PUBLISH_TEST_FAIL_AT": "artifact_copy",
         },
         "--activate",
+        "--replace-corrupt-active-manifest",
     )
 
     assert result.returncode != 0

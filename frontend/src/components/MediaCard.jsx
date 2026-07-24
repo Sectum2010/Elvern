@@ -28,7 +28,9 @@ import {
 } from "../lib/smartPosterLoading";
 import {
   getPosterRecoveryAttachContext,
+  hasPosterRecoveryAttempt,
   isPosterAttachContextRecovered,
+  markPosterRecoveryAttempt,
   POSTER_RECOVERY_COOLDOWN_MS,
   resolvePosterRecoveryErrorContext,
   subscribePosterRecoveryEvents,
@@ -136,11 +138,10 @@ export function MediaCard({
   const posterLoadStateRef = useRef(posterLoadState);
   const posterRecoveryRef = useRef({
     url: resolvedPosterUrl,
-    eligible: false,
-    incident: 0,
-    failureId: 0,
     attachFailureWatermark: 0,
-    attempted: false,
+    boundIncidentId: 0,
+    boundFailureId: 0,
+    attemptedIncidentIds: [],
   });
   const posterRequestAttachedRef = useRef(false);
   const posterRecoveryTimerRef = useRef(0);
@@ -235,11 +236,10 @@ export function MediaCard({
     posterRecoveryUrlRef.current = resolvedPosterUrl;
     posterRecoveryRef.current = {
       url: resolvedPosterUrl,
-      eligible: false,
-      incident: 0,
-      failureId: 0,
       attachFailureWatermark: 0,
-      attempted: false,
+      boundIncidentId: 0,
+      boundFailureId: 0,
+      attemptedIncidentIds: [],
     };
     posterRequestAttachedRef.current = false;
     if (posterRecoveryTimerRef.current) {
@@ -259,17 +259,21 @@ export function MediaCard({
   const retryRecoveredPoster = useCallback(() => {
     const loadState = posterLoadStateRef.current;
     const recovery = posterRecoveryRef.current;
+    const incidentId = Number(recovery.boundIncidentId || 0);
     if (
       recovery.url !== resolvedPosterUrl
-      || !recovery.eligible
-      || recovery.attempted
+      || incidentId <= 0
+      || hasPosterRecoveryAttempt(recovery, incidentId)
       || !isPosterAttachContextRecovered(recovery)
       || loadState.url !== resolvedPosterUrl
       || !loadState.failed
     ) {
       return;
     }
-    recovery.attempted = true;
+    posterRecoveryRef.current = markPosterRecoveryAttempt(
+      recovery,
+      incidentId,
+    );
     window.clearTimeout(posterRecoveryTimerRef.current);
     posterRecoveryTimerRef.current = window.setTimeout(() => {
       const current = posterLoadStateRef.current;
@@ -298,13 +302,14 @@ export function MediaCard({
     }
     posterRequestAttachedRef.current = true;
     const current = posterRecoveryRef.current;
-    if (current.url === resolvedPosterUrl && current.attempted) {
-      return;
-    }
     posterRecoveryRef.current = {
       url: resolvedPosterUrl,
       ...getPosterRecoveryAttachContext(),
-      attempted: false,
+      attemptedIncidentIds: (
+        current.url === resolvedPosterUrl
+          ? current.attemptedIncidentIds
+          : []
+      ),
     };
   }, [resolvedPosterUrl]);
 
@@ -410,11 +415,10 @@ export function MediaCard({
                 // starts clean for any future incident.
                 posterRecoveryRef.current = {
                   url: resolvedPosterUrl,
-                  eligible: false,
-                  incident: 0,
-                  failureId: 0,
                   attachFailureWatermark: 0,
-                  attempted: false,
+                  boundIncidentId: 0,
+                  boundFailureId: 0,
+                  attemptedIncidentIds: [],
                 };
                 const loadedState = {
                   url: resolvedPosterUrl,

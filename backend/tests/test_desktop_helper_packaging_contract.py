@@ -18,6 +18,16 @@ def _bash(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _sh(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/sh", "-c", script],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_macos_runtime_selector_handles_native_and_rosetta() -> None:
     selectors = HELPER_ROOT / "packaging" / "common" / "platform-selectors.sh"
     cases = {
@@ -44,23 +54,36 @@ def test_linux_runtime_selector_handles_cpu_and_libc_matrix() -> None:
         ("x86_64", "musl"): "linux-musl-x64",
     }
     for (machine, libc), expected in cases.items():
-        result = _bash(f'source "{selectors}"; select_linux_runtime "{machine}" "{libc}"')
+        result = _sh(f'. "{selectors}"; select_linux_runtime "{machine}" "{libc}"')
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == expected
 
-    assert _bash(f'source "{selectors}"; select_linux_runtime "x86_64" "unknown"').returncode != 0
-    assert _bash(f'source "{selectors}"; select_linux_runtime "ppc64" "glibc"').returncode != 0
+    assert _sh(f'. "{selectors}"; select_linux_runtime "x86_64" "unknown"').returncode != 0
+    assert _sh(f'. "{selectors}"; select_linux_runtime "ppc64" "glibc"').returncode != 0
 
 
 def test_installer_scripts_are_syntactically_valid() -> None:
-    scripts = [
+    bash_scripts = [
         HELPER_ROOT / "packaging" / "macos" / "Install-ElvernVlcOpener.command",
-        HELPER_ROOT / "packaging" / "linux" / "Install-ElvernVlcOpener.sh",
         HELPER_ROOT / "scripts" / "publish-bundles.sh",
     ]
-    for script in scripts:
+    for script in bash_scripts:
         result = subprocess.run(
             ["bash", "-n", str(script)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"{script}: {result.stderr}"
+
+    sh_scripts = [
+        HELPER_ROOT / "packaging" / "common" / "platform-selectors.sh",
+        HELPER_ROOT / "packaging" / "linux" / "Install-ElvernVlcOpener.sh",
+        HELPER_ROOT / "packaging" / "linux" / "Uninstall-ElvernVlcOpener.sh",
+    ]
+    for script in sh_scripts:
+        result = subprocess.run(
+            ["/bin/sh", "-n", str(script)],
             check=False,
             capture_output=True,
             text=True,
@@ -138,7 +161,7 @@ def test_installers_verify_the_full_tree_before_using_package_code() -> None:
     ).read_text(encoding="utf-8")
 
     assert mac.index("verify_package_tree") < mac.index('source "${SELECTORS}"')
-    assert linux.index("verify_package_tree") < linux.index('source "${SELECTORS}"')
+    assert linux.index("verify_package_tree") < linux.index('. "${SELECTORS}"')
     assert windows.index("Test-InstallerTree") < windows.index(
         "$installerManifest = Read-StrictInstallerManifest"
     )
@@ -177,7 +200,19 @@ def test_windows_installer_uses_a_powershell_51_exclusive_per_user_file_lock() -
     assert "[System.IO.FileMode]::OpenOrCreate" in source
     assert "[System.IO.FileAccess]::ReadWrite" in source
     assert "[System.IO.FileShare]::None" in source
+    assert "[System.IO.FileOptions]::DeleteOnClose" in source
     assert "Another Elvern VLC Opener install is already running for this user." in source
+    assert "Get-Win32ErrorCode" in source
+    assert "$lockErrorCode -eq 32 -or $lockErrorCode -eq 33" in source
+    assert (
+        "Elvern could not create its per-user installation lock because access was denied."
+        in source
+    )
+    assert (
+        "Elvern could not create its per-user installation lock because the installation path is unavailable."
+        in source
+    )
+    assert "Elvern could not create its per-user installation lock." in source
     assert source.index("$installLockHandle = New-Object System.IO.FileStream") < source.index(
         "\n    Test-InstallerTree\n"
     )
@@ -244,7 +279,11 @@ def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> 
     assert '--activate' in source
     assert 'ALLOW_PARTIAL_ACTIVATE=0' in source
     assert '--allow-partial-activate' in source
-    assert '${digest:0:12}.zip' in source
+    assert 'PACKAGE_CONTRACT="${PROJECT_DIR}/../desktop_helper_package_contract.py"' in source
+    assert 'python3 "${PACKAGE_CONTRACT}"' in source
+    assert "--replace-corrupt-active-manifest" in source
+    assert "Active desktop helper manifest is invalid; activation was not attempted." in source
+    assert "release-manifest.corrupt-${corrupt_digest:0:12}.json" in source
     assert "Immutable active artifact collision:" in source
     assert 'mv "${manifest_temp}" "${ACTIVE_DIR}/release-manifest.json"' in source
     assert 'mkdir "${lock_dir}"' in source

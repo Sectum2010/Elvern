@@ -39,6 +39,11 @@ with non-sensitive owner diagnostics prevents concurrent activation. Failure
 before the final manifest rename leaves the previous active manifest authoritative
 and removes temporary active files. The dangerous
 `--allow-partial-activate` option exists only for explicit rollback/recovery work.
+If the active manifest itself is corrupt, activation fails before copying any new
+artifact. An operator may explicitly pair `--replace-corrupt-active-manifest` with
+`--activate` after validating the new release set; the publisher preserves the
+unreadable authority as an immutable SHA-named backup and does not infer or delete
+any artifacts from it.
 
 Publishing requires the .NET 10 SDK and every requested RID runtime pack. Any
 missing RID fails the entire selected publish; the script never substitutes a
@@ -106,6 +111,7 @@ Unzip the Linux package and run:
 The installer detects x64/ARM64 and glibc/musl, verifies the complete package tree
 and selected payload, installs under `~/.local/lib/elvern-vlc-opener`, and registers
 the protocol with `xdg-mime`. It does not need Python, use `sudo`, or modify `/usr`.
+The installer and uninstaller run with POSIX `/bin/sh`; Bash is not required.
 `--runtime <rid>` exists only for advanced troubleshooting and must match the
 verified manifest allowlist.
 
@@ -162,7 +168,10 @@ one recovery request without crossing user identities.
 dotnet build Elvern.VlcOpener.csproj --configuration Release
 dotnet test Tests/Elvern.VlcOpener.Tests.csproj --configuration Release
 bash -n packaging/macos/Install-ElvernVlcOpener.command
-bash -n packaging/linux/Install-ElvernVlcOpener.sh
+/bin/sh -n packaging/linux/Install-ElvernVlcOpener.sh
+/bin/sh -n packaging/linux/Uninstall-ElvernVlcOpener.sh
+dash -n packaging/linux/Install-ElvernVlcOpener.sh
+busybox sh -n packaging/linux/Install-ElvernVlcOpener.sh
 bash -n scripts/publish-bundles.sh
 ```
 

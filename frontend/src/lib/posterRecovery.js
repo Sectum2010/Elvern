@@ -8,23 +8,16 @@ import {
 
 
 export const POSTER_RECOVERY_COOLDOWN_MS = 500;
+export const MAX_POSTER_RECOVERY_ATTEMPTED_INCIDENTS = 6;
 
 
 export function getPosterRecoveryAttachContext() {
   const snapshot = getConnectivityRecoverySnapshot();
-  return snapshot.active
-    ? {
-      eligible: true,
-      incident: snapshot.activeIncidentId,
-      failureId: snapshot.latestFailureId,
-      attachFailureWatermark: snapshot.latestFailureId,
-    }
-    : {
-      eligible: false,
-      incident: 0,
-      failureId: 0,
-      attachFailureWatermark: snapshot.latestFailureId,
-    };
+  return {
+    attachFailureWatermark: snapshot.latestFailureId,
+    boundIncidentId: snapshot.active ? snapshot.activeIncidentId : 0,
+    boundFailureId: snapshot.active ? snapshot.latestFailureId : 0,
+  };
 }
 
 
@@ -34,30 +27,86 @@ export const getPosterRecoveryCandidate = getPosterRecoveryAttachContext;
 
 
 export function resolvePosterRecoveryErrorContext(context) {
-  if (context?.eligible) {
+  const snapshot = getConnectivityRecoverySnapshot();
+  const boundIncidentId = Number(context?.boundIncidentId || 0);
+  const boundFailureId = Number(context?.boundFailureId || 0);
+  const searchWatermark = Math.max(
+    Number(context?.attachFailureWatermark || 0),
+    boundFailureId,
+  );
+  const newerIncident = getConnectivityIncidentAfterFailure(
+    searchWatermark,
+    snapshot.latestFailureId,
+  );
+  if (newerIncident) {
+    return {
+      ...context,
+      boundIncidentId: newerIncident.incidentId,
+      boundFailureId: newerIncident.latestFailureId,
+    };
+  }
+  if (
+    boundIncidentId > 0
+    && snapshot.active
+    && snapshot.activeIncidentId === boundIncidentId
+    && snapshot.latestFailureId > boundFailureId
+  ) {
+    return {
+      ...context,
+      boundFailureId: snapshot.latestFailureId,
+    };
+  }
+  if (boundIncidentId > 0) {
     return context;
   }
   const incident = getConnectivityIncidentAfterFailure(
     context?.attachFailureWatermark,
+    snapshot.latestFailureId,
   );
-  if (!incident) {
-    return context;
-  }
-  return {
-    ...context,
-    eligible: true,
-    incident: incident.incidentId,
-    failureId: incident.latestFailureId,
-  };
+  return incident
+    ? {
+      ...context,
+      boundIncidentId: incident.incidentId,
+      boundFailureId: incident.latestFailureId,
+    }
+    : context;
 }
 
 
 export function isPosterAttachContextRecovered(context) {
   return Boolean(
-    context?.eligible
-    && Number(context.incident) > 0
-    && wasConnectivityIncidentRecovered(context.incident, context.failureId),
+    Number(context?.boundIncidentId) > 0
+    && wasConnectivityIncidentRecovered(
+      context.boundIncidentId,
+      context.boundFailureId,
+    ),
   );
+}
+
+
+export function hasPosterRecoveryAttempt(context, incidentId) {
+  const normalizedIncidentId = Number(incidentId || 0);
+  return normalizedIncidentId > 0
+    && Array.isArray(context?.attemptedIncidentIds)
+    && context.attemptedIncidentIds.includes(normalizedIncidentId);
+}
+
+
+export function markPosterRecoveryAttempt(context, incidentId) {
+  const normalizedIncidentId = Number(incidentId || 0);
+  if (normalizedIncidentId <= 0 || hasPosterRecoveryAttempt(context, normalizedIncidentId)) {
+    return context;
+  }
+  const attemptedIncidentIds = [
+    ...(Array.isArray(context?.attemptedIncidentIds)
+      ? context.attemptedIncidentIds
+      : []),
+    normalizedIncidentId,
+  ].slice(-MAX_POSTER_RECOVERY_ATTEMPTED_INCIDENTS);
+  return {
+    ...context,
+    attemptedIncidentIds,
+  };
 }
 
 

@@ -5,6 +5,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,29 @@ LINUX_UNINSTALLER = (
 )
 PLATFORM_SELECTORS = (
     HELPER_ROOT / "packaging" / "common" / "platform-selectors.sh"
+)
+SYSTEM_COMMANDS = (
+    "awk",
+    "cat",
+    "chmod",
+    "cmp",
+    "cp",
+    "date",
+    "dirname",
+    "find",
+    "grep",
+    "mkdir",
+    "mktemp",
+    "mv",
+    "rm",
+    "rmdir",
+    "sed",
+    "sha256sum",
+    "sort",
+    "stat",
+    "tr",
+    "uname",
+    "wc",
 )
 
 
@@ -46,6 +70,57 @@ def _write_tree_manifest(package_root: Path) -> None:
     tree_manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _isolated_installer_env(
+    tmp_path: Path,
+    *,
+    home: Path,
+    fake_bin: Path,
+) -> dict[str, str]:
+    config_home = home / ".config"
+    data_home = home / ".local" / "share"
+    tmp_dir = tmp_path / "tmp"
+    system_bin = tmp_path / "system-bin"
+    config_home.mkdir(parents=True, exist_ok=True)
+    data_home.mkdir(parents=True, exist_ok=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    system_bin.mkdir(parents=True, exist_ok=True)
+    for command in SYSTEM_COMMANDS:
+        source = shutil.which(command)
+        assert source is not None, f"required test command is unavailable: {command}"
+        destination = system_bin / command
+        if not destination.exists():
+            destination.symlink_to(Path(source).resolve())
+    env = {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(config_home),
+        "XDG_DATA_HOME": str(data_home),
+        "PATH": f"{fake_bin}:{system_bin}",
+        "TMPDIR": str(tmp_dir),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "ELVERN_TEST_XDG_STATE": str(config_home / "mimeapps.list"),
+    }
+    assert Path(env["ELVERN_TEST_XDG_STATE"]) == (
+        Path(env["XDG_CONFIG_HOME"]) / "mimeapps.list"
+    )
+    return env
+
+
+def _read_default_handler(state: Path) -> str:
+    section = ""
+    for line in state.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+            continue
+        if (
+            section == "[Default Applications]"
+            and stripped.startswith("x-scheme-handler/elvern-vlc=")
+        ):
+            return stripped.split("=", 1)[1].split(";", 1)[0]
+    return ""
+
+
 def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     package_root = tmp_path / "Elvern VLC Opener Linux Installer"
     private = package_root / ".elvern"
@@ -61,8 +136,8 @@ def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     (package_root / "README.txt").write_text("Elvern test package\n", encoding="utf-8")
     _write_executable(
         payload,
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
+        "#!/bin/sh\n"
+        "set -eu\n"
         "[ \"${1:-}\" = \"--version\" ] && { echo 0.9.0; exit 0; }\n"
         "exit 0\n",
     )
@@ -88,34 +163,104 @@ def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     home.mkdir()
     state.parent.mkdir()
     fake_bin.mkdir()
-    state.write_text("old-handler.desktop\n", encoding="utf-8")
+    state.write_text(
+        "[Default Applications]\n"
+        "x-scheme-handler/elvern-vlc=old-handler.desktop\n"
+        "image/png=keep-viewer.desktop\n",
+        encoding="utf-8",
+    )
     _write_executable(
         fake_bin / "xdg-mime",
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "if [[ \"${1:-}\" == \"query\" && \"${2:-}\" == \"default\" ]]; then\n"
-        "  cat \"${ELVERN_TEST_XDG_STATE}\"\n"
-        "  exit 0\n"
-        "fi\n"
-        "if [[ \"${1:-}\" == \"default\" ]]; then\n"
-        "  printf '%s\\n' \"${2}\" > \"${ELVERN_TEST_XDG_STATE}\"\n"
-        "  if [[ \"${ELVERN_TEST_XDG_FAIL_NEW:-0}\" == \"1\" && \"${2}\" == \"elvern-vlc-opener.desktop\" ]]; then\n"
-        "    exit 41\n"
-        "  fi\n"
-        "  exit 0\n"
-        "fi\n"
-        "if [[ \"${1:-}\" == \"uninstall\" && \"${2:-}\" == \"--mode\" && \"${3:-}\" == \"user\" ]]; then\n"
-        "  : > \"${ELVERN_TEST_XDG_STATE}\"\n"
-        "  exit 0\n"
-        "fi\n"
-        "exit 2\n",
+        f"""#!{sys.executable}
+import os
+import pathlib
+import sys
+
+state = pathlib.Path(os.environ["ELVERN_TEST_XDG_STATE"])
+mime = "x-scheme-handler/elvern-vlc"
+rollback_query_marker = state.with_name(".elvern-test-rollback-query")
+
+
+def read_default() -> str:
+    if not state.exists():
+        return ""
+    section = ""
+    for line in state.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+        elif section == "[Default Applications]" and stripped.startswith(mime + "="):
+            return stripped.split("=", 1)[1].split(";", 1)[0]
+    return ""
+
+
+def write_default(desktop_file: str) -> None:
+    lines = state.read_text(encoding="utf-8").splitlines(keepends=True) if state.exists() else []
+    output = []
+    section = ""
+    replaced = False
+    inserted = False
+    saw_default_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if section == "[Default Applications]" and not replaced:
+                output.append(f"{{mime}}={{desktop_file}}\\n")
+                inserted = True
+            section = stripped
+            saw_default_section = saw_default_section or section == "[Default Applications]"
+            output.append(line)
+            continue
+        if section == "[Default Applications]" and stripped.startswith(mime + "="):
+            output.append(f"{{mime}}={{desktop_file}}\\n")
+            replaced = True
+        else:
+            output.append(line)
+    if not replaced and not inserted:
+        if not saw_default_section:
+            if output and not output[-1].endswith("\\n"):
+                output[-1] += "\\n"
+            output.extend(["[Default Applications]\\n", f"{{mime}}={{desktop_file}}\\n"])
+        else:
+            output.append(f"{{mime}}={{desktop_file}}\\n")
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("".join(output), encoding="utf-8")
+
+
+args = sys.argv[1:]
+if args == ["query", "default", mime]:
+    if os.environ.get("ELVERN_TEST_XDG_QUERY_ERROR") == "1":
+        raise SystemExit(42)
+    value = read_default()
+    if (
+        os.environ.get("ELVERN_TEST_XDG_ROLLBACK_MISMATCH") == "1"
+        and rollback_query_marker.exists()
+    ):
+        value = "elvern-vlc-opener.desktop"
+    if value:
+        print(value)
+    raise SystemExit(0)
+if len(args) == 3 and args[0] == "default" and args[2] == mime:
+    write_default(args[1])
+    if (
+        os.environ.get("ELVERN_TEST_XDG_ROLLBACK_MISMATCH") == "1"
+        and args[1] != "elvern-vlc-opener.desktop"
+    ):
+        rollback_query_marker.touch()
+    if (
+        os.environ.get("ELVERN_TEST_XDG_FAIL_NEW") == "1"
+        and args[1] == "elvern-vlc-opener.desktop"
+    ):
+        raise SystemExit(41)
+    raise SystemExit(0)
+raise SystemExit(2)
+""",
     )
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "PATH": f"{fake_bin}:/usr/bin:/bin",
-        "ELVERN_TEST_XDG_STATE": str(state),
-    }
+    env = _isolated_installer_env(
+        tmp_path,
+        home=home,
+        fake_bin=fake_bin,
+    )
     return package_root, state, env
 
 
@@ -133,7 +278,7 @@ def _run_installer(
         })
     return subprocess.run(
         [
-            "bash",
+            "/bin/sh",
             str(package_root / "Install-ElvernVlcOpener.sh"),
             "--runtime",
             "linux-x64",
@@ -147,6 +292,7 @@ def _run_installer(
 
 def test_linux_installer_is_user_scoped_and_idempotent(tmp_path: Path) -> None:
     package_root, state, env = _create_linux_package(tmp_path)
+    assert shutil.which("bash", path=env["PATH"]) is None
 
     first = _run_installer(package_root, env)
     second = _run_installer(package_root, env)
@@ -164,11 +310,53 @@ def test_linux_installer_is_user_scoped_and_idempotent(tmp_path: Path) -> None:
     assert (install_dir / "Elvern.VlcOpener").is_file()
     assert (install_dir / "Uninstall-ElvernVlcOpener.sh").is_file()
     assert desktop_file.is_file()
-    assert state.read_text(encoding="utf-8").strip() == "elvern-vlc-opener.desktop"
+    assert _read_default_handler(state) == "elvern-vlc-opener.desktop"
     assert stat.S_IMODE(install_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE((install_dir / "Elvern.VlcOpener").stat().st_mode) == 0o755
     assert stat.S_IMODE((install_dir / "Uninstall-ElvernVlcOpener.sh").stat().st_mode) == 0o755
     assert stat.S_IMODE(desktop_file.stat().st_mode) == 0o644
+
+
+def test_linux_installer_environment_ignores_polluted_parent_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    outside_config = tmp_path / "outside-config"
+    outside_data = tmp_path / "outside-data"
+    outside_config.mkdir()
+    outside_data.mkdir()
+    outside_mime = outside_config / "mimeapps.list"
+    outside_marker = outside_data / "must-not-change"
+    outside_mime.write_bytes(b"outside mime bytes\n")
+    outside_marker.write_bytes(b"outside data bytes\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(outside_config))
+    monkeypatch.setenv("XDG_DATA_HOME", str(outside_data))
+    monkeypatch.setenv("ELVERN_INSTALL_TEST_FAIL_AT", "unexpected")
+    monkeypatch.setenv("ELVERN_INSTALL_TEST_FAIL_ROLLBACK", "1")
+    monkeypatch.setenv("ELVERN_TEST_XDG_FAIL_NEW", "1")
+    monkeypatch.setenv("BASH_ENV", str(tmp_path / "outside-bash-env"))
+    monkeypatch.setenv("ENV", str(tmp_path / "outside-env"))
+    monkeypatch.setenv("CDPATH", str(tmp_path / "outside-cdpath"))
+
+    package_root, _state, env = _create_linux_package(tmp_path / "isolated")
+
+    assert set(env) == {
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "PATH",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "ELVERN_TEST_XDG_STATE",
+    }
+    assert Path(env["ELVERN_TEST_XDG_STATE"]).is_relative_to(tmp_path)
+    result = _run_installer(package_root, env)
+
+    assert result.returncode == 0, result.stderr
+    assert outside_mime.read_bytes() == b"outside mime bytes\n"
+    assert outside_marker.read_bytes() == b"outside data bytes\n"
+    assert not list(outside_data.rglob("elvern-vlc-opener.desktop"))
 
 
 def test_linux_installer_uses_custom_xdg_data_and_config_roots_for_commit_and_rollback(
@@ -179,7 +367,11 @@ def test_linux_installer_uses_custom_xdg_data_and_config_roots_for_commit_and_ro
     custom_data = tmp_path / "xdg-data"
     custom_config.mkdir()
     custom_state = custom_config / "mimeapps.list"
-    custom_state.write_bytes(b"old-handler.desktop\nunrelated=config\n")
+    custom_state.write_bytes(
+        b"[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=old-handler.desktop\n"
+        b"image/png=unrelated-config.desktop\n"
+    )
     custom_state.chmod(0o640)
     env.update({
         "XDG_CONFIG_HOME": str(custom_config),
@@ -192,7 +384,7 @@ def test_linux_installer_uses_custom_xdg_data_and_config_roots_for_commit_and_ro
     desktop_file = custom_data / "applications" / "elvern-vlc-opener.desktop"
     data_mime = custom_data / "applications" / "mimeapps.list"
     assert desktop_file.is_file()
-    assert custom_state.read_text(encoding="utf-8").strip() == "elvern-vlc-opener.desktop"
+    assert _read_default_handler(custom_state) == "elvern-vlc-opener.desktop"
     assert not (
         Path(env["HOME"]) / ".local" / "share" / "applications" / "elvern-vlc-opener.desktop"
     ).exists()
@@ -274,7 +466,7 @@ def test_linux_installer_rolls_back_binary_desktop_and_protocol(
     assert result.returncode != 0
     assert (install_dir / "old-marker.txt").read_text(encoding="utf-8") == "old install\n"
     assert desktop_file.read_text(encoding="utf-8") == "old desktop\n"
-    assert state.read_text(encoding="utf-8").strip() == "old-handler.desktop"
+    assert _read_default_handler(state) == "old-handler.desktop"
 
 
 def test_linux_installer_rolls_back_when_no_protocol_handler_existed(
@@ -298,6 +490,94 @@ def test_linux_installer_rolls_back_when_no_protocol_handler_existed(
         / "elvern-vlc-opener.desktop"
     ).exists()
     assert state.read_text(encoding="utf-8") == ""
+
+
+def test_linux_installer_rolls_back_when_mimeapps_did_not_exist(
+    tmp_path: Path,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    state.unlink()
+    env["ELVERN_TEST_XDG_FAIL_NEW"] = "1"
+
+    result = _run_installer(package_root, env)
+
+    assert result.returncode != 0
+    assert not state.exists()
+    assert not (
+        Path(env["XDG_DATA_HOME"])
+        / "applications"
+        / "mimeapps.list"
+    ).exists()
+
+
+def test_linux_installer_preserves_unrelated_mime_associations_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    original = (
+        b"[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=third-party.desktop\n"
+        b"image/png=keep-viewer.desktop;\n"
+        b"\n[Added Associations]\n"
+        b"text/plain=keep-editor.desktop;\n"
+    )
+    state.write_bytes(original)
+    env["ELVERN_TEST_XDG_FAIL_NEW"] = "1"
+
+    result = _run_installer(package_root, env)
+
+    assert result.returncode != 0
+    assert state.read_bytes() == original
+    assert _read_default_handler(state) == "third-party.desktop"
+
+
+def test_linux_installer_query_error_fails_closed_and_restores_exact_mime_state(
+    tmp_path: Path,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    original = state.read_bytes()
+    env["ELVERN_TEST_XDG_QUERY_ERROR"] = "1"
+
+    result = _run_installer(package_root, env)
+
+    assert result.returncode != 0
+    assert state.read_bytes() == original
+
+
+def test_linux_installer_reports_rollback_handler_mismatch_and_preserves_materials(
+    tmp_path: Path,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    home = Path(env["HOME"])
+    install_dir = home / ".local" / "lib" / "elvern-vlc-opener"
+    desktop_file = (
+        Path(env["XDG_DATA_HOME"])
+        / "applications"
+        / "elvern-vlc-opener.desktop"
+    )
+    install_dir.mkdir(parents=True)
+    desktop_file.parent.mkdir(parents=True)
+    (install_dir / "old-marker.txt").write_bytes(b"old-install\n")
+    desktop_file.write_bytes(b"old-desktop\n")
+    original_mime = state.read_bytes()
+    env["ELVERN_TEST_XDG_ROLLBACK_MISMATCH"] = "1"
+
+    result = _run_installer(
+        package_root,
+        env,
+        fail_at="final_binary_validation",
+    )
+
+    assert result.returncode != 0
+    assert "rollback could not be verified" in result.stderr
+    assert state.read_bytes() == original_mime
+    backups = list(install_dir.parent.glob(".elvern-vlc-opener-backup.*"))
+    transactions = list(install_dir.parent.glob(".elvern-vlc-opener-transaction.*"))
+    assert len(backups) == 1
+    assert len(transactions) == 1
+    assert (backups[0] / "old-marker.txt").read_bytes() == b"old-install\n"
+    assert (transactions[0] / "mimeapps-0").is_file()
+    assert (transactions[0] / "elvern-vlc-opener.desktop").is_file()
 
 
 @pytest.mark.parametrize(
@@ -325,7 +605,11 @@ def test_linux_installer_transaction_failures_preserve_existing_install_and_regi
     (install_dir / "old-marker.txt").write_bytes(b"old-install-bytes\n")
     desktop_file.write_bytes(b"old-desktop-bytes\n")
     desktop_file.chmod(0o600)
-    state.write_bytes(b"old-handler.desktop\nunrelated=config\n")
+    state.write_bytes(
+        b"[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=old-handler.desktop\n"
+        b"image/png=unrelated-config.desktop\n"
+    )
     state.chmod(0o640)
     data_mime.write_bytes(b"unrelated=data\n")
     data_mime.chmod(0o600)
@@ -380,3 +664,28 @@ def test_linux_installer_reports_unverified_rollback_and_preserves_backup(
     assert (transactions[0] / "elvern-vlc-opener.desktop").is_file()
     assert str(backups[0]) in result.stderr
     assert str(transactions[0]) in result.stderr
+
+
+def test_linux_installer_source_is_posix_and_uses_real_xdg_mime_contract() -> None:
+    installer = LINUX_INSTALLER.read_text(encoding="utf-8")
+    uninstaller = LINUX_UNINSTALLER.read_text(encoding="utf-8")
+    selector = PLATFORM_SELECTORS.read_text(encoding="utf-8")
+    combined = "\n".join((installer, uninstaller, selector))
+
+    assert installer.startswith("#!/bin/sh\n")
+    assert uninstaller.startswith("#!/bin/sh\n")
+    assert selector.startswith("#!/bin/sh\n")
+    assert "xdg-mime uninstall" not in installer
+    assert 'xdg-mime query default x-scheme-handler/elvern-vlc' in installer
+    assert 'xdg-mime default elvern-vlc-opener.desktop x-scheme-handler/elvern-vlc' in installer
+    for bashism in (
+        "[[",
+        "declare -A",
+        "mapfile",
+        "compgen",
+        "<(",
+        "${value,,}",
+        "source ",
+        "#!/usr/bin/env bash",
+    ):
+        assert bashism not in combined

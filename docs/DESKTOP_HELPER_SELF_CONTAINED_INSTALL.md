@@ -35,6 +35,14 @@ are flushed before the read-only manifest is atomically renamed. Failure injecti
 at artifact copy or manifest rename leaves the old manifest authoritative and
 cleans temporary active files; same-name/different-content collisions fail closed.
 
+An existing active manifest that is unreadable, malformed, unsafe, or invalid
+causes activation to fail before any new artifact is copied. The explicit
+`--replace-corrupt-active-manifest` recovery flag is accepted only with
+`--activate`. It preserves the old manifest as an immutable SHA-named backup,
+retains every pre-existing artifact, and replaces the active authority only after
+the new complete release set passes validation. This is a manual recovery tool,
+not a normal publishing mode.
+
 The build records the SHA-256 of the canonical effective backend origin, not the raw
 origin. The backend recomputes that identity from its authoritative handoff origin
 before status, release listing, or download. A mismatch is fail-closed and does not
@@ -105,6 +113,8 @@ Linux maps `x86_64`/`amd64` to x64 and `aarch64`/`arm64` to ARM64. It identifies
 glibc using `getconf GNU_LIBC_VERSION`, or musl using `ldd`/musl-loader evidence.
 Unknown CPU or libc fails instead of guessing. An explicit `--runtime` is an
 advanced troubleshooting control and still must be present in the manifest.
+The Linux installer, uninstaller, and selector use POSIX `/bin/sh`; the universal
+package does not assume Bash exists on glibc or musl systems.
 
 ## Install and rollback
 

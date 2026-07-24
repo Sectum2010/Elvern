@@ -1396,6 +1396,54 @@ test("a recovered attach-time poster incident still retries a late onError once"
 });
 
 
+test("consecutive poster incidents each retain their own single recovery retry", async ({
+  page,
+}) => {
+  const requests = [];
+  const state = {
+    posterRecoveryEnabled: true,
+    waitBeforeFirstPosterFailure: true,
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await page.goto("install");
+  await expect(page.getByText("Not required on this Elvern host")).toBeVisible();
+
+  state.healthHealthy = false;
+  await page.evaluate(() => {
+    window.__posterRecoveryEvents = 0;
+    window.addEventListener("elvern:connectivity-recovered", () => {
+      window.__posterRecoveryEvents += 1;
+    });
+    window.dispatchEvent(new CustomEvent("elvern:connectivity-failure", {
+      detail: { classification: "transport", requestClass: "library" },
+    }));
+  });
+  await page.getByRole("link", { name: "Library" }).click();
+  await expect(page).toHaveURL(/\/library$/);
+  await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
+
+  state.healthHealthy = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect.poll(() => page.evaluate(() => window.__posterRecoveryEvents)).toBe(1);
+
+  state.healthHealthy = false;
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent("elvern:connectivity-failure", {
+      detail: { classification: "transport", requestClass: "library" },
+    }));
+  });
+  state.releaseFirstPosterFailure();
+
+  state.healthHealthy = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect.poll(() => page.evaluate(() => window.__posterRecoveryEvents)).toBe(2);
+  await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(2);
+  await expect(page.locator(".media-card__poster-image--loaded").first()).toBeVisible();
+  expect(state.posterRequestCounts["/api/posters/1"]).toBe(2);
+});
+
+
 test("poster recovery stays authoritative while no MediaCard subscriber exists", async ({ page }) => {
   const requests = [];
   const state = {

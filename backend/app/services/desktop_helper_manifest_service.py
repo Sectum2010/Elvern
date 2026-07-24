@@ -11,6 +11,11 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
+from clients.desktop_helper_package_contract import (
+    PACKAGE_NAME_PREFIX,
+    expected_package_filename,
+)
+
 from ..config import PROJECT_ROOT
 
 
@@ -201,14 +206,12 @@ def _read_manifest_snapshot() -> tuple[bytes, tuple[object, ...]]:
 
 
 def _manifest_read_identity(stat_result: os.stat_result) -> tuple[int, ...]:
-    # Replacing a pathname can update only the unlinked old inode's ctime. The
-    # already-open bytes remain a valid snapshot; device/inode/size/mtime still
-    # detect a different file or an in-place content rewrite.
     return (
         stat_result.st_dev,
         stat_result.st_ino,
         stat_result.st_size,
         stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
     )
 
 
@@ -346,6 +349,21 @@ def _normalize_v2_manifest_records(
             "installer_entrypoint",
         )
         sha256 = _require_sha256(raw_record.get("sha256"), "sha256")
+        try:
+            required_filename = expected_package_filename(
+                PACKAGE_NAME_PREFIX,
+                helper_version,
+                package_target,
+                sha256,
+            )
+        except ValueError as exc:
+            raise DesktopHelperManifestError(
+                "Desktop helper v2 package filename contract is invalid"
+            ) from exc
+        if filename != required_filename or relative_path != required_filename:
+            raise DesktopHelperManifestError(
+                "Desktop helper v2 package filename does not match its content hash"
+            )
         installer_manifest_sha256 = _require_sha256(
             raw_record.get("installer_manifest_sha256"),
             "installer_manifest_sha256",
