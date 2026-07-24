@@ -17,6 +17,7 @@ OSACOMPILE="/usr/bin/osacompile"
 PLISTBUDDY="/usr/libexec/PlistBuddy"
 STAGE_ROOT=""
 BACKUP_APP=""
+FAILED_NEW_APP=""
 LOCK_DIR=""
 STAGING_CREATED=0
 OLD_INSTALL_EXISTED=0
@@ -46,13 +47,24 @@ cleanup() {
   local rollback_failed=0
   if [[ ${INSTALL_COMMITTED} -eq 0 ]]; then
     if [[ ${NEW_INSTALL_PLACED} -eq 1 && -d "${DEST_APP}" ]]; then
-      rm -rf "${DEST_APP}" || rollback_failed=1
+      if [[ ${REGISTRATION_MODIFIED} -eq 1 ]]; then
+        if ! "${LSREGISTER}" -u "${DEST_APP}" >/dev/null 2>&1; then
+          rollback_failed=1
+          FAILED_NEW_APP="${STAGE_ROOT}/${APP_NAME}"
+          if ! mv "${DEST_APP}" "${FAILED_NEW_APP}"; then
+            FAILED_NEW_APP="${DEST_APP}"
+          fi
+        fi
+      fi
+      if [[ -d "${DEST_APP}" && "${FAILED_NEW_APP}" != "${DEST_APP}" ]]; then
+        rm -rf "${DEST_APP}" || rollback_failed=1
+      fi
     fi
     if [[ ${OLD_INSTALL_BACKED_UP} -eq 1 ]]; then
       if [[ -d "${DEST_APP}" || ! -d "${BACKUP_APP}" ]]; then
         rollback_failed=1
       else
-        mv "${BACKUP_APP}" "${DEST_APP}" || rollback_failed=1
+        /bin/cp -a "${BACKUP_APP}" "${DEST_APP}" || rollback_failed=1
         if [[ ${rollback_failed} -eq 0 ]]; then
           "${LSREGISTER}" -f "${DEST_APP}" >/dev/null 2>&1 || rollback_failed=1
           "${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener" --version >/dev/null 2>&1 \
@@ -61,8 +73,18 @@ cleanup() {
       fi
     fi
   fi
-  [[ -n "${STAGE_ROOT}" && -d "${STAGE_ROOT}" ]] && rm -rf "${STAGE_ROOT}"
-  if [[ ${INSTALL_COMMITTED} -eq 1 && ${OLD_INSTALL_BACKED_UP} -eq 1 && -d "${BACKUP_APP}" ]]; then
+  if [[
+    -n "${STAGE_ROOT}"
+    && -d "${STAGE_ROOT}"
+    && ( ${INSTALL_COMMITTED} -eq 1 || ${rollback_failed} -eq 0 )
+  ]]; then
+    rm -rf "${STAGE_ROOT}"
+  fi
+  if [[
+    ( ${INSTALL_COMMITTED} -eq 1 || ${rollback_failed} -eq 0 )
+    && ${OLD_INSTALL_BACKED_UP} -eq 1
+    && -d "${BACKUP_APP}"
+  ]]; then
     rm -rf "${BACKUP_APP}"
   fi
   if [[ -n "${LOCK_DIR}" && -d "${LOCK_DIR}" ]]; then
@@ -70,7 +92,14 @@ cleanup() {
     rmdir "${LOCK_DIR}"
   fi
   if [[ ${rollback_failed} -ne 0 ]]; then
-    echo "Elvern VLC Opener rollback could not be verified. Preserve ${BACKUP_APP:-the backup App} and repair Launch Services manually." >&2
+    echo "Elvern VLC Opener rollback could not be verified." >&2
+    [[ -n "${BACKUP_APP}" ]] \
+      && echo "Preserved previous App backup when available: ${BACKUP_APP}" >&2
+    [[ -n "${STAGE_ROOT}" ]] \
+      && echo "Preserved rollback workspace: ${STAGE_ROOT}" >&2
+    [[ -n "${FAILED_NEW_APP}" ]] \
+      && echo "Preserved the failed newly registered App: ${FAILED_NEW_APP}" >&2
+    echo "Repair only the listed Elvern App registration before retrying." >&2
     return 1
   fi
   return 0

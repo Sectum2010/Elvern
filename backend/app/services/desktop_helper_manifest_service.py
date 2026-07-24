@@ -63,6 +63,8 @@ _verified_artifacts: OrderedDict[
 ] = OrderedDict()
 _artifact_locks: dict[str, tuple[threading.Lock, int]] = {}
 _MAX_VERIFIED_ARTIFACTS = 64
+_MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+_MAX_MANIFEST_READ_ATTEMPTS = 3
 
 
 def desktop_helper_release_manifest_exists() -> bool:
@@ -117,14 +119,19 @@ def get_desktop_helper_manifest_record_by_id(
 def _load_manifest_document_locked() -> dict[str, object]:
     global _snapshot_fingerprint, _snapshot_payload, _snapshot_records
     try:
-        fingerprint = _file_fingerprint(HELPER_RELEASE_MANIFEST_PATH)
+        manifest_bytes, fingerprint = _read_manifest_snapshot()
+    except DesktopHelperManifestError:
+        raise
     except OSError as exc:
-        raise DesktopHelperManifestError("Desktop helper release manifest is unavailable") from exc
+        raise DesktopHelperManifestError(
+            "Desktop helper release manifest is unavailable"
+        ) from exc
     if _snapshot_payload is not None and fingerprint == _snapshot_fingerprint:
         return _snapshot_payload
     try:
-        payload = json.loads(HELPER_RELEASE_MANIFEST_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest_text = manifest_bytes.decode("utf-8")
+        payload = json.loads(manifest_text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DesktopHelperManifestError(
             "Desktop helper release manifest could not be read"
         ) from exc
@@ -147,6 +154,62 @@ def _load_normalized_manifest_records_locked() -> list[dict[str, object]]:
             verify_artifacts=False,
         )
     return _snapshot_records
+
+
+def _read_manifest_snapshot() -> tuple[bytes, tuple[object, ...]]:
+    relative_path = HELPER_RELEASE_MANIFEST_PATH.name
+    identity = _artifact_identity(
+        HELPER_RELEASE_PACKAGES_DIR,
+        relative_path,
+    )
+    for attempt in range(1, _MAX_MANIFEST_READ_ATTEMPTS + 1):
+        handle = _open_artifact_no_follow(
+            HELPER_RELEASE_PACKAGES_DIR,
+            relative_path,
+        )
+        try:
+            before_stat = os.fstat(handle.fileno())
+            before = _fingerprint_from_stat(before_stat, identity)
+            before_read_identity = _manifest_read_identity(before_stat)
+            if before_stat.st_size > _MAX_MANIFEST_BYTES:
+                raise DesktopHelperManifestError(
+                    "Desktop helper release manifest is too large"
+                )
+            manifest_bytes = handle.read(_MAX_MANIFEST_BYTES + 1)
+            after_stat = os.fstat(handle.fileno())
+            after_read_identity = _manifest_read_identity(after_stat)
+        except OSError as exc:
+            raise DesktopHelperManifestError(
+                "Desktop helper release manifest could not be read"
+            ) from exc
+        finally:
+            handle.close()
+        if len(manifest_bytes) > _MAX_MANIFEST_BYTES:
+            raise DesktopHelperManifestError(
+                "Desktop helper release manifest is too large"
+            )
+        if (
+            before_read_identity == after_read_identity
+            and len(manifest_bytes) == before_stat.st_size
+        ):
+            return manifest_bytes, before
+        if attempt >= _MAX_MANIFEST_READ_ATTEMPTS:
+            break
+    raise DesktopHelperManifestError(
+        "Desktop helper release manifest changed during reading"
+    )
+
+
+def _manifest_read_identity(stat_result: os.stat_result) -> tuple[int, ...]:
+    # Replacing a pathname can update only the unlinked old inode's ctime. The
+    # already-open bytes remain a valid snapshot; device/inode/size/mtime still
+    # detect a different file or an in-place content rewrite.
+    return (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+    )
 
 
 def _select_and_verify_records(
@@ -495,18 +558,6 @@ def _normalize_legacy_manifest_records(
             }
         )
     return records
-
-
-def _file_fingerprint(path: Path) -> tuple[object, ...]:
-    stat_result = path.stat()
-    return (
-        str(path.resolve()),
-        stat_result.st_dev,
-        stat_result.st_ino,
-        stat_result.st_size,
-        stat_result.st_mtime_ns,
-        stat_result.st_ctime_ns,
-    )
 
 
 # Bounded retries when the artifact is observed to change during hashing.

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+from collections import OrderedDict
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -27,8 +29,55 @@ from ..services.desktop_helper_service import (
 
 
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+_MAX_DOWNLOAD_FILENAME_LENGTH = 180
 _SAFE_DOWNLOAD_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*\.zip$")
+_MAX_ACTIVE_DOWNLOADS_PER_SESSION = 2
+_MAX_DOWNLOAD_SESSION_KEYS = 1024
+_download_slots_lock = threading.Lock()
+_active_downloads: OrderedDict[tuple[int, str], int] = OrderedDict()
 logger = logging.getLogger(__name__)
+
+
+def _acquire_download_slot(*, user_id: int, session_id: str | None):
+    key = (int(user_id), str(session_id or ""))
+    with _download_slots_lock:
+        active = _active_downloads.get(key, 0)
+        if active >= _MAX_ACTIVE_DOWNLOADS_PER_SESSION:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many active desktop helper downloads",
+                headers={"Retry-After": "2"},
+            )
+        if key not in _active_downloads and len(_active_downloads) >= _MAX_DOWNLOAD_SESSION_KEYS:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Desktop helper download capacity is temporarily unavailable",
+                headers={"Retry-After": "2"},
+            )
+        _active_downloads[key] = active + 1
+        _active_downloads.move_to_end(key)
+
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        with _download_slots_lock:
+            if released:
+                return
+            released = True
+            current = _active_downloads.get(key, 0)
+            if current <= 1:
+                _active_downloads.pop(key, None)
+            else:
+                _active_downloads[key] = current - 1
+                _active_downloads.move_to_end(key)
+
+    return release
+
+
+def _reset_download_slots_for_tests() -> None:
+    with _download_slots_lock:
+        _active_downloads.clear()
 
 
 def _stream_and_close(
@@ -36,6 +85,7 @@ def _stream_and_close(
     *,
     remaining: int | None = None,
     audit_completion=lambda _outcome: None,
+    release_slot=lambda: None,
     chunk_size: int = _DOWNLOAD_CHUNK_SIZE,
 ):
     """Stream the verified handle and always close it — on success, error, or
@@ -60,10 +110,15 @@ def _stream_and_close(
             audit_completion("success" if completed else "interrupted")
         except Exception:
             logger.warning("Desktop helper download completion audit could not be recorded")
+        finally:
+            release_slot()
 
 
 def _download_content_disposition(filename: str) -> str:
-    if not _SAFE_DOWNLOAD_FILENAME.fullmatch(filename):
+    if (
+        not 1 <= len(filename) <= _MAX_DOWNLOAD_FILENAME_LENGTH
+        or not _SAFE_DOWNLOAD_FILENAME.fullmatch(filename)
+    ):
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail="Desktop helper release filename is invalid",
@@ -210,7 +265,15 @@ def desktop_helper_release_download(
     request: Request,
     user=CurrentUser,
 ):
-    release = open_helper_release_download(request.app.state.settings, release_id)
+    release_slot = _acquire_download_slot(
+        user_id=user.id,
+        session_id=user.session_id,
+    )
+    try:
+        release = open_helper_release_download(request.app.state.settings, release_id)
+    except BaseException:
+        release_slot()
+        raise
     handle = release["handle"]
     audit_details = {
         "platform": release["platform"],
@@ -244,6 +307,7 @@ def desktop_helper_release_download(
         audit("started")
     except BaseException:
         handle.close()
+        release_slot()
         raise
 
     start, end = byte_range or (0, size_bytes - 1)
@@ -259,7 +323,10 @@ def desktop_helper_release_download(
         headers["Content-Range"] = f"bytes {start}-{end}/{size_bytes}"
     if request.method == "HEAD":
         handle.close()
-        audit("success")
+        try:
+            audit("success")
+        finally:
+            release_slot()
         return Response(
             status_code=response_status,
             media_type="application/zip",
@@ -270,6 +337,7 @@ def desktop_helper_release_download(
             handle,
             remaining=content_length,
             audit_completion=audit,
+            release_slot=release_slot,
         ),
         status_code=response_status,
         media_type="application/zip",

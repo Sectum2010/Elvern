@@ -80,6 +80,22 @@ for (let i = 0; i < required.length; i += 1) {
 
 check_node_version
 
+check_dotnet_version() {
+  if ! command -v dotnet >/dev/null 2>&1; then
+    echo ".NET SDK 10 is required for the desktop Helper checks." >&2
+    echo "Install dotnet-sdk-10.0, or temporarily prepend a .NET 10 SDK to PATH." >&2
+    exit 1
+  fi
+  local selected_version
+  selected_version="$(dotnet --version 2>/dev/null || true)"
+  if [[ ! "$selected_version" =~ ^10\. ]]; then
+    echo "Elvern requires the repository-selected .NET SDK 10; dotnet --version returned '${selected_version:-unavailable}'." >&2
+    echo "Install dotnet-sdk-10.0 without removing .NET 8, then rerun this command." >&2
+    exit 1
+  fi
+  printf '\n==> .NET SDK %s satisfies the Elvern Helper contract\n' "$selected_version"
+}
+
 if [[ "$FRESH" == "1" ]]; then
   TEMP_ROOT="$(mktemp -d)"
   BASE_PYTHON="${PYTHON:-python3}"
@@ -122,7 +138,11 @@ hide_frontend_dist_for_backend_pytest
 run "$PYTHON_BIN" -m pytest
 restore_frontend_dist
 
+check_dotnet_version
+run dotnet --info
+run dotnet --list-sdks
 run dotnet build clients/desktop-vlc-opener/Elvern.VlcOpener.csproj --configuration Release
+run dotnet test clients/desktop-vlc-opener/Tests/Elvern.VlcOpener.Tests.csproj --configuration Release
 
 pushd frontend >/dev/null
 run npm ci

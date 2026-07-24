@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLocation } from "react-router-dom";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCardPosterUrl } from "../lib/posterUrls";
@@ -22,6 +30,7 @@ import {
   getPosterRecoveryAttachContext,
   isPosterAttachContextRecovered,
   POSTER_RECOVERY_COOLDOWN_MS,
+  resolvePosterRecoveryErrorContext,
   subscribePosterRecoveryEvents,
 } from "../lib/posterRecovery";
 
@@ -119,17 +128,23 @@ export function MediaCard({
   });
   const [rankTooltipOpen, setRankTooltipOpen] = useState(false);
   const posterRef = useRef(null);
+  const resolvedPosterUrl = useMemo(
+    () => getCardPosterUrl(item.poster_url, posterDisplayWidth),
+    [item.poster_url, posterDisplayWidth],
+  );
+  const posterImageRef = useRef(null);
   const posterLoadStateRef = useRef(posterLoadState);
   const posterRecoveryRef = useRef({
-    url: null,
+    url: resolvedPosterUrl,
     eligible: false,
     incident: 0,
     failureId: 0,
+    attachFailureWatermark: 0,
     attempted: false,
   });
   const posterRequestAttachedRef = useRef(false);
   const posterRecoveryTimerRef = useRef(0);
-  const posterRecoveryUrlRef = useRef(null);
+  const posterRecoveryUrlRef = useRef(resolvedPosterUrl);
   const posterInstanceId = useId();
   const smartPosterCardId = useMemo(
     () => `poster-${item.id}-${posterInstanceId}`,
@@ -140,24 +155,6 @@ export function MediaCard({
     && Boolean(item.poster_url)
     && isSmartPosterLoadingSupported()
   );
-  const resolvedPosterUrl = useMemo(
-    () => getCardPosterUrl(item.poster_url, posterDisplayWidth),
-    [item.poster_url, posterDisplayWidth],
-  );
-  if (posterRecoveryUrlRef.current !== resolvedPosterUrl) {
-    posterRecoveryUrlRef.current = resolvedPosterUrl;
-    posterRecoveryRef.current = {
-      url: resolvedPosterUrl,
-      eligible: false,
-      incident: 0,
-      failureId: 0,
-      attempted: false,
-    };
-    posterRequestAttachedRef.current = false;
-    if (typeof window !== "undefined") {
-      window.clearTimeout(posterRecoveryTimerRef.current);
-    }
-  }
   const posterStateMatchesUrl = posterLoadState.url === resolvedPosterUrl;
   const posterFailed = posterStateMatchesUrl && posterLoadState.failed;
   const posterLoaded = posterStateMatchesUrl && posterLoadState.loaded;
@@ -231,6 +228,26 @@ export function MediaCard({
     posterLoadStateRef.current = posterLoadState;
   }, [posterLoadState]);
 
+  useLayoutEffect(() => {
+    if (posterRecoveryUrlRef.current === resolvedPosterUrl) {
+      return;
+    }
+    posterRecoveryUrlRef.current = resolvedPosterUrl;
+    posterRecoveryRef.current = {
+      url: resolvedPosterUrl,
+      eligible: false,
+      incident: 0,
+      failureId: 0,
+      attachFailureWatermark: 0,
+      attempted: false,
+    };
+    posterRequestAttachedRef.current = false;
+    if (posterRecoveryTimerRef.current) {
+      window.clearTimeout(posterRecoveryTimerRef.current);
+      posterRecoveryTimerRef.current = 0;
+    }
+  }, [resolvedPosterUrl]);
+
   useEffect(() => {
     setPosterLoadState((current) => (
       current.url === resolvedPosterUrl
@@ -275,8 +292,8 @@ export function MediaCard({
     }
   }), [retryRecoveredPoster]);
 
-  const recordPosterRequestAttach = useCallback((node) => {
-    if (!node || posterRequestAttachedRef.current) {
+  const recordPosterRequestAttach = useCallback(() => {
+    if (!posterImageRef.current || posterRequestAttachedRef.current) {
       return;
     }
     posterRequestAttachedRef.current = true;
@@ -290,6 +307,10 @@ export function MediaCard({
       attempted: false,
     };
   }, [resolvedPosterUrl]);
+
+  useLayoutEffect(() => {
+    recordPosterRequestAttach();
+  }, [recordPosterRequestAttach, showPoster]);
 
   useEffect(() => () => {
     window.clearTimeout(posterRecoveryTimerRef.current);
@@ -363,11 +384,15 @@ export function MediaCard({
               draggable="false"
               fetchPriority={smartPosterSchedulerActive ? undefined : "low"}
               loading={smartPosterSchedulerActive ? "eager" : "lazy"}
-              ref={recordPosterRequestAttach}
+              ref={posterImageRef}
               onError={() => {
                 if (smartPosterSchedulerActive) {
                   markSmartPosterCardError(smartPosterCardId);
                 }
+                posterRecoveryRef.current = {
+                  ...resolvePosterRecoveryErrorContext(posterRecoveryRef.current),
+                  url: resolvedPosterUrl,
+                };
                 const failedState = {
                   url: resolvedPosterUrl,
                   loaded: false,
@@ -388,6 +413,7 @@ export function MediaCard({
                   eligible: false,
                   incident: 0,
                   failureId: 0,
+                  attachFailureWatermark: 0,
                   attempted: false,
                 };
                 const loadedState = {

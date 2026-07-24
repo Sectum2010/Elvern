@@ -123,4 +123,27 @@ describe("page resume coordinator", () => {
     expect(events).toHaveLength(1);
     window.removeEventListener(PAGE_RESUME_EVENT, handleResume);
   });
+
+  test("cancelled persisted metadata does not leak into the next normal focus resume", async () => {
+    const events = [];
+    const handleResume = (event) => events.push(event.detail);
+    window.addEventListener(PAGE_RESUME_EVENT, handleResume);
+    installPageResumeCoordinator();
+
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(PAGE_RESUME_COALESCE_MS);
+    expect(events).toEqual([]);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(PAGE_RESUME_COALESCE_MS);
+
+    expect(events).toEqual([expect.objectContaining({
+      generation: 1,
+      pageshowPersisted: false,
+    })]);
+    window.removeEventListener(PAGE_RESUME_EVENT, handleResume);
+  });
 });

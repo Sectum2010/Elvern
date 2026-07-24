@@ -485,8 +485,9 @@ export function InstallPage() {
   const [terminalCommandFeedback, setTerminalCommandFeedback] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
   const statusRefreshOperationRef = useRef(null);
+  const drainPendingStatusRefreshRef = useRef(() => {});
   const pendingPassiveRefreshRef = useRef(false);
-  const pendingRecoveryRefreshRef = useRef(false);
+  const pendingRecoveryRefreshRef = useRef(0);
   const statusRequestControllerRef = useRef(null);
   const statusRequestGenerationRef = useRef(0);
   const statusFailureRef = useRef(null);
@@ -590,7 +591,10 @@ export function InstallPage() {
     }
     if (verifyPendingRef.current) {
       if (reason === "recovery") {
-        pendingRecoveryRefreshRef.current = true;
+        pendingRecoveryRefreshRef.current = Math.max(
+          pendingRecoveryRefreshRef.current,
+          lastRecoveryGenerationRef.current,
+        );
       } else {
         pendingPassiveRefreshRef.current = true;
       }
@@ -598,40 +602,91 @@ export function InstallPage() {
     }
     const currentOperation = statusRefreshOperationRef.current;
     if (currentOperation) {
-      if (currentOperation.reason === "initial" && reason !== "initial") {
-        // A real return/recovery supersedes the cold-start read. The generation
-        // guard in loadDesktopStatus prevents the old result from writing back.
-      } else {
-        if (reason === "recovery") {
-          pendingRecoveryRefreshRef.current = true;
-        }
-        return currentOperation.promise;
+      if (reason === "recovery") {
+        pendingRecoveryRefreshRef.current = Math.max(
+          pendingRecoveryRefreshRef.current,
+          lastRecoveryGenerationRef.current,
+        );
+      } else if (reason !== "initial") {
+        pendingPassiveRefreshRef.current = true;
       }
+      return currentOperation.promise;
     }
-    const operation = loadDesktopStatus({ showLoading }).finally(() => {
-      if (statusRefreshOperationRef.current?.promise === operation) {
-        statusRefreshOperationRef.current = null;
-      }
-    });
+    let operation;
+    operation = loadDesktopStatus({ showLoading })
+      .then((payload) => {
+        if (payload && mountedRef.current) {
+          // A successful status response completed after any queued signal and
+          // therefore already observes the recovered/resumed service state.
+          pendingRecoveryRefreshRef.current = 0;
+          pendingPassiveRefreshRef.current = false;
+        }
+        return payload;
+      })
+      .finally(() => {
+        if (statusRefreshOperationRef.current?.promise === operation) {
+          statusRefreshOperationRef.current = null;
+          drainPendingStatusRefreshRef.current();
+        }
+      });
     statusRefreshOperationRef.current = { promise: operation, reason };
     return operation;
   }, [isDesktop, loadDesktopStatus]);
+
+  const drainPendingStatusRefresh = useCallback(() => {
+    if (
+      !mountedRef.current
+      || !isDesktop
+      || document.visibilityState === "hidden"
+      || verifyPendingRef.current
+      || statusRefreshOperationRef.current
+    ) {
+      return;
+    }
+    if (pendingRecoveryRefreshRef.current > 0) {
+      pendingRecoveryRefreshRef.current = 0;
+      pendingPassiveRefreshRef.current = false;
+      void refreshDesktopStatus({ reason: "recovery", showLoading: false });
+      return;
+    }
+    if (pendingPassiveRefreshRef.current) {
+      pendingPassiveRefreshRef.current = false;
+      void refreshDesktopStatus({ reason: "resume", showLoading: false });
+    }
+  }, [isDesktop, refreshDesktopStatus]);
+
+  const cancelStatusLifecycle = useCallback(() => {
+    pendingRecoveryRefreshRef.current = 0;
+    pendingPassiveRefreshRef.current = false;
+    statusRequestGenerationRef.current += 1;
+    statusRequestControllerRef.current?.abort();
+    statusRequestControllerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    drainPendingStatusRefreshRef.current = drainPendingStatusRefresh;
+    return () => {
+      drainPendingStatusRefreshRef.current = () => {};
+    };
+  }, [drainPendingStatusRefresh]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      statusRequestGenerationRef.current += 1;
-      statusRequestControllerRef.current?.abort();
+      cancelStatusLifecycle();
       cancelVerifyLifecycle();
     };
-  }, [cancelVerifyLifecycle]);
+  }, [cancelStatusLifecycle, cancelVerifyLifecycle]);
 
   useEffect(() => {
-    const handlePageHide = () => cancelVerifyLifecycle();
+    const handlePageHide = () => {
+      cancelStatusLifecycle();
+      cancelVerifyLifecycle();
+    };
     window.addEventListener("pagehide", handlePageHide);
     return () => window.removeEventListener("pagehide", handlePageHide);
-  }, [cancelVerifyLifecycle]);
+  }, [cancelStatusLifecycle, cancelVerifyLifecycle]);
 
   useEffect(() => {
     statusRef.current = status;
@@ -687,7 +742,7 @@ export function InstallPage() {
       }
       lastRecoveryGenerationRef.current = generation;
       if (verifyPendingRef.current) {
-        pendingRecoveryRefreshRef.current = true;
+        pendingRecoveryRefreshRef.current = generation;
         return;
       }
       void refreshDesktopStatus({ reason: "recovery", showLoading: false });
@@ -850,16 +905,7 @@ export function InstallPage() {
       if (mountedRef.current) {
         setDesktopVerifyPending(false);
       }
-      const shouldRunRecovery = pendingRecoveryRefreshRef.current;
-      const shouldRunPassive = pendingPassiveRefreshRef.current;
-      pendingRecoveryRefreshRef.current = false;
-      pendingPassiveRefreshRef.current = false;
-      if (mountedRef.current && (shouldRunRecovery || shouldRunPassive)) {
-        void refreshDesktopStatus({
-          reason: shouldRunRecovery ? "recovery" : "resume",
-          showLoading: false,
-        });
-      }
+      drainPendingStatusRefreshRef.current();
     }
   }
 

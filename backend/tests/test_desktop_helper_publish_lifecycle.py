@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -29,6 +32,10 @@ def _create_publish_workspace(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     shutil.copy2(
         HELPER_ROOT / "scripts" / "normalize-origin.py",
         workspace / "scripts" / "normalize-origin.py",
+    )
+    shutil.copy2(
+        HELPER_ROOT / "scripts" / "validate-package.py",
+        workspace / "scripts" / "validate-package.py",
     )
     shutil.copy2(
         HELPER_ROOT / "Elvern.VlcOpener.csproj",
@@ -107,6 +114,72 @@ def _staged_manifests(workspace: Path) -> list[Path]:
     )
 
 
+def _run_package_validator(
+    workspace: Path,
+    manifest_path: Path,
+    *expected_targets: str,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(workspace / "scripts" / "validate-package.py"),
+        "--manifest",
+        str(manifest_path),
+        "--artifacts-dir",
+        str(manifest_path.parent),
+    ]
+    for target in expected_targets:
+        command.extend(["--expected-package-target", target])
+    return subprocess.run(command, check=False, capture_output=True, text=True)
+
+
+def _refresh_outer_package_integrity(manifest_path: Path) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for package in manifest["packages"]:
+        artifact = manifest_path.parent / package["filename"]
+        package["size_bytes"] = artifact.stat().st_size
+        package["sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def _append_zip_member(
+    archive: Path,
+    name: str,
+    payload: bytes,
+    *,
+    mode: int = stat.S_IFREG | 0o644,
+) -> None:
+    info = zipfile.ZipInfo(name)
+    info.create_system = 3
+    info.external_attr = mode << 16
+    with zipfile.ZipFile(archive, "a", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr(info, payload)
+
+
+def _rewrite_zip_member(
+    archive: Path,
+    member_name: str,
+    *,
+    payload: bytes | None = None,
+    mode: int | None = None,
+) -> None:
+    replacement = archive.with_suffix(".rewrite.zip")
+    with zipfile.ZipFile(archive, "r") as source, zipfile.ZipFile(
+        replacement,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as destination:
+        for original in source.infolist():
+            data = b"" if original.is_dir() else source.read(original)
+            if original.filename == member_name:
+                if payload is not None:
+                    data = payload
+                if mode is not None:
+                    original.create_system = 3
+                    original.external_attr = mode << 16
+            destination.writestr(original, data)
+    os.replace(replacement, archive)
+
+
 def test_partial_build_stays_staged_and_does_not_replace_active_manifest(
     tmp_path: Path,
 ) -> None:
@@ -127,6 +200,183 @@ def test_partial_build_stays_staged_and_does_not_replace_active_manifest(
     ]
     assert all(row["bound_origin_sha256"] for row in manifest["packages"])
     assert "-macos-dual-arch-" in manifest["packages"][0]["filename"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("unexpected", True, "missing or unknown fields"),
+        ("target_framework", "net8.0", "target framework"),
+    ],
+)
+def test_strict_package_validator_rejects_outer_contract_tampering(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    published = _run_publisher(workspace, env, "--windows")
+    assert published.returncode == 0, published.stderr
+    manifest_path = _staged_manifests(workspace)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    validated = _run_package_validator(workspace, manifest_path, "windows-x64")
+
+    assert validated.returncode != 0
+    assert message in validated.stderr
+
+
+def test_strict_package_validator_rejects_non_list_runtime_ids(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    published = _run_publisher(workspace, env, "--windows")
+    assert published.returncode == 0, published.stderr
+    manifest_path = _staged_manifests(workspace)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["packages"][0]["supported_runtime_ids"] = "win-x64"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    validated = _run_package_validator(workspace, manifest_path, "windows-x64")
+
+    assert validated.returncode != 0
+    assert "Release RID order is invalid" in validated.stderr
+    assert "Traceback" not in validated.stderr
+
+
+@pytest.mark.parametrize("tamper_kind", ["traversal", "case_collision", "symlink"])
+def test_strict_package_validator_rejects_unsafe_zip_members(
+    tmp_path: Path,
+    tamper_kind: str,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    published = _run_publisher(workspace, env, "--windows")
+    assert published.returncode == 0, published.stderr
+    manifest_path = _staged_manifests(workspace)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package = manifest["packages"][0]
+    archive = manifest_path.parent / package["filename"]
+    package_root = package["package_root"]
+    if tamper_kind == "traversal":
+        _append_zip_member(archive, "../escape.txt", b"escape")
+    elif tamper_kind == "case_collision":
+        _append_zip_member(archive, f"{package_root}/README.TXT", b"collision")
+    else:
+        _append_zip_member(
+            archive,
+            f"{package_root}/.elvern/unsafe-link",
+            b"README.txt",
+            mode=stat.S_IFLNK | 0o777,
+        )
+    _refresh_outer_package_integrity(manifest_path)
+
+    validated = _run_package_validator(workspace, manifest_path, "windows-x64")
+
+    assert validated.returncode != 0
+    expected = {
+        "traversal": "unsafe path",
+        "case_collision": "case-colliding path",
+        "symlink": "unsupported symlink",
+    }
+    assert expected[tamper_kind] in validated.stderr
+
+
+def test_strict_package_validator_rejects_directory_mode_tampering(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    published = _run_publisher(workspace, env, "--linux")
+    assert published.returncode == 0, published.stderr
+    manifest_path = _staged_manifests(workspace)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package = manifest["packages"][0]
+    archive = manifest_path.parent / package["filename"]
+    _rewrite_zip_member(
+        archive,
+        f"{package['package_root']}/",
+        mode=stat.S_IFDIR | 0o700,
+    )
+    _refresh_outer_package_integrity(manifest_path)
+
+    validated = _run_package_validator(workspace, manifest_path, "linux-universal")
+
+    assert validated.returncode != 0
+    assert "Package directory mode is invalid" in validated.stderr
+
+
+def test_strict_package_validator_rejects_duplicate_tree_manifest_paths(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    published = _run_publisher(workspace, env, "--windows")
+    assert published.returncode == 0, published.stderr
+    manifest_path = _staged_manifests(workspace)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package = manifest["packages"][0]
+    archive = manifest_path.parent / package["filename"]
+    tree_name = f"{package['package_root']}/{package['installer_tree_manifest_path']}"
+    with zipfile.ZipFile(archive, "r") as bundle:
+        tree_payload = bundle.read(tree_name)
+    first_row = tree_payload.decode("utf-8").splitlines()[1]
+    tampered_tree = tree_payload + (first_row + "\n").encode("utf-8")
+    _rewrite_zip_member(archive, tree_name, payload=tampered_tree)
+    manifest["packages"][0]["installer_tree_manifest_sha256"] = hashlib.sha256(
+        tampered_tree
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _refresh_outer_package_integrity(manifest_path)
+
+    validated = _run_package_validator(workspace, manifest_path, "windows-x64")
+
+    assert validated.returncode != 0
+    assert "Tree manifest path is duplicated" in validated.stderr
+
+
+def test_strict_package_validator_rejects_inner_json_schema_tampering(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    published = _run_publisher(workspace, env, "--windows")
+    assert published.returncode == 0, published.stderr
+    manifest_path = _staged_manifests(workspace)[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package = manifest["packages"][0]
+    archive = manifest_path.parent / package["filename"]
+    prefix = f"{package['package_root']}/"
+    inner_name = prefix + ".elvern/manifest.json"
+    tree_name = prefix + package["installer_tree_manifest_path"]
+    with zipfile.ZipFile(archive, "r") as bundle:
+        inner = json.loads(bundle.read(inner_name))
+        tree_lines = bundle.read(tree_name).decode("utf-8").splitlines()
+    inner["unexpected"] = True
+    inner_payload = (json.dumps(inner, indent=2) + "\n").encode("utf-8")
+    inner_digest = hashlib.sha256(inner_payload).hexdigest()
+    for index, line in enumerate(tree_lines):
+        fields = line.split("\t")
+        if fields[0] == ".elvern/manifest.json":
+            tree_lines[index] = (
+                f"{fields[0]}\t{len(inner_payload)}\t{inner_digest}\t{fields[3]}"
+            )
+            break
+    else:
+        raise AssertionError("inner manifest missing from tree manifest")
+    tree_payload = ("\n".join(tree_lines) + "\n").encode("utf-8")
+    _rewrite_zip_member(archive, inner_name, payload=inner_payload)
+    _rewrite_zip_member(archive, tree_name, payload=tree_payload)
+    manifest["packages"][0]["installer_manifest_sha256"] = inner_digest
+    manifest["packages"][0]["installer_tree_manifest_sha256"] = hashlib.sha256(
+        tree_payload
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _refresh_outer_package_integrity(manifest_path)
+
+    validated = _run_package_validator(workspace, manifest_path, "windows-x64")
+
+    assert validated.returncode != 0
+    assert "Inner manifest contains missing or unknown fields" in validated.stderr
 
 
 def test_normal_activation_requires_all_platforms_and_preserves_old_active(
@@ -225,7 +475,65 @@ def test_injected_activation_failure_preserves_old_manifest_and_cleans_temp_file
     assert f"Injected activation failure at {failure_point}" in result.stderr
     assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
     assert not list(active_dir.glob(".*.new.*"))
+    assert not list(active_dir.glob("*.zip"))
     assert not (workspace / "artifacts" / ".activation.lock").exists()
+
+
+def test_activation_cleanup_failure_preserves_old_manifest_and_reports_orphan(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    active_dir = workspace / "artifacts" / "packages"
+    active_dir.mkdir(parents=True)
+    active_manifest = active_dir / "release-manifest.json"
+    active_manifest.write_text('{"active":"old"}\n', encoding="utf-8")
+
+    result = _run_publisher(
+        workspace,
+        {
+            **env,
+            "ELVERN_PUBLISH_TEST_MODE": "1",
+            "ELVERN_PUBLISH_TEST_FAIL_AT": "orphan_cleanup",
+        },
+        "--activate",
+    )
+
+    assert result.returncode != 0
+    assert "Injected activation failure before orphan cleanup." in result.stderr
+    assert "Could not remove transaction-created orphan artifact:" in result.stderr
+    assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
+    assert len(list(active_dir.glob("*.zip"))) == 1
+
+
+def test_failed_activation_preserves_preexisting_identical_artifact(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    staged = _run_publisher(workspace, env, "--windows")
+    assert staged.returncode == 0, staged.stderr
+    staged_manifest_path = _staged_manifests(workspace)[0]
+    staged_manifest = json.loads(staged_manifest_path.read_text(encoding="utf-8"))
+    package = staged_manifest["packages"][0]
+    active_dir = workspace / "artifacts" / "packages"
+    active_dir.mkdir(parents=True)
+    preexisting = active_dir / package["filename"]
+    shutil.copy2(staged_manifest_path.parent / package["filename"], preexisting)
+    active_manifest = active_dir / "release-manifest.json"
+    active_manifest.write_text('{"active":"old"}\n', encoding="utf-8")
+
+    result = _run_publisher(
+        workspace,
+        {
+            **env,
+            "ELVERN_PUBLISH_TEST_MODE": "1",
+            "ELVERN_PUBLISH_TEST_FAIL_AT": "artifact_copy",
+        },
+        "--activate",
+    )
+
+    assert result.returncode != 0
+    assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
+    assert preexisting.is_file()
 
 
 def test_activation_lock_is_fail_closed_and_reports_owner_without_changing_active(

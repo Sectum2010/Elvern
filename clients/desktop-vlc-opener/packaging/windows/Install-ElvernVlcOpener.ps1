@@ -7,7 +7,9 @@ $privateRoot = Join-Path $packageRoot ".elvern"
 $manifestPath = Join-Path $privateRoot "manifest.json"
 $installerManifestPath = Join-Path $privateRoot "installer-manifest.tsv"
 $treeManifestPath = Join-Path $privateRoot "tree-manifest.tsv"
+$installParent = Join-Path $env:LocalAppData "Programs"
 $installRoot = Join-Path $env:LocalAppData "Programs\Elvern VLC Opener"
+$installLockPath = Join-Path $installParent "Elvern VLC Opener.install.lock"
 $transactionNonce = [Guid]::NewGuid().ToString("N")
 $stagingRoot = "$installRoot.staging.$transactionNonce"
 $backupRoot = "$installRoot.backup.$transactionNonce"
@@ -28,6 +30,8 @@ $oldRegistrationCaptured = $false
 $registrationModified = $false
 $finalValidationPassed = $false
 $installCommitted = $false
+$rollbackSucceeded = $false
+$installLockHandle = $null
 
 function Invoke-InjectedFailure([string]$Point) {
     if ($env:ELVERN_INSTALL_TEST_MODE -eq "1" -and $env:ELVERN_INSTALL_TEST_FAIL_AT -eq $Point) {
@@ -233,6 +237,25 @@ function Read-StrictInstallerManifest {
 }
 
 try {
+    New-Item -ItemType Directory -Path $installParent -Force | Out-Null
+    try {
+        $installLockHandle = New-Object System.IO.FileStream(
+            $installLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    }
+    catch {
+        throw "Another Elvern VLC Opener install is already running for this user."
+    }
+    $lockMetadata = [Text.Encoding]::UTF8.GetBytes(
+        "pid=$PID`nstarted_at=$([DateTime]::UtcNow.ToString('o'))`ntransaction_nonce=$transactionNonce`n"
+    )
+    $installLockHandle.SetLength(0)
+    $installLockHandle.Write($lockMetadata, 0, $lockMetadata.Length)
+    $installLockHandle.Flush()
+
     Test-InstallerTree
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "The verified JSON package metadata is missing."
@@ -370,7 +393,7 @@ catch {
                 if (-not (Test-Path -LiteralPath $backupRoot)) {
                     throw "The previous installation backup is missing."
                 }
-                Move-Item -LiteralPath $backupRoot -Destination $installRoot
+                Copy-Item -LiteralPath $backupRoot -Destination $installRoot -Recurse
                 if (-not (Test-Path -LiteralPath $installRoot)) {
                     throw "The previous installation restore could not be verified."
                 }
@@ -378,9 +401,21 @@ catch {
             if ($registrationModified -and $oldRegistrationCaptured) {
                 Restore-RegistryState
             }
+            $rollbackSucceeded = $true
+            if ($oldInstallBackedUp -and (Test-Path -LiteralPath $backupRoot)) {
+                Remove-Item -LiteralPath $backupRoot -Recurse -Force
+            }
         }
         catch {
-            Write-Error "Elvern VLC Opener was not installed: $installError Registry rollback also failed: $($_.Exception.Message)"
+            [Console]::Error.WriteLine(
+                "Elvern VLC Opener was not installed: $installError Registry rollback also failed: $($_.Exception.Message)"
+            )
+            if (Test-Path -LiteralPath $registryBackupRoot) {
+                [Console]::Error.WriteLine("Preserved registry recovery files: $registryBackupRoot")
+            }
+            if (Test-Path -LiteralPath $backupRoot) {
+                [Console]::Error.WriteLine("Preserved previous installation backup: $backupRoot")
+            }
             exit 1
         }
     }
@@ -392,8 +427,15 @@ finally {
         try { Remove-Item -LiteralPath $stagingRoot -Recurse -Force }
         catch { Write-Warning "The private staging directory could not be removed: $stagingRoot" }
     }
-    if (Test-Path -LiteralPath $registryBackupRoot) {
+    if (
+        ( $installCommitted -or $rollbackSucceeded ) -and
+        (Test-Path -LiteralPath $registryBackupRoot)
+    ) {
         try { Remove-Item -LiteralPath $registryBackupRoot -Recurse -Force }
         catch { Write-Warning "The private registry backup directory could not be removed: $registryBackupRoot" }
+    }
+    if ($null -ne $installLockHandle) {
+        $installLockHandle.Dispose()
+        $installLockHandle = $null
     }
 }

@@ -171,6 +171,43 @@ def test_linux_installer_is_user_scoped_and_idempotent(tmp_path: Path) -> None:
     assert stat.S_IMODE(desktop_file.stat().st_mode) == 0o644
 
 
+def test_linux_installer_uses_custom_xdg_data_and_config_roots_for_commit_and_rollback(
+    tmp_path: Path,
+) -> None:
+    package_root, _default_state, env = _create_linux_package(tmp_path)
+    custom_config = tmp_path / "xdg-config"
+    custom_data = tmp_path / "xdg-data"
+    custom_config.mkdir()
+    custom_state = custom_config / "mimeapps.list"
+    custom_state.write_bytes(b"old-handler.desktop\nunrelated=config\n")
+    custom_state.chmod(0o640)
+    env.update({
+        "XDG_CONFIG_HOME": str(custom_config),
+        "XDG_DATA_HOME": str(custom_data),
+        "ELVERN_TEST_XDG_STATE": str(custom_state),
+    })
+
+    installed = _run_installer(package_root, env)
+    assert installed.returncode == 0, installed.stderr
+    desktop_file = custom_data / "applications" / "elvern-vlc-opener.desktop"
+    data_mime = custom_data / "applications" / "mimeapps.list"
+    assert desktop_file.is_file()
+    assert custom_state.read_text(encoding="utf-8").strip() == "elvern-vlc-opener.desktop"
+    assert not (
+        Path(env["HOME"]) / ".local" / "share" / "applications" / "elvern-vlc-opener.desktop"
+    ).exists()
+
+    desktop_before = desktop_file.read_bytes()
+    config_before = custom_state.read_bytes()
+    data_before = data_mime.read_bytes() if data_mime.exists() else None
+    failed = _run_installer(package_root, env, fail_at="final_binary_validation")
+    assert failed.returncode != 0
+    assert desktop_file.read_bytes() == desktop_before
+    assert custom_state.read_bytes() == config_before
+    assert (data_mime.read_bytes() if data_mime.exists() else None) == data_before
+    assert stat.S_IMODE(desktop_file.stat().st_mode) == 0o644
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
@@ -317,8 +354,17 @@ def test_linux_installer_reports_unverified_rollback_and_preserves_backup(
 ) -> None:
     package_root, _state, env = _create_linux_package(tmp_path)
     install_dir = Path(env["HOME"]) / ".local" / "lib" / "elvern-vlc-opener"
+    desktop_file = (
+        Path(env["HOME"])
+        / ".local"
+        / "share"
+        / "applications"
+        / "elvern-vlc-opener.desktop"
+    )
     install_dir.mkdir(parents=True)
+    desktop_file.parent.mkdir(parents=True)
     (install_dir / "old-marker.txt").write_text("old\n", encoding="utf-8")
+    desktop_file.write_text("old desktop\n", encoding="utf-8")
 
     env["ELVERN_INSTALL_TEST_FAIL_ROLLBACK"] = "1"
     result = _run_installer(package_root, env, fail_at="final_binary_validation")
@@ -328,3 +374,9 @@ def test_linux_installer_reports_unverified_rollback_and_preserves_backup(
     backups = list(install_dir.parent.glob(".elvern-vlc-opener-backup.*"))
     assert len(backups) == 1
     assert (backups[0] / "old-marker.txt").read_text(encoding="utf-8") == "old\n"
+    transactions = list(install_dir.parent.glob(".elvern-vlc-opener-transaction.*"))
+    assert len(transactions) == 1
+    assert (transactions[0] / "mimeapps-0").is_file()
+    assert (transactions[0] / "elvern-vlc-opener.desktop").is_file()
+    assert str(backups[0]) in result.stderr
+    assert str(transactions[0]) in result.stderr

@@ -503,7 +503,6 @@ def open_helper_release_download(settings: Settings, release_id: int) -> dict[st
             size_bytes=size_bytes,
             sha256=str(record["sha256"]),
             package_target=package_target,
-            force_hash=True,
         )
     except DesktopHelperManifestError as exc:
         raise HTTPException(

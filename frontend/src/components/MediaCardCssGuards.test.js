@@ -8,6 +8,10 @@ const stylesPath = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../styles.css",
 );
+const mediaCardPath = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "MediaCard.jsx",
+);
 
 function readStyles() {
   return fs.readFileSync(stylesPath, "utf8");
@@ -24,6 +28,17 @@ function cssBlockContaining(styles, selector) {
 }
 
 describe("MediaCard CSS hover guards", () => {
+  test("poster URL recovery reset is committed in a layout effect, not render", () => {
+    const source = fs.readFileSync(mediaCardPath, "utf8");
+
+    expect(source).not.toContain(
+      "if (posterRecoveryUrlRef.current !== resolvedPosterUrl)",
+    );
+    expect(source).toMatch(
+      /useLayoutEffect\(\(\) => \{\s+if \(posterRecoveryUrlRef\.current === resolvedPosterUrl\)/,
+    );
+  });
+
   test("library media cards use a full-card hover border without shadow", () => {
     const styles = readStyles();
     const block = cssBlockContaining(styles, ".app-shell--library-root .media-card:hover");

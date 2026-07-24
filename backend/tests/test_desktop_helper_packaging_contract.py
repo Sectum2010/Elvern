@@ -163,6 +163,26 @@ def test_windows_installer_checks_registry_backup_and_restore_failures() -> None
     assert "The previous elvern-vlc:// registration could not be restored." in source
     assert "The previous uninstall registration could not be restored." in source
     assert "Registry rollback also failed:" in source
+    assert "Preserved registry recovery files:" in source
+    assert "Preserved previous installation backup:" in source
+    assert "( $installCommitted -or $rollbackSucceeded )" in source
+
+
+def test_windows_installer_uses_a_powershell_51_exclusive_per_user_file_lock() -> None:
+    source = (
+        HELPER_ROOT / "packaging" / "windows" / "Install-ElvernVlcOpener.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "Elvern VLC Opener.install.lock" in source
+    assert "[System.IO.FileMode]::OpenOrCreate" in source
+    assert "[System.IO.FileAccess]::ReadWrite" in source
+    assert "[System.IO.FileShare]::None" in source
+    assert "Another Elvern VLC Opener install is already running for this user." in source
+    assert source.index("$installLockHandle = New-Object System.IO.FileStream") < source.index(
+        "\n    Test-InstallerTree\n"
+    )
+    assert "$installLockHandle.Dispose()" in source
+    assert "Remove-Item -LiteralPath $installLockPath" not in source
 
 
 def test_windows_installer_is_powershell_51_safe_and_uses_strict_tsv_contract() -> None:
@@ -196,6 +216,25 @@ def test_macos_transaction_commits_before_finder_reveal_and_backup_flag_is_safe(
     assert source.index("INSTALL_COMMITTED=1") < source.index('open -R "${DEST_APP}"')
     assert "Warning: Finder could not reveal" in source
     assert 'xattr -dr com.apple.quarantine "${DEST_APP}"' in source
+    assert '"${LSREGISTER}" -u "${DEST_APP}"' in source
+    assert source.index('"${LSREGISTER}" -u "${DEST_APP}"') < source.index(
+        'rm -rf "${DEST_APP}"'
+    )
+    assert '/bin/cp -a "${BACKUP_APP}" "${DEST_APP}"' in source
+    assert "lsregister -kill" not in source.lower()
+    assert "Preserved rollback workspace:" in source
+
+
+def test_linux_installer_uses_one_xdg_data_root_and_preserves_failed_rollback_materials() -> None:
+    source = (
+        HELPER_ROOT / "packaging" / "linux" / "Install-ElvernVlcOpener.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'DESKTOP_DIR="${XDG_DATA_ROOT}/applications"' in source
+    assert 'MIME_DATA_FILE="${DESKTOP_DIR}/mimeapps.list"' in source
+    assert 'DESKTOP_DIR="${HOME}/.local/share/applications"' not in source
+    assert "Preserved MIME and desktop registration backups:" in source
+    assert 'cp -a "${BACKUP_DIR}" "${INSTALL_DIR}"' in source
 
 
 def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> None:

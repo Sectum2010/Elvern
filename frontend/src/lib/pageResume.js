@@ -43,6 +43,7 @@ function markAway() {
   if (pendingTimer) {
     window.clearTimeout(pendingTimer);
     pendingTimer = 0;
+    pendingPersisted = false;
   }
   awayPending = true;
 }

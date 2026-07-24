@@ -184,6 +184,162 @@ def test_manifest_snapshot_rebuilds_when_manifest_is_replaced(
     assert second[0]["id"] != first[0]["id"]
 
 
+def test_manifest_snapshot_rejects_a_final_symlink(monkeypatch, tmp_path) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    manifest_path = manifest_service.HELPER_RELEASE_MANIFEST_PATH
+    outside = tmp_path / "outside-manifest.json"
+    outside.write_bytes(manifest_path.read_bytes())
+    manifest_path.unlink()
+    manifest_path.symlink_to(outside)
+    manifest_service.reset_desktop_helper_manifest_cache()
+
+    with pytest.raises(manifest_service.DesktopHelperManifestError):
+        manifest_service.list_desktop_helper_manifest_records(platform="mac")
+
+
+def test_manifest_snapshot_fails_closed_when_inode_changes_during_read(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    manifest_path = manifest_service.HELPER_RELEASE_MANIFEST_PATH
+    real_open = manifest_service._open_artifact_no_follow
+
+    class MutatingHandle:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size=-1):
+            payload = self.handle.read(size)
+            with manifest_path.open("ab") as mutator:
+                mutator.write(b" ")
+            return payload
+
+        def close(self):
+            self.handle.close()
+
+    def mutating_open(root_dir: Path, relative_path: str):
+        handle = real_open(root_dir, relative_path)
+        return (
+            MutatingHandle(handle)
+            if relative_path == manifest_path.name
+            else handle
+        )
+
+    monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", mutating_open)
+    manifest_service.reset_desktop_helper_manifest_cache()
+
+    with pytest.raises(
+        manifest_service.DesktopHelperManifestError,
+        match="changed during reading",
+    ):
+        manifest_service.list_desktop_helper_manifest_records(platform="mac")
+
+
+def test_manifest_snapshot_uses_open_inode_then_observes_atomic_replacement(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manifest = _write_manifest(monkeypatch, tmp_path)
+    manifest_path = manifest_service.HELPER_RELEASE_MANIFEST_PATH
+    manifest["helper_version"] = "0.9.1"
+    replacement = manifest_path.with_name("replacement.json")
+    replacement.write_text(json.dumps(manifest), encoding="utf-8")
+    real_open = manifest_service._open_artifact_no_follow
+    replaced = False
+
+    class ReplacingHandle:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size=-1):
+            nonlocal replaced
+            payload = self.handle.read(size)
+            if not replaced:
+                os.replace(replacement, manifest_path)
+                replaced = True
+            return payload
+
+        def close(self):
+            self.handle.close()
+
+    def replacing_open(root_dir: Path, relative_path: str):
+        handle = real_open(root_dir, relative_path)
+        return (
+            ReplacingHandle(handle)
+            if relative_path == manifest_path.name and not replaced
+            else handle
+        )
+
+    monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", replacing_open)
+    first_bytes, first_fingerprint = manifest_service._read_manifest_snapshot()
+    second_bytes, second_fingerprint = manifest_service._read_manifest_snapshot()
+
+    assert json.loads(first_bytes)["helper_version"] == "0.9.0"
+    assert json.loads(second_bytes)["helper_version"] == "0.9.1"
+    assert first_fingerprint != second_fingerprint
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"\xff\xfe", "could not be read"),
+        (b"{not-json}", "could not be read"),
+    ],
+)
+def test_manifest_snapshot_rejects_invalid_encoding_or_json(
+    monkeypatch,
+    tmp_path,
+    payload: bytes,
+    message: str,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    manifest_service.HELPER_RELEASE_MANIFEST_PATH.write_bytes(payload)
+    manifest_service.reset_desktop_helper_manifest_cache()
+
+    with pytest.raises(manifest_service.DesktopHelperManifestError, match=message):
+        manifest_service.list_desktop_helper_manifest_records(platform="mac")
+
+
+def test_manifest_snapshot_closes_its_read_handle(monkeypatch, tmp_path) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    real_open = manifest_service._open_artifact_no_follow
+    closed: list[bool] = []
+
+    class TrackingHandle:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size=-1):
+            return self.handle.read(size)
+
+        def close(self):
+            self.handle.close()
+            closed.append(self.handle.closed)
+
+    def tracking_open(root_dir: Path, relative_path: str):
+        handle = real_open(root_dir, relative_path)
+        return (
+            TrackingHandle(handle)
+            if relative_path == "release-manifest.json"
+            else handle
+        )
+
+    monkeypatch.setattr(manifest_service, "_open_artifact_no_follow", tracking_open)
+    manifest_service.list_desktop_helper_manifest_records(platform="mac")
+
+    assert closed == [True]
+
+
 def test_manifest_only_hashes_artifacts_for_the_requested_platform(monkeypatch, tmp_path) -> None:
     manifest = _write_manifest(monkeypatch, tmp_path)
     windows_payload = b"windows-package"
@@ -484,7 +640,7 @@ def test_verified_artifact_cache_is_bounded_and_singleflight_locks_are_released(
     assert manifest_service._artifact_locks == {}
 
 
-def test_strong_download_verification_rehashes_even_after_a_listing_cache_hit(
+def test_download_verification_reuses_an_exact_fingerprint_cache_hit(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -510,11 +666,44 @@ def test_strong_download_verification_rehashes_even_after_a_listing_cache_hit(
         size_bytes=artifact.stat().st_size,
         sha256=_sha256(artifact.read_bytes()),
         package_target="macos-dual-arch",
-        force_hash=True,
     )
     handle.close()
 
-    assert hash_calls == 2
+    assert hash_calls == 1
+
+
+def test_repeated_download_opens_do_not_rehash_unchanged_artifact(
+    initialized_settings,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        desktop_helper_service,
+        "_desktop_backend_origin_sha256",
+        lambda _settings: BOUND_ORIGIN_SHA256,
+    )
+    original_sha256 = manifest_service._sha256_for_file
+    hash_calls = 0
+
+    def counted_sha256(path: Path, *, handle=None) -> str:
+        nonlocal hash_calls
+        hash_calls += 1
+        return original_sha256(path, handle=handle)
+
+    monkeypatch.setattr(manifest_service, "_sha256_for_file", counted_sha256)
+    release = manifest_service.list_desktop_helper_manifest_records(
+        platform="mac",
+        expected_bound_origin_sha256=BOUND_ORIGIN_SHA256,
+    )[0]
+    for _index in range(12):
+        opened = desktop_helper_service.open_helper_release_download(
+            initialized_settings,
+            int(release["id"]),
+        )
+        opened["handle"].close()
+
+    assert hash_calls == 1
 
 
 def test_download_stream_generator_closes_handle_on_success_and_disconnect() -> None:
@@ -530,16 +719,24 @@ def test_download_stream_generator_closes_handle_on_success_and_disconnect() -> 
             self.closed = True
 
     # Full consumption closes the handle.
+    released: list[str] = []
     consumed = FakeHandle([b"a", b"b"])
-    assert b"".join(desktop_helper_route._stream_and_close(consumed)) == b"ab"
+    assert b"".join(desktop_helper_route._stream_and_close(
+        consumed,
+        release_slot=lambda: released.append("success"),
+    )) == b"ab"
     assert consumed.closed is True
 
     # Early termination (client disconnect) closes the handle.
     disconnected = FakeHandle([b"a", b"b", b"c"])
-    generator = desktop_helper_route._stream_and_close(disconnected)
+    generator = desktop_helper_route._stream_and_close(
+        disconnected,
+        release_slot=lambda: released.append("disconnect"),
+    )
     assert next(generator) == b"a"
     generator.close()
     assert disconnected.closed is True
+    assert released == ["success", "disconnect"]
 
 
 def test_download_stream_generator_closes_handle_on_read_error() -> None:
@@ -554,9 +751,14 @@ def test_download_stream_generator_closes_handle_on_read_error() -> None:
             self.closed = True
 
     handle = FailingHandle()
+    released: list[bool] = []
     with pytest.raises(OSError):
-        list(desktop_helper_route._stream_and_close(handle))
+        list(desktop_helper_route._stream_and_close(
+            handle,
+            release_slot=lambda: released.append(True),
+        ))
     assert handle.closed is True
+    assert released == [True]
 
 
 def test_download_stream_records_success_and_interruption() -> None:
@@ -591,6 +793,40 @@ def test_download_stream_records_success_and_interruption() -> None:
     assert outcomes == ["success", "interrupted"]
     assert complete.closed is True
     assert interrupted.closed is True
+
+
+def test_helper_download_slots_limit_each_session_and_release_idempotently() -> None:
+    desktop_helper_route._reset_download_slots_for_tests()
+    release_one = desktop_helper_route._acquire_download_slot(
+        user_id=12,
+        session_id="session-a",
+    )
+    release_two = desktop_helper_route._acquire_download_slot(
+        user_id=12,
+        session_id="session-a",
+    )
+    other_session = desktop_helper_route._acquire_download_slot(
+        user_id=12,
+        session_id="session-b",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        desktop_helper_route._acquire_download_slot(
+            user_id=12,
+            session_id="session-a",
+        )
+    assert exc_info.value.status_code == 429
+
+    release_one()
+    retry = desktop_helper_route._acquire_download_slot(
+        user_id=12,
+        session_id="session-a",
+    )
+    release_one()
+    release_two()
+    retry()
+    other_session()
+
+    assert desktop_helper_route._active_downloads == {}
 
 
 @pytest.mark.parametrize(
@@ -629,6 +865,32 @@ def test_helper_download_content_disposition_rejects_header_injection() -> None:
     with pytest.raises(HTTPException) as exc_info:
         desktop_helper_route._download_content_disposition('helper.zip"\r\nX-Evil: 1')
     assert exc_info.value.status_code == 410
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "a" * 177 + ".zip",
+        "helper\r\nInjected.zip",
+        'helper".zip',
+        "nested/helper.zip",
+        r"nested\helper.zip",
+        "hélper.zip",
+    ],
+)
+def test_helper_download_filename_contract_rejects_unsafe_or_oversized_names(
+    filename: str,
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        desktop_helper_route._download_content_disposition(filename)
+    assert exc_info.value.status_code == 410
+
+
+def test_helper_download_filename_contract_accepts_180_character_boundary() -> None:
+    filename = "a" * 176 + ".zip"
+    assert len(filename) == 180
+    header = desktop_helper_route._download_content_disposition(filename)
+    assert f'filename="{filename}"' in header
 
 
 def test_manifest_origin_mismatch_fails_before_artifact_hash(monkeypatch, tmp_path) -> None:

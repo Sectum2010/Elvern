@@ -10,8 +10,12 @@ SELECTORS="${PRIVATE_DIR}/lib/platform-selectors.sh"
 UNINSTALL_SOURCE="${PRIVATE_DIR}/uninstall/Uninstall-ElvernVlcOpener.sh"
 INSTALL_PARENT="${HOME}/.local/lib"
 INSTALL_DIR="${INSTALL_PARENT}/elvern-vlc-opener"
-DESKTOP_DIR="${HOME}/.local/share/applications"
+XDG_CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}"
+XDG_DATA_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}"
+DESKTOP_DIR="${XDG_DATA_ROOT}/applications"
 DESKTOP_FILE="${DESKTOP_DIR}/elvern-vlc-opener.desktop"
+MIME_CONFIG_FILE="${XDG_CONFIG_ROOT}/mimeapps.list"
+MIME_DATA_FILE="${DESKTOP_DIR}/mimeapps.list"
 RUNTIME_OVERRIDE=""
 STAGE_DIR=""
 BACKUP_DIR=""
@@ -27,10 +31,6 @@ OLD_REGISTRATION_CAPTURED=0
 REGISTRATION_MODIFIED=0
 FINAL_VALIDATION_PASSED=0
 INSTALL_COMMITTED=0
-XDG_CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}"
-XDG_DATA_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}"
-MIME_CONFIG_FILE="${XDG_CONFIG_ROOT}/mimeapps.list"
-MIME_DATA_FILE="${XDG_DATA_ROOT}/applications/mimeapps.list"
 MIME_PATHS=("${MIME_CONFIG_FILE}" "${MIME_DATA_FILE}")
 MIME_EXISTED=()
 MIME_MODES=()
@@ -74,10 +74,14 @@ cleanup() {
       elif [[ -e "${INSTALL_DIR}" || ! -d "${BACKUP_DIR}" ]]; then
         rollback_failed=1
       else
-        mv "${BACKUP_DIR}" "${INSTALL_DIR}" || rollback_failed=1
+        cp -a "${BACKUP_DIR}" "${INSTALL_DIR}" || rollback_failed=1
       fi
     fi
     if [[ ${REGISTRATION_MODIFIED} -eq 1 && ${OLD_REGISTRATION_CAPTURED} -eq 1 ]]; then
+      if [[ -n "${PREVIOUS_PROTOCOL_DEFAULT}" ]]; then
+        xdg-mime default "${PREVIOUS_PROTOCOL_DEFAULT}" x-scheme-handler/elvern-vlc \
+          >/dev/null 2>&1 || rollback_failed=1
+      fi
       for index in "${!MIME_PATHS[@]}"; do
         target="${MIME_PATHS[$index]}"
         if [[ "${MIME_EXISTED[$index]}" == "1" ]]; then
@@ -106,6 +110,9 @@ cleanup() {
       elif [[ -e "${DESKTOP_FILE}" ]]; then
         rm -f "${DESKTOP_FILE}" || rollback_failed=1
       fi
+      if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "${DESKTOP_DIR}" >/dev/null 2>&1 || true
+      fi
       restored_default="$(xdg-mime query default x-scheme-handler/elvern-vlc 2>/dev/null || true)"
       if [[ -n "${PREVIOUS_PROTOCOL_DEFAULT}" ]]; then
         [[ "${restored_default}" == "${PREVIOUS_PROTOCOL_DEFAULT}" ]] || rollback_failed=1
@@ -115,16 +122,31 @@ cleanup() {
     fi
   fi
   [[ -n "${STAGE_DIR}" && -d "${STAGE_DIR}" ]] && rm -rf "${STAGE_DIR}"
-  if [[ ${INSTALL_COMMITTED} -eq 1 && ${OLD_INSTALL_BACKED_UP} -eq 1 && -d "${BACKUP_DIR}" ]]; then
+  if [[
+    ( ${INSTALL_COMMITTED} -eq 1 || ${rollback_failed} -eq 0 )
+    && ${OLD_INSTALL_BACKED_UP} -eq 1
+    && -d "${BACKUP_DIR}"
+  ]]; then
     rm -rf "${BACKUP_DIR}"
   fi
-  [[ -n "${TRANSACTION_DIR}" && -d "${TRANSACTION_DIR}" ]] && rm -rf "${TRANSACTION_DIR}"
+  if [[
+    -n "${TRANSACTION_DIR}"
+    && -d "${TRANSACTION_DIR}"
+    && ( ${INSTALL_COMMITTED} -eq 1 || ${rollback_failed} -eq 0 )
+  ]]; then
+    rm -rf "${TRANSACTION_DIR}"
+  fi
   if [[ -n "${LOCK_DIR}" && -d "${LOCK_DIR}" ]]; then
     rm -f "${LOCK_DIR}/owner"
     rmdir "${LOCK_DIR}"
   fi
   if [[ ${rollback_failed} -ne 0 ]]; then
-    echo "Elvern VLC Opener rollback could not be verified. Preserve ${BACKUP_DIR:-the backup} and repair the user-level registration manually." >&2
+    echo "Elvern VLC Opener rollback could not be verified." >&2
+    [[ -n "${BACKUP_DIR}" ]] \
+      && echo "Preserved previous installation backup: ${BACKUP_DIR}" >&2
+    [[ -n "${TRANSACTION_DIR}" ]] \
+      && echo "Preserved MIME and desktop registration backups: ${TRANSACTION_DIR}" >&2
+    echo "Repair only the preserved user-level Elvern registration before retrying." >&2
     return 1
   fi
   return 0

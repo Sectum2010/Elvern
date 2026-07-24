@@ -34,10 +34,18 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: "10.0.x"
+
+      - name: Show .NET environment
+        run: |
+          dotnet --info
+          dotnet --list-sdks
 
       - name: Build desktop helper
         run: dotnet build clients/desktop-vlc-opener/Elvern.VlcOpener.csproj --configuration Release
+
+      - name: Test desktop helper
+        run: dotnet test clients/desktop-vlc-opener/Tests/Elvern.VlcOpener.Tests.csproj --configuration Release
 
   frontend_tests:
     name: Frontend tests

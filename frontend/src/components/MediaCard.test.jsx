@@ -195,6 +195,44 @@ describe("MediaCard poster loading", () => {
     }
   });
 
+  test("binds an incident that opens after a healthy image attach but before error", async () => {
+    vi.useFakeTimers();
+    try {
+      const image = renderCard({ deviceShell: "iphone" });
+      const failure = registerConnectivityFailure();
+      fireEvent.error(image);
+      publishConnectivityRecovery({
+        generation: 14,
+        recoveredThroughFailureId: failure.failureId,
+      });
+      await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
+
+      expect(document.querySelector(".media-card__poster-image")).toBeInTheDocument();
+      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("binds a recovered incident that opened after attach before a late error", async () => {
+    vi.useFakeTimers();
+    try {
+      const image = renderCard();
+      const failure = registerConnectivityFailure();
+      publishConnectivityRecovery({
+        generation: 15,
+        recoveredThroughFailureId: failure.failureId,
+      });
+      fireEvent.error(image);
+      await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
+
+      expect(document.querySelector(".media-card__poster-image")).toBeInTheDocument();
+      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("does not retroactively retry a poster that failed before any incident", async () => {
     vi.useFakeTimers();
     try {
@@ -367,6 +405,79 @@ describe("MediaCard poster loading", () => {
     expect(document.querySelector(".media-card__poster-fallback")).not.toHaveClass(
       "media-card__poster-fallback--hidden",
     );
+  });
+
+  test("changing URL cancels the committed recovery timer and prevents an old retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const failure = registerConnectivityFailure();
+      const item = {
+        id: 42,
+        title: "Akira",
+        source_kind: "local",
+        poster_url: "/api/library/item/42/poster?v=first",
+      };
+      const rendered = render(
+        <MemoryRouter>
+          <PosterContextMenuProvider enabled={false}>
+            <MediaCard item={item} />
+          </PosterContextMenuProvider>
+        </MemoryRouter>,
+      );
+      fireEvent.error(document.querySelector(".media-card__poster-image"));
+      publishConnectivityRecovery({
+        generation: 16,
+        recoveredThroughFailureId: failure.failureId,
+      });
+
+      rendered.rerender(
+        <MemoryRouter>
+          <PosterContextMenuProvider enabled={false}>
+            <MediaCard item={{ ...item, poster_url: "/api/library/item/42/poster?v=second" }} />
+          </PosterContextMenuProvider>
+        </MemoryRouter>,
+      );
+      await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
+
+      expect(document.querySelector(".media-card__poster-image")).toHaveAttribute(
+        "src",
+        "/api/library/item/42/poster?v=second&variant=card&display_width=1400",
+      );
+      expect(smartPosterMocks.retry).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("unmount cancels a committed recovery timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const failure = registerConnectivityFailure();
+      const rendered = render(
+        <MemoryRouter>
+          <PosterContextMenuProvider enabled={false}>
+            <MediaCard item={{
+              id: 42,
+              title: "Akira",
+              source_kind: "local",
+              poster_url: "/api/library/item/42/poster?v=cache-token",
+            }} />
+          </PosterContextMenuProvider>
+        </MemoryRouter>,
+      );
+      fireEvent.error(document.querySelector(".media-card__poster-image"));
+      publishConnectivityRecovery({
+        generation: 17,
+        recoveredThroughFailureId: failure.failureId,
+      });
+
+      rendered.unmount();
+      await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
+
+      expect(smartPosterMocks.retry).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("uses the authoritative v2 quality rank when the item provides one", () => {

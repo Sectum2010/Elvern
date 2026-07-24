@@ -13,7 +13,7 @@ let snapshot = {
   latestRecoveryGeneration: 0,
 };
 const listeners = new Set();
-const recoveredIncidents = new Map();
+const incidents = new Map();
 
 
 function emit() {
@@ -21,11 +21,11 @@ function emit() {
 }
 
 
-function rememberRecoveredIncident(incidentId, failureId, generation) {
-  recoveredIncidents.delete(incidentId);
-  recoveredIncidents.set(incidentId, { failureId, generation });
-  while (recoveredIncidents.size > MAX_RECOVERED_INCIDENTS) {
-    recoveredIncidents.delete(recoveredIncidents.keys().next().value);
+function rememberIncident(record) {
+  incidents.delete(record.incidentId);
+  incidents.set(record.incidentId, record);
+  while (incidents.size > MAX_RECOVERED_INCIDENTS) {
+    incidents.delete(incidents.keys().next().value);
   }
 }
 
@@ -38,6 +38,15 @@ export function registerConnectivityFailure() {
   if (!snapshot.active) {
     incidentSequence = incidentId;
   }
+  const existing = incidents.get(incidentId);
+  rememberIncident({
+    incidentId,
+    firstFailureId: existing?.firstFailureId || failureId,
+    latestFailureId: failureId,
+    active: true,
+    recovered: false,
+    recoveryGeneration: 0,
+  });
   snapshot = {
     ...snapshot,
     active: true,
@@ -75,7 +84,15 @@ export function publishConnectivityRecovery({
     latestRecoveredIncidentId: incidentId,
     latestRecoveryGeneration: recoveryGeneration,
   };
-  rememberRecoveredIncident(incidentId, normalizedFailureId, recoveryGeneration);
+  const activeIncident = incidents.get(incidentId);
+  rememberIncident({
+    incidentId,
+    firstFailureId: activeIncident?.firstFailureId || normalizedFailureId,
+    latestFailureId: normalizedFailureId,
+    active: false,
+    recovered: true,
+    recoveryGeneration,
+  });
   emit();
 
   const detail = {
@@ -97,19 +114,48 @@ export function getConnectivityRecoverySnapshot() {
 
 
 export function wasConnectivityIncidentRecovered(incidentId, failureId = 0) {
-  const recovered = recoveredIncidents.get(Number(incidentId));
-  return Boolean(
-    recovered
-    && recovered.failureId >= Number(failureId || 0),
-  );
+  return getConnectivityIncidentRecoveryGeneration(incidentId, failureId) > 0;
 }
 
 
 export function getConnectivityIncidentRecoveryGeneration(incidentId, failureId = 0) {
-  const recovered = recoveredIncidents.get(Number(incidentId));
-  return recovered && recovered.failureId >= Number(failureId || 0)
-    ? recovered.generation
-    : 0;
+  const normalizedFailureId = Number(failureId || 0);
+  const incident = incidents.get(Number(incidentId));
+  if (
+    incident
+    && incident.recovered
+    && incident.latestFailureId >= normalizedFailureId
+  ) {
+    return incident.recoveryGeneration;
+  }
+  if (
+    !incident
+    && normalizedFailureId > 0
+    && snapshot.latestRecoveredFailureId >= normalizedFailureId
+  ) {
+    return snapshot.latestRecoveryGeneration;
+  }
+  return 0;
+}
+
+
+export function getConnectivityIncidentAfterFailure(
+  failureWatermark,
+  throughFailureId = snapshot.latestFailureId,
+) {
+  const lowerBound = Number(failureWatermark || 0);
+  const upperBound = Number(throughFailureId || 0);
+  const records = Array.from(incidents.values());
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const incident = records[index];
+    if (
+      incident.firstFailureId > lowerBound
+      && incident.firstFailureId <= upperBound
+    ) {
+      return { ...incident };
+    }
+  }
+  return null;
 }
 
 
@@ -130,6 +176,6 @@ export function resetConnectivityRecoveryStoreForTests() {
     latestRecoveredIncidentId: 0,
     latestRecoveryGeneration: 0,
   };
-  recoveredIncidents.clear();
+  incidents.clear();
   emit();
 }

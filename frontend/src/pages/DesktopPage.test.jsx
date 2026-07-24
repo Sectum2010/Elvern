@@ -230,26 +230,60 @@ describe("desktop helper install page", () => {
     expect(apiRequest).toHaveBeenCalledTimes(2);
   });
 
-  test("a stale status response cannot overwrite a newer resume refresh", async () => {
+  test("a successful active status request absorbs a queued resume without overlap", async () => {
     let resolveInitial;
-    let resolveResume;
-    apiRequest
-      .mockImplementationOnce(() => new Promise((resolve) => {
-        resolveInitial = resolve;
-      }))
-      .mockImplementationOnce(() => new Promise((resolve) => {
-        resolveResume = resolve;
-      }));
+    apiRequest.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveInitial = resolve;
+    }));
     render(<InstallPage />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
     fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
-    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(2));
-    resolveResume(status({ state: "up_to_date" }));
-    resolveInitial(status({ state: "release_unavailable", latest_releases: [] }));
+    expect(apiRequest).toHaveBeenCalledTimes(1);
+    resolveInitial(status({ state: "up_to_date" }));
 
     expect(await screen.findByText("Ready")).toBeInTheDocument();
-    expect(screen.queryByText("Installer unavailable")).not.toBeInTheDocument();
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(apiRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test("a failed active status request drains one queued recovery refresh", async () => {
+    const failure = registerConnectivityFailure();
+    let rejectInitial;
+    apiRequest
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectInitial = reject;
+      }))
+      .mockResolvedValueOnce(status({ state: "up_to_date" }));
+    render(<InstallPage />);
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
+
+    publishConnectivityRecovery({
+      generation: 8,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    rejectInitial(new ApiNetworkError(undefined, failure));
+
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+  });
+
+  test("a failed active status request drains one queued passive resume", async () => {
+    let rejectInitial;
+    apiRequest
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        rejectInitial = reject;
+      }))
+      .mockResolvedValueOnce(status({ state: "up_to_date" }));
+    render(<InstallPage />);
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
+    expect(apiRequest).toHaveBeenCalledTimes(1);
+    rejectInitial(new Error("status failed"));
+
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledTimes(2);
   });
 
   test("a Firefox transport error is shown with stable copy, not the raw browser message", async () => {
