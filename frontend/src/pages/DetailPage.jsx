@@ -70,7 +70,11 @@ import {
   buildActivePlaybackConflictPrompt,
   getActivePlaybackWorkerConflict,
 } from "../lib/playbackWorkerOwnership";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
+import {
+  getConnectivityIncidentRecoveryGeneration,
+  subscribeConnectivityRecovery,
+} from "../lib/connectivityRecoveryStore";
+import { PAGE_RESUME_EVENT } from "../lib/pageResume";
 
 
 const SEEK_HEADROOM_SECONDS = 2;
@@ -107,6 +111,32 @@ const PROVIDER_ACTION_DESKTOP_VLC = "desktop_vlc_handoff";
 const PROVIDER_ACTION_IOS_VLC = "ios_external_vlc_handoff";
 const PROVIDER_ACTION_IOS_INFUSE = "ios_external_infuse_handoff";
 const PROVIDER_RECONNECT_CONTINUE_LABEL = "Continue anyway";
+const DETAIL_READ_NOT_STARTED = "not_started";
+const DETAIL_READ_LOADING = "loading";
+const DETAIL_READ_READY = "ready";
+const DETAIL_READ_TRANSIENT_FAILED = "transient_failed";
+const DETAIL_READ_BUSINESS_FAILED = "business_failed";
+const DETAIL_AUXILIARY_READS = Object.freeze([
+  "progress",
+  "playback",
+  "desktop",
+  "activeSession",
+  "cloudHealth",
+  "adminReference",
+]);
+
+
+function createDetailReadStates() {
+  return {
+    metadata: DETAIL_READ_NOT_STARTED,
+    progress: DETAIL_READ_NOT_STARTED,
+    playback: DETAIL_READ_NOT_STARTED,
+    desktop: DETAIL_READ_NOT_STARTED,
+    activeSession: DETAIL_READ_NOT_STARTED,
+    cloudHealth: DETAIL_READ_NOT_STARTED,
+    adminReference: DETAIL_READ_NOT_STARTED,
+  };
+}
 const IOS_INFUSE_HANDOFF_STORAGE_PREFIX = "elvern-ios-handoff";
 const IOS_INFUSE_HANDOFF_STORAGE_MAX_AGE_MS = 15 * 60 * 1000;
 const DESKTOP_PLAYBACK_HIDDEN_NOTE_PREFIXES = [
@@ -651,21 +681,13 @@ export function DetailPage() {
   const [globalHiddenActionError, setGlobalHiddenActionError] = useState("");
   const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const [detailReconnecting, setDetailReconnecting] = useState(false);
-  // Tracks which idempotent auxiliary Detail reads failed transiently while the
-  // primary metadata is present, so a confirmed recovery retries only those.
   const [auxiliaryReconnecting, setAuxiliaryReconnecting] = useState(false);
-  const auxiliaryReconnectRef = useRef({
-    progress: false,
-    playback: false,
-    desktop: false,
-    activeSession: false,
-  });
-  // True only while the primary metadata read itself failed transiently, so a
-  // soft refresh re-fetches metadata only when it actually needs recovery.
-  const metadataFailedRef = useRef(false);
+  const detailReadStatesRef = useRef(createDetailReadStates());
+  const detailReadErrorsRef = useRef({});
+  const detailRecoveryHandledRef = useRef({});
+  const detailRecoveryEligibleRef = useRef(new Set());
   const detailLoadGenerationRef = useRef(0);
   const detailSoftRefreshRef = useRef(false);
-  const detailRecoveryGenerationRef = useRef(0);
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
   const [downloadState, setDownloadState] = useState(() => ({ ...INITIAL_DOWNLOAD_STATE }));
   const downloadSamplesRef = useRef([]);
@@ -761,25 +783,10 @@ export function DetailPage() {
     if (typeof window === "undefined") {
       return undefined;
     }
-    const handlePageReturn = () => {
-      resetLocalProviderReconnectPendingAfterReturn();
-    };
-    const handleVisibilityChange = () => {
-      if (typeof document === "undefined" || document.visibilityState === "visible") {
-        resetLocalProviderReconnectPendingAfterReturn();
-      }
-    };
-    window.addEventListener("pageshow", handlePageReturn);
-    window.addEventListener("focus", handlePageReturn);
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", handleVisibilityChange);
-    }
+    const handlePageReturn = () => resetLocalProviderReconnectPendingAfterReturn();
+    window.addEventListener(PAGE_RESUME_EVENT, handlePageReturn);
     return () => {
-      window.removeEventListener("pageshow", handlePageReturn);
-      window.removeEventListener("focus", handlePageReturn);
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
-      }
+      window.removeEventListener(PAGE_RESUME_EVENT, handlePageReturn);
     };
   }, []);
 
@@ -1296,7 +1303,6 @@ export function DetailPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const abortController = new AbortController();
 
     async function loadMediaLibraryReferenceInfo() {
       if (!user) {
@@ -1308,17 +1314,6 @@ export function DetailPage() {
 
       try {
         if (user.role === "admin") {
-          const payload = await apiRequest("/api/admin/media-library-reference", {
-            signal: abortController.signal,
-            abortOnPageHide: true,
-          });
-          if (!cancelled) {
-            setMediaLibraryReferenceInfo({
-              sharedDefault: payload.effective_value || payload.default_value || "Not set",
-              privateValue: null,
-              effectiveValue: payload.effective_value || payload.default_value || "Not set",
-            });
-          }
           return;
         }
 
@@ -1352,23 +1347,8 @@ export function DetailPage() {
     loadMediaLibraryReferenceInfo();
     return () => {
       cancelled = true;
-      abortController.abort();
     };
   }, [user?.id, user?.role, userSettingsQuery.data, userSettingsQuery.error]);
-
-  useEffect(() => {
-    if (!item || (item.source_kind || "local") !== "cloud") {
-      setCloudLibraries(EMPTY_CLOUD_LIBRARIES);
-      setCloudLibrariesLoaded(false);
-      return undefined;
-    }
-    const controller = new AbortController();
-    setCloudLibrariesLoaded(false);
-    void loadCloudLibrariesHealth({ signal: controller.signal });
-    return () => {
-      controller.abort();
-    };
-  }, [item?.id, item?.source_kind]);
 
   useEffect(() => {
     if (!providerReconnectResult) {
@@ -1431,19 +1411,83 @@ export function DetailPage() {
     detailLoadGenerationRef.current = loadGeneration;
     const softRefresh = detailSoftRefreshRef.current;
     detailSoftRefreshRef.current = false;
+    const recoveryEligible = new Set(detailRecoveryEligibleRef.current);
+    detailRecoveryEligibleRef.current.clear();
     const isCurrentLoad = () => (
       !cancelled && detailLoadGenerationRef.current === loadGeneration
     );
 
-    const markAuxiliary = (name, failed) => {
+    const syncAuxiliaryState = () => {
       if (!isCurrentLoad()) {
         return;
       }
-      auxiliaryReconnectRef.current[name] = failed;
       setAuxiliaryReconnecting(
-        Object.values(auxiliaryReconnectRef.current).some(Boolean),
+        DETAIL_AUXILIARY_READS.some(
+          (name) => detailReadStatesRef.current[name] === DETAIL_READ_TRANSIENT_FAILED,
+        ),
       );
     };
+
+    const syncAuxiliaryErrors = () => {
+      if (!isCurrentLoad()) {
+        return;
+      }
+      setProgressLoadError(detailReadErrorsRef.current.progress?.message || "");
+      setPlaybackCapabilityError(
+        detailReadErrorsRef.current.playback?.message
+        || detailReadErrorsRef.current.activeSession?.message
+        || "",
+      );
+      setVlcLaunchError(detailReadErrorsRef.current.desktop?.message || "");
+    };
+
+    const setReadState = (name, state, requestError = null) => {
+      if (!isCurrentLoad()) {
+        return;
+      }
+      detailReadStatesRef.current[name] = state;
+      if (requestError) {
+        detailReadErrorsRef.current[name] = requestError;
+      } else {
+        delete detailReadErrorsRef.current[name];
+      }
+      if (name !== "metadata") {
+        syncAuxiliaryState();
+        syncAuxiliaryErrors();
+      }
+    };
+
+    const shouldRunAuxiliary = (name, metadataRecovered) => {
+      const state = detailReadStatesRef.current[name];
+      if (!softRefresh) {
+        return state === DETAIL_READ_NOT_STARTED;
+      }
+      return recoveryEligible.has(name)
+        || (metadataRecovered && state === DETAIL_READ_NOT_STARTED);
+    };
+
+    async function runAuxiliary(name, operation, onSuccess) {
+      setReadState(name, DETAIL_READ_LOADING);
+      try {
+        const payload = await operation();
+        if (!isCurrentLoad()) {
+          return;
+        }
+        onSuccess?.(payload);
+        setReadState(name, DETAIL_READ_READY);
+      } catch (requestError) {
+        if (!isCurrentLoad() || isAbortError(requestError)) {
+          return;
+        }
+        setReadState(
+          name,
+          isTransientNetworkError(requestError)
+            ? DETAIL_READ_TRANSIENT_FAILED
+            : DETAIL_READ_BUSINESS_FAILED,
+          requestError,
+        );
+      }
+    }
 
     async function loadDetails() {
       if (!softRefresh) {
@@ -1455,13 +1499,10 @@ export function DetailPage() {
         setError("");
         setProgressLoadError("");
         setPlaybackCapabilityError("");
-        auxiliaryReconnectRef.current = {
-          progress: false,
-          playback: false,
-          desktop: false,
-          activeSession: false,
-        };
-        metadataFailedRef.current = false;
+        detailReadStatesRef.current = createDetailReadStates();
+        detailReadErrorsRef.current = {};
+        detailRecoveryHandledRef.current = {};
+        detailRecoveryEligibleRef.current.clear();
         setAuxiliaryReconnecting(false);
         if (!iosExternalAppCallback) {
           resetIosExternalAppState();
@@ -1492,11 +1533,15 @@ export function DetailPage() {
       }
       try {
         let itemPayload;
-        if (softRefresh && !metadataFailedRef.current && itemRef.current) {
-          // Metadata is already present and healthy — recover only the failed
-          // auxiliary reads without re-fetching or clearing the current item.
+        let metadataRecovered = false;
+        const metadataState = detailReadStatesRef.current.metadata;
+        const shouldFetchMetadata = !softRefresh
+          || recoveryEligible.has("metadata")
+          || metadataState === DETAIL_READ_NOT_STARTED;
+        if (!shouldFetchMetadata && itemRef.current) {
           itemPayload = itemRef.current;
         } else {
+          setReadState("metadata", DETAIL_READ_LOADING);
           itemPayload = await apiRequest(`/api/library/item/${itemId}`, {
             signal: abortController.signal,
             abortOnPageHide: true,
@@ -1508,7 +1553,8 @@ export function DetailPage() {
           itemRef.current = itemPayload;
           setError("");
           setDetailReconnecting(false);
-          metadataFailedRef.current = false;
+          setReadState("metadata", DETAIL_READ_READY);
+          metadataRecovered = softRefresh;
           markDetailPerformance(DETAIL_PERFORMANCE_MARKS.metadataReceived);
           setLoading(false);
           if (itemPayload.hidden_globally) {
@@ -1521,86 +1567,115 @@ export function DetailPage() {
           }
         }
 
-        // On a soft refresh (recovery), retry an idempotent auxiliary read only
-        // when it previously failed transiently — never re-run a healthy read,
-        // and never recreate playback/session unnecessarily.
-        const aux = auxiliaryReconnectRef.current;
-        const shouldFetchProgress = !softRefresh || aux.progress;
-        const shouldFetchPlayback = !iosMobile && (!softRefresh || aux.playback);
-        const shouldFetchDesktop = Boolean(desktopPlatform) && (!softRefresh || aux.desktop);
-        const shouldRestoreSession = !softRefresh || aux.activeSession;
-
-        const progressRequest = shouldFetchProgress
-          ? apiRequest(`/api/progress/${itemId}`, {
-            signal: abortController.signal,
-            abortOnPageHide: true,
-          }).then((progressPayload) => {
-            if (isCurrentLoad()) {
+        const progressRequest = shouldRunAuxiliary("progress", metadataRecovered)
+          ? runAuxiliary(
+            "progress",
+            () => apiRequest(`/api/progress/${itemId}`, {
+              signal: abortController.signal,
+              abortOnPageHide: true,
+            }),
+            (progressPayload) => {
               setProgress(progressPayload);
               markDetailPerformance(DETAIL_PERFORMANCE_MARKS.progressReceived);
-            }
-            markAuxiliary("progress", false);
-          }).catch((progressError) => {
-            if (isCurrentLoad() && !isAbortError(progressError)) {
-              setProgressLoadError(progressError.message || "Progress is temporarily unavailable.");
-              markAuxiliary("progress", isTransientNetworkError(progressError));
-            }
-          })
+            },
+          )
           : Promise.resolve();
 
-        const playbackRequest = shouldFetchPlayback
-          ? apiRequest(`/api/playback/${itemId}`, {
-            signal: abortController.signal,
-            abortOnPageHide: true,
-          }).then((playbackPayload) => {
-            if (isCurrentLoad()) {
+        const playbackRequest = !iosMobile && shouldRunAuxiliary("playback", metadataRecovered)
+          ? runAuxiliary(
+            "playback",
+            () => apiRequest(`/api/playback/${itemId}`, {
+              signal: abortController.signal,
+              abortOnPageHide: true,
+            }),
+            (playbackPayload) => {
               syncPlaybackState(playbackPayload);
               markDetailPerformance(DETAIL_PERFORMANCE_MARKS.playbackCapabilityReceived);
-            }
-            markAuxiliary("playback", false);
-          }).catch((requestError) => {
-            if (isCurrentLoad() && !isAbortError(requestError)) {
-              setPlaybackCapabilityError(requestError.message || "Browser playback is temporarily unavailable.");
-              markAuxiliary("playback", isTransientNetworkError(requestError));
-            }
-          })
+            },
+          )
           : Promise.resolve();
+        if (iosMobile && detailReadStatesRef.current.playback === DETAIL_READ_NOT_STARTED) {
+          setReadState("playback", DETAIL_READ_READY);
+        }
 
-        const desktopRequest = shouldFetchDesktop
-          ? apiRequest(
-            `/api/desktop-playback/${itemId}?platform=${desktopPlatform}&same_host=${localDevLoopback ? "1" : "0"}`,
-            { signal: abortController.signal, abortOnPageHide: true },
-          ).then((desktopPayload) => {
-            if (isCurrentLoad()) {
+        const desktopRequest = desktopPlatform && shouldRunAuxiliary("desktop", metadataRecovered)
+          ? runAuxiliary(
+            "desktop",
+            () => apiRequest(
+              `/api/desktop-playback/${itemId}?platform=${desktopPlatform}&same_host=${localDevLoopback ? "1" : "0"}`,
+              { signal: abortController.signal, abortOnPageHide: true },
+            ),
+            (desktopPayload) => {
               setDesktopPlayback(desktopPayload);
               markDetailPerformance(DETAIL_PERFORMANCE_MARKS.desktopCapabilityReceived);
-            }
-            markAuxiliary("desktop", false);
-          }).catch((desktopError) => {
-            if (isCurrentLoad() && !isAbortError(desktopError)) {
-              setVlcLaunchError(desktopError.message || "Failed to resolve desktop VLC playback");
-              markAuxiliary("desktop", isTransientNetworkError(desktopError));
-            }
-          })
+            },
+          )
+          : Promise.resolve();
+        if (!desktopPlatform && detailReadStatesRef.current.desktop === DETAIL_READ_NOT_STARTED) {
+          setReadState("desktop", DETAIL_READ_READY);
+        }
+
+        const activeSessionRequest = shouldRunAuxiliary("activeSession", metadataRecovered)
+          ? runAuxiliary(
+            "activeSession",
+            () => restoreActiveBrowserPlaybackSession(),
+          )
           : Promise.resolve();
 
-        const activeSessionRequest = shouldRestoreSession
-          ? Promise.resolve()
-            .then(() => restoreActiveBrowserPlaybackSession())
-            .then(() => markAuxiliary("activeSession", false))
-            .catch((restoreError) => {
-              if (isCurrentLoad() && !isAbortError(restoreError)) {
-                setPlaybackCapabilityError(restoreError.message || "Active playback restore is temporarily unavailable.");
-                markAuxiliary("activeSession", isTransientNetworkError(restoreError));
-              }
-            })
+        const cloudHealthRequest = itemPayload.source_kind === "cloud"
+          && shouldRunAuxiliary("cloudHealth", metadataRecovered)
+          ? runAuxiliary(
+            "cloudHealth",
+            () => apiRequest("/api/cloud-libraries", {
+              signal: abortController.signal,
+              abortOnPageHide: true,
+            }),
+            (payload) => {
+              setCloudLibraries(payload);
+              setCloudLibrariesLoaded(true);
+            },
+          )
           : Promise.resolve();
+        if (
+          itemPayload.source_kind !== "cloud"
+          && detailReadStatesRef.current.cloudHealth === DETAIL_READ_NOT_STARTED
+        ) {
+          setCloudLibraries(EMPTY_CLOUD_LIBRARIES);
+          setCloudLibrariesLoaded(false);
+          setReadState("cloudHealth", DETAIL_READ_READY);
+        }
+
+        const adminReferenceRequest = user?.role === "admin"
+          && shouldRunAuxiliary("adminReference", metadataRecovered)
+          ? runAuxiliary(
+            "adminReference",
+            () => apiRequest("/api/admin/media-library-reference", {
+              signal: abortController.signal,
+              abortOnPageHide: true,
+            }),
+            (payload) => {
+              setMediaLibraryReferenceInfo({
+                sharedDefault: payload.effective_value || payload.default_value || "Not set",
+                privateValue: null,
+                effectiveValue: payload.effective_value || payload.default_value || "Not set",
+              });
+            },
+          )
+          : Promise.resolve();
+        if (
+          user?.role !== "admin"
+          && detailReadStatesRef.current.adminReference === DETAIL_READ_NOT_STARTED
+        ) {
+          setReadState("adminReference", DETAIL_READ_READY);
+        }
 
         await Promise.allSettled([
           progressRequest,
           playbackRequest,
           desktopRequest,
           activeSessionRequest,
+          cloudHealthRequest,
+          adminReferenceRequest,
         ]);
         if (isCurrentLoad()) {
           markDetailPerformance(DETAIL_PERFORMANCE_MARKS.interactiveReady);
@@ -1608,12 +1683,14 @@ export function DetailPage() {
       } catch (requestError) {
         if (isCurrentLoad() && !isAbortError(requestError)) {
           if (isTransientNetworkError(requestError)) {
-            metadataFailedRef.current = true;
+            setReadState("metadata", DETAIL_READ_TRANSIENT_FAILED, requestError);
             setDetailReconnecting(true);
             if (!itemRef.current) {
               setError("Elvern could not load this media item.");
             }
           } else {
+            setReadState("metadata", DETAIL_READ_BUSINESS_FAILED, requestError);
+            setDetailReconnecting(false);
             setError(requestError.message || "Failed to load media item");
           }
         }
@@ -1633,29 +1710,39 @@ export function DetailPage() {
         resetMobilePlaybackState();
       }
     };
-  }, [cachedDetailPreview, desktopPlatform, iosExternalAppCallback, iosMobile, itemId, localDevLoopback, detailRefreshKey]);
+  }, [cachedDetailPreview, desktopPlatform, iosExternalAppCallback, iosMobile, itemId, localDevLoopback, detailRefreshKey, user?.role]);
 
   useEffect(() => {
-    function handleConnectivityRecovered(event) {
-      const generation = Number(event.detail?.generation || 0);
-      if (
-        (!detailReconnecting && !auxiliaryReconnecting)
-        || generation <= detailRecoveryGenerationRef.current
-      ) {
+    function recoverEligibleReads() {
+      const eligible = new Set();
+      for (const [name, state] of Object.entries(detailReadStatesRef.current)) {
+        if (state !== DETAIL_READ_TRANSIENT_FAILED) {
+          continue;
+        }
+        const requestError = detailReadErrorsRef.current[name];
+        const generation = getConnectivityIncidentRecoveryGeneration(
+          requestError?.incidentId,
+          requestError?.failureId,
+        );
+        if (
+          generation > 0
+          && generation > Number(detailRecoveryHandledRef.current[name] || 0)
+        ) {
+          detailRecoveryHandledRef.current[name] = generation;
+          eligible.add(name);
+        }
+      }
+      if (eligible.size === 0) {
         return;
       }
-      // One soft refresh per recovery generation. A soft refresh preserves the
-      // current item, active playback, and any valid progress, retrying only the
-      // primary metadata (if it failed) and the auxiliary reads that failed.
-      detailRecoveryGenerationRef.current = generation;
+      eligible.forEach((name) => detailRecoveryEligibleRef.current.add(name));
       detailSoftRefreshRef.current = true;
       setDetailRefreshKey((current) => current + 1);
     }
-    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    return () => {
-      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    };
-  }, [detailReconnecting, auxiliaryReconnecting]);
+    const unsubscribe = subscribeConnectivityRecovery(recoverEligibleReads);
+    recoverEligibleReads();
+    return unsubscribe;
+  }, [auxiliaryReconnecting, detailReconnecting, itemId]);
 
   useEffect(() => {
     if (!item?.id) {

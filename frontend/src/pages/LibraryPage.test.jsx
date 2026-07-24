@@ -22,7 +22,11 @@ import {
   LIBRARY_QUERY_STALE_TIME_MS,
 } from "../lib/libraryQueries";
 import { queryClient } from "../lib/queryClient";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
+import {
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+} from "../lib/connectivityRecoveryStore";
 import { LibraryPage } from "./LibraryPage";
 
 const MAINTENANCE_MODE_MESSAGE = "The server is currently under construction, please try again later";
@@ -343,6 +347,7 @@ function mockCategorySwitchRects() {
 describe("LibraryPage category switching", () => {
   beforeEach(() => {
     queryClient.clear();
+    resetConnectivityRecoveryStoreForTests();
     apiRequest.mockReset();
     vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "off");
     mockPlatformState.deviceClass = "desktop";
@@ -371,6 +376,7 @@ describe("LibraryPage category switching", () => {
   afterEach(() => {
     cleanup();
     queryClient.clear();
+    resetConnectivityRecoveryStoreForTests();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
@@ -1283,14 +1289,18 @@ describe("LibraryPage category switching", () => {
       updatedAt: Date.now() - LIBRARY_QUERY_STALE_TIME_MS - 1,
     });
     let libraryCalls = 0;
+    let failure;
     apiRequest.mockImplementation((requestPath) => {
       if (requestPath === "/api/user-settings") {
         return Promise.resolve(defaultSettings);
       }
       if (requestPath === "/api/library?category=movies") {
         libraryCalls += 1;
+        if (libraryCalls === 1) {
+          failure = registerConnectivityFailure();
+        }
         return libraryCalls === 1
-          ? Promise.reject(new ApiNetworkError())
+          ? Promise.reject(new ApiNetworkError(undefined, failure))
           : Promise.resolve(payload);
       }
       return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
@@ -1307,14 +1317,18 @@ describe("LibraryPage category switching", () => {
     expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
     expect(screen.queryByText("Loading library...")).not.toBeInTheDocument();
 
-    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-      detail: { generation: 12 },
+    const recoveryEvent = publishConnectivityRecovery({
+      generation: 12,
+      recoveredThroughFailureId: failure.failureId,
     });
-    fireEvent(window, recoveryEvent);
+    expect(recoveryEvent).not.toBeNull();
     await waitFor(() => expect(libraryCalls).toBe(2));
     await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
 
-    fireEvent(window, recoveryEvent);
+    expect(publishConnectivityRecovery({
+      generation: 12,
+      recoveredThroughFailureId: failure.failureId,
+    })).toBeNull();
     await act(async () => Promise.resolve());
     expect(libraryCalls).toBe(2);
   });
@@ -1407,9 +1421,11 @@ describe("LibraryPage category switching", () => {
     );
 
     await waitFor(() => expect(libraryCalls).toBe(1));
-    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-      detail: { generation: 33 },
-    }));
+    const failure = registerConnectivityFailure();
+    publishConnectivityRecovery({
+      generation: 33,
+      recoveredThroughFailureId: failure.failureId,
+    });
     await act(async () => Promise.resolve());
     expect(libraryCalls).toBe(1);
   });

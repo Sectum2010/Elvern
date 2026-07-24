@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
 import { apiRequest } from "../lib/api";
+import { PAGE_RESUME_EVENT } from "../lib/pageResume";
 import {
   buildProviderAuthReturnPath,
   getGoogleDriveStatusFromLocation,
@@ -169,25 +170,10 @@ export function ProviderAuthProvider({ children }) {
     if (typeof window === "undefined") {
       return undefined;
     }
-    const handlePageReturn = () => {
-      resetReconnectPendingAfterReturn();
-    };
-    const handleVisibilityChange = () => {
-      if (typeof document === "undefined" || document.visibilityState === "visible") {
-        resetReconnectPendingAfterReturn();
-      }
-    };
-    window.addEventListener("pageshow", handlePageReturn);
-    window.addEventListener("focus", handlePageReturn);
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", handleVisibilityChange);
-    }
+    const handlePageReturn = () => resetReconnectPendingAfterReturn();
+    window.addEventListener(PAGE_RESUME_EVENT, handlePageReturn);
     return () => {
-      window.removeEventListener("pageshow", handlePageReturn);
-      window.removeEventListener("focus", handlePageReturn);
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
-      }
+      window.removeEventListener(PAGE_RESUME_EVENT, handlePageReturn);
     };
   }, []);
 

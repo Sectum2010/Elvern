@@ -9,6 +9,12 @@ import {
   getRuntimeConnectionOopsCopy,
   matchesFastOopsCandidates,
 } from "./connectivityRuntimeCore.js";
+import {
+  CONNECTIVITY_RECOVERED_EVENT,
+  getConnectivityRecoverySnapshot,
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+} from "./connectivityRecoveryStore.js";
 import { detectClientPlatform, isDesktopClientPlatform } from "./platformDetection.js";
 
 
@@ -22,7 +28,7 @@ export const STARTUP_SHELL_REVEAL_DELAY_MS = 400;
 export const NO_INTERNET_REAPPEAR_MS = 10_000;
 export const STARTUP_CONNECTIVITY_FAILURE_EVENT = "elvern:connectivity-failure";
 export const STARTUP_APPLICATION_READY_EVENT = "elvern:application-response";
-export const CONNECTIVITY_RECOVERED_EVENT = "elvern:connectivity-recovered";
+export { CONNECTIVITY_RECOVERED_EVENT };
 export const STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY = CONNECTION_RUNTIME_CONTRACT.manualServiceRecoveryStorageKey;
 export const FRONTEND_HEALTH_PATH = "/_elvern/frontend-health";
 export const BACKEND_HEALTH_PATH = "/health";
@@ -85,10 +91,19 @@ export function classifyStartupHealthResponse(path, response) {
 
 
 export function dispatchStartupConnectivityFailure(detail = null) {
+  const recoveryIdentity = registerConnectivityFailure();
+  const safeDetail = {
+    classification: detail?.classification === "transport" ? "transport" : "transport",
+    requestClass: typeof detail?.requestClass === "string" ? detail.requestClass : "api",
+    ...recoveryIdentity,
+  };
   if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") {
-    return;
+    return safeDetail;
   }
-  window.dispatchEvent(new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, { detail }));
+  window.dispatchEvent(new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
+    detail: safeDetail,
+  }));
+  return safeDetail;
 }
 
 
@@ -154,15 +169,6 @@ export function createStartupConnectionController({
   let outageGeneration = 1;
   let oopsLatchedGeneration = 0;
   let outageActive = true;
-  // A transport incident is a bounded recovery generation that is independent
-  // from the full-screen outage/Oops machinery. It opens when a genuine
-  // ApiNetworkError is reported while the visible application is still healthy,
-  // shares the monotonic `outageGeneration` space so recovery generations stay
-  // globally strictly-increasing, and never mutates the visible status, the
-  // Oops deadline, or the paint surface.
-  let transportIncidentActive = false;
-  let runtimeOutageGeneration = 0;
-  let recoveredOutageGeneration = 0;
   let browserOfflineEvidenceGeneration = 0;
   let initialProbeCompleted = false;
   let outageStartedAt = Number.isFinite(initialOutageStartedAt) && initialOutageStartedAt > 0
@@ -171,6 +177,8 @@ export function createStartupConnectionController({
   let unreachableTimer = 0;
   let scheduledProbeTimer = 0;
   let inFlightProbe = null;
+  let inFlightProbeObservedFailureId = 0;
+  let followUpProbeRequested = false;
   const activeHealthControllers = new Set();
   const activeConfirmationTimers = new Map();
   const listeners = new Set();
@@ -258,17 +266,7 @@ export function createStartupConnectionController({
   function beginOutage() {
     if (outageActive) return;
     outageActive = true;
-    if (transportIncidentActive) {
-      // Escalate an already-open lightweight transport incident into a full
-      // outage, reusing the generation it has already issued so a single
-      // incident never consumes two recovery generations.
-      transportIncidentActive = false;
-    } else {
-      outageGeneration += 1;
-      if (runtimeReady) {
-        runtimeOutageGeneration = outageGeneration;
-      }
-    }
+    outageGeneration += 1;
     outageStartedAt = Date.now();
     cancelConfirmationTimers();
     emit({
@@ -279,47 +277,27 @@ export function createStartupConnectionController({
     });
   }
 
-  function openTransportIncident() {
-    // Join the current incident when one is already open (coalesce overlapping
-    // transport failures), and never open one while the full-screen outage
-    // machinery already owns recovery.
-    if (outageActive || transportIncidentActive) return;
-    transportIncidentActive = true;
-    outageGeneration += 1;
-    if (runtimeReady) {
-      runtimeOutageGeneration = outageGeneration;
-    }
-  }
-
-  function endTransportIncidentIfRecovered() {
+  function endConnectivityIncidentIfRecovered(observedFailureId) {
+    const recoverySnapshot = getConnectivityRecoverySnapshot();
     if (
-      !transportIncidentActive
+      !recoverySnapshot.active
       || !started
       || !snapshot.serviceReachable
       || !applicationReady
       || snapshot.internetOutageLatched
       || offlineOopsRequired
+      || Number(observedFailureId) < recoverySnapshot.latestFailureId
     ) {
       return;
     }
-    const recoveredGeneration = outageGeneration;
-    transportIncidentActive = false;
-    if (
-      runtimeOutageGeneration === recoveredGeneration
-      && recoveredOutageGeneration !== recoveredGeneration
-      && typeof windowObject?.dispatchEvent === "function"
-    ) {
-      recoveredOutageGeneration = recoveredGeneration;
-      windowObject.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: {
-          generation: recoveredGeneration,
-          previousClassification: "service_unreachable",
-        },
-      }));
-    }
+    publishConnectivityRecovery({
+      generation: outageGeneration,
+      previousClassification: "service_unreachable",
+      recoveredThroughFailureId: observedFailureId,
+    });
   }
 
-  function endOutageIfRecovered() {
+  function endOutageIfRecovered(observedFailureId = 0) {
     if (
       !outageActive
       || !snapshot.serviceReachable
@@ -329,7 +307,6 @@ export function createStartupConnectionController({
     ) {
       return;
     }
-    const recoveredGeneration = outageGeneration;
     outageActive = false;
     oopsLatchedGeneration = 0;
     clearUnreachableTimer();
@@ -341,19 +318,7 @@ export function createStartupConnectionController({
       oopsLatchedGeneration: 0,
       oopsEvidenceReason: null,
     });
-    if (
-      runtimeOutageGeneration === recoveredGeneration
-      && recoveredOutageGeneration !== recoveredGeneration
-      && typeof windowObject?.dispatchEvent === "function"
-    ) {
-      recoveredOutageGeneration = recoveredGeneration;
-      windowObject.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: {
-          generation: recoveredGeneration,
-          previousClassification: "service_unreachable",
-        },
-      }));
-    }
+    endConnectivityIncidentIfRecovered(observedFailureId);
   }
 
   function latchOops({ classification = snapshot.classification, evidenceReason } = {}) {
@@ -394,7 +359,8 @@ export function createStartupConnectionController({
     const needsRecovery = !snapshot.serviceReachable
       || !applicationReady
       || snapshot.internetOutageLatched
-      || offlineOopsRequired;
+      || offlineOopsRequired
+      || getConnectivityRecoverySnapshot().active;
     if (!desktopWatchdogEnabled && !needsRecovery) {
       return;
     }
@@ -477,7 +443,7 @@ export function createStartupConnectionController({
     });
   }
 
-  function markServiceHealthy() {
+  function markServiceHealthy({ observedFailureId = 0 } = {}) {
     const canConnect = applicationReady && !offlineOopsRequired;
     if (canConnect) {
       runtimeReady = true;
@@ -489,8 +455,8 @@ export function createStartupConnectionController({
       serviceReachable: true,
       status: canConnect ? "connected" : (snapshot.status === "unreachable" ? "unreachable" : "connecting"),
     });
-    endOutageIfRecovered();
-    endTransportIncidentIfRecovered();
+    endOutageIfRecovered(observedFailureId);
+    endConnectivityIncidentIfRecovered(observedFailureId);
   }
 
   function markServiceFailure({ frontendState, backendState }) {
@@ -613,7 +579,10 @@ export function createStartupConnectionController({
     return { internet, service };
   }
 
-  function applyProbeEvidence({ internet, service }, { initialCycle = false } = {}) {
+  function applyProbeEvidence(
+    { internet, service },
+    { initialCycle = false, observedFailureId = 0 } = {},
+  ) {
     const serviceHealthy = service.frontendState === "reachable" && service.backendState === "reachable";
     if (
       initialCycle
@@ -631,7 +600,7 @@ export function createStartupConnectionController({
         publicEvidenceReason: internet.publicEvidenceReason,
         publicProbeTrusted: Boolean(internet.trusted),
       });
-      markServiceHealthy();
+      markServiceHealthy({ observedFailureId });
       return;
     }
     if (initialCycle) {
@@ -639,7 +608,7 @@ export function createStartupConnectionController({
     }
     applyInternetEvidence(internet, { initialCycle });
     if (serviceHealthy) {
-      markServiceHealthy();
+      markServiceHealthy({ observedFailureId });
     } else {
       markServiceFailure(service);
     }
@@ -657,19 +626,31 @@ export function createStartupConnectionController({
   }
 
   function probe() {
-    if (inFlightProbe || typeof fetchImpl !== "function") {
+    if (inFlightProbe) {
+      const recoverySnapshot = getConnectivityRecoverySnapshot();
+      if (
+        recoverySnapshot.active
+        && recoverySnapshot.latestFailureId > inFlightProbeObservedFailureId
+      ) {
+        followUpProbeRequested = true;
+      }
+      return inFlightProbe;
+    }
+    if (typeof fetchImpl !== "function") {
       return inFlightProbe || Promise.resolve(false);
     }
     clearScheduledProbe();
     const generation = lifecycleGeneration;
     const offlineGeneration = browserOfflineEvidenceGeneration;
     const initialCycle = !initialProbeCompleted;
+    const observedFailureId = getConnectivityRecoverySnapshot().latestFailureId;
+    inFlightProbeObservedFailureId = observedFailureId;
     const transactionIsCurrent = () => started
       && generation === lifecycleGeneration
       && offlineGeneration === browserOfflineEvidenceGeneration;
     const operation = collectProbeEvidence(generation).then(async (firstEvidence) => {
       if (!transactionIsCurrent()) return false;
-      applyProbeEvidence(firstEvidence, { initialCycle });
+      applyProbeEvidence(firstEvidence, { initialCycle, observedFailureId });
       const firstCandidate = fastOopsCandidateFor(firstEvidence);
       const candidateOutageGeneration = outageGeneration;
       if (firstCandidate?.evidenceReason === CONNECTION_RUNTIME_CONTRACT.fastOopsReasons.browserOffline) {
@@ -682,7 +663,7 @@ export function createStartupConnectionController({
       ) {
         const secondEvidence = await collectProbeEvidence(generation);
         if (!transactionIsCurrent()) return false;
-        applyProbeEvidence(secondEvidence);
+        applyProbeEvidence(secondEvidence, { observedFailureId });
         const secondCandidate = fastOopsCandidateFor(secondEvidence);
         if (matchesFastOopsCandidates(firstCandidate, secondCandidate)) {
           latchOops(secondCandidate);
@@ -699,9 +680,22 @@ export function createStartupConnectionController({
       }
       if (inFlightProbe === tracked) {
         inFlightProbe = null;
+        inFlightProbeObservedFailureId = 0;
       }
       if (started && generation === lifecycleGeneration) {
-        scheduleNextProbe();
+        const recoverySnapshot = getConnectivityRecoverySnapshot();
+        if (
+          followUpProbeRequested
+          || (
+            recoverySnapshot.active
+            && recoverySnapshot.latestFailureId > observedFailureId
+          )
+        ) {
+          followUpProbeRequested = false;
+          void probe();
+        } else {
+          scheduleNextProbe();
+        }
       }
     });
     inFlightProbe = tracked;
@@ -722,6 +716,9 @@ export function createStartupConnectionController({
 
   function handleOffline() {
     browserOfflineEvidenceGeneration += 1;
+    if (!getConnectivityRecoverySnapshot().active) {
+      registerConnectivityFailure();
+    }
     markInternetOffline({
       initialCycle: !initialProbeCompleted,
       publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
@@ -739,6 +736,9 @@ export function createStartupConnectionController({
       outageStartedAt = Date.now();
     }
     if (initiallyOffline || navigatorObject?.onLine === false) {
+      if (!getConnectivityRecoverySnapshot().active) {
+        registerConnectivityFailure();
+      }
       markInternetOffline({
         initialCycle: true,
         publicEvidenceReason: CONNECTION_RUNTIME_CONTRACT.publicEvidenceReasons.browserExplicitOffline,
@@ -757,9 +757,7 @@ export function createStartupConnectionController({
     }
     started = false;
     lifecycleGeneration += 1;
-    // Abandon any pending transport incident so a stopped/obsolete lifecycle
-    // can never emit a late recovery event.
-    transportIncidentActive = false;
+    followUpProbeRequested = false;
     clearUnreachableTimer();
     clearScheduledProbe();
     activeHealthControllers.forEach((controller) => controller.abort());
@@ -772,7 +770,13 @@ export function createStartupConnectionController({
     documentObject?.removeEventListener?.("visibilitychange", handleVisibilityChange);
   }
 
-  function reportFailure({ forceOfflineOops = false } = {}) {
+  function reportFailure({
+    failureId = 0,
+    forceOfflineOops = false,
+  } = {}) {
+    if (!Number(failureId)) {
+      registerConnectivityFailure();
+    }
     if (forceOfflineOops) {
       forceOfflineOopsPending = true;
       if (snapshot.internetOutageLatched || navigatorObject?.onLine === false) {
@@ -788,12 +792,6 @@ export function createStartupConnectionController({
       markInternetOffline();
     } else if (!snapshot.serviceReachable) {
       markServiceFailure({ frontendState: snapshot.frontendState, backendState: snapshot.backendState });
-    } else {
-      // A genuine transport failure while the last health snapshot is still
-      // reachable: open a bounded incident so the immediate health probe below
-      // can confirm recovery and emit CONNECTIVITY_RECOVERED_EVENT even though
-      // serviceReachable was already true.
-      openTransportIncident();
     }
     return probe();
   }

@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ApiNetworkError, apiRequest } from "../lib/api";
 import { PAGE_RESUME_EVENT } from "../lib/pageResume";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
+import {
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+} from "../lib/connectivityRecoveryStore";
 import { InstallPage } from "./DesktopPage.jsx";
 
 
@@ -66,6 +70,7 @@ function status(overrides = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetConnectivityRecoveryStoreForTests();
   platformState.value = "mac";
   apiRequest.mockResolvedValue(status());
 });
@@ -248,8 +253,10 @@ describe("desktop helper install page", () => {
   });
 
   test("a Firefox transport error is shown with stable copy, not the raw browser message", async () => {
+    const failure = registerConnectivityFailure();
     apiRequest.mockRejectedValueOnce(new ApiNetworkError(undefined, {
       cause: new TypeError("NetworkError when attempting to fetch resource"),
+      ...failure,
     }));
     render(<InstallPage />);
 
@@ -259,22 +266,86 @@ describe("desktop helper install page", () => {
   });
 
   test("confirmed recovery retries a transient status failure once per generation", async () => {
+    const failure = registerConnectivityFailure();
     apiRequest
-      .mockRejectedValueOnce(new ApiNetworkError())
+      .mockRejectedValueOnce(new ApiNetworkError(undefined, failure))
       .mockResolvedValueOnce(status({ state: "up_to_date" }));
     render(<InstallPage />);
     expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
 
-    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-      detail: { generation: 9 },
+    publishConnectivityRecovery({
+      generation: 9,
+      recoveredThroughFailureId: failure.failureId,
     });
-    fireEvent(window, recoveryEvent);
     expect(await screen.findByText("Ready")).toBeInTheDocument();
     expect(apiRequest).toHaveBeenCalledTimes(2);
 
-    fireEvent(window, recoveryEvent);
+    publishConnectivityRecovery({
+      generation: 9,
+      recoveredThroughFailureId: failure.failureId,
+    });
     await new Promise((resolve) => window.setTimeout(resolve, 20));
     expect(apiRequest).toHaveBeenCalledTimes(2);
+  });
+
+  test("resume and recovery requests coalesce behind an active helper verification", async () => {
+    const failure = registerConnectivityFailure();
+    let resolveVerify;
+    apiRequest
+      .mockResolvedValueOnce(status())
+      .mockRejectedValueOnce(new ApiNetworkError(undefined, failure))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveVerify = resolve;
+      }))
+      .mockResolvedValueOnce(status({ state: "up_to_date" }));
+    render(<InstallPage />);
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Test helper" }));
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(3));
+
+    publishConnectivityRecovery({
+      generation: 11,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
+    resolveVerify({ status: status({ state: "up_to_date" }) });
+
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(4));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(apiRequest).toHaveBeenCalledTimes(4);
+  });
+
+  test("pagehide immediately cancels helper verification polling", async () => {
+    vi.useFakeTimers();
+    try {
+      apiRequest.mockImplementation((path) => {
+        if (path.startsWith("/api/desktop-helper/status")) {
+          return Promise.resolve(status({ vlc_detection_state: "detection_unavailable" }));
+        }
+        if (path === "/api/desktop-helper/verify") {
+          return Promise.resolve({ protocol_url: "elvern-vlc-opener://verify" });
+        }
+        return Promise.reject(new Error(`Unexpected request: ${path}`));
+      });
+      render(<InstallPage />);
+      await vi.advanceTimersByTimeAsync(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Test helper" }));
+      await vi.advanceTimersByTimeAsync(0);
+      const callsBeforePageHide = apiRequest.mock.calls.length;
+
+      fireEvent(window, new Event("pagehide"));
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(apiRequest.mock.calls.length).toBe(callsBeforePageHide);
+      expect(screen.getByRole("button", { name: "Test helper" })).not.toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("helper verification polling stops and issues no further requests after unmount", async () => {

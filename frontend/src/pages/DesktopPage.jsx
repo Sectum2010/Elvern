@@ -15,7 +15,10 @@ import {
   isDesktopClientPlatform,
 } from "../lib/platformDetection";
 import { PAGE_RESUME_EVENT } from "../lib/pageResume.js";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection.js";
+import {
+  getConnectivityIncidentRecoveryGeneration,
+  subscribeConnectivityRecovery,
+} from "../lib/connectivityRecoveryStore.js";
 
 
 const IOS_APP_LINKS = {
@@ -481,11 +484,18 @@ export function InstallPage() {
   const [desktopVerifyFeedback, setDesktopVerifyFeedback] = useState("");
   const [terminalCommandFeedback, setTerminalCommandFeedback] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
-  const passiveRefreshInFlightRef = useRef(false);
+  const statusRefreshOperationRef = useRef(null);
+  const pendingPassiveRefreshRef = useRef(false);
+  const pendingRecoveryRefreshRef = useRef(false);
   const statusRequestControllerRef = useRef(null);
   const statusRequestGenerationRef = useRef(0);
+  const statusFailureRef = useRef(null);
   const statusRef = useRef(null);
   const verifyPendingRef = useRef(false);
+  const verifyGenerationRef = useRef(0);
+  const verifyPollTimerRef = useRef(0);
+  const verifyPollResolveRef = useRef(null);
+  const verifyRequestControllerRef = useRef(null);
   const mountedRef = useRef(true);
   const lastRecoveryGenerationRef = useRef(0);
   const [mobileAppStatus, setMobileAppStatus] = useState(() => ({
@@ -523,6 +533,7 @@ export function InstallPage() {
       setStatus(payload);
       setError("");
       setReconnecting(false);
+      statusFailureRef.current = null;
       return payload;
     } catch (requestError) {
       if (
@@ -533,9 +544,12 @@ export function InstallPage() {
         return null;
       }
       if (isTransientNetworkError(requestError)) {
+        statusFailureRef.current = requestError;
         setReconnecting(true);
         setError((current) => (statusRef.current ? current : "Elvern could not load Helper status."));
       } else {
+        statusFailureRef.current = null;
+        setReconnecting(false);
         setError(requestError.message || "Failed to load install status");
       }
       return null;
@@ -552,14 +566,72 @@ export function InstallPage() {
     }
   }, [deviceId, isDesktop, platform]);
 
+  const cancelVerifyLifecycle = useCallback(() => {
+    verifyGenerationRef.current += 1;
+    verifyPendingRef.current = false;
+    if (mountedRef.current) {
+      setDesktopVerifyPending(false);
+    }
+    verifyRequestControllerRef.current?.abort();
+    verifyRequestControllerRef.current = null;
+    if (verifyPollTimerRef.current) {
+      window.clearTimeout(verifyPollTimerRef.current);
+      verifyPollTimerRef.current = 0;
+    }
+    if (verifyPollResolveRef.current) {
+      verifyPollResolveRef.current(false);
+      verifyPollResolveRef.current = null;
+    }
+  }, []);
+
+  const refreshDesktopStatus = useCallback(async ({ reason = "passive", showLoading = false } = {}) => {
+    if (!isDesktop || document.visibilityState === "hidden") {
+      return null;
+    }
+    if (verifyPendingRef.current) {
+      if (reason === "recovery") {
+        pendingRecoveryRefreshRef.current = true;
+      } else {
+        pendingPassiveRefreshRef.current = true;
+      }
+      return null;
+    }
+    const currentOperation = statusRefreshOperationRef.current;
+    if (currentOperation) {
+      if (currentOperation.reason === "initial" && reason !== "initial") {
+        // A real return/recovery supersedes the cold-start read. The generation
+        // guard in loadDesktopStatus prevents the old result from writing back.
+      } else {
+        if (reason === "recovery") {
+          pendingRecoveryRefreshRef.current = true;
+        }
+        return currentOperation.promise;
+      }
+    }
+    const operation = loadDesktopStatus({ showLoading }).finally(() => {
+      if (statusRefreshOperationRef.current?.promise === operation) {
+        statusRefreshOperationRef.current = null;
+      }
+    });
+    statusRefreshOperationRef.current = { promise: operation, reason };
+    return operation;
+  }, [isDesktop, loadDesktopStatus]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       statusRequestGenerationRef.current += 1;
       statusRequestControllerRef.current?.abort();
+      cancelVerifyLifecycle();
     };
-  }, []);
+  }, [cancelVerifyLifecycle]);
+
+  useEffect(() => {
+    const handlePageHide = () => cancelVerifyLifecycle();
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [cancelVerifyLifecycle]);
 
   useEffect(() => {
     statusRef.current = status;
@@ -573,7 +645,7 @@ export function InstallPage() {
     let cancelled = false;
 
     async function loadStatus() {
-      const payload = await loadDesktopStatus();
+      const payload = await refreshDesktopStatus({ reason: "initial", showLoading: true });
       if (!cancelled && payload) {
         setStatus(payload);
       }
@@ -583,7 +655,7 @@ export function InstallPage() {
     return () => {
       cancelled = true;
     };
-  }, [isDesktop, loadDesktopStatus]);
+  }, [isDesktop, refreshDesktopStatus]);
 
   useEffect(() => {
     if (!isDesktop) {
@@ -591,45 +663,39 @@ export function InstallPage() {
     }
 
     const refreshStatus = async () => {
-      if (
-        document.visibilityState === "hidden"
-        || passiveRefreshInFlightRef.current
-        || verifyPendingRef.current
-      ) {
-        return;
-      }
-      passiveRefreshInFlightRef.current = true;
-      try {
-        await loadDesktopStatus({ showLoading: false });
-      } finally {
-        passiveRefreshInFlightRef.current = false;
-      }
+      await refreshDesktopStatus({ reason: "resume", showLoading: false });
     };
     window.addEventListener(PAGE_RESUME_EVENT, refreshStatus);
     return () => {
       window.removeEventListener(PAGE_RESUME_EVENT, refreshStatus);
     };
-  }, [isDesktop, loadDesktopStatus]);
+  }, [isDesktop, refreshDesktopStatus]);
 
   useEffect(() => {
-    function handleConnectivityRecovered(event) {
-      const generation = Number(event.detail?.generation || 0);
+    function recoverStatus() {
+      const failure = statusFailureRef.current;
+      const generation = getConnectivityIncidentRecoveryGeneration(
+        failure?.incidentId,
+        failure?.failureId,
+      );
       if (
         !isDesktop
         || !reconnecting
-        || verifyPendingRef.current
         || generation <= lastRecoveryGenerationRef.current
       ) {
         return;
       }
       lastRecoveryGenerationRef.current = generation;
-      void loadDesktopStatus({ showLoading: false });
+      if (verifyPendingRef.current) {
+        pendingRecoveryRefreshRef.current = true;
+        return;
+      }
+      void refreshDesktopStatus({ reason: "recovery", showLoading: false });
     }
-    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    return () => {
-      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    };
-  }, [isDesktop, loadDesktopStatus, reconnecting]);
+    const unsubscribe = subscribeConnectivityRecovery(recoverStatus);
+    recoverStatus();
+    return unsubscribe;
+  }, [isDesktop, reconnecting, refreshDesktopStatus]);
 
   const requiredSection = useMemo(() => buildRequiredSection(platform, status), [platform, status]);
   const showRequiredSection = !requiredSection.empty;
@@ -676,10 +742,14 @@ export function InstallPage() {
     if (!isDesktop || !deviceId) {
       return;
     }
+    cancelVerifyLifecycle();
+    const verifyGeneration = verifyGenerationRef.current;
     setDesktopVerifyPending(true);
     verifyPendingRef.current = true;
     statusRequestGenerationRef.current += 1;
     statusRequestControllerRef.current?.abort();
+    const verifyController = new AbortController();
+    verifyRequestControllerRef.current = verifyController;
     setError("");
     setDesktopVerifyFeedback("");
     const previousCheckedAt = status?.vlc_detection_checked_at || "";
@@ -687,11 +757,18 @@ export function InstallPage() {
     try {
       const payload = await apiRequest("/api/desktop-helper/verify", {
         method: "POST",
+        signal: verifyController.signal,
         data: {
           platform,
           device_id: deviceId,
         },
       });
+      if (
+        !mountedRef.current
+        || verifyGenerationRef.current !== verifyGeneration
+      ) {
+        return;
+      }
       if (payload.status) {
         setStatus(payload.status);
         setDesktopVerifyFeedback(desktopHelperFeedbackForStatus(platform, payload.status));
@@ -711,15 +788,26 @@ export function InstallPage() {
       const deadline = Date.now() + 8000;
       let callbackSeen = false;
       while (Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 900));
-        // Stop polling immediately if the page was unmounted or navigated away
-        // so an obsolete verification lifecycle cannot keep firing requests or
-        // updating state.
-        if (!mountedRef.current) {
+        const shouldContinue = await new Promise((resolve) => {
+          verifyPollResolveRef.current = resolve;
+          verifyPollTimerRef.current = window.setTimeout(() => {
+            verifyPollTimerRef.current = 0;
+            verifyPollResolveRef.current = null;
+            resolve(true);
+          }, 900);
+        });
+        if (
+          !shouldContinue
+          || !mountedRef.current
+          || verifyGenerationRef.current !== verifyGeneration
+        ) {
           return;
         }
         const refreshed = await loadDesktopStatus({ showLoading: false });
-        if (!mountedRef.current) {
+        if (
+          !mountedRef.current
+          || verifyGenerationRef.current !== verifyGeneration
+        ) {
           return;
         }
         if (!refreshed) {
@@ -734,19 +822,43 @@ export function InstallPage() {
           break;
         }
       }
-      if (!callbackSeen && mountedRef.current) {
+      if (
+        !callbackSeen
+        && mountedRef.current
+        && verifyGenerationRef.current === verifyGeneration
+      ) {
         setDesktopVerifyFeedback(
           "No helper check-back reached Elvern yet. If nothing opened, install or re-register the helper on this device and try again.",
         );
       }
     } catch (requestError) {
-      if (mountedRef.current) {
+      if (
+        mountedRef.current
+        && verifyGenerationRef.current === verifyGeneration
+        && !isAbortError(requestError)
+      ) {
         setError(requestError.message || "Failed to verify VLC");
       }
     } finally {
+      if (verifyRequestControllerRef.current === verifyController) {
+        verifyRequestControllerRef.current = null;
+      }
+      if (verifyGenerationRef.current !== verifyGeneration) {
+        return;
+      }
       verifyPendingRef.current = false;
       if (mountedRef.current) {
         setDesktopVerifyPending(false);
+      }
+      const shouldRunRecovery = pendingRecoveryRefreshRef.current;
+      const shouldRunPassive = pendingPassiveRefreshRef.current;
+      pendingRecoveryRefreshRef.current = false;
+      pendingPassiveRefreshRef.current = false;
+      if (mountedRef.current && (shouldRunRecovery || shouldRunPassive)) {
+        void refreshDesktopStatus({
+          reason: shouldRunRecovery ? "recovery" : "resume",
+          showLoading: false,
+        });
       }
     }
   }

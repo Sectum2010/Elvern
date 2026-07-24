@@ -33,8 +33,11 @@ have been built and verified together, publish them explicitly:
 ./scripts/publish-bundles.sh --activate
 ```
 
-Activation copies immutable, content-hash-named ZIPs first and atomically replaces
-the active manifest last. A lock prevents concurrent activation. The dangerous
+Activation copies immutable, content-hash-named ZIPs first, flushes package bytes
+and directory metadata, and atomically replaces the active manifest last. A lock
+with non-sensitive owner diagnostics prevents concurrent activation. Failure
+before the final manifest rename leaves the previous active manifest authoritative
+and removes temporary active files. The dangerous
 `--allow-partial-activate` option exists only for explicit rollback/recovery work.
 
 Publishing requires the .NET 10 SDK and every requested RID runtime pack. Any
@@ -54,8 +57,11 @@ The standard output is:
 - `release-manifest.json`: package-level release manifest v2 with outer ZIP and
   inner installer-manifest, full tree-manifest, and server-origin binding hashes.
 
-The backend verifies only the requested platform package and caches unchanged
-artifact validation by filesystem identity. A package built for a different
+The backend opens every package path component relative to the trusted package
+directory without following symlinks. It verifies only the requested platform
+package, uses per-artifact single-flight hashing and a bounded cache, and rehashes
+the exact opened file handle for every download. The same verified handle is used
+for GET, HEAD, and single-range streaming. A package built for a different
 effective backend origin is withheld rather than falling back to an incompatible
 v2 download.
 
@@ -103,6 +109,11 @@ the protocol with `xdg-mime`. It does not need Python, use `sudo`, or modify `/u
 `--runtime <rid>` exists only for advanced troubleshooting and must match the
 verified manifest allowlist.
 
+Upgrade is transactional. The old install is not considered backed up until its
+move succeeds, and a failed registration or final validation restores the old
+install, desktop entry, both user `mimeapps.list` locations byte-for-byte, and
+their original modes. The installer never uses `xdg-mime uninstall` as rollback.
+
 VLC discovery checks `ELVERN_VLC_PATH`, executable `vlc` entries on `PATH`,
 `/usr/bin/vlc`, `/usr/local/bin/vlc`, and `/snap/bin/vlc`. Flatpak VLC is not
 supported in this release.
@@ -138,6 +149,12 @@ and custom protocol checks remain explicit user actions. Page-owned status reque
 are cancelled on `pagehide`, then one coalesced resume event refreshes status after
 return. This prevents a cancelled Firefox request from surfacing its raw
 `NetworkError` or overwriting a newer result.
+
+Transport recovery uses a process-memory incident snapshot rather than depending
+on one fire-and-forget browser event. Late React query errors can therefore observe
+an already-confirmed recovery. Refetch bookkeeping is bounded and keyed by the
+exact TanStack query identity and recovery generation, so multiple observers share
+one recovery request without crossing user identities.
 
 ## Validation
 

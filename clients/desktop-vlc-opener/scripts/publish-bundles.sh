@@ -12,6 +12,7 @@ ACTIVE_DIR="${ARTIFACTS_DIR}/packages"
 STAGING_ROOT="${ARTIFACTS_DIR}/staging"
 COMMON_README="${PACKAGING_DIR}/common/README.txt"
 SELECTORS="${PACKAGING_DIR}/common/platform-selectors.sh"
+ORIGIN_NORMALIZER="${SCRIPT_DIR}/normalize-origin.py"
 NUGET_SOURCE="${ELVERN_DOTNET_NUGET_SOURCE:-https://api.nuget.org/v3/index.json}"
 GENERATED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 PUBLISH_MODE="self-contained"
@@ -19,6 +20,7 @@ ACTIVATE=0
 ALLOW_PARTIAL_ACTIVATE=0
 TARGETS_EXPLICIT=0
 ACTIVATION_LOCK_DIR=""
+ACTIVE_TEMP_FILES=()
 declare -a TARGETS=("windows" "macos" "linux")
 declare -a WINDOWS_RIDS=("win-x64")
 declare -a MACOS_RIDS=("osx-arm64" "osx-x64")
@@ -72,7 +74,7 @@ done
 [[ ${#TARGETS[@]} -gt 0 ]] || { echo "At least one platform target is required." >&2; exit 1; }
 mapfile -t TARGETS < <(printf '%s\n' "${TARGETS[@]}" | awk '!seen[$0]++')
 
-for required_file in "${PROJECT_FILE}" "${PROPS_FILE}" "${METADATA_FILE}" "${COMMON_README}" "${SELECTORS}"; do
+for required_file in "${PROJECT_FILE}" "${PROPS_FILE}" "${METADATA_FILE}" "${COMMON_README}" "${SELECTORS}" "${ORIGIN_NORMALIZER}"; do
   [[ -f "${required_file}" ]] || { echo "Missing required file: ${required_file}" >&2; exit 1; }
 done
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required on the release build host." >&2; exit 1; }
@@ -89,36 +91,8 @@ for required_key in HELPER_CHANNEL PACKAGE_NAME_PREFIX MACOS_MINIMUM_VERSION; do
   [[ -n "${!required_key:-}" ]] || { echo "Missing ${required_key} in ${METADATA_FILE}." >&2; exit 1; }
 done
 
-mapfile -t ORIGIN_PROPERTIES < <(python3 - "${ELVERN_BACKEND_ORIGIN:-}" <<'PY'
-import hashlib
-import sys
-from urllib.parse import urlsplit
-
-value = sys.argv[1].strip()
-try:
-    parsed = urlsplit(value)
-    port = parsed.port
-except ValueError as exc:
-    raise SystemExit("ELVERN_BACKEND_ORIGIN is invalid") from exc
-if (
-    parsed.scheme.lower() not in {"http", "https"}
-    or not parsed.hostname
-    or parsed.username is not None
-    or parsed.password is not None
-    or parsed.path not in {"", "/"}
-    or parsed.query
-    or parsed.fragment
-):
-    raise SystemExit("Set ELVERN_BACKEND_ORIGIN to an exact absolute HTTP(S) origin")
-scheme = parsed.scheme.lower()
-host = parsed.hostname.lower()
-if ":" in host:
-    host = f"[{host}]"
-default_port = 80 if scheme == "http" else 443
-origin = f"{scheme}://{host}" + ("" if port in {None, default_port} else f":{port}")
-print(origin)
-print(hashlib.sha256(origin.encode()).hexdigest())
-PY
+mapfile -t ORIGIN_PROPERTIES < <(
+  python3 "${ORIGIN_NORMALIZER}" "${ELVERN_BACKEND_ORIGIN:-}"
 )
 [[ ${#ORIGIN_PROPERTIES[@]} -eq 2 ]] || { echo "Could not normalize ELVERN_BACKEND_ORIGIN." >&2; exit 1; }
 ELVERN_BACKEND_ORIGIN="${ORIGIN_PROPERTIES[0]}"
@@ -152,11 +126,19 @@ OUTPUT_DIR="${STAGING_DIR}/output"
 PUBLISH_ROOT="${WORK_DIR}/publish"
 PACKAGE_ROOT="${WORK_DIR}/packages"
 RECORDS_FILE="${WORK_DIR}/package-records.jsonl"
-mkdir -p "${PUBLISH_ROOT}" "${PACKAGE_ROOT}" "${OUTPUT_DIR}" "${ACTIVE_DIR}"
+mkdir -p "${PUBLISH_ROOT}" "${PACKAGE_ROOT}" "${OUTPUT_DIR}"
+if [[ ${ACTIVATE} -eq 1 ]]; then
+  mkdir -p "${ACTIVE_DIR}"
+fi
 : > "${RECORDS_FILE}"
 cleanup() {
   rm -rf "${WORK_DIR}"
+  local active_temp
+  for active_temp in "${ACTIVE_TEMP_FILES[@]}"; do
+    [[ -n "${active_temp}" ]] && rm -f "${active_temp}"
+  done
   if [[ -n "${ACTIVATION_LOCK_DIR}" ]]; then
+    rm -f "${ACTIVATION_LOCK_DIR}/owner"
     rmdir "${ACTIVATION_LOCK_DIR}" 2>/dev/null || true
   fi
 }
@@ -164,6 +146,26 @@ trap cleanup EXIT
 
 compute_sha256() {
   sha256sum "$1" | awk '{print $1}'
+}
+
+fsync_directory() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+inject_activation_failure() {
+  local point="$1"
+  if [[ "${ELVERN_PUBLISH_TEST_MODE:-0}" == "1" && "${ELVERN_PUBLISH_TEST_FAIL_AT:-}" == "${point}" ]]; then
+    echo "Injected activation failure at ${point}." >&2
+    return 1
+  fi
 }
 
 publish_rid() {
@@ -302,7 +304,7 @@ write_package_readme() {
     echo
     echo "Package version: ${HELPER_VERSION}"
     echo "${detail}"
-    echo "This package includes its .NET runtime and is cryptographically bound to the Elvern server that built it."
+    echo "Runtime included. Integrity-verified and bound to this Elvern server origin by hash."
   } >> "${path}"
 }
 
@@ -580,10 +582,27 @@ activate_release() {
   fi
   local lock_dir="${ARTIFACTS_DIR}/.activation.lock"
   if ! mkdir "${lock_dir}" 2>/dev/null; then
-    echo "Another desktop helper activation is already running." >&2
+    echo "Another desktop helper activation is already running, or a stale lock remains at ${lock_dir}." >&2
+    [[ -f "${lock_dir}/owner" ]] && sed -n '1,3p' "${lock_dir}/owner" >&2
+    echo "Do not remove the lock until confirming the recorded process is no longer active." >&2
     exit 1
   fi
   ACTIVATION_LOCK_DIR="${lock_dir}"
+  printf 'pid=%s\nstarted_at=%s\nbuild_id=%s\n' \
+    "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BUILD_ID}" > "${lock_dir}/owner"
+  chmod 644 "${lock_dir}/owner"
+  python3 - "${FINAL_BUILD_DIR}/release-manifest.json" "${BOUND_ORIGIN_SHA256}" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = sys.argv[2]
+if manifest.get("bound_origin_sha256") != expected:
+    raise SystemExit("Release manifest origin changed before activation")
+if any(package.get("bound_origin_sha256") != expected for package in manifest.get("packages", [])):
+    raise SystemExit("Package origin changed before activation")
+PY
   local package
   for package in "${FINAL_BUILD_DIR}"/*.zip; do
     local name temp_path
@@ -597,18 +616,37 @@ activate_release() {
         echo "Immutable active artifact collision: ${name}" >&2
         exit 1
       }
+      chmod 0444 "${ACTIVE_DIR}/${name}"
       continue
     fi
-    temp_path="${ACTIVE_DIR}/.${name}.new.$$"
+    temp_path="${ACTIVE_DIR}/.${name}.new.${BUILD_ID}"
+    ACTIVE_TEMP_FILES+=("${temp_path}")
     cp "${package}" "${temp_path}"
-    sync -f "${temp_path}" 2>/dev/null || sync
+    chmod 0444 "${temp_path}"
+    python3 - "${temp_path}" <<'PY'
+import os
+import sys
+with open(sys.argv[1], "rb") as handle:
+    os.fsync(handle.fileno())
+PY
     mv "${temp_path}" "${ACTIVE_DIR}/${name}"
+    inject_activation_failure "artifact_copy"
   done
-  local manifest_temp="${ACTIVE_DIR}/.release-manifest.json.new.$$"
+  fsync_directory "${ACTIVE_DIR}"
+  local manifest_temp="${ACTIVE_DIR}/.release-manifest.json.new.${BUILD_ID}"
+  ACTIVE_TEMP_FILES+=("${manifest_temp}")
   cp "${FINAL_BUILD_DIR}/release-manifest.json" "${manifest_temp}"
-  sync -f "${manifest_temp}" 2>/dev/null || sync
+  chmod 0444 "${manifest_temp}"
+  python3 - "${manifest_temp}" <<'PY'
+import os
+import sys
+with open(sys.argv[1], "rb") as handle:
+    os.fsync(handle.fileno())
+PY
+  inject_activation_failure "manifest_rename"
   mv "${manifest_temp}" "${ACTIVE_DIR}/release-manifest.json"
-  sync -f "${ACTIVE_DIR}" 2>/dev/null || sync
+  fsync_directory "${ACTIVE_DIR}"
+  rm -f "${lock_dir}/owner"
   rmdir "${lock_dir}"
   ACTIVATION_LOCK_DIR=""
   echo "Activated verified desktop helper release manifest."

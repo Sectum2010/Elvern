@@ -23,9 +23,11 @@ import {
   STARTUP_APPLICATION_READY_EVENT,
   STARTUP_CONNECTIVITY_FAILURE_EVENT,
 } from "./startupConnection.js";
+import { resetConnectivityRecoveryStoreForTests } from "./connectivityRecoveryStore.js";
 
 afterEach(() => {
   resetPageLifecycleForTests();
+  resetConnectivityRecoveryStoreForTests();
   queryClient.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -395,6 +397,9 @@ test("malformed JSON produces a sanitized ApiResponseError, not a raw SyntaxErro
       assert.equal(error.name, "ApiResponseError");
       assert.equal(error.category, "protocol");
       assert.equal(error.transient, false);
+      assert.equal(error.status, 200);
+      assert.equal(error.responseStatus, 200);
+      assert.equal(error.cause?.name, "SyntaxError");
       assert.notEqual(error.name, "AbortError");
       assert.doesNotMatch(error.message, /SyntaxError|Unexpected token|NetworkError/);
       return true;
@@ -406,6 +411,94 @@ test("malformed JSON produces a sanitized ApiResponseError, not a raw SyntaxErro
   } finally {
     window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
     window.removeEventListener(STARTUP_APPLICATION_READY_EVENT, handleReady);
+  }
+});
+
+test("malformed 401 still clears protected cache before body parsing fails", async () => {
+  const key = buildLibraryQueryKey({
+    userId: 2,
+    role: "standard_user",
+    category: "movies",
+  });
+  queryClient.setQueryData(key, { items: [{ id: 401 }] });
+  vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({
+    status: 401,
+    json: () => Promise.reject(new SyntaxError("malformed")),
+  })));
+
+  await assert.rejects(() => apiRequest("/api/library"), (error) => {
+    assert.equal(error instanceof ApiResponseError, true);
+    assert.equal(error.status, 401);
+    return true;
+  });
+  assert.equal(queryClient.getQueryData(key), undefined);
+});
+
+test("malformed business 403 still requests auth revalidation before body parsing fails", async () => {
+  const events = [];
+  const handler = () => events.push("revalidate");
+  window.addEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handler);
+  vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({
+    status: 403,
+    json: () => Promise.reject(new SyntaxError("malformed")),
+  })));
+
+  try {
+    await assert.rejects(() => apiRequest("/api/assistant/requests"), (error) => {
+      assert.equal(error instanceof ApiResponseError, true);
+      assert.equal(error.status, 403);
+      return true;
+    });
+    assert.deepEqual(events, ["revalidate"]);
+  } finally {
+    window.removeEventListener(AUTH_REVALIDATION_REQUESTED_EVENT, handler);
+  }
+});
+
+test("malformed 503 is a protocol error and never impersonates maintenance mode", async () => {
+  const events = [];
+  const handler = () => events.push("maintenance");
+  window.addEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handler);
+  vi.stubGlobal("fetch", vi.fn(async () => fakeResponse({
+    status: 503,
+    json: () => Promise.reject(new SyntaxError("malformed")),
+  })));
+
+  try {
+    await assert.rejects(() => apiRequest("/api/library"), (error) => {
+      assert.equal(error instanceof ApiResponseError, true);
+      assert.equal(error.status, 503);
+      assert.equal(isMaintenanceModeError(error), false);
+      return true;
+    });
+    assert.deepEqual(events, []);
+  } finally {
+    window.removeEventListener(MAINTENANCE_MODE_BLOCKED_EVENT, handler);
+  }
+});
+
+test("transport diagnostics expose only a generic request class, never a raw path", async () => {
+  const details = [];
+  const handler = (event) => details.push(event.detail);
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handler);
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+
+  try {
+    await assert.rejects(
+      () => apiRequest("/api/library/search?q=private-title"),
+      (error) => {
+        assert.equal(error instanceof ApiNetworkError, true);
+        assert.equal(error.requestClass, "library");
+        assert.equal(error.failureId > 0, true);
+        assert.equal(error.incidentId > 0, true);
+        return true;
+      },
+    );
+    assert.equal(details.length, 1);
+    assert.equal(details[0].requestClass, "library");
+    assert.equal(JSON.stringify(details[0]).includes("private-title"), false);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handler);
   }
 });
 

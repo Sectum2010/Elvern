@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PRIVATE_DIR="${SCRIPT_DIR}/.elvern"
@@ -16,8 +17,22 @@ OSACOMPILE="/usr/bin/osacompile"
 PLISTBUDDY="/usr/libexec/PlistBuddy"
 STAGE_ROOT=""
 BACKUP_APP=""
-INSTALL_SUCCEEDED=0
-REPLACEMENT_STARTED=0
+LOCK_DIR=""
+STAGING_CREATED=0
+OLD_INSTALL_EXISTED=0
+OLD_INSTALL_BACKED_UP=0
+NEW_INSTALL_PLACED=0
+OLD_REGISTRATION_CAPTURED=0
+REGISTRATION_MODIFIED=0
+FINAL_VALIDATION_PASSED=0
+INSTALL_COMMITTED=0
+
+inject_failure() {
+  local point="$1"
+  if [[ "${ELVERN_INSTALL_TEST_MODE:-0}" == "1" && "${ELVERN_INSTALL_TEST_FAIL_AT:-}" == "${point}" ]]; then
+    fail "Injected failure at ${point}."
+  fi
+}
 
 show_error() {
   local message="$1"
@@ -28,16 +43,35 @@ show_error() {
 }
 
 cleanup() {
-  [[ -n "${STAGE_ROOT}" && -d "${STAGE_ROOT}" ]] && rm -rf "${STAGE_ROOT}"
-  if [[ ${INSTALL_SUCCEEDED} -eq 0 && ${REPLACEMENT_STARTED} -eq 1 ]]; then
-    [[ -d "${DEST_APP}" ]] && rm -rf "${DEST_APP}"
-    if [[ -n "${BACKUP_APP}" && -d "${BACKUP_APP}" ]]; then
-      mv "${BACKUP_APP}" "${DEST_APP}" || true
-      "${LSREGISTER}" -f "${DEST_APP}" >/dev/null 2>&1 || true
+  local rollback_failed=0
+  if [[ ${INSTALL_COMMITTED} -eq 0 ]]; then
+    if [[ ${NEW_INSTALL_PLACED} -eq 1 && -d "${DEST_APP}" ]]; then
+      rm -rf "${DEST_APP}" || rollback_failed=1
+    fi
+    if [[ ${OLD_INSTALL_BACKED_UP} -eq 1 ]]; then
+      if [[ -d "${DEST_APP}" || ! -d "${BACKUP_APP}" ]]; then
+        rollback_failed=1
+      else
+        mv "${BACKUP_APP}" "${DEST_APP}" || rollback_failed=1
+        if [[ ${rollback_failed} -eq 0 ]]; then
+          "${LSREGISTER}" -f "${DEST_APP}" >/dev/null 2>&1 || rollback_failed=1
+          "${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener" --version >/dev/null 2>&1 \
+            || rollback_failed=1
+        fi
+      fi
     fi
   fi
-  if [[ ${INSTALL_SUCCEEDED} -eq 1 && -n "${BACKUP_APP}" && -d "${BACKUP_APP}" ]]; then
+  [[ -n "${STAGE_ROOT}" && -d "${STAGE_ROOT}" ]] && rm -rf "${STAGE_ROOT}"
+  if [[ ${INSTALL_COMMITTED} -eq 1 && ${OLD_INSTALL_BACKED_UP} -eq 1 && -d "${BACKUP_APP}" ]]; then
     rm -rf "${BACKUP_APP}"
+  fi
+  if [[ -n "${LOCK_DIR}" && -d "${LOCK_DIR}" ]]; then
+    rm -f "${LOCK_DIR}/owner"
+    rmdir "${LOCK_DIR}"
+  fi
+  if [[ ${rollback_failed} -ne 0 ]]; then
+    echo "Elvern VLC Opener rollback could not be verified. Preserve ${BACKUP_APP:-the backup App} and repair Launch Services manually." >&2
+    return 1
   fi
   return 0
 }
@@ -50,7 +84,14 @@ fail() {
 
 safe_relative_path() {
   local value="$1"
-  [[ -n "${value}" && "${value}" != /* && "${value}" != *\\* ]] || return 1
+  [[
+    -n "${value}"
+    && "${value}" != /*
+    && "${value}" != *\\*
+    && "${value}" != *$'\r'*
+    && "${value}" != *$'\n'*
+    && "${value}" != *$'\t'*
+  ]] || return 1
   case "/${value}/" in
     */../*|*/./*) return 1 ;;
   esac
@@ -62,15 +103,26 @@ verify_package_tree() {
   if find "${SCRIPT_DIR}" -type l -print -quit | grep -q .; then
     fail "The installer package contains an unsafe link."
   fi
-  local expected actual path size digest file_class extra full actual_size actual_digest
+  local expected actual case_seen path size digest file_class extra full actual_size actual_digest header row_count=0 lower_path
+  IFS= read -r header < "${TREE_MANIFEST}" || fail "The installer tree manifest is empty."
+  [[ "${header}" == $'path\tsize_bytes\tsha256\tfile_class' ]] \
+    || fail "The installer tree manifest header is invalid."
   expected="$(mktemp)"
   actual="$(mktemp)"
+  case_seen="$(mktemp)"
   while IFS=$'\t' read -r path size digest file_class extra; do
-    [[ "${path}" == "path" ]] && continue
+    [[ -n "${path}${size}${digest}${file_class}${extra:-}" ]] \
+      || { rm -f "${expected}" "${actual}"; fail "The installer tree manifest contains an empty row."; }
     [[ -z "${extra:-}" ]] || { rm -f "${expected}" "${actual}"; fail "The installer tree manifest has an invalid row."; }
     safe_relative_path "${path}" || { rm -f "${expected}" "${actual}"; fail "The installer tree manifest contains an unsafe path."; }
-    [[ "${size}" =~ ^[0-9]+$ && "${digest}" =~ ^[0-9a-f]{64}$ && "${file_class}" =~ ^(data|executable)$ ]] \
+    [[ "${size}" =~ ^[0-9]+$ && "${size}" -le 2147483648 && "${digest}" =~ ^[0-9a-f]{64}$ && "${file_class}" =~ ^(data|executable)$ ]] \
       || { rm -f "${expected}" "${actual}"; fail "The installer tree manifest contains invalid metadata."; }
+    lower_path="$(printf '%s' "${path}" | tr '[:upper:]' '[:lower:]')"
+    if grep -Fqx "${path}" "${expected}" || grep -Fqx "${lower_path}" "${case_seen}"; then
+      rm -f "${expected}" "${actual}" "${case_seen}"
+      fail "The installer tree manifest contains a duplicate or case-colliding path."
+    fi
+    row_count=$((row_count + 1))
     full="${SCRIPT_DIR}/${path}"
     [[ -f "${full}" && ! -L "${full}" ]] || { rm -f "${expected}" "${actual}"; fail "An installer file is missing or unsafe."; }
     actual_size="$(wc -c < "${full}" | tr -d '[:space:]')"
@@ -78,7 +130,9 @@ verify_package_tree() {
     [[ "${actual_size}" == "${size}" && "${actual_digest}" == "${digest}" ]] \
       || { rm -f "${expected}" "${actual}"; fail "An installer file failed integrity verification."; }
     printf '%s\n' "${path}" >> "${expected}"
-  done < "${TREE_MANIFEST}"
+    printf '%s\n' "${lower_path}" >> "${case_seen}"
+  done < <(tail -n +2 "${TREE_MANIFEST}")
+  [[ ${row_count} -gt 0 ]] || { rm -f "${expected}" "${actual}" "${case_seen}"; fail "The installer tree manifest is empty."; }
   while IFS= read -r full; do
     path="${full#"${SCRIPT_DIR}/"}"
     [[ "${path}" == ".elvern/tree-manifest.tsv" || "${path##*/}" == ".DS_Store" ]] && continue
@@ -86,8 +140,8 @@ verify_package_tree() {
   done < <(find "${SCRIPT_DIR}" -type f -print)
   LC_ALL=C sort -o "${expected}" "${expected}"
   LC_ALL=C sort -o "${actual}" "${actual}"
-  cmp -s "${expected}" "${actual}" || { rm -f "${expected}" "${actual}"; fail "The installer package contains a missing or unexpected file."; }
-  rm -f "${expected}" "${actual}"
+  cmp -s "${expected}" "${actual}" || { rm -f "${expected}" "${actual}" "${case_seen}"; fail "The installer package contains a missing or unexpected file."; }
+  rm -f "${expected}" "${actual}" "${case_seen}"
 }
 
 verify_quarantine_cleared() {
@@ -126,35 +180,76 @@ RUNTIME_ID="$(select_macos_runtime "${TRANSLATED}" "$(uname -m)")" || fail "This
 
 SCHEMA=""
 HELPER_VERSION=""
+TARGET_FRAMEWORK=""
+RUNTIME_FAMILY=""
 DEPLOYMENT_MODE=""
 PACKAGE_TARGET=""
+BOUND_ORIGIN_SHA256=""
 PAYLOAD_RELATIVE_PATH=""
 EXPECTED_SHA256=""
 EXPECTED_SIZE=""
 PAYLOAD_EXECUTABLE=""
+SCHEMA_COUNT=0
+HELPER_VERSION_COUNT=0
+TARGET_FRAMEWORK_COUNT=0
+RUNTIME_FAMILY_COUNT=0
+DEPLOYMENT_MODE_COUNT=0
+PACKAGE_TARGET_COUNT=0
+BOUND_ORIGIN_SHA256_COUNT=0
+RID_SEEN_FILE="$(mktemp)"
 while IFS=$'\t' read -r kind field value fourth fifth sixth extra; do
   [[ -z "${extra:-}" ]] || fail "The verified installer manifest has an invalid row."
   if [[ "${kind}" == "meta" ]]; then
+    [[ -z "${fourth}${fifth}${sixth}" ]] || fail "The verified installer manifest has an invalid metadata row."
     case "${field}" in
-      schema_version) SCHEMA="${value}" ;;
-      helper_version) HELPER_VERSION="${value}" ;;
-      deployment_mode) DEPLOYMENT_MODE="${value}" ;;
-      package_target) PACKAGE_TARGET="${value}" ;;
+      schema_version|helper_version|target_framework|runtime_family|deployment_mode|package_target|bound_origin_sha256) ;;
+      *) fail "The verified installer manifest contains unknown metadata." ;;
     esac
-  elif [[ "${kind}" == "payload" && "${field}" == "${RUNTIME_ID}" ]]; then
-    [[ -z "${PAYLOAD_RELATIVE_PATH}" ]] || fail "The verified installer manifest repeats this Mac payload."
-    PAYLOAD_RELATIVE_PATH="${value}"
-    EXPECTED_SHA256="${fourth}"
-    EXPECTED_SIZE="${fifth}"
-    PAYLOAD_EXECUTABLE="${sixth}"
+    case "${field}" in
+      schema_version) SCHEMA_COUNT=$((SCHEMA_COUNT + 1)); [[ ${SCHEMA_COUNT} -eq 1 ]] || fail "The verified installer manifest repeats mandatory metadata."; SCHEMA="${value}" ;;
+      helper_version) HELPER_VERSION_COUNT=$((HELPER_VERSION_COUNT + 1)); [[ ${HELPER_VERSION_COUNT} -eq 1 ]] || fail "The verified installer manifest repeats mandatory metadata."; HELPER_VERSION="${value}" ;;
+      target_framework) TARGET_FRAMEWORK_COUNT=$((TARGET_FRAMEWORK_COUNT + 1)); [[ ${TARGET_FRAMEWORK_COUNT} -eq 1 ]] || fail "The verified installer manifest repeats mandatory metadata."; TARGET_FRAMEWORK="${value}" ;;
+      runtime_family) RUNTIME_FAMILY_COUNT=$((RUNTIME_FAMILY_COUNT + 1)); [[ ${RUNTIME_FAMILY_COUNT} -eq 1 ]] || fail "The verified installer manifest repeats mandatory metadata."; RUNTIME_FAMILY="${value}" ;;
+      deployment_mode) DEPLOYMENT_MODE_COUNT=$((DEPLOYMENT_MODE_COUNT + 1)); [[ ${DEPLOYMENT_MODE_COUNT} -eq 1 ]] || fail "The verified installer manifest repeats mandatory metadata."; DEPLOYMENT_MODE="${value}" ;;
+      package_target) PACKAGE_TARGET_COUNT=$((PACKAGE_TARGET_COUNT + 1)); [[ ${PACKAGE_TARGET_COUNT} -eq 1 ]] || fail "The verified installer manifest repeats mandatory metadata."; PACKAGE_TARGET="${value}" ;;
+      bound_origin_sha256) BOUND_ORIGIN_SHA256_COUNT=$((BOUND_ORIGIN_SHA256_COUNT + 1)); [[ ${BOUND_ORIGIN_SHA256_COUNT} -eq 1 ]] || fail "The verified installer manifest repeats mandatory metadata."; BOUND_ORIGIN_SHA256="${value}" ;;
+    esac
+  elif [[ "${kind}" == "payload" ]]; then
+    [[ -n "${field}${value}${fourth}${fifth}${sixth}" ]] || fail "The verified installer manifest has an invalid payload row."
+    grep -Fqx "${field}" "${RID_SEEN_FILE}" && fail "The verified installer manifest repeats a runtime."
+    printf '%s\n' "${field}" >> "${RID_SEEN_FILE}"
+    if [[ "${field}" == "${RUNTIME_ID}" ]]; then
+      PAYLOAD_RELATIVE_PATH="${value}"
+      EXPECTED_SHA256="${fourth}"
+      EXPECTED_SIZE="${fifth}"
+      PAYLOAD_EXECUTABLE="${sixth}"
+    fi
+  else
+    fail "The verified installer manifest contains an unknown row."
   fi
 done < "${MANIFEST_TSV}"
+rm -f "${RID_SEEN_FILE}"
 [[ "${SCHEMA}" == "desktop-helper-installer-manifest-v2" ]] || fail "The verified installer manifest schema is unsupported."
-[[ "${DEPLOYMENT_MODE}" == "self_contained" && "${PACKAGE_TARGET}" == "macos-dual-arch" ]] \
+[[
+  "${SCHEMA_COUNT}" -eq 1
+  && "${HELPER_VERSION_COUNT}" -eq 1
+  && "${TARGET_FRAMEWORK_COUNT}" -eq 1
+  && "${RUNTIME_FAMILY_COUNT}" -eq 1
+  && "${DEPLOYMENT_MODE_COUNT}" -eq 1
+  && "${PACKAGE_TARGET_COUNT}" -eq 1
+  && "${BOUND_ORIGIN_SHA256_COUNT}" -eq 1
+]] || fail "The verified installer manifest is missing mandatory metadata."
+[[
+  "${TARGET_FRAMEWORK}" == "net10.0"
+  && "${RUNTIME_FAMILY}" == "10.0"
+  && "${BOUND_ORIGIN_SHA256}" =~ ^[0-9a-f]{64}$
+  && "${DEPLOYMENT_MODE}" == "self_contained"
+  && "${PACKAGE_TARGET}" == "macos-dual-arch"
+]] \
   || fail "This is not the standard self-contained macOS package."
 [[ "${HELPER_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "The verified installer manifest has an invalid version."
 safe_relative_path "${PAYLOAD_RELATIVE_PATH}" || fail "The selected payload path is unsafe."
-[[ "${EXPECTED_SHA256}" =~ ^[0-9a-f]{64}$ && "${EXPECTED_SIZE}" =~ ^[0-9]+$ ]] \
+[[ "${EXPECTED_SHA256}" =~ ^[0-9a-f]{64}$ && "${EXPECTED_SIZE}" =~ ^[0-9]+$ && "${EXPECTED_SIZE}" -le 2147483648 ]] \
   || fail "The selected payload metadata is invalid."
 [[ "${PAYLOAD_EXECUTABLE}" == "Elvern.VlcOpener" ]] || fail "The selected payload executable is invalid."
 SOURCE_PAYLOAD="${PRIVATE_DIR}/${PAYLOAD_RELATIVE_PATH}"
@@ -164,7 +259,15 @@ SOURCE_PAYLOAD="${PRIVATE_DIR}/${PAYLOAD_RELATIVE_PATH}"
   || fail "The Helper payload SHA-256 check failed."
 
 mkdir -p "${DEST_DIR}"
+LOCK_DIR="${DEST_DIR}/.elvern-vlc-opener-install.lock"
+if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+  fail "Another Helper install may be running. Remove ${LOCK_DIR} manually only after confirming no installer is active."
+fi
+printf 'pid=%s\nstarted_at=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${LOCK_DIR}/owner"
+chmod 644 "${LOCK_DIR}/owner"
 STAGE_ROOT="$(mktemp -d "${DEST_DIR}/.elvern-vlc-opener-stage.XXXXXX")"
+STAGING_CREATED=1
+inject_failure "staging_created"
 STAGED_APP="${STAGE_ROOT}/${APP_NAME}"
 "${OSACOMPILE}" -o "${STAGED_APP}" "${APPLESCRIPT_SOURCE}" || fail "The local URL bridge could not be created."
 RESOURCES_DIR="${STAGED_APP}/Contents/Resources"
@@ -208,21 +311,41 @@ verify_quarantine_cleared "${STAGED_APP}"
 "${APP_PAYLOAD_DIR}/Elvern.VlcOpener" --version >/dev/null \
   || fail "The staged Helper failed its version check."
 
-REPLACEMENT_STARTED=1
+OLD_REGISTRATION_CAPTURED=1
 if [[ -d "${DEST_APP}" ]]; then
-  BACKUP_APP="${DEST_DIR}/.elvern-vlc-opener-backup.$$.app"
+  OLD_INSTALL_EXISTED=1
+  BACKUP_APP="$(mktemp -d "${DEST_DIR}/.elvern-vlc-opener-backup.XXXXXX")"
+  rmdir "${BACKUP_APP}" || fail "A unique App backup path could not be prepared."
+  BACKUP_APP="${BACKUP_APP}.app"
+  inject_failure "first_backup_move"
   mv "${DEST_APP}" "${BACKUP_APP}" || fail "The existing Helper App could not be staged for upgrade."
+  OLD_INSTALL_BACKED_UP=1
 fi
+inject_failure "new_placement"
 mv "${STAGED_APP}" "${DEST_APP}" || fail "The new Helper App could not replace the existing installation."
+NEW_INSTALL_PLACED=1
+chmod 755 "${DEST_APP}" "${DEST_APP}/Contents" "${DEST_APP}/Contents/Resources" "${DEST_APP}/Contents/Resources/app" \
+  || fail "The installed Helper directory permissions could not be secured."
+chmod 755 "${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener" "${DEST_APP}/Contents/Resources/run-helper.sh" \
+  || fail "The installed Helper executable permissions could not be secured."
 xattr -dr com.apple.quarantine "${DEST_APP}" \
   || fail "macOS quarantine could not be removed from the verified installed Helper App."
 verify_quarantine_cleared "${DEST_APP}"
+inject_failure "registration"
 "${LSREGISTER}" -f "${DEST_APP}" >/dev/null 2>&1 \
   || fail "Launch Services could not register the installed Helper App."
+REGISTRATION_MODIFIED=1
+inject_failure "registration_validation"
+codesign --verify --deep --strict "${DEST_APP}" >/dev/null 2>&1 \
+  || fail "The installed App signature verification failed."
+inject_failure "final_binary_validation"
 "${DEST_APP}/Contents/Resources/app/Elvern.VlcOpener" --version >/dev/null \
   || fail "The installed Helper failed its final version check."
+FINAL_VALIDATION_PASSED=1
 touch "${DEST_APP}"
-open -R "${DEST_APP}" >/dev/null 2>&1 || fail "Finder could not reveal the installed Helper App."
-INSTALL_SUCCEEDED=1
+INSTALL_COMMITTED=1
+if ! open -R "${DEST_APP}" >/dev/null 2>&1; then
+  echo "Warning: Finder could not reveal the installed Helper App at ${DEST_APP}." >&2
+fi
 echo "Installed ${APP_NAME} ${HELPER_VERSION} into ${DEST_APP}"
 echo "The App uses a local ad-hoc structural signature; it is not Developer ID signed or notarized."

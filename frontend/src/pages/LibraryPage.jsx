@@ -74,7 +74,6 @@ import {
   isIOSViewportRestoreGateOpen,
 } from "../lib/iosViewportCoordinator";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { useCommittedLibrarySearch } from "../lib/useCommittedLibrarySearch";
 import { LIBRARY_REVISION_CHECK_EVENT } from "../lib/libraryRevisionQueries.js";
@@ -711,7 +710,6 @@ export function LibraryPage() {
   const floatingSearchScrollYRef = useRef(null);
   const pendingFloatingSearchRestoreYRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
-  const libraryRecoveryGenerationRef = useRef(0);
   const [floatingSearchViewportOrientation, setFloatingSearchViewportOrientation] = useState(() => getFloatingSearchViewportOrientation());
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const libraryDevice = clientPlatform === "ipad" ? "ipad" : undefined;
@@ -951,24 +949,6 @@ export function LibraryPage() {
       setError(requestError.message || "Failed to load library");
     }
   }, [libraryQuery.data, libraryQuery.error, refreshAuth]);
-
-  useEffect(() => {
-    function handleConnectivityRecovered(event) {
-      const generation = Number(event.detail?.generation || 0);
-      if (
-        generation <= libraryRecoveryGenerationRef.current
-        || !isTransientNetworkError(libraryQuery.error)
-      ) {
-        return;
-      }
-      libraryRecoveryGenerationRef.current = generation;
-      void libraryQuery.refetch();
-    }
-    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    return () => {
-      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    };
-  }, [libraryQuery.error, libraryQuery.refetch]);
 
   useEffect(() => {
     if (!libraryQuery.data) {

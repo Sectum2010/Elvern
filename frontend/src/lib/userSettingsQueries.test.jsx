@@ -4,7 +4,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ApiNetworkError, apiRequest } from "./api";
 import { clearProtectedQueryCache, queryClient } from "./queryClient";
-import { CONNECTIVITY_RECOVERED_EVENT } from "./startupConnection";
+import {
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+} from "./connectivityRecoveryStore";
 import {
   buildUserSettingsQueryKey,
   resolveUserSettings,
@@ -38,6 +42,7 @@ function renderProbes(children) {
 describe("user settings query", () => {
   beforeEach(() => {
     queryClient.clear();
+    resetConnectivityRecoveryStoreForTests();
     apiRequest.mockReset();
   });
 
@@ -63,11 +68,13 @@ describe("user settings query", () => {
       <>
         <SettingsProbe label="shell" user={user} />
         <SettingsProbe label="library" user={user} />
+        <SettingsProbe label="detail" user={user} />
       </>,
     );
 
     expect(await screen.findByText("shell:800")).toBeInTheDocument();
     expect(screen.getByText("library:800")).toBeInTheDocument();
+    expect(screen.getByText("detail:800")).toBeInTheDocument();
     expect(apiRequest).toHaveBeenCalledTimes(1);
     expect(apiRequest).toHaveBeenCalledWith(
       "/api/user-settings",
@@ -111,8 +118,9 @@ describe("user settings query", () => {
   });
 
   test("recovers a transient-failed settings query once per connectivity generation", async () => {
+    const failure = registerConnectivityFailure();
     apiRequest
-      .mockRejectedValueOnce(new ApiNetworkError())
+      .mockRejectedValueOnce(new ApiNetworkError(undefined, failure))
       .mockResolvedValue({ poster_card_display_max_width: "1600" });
     const user = { id: 7, role: "standard_user" };
     const settingsKey = buildUserSettingsQueryKey({ userId: user.id, role: user.role });
@@ -124,8 +132,44 @@ describe("user settings query", () => {
     expect(screen.getByText("s:1400")).toBeInTheDocument();
     expect(apiRequest).toHaveBeenCalledTimes(1);
 
-    window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 3 } }));
+    publishConnectivityRecovery({
+      generation: 3,
+      recoveredThroughFailureId: failure.failureId,
+    });
     expect(await screen.findByText("s:1600")).toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+  });
+
+  test("recovers once when health recovery is published before the query error reaches React", async () => {
+    let rejectInitial;
+    const pendingInitial = new Promise((_resolve, reject) => {
+      rejectInitial = reject;
+    });
+    const failure = registerConnectivityFailure();
+    apiRequest
+      .mockReturnValueOnce(pendingInitial)
+      .mockResolvedValue({ poster_card_display_max_width: "1800" });
+    const user = { id: 7, role: "standard_user" };
+    const settingsKey = buildUserSettingsQueryKey({ userId: user.id, role: user.role });
+    renderProbes(
+      <>
+        <SettingsProbe label="shell" user={user} />
+        <SettingsProbe label="library" user={user} />
+        <SettingsProbe label="detail" user={user} />
+      </>,
+    );
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
+
+    publishConnectivityRecovery({
+      generation: 4,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    rejectInitial(new ApiNetworkError(undefined, failure));
+
+    await waitFor(() => expect(queryClient.getQueryState(settingsKey)?.status).toBe("success"));
+    expect(await screen.findByText("shell:1800")).toBeInTheDocument();
+    expect(screen.getByText("library:1800")).toBeInTheDocument();
+    expect(screen.getByText("detail:1800")).toBeInTheDocument();
     expect(apiRequest).toHaveBeenCalledTimes(2);
   });
 
@@ -137,7 +181,11 @@ describe("user settings query", () => {
     renderProbes(<SettingsProbe label="s" user={user} />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
-    window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 9 } }));
+    const failure = registerConnectivityFailure();
+    publishConnectivityRecovery({
+      generation: 9,
+      recoveredThroughFailureId: failure.failureId,
+    });
     await Promise.resolve();
     await Promise.resolve();
 

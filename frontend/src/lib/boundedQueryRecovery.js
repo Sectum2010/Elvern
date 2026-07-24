@@ -1,44 +1,116 @@
-import { useEffect, useRef } from "react";
+import { hashKey } from "@tanstack/react-query";
+import { useEffect } from "react";
 
-import { CONNECTIVITY_RECOVERED_EVENT } from "./startupConnection";
+import {
+  getConnectivityIncidentRecoveryGeneration,
+  getConnectivityRecoverySnapshot,
+  subscribeConnectivityRecovery,
+} from "./connectivityRecoveryStore.js";
+import { queryClient } from "./queryClient.js";
 
 
-// A transient transport failure (ApiNetworkError) always carries transient=true.
-// Checked structurally so this hook stays decoupled from the api module and its
-// test mocks; HTTP/business errors (status set) and aborts never set it.
+const MAX_RECOVERY_CLAIMS = 512;
+const recoveryClaims = new Map();
+let queryCacheSubscriptionInstalled = false;
+
+
 function isTransientTransportError(error) {
-  return error?.transient === true;
+  return error?.transient === true && Number(error?.failureId) > 0;
 }
 
 
-/**
- * Bounded, generation-guarded recovery for a TanStack Query.
- *
- * When the supplied query is currently failed with a transient transport error,
- * a confirmed CONNECTIVITY_RECOVERED_EVENT refetches it exactly once per
- * recovery generation. It never converts an HTTP/business error into a retry,
- * never refetches on unrelated URL changes, and settles quietly when the query
- * is not transient-failed — so a failed initial request is marked reconnecting
- * rather than permanently stuck with no future recovery.
- */
-export function useBoundedQueryRecovery(query) {
-  const handledGenerationRef = useRef(0);
+function recoveryGenerationForError(error) {
+  if (!isTransientTransportError(error)) {
+    return 0;
+  }
+  if (Number(error.incidentId) > 0) {
+    return getConnectivityIncidentRecoveryGeneration(
+      error.incidentId,
+      error.failureId,
+    );
+  }
+  const snapshot = getConnectivityRecoverySnapshot();
+  return snapshot.latestRecoveredFailureId >= Number(error.failureId)
+    ? snapshot.latestRecoveryGeneration
+    : 0;
+}
+
+
+function rememberClaim(claimKey) {
+  recoveryClaims.delete(claimKey);
+  recoveryClaims.set(claimKey, true);
+  while (recoveryClaims.size > MAX_RECOVERY_CLAIMS) {
+    recoveryClaims.delete(recoveryClaims.keys().next().value);
+  }
+}
+
+
+function clearClaimsForQueryHash(queryHash) {
+  const suffix = `:${queryHash}`;
+  for (const claimKey of recoveryClaims.keys()) {
+    if (claimKey.endsWith(suffix)) {
+      recoveryClaims.delete(claimKey);
+    }
+  }
+}
+
+
+function installQueryCacheCleanup() {
+  if (queryCacheSubscriptionInstalled) {
+    return;
+  }
+  queryCacheSubscriptionInstalled = true;
+  queryClient.getQueryCache().subscribe((event) => {
+    if (event?.type === "removed" && event.query?.queryHash) {
+      clearClaimsForQueryHash(event.query.queryHash);
+    }
+  });
+}
+
+
+export function clearBoundedQueryRecoveryBookkeeping() {
+  recoveryClaims.clear();
+}
+
+
+export function requestBoundedQueryRecovery({ error, queryKey, refetch }) {
+  if (!Array.isArray(queryKey) || typeof refetch !== "function") {
+    return false;
+  }
+  const generation = recoveryGenerationForError(error);
+  if (generation <= 0) {
+    return false;
+  }
+  const queryHash = hashKey(queryKey);
+  const claimKey = `${generation}:${queryHash}`;
+  if (recoveryClaims.has(claimKey)) {
+    return false;
+  }
+  rememberClaim(claimKey);
+  void refetch();
+  return true;
+}
+
+
+export function useBoundedQueryRecovery(query, { enabled = true, queryKey } = {}) {
+  const error = query?.error;
   const refetch = typeof query?.refetch === "function" ? query.refetch : null;
-  const isTransient = isTransientTransportError(query?.error);
 
   useEffect(() => {
-    if (!isTransient || !refetch || typeof window === "undefined") {
+    installQueryCacheCleanup();
+    if (!enabled || !isTransientTransportError(error) || !refetch) {
       return undefined;
     }
-    function handleRecovered(event) {
-      const generation = Number(event.detail?.generation || 0);
-      if (generation <= handledGenerationRef.current) {
-        return;
-      }
-      handledGenerationRef.current = generation;
-      void refetch();
-    }
-    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleRecovered);
-    return () => window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleRecovered);
-  }, [isTransient, refetch]);
+    const recover = () => {
+      requestBoundedQueryRecovery({ error, queryKey, refetch });
+    };
+    const unsubscribe = subscribeConnectivityRecovery(recover);
+    recover();
+    return unsubscribe;
+  }, [enabled, error, queryKey, refetch]);
+}
+
+
+export function resetBoundedQueryRecoveryForTests() {
+  recoveryClaims.clear();
 }

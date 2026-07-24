@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { apiRequest } from "./api";
+import { useBoundedQueryRecovery } from "./boundedQueryRecovery";
 import {
   buildLibraryQueryKey,
   buildLibraryShadowV2QueryKey,
@@ -84,6 +85,14 @@ export function useLibraryViewQuery({
     gcTime: LIBRARY_QUERY_GC_TIME_MS,
     retry: false,
     refetchInterval: scanPollingInterval,
+  });
+  useBoundedQueryRecovery(v1Query, {
+    enabled: Boolean(v1Query.isError),
+    queryKey: v1QueryKey,
+  });
+  useBoundedQueryRecovery(v2Query, {
+    enabled: Boolean(v2Query.isError),
+    queryKey: v2QueryKey,
   });
 
   useEffect(() => {

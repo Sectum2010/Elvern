@@ -22,11 +22,17 @@ export const AUTH_REVALIDATION_REQUESTED_EVENT = "elvern:auth-revalidation-reque
 
 
 export class ApiNetworkError extends Error {
-  constructor(message = "Elvern could not complete the request.", { cause } = {}) {
+  constructor(
+    message = "Elvern could not complete the request.",
+    { cause, failureId = 0, incidentId = 0, requestClass = "api" } = {},
+  ) {
     super(message, { cause });
     this.name = "ApiNetworkError";
     this.transient = true;
     this.category = "transport";
+    this.failureId = Number(failureId) || 0;
+    this.incidentId = Number(incidentId) || 0;
+    this.requestClass = requestClass;
   }
 }
 
@@ -37,7 +43,8 @@ export class ApiResponseError extends Error {
     this.name = "ApiResponseError";
     this.transient = false;
     this.category = "protocol";
-    this.responseStatus = Number.isInteger(status) ? status : null;
+    this.status = Number.isInteger(status) ? status : null;
+    this.responseStatus = this.status;
   }
 }
 
@@ -79,6 +86,37 @@ function createAbortError() {
 function isAuthRequestPath(path) {
   const pathname = String(path || "").split("?", 1)[0];
   return pathname.startsWith("/api/auth/");
+}
+
+export function classifyApiRequest(path) {
+  const pathname = String(path || "").split("?", 1)[0];
+  if (pathname === "/api/auth/login") return "auth_login";
+  if (pathname.startsWith("/api/auth/")) return "auth";
+  if (pathname.startsWith("/api/library")) return "library";
+  if (pathname.startsWith("/api/user-settings")) return "user_settings";
+  if (pathname.startsWith("/api/desktop-helper")) return "desktop_helper";
+  if (
+    pathname.startsWith("/api/playback")
+    || pathname.startsWith("/api/progress")
+    || pathname.startsWith("/api/browser-playback")
+    || pathname.startsWith("/api/desktop-playback")
+  ) {
+    return "playback";
+  }
+  return "api";
+}
+
+function createNetworkError(path, cause) {
+  const requestClass = classifyApiRequest(path);
+  const recoveryIdentity = dispatchStartupConnectivityFailure({
+    classification: "transport",
+    requestClass,
+  });
+  return new ApiNetworkError(undefined, {
+    cause,
+    requestClass,
+    ...recoveryIdentity,
+  });
 }
 
 function dispatchAuthRevalidationRequested(path, status) {
@@ -240,13 +278,19 @@ export async function apiRequest(path, options = {}) {
       if (combinedSignal.signal?.aborted || isAbortError(error)) {
         throw createAbortError();
       }
-      dispatchStartupConnectivityFailure({ classification: "transport" });
-      throw new ApiNetworkError(undefined, { cause: error });
+      throw createNetworkError(path, error);
     }
 
     // Headers have arrived: an actual HTTP response exists. The application is
     // proven reachable even if the body later fails to read or parse.
     dispatchStartupApplicationReady();
+
+    // Authentication security actions depend only on the HTTP status and must
+    // happen even when the response body is malformed or its stream fails.
+    if (response.status === 401) {
+      clearProtectedQueryCache();
+    }
+    dispatchAuthRevalidationRequested(path, response.status);
 
     const contentType = response.headers.get("content-type") || "";
     if (response.headers.get("x-elvern-totp-setup-required") === "true" && typeof window !== "undefined") {
@@ -274,8 +318,7 @@ export async function apiRequest(path, options = {}) {
         // failure, not a transport outage and not an abort.
         throw new ApiResponseError(response.status, { cause: error });
       }
-      dispatchStartupConnectivityFailure({ classification: "transport" });
-      throw new ApiNetworkError(undefined, { cause: error });
+      throw createNetworkError(path, error);
     }
 
     // Stage 6: classify HTTP status now that the full body is available.
@@ -289,10 +332,6 @@ export async function apiRequest(path, options = {}) {
       error.status = response.status;
       error.payload = payload;
       error.detail = detail;
-      if (response.status === 401) {
-        clearProtectedQueryCache();
-      }
-      dispatchAuthRevalidationRequested(path, response.status);
       dispatchMaintenanceModeBlocked(error);
       throw error;
     }

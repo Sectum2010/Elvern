@@ -139,7 +139,9 @@ def test_installers_verify_the_full_tree_before_using_package_code() -> None:
 
     assert mac.index("verify_package_tree") < mac.index('source "${SELECTORS}"')
     assert linux.index("verify_package_tree") < linux.index('source "${SELECTORS}"')
-    assert windows.index("Test-InstallerTree") < windows.index("$manifest = Get-Content")
+    assert windows.index("Test-InstallerTree") < windows.index(
+        "$installerManifest = Read-StrictInstallerManifest"
+    )
     assert "python" not in mac.lower()
     assert "python" not in linux.lower()
     assert '"${SOURCE_PAYLOAD}" --version' not in mac
@@ -161,6 +163,39 @@ def test_windows_installer_checks_registry_backup_and_restore_failures() -> None
     assert "The previous elvern-vlc:// registration could not be restored." in source
     assert "The previous uninstall registration could not be restored." in source
     assert "Registry rollback also failed:" in source
+
+
+def test_windows_installer_is_powershell_51_safe_and_uses_strict_tsv_contract() -> None:
+    source = (
+        HELPER_ROOT / "packaging" / "windows" / "Install-ElvernVlcOpener.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "[IO.Path]::GetRelativePath" not in source
+    assert "pwsh" not in source.lower()
+    assert "Read-StrictInstallerManifest" in source
+    assert 'path`tsize_bytes`tsha256`tfile_class' in source
+    assert "repeats mandatory metadata" in source
+    assert "repeats a runtime or payload path" in source
+    assert source.index('Invoke-InjectedFailure "first_backup_move"') < source.index(
+        "$oldInstallBackedUp = $true"
+    )
+    assert source.index('Invoke-InjectedFailure "registration"') < source.index(
+        "$registrationModified = $true"
+    )
+
+
+def test_macos_transaction_commits_before_finder_reveal_and_backup_flag_is_safe() -> None:
+    source = (
+        HELPER_ROOT / "packaging" / "macos" / "Install-ElvernVlcOpener.command"
+    ).read_text(encoding="utf-8")
+
+    assert "REPLACEMENT_STARTED" not in source
+    assert source.index('inject_failure "first_backup_move"') < source.index(
+        "OLD_INSTALL_BACKED_UP=1"
+    )
+    assert source.index("INSTALL_COMMITTED=1") < source.index('open -R "${DEST_APP}"')
+    assert "Warning: Finder could not reveal" in source
+    assert 'xattr -dr com.apple.quarantine "${DEST_APP}"' in source
 
 
 def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> None:

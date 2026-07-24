@@ -216,7 +216,8 @@ export function StartupConnectionGate({ children, controller: providedController
   useEffect(() => {
     function handleConnectivityFailure(event) {
       controller.reportFailure({
-        forceOfflineOops: event.detail?.path === "/api/auth/login",
+        failureId: event.detail?.failureId,
+        forceOfflineOops: event.detail?.requestClass === "auth_login",
       });
     }
     window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleConnectivityFailure);

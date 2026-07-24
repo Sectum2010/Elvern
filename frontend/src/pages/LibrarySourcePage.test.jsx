@@ -14,7 +14,11 @@ import { ApiNetworkError, apiRequest } from "../lib/api";
 import { buildLibraryQueryKey, LIBRARY_QUERY_STALE_TIME_MS } from "../lib/libraryQueries";
 import { readLibraryReturnTarget } from "../lib/libraryNavigation";
 import { queryClient } from "../lib/queryClient";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
+import {
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+} from "../lib/connectivityRecoveryStore";
 import { LibrarySourcePage } from "./LibrarySourcePage";
 
 
@@ -149,6 +153,7 @@ function DetailStub() {
 describe("LibrarySourcePage cached source views", () => {
   beforeEach(() => {
     queryClient.clear();
+    resetConnectivityRecoveryStoreForTests();
     vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "off");
     window.sessionStorage.clear();
     window.scrollTo = vi.fn();
@@ -165,6 +170,7 @@ describe("LibrarySourcePage cached source views", () => {
   afterEach(() => {
     cleanup();
     queryClient.clear();
+    resetConnectivityRecoveryStoreForTests();
     apiRequest.mockReset();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
@@ -351,14 +357,18 @@ describe("LibrarySourcePage cached source views", () => {
       updatedAt: Date.now() - LIBRARY_QUERY_STALE_TIME_MS - 1,
     });
     let sourceCalls = 0;
+    let failure;
     apiRequest.mockImplementation((path) => {
       if (path === "/api/user-settings") {
         return Promise.resolve({ floating_library_search_enabled: true });
       }
       if (path === "/api/library?category=movies&source=local") {
         sourceCalls += 1;
+        if (sourceCalls === 1) {
+          failure = registerConnectivityFailure();
+        }
         return sourceCalls === 1
-          ? Promise.reject(new ApiNetworkError())
+          ? Promise.reject(new ApiNetworkError(undefined, failure))
           : Promise.resolve(payload);
       }
       return Promise.reject(new Error(`Unexpected request: ${path}`));
@@ -376,14 +386,18 @@ describe("LibrarySourcePage cached source views", () => {
     expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
     expect(screen.queryByText("Loading local library...")).not.toBeInTheDocument();
 
-    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-      detail: { generation: 21 },
+    const recoveryEvent = publishConnectivityRecovery({
+      generation: 21,
+      recoveredThroughFailureId: failure.failureId,
     });
-    fireEvent(window, recoveryEvent);
+    expect(recoveryEvent).not.toBeNull();
     await waitFor(() => expect(sourceCalls).toBe(2));
     await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
 
-    fireEvent(window, recoveryEvent);
+    expect(publishConnectivityRecovery({
+      generation: 21,
+      recoveredThroughFailureId: failure.failureId,
+    })).toBeNull();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
     expect(sourceCalls).toBe(2);
   });

@@ -14,9 +14,9 @@ import {
   resetPosterRecoveryStateForTests,
 } from "../lib/posterRecovery";
 import {
-  CONNECTIVITY_RECOVERED_EVENT,
-  STARTUP_CONNECTIVITY_FAILURE_EVENT,
-} from "../lib/startupConnection";
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+} from "../lib/connectivityRecoveryStore";
 
 
 const smartPosterMocks = vi.hoisted(() => ({
@@ -171,17 +171,16 @@ describe("MediaCard poster loading", () => {
   test("retries a transport-failed poster once after connectivity recovers", async () => {
     vi.useFakeTimers();
     try {
+      const failure = registerConnectivityFailure();
       const image = renderCard({ deviceShell: "iphone" });
-      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-        detail: { classification: "transport" },
-      }));
       fireEvent.error(image);
 
       expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
 
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 7 },
-      }));
+      publishConnectivityRecovery({
+        generation: 7,
+        recoveredThroughFailureId: failure.failureId,
+      });
       await vi.advanceTimersByTimeAsync(499);
       expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
 
@@ -191,18 +190,6 @@ describe("MediaCard poster loading", () => {
         "/api/library/item/42/poster?v=cache-token&variant=card&display_width=1400#poster",
       );
       expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
-
-      // A genuinely new transport incident that the poster fails within is
-      // allowed to retry once more (bounded: at most once per incident).
-      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-        detail: { classification: "transport" },
-      }));
-      fireEvent.error(document.querySelector(".media-card__poster-image"));
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 8 },
-      }));
-      await vi.advanceTimersByTimeAsync(500);
-      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -218,12 +205,11 @@ describe("MediaCard poster loading", () => {
       expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
 
       // A later, unrelated transport incident opens and recovers.
-      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-        detail: { classification: "transport" },
-      }));
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 3 },
-      }));
+      const failure = registerConnectivityFailure();
+      publishConnectivityRecovery({
+        generation: 3,
+        recoveredThroughFailureId: failure.failureId,
+      });
       await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
 
       expect(document.querySelector(".media-card__poster-image")).not.toBeInTheDocument();
@@ -236,28 +222,26 @@ describe("MediaCard poster loading", () => {
   test("a later unrelated incident recovery does not retry a poster bound to an earlier incident", async () => {
     vi.useFakeTimers();
     try {
+      const firstFailure = registerConnectivityFailure();
       const image = renderCard({ deviceShell: "iphone" });
       // Incident N opens; the poster fails within it and binds to incident N.
-      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-        detail: { classification: "transport" },
-      }));
       fireEvent.error(image);
 
       // Incident N recovers, then an independent incident N+1 opens and
       // recovers. The poster (bound to N, already retried) must not retry for
       // the unrelated N+1 recovery.
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 5 },
-      }));
+      publishConnectivityRecovery({
+        generation: 5,
+        recoveredThroughFailureId: firstFailure.failureId,
+      });
       await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
       expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
 
-      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-        detail: { classification: "transport" },
-      }));
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 6 },
-      }));
+      const secondFailure = registerConnectivityFailure();
+      publishConnectivityRecovery({
+        generation: 6,
+        recoveredThroughFailureId: secondFailure.failureId,
+      });
       await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
       expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
     } finally {
@@ -268,18 +252,18 @@ describe("MediaCard poster loading", () => {
   test("duplicate recovery events for one incident do not cause duplicate retries", async () => {
     vi.useFakeTimers();
     try {
+      const failure = registerConnectivityFailure();
       const image = renderCard({ deviceShell: "iphone" });
-      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-        detail: { classification: "transport" },
-      }));
       fireEvent.error(image);
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 9 },
-      }));
+      publishConnectivityRecovery({
+        generation: 9,
+        recoveredThroughFailureId: failure.failureId,
+      });
       // A duplicate recovery event for the (already closed) incident.
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 9 },
-      }));
+      publishConnectivityRecovery({
+        generation: 9,
+        recoveredThroughFailureId: failure.failureId,
+      });
       await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
 
       expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
@@ -291,20 +275,58 @@ describe("MediaCard poster loading", () => {
   test("retries a non-scheduler poster once without changing its URL", async () => {
     vi.useFakeTimers();
     try {
+      const failure = registerConnectivityFailure();
       const image = renderCard();
-      fireEvent(window, new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-        detail: { classification: "transport" },
-      }));
       fireEvent.error(image);
-      fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: { generation: 8 },
-      }));
+      publishConnectivityRecovery({
+        generation: 8,
+        recoveredThroughFailureId: failure.failureId,
+      });
       await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
 
       expect(document.querySelector(".media-card__poster-image")).toHaveAttribute(
         "src",
         "/api/library/item/42/poster?v=cache-token&variant=card&display_width=1400#poster",
       );
+      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("retries a late poster error when its attach-time incident already recovered", async () => {
+    vi.useFakeTimers();
+    try {
+      const failure = registerConnectivityFailure();
+      const image = renderCard({ deviceShell: "iphone" });
+      publishConnectivityRecovery({
+        generation: 12,
+        recoveredThroughFailureId: failure.failureId,
+      });
+
+      fireEvent.error(image);
+      await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
+
+      expect(document.querySelector(".media-card__poster-image")).toBeInTheDocument();
+      expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("keeps an attach-time incident recoverable beyond the old 30 second window", async () => {
+    vi.useFakeTimers();
+    try {
+      const failure = registerConnectivityFailure();
+      const image = renderCard({ deviceShell: "iphone" });
+      await vi.advanceTimersByTimeAsync(31_000);
+      fireEvent.error(image);
+      publishConnectivityRecovery({
+        generation: 13,
+        recoveredThroughFailureId: failure.failureId,
+      });
+      await vi.advanceTimersByTimeAsync(POSTER_RECOVERY_COOLDOWN_MS);
+
       expect(smartPosterMocks.retry).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();

@@ -4,8 +4,11 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import threading
 import time
+from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from ..config import PROJECT_ROOT
@@ -53,10 +56,13 @@ _snapshot_lock = threading.RLock()
 _snapshot_fingerprint: tuple[object, ...] | None = None
 _snapshot_payload: dict[str, object] | None = None
 _snapshot_records: list[dict[str, object]] | None = None
-_verified_artifacts: dict[
-    tuple[str, tuple[object, ...], int, str],
-    bool,
-] = {}
+_artifact_cache_lock = threading.RLock()
+_verified_artifacts: OrderedDict[
+    str,
+    tuple[tuple[object, ...], int, str],
+] = OrderedDict()
+_artifact_locks: dict[str, tuple[threading.Lock, int]] = {}
+_MAX_VERIFIED_ARTIFACTS = 64
 
 
 def desktop_helper_release_manifest_exists() -> bool:
@@ -69,7 +75,9 @@ def reset_desktop_helper_manifest_cache() -> None:
         _snapshot_fingerprint = None
         _snapshot_payload = None
         _snapshot_records = None
+    with _artifact_cache_lock:
         _verified_artifacts.clear()
+        _artifact_locks.clear()
 
 
 def list_desktop_helper_manifest_records(
@@ -79,12 +87,13 @@ def list_desktop_helper_manifest_records(
     expected_bound_origin_sha256: str | None = None,
 ) -> list[dict[str, object]]:
     with _snapshot_lock:
-        normalized_records = _select_and_verify_records_locked(
-            _load_normalized_manifest_records_locked(),
-            platform=platform,
-            channel=channel,
-            expected_bound_origin_sha256=expected_bound_origin_sha256,
-        )
+        records = [dict(record) for record in _load_normalized_manifest_records_locked()]
+    normalized_records = _select_and_verify_records(
+        records,
+        platform=platform,
+        channel=channel,
+        expected_bound_origin_sha256=expected_bound_origin_sha256,
+    )
     return [dict(record) for record in normalized_records]
 
 
@@ -94,13 +103,14 @@ def get_desktop_helper_manifest_record_by_id(
     expected_bound_origin_sha256: str | None = None,
 ) -> dict[str, object] | None:
     with _snapshot_lock:
-        for record in _select_and_verify_records_locked(
-            _load_normalized_manifest_records_locked(),
-            release_id=release_id,
-            expected_bound_origin_sha256=expected_bound_origin_sha256,
-        ):
-            if int(record["id"]) == release_id:
-                return dict(record)
+        records = [dict(record) for record in _load_normalized_manifest_records_locked()]
+    for record in _select_and_verify_records(
+        records,
+        release_id=release_id,
+        expected_bound_origin_sha256=expected_bound_origin_sha256,
+    ):
+        if int(record["id"]) == release_id:
+            return dict(record)
     return None
 
 
@@ -123,7 +133,8 @@ def _load_manifest_document_locked() -> dict[str, object]:
     _snapshot_fingerprint = fingerprint
     _snapshot_payload = payload
     _snapshot_records = None
-    _verified_artifacts.clear()
+    with _artifact_cache_lock:
+        _verified_artifacts.clear()
     return payload
 
 
@@ -138,7 +149,7 @@ def _load_normalized_manifest_records_locked() -> list[dict[str, object]]:
     return _snapshot_records
 
 
-def _select_and_verify_records_locked(
+def _select_and_verify_records(
     records: list[dict[str, object]],
     *,
     platform: str | None = None,
@@ -169,6 +180,8 @@ def _select_and_verify_records_locked(
         )
         _verify_artifact(
             file_path,
+            root_dir=HELPER_RELEASE_PACKAGES_DIR,
+            relative_path=str(record["relative_path"]),
             size_bytes=int(record["size_bytes"]),
             sha256=str(record["sha256"]),
             package_target=str(record["package_target"]),
@@ -179,6 +192,8 @@ def _select_and_verify_records_locked(
         verified.append({
             **record,
             "file_path": file_path,
+            "artifact_root": HELPER_RELEASE_PACKAGES_DIR,
+            "artifact_relative_path": str(record["relative_path"]),
             "package_binding": package_binding,
         })
     return verified
@@ -346,6 +361,8 @@ def _normalize_v2_manifest_records(
             file_path = _resolve_package_file(relative_path, filename)
             _verify_artifact(
                 file_path,
+                root_dir=HELPER_RELEASE_PACKAGES_DIR,
+                relative_path=relative_path,
                 size_bytes=size_bytes,
                 sha256=sha256,
                 package_target=package_target,
@@ -439,6 +456,8 @@ def _normalize_legacy_manifest_records(
             file_path = _resolve_package_file(relative_path, filename)
             _verify_artifact(
                 file_path,
+                root_dir=HELPER_RELEASE_PACKAGES_DIR,
+                relative_path=relative_path,
                 size_bytes=size_bytes,
                 sha256=sha256,
                 package_target=runtime_id,
@@ -494,21 +513,78 @@ def _file_fingerprint(path: Path) -> tuple[object, ...]:
 _MAX_ARTIFACT_VERIFY_ATTEMPTS = 3
 
 
-def _open_artifact_no_follow(file_path: Path):
-    """Open the artifact exactly once, refusing to follow a final-component symlink.
+class _ArtifactChangedDuringVerification(RuntimeError):
+    pass
 
-    The returned handle is the single file description that is fstat'd, hashed,
-    and streamed, closing the TOCTOU window between verifying a path and later
-    reopening it.
-    """
-    flags = os.O_RDONLY
-    for flag_name in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
-        flags |= getattr(os, flag_name, 0)
-    fd = os.open(file_path, flags)
+
+def _artifact_identity(root_dir: Path, relative_path: str) -> str:
+    return f"{root_dir.absolute()}::{relative_path}"
+
+
+@contextmanager
+def _artifact_singleflight(identity: str):
+    with _artifact_cache_lock:
+        entry = _artifact_locks.get(identity)
+        if entry is None:
+            lock = threading.Lock()
+            references = 0
+        else:
+            lock, references = entry
+        _artifact_locks[identity] = (lock, references + 1)
     try:
-        return os.fdopen(fd, "rb", buffering=1024 * 1024)
-    except Exception:
-        os.close(fd)
+        with lock:
+            yield
+    finally:
+        with _artifact_cache_lock:
+            current = _artifact_locks.get(identity)
+            if current is not None and current[0] is lock:
+                remaining = current[1] - 1
+                if remaining <= 0:
+                    _artifact_locks.pop(identity, None)
+                else:
+                    _artifact_locks[identity] = (lock, remaining)
+
+
+def _open_artifact_no_follow(root_dir: Path, relative_path: str):
+    """Open an artifact beneath a trusted root without following any symlink."""
+    safe_relative_path = _require_safe_relative_path(relative_path, "relative_path")
+    if not getattr(os, "O_NOFOLLOW", 0) or not getattr(os, "O_DIRECTORY", 0):
+        raise DesktopHelperManifestError(
+            "Desktop helper release artifact verification is unsupported on this server"
+        )
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    for flag_name in ("O_CLOEXEC", "O_BINARY"):
+        directory_flags |= getattr(os, flag_name, 0)
+        file_flags |= getattr(os, flag_name, 0)
+
+    directory_fd = -1
+    try:
+        directory_fd = os.open(root_dir, directory_flags)
+        parts = PurePosixPath(safe_relative_path).parts
+        for component in parts[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise DesktopHelperManifestError(
+            "Desktop helper release artifact is unavailable"
+        ) from exc
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+    try:
+        stat_result = os.fstat(file_fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise DesktopHelperManifestError(
+                "Desktop helper release artifact is not a regular file"
+            )
+        return os.fdopen(file_fd, "rb", buffering=1024 * 1024)
+    except BaseException:
+        os.close(file_fd)
         raise
 
 
@@ -532,9 +608,11 @@ def _verify_open_handle(
     handle,
     file_path: Path,
     *,
+    artifact_identity: str,
     size_bytes: int,
     sha256: str,
     package_target: str,
+    force_hash: bool,
 ) -> tuple[object, ...]:
     """Verify an already-open handle and return its confirmed fingerprint.
 
@@ -543,101 +621,129 @@ def _verify_open_handle(
     changed mid-read, and the verification cache is keyed by the complete
     fingerprint so any change forces a rehash.
     """
-    resolved_path = str(file_path.resolve())
-    for attempt in range(1, _MAX_ARTIFACT_VERIFY_ATTEMPTS + 1):
-        before = _fingerprint_from_stat(os.fstat(handle.fileno()), resolved_path)
-        if before[3] != size_bytes:
-            raise DesktopHelperManifestError("Desktop helper release artifact size mismatch")
-        cache_key = (resolved_path, before, size_bytes, sha256)
-        if _verified_artifacts.get(cache_key):
+    before = _fingerprint_from_stat(os.fstat(handle.fileno()), artifact_identity)
+    if before[3] != size_bytes:
+        raise DesktopHelperManifestError("Desktop helper release artifact size mismatch")
+    with _artifact_cache_lock:
+        cached = _verified_artifacts.get(artifact_identity)
+        if cached == (before, size_bytes, sha256) and not force_hash:
+            _verified_artifacts.move_to_end(artifact_identity)
             logger.debug(
                 "Desktop helper package verification package_target=%s cache=hit result=valid",
                 package_target,
             )
             return before
-        started_at = time.monotonic()
-        digest = _hash_open_handle(handle, file_path)
-        after = _fingerprint_from_stat(os.fstat(handle.fileno()), resolved_path)
-        if after != before:
-            # The artifact changed underneath the open handle while hashing.
-            if attempt < _MAX_ARTIFACT_VERIFY_ATTEMPTS:
-                continue
-            raise DesktopHelperManifestError(
-                "Desktop helper release artifact changed during verification"
-            )
-        if digest != sha256:
-            logger.warning(
-                "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=invalid",
-                package_target,
-                round((time.monotonic() - started_at) * 1000),
-            )
-            raise DesktopHelperManifestError("Desktop helper release artifact SHA-256 mismatch")
-        _verified_artifacts[cache_key] = True
-        logger.debug(
-            "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=valid",
+
+    started_at = time.monotonic()
+    digest = _hash_open_handle(handle, file_path)
+    after = _fingerprint_from_stat(os.fstat(handle.fileno()), artifact_identity)
+    if after != before:
+        raise _ArtifactChangedDuringVerification
+    if digest != sha256:
+        logger.warning(
+            "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=invalid",
             package_target,
             round((time.monotonic() - started_at) * 1000),
         )
-        return before
-    raise DesktopHelperManifestError(
-        "Desktop helper release artifact changed during verification"
+        raise DesktopHelperManifestError("Desktop helper release artifact SHA-256 mismatch")
+    with _artifact_cache_lock:
+        _verified_artifacts[artifact_identity] = (before, size_bytes, sha256)
+        _verified_artifacts.move_to_end(artifact_identity)
+        while len(_verified_artifacts) > _MAX_VERIFIED_ARTIFACTS:
+            _verified_artifacts.popitem(last=False)
+    logger.debug(
+        "Desktop helper package verification package_target=%s cache=miss duration_ms=%d result=valid",
+        package_target,
+        round((time.monotonic() - started_at) * 1000),
     )
+    return before
 
 
 def _open_verified_handle(
     file_path: Path,
     *,
+    root_dir: Path,
+    relative_path: str,
     size_bytes: int,
     sha256: str,
     package_target: str,
+    force_hash: bool = False,
 ):
     """Open, verify, and return a read handle positioned at the start of the file."""
-    try:
-        handle = _open_artifact_no_follow(file_path)
-    except OSError as exc:
-        raise DesktopHelperManifestError(
-            "Desktop helper release artifact is unavailable"
-        ) from exc
-    try:
-        _verify_open_handle(
-            handle,
-            file_path,
-            size_bytes=size_bytes,
-            sha256=sha256,
-            package_target=package_target,
-        )
-    except BaseException:
-        handle.close()
-        raise
-    handle.seek(0)
-    return handle
+    identity = _artifact_identity(root_dir, relative_path)
+    with _artifact_singleflight(identity):
+        for attempt in range(1, _MAX_ARTIFACT_VERIFY_ATTEMPTS + 1):
+            handle = _open_artifact_no_follow(root_dir, relative_path)
+            try:
+                _verify_open_handle(
+                    handle,
+                    file_path,
+                    artifact_identity=identity,
+                    size_bytes=size_bytes,
+                    sha256=sha256,
+                    package_target=package_target,
+                    force_hash=force_hash,
+                )
+            except _ArtifactChangedDuringVerification as exc:
+                handle.close()
+                if attempt >= _MAX_ARTIFACT_VERIFY_ATTEMPTS:
+                    raise DesktopHelperManifestError(
+                        "Desktop helper release artifact changed during verification"
+                    ) from exc
+                continue
+            except BaseException:
+                handle.close()
+                raise
+            handle.seek(0)
+            return handle
+    raise DesktopHelperManifestError(
+        "Desktop helper release artifact changed during verification"
+    )
 
 
 def open_verified_artifact(
     file_path: Path,
     *,
+    root_dir: Path | None = None,
+    relative_path: str | None = None,
     size_bytes: int,
     sha256: str,
     package_target: str,
+    force_hash: bool = False,
 ):
     """Public entry point returning an open, verified handle for streaming."""
+    root = root_dir or HELPER_RELEASE_PACKAGES_DIR
+    if relative_path is None:
+        try:
+            relative_path = file_path.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise DesktopHelperManifestError(
+                "Desktop helper release artifact is outside its trusted root"
+            ) from exc
     return _open_verified_handle(
         file_path,
+        root_dir=root,
+        relative_path=relative_path,
         size_bytes=size_bytes,
         sha256=sha256,
         package_target=package_target,
+        force_hash=force_hash,
     )
 
 
 def _verify_artifact(
     file_path: Path,
     *,
+    root_dir: Path,
+    relative_path: str,
     size_bytes: int,
     sha256: str,
     package_target: str,
 ) -> None:
     handle = _open_verified_handle(
         file_path,
+        root_dir=root_dir,
+        relative_path=relative_path,
         size_bytes=size_bytes,
         sha256=sha256,
         package_target=package_target,
@@ -646,19 +752,12 @@ def _verify_artifact(
 
 
 def _resolve_package_file(relative_path: str, filename: str) -> Path:
-    file_path = (HELPER_RELEASE_PACKAGES_DIR / relative_path).resolve()
-    try:
-        file_path.relative_to(HELPER_RELEASE_PACKAGES_DIR.resolve())
-    except ValueError as exc:
-        raise DesktopHelperManifestError(
-            f"Desktop helper release manifest path escapes packages directory: {relative_path}"
-        ) from exc
+    safe_relative_path = _require_safe_relative_path(relative_path, "relative_path")
+    file_path = HELPER_RELEASE_PACKAGES_DIR / safe_relative_path
     if file_path.name != filename:
         raise DesktopHelperManifestError(
             f"Desktop helper release manifest filename mismatch for {relative_path}"
         )
-    if not file_path.is_file():
-        raise DesktopHelperManifestError("Desktop helper release artifact is missing")
     return file_path
 
 
@@ -685,13 +784,31 @@ def _normalize_platform_family(platform_family: str) -> str:
 
 
 def _require_safe_relative_path(value: object, field_name: str) -> str:
-    normalized = _require_non_empty_string(value, field_name).replace("\\", "/")
+    normalized = _require_non_empty_string(value, field_name)
+    if (
+        "\\" in normalized
+        or "//" in normalized
+        or normalized != normalized.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
+        raise DesktopHelperManifestError(
+            f"Desktop helper release manifest field {field_name} is not a canonical relative path"
+        )
     path = PurePosixPath(normalized)
-    if path.is_absolute() or ".." in path.parts or "." in path.parts:
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or "." in path.parts
+        or path.as_posix() != normalized
+    ):
         raise DesktopHelperManifestError(
             f"Desktop helper release manifest path escapes packages directory: {normalized}"
         )
     return path.as_posix()
+
+
+def validate_artifact_relative_path(value: object) -> str:
+    return _require_safe_relative_path(value, "relative_path")
 
 
 def _require_sha256(value: object, field_name: str) -> str:
@@ -737,7 +854,7 @@ def _require_non_empty_string(value: object, field_name: str) -> str:
     return normalized
 
 
-def _sha256_for_file(file_path: Path, *, handle=None) -> str:
+def _sha256_for_file(file_path: Path | None = None, *, handle=None) -> str:
     digest = hashlib.sha256()
     if handle is not None:
         # Hash the already-open verified handle, reading from its start.
@@ -745,6 +862,8 @@ def _sha256_for_file(file_path: Path, *, handle=None) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
         return digest.hexdigest()
+    if file_path is None:
+        raise DesktopHelperManifestError("Desktop helper release artifact path is required")
     with file_path.open("rb") as opened:
         for chunk in iter(lambda: opened.read(1024 * 1024), b""):
             digest.update(chunk)

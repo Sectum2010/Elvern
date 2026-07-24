@@ -13,4 +13,9 @@
   <ItemGroup>
     <ProjectReference Include="../Elvern.VlcOpener.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="../packaging/common/origin-normalization-cases.json"
+          Link="origin-normalization-cases.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

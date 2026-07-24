@@ -37,7 +37,6 @@ import {
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { useCommittedLibrarySearch } from "../lib/useCommittedLibrarySearch";
 import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
 
 
 const EMPTY_SOURCE_LIBRARY_PAYLOAD = Object.freeze({
@@ -189,7 +188,6 @@ export function LibrarySourcePage({ sourceKind }) {
   const pendingFloatingSearchRestoreYRef = useRef(null);
   const librarySectionRef = useRef(null);
   const libraryReturnRestoreKeyRef = useRef("");
-  const libraryRecoveryGenerationRef = useRef(0);
   const useIpadPortraitSeriesPacking = useIpadPortraitLibraryLayout();
   const resolvedSourceKind = sourceKind === "cloud" ? "cloud" : "local";
   const copy = SOURCE_PAGE_COPY[resolvedSourceKind];
@@ -333,24 +331,6 @@ export function LibrarySourcePage({ sourceKind }) {
       setError(requestError.message || "Failed to load library section");
     }
   }, [libraryQuery.data, libraryQuery.error, refreshAuth]);
-
-  useEffect(() => {
-    function handleConnectivityRecovered(event) {
-      const generation = Number(event.detail?.generation || 0);
-      if (
-        generation <= libraryRecoveryGenerationRef.current
-        || !isTransientNetworkError(libraryQuery.error)
-      ) {
-        return;
-      }
-      libraryRecoveryGenerationRef.current = generation;
-      void libraryQuery.refetch();
-    }
-    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    return () => {
-      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
-    };
-  }, [libraryQuery.error, libraryQuery.refetch]);
 
   useEffect(() => {
     if (

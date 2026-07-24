@@ -11,7 +11,11 @@ import {
 import { DetailPage, iosExternalAppNavigator } from "./DetailPage";
 import { queryClient } from "../lib/queryClient";
 import { buildLibraryV2QueryKey } from "../lib/libraryQueries";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/startupConnection";
+import {
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+} from "../lib/connectivityRecoveryStore";
 
 
 const mockAuthState = vi.hoisted(() => ({
@@ -306,6 +310,7 @@ async function openInfoModal() {
 describe("DetailPage source metadata privacy", () => {
   beforeEach(() => {
     queryClient.clear();
+    resetConnectivityRecoveryStoreForTests();
     window.scrollTo = vi.fn();
   });
 
@@ -440,6 +445,7 @@ describe("DetailPage source metadata privacy", () => {
   });
 
   test("keeps a cached preview through a transport failure and retries once on recovery", async () => {
+    const failure = registerConnectivityFailure();
     queryClient.setQueryData(buildLibraryV2QueryKey({
       userId: 2,
       role: "standard_user",
@@ -465,6 +471,7 @@ describe("DetailPage source metadata privacy", () => {
         return itemCalls === 1
           ? Promise.reject(new ApiNetworkError(undefined, {
             cause: new TypeError("NetworkError when attempting to fetch resource"),
+            ...failure,
           }))
           : Promise.resolve(detailItem({ title: "Recovered Movie", parsed_title: null }));
       }
@@ -492,25 +499,110 @@ describe("DetailPage source metadata privacy", () => {
     expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
     expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
 
-    const recoveryEvent = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-      detail: { generation: 21 },
-    });
-    fireEvent(window, recoveryEvent);
+    const recoveryEvent = {
+      generation: 21,
+      recoveredThroughFailureId: failure.failureId,
+    };
+    publishConnectivityRecovery(recoveryEvent);
     expect(await screen.findByRole("heading", { level: 1, name: "Recovered Movie" })).toBeInTheDocument();
     expect(itemCalls).toBe(2);
 
-    fireEvent(window, recoveryEvent);
+    publishConnectivityRecovery(recoveryEvent);
     await act(async () => Promise.resolve());
     expect(itemCalls).toBe(2);
   });
 
+  test("metadata-first recovery starts every applicable auxiliary read only after metadata succeeds", async () => {
+    mockAuthState.user = { id: 2, username: "admin", role: "admin" };
+    mockPlatformState.desktopPlatform = "linux";
+    const restoreSession = vi.fn(async () => null);
+    mockBrowserPlaybackControllerState.overrides = {
+      restoreActiveBrowserPlaybackSession: restoreSession,
+    };
+    const failure = registerConnectivityFailure();
+    const counts = {
+      metadata: 0,
+      progress: 0,
+      playback: 0,
+      desktop: 0,
+      cloud: 0,
+      admin: 0,
+    };
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      if (requestPath === "/api/library/item/42") {
+        counts.metadata += 1;
+        return counts.metadata === 1
+          ? Promise.reject(new ApiNetworkError(undefined, failure))
+          : Promise.resolve(detailItem({ source_kind: "cloud" }));
+      }
+      if (requestPath === "/api/progress/42") {
+        counts.progress += 1;
+        return Promise.resolve({ position_seconds: 0, duration_seconds: 1200, completed: false });
+      }
+      if (requestPath === "/api/playback/42") {
+        counts.playback += 1;
+        return Promise.resolve({ status: "ready", reason: "", mode: "direct" });
+      }
+      if (requestPath.startsWith("/api/desktop-playback/42?")) {
+        counts.desktop += 1;
+        return Promise.resolve({ supported: true });
+      }
+      if (requestPath === "/api/cloud-libraries") {
+        counts.cloud += 1;
+        return Promise.resolve({ libraries: [] });
+      }
+      if (requestPath === "/api/admin/media-library-reference") {
+        counts.admin += 1;
+        return Promise.resolve({ effective_value: "/media/reference" });
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(counts).toEqual({
+      metadata: 1,
+      progress: 0,
+      playback: 0,
+      desktop: 0,
+      cloud: 0,
+      admin: 0,
+    });
+    expect(restoreSession).not.toHaveBeenCalled();
+
+    publishConnectivityRecovery({
+      generation: 22,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    expect(await screen.findByRole("heading", { level: 1, name: "Privacy Movie" })).toBeInTheDocument();
+    await waitFor(() => expect(counts).toEqual({
+      metadata: 2,
+      progress: 1,
+      playback: 1,
+      desktop: 1,
+      cloud: 1,
+      admin: 1,
+    }));
+    expect(restoreSession).toHaveBeenCalledTimes(1);
+  });
+
   test("initial detail transport failure exposes a stable manual retry", async () => {
+    const failure = registerConnectivityFailure();
     let itemCalls = 0;
     apiRequest.mockImplementation((requestPath) => {
       if (requestPath === "/api/library/item/42") {
         itemCalls += 1;
         return itemCalls === 1
-          ? Promise.reject(new ApiNetworkError())
+          ? Promise.reject(new ApiNetworkError(undefined, failure))
           : Promise.resolve(detailItem());
       }
       if (requestPath === "/api/progress/42") {
@@ -564,14 +656,17 @@ describe("DetailPage source metadata privacy", () => {
     );
 
     expect(await screen.findByText("Detail is unavailable")).toBeInTheDocument();
-    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-      detail: { generation: 42 },
-    }));
+    const unrelatedFailure = registerConnectivityFailure();
+    publishConnectivityRecovery({
+      generation: 42,
+      recoveredThroughFailureId: unrelatedFailure.failureId,
+    });
     await act(async () => Promise.resolve());
     expect(itemCalls).toBe(1);
   });
 
   test("recovers a transient progress failure by retrying only progress, not healthy metadata or playback", async () => {
+    const failure = registerConnectivityFailure();
     let itemCalls = 0;
     let progressCalls = 0;
     let playbackCalls = 0;
@@ -585,6 +680,7 @@ describe("DetailPage source metadata privacy", () => {
         return progressCalls === 1
           ? Promise.reject(new ApiNetworkError(undefined, {
             cause: new TypeError("NetworkError when attempting to fetch resource"),
+            ...failure,
           }))
           : Promise.resolve({ position_seconds: 42, duration_seconds: 1200, completed: false });
       }
@@ -609,20 +705,24 @@ describe("DetailPage source metadata privacy", () => {
     expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
     expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
 
-    const recovery = new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 7 } });
-    fireEvent(window, recovery);
+    const recovery = {
+      generation: 7,
+      recoveredThroughFailureId: failure.failureId,
+    };
+    publishConnectivityRecovery(recovery);
     await waitFor(() => expect(progressCalls).toBe(2));
     await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
     // Metadata and the healthy playback capability are not re-fetched.
     expect(itemCalls).toBe(1);
     expect(playbackCalls).toBe(1);
 
-    fireEvent(window, recovery);
+    publishConnectivityRecovery(recovery);
     await act(async () => Promise.resolve());
     expect(progressCalls).toBe(2);
   });
 
   test("recovers a transient playback-capability failure by retrying it once on recovery", async () => {
+    const failure = registerConnectivityFailure();
     let itemCalls = 0;
     let playbackCalls = 0;
     apiRequest.mockImplementation((requestPath) => {
@@ -636,7 +736,7 @@ describe("DetailPage source metadata privacy", () => {
       if (requestPath === "/api/playback/42") {
         playbackCalls += 1;
         return playbackCalls === 1
-          ? Promise.reject(new ApiNetworkError())
+          ? Promise.reject(new ApiNetworkError(undefined, failure))
           : Promise.resolve({ status: "ready", reason: "", mode: "direct" });
       }
       if (requestPath === "/api/user-settings") {
@@ -655,10 +755,66 @@ describe("DetailPage source metadata privacy", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Privacy Movie" })).toBeInTheDocument();
     expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
 
-    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 9 } }));
+    publishConnectivityRecovery({
+      generation: 9,
+      recoveredThroughFailureId: failure.failureId,
+    });
     await waitFor(() => expect(playbackCalls).toBe(2));
     await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
     expect(itemCalls).toBe(1);
+  });
+
+  test("cloud health and admin reference transient failures retry selectively and clear recovery UI", async () => {
+    mockAuthState.user = { id: 2, username: "admin", role: "admin" };
+    const failure = registerConnectivityFailure();
+    let metadataCalls = 0;
+    let cloudCalls = 0;
+    let adminCalls = 0;
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/library/item/42") {
+        metadataCalls += 1;
+        return Promise.resolve(detailItem({ source_kind: "cloud" }));
+      }
+      if (requestPath === "/api/progress/42") {
+        return Promise.resolve({ position_seconds: 0, duration_seconds: 1200, completed: false });
+      }
+      if (requestPath === "/api/playback/42") {
+        return Promise.resolve({ status: "ready", reason: "", mode: "direct" });
+      }
+      if (requestPath === "/api/cloud-libraries") {
+        cloudCalls += 1;
+        return cloudCalls === 1
+          ? Promise.reject(new ApiNetworkError(undefined, failure))
+          : Promise.resolve({ libraries: [] });
+      }
+      if (requestPath === "/api/admin/media-library-reference") {
+        adminCalls += 1;
+        return adminCalls === 1
+          ? Promise.reject(new ApiNetworkError(undefined, failure))
+          : Promise.resolve({ effective_value: "/media/reference" });
+      }
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultUserSettings);
+      }
+      return Promise.reject(new Error(`Unexpected request: ${requestPath}`));
+    });
+    render(
+      <MemoryRouter initialEntries={["/library/item/42"]}>
+        <Routes>
+          <Route path="/library/item/:itemId" element={<DetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
+    publishConnectivityRecovery({
+      generation: 23,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    await waitFor(() => expect(cloudCalls).toBe(2));
+    await waitFor(() => expect(adminCalls).toBe(2));
+    await waitFor(() => expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument());
+    expect(metadataCalls).toBe(1);
   });
 
   test("an HTTP business error on an auxiliary read is never treated as a network recovery", async () => {
@@ -693,7 +849,11 @@ describe("DetailPage source metadata privacy", () => {
     await waitFor(() => expect(progressCalls).toBe(1));
     expect(screen.queryByText("Reconnecting…")).not.toBeInTheDocument();
 
-    fireEvent(window, new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, { detail: { generation: 11 } }));
+    const unrelatedFailure = registerConnectivityFailure();
+    publishConnectivityRecovery({
+      generation: 11,
+      recoveredThroughFailureId: unrelatedFailure.failureId,
+    });
     await act(async () => Promise.resolve());
     expect(progressCalls).toBe(1);
   });

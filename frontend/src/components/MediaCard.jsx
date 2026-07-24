@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { getMovieCardTitle } from "../lib/movieTitles";
 import { getCardPosterUrl } from "../lib/posterUrls";
@@ -19,7 +19,8 @@ import {
   unregisterSmartPosterCard,
 } from "../lib/smartPosterLoading";
 import {
-  getPosterRecoveryCandidate,
+  getPosterRecoveryAttachContext,
+  isPosterAttachContextRecovered,
   POSTER_RECOVERY_COOLDOWN_MS,
   subscribePosterRecoveryEvents,
 } from "../lib/posterRecovery";
@@ -123,9 +124,12 @@ export function MediaCard({
     url: null,
     eligible: false,
     incident: 0,
+    failureId: 0,
     attempted: false,
   });
+  const posterRequestAttachedRef = useRef(false);
   const posterRecoveryTimerRef = useRef(0);
+  const posterRecoveryUrlRef = useRef(null);
   const posterInstanceId = useId();
   const smartPosterCardId = useMemo(
     () => `poster-${item.id}-${posterInstanceId}`,
@@ -140,6 +144,20 @@ export function MediaCard({
     () => getCardPosterUrl(item.poster_url, posterDisplayWidth),
     [item.poster_url, posterDisplayWidth],
   );
+  if (posterRecoveryUrlRef.current !== resolvedPosterUrl) {
+    posterRecoveryUrlRef.current = resolvedPosterUrl;
+    posterRecoveryRef.current = {
+      url: resolvedPosterUrl,
+      eligible: false,
+      incident: 0,
+      failureId: 0,
+      attempted: false,
+    };
+    posterRequestAttachedRef.current = false;
+    if (typeof window !== "undefined") {
+      window.clearTimeout(posterRecoveryTimerRef.current);
+    }
+  }
   const posterStateMatchesUrl = posterLoadState.url === resolvedPosterUrl;
   const posterFailed = posterStateMatchesUrl && posterLoadState.failed;
   const posterLoaded = posterStateMatchesUrl && posterLoadState.loaded;
@@ -219,31 +237,16 @@ export function MediaCard({
         ? current
         : { url: resolvedPosterUrl, loaded: false, failed: false }
     ));
-    posterRecoveryRef.current = {
-      url: resolvedPosterUrl,
-      eligible: false,
-      incident: 0,
-      attempted: false,
-    };
-    window.clearTimeout(posterRecoveryTimerRef.current);
   }, [resolvedPosterUrl]);
 
-  useEffect(() => subscribePosterRecoveryEvents(({ kind, detail }) => {
-    // A failure event never retroactively marks an already-failed poster
-    // eligible: eligibility is decided only at the poster's own onError, bound
-    // to the incident that was open at that moment.
-    if (kind !== "recovered") {
-      return;
-    }
+  const retryRecoveredPoster = useCallback(() => {
     const loadState = posterLoadStateRef.current;
     const recovery = posterRecoveryRef.current;
-    const recoveredIncident = Number(detail.incident || 0);
     if (
-      recoveredIncident <= 0
-      || recovery.url !== resolvedPosterUrl
+      recovery.url !== resolvedPosterUrl
       || !recovery.eligible
       || recovery.attempted
-      || recovery.incident !== recoveredIncident
+      || !isPosterAttachContextRecovered(recovery)
       || loadState.url !== resolvedPosterUrl
       || !loadState.failed
     ) {
@@ -256,6 +259,7 @@ export function MediaCard({
       if (current.url !== resolvedPosterUrl || !current.failed) {
         return;
       }
+      posterRequestAttachedRef.current = false;
       retrySmartPosterCard(smartPosterCardId);
       setPosterLoadState({
         url: resolvedPosterUrl,
@@ -263,7 +267,29 @@ export function MediaCard({
         failed: false,
       });
     }, POSTER_RECOVERY_COOLDOWN_MS);
-  }), [resolvedPosterUrl, smartPosterCardId]);
+  }, [resolvedPosterUrl, smartPosterCardId]);
+
+  useEffect(() => subscribePosterRecoveryEvents(({ kind }) => {
+    if (kind === "recovered") {
+      retryRecoveredPoster();
+    }
+  }), [retryRecoveredPoster]);
+
+  const recordPosterRequestAttach = useCallback((node) => {
+    if (!node || posterRequestAttachedRef.current) {
+      return;
+    }
+    posterRequestAttachedRef.current = true;
+    const current = posterRecoveryRef.current;
+    if (current.url === resolvedPosterUrl && current.attempted) {
+      return;
+    }
+    posterRecoveryRef.current = {
+      url: resolvedPosterUrl,
+      ...getPosterRecoveryAttachContext(),
+      attempted: false,
+    };
+  }, [resolvedPosterUrl]);
 
   useEffect(() => () => {
     window.clearTimeout(posterRecoveryTimerRef.current);
@@ -337,22 +363,19 @@ export function MediaCard({
               draggable="false"
               fetchPriority={smartPosterSchedulerActive ? undefined : "low"}
               loading={smartPosterSchedulerActive ? "eager" : "lazy"}
+              ref={recordPosterRequestAttach}
               onError={() => {
-                const recoveryCandidate = getPosterRecoveryCandidate();
-                posterRecoveryRef.current = {
-                  url: resolvedPosterUrl,
-                  eligible: recoveryCandidate.eligible,
-                  incident: recoveryCandidate.incident,
-                  attempted: false,
-                };
                 if (smartPosterSchedulerActive) {
                   markSmartPosterCardError(smartPosterCardId);
                 }
-                setPosterLoadState({
+                const failedState = {
                   url: resolvedPosterUrl,
                   loaded: false,
                   failed: true,
-                });
+                };
+                posterLoadStateRef.current = failedState;
+                setPosterLoadState(failedState);
+                void Promise.resolve().then(retryRecoveredPoster);
               }}
               onLoad={() => {
                 if (smartPosterSchedulerActive) {
@@ -364,13 +387,16 @@ export function MediaCard({
                   url: resolvedPosterUrl,
                   eligible: false,
                   incident: 0,
+                  failureId: 0,
                   attempted: false,
                 };
-                setPosterLoadState({
+                const loadedState = {
                   url: resolvedPosterUrl,
                   loaded: true,
                   failed: false,
-                });
+                };
+                posterLoadStateRef.current = loadedState;
+                setPosterLoadState(loadedState);
               }}
               src={resolvedPosterUrl}
             />

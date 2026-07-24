@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,21 @@ def _sha256(payload: bytes) -> str:
 
 
 BOUND_ORIGIN_SHA256 = _sha256(b"https://elvern.example")
+ORIGIN_CASES_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "clients"
+    / "desktop-vlc-opener"
+    / "packaging"
+    / "common"
+    / "origin-normalization-cases.json"
+)
+ORIGIN_BUILD_NORMALIZER = (
+    Path(__file__).resolve().parents[2]
+    / "clients"
+    / "desktop-vlc-opener"
+    / "scripts"
+    / "normalize-origin.py"
+)
 
 
 def _write_manifest(
@@ -360,6 +376,147 @@ def test_open_verified_artifact_refuses_a_symlink(monkeypatch, tmp_path) -> None
         )
 
 
+@pytest.mark.parametrize("symlink_component", ["directory", "artifact"])
+def test_manifest_artifact_resolution_rejects_symlinks_in_the_real_relative_path(
+    monkeypatch,
+    tmp_path,
+    symlink_component: str,
+) -> None:
+    _write_manifest(
+        monkeypatch,
+        tmp_path,
+        relative_path="nested/elvern-vlc-opener-0.9.0-macos-dual-arch.zip",
+    )
+    packages_dir = manifest_service.HELPER_RELEASE_PACKAGES_DIR
+    artifact = packages_dir / "nested" / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_artifact = outside / artifact.name
+    outside_artifact.write_bytes(artifact.read_bytes())
+    if symlink_component == "directory":
+        artifact.unlink()
+        artifact.parent.rmdir()
+        artifact.parent.symlink_to(outside, target_is_directory=True)
+    else:
+        artifact.unlink()
+        artifact.symlink_to(outside_artifact)
+    manifest_service.reset_desktop_helper_manifest_cache()
+
+    with pytest.raises(
+        manifest_service.DesktopHelperManifestError,
+        match="artifact is unavailable",
+    ):
+        manifest_service.list_desktop_helper_manifest_records(platform="mac")
+
+
+def test_different_artifacts_hash_in_parallel_without_a_global_verification_lock(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    root = tmp_path / "packages"
+    root.mkdir()
+    paths = [root / "one.zip", root / "two.zip"]
+    for index, path in enumerate(paths):
+        path.write_bytes(f"package-{index}".encode())
+    original_sha256 = manifest_service._sha256_for_file
+    barrier = threading.Barrier(2)
+    active = 0
+    maximum_active = 0
+    state_lock = threading.Lock()
+
+    def synchronized_hash(path: Path, *, handle=None) -> str:
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        barrier.wait(timeout=2)
+        try:
+            return original_sha256(path, handle=handle)
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(manifest_service, "_sha256_for_file", synchronized_hash)
+
+    def verify(path: Path) -> bytes:
+        handle = manifest_service.open_verified_artifact(
+            path,
+            root_dir=root,
+            relative_path=path.name,
+            size_bytes=path.stat().st_size,
+            sha256=_sha256(path.read_bytes()),
+            package_target=path.stem,
+        )
+        try:
+            return handle.read()
+        finally:
+            handle.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(verify, paths))
+
+    assert results == [b"package-0", b"package-1"]
+    assert maximum_active == 2
+    assert manifest_service._artifact_locks == {}
+
+
+def test_verified_artifact_cache_is_bounded_and_singleflight_locks_are_released(
+    tmp_path,
+) -> None:
+    root = tmp_path / "packages"
+    root.mkdir()
+    manifest_service.reset_desktop_helper_manifest_cache()
+    for index in range(manifest_service._MAX_VERIFIED_ARTIFACTS + 7):
+        path = root / f"artifact-{index}.zip"
+        payload = f"payload-{index}".encode()
+        path.write_bytes(payload)
+        handle = manifest_service.open_verified_artifact(
+            path,
+            root_dir=root,
+            relative_path=path.name,
+            size_bytes=len(payload),
+            sha256=_sha256(payload),
+            package_target=f"artifact-{index}",
+        )
+        handle.close()
+
+    assert len(manifest_service._verified_artifacts) == manifest_service._MAX_VERIFIED_ARTIFACTS
+    assert manifest_service._artifact_locks == {}
+
+
+def test_strong_download_verification_rehashes_even_after_a_listing_cache_hit(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_manifest(monkeypatch, tmp_path)
+    artifact = (
+        manifest_service.HELPER_RELEASE_PACKAGES_DIR
+        / "elvern-vlc-opener-0.9.0-macos-dual-arch.zip"
+    )
+    original_sha256 = manifest_service._sha256_for_file
+    hash_calls = 0
+
+    def counted_sha256(path: Path, *, handle=None) -> str:
+        nonlocal hash_calls
+        hash_calls += 1
+        return original_sha256(path, handle=handle)
+
+    monkeypatch.setattr(manifest_service, "_sha256_for_file", counted_sha256)
+    manifest_service.list_desktop_helper_manifest_records(platform="mac")
+    handle = manifest_service.open_verified_artifact(
+        artifact,
+        root_dir=manifest_service.HELPER_RELEASE_PACKAGES_DIR,
+        relative_path=artifact.name,
+        size_bytes=artifact.stat().st_size,
+        sha256=_sha256(artifact.read_bytes()),
+        package_target="macos-dual-arch",
+        force_hash=True,
+    )
+    handle.close()
+
+    assert hash_calls == 2
+
+
 def test_download_stream_generator_closes_handle_on_success_and_disconnect() -> None:
     class FakeHandle:
         def __init__(self, chunks: list[bytes]) -> None:
@@ -400,6 +557,78 @@ def test_download_stream_generator_closes_handle_on_read_error() -> None:
     with pytest.raises(OSError):
         list(desktop_helper_route._stream_and_close(handle))
     assert handle.closed is True
+
+
+def test_download_stream_records_success_and_interruption() -> None:
+    class FakeHandle:
+        def __init__(self) -> None:
+            self.closed = False
+            self._chunks = [b"abc", b"def"]
+
+        def read(self, size: int) -> bytes:
+            chunk = self._chunks.pop(0) if self._chunks else b""
+            return chunk[:size]
+
+        def close(self) -> None:
+            self.closed = True
+
+    outcomes: list[str] = []
+    complete = FakeHandle()
+    assert b"".join(desktop_helper_route._stream_and_close(
+        complete,
+        remaining=6,
+        audit_completion=outcomes.append,
+    )) == b"abcdef"
+    interrupted = FakeHandle()
+    stream = desktop_helper_route._stream_and_close(
+        interrupted,
+        remaining=6,
+        audit_completion=outcomes.append,
+    )
+    assert next(stream) == b"abc"
+    stream.close()
+
+    assert outcomes == ["success", "interrupted"]
+    assert complete.closed is True
+    assert interrupted.closed is True
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (None, None),
+        ("bytes=0-3", (0, 3)),
+        ("bytes=4-", (4, 9)),
+        ("bytes=-4", (6, 9)),
+        ("bytes=0-99", (0, 9)),
+    ],
+)
+def test_helper_download_range_parser_supports_one_bounded_range(
+    header: str | None,
+    expected: tuple[int, int] | None,
+) -> None:
+    assert desktop_helper_route._resolve_download_range(header, 10) == expected
+
+
+@pytest.mark.parametrize("header", ["bytes=10-", "bytes=4-2", "bytes=0-1,3-4", "items=0-1", "bytes=-0"])
+def test_helper_download_range_parser_rejects_invalid_or_multiple_ranges(
+    header: str,
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        desktop_helper_route._resolve_download_range(header, 10)
+
+    assert exc_info.value.status_code == 416
+    assert exc_info.value.headers == {"Content-Range": "bytes */10"}
+
+
+def test_helper_download_content_disposition_rejects_header_injection() -> None:
+    header = desktop_helper_route._download_content_disposition(
+        "elvern-vlc-opener-0.9.0-linux-universal.zip"
+    )
+    assert "filename*=UTF-8''" in header
+    with pytest.raises(HTTPException) as exc_info:
+        desktop_helper_route._download_content_disposition('helper.zip"\r\nX-Evil: 1')
+    assert exc_info.value.status_code == 410
 
 
 def test_manifest_origin_mismatch_fails_before_artifact_hash(monkeypatch, tmp_path) -> None:
@@ -477,11 +706,44 @@ def test_origin_mismatch_status_uses_the_safe_exact_note(
         "https://example.test/prefix",
         "https://example.test?query=1",
         "https://example.test/#fragment",
+        "https://xn--bcher-kva.example",
+        "https://example.test\x7f",
     ],
 )
 def test_desktop_helper_origin_rejects_non_origin_components(value: str) -> None:
-    with pytest.raises(ValueError, match="absolute HTTP"):
+    with pytest.raises(ValueError):
         desktop_helper_service.canonicalize_desktop_helper_origin(value)
+
+
+def test_backend_and_build_origin_normalizers_match_shared_matrix() -> None:
+    cases = json.loads(ORIGIN_CASES_PATH.read_text(encoding="utf-8"))
+
+    for case in cases:
+        expected = case["normalized"]
+        if expected is None:
+            with pytest.raises(ValueError):
+                desktop_helper_service.canonicalize_desktop_helper_origin(case["input"])
+            result = subprocess.run(
+                ["python3", str(ORIGIN_BUILD_NORMALIZER), case["input"]],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode != 0
+            continue
+
+        assert desktop_helper_service.canonicalize_desktop_helper_origin(
+            case["input"]
+        ) == expected
+        result = subprocess.run(
+            ["python3", str(ORIGIN_BUILD_NORMALIZER), case["input"]],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        output = result.stdout.splitlines()
+        assert output == [expected, _sha256(expected.encode())]
 
 
 def test_desktop_helper_origin_canonicalizes_case_and_default_ports() -> None:

@@ -305,7 +305,7 @@ describe("StartupConnectionGate", () => {
     await act(() => vi.advanceTimersByTimeAsync(0));
     navigatorObject.onLine = false;
     act(() => window.dispatchEvent(new CustomEvent(STARTUP_CONNECTIVITY_FAILURE_EVENT, {
-      detail: { path: "/api/auth/login" },
+      detail: { requestClass: "auth_login" },
     })));
 
     await act(() => vi.advanceTimersByTimeAsync(0));

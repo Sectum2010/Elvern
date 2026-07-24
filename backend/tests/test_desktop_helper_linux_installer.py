@@ -75,6 +75,7 @@ def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
             "meta\truntime_family\t10.0",
             "meta\tdeployment_mode\tself_contained",
             "meta\tpackage_target\tlinux-universal",
+            f"meta\tbound_origin_sha256\t{'a' * 64}",
             f"payload\tlinux-x64\tpayloads/linux-x64/Elvern.VlcOpener\t{_sha256(payload)}\t{payload.stat().st_size}\tElvern.VlcOpener",
         ]) + "\n",
         encoding="utf-8",
@@ -83,8 +84,9 @@ def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
 
     home = tmp_path / "home"
     fake_bin = tmp_path / "fake-bin"
-    state = tmp_path / "xdg-default"
+    state = home / ".config" / "mimeapps.list"
     home.mkdir()
+    state.parent.mkdir()
     fake_bin.mkdir()
     state.write_text("old-handler.desktop\n", encoding="utf-8")
     _write_executable(
@@ -120,7 +122,15 @@ def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
 def _run_installer(
     package_root: Path,
     env: dict[str, str],
+    *,
+    fail_at: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    run_env = dict(env)
+    if fail_at:
+        run_env.update({
+            "ELVERN_INSTALL_TEST_MODE": "1",
+            "ELVERN_INSTALL_TEST_FAIL_AT": fail_at,
+        })
     return subprocess.run(
         [
             "bash",
@@ -131,7 +141,7 @@ def _run_installer(
         check=False,
         capture_output=True,
         text=True,
-        env=env,
+        env=run_env,
     )
 
 
@@ -155,6 +165,10 @@ def test_linux_installer_is_user_scoped_and_idempotent(tmp_path: Path) -> None:
     assert (install_dir / "Uninstall-ElvernVlcOpener.sh").is_file()
     assert desktop_file.is_file()
     assert state.read_text(encoding="utf-8").strip() == "elvern-vlc-opener.desktop"
+    assert stat.S_IMODE(install_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((install_dir / "Elvern.VlcOpener").stat().st_mode) == 0o755
+    assert stat.S_IMODE((install_dir / "Uninstall-ElvernVlcOpener.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE(desktop_file.stat().st_mode) == 0o644
 
 
 @pytest.mark.parametrize(
@@ -247,3 +261,70 @@ def test_linux_installer_rolls_back_when_no_protocol_handler_existed(
         / "elvern-vlc-opener.desktop"
     ).exists()
     assert state.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "staging_created",
+        "first_backup_move",
+        "new_placement",
+        "registration",
+        "registration_validation",
+        "final_binary_validation",
+    ],
+)
+def test_linux_installer_transaction_failures_preserve_existing_install_and_registration(
+    tmp_path: Path,
+    failure_point: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    home = Path(env["HOME"])
+    install_dir = home / ".local" / "lib" / "elvern-vlc-opener"
+    desktop_file = home / ".local" / "share" / "applications" / "elvern-vlc-opener.desktop"
+    data_mime = home / ".local" / "share" / "applications" / "mimeapps.list"
+    install_dir.mkdir(parents=True)
+    desktop_file.parent.mkdir(parents=True, exist_ok=True)
+    (install_dir / "old-marker.txt").write_bytes(b"old-install-bytes\n")
+    desktop_file.write_bytes(b"old-desktop-bytes\n")
+    desktop_file.chmod(0o600)
+    state.write_bytes(b"old-handler.desktop\nunrelated=config\n")
+    state.chmod(0o640)
+    data_mime.write_bytes(b"unrelated=data\n")
+    data_mime.chmod(0o600)
+    expected = {
+        "install": (install_dir / "old-marker.txt").read_bytes(),
+        "desktop": desktop_file.read_bytes(),
+        "config": state.read_bytes(),
+        "data": data_mime.read_bytes(),
+    }
+
+    result = _run_installer(package_root, env, fail_at=failure_point)
+
+    assert result.returncode != 0
+    assert (install_dir / "old-marker.txt").read_bytes() == expected["install"]
+    assert desktop_file.read_bytes() == expected["desktop"]
+    assert state.read_bytes() == expected["config"]
+    assert data_mime.read_bytes() == expected["data"]
+    assert stat.S_IMODE(desktop_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(state.stat().st_mode) == 0o640
+    assert stat.S_IMODE(data_mime.stat().st_mode) == 0o600
+    assert not list(install_dir.parent.glob(".elvern-vlc-opener-stage.*"))
+
+
+def test_linux_installer_reports_unverified_rollback_and_preserves_backup(
+    tmp_path: Path,
+) -> None:
+    package_root, _state, env = _create_linux_package(tmp_path)
+    install_dir = Path(env["HOME"]) / ".local" / "lib" / "elvern-vlc-opener"
+    install_dir.mkdir(parents=True)
+    (install_dir / "old-marker.txt").write_text("old\n", encoding="utf-8")
+
+    env["ELVERN_INSTALL_TEST_FAIL_ROLLBACK"] = "1"
+    result = _run_installer(package_root, env, fail_at="final_binary_validation")
+
+    assert result.returncode != 0
+    assert "rollback could not be verified" in result.stderr
+    backups = list(install_dir.parent.glob(".elvern-vlc-opener-backup.*"))
+    assert len(backups) == 1
+    assert (backups[0] / "old-marker.txt").read_text(encoding="utf-8") == "old\n"

@@ -23,6 +23,10 @@ function navigationTypeCategory() {
 
 function dispatchResume() {
   pendingTimer = 0;
+  if (document.visibilityState === "hidden" || !awayPending) {
+    return;
+  }
+  awayPending = false;
   resumeGeneration += 1;
   window.dispatchEvent(new CustomEvent(PAGE_RESUME_EVENT, {
     detail: {
@@ -36,6 +40,10 @@ function dispatchResume() {
 
 
 function markAway() {
+  if (pendingTimer) {
+    window.clearTimeout(pendingTimer);
+    pendingTimer = 0;
+  }
   awayPending = true;
 }
 
@@ -47,7 +55,7 @@ function scheduleResume(event) {
   // next visible/focus signal to count as a genuine return, and still lets
   // consumers pause background work while hidden.
   if (type === "visibilitychange" && document.visibilityState === "hidden") {
-    awayPending = true;
+    markAway();
     return;
   }
   if (document.visibilityState === "hidden") {
@@ -59,6 +67,9 @@ function scheduleResume(event) {
     // A persisted BFCache restore is always a real return; a non-persisted
     // pageshow is the initial/fresh document load and never a resume.
     isResume = Boolean(event?.persisted);
+    if (isResume) {
+      awayPending = true;
+    }
   } else if (type === "focus" || type === "visibilitychange") {
     // Focus/visibility only count once the page has actually been away, so the
     // document's first normal focus at load produces no resume generation.
@@ -69,7 +80,6 @@ function scheduleResume(event) {
     return;
   }
 
-  awayPending = false;
   pendingPersisted = pendingPersisted || Boolean(event?.persisted);
   if (pendingTimer) {
     window.clearTimeout(pendingTimer);

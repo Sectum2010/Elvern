@@ -17,4 +17,5 @@ Notes:
 - The standard package is self-contained. No separate .NET installation is required.
 - The installer does not require Python.
 - The package tree and selected payload are verified with SHA-256 before installation.
+- Integrity-verified and bound to this Elvern server origin by hash.
 - If the package was built for another Elvern server origin, Elvern will not offer it.

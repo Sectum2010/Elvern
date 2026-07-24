@@ -1,4 +1,5 @@
 using Elvern.VlcOpener.Services;
+using System.Text.Json;
 using Xunit;
 
 namespace Elvern.VlcOpener.Tests;
@@ -81,4 +82,21 @@ public sealed class LaunchUrlParserOriginTests
     {
         Assert.Equal(expected, HelperOriginPolicy.NormalizeOrigin(value));
     }
+
+    [Fact]
+    public void OriginPolicy_MatchesSharedNormalizationMatrix()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "origin-normalization-cases.json");
+        var cases = JsonSerializer.Deserialize<List<OriginCase>>(File.ReadAllText(path))
+            ?? throw new InvalidOperationException("Origin normalization matrix is unavailable.");
+
+        foreach (var item in cases)
+        {
+            Assert.Equal(item.Normalized, HelperOriginPolicy.NormalizeOrigin(item.Input));
+        }
+    }
+
+    private sealed record OriginCase(
+        [property: System.Text.Json.Serialization.JsonPropertyName("input")] string Input,
+        [property: System.Text.Json.Serialization.JsonPropertyName("normalized")] string? Normalized);
 }

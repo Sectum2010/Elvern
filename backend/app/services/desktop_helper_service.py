@@ -24,6 +24,7 @@ from .desktop_helper_manifest_service import (
     get_desktop_helper_manifest_record_by_id,
     list_desktop_helper_manifest_records,
     open_verified_artifact,
+    validate_artifact_relative_path,
 )
 
 
@@ -455,13 +456,17 @@ def get_helper_release_download_path(settings: Settings, release_id: int) -> dic
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Desktop helper release was not found",
         )
-    file_path = (settings.helper_releases_dir / str(payload["relative_path"])).resolve()
-    if not file_path.exists() or not file_path.is_file():
+    try:
+        relative_path = validate_artifact_relative_path(payload["relative_path"])
+    except DesktopHelperManifestError as exc:
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail="Desktop helper release file is missing from the server",
-        )
+        ) from exc
+    file_path = settings.helper_releases_dir / relative_path
     payload["file_path"] = file_path
+    payload["artifact_root"] = settings.helper_releases_dir
+    payload["artifact_relative_path"] = relative_path
     return payload
 
 
@@ -485,11 +490,20 @@ def open_helper_release_download(settings: Settings, release_id: int) -> dict[st
         record.get("package_target") or record.get("runtime_id") or "unknown"
     )
     try:
+        artifact_root = Path(record.get("artifact_root") or file_path.parent)
+        artifact_relative_path = str(
+            record.get("artifact_relative_path")
+            or record.get("relative_path")
+            or file_path.name
+        )
         handle = open_verified_artifact(
             file_path,
+            root_dir=artifact_root,
+            relative_path=artifact_relative_path,
             size_bytes=size_bytes,
             sha256=str(record["sha256"]),
             package_target=package_target,
+            force_hash=True,
         )
     except DesktopHelperManifestError as exc:
         raise HTTPException(
@@ -1352,6 +1366,18 @@ def _desktop_backend_origin(settings: Settings) -> str:
 
 def canonicalize_desktop_helper_origin(value: str) -> str:
     candidate = (value or "").strip()
+    if (
+        not candidate
+        or candidate != value
+        or "%" in candidate
+        or any(
+            ord(character) > 127
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in candidate
+        )
+    ):
+        raise ValueError("Desktop helper origin is invalid")
     try:
         parsed = urlsplit(candidate)
         port = parsed.port
@@ -1369,6 +1395,8 @@ def canonicalize_desktop_helper_origin(value: str) -> str:
         raise ValueError("Desktop helper origin must be an absolute HTTP(S) origin")
     scheme = parsed.scheme.lower()
     host = parsed.hostname.lower()
+    if any(label.startswith("xn--") for label in host.split(".")):
+        raise ValueError("Desktop helper origin IDN hostnames are unsupported")
     if ":" in host:
         host = f"[{host}]"
     default_port = 80 if scheme == "http" else 443

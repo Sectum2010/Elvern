@@ -1,0 +1,18 @@
+[
+  {"input": "HTTPS://ELVERN.EXAMPLE.COM:443/", "normalized": "https://elvern.example.com"},
+  {"input": "http://ELVERN.EXAMPLE.COM:80", "normalized": "http://elvern.example.com"},
+  {"input": "https://elvern.example.com:8443", "normalized": "https://elvern.example.com:8443"},
+  {"input": "http://127.0.0.1:8080", "normalized": "http://127.0.0.1:8080"},
+  {"input": "https://[2001:db8::1]:8443", "normalized": "https://[2001:db8::1]:8443"},
+  {"input": "https://user@elvern.example.com", "normalized": null},
+  {"input": "https://elvern.example.com/path", "normalized": null},
+  {"input": "https://elvern.example.com?query=1", "normalized": null},
+  {"input": "https://elvern.example.com/#fragment", "normalized": null},
+  {"input": "https://elvern.example.com:bad", "normalized": null},
+  {"input": "https://", "normalized": null},
+  {"input": " https://elvern.example.com", "normalized": null},
+  {"input": "https://elvern.example.com ", "normalized": null},
+  {"input": "https://elvern%2Eexample.com", "normalized": null},
+  {"input": "https://bücher.example", "normalized": null},
+  {"input": "https://xn--bcher-kva.example", "normalized": null}
+]

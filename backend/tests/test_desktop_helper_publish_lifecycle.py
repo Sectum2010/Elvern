@@ -7,6 +7,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_ROOT = ROOT / "clients" / "desktop-vlc-opener"
@@ -23,6 +25,10 @@ def _create_publish_workspace(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     shutil.copy2(
         HELPER_ROOT / "scripts" / "publish-bundles.sh",
         workspace / "scripts" / "publish-bundles.sh",
+    )
+    shutil.copy2(
+        HELPER_ROOT / "scripts" / "normalize-origin.py",
+        workspace / "scripts" / "normalize-origin.py",
     )
     shutil.copy2(
         HELPER_ROOT / "Elvern.VlcOpener.csproj",
@@ -165,6 +171,8 @@ def test_full_verified_build_activates_three_package_manifest_atomically(
         artifact = active_dir / package["filename"]
         assert artifact.is_file()
         assert artifact.stat().st_size == package["size_bytes"]
+        assert stat.S_IMODE(artifact.stat().st_mode) == 0o444
+    assert stat.S_IMODE((active_dir / "release-manifest.json").stat().st_mode) == 0o444
     assert not list(active_dir.glob(".release-manifest.json.new.*"))
 
 
@@ -190,3 +198,75 @@ def test_publish_failure_and_invalid_origin_leave_active_manifest_unchanged(
     assert invalid_origin.returncode != 0
     assert "exact absolute HTTP(S) origin" in invalid_origin.stderr
     assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
+
+
+@pytest.mark.parametrize("failure_point", ["artifact_copy", "manifest_rename"])
+def test_injected_activation_failure_preserves_old_manifest_and_cleans_temp_files(
+    tmp_path: Path,
+    failure_point: str,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    active_dir = workspace / "artifacts" / "packages"
+    active_dir.mkdir(parents=True)
+    active_manifest = active_dir / "release-manifest.json"
+    active_manifest.write_text('{"active":"old"}\n', encoding="utf-8")
+
+    result = _run_publisher(
+        workspace,
+        {
+            **env,
+            "ELVERN_PUBLISH_TEST_MODE": "1",
+            "ELVERN_PUBLISH_TEST_FAIL_AT": failure_point,
+        },
+        "--activate",
+    )
+
+    assert result.returncode != 0
+    assert f"Injected activation failure at {failure_point}" in result.stderr
+    assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
+    assert not list(active_dir.glob(".*.new.*"))
+    assert not (workspace / "artifacts" / ".activation.lock").exists()
+
+
+def test_activation_lock_is_fail_closed_and_reports_owner_without_changing_active(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    active_dir = workspace / "artifacts" / "packages"
+    active_dir.mkdir(parents=True)
+    active_manifest = active_dir / "release-manifest.json"
+    active_manifest.write_text('{"active":"old"}\n', encoding="utf-8")
+    lock_dir = workspace / "artifacts" / ".activation.lock"
+    lock_dir.mkdir()
+    (lock_dir / "owner").write_text(
+        "pid=123\nstarted_at=2026-07-23T00:00:00Z\nbuild_id=existing\n",
+        encoding="utf-8",
+    )
+
+    result = _run_publisher(workspace, env, "--activate")
+
+    assert result.returncode != 0
+    assert "activation is already running" in result.stderr
+    assert "pid=123" in result.stderr
+    assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
+    assert lock_dir.is_dir()
+
+
+def test_partial_activation_requires_explicit_dangerous_flag(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+
+    blocked = _run_publisher(workspace, env, "--linux", "--activate")
+    assert blocked.returncode != 0
+    assert "Activation requires Windows, macOS, and Linux" in blocked.stderr
+
+    allowed = _run_publisher(
+        workspace,
+        env,
+        "--linux",
+        "--activate",
+        "--allow-partial-activate",
+    )
+    assert allowed.returncode == 0, allowed.stderr
+    assert "WARNING: activating an incomplete" in allowed.stderr

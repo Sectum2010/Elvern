@@ -102,4 +102,25 @@ describe("page resume coordinator", () => {
     expect(events).toHaveLength(1);
     window.removeEventListener(PAGE_RESUME_EVENT, handleResume);
   });
+
+  test("a pending focus resume is cancelled if the page becomes hidden before dispatch", async () => {
+    const events = [];
+    const handleResume = (event) => events.push(event.detail);
+    window.addEventListener(PAGE_RESUME_EVENT, handleResume);
+    installPageResumeCoordinator();
+
+    window.dispatchEvent(new Event("blur"));
+    window.dispatchEvent(new Event("focus"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(PAGE_RESUME_COALESCE_MS);
+
+    expect(events).toEqual([]);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(PAGE_RESUME_COALESCE_MS);
+    expect(events).toHaveLength(1);
+    window.removeEventListener(PAGE_RESUME_EVENT, handleResume);
+  });
 });

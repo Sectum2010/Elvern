@@ -56,8 +56,9 @@ export function resolveUserSettings(payload) {
 
 
 export function useUserSettingsQuery(user) {
+  const queryKey = buildUserSettingsQueryKey({ userId: user?.id, role: user?.role });
   const query = useQuery({
-    queryKey: buildUserSettingsQueryKey({ userId: user?.id, role: user?.role }),
+    queryKey,
     queryFn: ({ signal }) => apiRequest("/api/user-settings", {
       signal,
       abortOnPageHide: true,
@@ -70,7 +71,7 @@ export function useUserSettingsQuery(user) {
   // A transient transport failure keeps cached settings (or defaults) usable and
   // recovers once per confirmed connectivity generation without duplicating the
   // initial request or reacting to unrelated Library URL changes.
-  useBoundedQueryRecovery(query);
+  useBoundedQueryRecovery(query, { queryKey });
   return query;
 }
 

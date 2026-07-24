@@ -15,6 +15,11 @@ import {
   STARTUP_MANUAL_SERVICE_RECOVERY_STORAGE_KEY,
   STARTUP_UNREACHABLE_DELAY_MS,
 } from "./startupConnection.js";
+import {
+  getConnectivityRecoverySnapshot,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+} from "./connectivityRecoveryStore.js";
 
 
 function healthResponse(path, status = path === "/_elvern/frontend-health" ? 204 : 200) {
@@ -28,6 +33,7 @@ function healthResponse(path, status = path === "/_elvern/frontend-health" ? 204
 describe("startup connection controller", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    resetConnectivityRecoveryStoreForTests();
   });
 
   afterEach(() => {
@@ -89,6 +95,44 @@ describe("startup connection controller", () => {
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(STARTUP_HEALTH_PROBE_INTERVAL_MS);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+    controller.stop();
+  });
+
+  test("a failure opened during an older in-flight probe gets an immediate bounded follow-up", async () => {
+    const pending = [];
+    const fetchImpl = vi.fn((path) => new Promise((resolve) => {
+      pending.push({ path, resolve });
+    }));
+    const controller = createStartupConnectionController({ fetchImpl, publicConnectivityProbes: [] });
+
+    controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    const failure = registerConnectivityFailure();
+    void controller.reportFailure({ failureId: failure.failureId });
+
+    pending.shift().resolve(healthResponse("/_elvern/frontend-health"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    pending.shift().resolve(healthResponse("/health"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The first probe began before the failure and cannot close it. Its
+    // completion immediately starts one follow-up instead of waiting 10s.
+    expect(getConnectivityRecoverySnapshot().active).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    pending.shift().resolve(healthResponse("/_elvern/frontend-health"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    pending.shift().resolve(healthResponse("/health"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getConnectivityRecoverySnapshot()).toMatchObject({
+      active: false,
+      latestRecoveredFailureId: failure.failureId,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
     controller.stop();
   });
 
@@ -225,7 +269,9 @@ describe("startup connection controller", () => {
 
       expect(recoveryEvents).toEqual([{
         generation: outageGeneration,
+        incidentId: expect.any(Number),
         previousClassification: "service_unreachable",
+        recoveredThroughFailureId: expect.any(Number),
       }]);
       expect(recoveryEvents[0]).not.toHaveProperty("url");
       expect(recoveryEvents[0]).not.toHaveProperty("user");
@@ -258,7 +304,12 @@ describe("startup connection controller", () => {
       expect(recoveryEvents).toHaveLength(1);
       expect(recoveryEvents[0].previousClassification).toBe("service_unreachable");
       expect(recoveryEvents[0].generation).toBeGreaterThan(0);
-      expect(Object.keys(recoveryEvents[0]).sort()).toEqual(["generation", "previousClassification"]);
+      expect(Object.keys(recoveryEvents[0]).sort()).toEqual([
+        "generation",
+        "incidentId",
+        "previousClassification",
+        "recoveredThroughFailureId",
+      ]);
     } finally {
       controller.stop();
       window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handler);

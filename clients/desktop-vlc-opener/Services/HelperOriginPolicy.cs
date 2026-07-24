@@ -23,16 +23,32 @@ public static class HelperOriginPolicy
     public static string? NormalizeOrigin(string? value)
     {
         var candidate = (value ?? string.Empty).Trim();
-        if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
+        if (candidate.Length == 0
+            || !string.Equals(candidate, value, StringComparison.Ordinal)
+            || candidate.Contains('%')
+            || candidate.Any(character => character > 127 || character == 127 || char.IsControl(character))
+            || !Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
             || !string.IsNullOrEmpty(uri.UserInfo)
+            || string.IsNullOrEmpty(uri.Host)
             || (uri.AbsolutePath != "/" && !string.IsNullOrEmpty(uri.AbsolutePath))
             || !string.IsNullOrEmpty(uri.Query)
             || !string.IsNullOrEmpty(uri.Fragment))
         {
             return null;
         }
-        return uri.GetLeftPart(UriPartial.Authority);
+        var scheme = uri.Scheme.ToLowerInvariant();
+        var host = uri.Host.Trim('[', ']').ToLowerInvariant();
+        if (host.Split('.').Any(label => label.StartsWith("xn--", StringComparison.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+        if (uri.HostNameType == UriHostNameType.IPv6)
+        {
+            host = $"[{host}]";
+        }
+        var authority = uri.IsDefaultPort ? host : $"{host}:{uri.Port}";
+        return $"{scheme}://{authority}";
     }
 
     public static bool OriginsMatch(string attemptedOrigin, string allowedOrigin)

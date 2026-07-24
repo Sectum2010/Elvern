@@ -30,7 +30,10 @@ default. A platform-only build never changes active releases. Explicit `--activa
 requires Windows, macOS, and Linux, verifies the full staged set, copies immutable
 content-hash-named ZIPs, and atomically replaces the active manifest last. A simple
 activation lock prevents concurrent publishers. Existing immutable files are
-reused only when their content hash matches.
+reused only when their content hash matches. Package bytes and directory metadata
+are flushed before the read-only manifest is atomically renamed. Failure injection
+at artifact copy or manifest rename leaves the old manifest authoritative and
+cleans temporary active files; same-name/different-content collisions fail closed.
 
 The build records the SHA-256 of the canonical effective backend origin, not the raw
 origin. The backend recomputes that identity from its authoritative handoff origin
@@ -38,10 +41,20 @@ before status, release listing, or download. A mismatch is fail-closed and does 
 fall back to the same incompatible v2 package or the DB catalog.
 
 Manifest metadata and artifact verification are separately cached in-process.
-Only the requested platform artifact is fingerprinted and hashed. The fingerprint
-uses canonical path, device/inode, size, nanosecond modification time, and
-nanosecond change time. Concurrent first readers share one validation; changed or
-corrupt files are revalidated and rejected.
+Only the requested platform artifact is fingerprinted and hashed. Artifact paths
+are opened component-by-component from the trusted package directory using
+`dir_fd`, `O_DIRECTORY`, and `O_NOFOLLOW`; an intermediate or final symlink is
+rejected even when it points back inside the package directory. Per-artifact locks
+allow different packages to hash concurrently, while concurrent readers of one
+package share one validation. The verification cache is a bounded LRU.
+
+Listings may reuse a matching fingerprint. Downloads always rehash the exact open
+file description, compare `fstat` before and after hashing, and stream that same
+verified handle. A bounded retry handles a concurrently changing inode; an
+unstable package fails closed. GET, HEAD, `Content-Length`, one RFC byte range, and
+safe `Content-Disposition` filename handling are preserved. Audit records
+distinguish started, completed, and interrupted downloads without recording query
+tokens.
 
 The backend prefers package manifest v2. A platform gets at most one v2 primary
 package. Legacy manifest or database releases remain a rollback fallback only when
@@ -107,10 +120,16 @@ installation, desktop entry, and per-user protocol state are restored. Reinstall
 and upgrade are idempotent and do not require `sudo`, Python, or a separate .NET
 Runtime.
 
-Windows verifies the source tree, copies the Helper and required uninstaller into
-staging, and applies `Unblock-File` only to those verified staged files. Registry
-state is exported and checked before replacement; protocol and uninstall keys are
-restored on failure.
+Windows verifies the source tree, parses the exact TSV installer contract without
+PowerShell 7-only APIs, copies the Helper and required uninstaller into staging,
+and applies `Unblock-File` only to those verified staged files. It remains Windows
+PowerShell 5.1 compatible. Registry state is exported and checked before
+replacement; protocol and uninstall keys are restored and verified on failure.
+
+Linux snapshots both user-level `mimeapps.list` locations, their existence and
+modes, the prior desktop entry, and the prior default handler before modification.
+Rollback restores those files byte-for-byte and verifies the effective handler; it
+does not use `xdg-mime uninstall`.
 
 ## macOS trust boundary
 
@@ -165,6 +184,13 @@ require an explicit user action. Page-owned GET requests abort on `pagehide`;
 Firefox lifecycle cancellation is normalized to `AbortError` rather than exposing a
 raw browser `NetworkError`.
 
+Connectivity failures are retained in a process-memory incident store with
+monotonic failure and recovery identities. Health probes can only close failures
+they observed; a failure that opens during an older in-flight probe schedules one
+immediate follow-up. TanStack query recovery reads the store both on subscription
+and immediately, preventing a recovery-before-error race, and claims one refetch
+per exact query hash and recovery generation.
+
 Legacy per-RID releases appear under low-emphasis `More options...` only when a v2
 primary package is unavailable. Unknown browsers are not treated as Linux, and
 iPad desktop-class user agents remain iPad.
@@ -184,9 +210,13 @@ that database path.
 
 ## Validation matrix
 
-Automated validation covers manifest contracts, traversal rejection, status schema,
-same-host/remote Linux behavior, frontend package presentation, safe Terminal
-command generation, platform selectors, installer syntax, and VLC candidate order.
+Automated validation covers manifest contracts, lexical symlink rejection,
+same-handle download verification, bounded/per-artifact hashing, Range and filename
+headers, status schema, same-host/remote Linux behavior, frontend package
+presentation, safe Terminal command generation, platform selectors, strict
+installer parsing, transaction failure injection, exact Linux MIME rollback,
+activation interruption, shared origin-normalization vectors, and VLC candidate
+order.
 
 Isolated Linux tests use a temporary HOME and fake desktop integration commands.
 They do not establish remote Linux desktop compatibility. The following remain
