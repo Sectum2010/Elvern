@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   createCrossBrowserPrefix,
+  createNetworkGuardControlToken,
   releaseReservedPort,
   reserveAvailablePort,
   startLoopbackOnlyProxy,
@@ -35,7 +36,12 @@ if (useExistingBuild) {
   verifyPhase7BuildContract(frontendDirectory);
 }
 const port = await reserveAvailablePort();
-const networkProxy = await startLoopbackOnlyProxy();
+const productionOrigin = `http://127.0.0.1:${port}`;
+const networkProxyControlToken = createNetworkGuardControlToken();
+const networkProxy = await startLoopbackOnlyProxy({
+  initialAllowedOrigins: [productionOrigin],
+  controlToken: networkProxyControlToken,
+});
 let networkProxyClosePromise;
 const closeNetworkProxy = () => {
   if (!networkProxyClosePromise) {
@@ -85,7 +91,8 @@ writeFileSync(
     'self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));',
     'self.addEventListener("message", async (event) => {',
     "  try {",
-    '    await fetch("http://elvern-guard-test.invalid/service-worker-probe?token=hidden");',
+    '    const target = event.data?.url || "http://elvern-guard-test.invalid/service-worker-probe?token=hidden";',
+    "    await fetch(target);",
     "    event.source.postMessage({ blocked: false });",
     "  } catch {",
     "    event.source.postMessage({ blocked: true });",
@@ -95,6 +102,7 @@ writeFileSync(
   ].join("\n"),
   { encoding: "utf8", mode: 0o600 },
 );
+verifyPhase7BuildContract(frontendDirectory);
 let serviceWorkerFixtureRemoved = false;
 const removeServiceWorkerFixture = () => {
   if (serviceWorkerFixtureRemoved) {
@@ -102,6 +110,7 @@ const removeServiceWorkerFixture = () => {
   }
   serviceWorkerFixtureRemoved = true;
   rmSync(serviceWorkerFixtureDirectory, { recursive: true, force: true });
+  verifyPhase7BuildContract(frontendDirectory);
 };
 const cleanupLocalResources = () => {
   removeServiceWorkerFixture();
@@ -135,6 +144,7 @@ const child = spawn(
       ELVERN_PHASE7_BROWSER_OUTPUT_DIR: outputDirectory,
       ELVERN_PHASE7_NETWORK_PROXY: `http://127.0.0.1:${networkProxy.port}`,
       ELVERN_PHASE7_NETWORK_PROXY_CONTROL: `http://127.0.0.1:${networkProxy.port}`,
+      ELVERN_PHASE7_NETWORK_PROXY_CONTROL_TOKEN: networkProxyControlToken,
     },
     stdio: "inherit",
   },

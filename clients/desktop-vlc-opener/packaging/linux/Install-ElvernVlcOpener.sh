@@ -2,6 +2,16 @@
 set -eu
 umask 022
 
+for elvern_required_command in \
+  awk cat chmod cmp cp date dirname find grep mkdir mktemp mv rm rmdir sed \
+  sha256sum sort stat tr uname wc xdg-mime
+do
+  command -v "${elvern_required_command}" >/dev/null 2>&1 || {
+    echo "Elvern VLC Opener was not installed: ${elvern_required_command} is required to install Elvern VLC Opener." >&2
+    exit 1
+  }
+done
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PRIVATE_DIR="${SCRIPT_DIR}/.elvern"
 MANIFEST_TSV="${PRIVATE_DIR}/installer-manifest.tsv"
@@ -18,7 +28,9 @@ MIME_CONFIG_FILE="${XDG_CONFIG_ROOT}/mimeapps.list"
 MIME_DATA_FILE="${DESKTOP_DIR}/mimeapps.list"
 RUNTIME_OVERRIDE=""
 STAGE_DIR=""
+STAGED_INSTALL=""
 BACKUP_DIR=""
+BACKUP_OWNER=""
 DESKTOP_BACKUP=""
 PREVIOUS_PROTOCOL_DEFAULT=""
 OLD_PREVIOUS_PROTOCOL_DEFAULT=""
@@ -73,6 +85,31 @@ elvern_safe_absolute_path_value() {
   return 0
 }
 
+safe_existing_directory_chain() {
+  chain_path=$1
+  elvern_safe_absolute_path_value "${chain_path}" || return 1
+  chain_cursor=""
+  old_chain_ifs=${IFS}
+  IFS=/
+  for chain_component in ${chain_path#/}; do
+    IFS=${old_chain_ifs}
+    [ -n "${chain_component}" ] || {
+      IFS=/
+      continue
+    }
+    chain_cursor="${chain_cursor}/${chain_component}"
+    if [ -L "${chain_cursor}" ]; then
+      return 1
+    fi
+    if [ -e "${chain_cursor}" ] && [ ! -d "${chain_cursor}" ]; then
+      return 1
+    fi
+    IFS=/
+  done
+  IFS=${old_chain_ifs}
+  return 0
+}
+
 validate_path_environment() {
   for safe_path in \
     "${HOME:-}" "${INSTALL_PARENT}" "${XDG_CONFIG_ROOT}" "${XDG_DATA_ROOT}" \
@@ -81,16 +118,19 @@ validate_path_environment() {
     elvern_safe_absolute_path_value "${safe_path}" \
       || fail "a user installation path is unsafe."
   done
-  old_path_ifs=${IFS}
-  IFS=:
-  for safe_path in ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
-    IFS=${old_path_ifs}
-    [ -n "${safe_path}" ] || safe_path="${HOME}/.local/share"
-    elvern_safe_absolute_path_value "${safe_path}" \
-      || fail "an XDG data search path is unsafe."
-    IFS=:
+  safe_existing_directory_chain "${HOME}" \
+    && safe_existing_directory_chain "${INSTALL_PARENT}" \
+    && safe_existing_directory_chain "${XDG_CONFIG_ROOT}" \
+    && safe_existing_directory_chain "${XDG_DATA_ROOT}" \
+    && safe_existing_directory_chain "${DESKTOP_DIR}" \
+    && safe_existing_directory_chain "${TMPDIR:-/tmp}" \
+    || fail "a user installation path contains an unsafe link."
+  for safe_leaf in \
+    "${INSTALL_DIR}" "${DESKTOP_FILE}" "${MIME_CONFIG_FILE}" "${MIME_DATA_FILE}"
+  do
+    [ ! -L "${safe_leaf}" ] \
+      || fail "a user installation path contains an unsafe link."
   done
-  IFS=${old_path_ifs}
 }
 
 fail() {
@@ -104,6 +144,89 @@ inject_failure() {
     && [ "${ELVERN_INSTALL_TEST_FAIL_AT:-}" = "${inject_point}" ]; then
     fail "injected failure at ${inject_point}."
   fi
+}
+
+cleanup_failure_injected() {
+  cleanup_point=$1
+  [ "${ELVERN_INSTALL_TEST_MODE:-0}" = "1" ] \
+    && [ "${ELVERN_INSTALL_TEST_FAIL_CLEANUP_AT:-}" = "${cleanup_point}" ]
+}
+
+owned_directory_marker_matches() {
+  owned_directory=$1
+  owned_marker=$2
+  [ -n "${owned_directory}" ] \
+    && [ -d "${owned_directory}" ] \
+    && [ ! -L "${owned_directory}" ] \
+    && [ -f "${owned_directory}/${owned_marker}" ] \
+    && [ ! -L "${owned_directory}/${owned_marker}" ] \
+    && [ "$(cat "${owned_directory}/${owned_marker}")" = "${INSTALL_NONCE}" ]
+}
+
+stage_is_owned() {
+  [ -d "${INSTALL_PARENT}" ] && [ ! -L "${INSTALL_PARENT}" ] || return 1
+  case "${STAGE_DIR}" in
+    "${INSTALL_PARENT}"/.elvern-vlc-opener-stage.*) ;;
+    *) return 1 ;;
+  esac
+  owned_directory_marker_matches "${STAGE_DIR}" "transaction-owner"
+}
+
+transaction_is_owned() {
+  [ -d "${INSTALL_PARENT}" ] && [ ! -L "${INSTALL_PARENT}" ] || return 1
+  case "${TRANSACTION_DIR}" in
+    "${INSTALL_PARENT}"/.elvern-vlc-opener-transaction.*) ;;
+    *) return 1 ;;
+  esac
+  owned_directory_marker_matches "${TRANSACTION_DIR}" "transaction-owner"
+}
+
+backup_is_owned() {
+  [ -d "${INSTALL_PARENT}" ] && [ ! -L "${INSTALL_PARENT}" ] || return 1
+  case "${BACKUP_DIR}" in
+    "${INSTALL_PARENT}"/.elvern-vlc-opener-backup.*) ;;
+    *) return 1 ;;
+  esac
+  [ -d "${BACKUP_DIR}" ] \
+    && [ ! -L "${BACKUP_DIR}" ] \
+    && [ "${BACKUP_OWNER}" = "${INSTALL_PARENT}/.elvern-vlc-opener-backup-owner.${BACKUP_DIR##*.}" ] \
+    && [ -f "${BACKUP_OWNER}" ] \
+    && [ ! -L "${BACKUP_OWNER}" ] \
+    && [ "$(cat "${BACKUP_OWNER}")" = "${INSTALL_NONCE}" ]
+}
+
+backup_owner_marker_is_owned() {
+  [ -d "${INSTALL_PARENT}" ] \
+    && [ ! -L "${INSTALL_PARENT}" ] \
+    && [ -n "${BACKUP_DIR}" ] \
+    && [ "${BACKUP_OWNER}" = "${INSTALL_PARENT}/.elvern-vlc-opener-backup-owner.${BACKUP_DIR##*.}" ] \
+    && [ -f "${BACKUP_OWNER}" ] \
+    && [ ! -L "${BACKUP_OWNER}" ] \
+    && [ "$(cat "${BACKUP_OWNER}")" = "${INSTALL_NONCE}" ]
+}
+
+installed_is_owned() {
+  install_state="${INSTALL_DIR}/install-state.tsv"
+  [ -d "${INSTALL_PARENT}" ] \
+    && [ ! -L "${INSTALL_PARENT}" ] \
+    && [ -d "${INSTALL_DIR}" ] \
+    && [ ! -L "${INSTALL_DIR}" ] \
+    && [ -f "${install_state}" ] \
+    && [ ! -L "${install_state}" ] \
+    && grep -F -x "transaction_nonce${TAB}${INSTALL_NONCE}" "${install_state}" \
+      >/dev/null 2>&1
+}
+
+lock_is_owned() {
+  [ -d "${INSTALL_PARENT}" ] \
+    && [ ! -L "${INSTALL_PARENT}" ] \
+    && [ "${LOCK_DIR}" = "${INSTALL_PARENT}/.elvern-vlc-opener-install.lock" ] \
+    && [ -d "${LOCK_DIR}" ] \
+    && [ ! -L "${LOCK_DIR}" ] \
+    && [ -f "${LOCK_DIR}/owner" ] \
+    && [ ! -L "${LOCK_DIR}/owner" ] \
+    && grep -F -x "transaction_nonce=${INSTALL_NONCE}" "${LOCK_DIR}/owner" \
+      >/dev/null 2>&1
 }
 
 usage() {
@@ -173,7 +296,6 @@ require_command() {
     || fail "$1 is required to install Elvern VLC Opener."
 }
 
-require_command tr
 validate_path_environment
 
 safe_desktop_basename() {
@@ -273,13 +395,17 @@ cleanup() {
 
   if [ "${INSTALL_COMMITTED}" -eq 0 ]; then
     if [ "${NEW_INSTALL_PLACED}" -eq 1 ] && [ -e "${INSTALL_DIR}" ]; then
-      rm -rf "${INSTALL_DIR}" || rollback_failed=1
+      if installed_is_owned; then
+        rm -rf "${INSTALL_DIR}" || rollback_failed=1
+      else
+        rollback_failed=1
+      fi
     fi
     if [ "${OLD_INSTALL_BACKED_UP}" -eq 1 ]; then
       if [ "${ELVERN_INSTALL_TEST_MODE:-0}" = "1" ] \
         && [ "${ELVERN_INSTALL_TEST_FAIL_ROLLBACK:-0}" = "1" ]; then
         rollback_failed=1
-      elif [ -e "${INSTALL_DIR}" ] || [ ! -d "${BACKUP_DIR}" ]; then
+      elif [ -e "${INSTALL_DIR}" ] || ! backup_is_owned; then
         rollback_failed=1
       else
         cp -a "${BACKUP_DIR}" "${INSTALL_DIR}" || rollback_failed=1
@@ -354,7 +480,17 @@ cleanup() {
   fi
 
   [ -z "${DESKTOP_TEMP}" ] || rm -f "${DESKTOP_TEMP}"
-  [ -z "${STAGE_DIR}" ] || [ ! -d "${STAGE_DIR}" ] || rm -rf "${STAGE_DIR}"
+  if [ -n "${STAGE_DIR}" ] && [ -d "${STAGE_DIR}" ]; then
+    if ! stage_is_owned \
+      || cleanup_failure_injected "stage" \
+      || ! rm -rf "${STAGE_DIR}"; then
+      if [ "${INSTALL_COMMITTED}" -eq 1 ]; then
+        echo "Warning: committed staged installation cleanup failed: ${STAGE_DIR}" >&2
+      else
+        rollback_failed=1
+      fi
+    fi
+  fi
   rm -f \
     "${VERIFY_EXPECTED:-}" \
     "${VERIFY_ACTUAL:-}" \
@@ -363,19 +499,58 @@ cleanup() {
     "${MANIFEST_META_SEEN:-}" \
     "${MANIFEST_RID_SEEN:-}"
 
-  if { [ "${INSTALL_COMMITTED}" -eq 1 ] || [ "${rollback_failed}" -eq 0 ]; } \
-    && [ "${OLD_INSTALL_BACKED_UP}" -eq 1 ] \
-    && [ -d "${BACKUP_DIR}" ]; then
-    rm -rf "${BACKUP_DIR}"
+  if [ "${OLD_INSTALL_BACKED_UP}" -eq 1 ] \
+    && [ -d "${BACKUP_DIR}" ] \
+    && { [ "${INSTALL_COMMITTED}" -eq 1 ] || [ "${rollback_failed}" -eq 0 ]; }; then
+    if ! backup_is_owned \
+      || cleanup_failure_injected "backup" \
+      || ! rm -rf "${BACKUP_DIR}"; then
+      if [ "${INSTALL_COMMITTED}" -eq 1 ]; then
+        echo "Warning: committed previous installation backup cleanup failed: ${BACKUP_DIR}" >&2
+      elif [ "${rollback_failed}" -eq 0 ]; then
+        rollback_failed=1
+      fi
+    elif ! rm -f "${BACKUP_OWNER}"; then
+      if [ "${INSTALL_COMMITTED}" -eq 1 ]; then
+        echo "Warning: committed previous installation backup ownership marker cleanup failed: ${BACKUP_OWNER}" >&2
+      else
+        rollback_failed=1
+      fi
+    fi
+  elif [ -n "${BACKUP_OWNER}" ] \
+    && [ -e "${BACKUP_OWNER}" ] \
+    && { [ -z "${BACKUP_DIR}" ] || [ ! -e "${BACKUP_DIR}" ]; }; then
+    if ! backup_owner_marker_is_owned || ! rm -f "${BACKUP_OWNER}"; then
+      if [ "${INSTALL_COMMITTED}" -eq 1 ]; then
+        echo "Warning: committed previous installation backup ownership marker cleanup failed: ${BACKUP_OWNER}" >&2
+      else
+        rollback_failed=1
+      fi
+    fi
   fi
   if [ -n "${TRANSACTION_DIR}" ] \
     && [ -d "${TRANSACTION_DIR}" ] \
     && { [ "${INSTALL_COMMITTED}" -eq 1 ] || [ "${rollback_failed}" -eq 0 ]; }; then
-    rm -rf "${TRANSACTION_DIR}"
+    if ! transaction_is_owned \
+      || cleanup_failure_injected "transaction" \
+      || ! rm -rf "${TRANSACTION_DIR}"; then
+      if [ "${INSTALL_COMMITTED}" -eq 1 ]; then
+        echo "Warning: committed registration transaction cleanup failed: ${TRANSACTION_DIR}" >&2
+      else
+        rollback_failed=1
+      fi
+    fi
   fi
-  if [ "${LOCK_HELD}" -eq 1 ] && [ -d "${LOCK_DIR}" ]; then
-    rm -f "${LOCK_DIR}/owner"
-    rmdir "${LOCK_DIR}" 2>/dev/null || :
+  if [ "${LOCK_HELD}" -eq 1 ]; then
+    if ! lock_is_owned \
+      || cleanup_failure_injected "lock" \
+      || ! rm -f "${LOCK_DIR}/owner" \
+      || ! rmdir "${LOCK_DIR}" 2>/dev/null; then
+      echo "Warning: install lock cleanup failed: ${LOCK_DIR}" >&2
+      if [ "${INSTALL_COMMITTED}" -eq 0 ]; then
+        rollback_failed=1
+      fi
+    fi
   fi
 
   if [ "${rollback_failed}" -ne 0 ]; then
@@ -613,6 +788,7 @@ PAYLOAD="${PRIVATE_DIR}/${PAYLOAD_RELATIVE_PATH}"
 [ "$(sha256sum "${PAYLOAD}" | awk '{print $1}')" = "${EXPECTED_SHA}" ] \
   || fail "the payload SHA-256 check failed."
 
+validate_path_environment
 mkdir -p "${INSTALL_PARENT}" "${DESKTOP_DIR}" "${XDG_CONFIG_ROOT}" \
   || fail "the user-level installation directories could not be created."
 LOCK_DIR="${INSTALL_PARENT}/.elvern-vlc-opener-install.lock"
@@ -623,7 +799,7 @@ LOCK_HELD=1
 printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
   "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INSTALL_NONCE}" \
   > "${LOCK_DIR}/owner"
-chmod 644 "${LOCK_DIR}/owner"
+chmod 600 "${LOCK_DIR}/owner"
 CURRENT_PROTOCOL_DEFAULT=$(query_default_handler)
 read_previous_install_state
 case "${CURRENT_PROTOCOL_DEFAULT}" in
@@ -639,17 +815,24 @@ case "${CURRENT_PROTOCOL_DEFAULT}" in
 esac
 TRANSACTION_DIR=$(mktemp -d "${INSTALL_PARENT}/.elvern-vlc-opener-transaction.XXXXXX") \
   || fail "the install transaction directory could not be created."
+printf '%s\n' "${INSTALL_NONCE}" > "${TRANSACTION_DIR}/transaction-owner"
+chmod 600 "${TRANSACTION_DIR}/transaction-owner"
 MIME_STATE_FILE="${TRANSACTION_DIR}/mime-state.tsv"
 : > "${MIME_STATE_FILE}"
 STAGE_DIR=$(mktemp -d "${INSTALL_PARENT}/.elvern-vlc-opener-stage.XXXXXX") \
   || fail "a staged installation directory could not be created."
+printf '%s\n' "${INSTALL_NONCE}" > "${STAGE_DIR}/transaction-owner"
+chmod 600 "${STAGE_DIR}/transaction-owner"
+STAGED_INSTALL="${STAGE_DIR}/payload"
+mkdir "${STAGED_INSTALL}"
+chmod 700 "${STAGED_INSTALL}"
 STAGING_CREATED=1
 inject_failure "staging_created"
-cp "${PAYLOAD}" "${STAGE_DIR}/Elvern.VlcOpener"
-chmod 755 "${STAGE_DIR}/Elvern.VlcOpener"
-cp "${UNINSTALL_SOURCE}" "${STAGE_DIR}/Uninstall-ElvernVlcOpener.sh"
-chmod 755 "${STAGE_DIR}/Uninstall-ElvernVlcOpener.sh"
-"${STAGE_DIR}/Elvern.VlcOpener" --version >/dev/null \
+cp "${PAYLOAD}" "${STAGED_INSTALL}/Elvern.VlcOpener"
+chmod 755 "${STAGED_INSTALL}/Elvern.VlcOpener"
+cp "${UNINSTALL_SOURCE}" "${STAGED_INSTALL}/Uninstall-ElvernVlcOpener.sh"
+chmod 755 "${STAGED_INSTALL}/Uninstall-ElvernVlcOpener.sh"
+"${STAGED_INSTALL}/Elvern.VlcOpener" --version >/dev/null \
   || fail "the staged payload failed its version check."
 
 SAFE_PREVIOUS_PROTOCOL_DEFAULT=""
@@ -657,7 +840,7 @@ if [ -n "${PREVIOUS_PROTOCOL_DEFAULT}" ] \
   && safe_desktop_basename "${PREVIOUS_PROTOCOL_DEFAULT}"; then
   SAFE_PREVIOUS_PROTOCOL_DEFAULT=${PREVIOUS_PROTOCOL_DEFAULT}
 fi
-cat > "${STAGE_DIR}/install-state.tsv" <<EOF
+cat > "${STAGED_INSTALL}/install-state.tsv" <<EOF
 schema_version	elvern-desktop-helper-install-state-v1
 helper_version	${HELPER_VERSION}
 product_id	elvern-vlc-opener
@@ -665,7 +848,7 @@ package_target	${PACKAGE_TARGET}
 transaction_nonce	${INSTALL_NONCE}
 previous_protocol_default	${SAFE_PREVIOUS_PROTOCOL_DEFAULT}
 EOF
-chmod 644 "${STAGE_DIR}/install-state.tsv"
+chmod 644 "${STAGED_INSTALL}/install-state.tsv"
 backup_mime_path "${MIME_CONFIG_FILE}" 0
 backup_mime_path "${MIME_DATA_FILE}" 1
 if [ -f "${DESKTOP_FILE}" ]; then
@@ -684,6 +867,9 @@ if [ -d "${INSTALL_DIR}" ]; then
     || fail "a unique backup path could not be reserved."
   rmdir "${BACKUP_DIR}" \
     || fail "the unique backup path could not be prepared."
+  BACKUP_OWNER="${INSTALL_PARENT}/.elvern-vlc-opener-backup-owner.${BACKUP_DIR##*.}"
+  printf '%s\n' "${INSTALL_NONCE}" > "${BACKUP_OWNER}"
+  chmod 600 "${BACKUP_OWNER}"
   inject_failure "first_backup_move"
   mv "${INSTALL_DIR}" "${BACKUP_DIR}" \
     || fail "the existing installation could not be staged for upgrade."
@@ -693,9 +879,9 @@ elif [ -e "${INSTALL_DIR}" ] || [ -L "${INSTALL_DIR}" ]; then
 fi
 
 inject_failure "new_placement"
-mv "${STAGE_DIR}" "${INSTALL_DIR}" \
+mv "${STAGED_INSTALL}" "${INSTALL_DIR}" \
   || fail "the new Helper could not replace the existing installation."
-STAGE_DIR=""
+STAGED_INSTALL=""
 NEW_INSTALL_PLACED=1
 
 DESKTOP_TEMP=$(mktemp "${DESKTOP_DIR}/.elvern-vlc-opener.desktop.XXXXXX") \

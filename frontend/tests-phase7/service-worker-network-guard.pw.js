@@ -6,12 +6,17 @@ const EXPECTED_EXTERNAL_ORIGIN = "http://elvern-guard-test.invalid";
 
 async function proxyControl(path, init) {
   const controlOrigin = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL;
-  if (!controlOrigin) {
+  const controlToken = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL_TOKEN;
+  if (!controlOrigin || !controlToken) {
     throw new Error("The loopback-only browser proxy control endpoint is required.");
   }
   return fetch(`${controlOrigin}${path}`, {
     cache: "no-store",
     ...init,
+    headers: {
+      "X-Elvern-Network-Guard-Token": controlToken,
+      ...init?.headers,
+    },
   });
 }
 
@@ -43,7 +48,6 @@ test("browser-level authority blocks a Service Worker external fetch", async ({
         });
         worker.postMessage({ probe: true });
       });
-      await registration.unregister();
       return result.blocked;
     }, { url: scriptUrl });
     expect(blocked).toBe(true);
@@ -67,6 +71,32 @@ test("browser-level authority blocks a Service Worker external fetch", async ({
       && /^[0-9a-f]{12}$/.test(attempt.pathname_hash)
     ))).toBe(true);
     expect(JSON.stringify(state)).not.toContain("token");
+
+    const loopbackBlocked = await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.ready;
+      const worker = registration.active;
+      const result = await new Promise((resolve) => {
+        navigator.serviceWorker.addEventListener("message", (event) => resolve(event.data.blocked), {
+          once: true,
+        });
+        worker.postMessage({
+          url: "http://127.0.0.1:4174/unregistered-service?token=hidden",
+        });
+      });
+      await registration.unregister();
+      return result;
+    });
+    expect(loopbackBlocked).toBe(true);
+    await expect.poll(async () => {
+      const stateResponse = await proxyControl("/__elvern_network_guard_state");
+      return stateResponse.json();
+    }).toMatchObject({
+      attempts: expect.arrayContaining([{
+        scheme: "http",
+        origin: "http://127.0.0.1:4174",
+        pathname_hash: expect.stringMatching(/^[0-9a-f]{12}$/),
+      }]),
+    });
   } finally {
     await proxyControl("/__elvern_network_guard_clear", { method: "POST" });
   }

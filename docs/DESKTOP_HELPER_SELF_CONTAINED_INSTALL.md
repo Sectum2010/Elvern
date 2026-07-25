@@ -31,7 +31,11 @@ requires Windows, macOS, and Linux plus an absolute runtime destination supplied
 `--active-dir` or `ELVERN_HELPER_RELEASES_DIR`. The CLI value wins. Activation
 verifies the full staged set, copies immutable content-hash-named ZIPs, and
 atomically replaces the active manifest last. Its lock lives in that same runtime
-directory, preventing two publishers from targeting one authority concurrently.
+destination's parent and is named from a SHA-256 identity of the canonical runtime
+path. Runtime migration uses the exact same lock and owner schema, preventing any
+publisher or migration writers from targeting one authority concurrently. Lock
+cleanup requires the transaction nonce and directory identity; an unknown stale
+lock is preserved for manual operator review.
 Existing immutable files are reused only when their content hash matches. Package
 bytes and directory metadata are flushed before the read-only manifest is
 atomically renamed. Failure injection at artifact copy or manifest rename leaves
@@ -185,10 +189,14 @@ python scripts/desktop-helper-runtime-releases.py inspect \
 ```
 
 Exit `0` means valid and immutable, `2` means absent, `3` means present but
-invalid or origin-incompatible, and `4` means content-valid but mutable. Without
+invalid, `4` means content-valid but mutable, and `5` means a valid authority has
+an actual origin mismatch. Without
 `--expected-origin-sha256`, inspect reports `origin_check=not_checked` and
 `origin_compatible=null`: that verifies integrity only and does not prove
-compatibility with the current Elvern server. Review a migration with:
+compatibility with the current Elvern server. An absent authority is also
+`not_checked`; an unreadable, unsafe, or invalid authority is `unknown` when an
+expected hash was supplied. Integrity validation, immutable mode validation, and
+origin compatibility are separate conclusions. Review a migration with:
 
 ```bash
 python scripts/desktop-helper-runtime-releases.py migrate \
@@ -201,6 +209,11 @@ Add `--apply` only after review. Apply validates all three packages and their in
 trees, copies read-only content-addressed ZIPs with fsync, and renames the manifest
 last. Existing identical files whose mode is not `0444` are reported by dry-run
 and repaired only by explicit `--apply`; conflicting content still fails closed.
+Mode inspection uses no-follow metadata handles and does not load package ZIP
+contents into memory; strict package validation still streams and verifies every
+package hash. If a partial migration repairs identical pre-existing file modes and
+a later step fails, it restores only unchanged fingerprints to their original
+modes and removes only files created by that transaction.
 An existing manifest whose referenced package set is incomplete is treated as an
 invalid active authority and is never repaired in place; this preserves
 manifest-last activation.
@@ -215,13 +228,19 @@ publisher activation, or reads the live database. Docker uses
 
 `node frontend/scripts/build-phase7-production.mjs` builds with Library summary v2
 and Library revision mode fixed to `on`, then writes the non-private
-`dist/.elvern-build-contract.json`. The cross-browser runner builds this way by
-default. CI may pass `--use-existing-build`, which fails unless that exact contract
-is present.
+`dist/.elvern-build-contract.json`. The v2 contract records a canonical,
+bytewise-sorted inventory of every regular dist asset, aggregate SHA-256,
+`index.html` SHA-256, and asset count. Symlinks and non-regular entries fail
+closed. The cross-browser runner builds this way by default. CI may pass
+`--use-existing-build`, which recomputes the inventory and rejects a modified,
+added, deleted, stale, or foreign asset contract.
 
 Chromium and Firefox launch behind a dynamic loopback-only proxy in addition to
-the Playwright context route guard. Unknown HTTP, HTTPS, WS, and WSS destinations
-are rejected with diagnostics limited to scheme, origin, and a pathname hash.
+the Playwright context route guard. Only exact, explicitly registered numeric
+loopback origins are allowed; another port on `127.0.0.1` or `::1` is denied.
+Temporary fault-server origins are registered and revoked through a token-protected
+Node-only control API. Unknown HTTP, HTTPS, WS, and WSS destinations are rejected
+with diagnostics limited to scheme, origin, and a pathname hash.
 Dedicated Chromium and Firefox projects allow only a test worker and prove that
 its external fetch is rejected by the browser-level authority, while normal
 production regression projects continue to block Service Workers for isolation.

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 
 
 PACKAGE_NAME_PREFIX = "elvern-vlc-opener"
+AUTHORITY_MUTATION_LOCK_NAME = ".desktop-helper-authority.lock"
+AUTHORITY_MUTATION_LOCK_SCHEMA = "elvern-desktop-helper-authority-lock-v1"
 PACKAGE_RUNTIME_CONTRACTS = {
     "windows-x64": ("windows", ("win-x64",)),
     "macos-dual-arch": ("mac", ("osx-arm64", "osx-x64")),
@@ -16,6 +20,22 @@ PACKAGE_RUNTIME_CONTRACTS = {
 }
 _SAFE_COMPONENT = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def authority_runtime_path_sha256(runtime_path: str) -> str:
+    if not isinstance(runtime_path, str) or not runtime_path:
+        raise ValueError("Runtime authority path is required")
+    if any(ord(character) < 32 or ord(character) == 127 for character in runtime_path):
+        raise ValueError("Runtime authority path is unsafe")
+    canonical = os.path.abspath(runtime_path)
+    if not os.path.isabs(runtime_path) or canonical != runtime_path:
+        raise ValueError("Runtime authority path must be canonical and absolute")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def authority_mutation_lock_basename(runtime_path: str) -> str:
+    digest = authority_runtime_path_sha256(runtime_path)
+    return f".{digest[:24]}{AUTHORITY_MUTATION_LOCK_NAME}"
 
 
 def derive_standard_package_maps(
@@ -69,14 +89,35 @@ def expected_package_filename(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--authority-lock-json")
     parser.add_argument("helper_version", nargs="?")
     parser.add_argument("package_target", nargs="?")
     parser.add_argument("sha256", nargs="?")
     args = parser.parse_args()
+    if args.authority_lock_json is not None:
+        if args.json or any((args.helper_version, args.package_target, args.sha256)):
+            parser.error("--authority-lock-json does not accept other arguments")
+        try:
+            runtime_path_sha256 = authority_runtime_path_sha256(
+                args.authority_lock_json
+            )
+            lock_basename = authority_mutation_lock_basename(
+                args.authority_lock_json
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(json.dumps({
+            "schema": AUTHORITY_MUTATION_LOCK_SCHEMA,
+            "lock_basename": lock_basename,
+            "runtime_path_sha256": runtime_path_sha256,
+        }, separators=(",", ":"), sort_keys=True))
+        return 0
     if args.json:
         if any((args.helper_version, args.package_target, args.sha256)):
             parser.error("--json does not accept filename arguments")
         print(json.dumps({
+            "authority_mutation_lock_name": AUTHORITY_MUTATION_LOCK_NAME,
+            "authority_mutation_lock_schema": AUTHORITY_MUTATION_LOCK_SCHEMA,
             "prefix": PACKAGE_NAME_PREFIX,
             "packages": {
                 package_target: {

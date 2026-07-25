@@ -12,6 +12,27 @@ const LOCAL_FAULT_ORIGINS = new Set();
 const NETWORK_GUARD_STATE = new WeakMap();
 
 
+async function proxyControl(path, payload) {
+  const controlOrigin = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL;
+  const controlToken = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL_TOKEN;
+  if (!controlOrigin || !controlToken) {
+    throw new Error("The browser network authority control endpoint is unavailable.");
+  }
+  const response = await fetch(`${controlOrigin}${path}`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Elvern-Network-Guard-Token": controlToken,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Browser network authority control failed with ${response.status}.`);
+  }
+}
+
+
 function classifyTestNetworkRequest(rawUrl, allowedOrigins) {
   const url = new URL(rawUrl);
   if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
@@ -533,16 +554,23 @@ async function startBodyFaultServer() {
   });
   const address = server.address();
   const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await proxyControl("/__elvern_network_guard_register", { origin });
+  } catch (error) {
+    await new Promise((resolve) => server.close(resolve));
+    throw error;
+  }
   LOCAL_FAULT_ORIGINS.add(origin);
   return {
     get requestCount() {
       return requestCount;
     },
     url: `${origin}/body-fault`,
-    close: () => new Promise((resolve) => server.close(() => {
+    close: async () => {
+      await proxyControl("/__elvern_network_guard_unregister", { origin });
       LOCAL_FAULT_ORIGINS.delete(origin);
-      resolve();
-    })),
+      await new Promise((resolve) => server.close(resolve));
+    },
   };
 }
 

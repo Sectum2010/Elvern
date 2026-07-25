@@ -3,7 +3,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PHASE7_BUILD_CONTRACT } from "./cross-browser-runner-core.mjs";
+import {
+  PHASE7_BUILD_CONTRACT_FILENAME,
+  createPhase7BuildContract,
+  verifyPhase7BuildContract,
+} from "./cross-browser-runner-core.mjs";
 
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -27,10 +31,16 @@ if (result.error) {
 }
 if (result.status !== 0) process.exit(result.status || 1);
 
-const contractPath = resolve(frontendDirectory, "dist", ".elvern-build-contract.json");
+const contract = createPhase7BuildContract(frontendDirectory);
+const contractPath = resolve(
+  frontendDirectory,
+  "dist",
+  PHASE7_BUILD_CONTRACT_FILENAME,
+);
 mkdirSync(dirname(contractPath), { recursive: true });
-writeFileSync(contractPath, `${JSON.stringify(PHASE7_BUILD_CONTRACT, null, 2)}\n`, {
+writeFileSync(contractPath, `${JSON.stringify(contract, null, 2)}\n`, {
   encoding: "utf8",
   mode: 0o644,
 });
+verifyPhase7BuildContract(frontendDirectory);
 console.log(`Wrote phase7 build contract: ${contractPath}`);

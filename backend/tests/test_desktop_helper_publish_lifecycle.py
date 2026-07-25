@@ -15,6 +15,7 @@ import pytest
 
 from elvern_shared.desktop_helper_package_contract import (
     PACKAGE_NAME_PREFIX,
+    authority_mutation_lock_basename,
     expected_package_filename,
 )
 
@@ -416,10 +417,81 @@ def test_runtime_inspect_origin_tristate_and_incompatible_exit(
         "--expected-origin-sha256", "0" * 64,
     )
     incompatible_payload = json.loads(incompatible.stdout)
-    assert incompatible.returncode != 0
+    assert incompatible.returncode == 5
     assert incompatible_payload["manifest_state"] == "invalid"
     assert incompatible_payload["origin_check"] == "incompatible"
     assert incompatible_payload["origin_compatible"] is False
+
+
+def test_runtime_inspect_absent_and_invalid_origin_states_are_not_incompatible(
+    tmp_path: Path,
+) -> None:
+    expected_origin = "0" * 64
+    absent = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(tmp_path / "absent"),
+        "--expected-origin-sha256", expected_origin,
+    )
+    absent_payload = json.loads(absent.stdout)
+    assert absent.returncode == 2
+    assert absent_payload["manifest_state"] == "absent"
+    assert absent_payload["origin_check"] == "not_checked"
+    assert absent_payload["origin_compatible"] is None
+
+    malformed = tmp_path / "malformed"
+    malformed.mkdir()
+    (malformed / "release-manifest.json").write_text("{", encoding="utf-8")
+    invalid = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(malformed),
+        "--expected-origin-sha256", expected_origin,
+    )
+    invalid_payload = json.loads(invalid.stdout)
+    assert invalid.returncode == 3
+    assert invalid_payload["manifest_state"] == "invalid"
+    assert invalid_payload["origin_check"] == "unknown"
+    assert invalid_payload["origin_compatible"] is None
+
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "release-manifest.json").symlink_to(tmp_path / "missing")
+    unsafe = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(linked),
+        "--expected-origin-sha256", expected_origin,
+    )
+    unsafe_payload = json.loads(unsafe.stdout)
+    assert unsafe.returncode == 3
+    assert unsafe_payload["origin_check"] == "unknown"
+    assert unsafe_payload["origin_compatible"] is None
+
+
+def test_runtime_mode_inspection_is_metadata_only_for_large_packages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_runtime_release_tool_module()
+    package = tmp_path / "large-package.zip"
+    with package.open("wb") as handle:
+        handle.truncate(124 * 1024 * 1024)
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    package.chmod(0o444)
+    manifest.chmod(0o444)
+    before_handles = len(list(Path("/proc/self/fd").iterdir()))
+
+    def unexpected_read(*_args, **_kwargs):
+        raise AssertionError("mode inspection must not read file content")
+
+    monkeypatch.setattr(module.os, "read", unexpected_read)
+    mutable = module._mutable_authority_files(
+        tmp_path,
+        {"packages": [{"filename": package.name}]},
+    )
+
+    assert mutable == []
+    assert package.stat().st_size == 124 * 1024 * 1024
+    assert len(list(Path("/proc/self/fd").iterdir())) == before_handles
 
 
 def test_runtime_authority_mutable_modes_are_reported_and_repaired(
@@ -486,6 +558,128 @@ def test_runtime_authority_mutable_modes_are_reported_and_repaired(
         for path in source.iterdir()
         if path.is_file()
     }
+
+
+def test_partial_runtime_migration_restores_preexisting_modes_on_copy_failure(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    destination = tmp_path / "partial-runtime"
+    destination.mkdir()
+    first_package = manifest["packages"][0]["filename"]
+    existing = destination / first_package
+    shutil.copy2(source / first_package, existing)
+    existing.chmod(0o666)
+    failure_env = {
+        **os.environ,
+        "ELVERN_RUNTIME_MIGRATION_TEST_FAIL_AT": "1",
+    }
+
+    failed = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(destination),
+        "--expected-origin-sha256", manifest["bound_origin_sha256"],
+        "--apply",
+        env=failure_env,
+    )
+
+    assert failed.returncode != 0
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o666
+    assert existing.read_bytes() == (source / first_package).read_bytes()
+    assert sorted(path.name for path in destination.iterdir()) == [first_package]
+
+
+def test_partial_runtime_migration_restores_multiple_modes_when_manifest_copy_fails(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    destination = tmp_path / "partial-runtime"
+    destination.mkdir()
+    original_modes: dict[str, int] = {}
+    for index, package in enumerate(manifest["packages"]):
+        filename = package["filename"]
+        target = destination / filename
+        shutil.copy2(source / filename, target)
+        mode = 0o666 if index == 0 else 0o644
+        target.chmod(mode)
+        original_modes[filename] = mode
+    failure_env = {
+        **os.environ,
+        "ELVERN_RUNTIME_MIGRATION_TEST_FAIL_AT": str(len(manifest["packages"])),
+    }
+
+    failed = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(destination),
+        "--expected-origin-sha256", manifest["bound_origin_sha256"],
+        "--apply",
+        env=failure_env,
+    )
+
+    assert failed.returncode != 0
+    assert not (destination / "release-manifest.json").exists()
+    assert {
+        path.name: stat.S_IMODE(path.stat().st_mode)
+        for path in destination.iterdir()
+    } == original_modes
+
+
+def test_runtime_mode_rollback_does_not_chmod_replaced_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "partial-runtime"
+    destination.mkdir()
+    first_package = manifest["packages"][0]["filename"]
+    repaired = destination / first_package
+    shutil.copy2(source / first_package, repaired)
+    repaired.chmod(0o666)
+    replacement = tmp_path / "replacement.zip"
+    replacement.write_bytes(b"replacement owned elsewhere")
+    replacement.chmod(0o600)
+
+    def replace_then_fail(*_args, **_kwargs):
+        os.replace(replacement, repaired)
+        raise module.AuthorityError("Injected migration failure.")
+
+    monkeypatch.setattr(module, "_copy_verified_file", replace_then_fail)
+    payload = module._validate(
+        source,
+        expected_origin=manifest["bound_origin_sha256"],
+    )
+    package_names = module._package_names(payload)
+    source_files = [source / name for name in package_names]
+    all_source_files = [*source_files, source / "release-manifest.json"]
+    lock = module._AuthorityMutationLock(destination)
+    lock.acquire()
+    try:
+        with pytest.raises(module.AuthorityError, match="fingerprint changed"):
+            module._migrate_authority_locked(
+                source,
+                destination,
+                manifest["bound_origin_sha256"],
+                payload,
+                all_source_files,
+                source_files,
+                lock,
+            )
+        assert repaired.read_bytes() == b"replacement owned elsewhere"
+        assert stat.S_IMODE(repaired.stat().st_mode) == 0o600
+    finally:
+        assert lock.release()
 
 
 def test_runtime_path_requires_existing_safe_parent(tmp_path: Path) -> None:
@@ -1121,7 +1315,9 @@ def test_injected_activation_failure_preserves_old_manifest_and_cleans_temp_file
     assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
     assert not list(active_dir.glob(".*.new.*"))
     assert not list(active_dir.glob("*.zip"))
-    assert not (workspace / "artifacts" / ".activation.lock").exists()
+    assert not (
+        active_dir.parent / authority_mutation_lock_basename(str(active_dir))
+    ).exists()
 
 
 def test_activation_cleanup_failure_preserves_old_manifest_and_reports_orphan(
@@ -1191,19 +1387,77 @@ def test_activation_lock_is_fail_closed_and_reports_owner_without_changing_activ
     active_dir.mkdir(parents=True)
     active_manifest = active_dir / "release-manifest.json"
     active_manifest.write_text('{"active":"old"}\n', encoding="utf-8")
-    lock_dir = active_dir / ".activation.lock"
+    lock_dir = (
+        active_dir.parent / authority_mutation_lock_basename(str(active_dir))
+    )
     lock_dir.mkdir()
     (lock_dir / "owner").write_text(
-        "pid=123\nstarted_at=2026-07-23T00:00:00Z\nbuild_id=existing\n",
+        "schema=unknown\ntransaction_nonce=existing\n",
         encoding="utf-8",
     )
 
     result = _run_publisher(workspace, env, "--activate")
 
     assert result.returncode != 0
-    assert "activation is already running" in result.stderr
-    assert "pid=123" in result.stderr
+    assert "authority mutation is running" in result.stderr
+    assert "Do not remove the lock" in result.stderr
     assert active_manifest.read_text(encoding="utf-8") == '{"active":"old"}\n'
+    assert lock_dir.is_dir()
+
+
+def test_shared_authority_lock_blocks_migration_and_publisher_activation(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    destination = tmp_path / "runtime"
+    module = _load_runtime_release_tool_module()
+    lock = module._AuthorityMutationLock(destination)
+    lock.acquire()
+    try:
+        migration = _run_runtime_tool(
+            "migrate",
+            "--source-dir", str(source),
+            "--runtime-dir", str(destination),
+            "--expected-origin-sha256", manifest["bound_origin_sha256"],
+            "--apply",
+        )
+        activation = _run_publisher(
+            workspace,
+            {**env, "ELVERN_HELPER_RELEASES_DIR": str(destination)},
+            "--activate",
+        )
+        assert migration.returncode != 0
+        assert activation.returncode != 0
+        assert "authority mutation" in migration.stderr
+        assert "authority mutation" in activation.stderr
+        assert not destination.exists()
+    finally:
+        assert lock.release()
+
+
+def test_runtime_lock_replacement_is_not_removed_by_previous_owner(
+    tmp_path: Path,
+) -> None:
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    lock = module._AuthorityMutationLock(destination)
+    lock.acquire()
+    displaced = tmp_path / "displaced-lock"
+    os.replace(lock.path, displaced)
+    lock.path.mkdir(mode=0o700)
+    new_owner = lock.path / "owner"
+    new_owner.write_text(
+        "schema=foreign\ntransaction_nonce=new-owner\n",
+        encoding="ascii",
+    )
+    new_owner.chmod(0o600)
+
+    assert lock.release() is False
+    assert lock.path.is_dir()
+    assert new_owner.read_text(encoding="ascii").endswith("new-owner\n")
 
 
 def test_activation_requires_an_explicit_runtime_active_directory(

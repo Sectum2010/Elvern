@@ -268,7 +268,15 @@ Omitting the expected hash from `inspect` performs integrity-only validation and
 reports that origin compatibility was not checked. A mutable but otherwise valid
 authority exits nonzero; migration dry-run reports the required `0444` repairs,
 and `--apply` performs them without changing the source. The runtime directory's
-direct parent must already exist.
+direct parent must already exist. Migration and publisher activation share the
+same destination-exclusive hashed sibling lock; stale or unknown locks are never
+removed automatically.
+
+Linux user installs require non-symlink user authority paths. Existing symlink
+components in `HOME`, the install parent, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, MIME
+paths, or the selected temporary root are rejected consistently by both installer
+and uninstaller. Paths containing spaces remain supported. Unsafe system
+`XDG_DATA_DIRS` entries are skipped during previous-handler discovery.
 
 2. Download the active macOS package from Elvern's Install page.
 3. Unzip it.

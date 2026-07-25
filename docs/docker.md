@@ -102,7 +102,10 @@ runtime path.
 Pass the expected canonical origin SHA-256 when compatibility with the running
 server must be proven. Integrity-only inspect deliberately reports origin as not
 checked. Runtime manifests and ZIPs are immutable `0444`; identical mutable files
-are repaired only by explicit `--apply`.
+are repaired only by explicit `--apply`. Publisher activation and migration use
+the same destination-exclusive hashed lock in the runtime directory's parent;
+unknown stale locks require manual operator review and are not automatically
+removed.
 
 The standard packages and their per-user uninstallers are transactional. On Linux,
 uninstall restores a recorded safe previous protocol handler only when Elvern is

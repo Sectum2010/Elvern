@@ -25,6 +25,11 @@ ALLOW_PARTIAL_ACTIVATE=0
 REPLACE_CORRUPT_ACTIVE_MANIFEST=0
 TARGETS_EXPLICIT=0
 ACTIVATION_LOCK_DIR=""
+AUTHORITY_LOCK_BASENAME=""
+AUTHORITY_LOCK_SCHEMA=""
+AUTHORITY_RUNTIME_PATH_SHA256=""
+ACTIVE_PARENT=""
+ACTIVE_DIR_CREATED=0
 ACTIVE_TEMP_FILES=()
 ACTIVE_CREATED_ARTIFACTS=()
 ACTIVATION_COMMITTED=0
@@ -160,6 +165,10 @@ PACKAGE_NAME_PREFIX="$(
   python3 -c 'import json,sys; print(json.load(sys.stdin)["prefix"])' \
     <<<"${PACKAGE_CONTRACT_JSON}"
 )"
+AUTHORITY_LOCK_SCHEMA="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["authority_mutation_lock_schema"])' \
+    <<<"${PACKAGE_CONTRACT_JSON}"
+)"
 [[ -n "${PACKAGE_NAME_PREFIX}" ]] || {
   echo "Shared desktop helper package prefix is unavailable." >&2
   exit 1
@@ -217,18 +226,46 @@ PUBLISH_ROOT="${WORK_DIR}/publish"
 PACKAGE_ROOT="${WORK_DIR}/packages"
 RECORDS_FILE="${WORK_DIR}/package-records.jsonl"
 mkdir -p "${PUBLISH_ROOT}" "${PACKAGE_ROOT}" "${OUTPUT_DIR}"
-if [[ ${ACTIVATE} -eq 1 ]]; then
-  mkdir -p "${ACTIVE_DIR}"
-  [[ ! -L "${ACTIVE_DIR}" ]] || {
-    echo "Active release directory cannot be a symlink." >&2
-    exit 1
-  }
-fi
 : > "${RECORDS_FILE}"
+
+authority_lock_is_owned() {
+  [[
+    -n "${ACTIVATION_LOCK_DIR}"
+    && -n "${AUTHORITY_LOCK_BASENAME}"
+    && "${ACTIVATION_LOCK_DIR}" == "${ACTIVE_PARENT}/${AUTHORITY_LOCK_BASENAME}"
+    && -d "${ACTIVATION_LOCK_DIR}"
+    && ! -L "${ACTIVATION_LOCK_DIR}"
+    && -f "${ACTIVATION_LOCK_DIR}/owner"
+    && ! -L "${ACTIVATION_LOCK_DIR}/owner"
+  ]] || return 1
+  grep -F -x "schema=${AUTHORITY_LOCK_SCHEMA}" "${ACTIVATION_LOCK_DIR}/owner" >/dev/null 2>&1 \
+    && grep -F -x "transaction_nonce=${BUILD_ID}" "${ACTIVATION_LOCK_DIR}/owner" >/dev/null 2>&1 \
+    && grep -F -x "runtime_path_sha256=${AUTHORITY_RUNTIME_PATH_SHA256}" "${ACTIVATION_LOCK_DIR}/owner" >/dev/null 2>&1
+}
+
+release_authority_lock() {
+  [[ -n "${ACTIVATION_LOCK_DIR}" ]] || return 0
+  if ! authority_lock_is_owned; then
+    echo "Warning: authority mutation lock was preserved because transaction ownership could not be verified: ${ACTIVATION_LOCK_DIR}" >&2
+    return 1
+  fi
+  if ! rm -f "${ACTIVATION_LOCK_DIR}/owner" \
+    || ! rmdir "${ACTIVATION_LOCK_DIR}" 2>/dev/null; then
+    echo "Warning: authority mutation lock cleanup failed: ${ACTIVATION_LOCK_DIR}" >&2
+    return 1
+  fi
+  ACTIVATION_LOCK_DIR=""
+  return 0
+}
+
 cleanup() {
   local status=$?
   local created active_path staged_path
-  if [[ ${ACTIVATION_COMMITTED} -eq 0 ]]; then
+  local lock_owned=0
+  if authority_lock_is_owned; then
+    lock_owned=1
+  fi
+  if [[ ${ACTIVATION_COMMITTED} -eq 0 && ${lock_owned} -eq 1 ]]; then
     for created in "${ACTIVE_CREATED_ARTIFACTS[@]}"; do
       active_path="${ACTIVE_DIR}/${created}"
       staged_path="${FINAL_BUILD_DIR:-}/${created}"
@@ -254,16 +291,29 @@ cleanup() {
         echo "Preserved an unproven active artifact after failed activation: ${active_path}" >&2
       fi
     done
+  elif [[
+    ${ACTIVATION_COMMITTED} -eq 0
+    && ${#ACTIVE_CREATED_ARTIFACTS[@]} -gt 0
+  ]]; then
+    echo "Preserved transaction artifacts because authority lock ownership changed." >&2
   fi
   rm -rf "${WORK_DIR}"
   local active_temp
   for active_temp in "${ACTIVE_TEMP_FILES[@]}"; do
-    [[ -n "${active_temp}" ]] && rm -f "${active_temp}"
+    if [[ -n "${active_temp}" && ${lock_owned} -eq 1 ]]; then
+      rm -f "${active_temp}"
+    fi
   done
-  if [[ -n "${ACTIVATION_LOCK_DIR}" ]]; then
-    rm -f "${ACTIVATION_LOCK_DIR}/owner"
-    rmdir "${ACTIVATION_LOCK_DIR}" 2>/dev/null || true
+  if [[
+    ${ACTIVATION_COMMITTED} -eq 0
+    && ${ACTIVE_DIR_CREATED} -eq 1
+    && ${lock_owned} -eq 1
+    && -d "${ACTIVE_DIR}"
+    && ! -L "${ACTIVE_DIR}"
+  ]]; then
+    rmdir "${ACTIVE_DIR}" 2>/dev/null || true
   fi
+  release_authority_lock || true
   return "${status}"
 }
 trap cleanup EXIT
@@ -703,17 +753,81 @@ activate_release() {
   if [[ ${ALLOW_PARTIAL_ACTIVATE} -eq 1 ]]; then
     echo "WARNING: activating an incomplete desktop helper release set." >&2
   fi
-  local lock_dir="${ACTIVE_DIR}/.activation.lock"
+  local authority_lock_json
+  authority_lock_json="$(
+    PYTHONPATH="${REPO_ROOT}" python3 -m \
+      elvern_shared.desktop_helper_package_contract \
+      --authority-lock-json "${ACTIVE_DIR}"
+  )"
+  AUTHORITY_LOCK_BASENAME="$(
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["lock_basename"])' \
+      <<<"${authority_lock_json}"
+  )"
+  AUTHORITY_RUNTIME_PATH_SHA256="$(
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["runtime_path_sha256"])' \
+      <<<"${authority_lock_json}"
+  )"
+  ACTIVE_PARENT="$(dirname "${ACTIVE_DIR}")"
+  python3 - "${ACTIVE_PARENT}" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+parent = pathlib.Path(os.path.abspath(sys.argv[1]))
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(parent.anchor, flags)
+try:
+  for component in parent.parts[1:]:
+    try:
+      os.mkdir(component, 0o755, dir_fd=descriptor)
+    except FileExistsError:
+      pass
+    next_descriptor = os.open(component, flags, dir_fd=descriptor)
+    os.close(descriptor)
+    descriptor = next_descriptor
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+      raise SystemExit("Active release directory parent is unsafe.")
+finally:
+  os.close(descriptor)
+PY
+  local lock_dir="${ACTIVE_PARENT}/${AUTHORITY_LOCK_BASENAME}"
   if ! mkdir "${lock_dir}" 2>/dev/null; then
-    echo "Another desktop helper activation is already running, or a stale lock remains at ${lock_dir}." >&2
-    [[ -f "${lock_dir}/owner" ]] && sed -n '1,3p' "${lock_dir}/owner" >&2
+    echo "Another desktop helper authority mutation is running, or an unknown stale lock remains at ${lock_dir}." >&2
     echo "Do not remove the lock until confirming the recorded process is no longer active." >&2
     exit 1
   fi
   ACTIVATION_LOCK_DIR="${lock_dir}"
-  printf 'pid=%s\nstarted_at=%s\nbuild_id=%s\n' \
-    "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BUILD_ID}" > "${lock_dir}/owner"
-  chmod 644 "${lock_dir}/owner"
+  printf 'schema=%s\npid=%s\nstarted_at=%s\ntransaction_nonce=%s\nruntime_path_sha256=%s\n' \
+    "${AUTHORITY_LOCK_SCHEMA}" \
+    "$$" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "${BUILD_ID}" \
+    "${AUTHORITY_RUNTIME_PATH_SHA256}" \
+    > "${lock_dir}/owner"
+  chmod 600 "${lock_dir}/owner"
+  python3 - "${lock_dir}/owner" "${lock_dir}" "${ACTIVE_PARENT}" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    os.fsync(handle.fileno())
+for directory in sys.argv[2:]:
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+PY
+  if [[ -e "${ACTIVE_DIR}" || -L "${ACTIVE_DIR}" ]]; then
+    [[ -d "${ACTIVE_DIR}" && ! -L "${ACTIVE_DIR}" ]] || {
+      echo "Active release directory is unsafe." >&2
+      exit 1
+    }
+  else
+    mkdir "${ACTIVE_DIR}"
+    ACTIVE_DIR_CREATED=1
+  fi
   local active_manifest="${ACTIVE_DIR}/release-manifest.json"
   local active_manifest_valid=0
   if [[ -e "${active_manifest}" || -L "${active_manifest}" ]]; then
@@ -843,9 +957,7 @@ PY
   mv "${manifest_temp}" "${ACTIVE_DIR}/release-manifest.json"
   ACTIVATION_COMMITTED=1
   fsync_directory "${ACTIVE_DIR}"
-  rm -f "${lock_dir}/owner"
-  rmdir "${lock_dir}"
-  ACTIVATION_LOCK_DIR=""
+  release_authority_lock || true
   echo "Activated verified desktop helper release manifest."
 }
 

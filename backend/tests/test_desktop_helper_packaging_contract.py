@@ -264,7 +264,13 @@ def test_macos_transaction_commits_before_finder_reveal_and_backup_flag_is_safe(
     assert "Preserved rollback workspace:" in source
     assert "LOCK_HELD=0" in source
     assert "LOCK_HELD=1" in source
-    assert 'if [[ ${LOCK_HELD} -eq 1 && -d "${LOCK_DIR}" ]]' in source
+    assert "lock_is_owned()" in source
+    assert 'grep -F -x "transaction_nonce=${INSTALL_NONCE}"' in source
+    assert "cleanup_failure_injected \"stage\"" in source
+    assert "cleanup_failure_injected \"backup\"" in source
+    assert "cleanup_failure_injected \"lock\"" in source
+    assert "Warning: committed staged App cleanup failed:" in source
+    assert "Warning: committed previous App backup cleanup failed:" in source
 
 
 def test_macos_backup_targets_are_prepared_before_unregister_or_move() -> None:
@@ -302,7 +308,8 @@ def test_linux_installer_uses_one_xdg_data_root_and_preserves_failed_rollback_ma
     assert 'cp -a "${BACKUP_DIR}" "${INSTALL_DIR}"' in source
     assert "LOCK_HELD=0" in source
     assert "LOCK_HELD=1" in source
-    assert 'if [ "${LOCK_HELD}" -eq 1 ] && [ -d "${LOCK_DIR}" ]' in source
+    assert "lock_is_owned()" in source
+    assert 'grep -F -x "transaction_nonce=${INSTALL_NONCE}"' in source
 
 
 def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> None:
@@ -327,7 +334,9 @@ def test_publish_requires_explicit_activation_and_immutable_artifact_names() -> 
     assert 'mv "${manifest_temp}" "${ACTIVE_DIR}/release-manifest.json"' in source
     assert 'mkdir "${lock_dir}"' in source
     assert 'ACTIVATION_LOCK_DIR="${lock_dir}"' in source
-    assert 'rmdir "${ACTIVATION_LOCK_DIR}" 2>/dev/null || true' in source
+    assert "authority_lock_is_owned()" in source
+    assert "release_authority_lock()" in source
+    assert 'grep -F -x "transaction_nonce=${BUILD_ID}"' in source
 
 
 def test_shared_package_prefix_has_one_runtime_authority() -> None:
@@ -362,6 +371,41 @@ def test_shared_package_prefix_has_one_runtime_authority() -> None:
     assert "linux-musl-arm64" not in publisher
     assert "COPY elvern_shared ./elvern_shared" in dockerfile
     assert not (ROOT / "clients" / "desktop_helper_package_contract.py").exists()
+
+
+def test_macos_install_and_uninstall_cleanup_use_nonce_owned_targets() -> None:
+    installer = (
+        HELPER_ROOT / "packaging" / "macos" / "Install-ElvernVlcOpener.command"
+    ).read_text(encoding="utf-8")
+    uninstaller = (
+        HELPER_ROOT / "packaging" / "macos" / "Uninstall-ElvernVlcOpener.command"
+    ).read_text(encoding="utf-8")
+
+    assert 'grep -F -x "transaction_nonce=${INSTALL_NONCE}"' in installer
+    assert 'grep -F -x "transaction_nonce=${TRANSACTION_NONCE}"' in uninstaller
+    for source in (installer, uninstaller):
+        assert "lock_is_owned()" in source
+        assert "backup_is_owned()" in source
+        assert "transaction-owner" in source
+        assert '&& ! -L "${LOCK_DIR}"' in source
+        assert '&& ! -L "${LOCK_DIR}/owner"' in source
+    assert "INSTALL_COMMITTED=1" in installer
+    assert "UNINSTALL_COMMITTED=1" in uninstaller
+    assert "Warning: install lock cleanup failed:" in installer
+    assert "Warning: uninstall lock cleanup failed:" in uninstaller
+
+
+def test_windows_committed_backup_cleanup_is_warning_only() -> None:
+    source = (
+        HELPER_ROOT / "packaging" / "windows" / "Install-ElvernVlcOpener.ps1"
+    ).read_text(encoding="utf-8")
+
+    commit_index = source.index("$installCommitted = $true")
+    warning_index = source.index(
+        'Write-Warning "The committed previous installation backup could not be removed:'
+    )
+    catch_index = source.rfind("catch {", commit_index, warning_index)
+    assert commit_index < catch_index < warning_index
 
 
 def test_uninstallers_share_installer_locks_and_transaction_boundaries() -> None:

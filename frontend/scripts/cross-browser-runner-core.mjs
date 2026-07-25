@@ -2,15 +2,19 @@ import { randomBytes } from "node:crypto";
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  lstatSync,
   mkdirSync,
   openSync,
+  readSync,
+  readdirSync,
   readFileSync,
+  statSync,
   unlinkSync,
 } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 
 const BASE32_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
@@ -18,11 +22,14 @@ const reservedPorts = new Set();
 const reservedPortLocks = new Map();
 const lockDirectory = join(tmpdir(), "elvern-playwright-ports");
 export const PHASE7_BUILD_CONTRACT = Object.freeze({
-  schema_version: "elvern-frontend-build-contract-v1",
+  schema_version: "elvern-frontend-build-contract-v2",
   library_summary_v2_mode: "on",
   library_revision_mode: "on",
   build_kind: "phase7-production",
 });
+export const PHASE7_BUILD_CONTRACT_FILENAME = ".elvern-build-contract.json";
+const PHASE7_EXCLUDED_PREFIXES = Object.freeze(["network-guard-fixture/"]);
+const NETWORK_GUARD_CONTROL_HEADER = "x-elvern-network-guard-token";
 
 
 export function createCrossBrowserPrefix(byteCount = 12) {
@@ -93,11 +100,90 @@ export function releaseReservedPort(port) {
 }
 
 
+function hashRegularFile(path) {
+  const descriptor = openSync(path, "r");
+  const digest = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let count;
+    while ((count = readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
+      digest.update(buffer.subarray(0, count));
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  return digest.digest("hex");
+}
+
+
+function isExcludedPhase7Asset(relativePath) {
+  return relativePath === PHASE7_BUILD_CONTRACT_FILENAME
+    || PHASE7_EXCLUDED_PREFIXES.some((prefix) => relativePath.startsWith(prefix));
+}
+
+
+export function collectPhase7AssetRecords(frontendDirectory) {
+  const distDirectory = resolve(frontendDirectory, "dist");
+  const records = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = join(directory, entry.name);
+      const relativePath = relative(distDirectory, absolutePath).split(sep).join("/");
+      const metadata = lstatSync(absolutePath);
+      if (metadata.isSymbolicLink()) {
+        throw new Error(`The phase7 dist contains an unsafe symlink: ${relativePath}`);
+      }
+      if (metadata.isDirectory()) {
+        if (!isExcludedPhase7Asset(`${relativePath}/`)) visit(absolutePath);
+        continue;
+      }
+      if (isExcludedPhase7Asset(relativePath)) continue;
+      if (!metadata.isFile()) {
+        throw new Error(`The phase7 dist contains a non-regular entry: ${relativePath}`);
+      }
+      records.push({
+        relative_path: relativePath,
+        size_bytes: metadata.size,
+        sha256: hashRegularFile(absolutePath),
+      });
+    }
+  };
+  visit(distDirectory);
+  records.sort((left, right) => Buffer.compare(
+    Buffer.from(left.relative_path),
+    Buffer.from(right.relative_path),
+  ));
+  return records;
+}
+
+
+export function createPhase7BuildContract(frontendDirectory) {
+  const records = collectPhase7AssetRecords(frontendDirectory);
+  const aggregate = createHash("sha256");
+  for (const record of records) {
+    aggregate.update(
+      `${record.relative_path}\0${record.size_bytes}\0${record.sha256}\n`,
+      "utf8",
+    );
+  }
+  const index = records.find((record) => record.relative_path === "index.html");
+  if (!index) {
+    throw new Error("The phase7 dist is missing index.html.");
+  }
+  return {
+    ...PHASE7_BUILD_CONTRACT,
+    asset_count: records.length,
+    asset_manifest_sha256: aggregate.digest("hex"),
+    index_html_sha256: index.sha256,
+  };
+}
+
+
 export function verifyPhase7BuildContract(frontendDirectory) {
   const contractPath = resolve(
     frontendDirectory,
     "dist",
-    ".elvern-build-contract.json",
+    PHASE7_BUILD_CONTRACT_FILENAME,
   );
   let parsed;
   try {
@@ -108,28 +194,62 @@ export function verifyPhase7BuildContract(frontendDirectory) {
       + "Run: node scripts/build-phase7-production.mjs",
     );
   }
-  if (JSON.stringify(parsed) !== JSON.stringify(PHASE7_BUILD_CONTRACT)) {
+  const expected = createPhase7BuildContract(frontendDirectory);
+  if (JSON.stringify(parsed) !== JSON.stringify(expected)) {
     throw new Error(
-      "The existing dist was not built with the required phase7 production modes. "
+      "The existing dist does not match its required phase7 production asset contract. "
       + "Run: node scripts/build-phase7-production.mjs",
     );
+  }
+  const mode = statSync(contractPath).mode & 0o777;
+  if (mode !== 0o644) {
+    throw new Error("The phase7 production build contract must use mode 0644.");
   }
   return contractPath;
 }
 
 
-export function classifyProxyTarget(rawUrl, { upgrade = false } = {}) {
+export function normalizeRegisteredLoopbackOrigin(rawOrigin) {
+  const url = new URL(rawOrigin);
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (
+    !["http:", "https:", "ws:", "wss:"].includes(url.protocol)
+    || !["127.0.0.1", "::1"].includes(hostname)
+    || url.username
+    || url.password
+    || url.pathname !== "/"
+    || url.search
+    || url.hash
+  ) {
+    throw new Error("Only exact numeric-loopback origins may be registered.");
+  }
+  return url.origin;
+}
+
+
+export function classifyProxyTarget(
+  rawUrl,
+  { upgrade = false, allowedOrigins = new Set() } = {},
+) {
   const url = new URL(rawUrl);
-  const hostname = url.hostname.toLowerCase();
-  const loopback = hostname === "localhost"
-    || hostname === "127.0.0.1"
-    || hostname === "::1"
-    || hostname === "[::1]";
+  let protocol = url.protocol;
+  if (upgrade && protocol === "http:") protocol = "ws:";
+  if (upgrade && protocol === "https:") protocol = "wss:";
+  const normalizedTarget = new URL(url.href);
+  normalizedTarget.protocol = protocol;
+  const origin = normalizedTarget.origin;
+  let normalizedOrigin = null;
+  try {
+    normalizedOrigin = normalizeRegisteredLoopbackOrigin(origin);
+  } catch {
+    // The diagnostic below is deliberately limited to origin and path identity.
+  }
+  const allowed = normalizedOrigin !== null && allowedOrigins.has(normalizedOrigin);
   return {
-    allowed: loopback,
-    diagnostic: loopback ? null : {
-      scheme: upgrade && url.protocol === "http:" ? "ws" : url.protocol.replace(/:$/, ""),
-      origin: url.origin,
+    allowed,
+    diagnostic: allowed ? null : {
+      scheme: protocol.replace(/:$/, ""),
+      origin,
       pathname_hash: createHash("sha256")
         .update(url.pathname)
         .digest("hex")
@@ -139,23 +259,95 @@ export function classifyProxyTarget(rawUrl, { upgrade = false } = {}) {
 }
 
 
-export async function startLoopbackOnlyProxy() {
+export function createNetworkGuardControlToken() {
+  return randomBytes(32).toString("hex");
+}
+
+
+export async function startLoopbackOnlyProxy({
+  initialAllowedOrigins = [],
+  controlToken = createNetworkGuardControlToken(),
+} = {}) {
   const attempts = [];
+  const initialOrigins = new Set(
+    initialAllowedOrigins.map(normalizeRegisteredLoopbackOrigin),
+  );
+  const allowedOrigins = new Set(initialOrigins);
+  const authorizedControlRequest = (request) => (
+    typeof request.headers[NETWORK_GUARD_CONTROL_HEADER] === "string"
+    && request.headers[NETWORK_GUARD_CONTROL_HEADER] === controlToken
+  );
+  const sendJson = (response, status, payload) => {
+    response.writeHead(status, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    response.end(JSON.stringify(payload));
+  };
+  const readControlJson = (request, response, callback) => {
+    const chunks = [];
+    let size = 0;
+    request.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 4096) {
+        response.writeHead(413, { "Cache-Control": "no-store" });
+        response.end();
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      if (response.writableEnded) return;
+      try {
+        callback(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        response.writeHead(400, { "Cache-Control": "no-store" });
+        response.end();
+      }
+    });
+  };
   const server = http.createServer((request, response) => {
-    if (
-      request.url === "/__elvern_network_guard_state"
-      && request.headers.host?.startsWith("127.0.0.1:")
-    ) {
-      response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-      response.end(JSON.stringify({ attempts }));
-      return;
-    }
-    if (
-      request.url === "/__elvern_network_guard_clear"
-      && request.headers.host?.startsWith("127.0.0.1:")
-    ) {
-      attempts.length = 0;
-      response.writeHead(204, { "Cache-Control": "no-store" });
+    const controlPath = String(request.url || "");
+    if (controlPath.startsWith("/__elvern_network_guard_")) {
+      if (!authorizedControlRequest(request)) {
+        response.writeHead(403, { "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+      if (controlPath === "/__elvern_network_guard_state" && request.method === "GET") {
+        sendJson(response, 200, {
+          attempts,
+          allowed_origins: [...allowedOrigins].sort(),
+          initial_allowed_origins: [...initialOrigins].sort(),
+        });
+        return;
+      }
+      if (controlPath === "/__elvern_network_guard_clear" && request.method === "POST") {
+        attempts.length = 0;
+        allowedOrigins.clear();
+        for (const origin of initialOrigins) allowedOrigins.add(origin);
+        response.writeHead(204, { "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+      if (
+        ["/__elvern_network_guard_register", "/__elvern_network_guard_unregister"]
+          .includes(controlPath)
+        && request.method === "POST"
+      ) {
+        readControlJson(request, response, (payload) => {
+          const origin = normalizeRegisteredLoopbackOrigin(payload?.origin);
+          if (controlPath.endsWith("_register")) {
+            allowedOrigins.add(origin);
+          } else if (!initialOrigins.has(origin)) {
+            allowedOrigins.delete(origin);
+          }
+          sendJson(response, 200, { origin });
+        });
+        return;
+      }
+      response.writeHead(404, { "Cache-Control": "no-store" });
       response.end();
       return;
     }
@@ -169,6 +361,7 @@ export async function startLoopbackOnlyProxy() {
     }
     const classification = classifyProxyTarget(target.href, {
       upgrade: String(request.headers.upgrade || "").toLowerCase() === "websocket",
+      allowedOrigins,
     });
     if (!classification.allowed) {
       attempts.push(classification.diagnostic);
@@ -199,7 +392,9 @@ export async function startLoopbackOnlyProxy() {
     const rawHost = separator > 0 ? authority.slice(0, separator) : authority;
     const host = rawHost.replace(/^\[|\]$/g, "");
     const port = Number(separator > 0 ? authority.slice(separator + 1) : 443);
-    const classification = classifyProxyTarget(`https://${host}:${port}/`);
+    const classification = classifyProxyTarget(`https://${host}:${port}/`, {
+      allowedOrigins,
+    });
     if (!classification.allowed) {
       attempts.push(classification.diagnostic);
       clientSocket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
@@ -222,7 +417,10 @@ export async function startLoopbackOnlyProxy() {
       socket.destroy();
       return;
     }
-    const classification = classifyProxyTarget(target.href, { upgrade: true });
+    const classification = classifyProxyTarget(target.href, {
+      upgrade: true,
+      allowedOrigins,
+    });
     if (!classification.allowed) {
       attempts.push(classification.diagnostic);
       socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
@@ -260,6 +458,8 @@ export async function startLoopbackOnlyProxy() {
   return {
     port,
     attempts,
+    allowedOrigins,
+    controlToken,
     close: () => new Promise((resolvePromise) => server.close(resolvePromise)),
   };
 }

@@ -418,7 +418,13 @@ try {
     $finalValidationPassed = $true
     $installCommitted = $true
     if ($oldInstallBackedUp -and (Test-Path -LiteralPath $backupRoot)) {
-        Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        try {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force
+            $oldInstallBackedUp = $false
+        }
+        catch {
+            Write-Warning "The committed previous installation backup could not be removed: $backupRoot"
+        }
     }
     Write-Host "Installed Elvern VLC Opener $helperVersion into $installRoot"
     Write-Host "Registered elvern-vlc:// for this user. No separate .NET installation is required."

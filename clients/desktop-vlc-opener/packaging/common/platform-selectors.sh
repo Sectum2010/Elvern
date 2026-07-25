@@ -27,6 +27,31 @@ elvern_safe_absolute_path_value() {
   return 0
 }
 
+safe_existing_directory_chain() {
+  chain_path=$1
+  elvern_safe_absolute_path_value "${chain_path}" || return 1
+  chain_cursor=""
+  old_chain_ifs=${IFS}
+  IFS=/
+  for chain_component in ${chain_path#/}; do
+    IFS=${old_chain_ifs}
+    [ -n "${chain_component}" ] || {
+      IFS=/
+      continue
+    }
+    chain_cursor="${chain_cursor}/${chain_component}"
+    if [ -L "${chain_cursor}" ]; then
+      return 1
+    fi
+    if [ -e "${chain_cursor}" ] && [ ! -d "${chain_cursor}" ]; then
+      return 1
+    fi
+    IFS=/
+  done
+  IFS=${old_chain_ifs}
+  return 0
+}
+
 select_macos_runtime() {
   selector_translated="${1:-0}"
   selector_machine="${2:-}"

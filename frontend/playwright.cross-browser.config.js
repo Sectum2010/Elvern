@@ -5,6 +5,9 @@ const port = Number(process.env.ELVERN_PHASE7_BROWSER_PORT || 4199);
 const prefix = process.env.ELVERN_PHASE7_BROWSER_PREFIX || "phase7brwser";
 const origin = `http://127.0.0.1:${port}`;
 const networkProxy = process.env.ELVERN_PHASE7_NETWORK_PROXY;
+const guardedProxy = networkProxy
+  ? { server: networkProxy, bypass: "<-loopback>" }
+  : undefined;
 
 
 export default defineConfig({
@@ -32,7 +35,7 @@ export default defineConfig({
       use: {
         browserName: "chromium",
         viewport: { width: 1440, height: 900 },
-        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
       },
     },
     {
@@ -41,7 +44,12 @@ export default defineConfig({
       use: {
         browserName: "firefox",
         viewport: { width: 1440, height: 900 },
-        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+        launchOptions: {
+          firefoxUserPrefs: {
+            "network.proxy.allow_hijacking_localhost": true,
+          },
+        },
       },
     },
     {
@@ -50,7 +58,7 @@ export default defineConfig({
       use: {
         browserName: "webkit",
         viewport: { width: 1440, height: 900 },
-        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
       },
     },
     {
@@ -59,7 +67,7 @@ export default defineConfig({
       use: {
         browserName: "chromium",
         serviceWorkers: "allow",
-        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
       },
     },
     {
@@ -68,7 +76,12 @@ export default defineConfig({
       use: {
         browserName: "firefox",
         serviceWorkers: "allow",
-        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+        launchOptions: {
+          firefoxUserPrefs: {
+            "network.proxy.allow_hijacking_localhost": true,
+          },
+        },
       },
     },
   ],

@@ -18,6 +18,7 @@ OSACOMPILE="/usr/bin/osacompile"
 PLISTBUDDY="/usr/libexec/PlistBuddy"
 STAGE_ROOT=""
 BACKUP_APP=""
+BACKUP_OWNER=""
 FAILED_NEW_APP=""
 LOCK_DIR=""
 LOCK_HELD=0
@@ -36,6 +37,71 @@ inject_failure() {
   if [[ "${ELVERN_INSTALL_TEST_MODE:-0}" == "1" && "${ELVERN_INSTALL_TEST_FAIL_AT:-}" == "${point}" ]]; then
     fail "Injected failure at ${point}."
   fi
+}
+
+cleanup_failure_injected() {
+  local point="$1"
+  [[
+    "${ELVERN_INSTALL_TEST_MODE:-0}" == "1"
+    && "${ELVERN_INSTALL_TEST_FAIL_CLEANUP_AT:-}" == "${point}"
+  ]]
+}
+
+stage_is_owned() {
+  [[
+    -d "${DEST_DIR}"
+    && ! -L "${DEST_DIR}"
+    && -n "${STAGE_ROOT}"
+    && "${STAGE_ROOT}" == "${DEST_DIR}"/.elvern-vlc-opener-stage.*
+    && -d "${STAGE_ROOT}"
+    && ! -L "${STAGE_ROOT}"
+    && -f "${STAGE_ROOT}/transaction-owner"
+    && ! -L "${STAGE_ROOT}/transaction-owner"
+    && "$(<"${STAGE_ROOT}/transaction-owner")" == "${INSTALL_NONCE}"
+  ]]
+}
+
+backup_is_owned() {
+  [[
+    -d "${DEST_DIR}"
+    && ! -L "${DEST_DIR}"
+    && -n "${BACKUP_APP}"
+    && "${BACKUP_APP}" == "${DEST_DIR}"/.elvern-vlc-opener-backup.*.app
+    && -d "${BACKUP_APP}"
+    && ! -L "${BACKUP_APP}"
+    && "${BACKUP_OWNER}" == "${BACKUP_APP}.transaction-owner"
+    && -f "${BACKUP_OWNER}"
+    && ! -L "${BACKUP_OWNER}"
+    && "$(<"${BACKUP_OWNER}")" == "${INSTALL_NONCE}"
+  ]]
+}
+
+backup_owner_marker_is_owned() {
+  [[
+    -d "${DEST_DIR}"
+    && ! -L "${DEST_DIR}"
+    && -n "${BACKUP_OWNER}"
+    && -n "${BACKUP_APP}"
+    && "${BACKUP_OWNER}" == "${BACKUP_APP}.transaction-owner"
+    && "${BACKUP_APP}" == "${DEST_DIR}"/.elvern-vlc-opener-backup.*.app
+    && -f "${BACKUP_OWNER}"
+    && ! -L "${BACKUP_OWNER}"
+    && "$(<"${BACKUP_OWNER}")" == "${INSTALL_NONCE}"
+  ]]
+}
+
+lock_is_owned() {
+  [[
+    -d "${DEST_DIR}"
+    && ! -L "${DEST_DIR}"
+    && "${LOCK_DIR}" == "${DEST_DIR}/.elvern-vlc-opener-install.lock"
+    && -d "${LOCK_DIR}"
+    && ! -L "${LOCK_DIR}"
+    && -f "${LOCK_DIR}/owner"
+    && ! -L "${LOCK_DIR}/owner"
+  ]] \
+    && grep -F -x "transaction_nonce=${INSTALL_NONCE}" "${LOCK_DIR}/owner" \
+      >/dev/null 2>&1
 }
 
 prepare_backup_target() {
@@ -81,6 +147,8 @@ show_error() {
 }
 
 cleanup() {
+  local status=$?
+  trap - EXIT
   local rollback_failed=0
   if [[ ${INSTALL_COMMITTED} -eq 0 ]]; then
     if [[ ${NEW_INSTALL_PLACED} -eq 1 && -d "${DEST_APP}" ]]; then
@@ -98,7 +166,7 @@ cleanup() {
       fi
     fi
     if [[ ${OLD_INSTALL_BACKED_UP} -eq 1 ]]; then
-      if [[ -d "${DEST_APP}" || ! -d "${BACKUP_APP}" ]]; then
+      if [[ -d "${DEST_APP}" ]] || ! backup_is_owned; then
         rollback_failed=1
       else
         /bin/cp -a "${BACKUP_APP}" "${DEST_APP}" || rollback_failed=1
@@ -110,23 +178,58 @@ cleanup() {
       fi
     fi
   fi
-  if [[
-    -n "${STAGE_ROOT}"
-    && -d "${STAGE_ROOT}"
-    && ( ${INSTALL_COMMITTED} -eq 1 || ${rollback_failed} -eq 0 )
-  ]]; then
-    rm -rf "${STAGE_ROOT}"
+  if [[ -n "${STAGE_ROOT}" && -d "${STAGE_ROOT}" ]]; then
+    if ! stage_is_owned \
+      || cleanup_failure_injected "stage" \
+      || ! rm -rf "${STAGE_ROOT}"; then
+      if [[ ${INSTALL_COMMITTED} -eq 1 ]]; then
+        echo "Warning: committed staged App cleanup failed: ${STAGE_ROOT}" >&2
+      else
+        rollback_failed=1
+      fi
+    fi
   fi
   if [[
     ( ${INSTALL_COMMITTED} -eq 1 || ${rollback_failed} -eq 0 )
     && ${OLD_INSTALL_BACKED_UP} -eq 1
     && -d "${BACKUP_APP}"
   ]]; then
-    rm -rf "${BACKUP_APP}"
+    if ! backup_is_owned \
+      || cleanup_failure_injected "backup" \
+      || ! rm -rf "${BACKUP_APP}"; then
+      if [[ ${INSTALL_COMMITTED} -eq 1 ]]; then
+        echo "Warning: committed previous App backup cleanup failed: ${BACKUP_APP}" >&2
+      else
+        rollback_failed=1
+      fi
+    else
+      rm -f "${BACKUP_OWNER}" || {
+        if [[ ${INSTALL_COMMITTED} -eq 1 ]]; then
+          echo "Warning: committed App backup ownership marker cleanup failed: ${BACKUP_OWNER}" >&2
+        else
+          rollback_failed=1
+        fi
+      }
+    fi
+  elif [[ -n "${BACKUP_OWNER}" && -e "${BACKUP_OWNER}" ]]; then
+    if ! backup_owner_marker_is_owned || ! rm -f "${BACKUP_OWNER}"; then
+      if [[ ${INSTALL_COMMITTED} -eq 1 ]]; then
+        echo "Warning: committed App backup ownership marker cleanup failed: ${BACKUP_OWNER}" >&2
+      else
+        rollback_failed=1
+      fi
+    fi
   fi
-  if [[ ${LOCK_HELD} -eq 1 && -d "${LOCK_DIR}" ]]; then
-    rm -f "${LOCK_DIR}/owner"
-    rmdir "${LOCK_DIR}"
+  if [[ ${LOCK_HELD} -eq 1 ]]; then
+    if ! lock_is_owned \
+      || cleanup_failure_injected "lock" \
+      || ! rm -f "${LOCK_DIR}/owner" \
+      || ! rmdir "${LOCK_DIR}" 2>/dev/null; then
+      echo "Warning: install lock cleanup failed: ${LOCK_DIR}" >&2
+      if [[ ${INSTALL_COMMITTED} -eq 0 ]]; then
+        rollback_failed=1
+      fi
+    fi
   fi
   if [[ ${rollback_failed} -ne 0 ]]; then
     echo "Elvern VLC Opener rollback could not be verified." >&2
@@ -137,9 +240,9 @@ cleanup() {
     [[ -n "${FAILED_NEW_APP}" ]] \
       && echo "Preserved the failed newly registered App: ${FAILED_NEW_APP}" >&2
     echo "Repair only the listed Elvern App registration before retrying." >&2
-    return 1
+    exit 1
   fi
-  return 0
+  exit "${status}"
 }
 trap cleanup EXIT
 
@@ -334,8 +437,10 @@ LOCK_HELD=1
 printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
   "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${INSTALL_NONCE}" \
   > "${LOCK_DIR}/owner"
-chmod 644 "${LOCK_DIR}/owner"
+chmod 600 "${LOCK_DIR}/owner"
 STAGE_ROOT="$(mktemp -d "${DEST_DIR}/.elvern-vlc-opener-stage.XXXXXX")"
+printf '%s\n' "${INSTALL_NONCE}" > "${STAGE_ROOT}/transaction-owner"
+chmod 600 "${STAGE_ROOT}/transaction-owner"
 STAGING_CREATED=1
 inject_failure "staging_created"
 STAGED_APP="${STAGE_ROOT}/${APP_NAME}"
@@ -408,6 +513,9 @@ OLD_REGISTRATION_CAPTURED=1
 if [[ -d "${DEST_APP}" ]]; then
   OLD_INSTALL_EXISTED=1
   BACKUP_APP="$(prepare_backup_target ".elvern-vlc-opener-backup")"
+  BACKUP_OWNER="${BACKUP_APP}.transaction-owner"
+  printf '%s\n' "${INSTALL_NONCE}" > "${BACKUP_OWNER}"
+  chmod 600 "${BACKUP_OWNER}"
   inject_failure "backup_target_prepared"
   inject_failure "first_backup_move"
   mv "${DEST_APP}" "${BACKUP_APP}" || fail "The existing Helper App could not be staged for upgrade."

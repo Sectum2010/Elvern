@@ -2,6 +2,15 @@
 set -eu
 umask 022
 
+for elvern_required_command in \
+  awk cat chmod cp date dirname grep mkdir mktemp mv rm rmdir stat tr xdg-mime
+do
+  command -v "${elvern_required_command}" >/dev/null 2>&1 || {
+    echo "Elvern VLC Opener was not removed: ${elvern_required_command} is required to remove Elvern VLC Opener." >&2
+    exit 1
+  }
+done
+
 INSTALL_PARENT="${HOME}/.local/lib"
 INSTALL_DIR="${INSTALL_PARENT}/elvern-vlc-opener"
 LOCK_DIR="${INSTALL_PARENT}/.elvern-vlc-opener-install.lock"
@@ -97,17 +106,15 @@ validate_path_environment() {
     && safe_existing_directory_chain "${INSTALL_PARENT}" \
     && safe_existing_directory_chain "${XDG_CONFIG_ROOT}" \
     && safe_existing_directory_chain "${XDG_DATA_ROOT}" \
+    && safe_existing_directory_chain "${DESKTOP_DIR}" \
+    && safe_existing_directory_chain "${TMPDIR:-/tmp}" \
     || fail "a user installation path contains an unsafe link."
-  old_path_ifs=${IFS}
-  IFS=:
-  for safe_path in ${XDG_DATA_SEARCH_PATH}; do
-    IFS=${old_path_ifs}
-    [ -n "${safe_path}" ] || safe_path="${HOME}/.local/share"
-    elvern_safe_absolute_path_value "${safe_path}" \
-      || fail "an XDG data search path is unsafe."
-    IFS=:
+  for safe_leaf in \
+    "${INSTALL_DIR}" "${DESKTOP_FILE}" "${MIME_CONFIG_FILE}" "${MIME_DATA_FILE}"
+  do
+    [ ! -L "${safe_leaf}" ] \
+      || fail "a user installation path contains an unsafe link."
   done
-  IFS=${old_path_ifs}
 }
 
 fail() {
@@ -130,7 +137,9 @@ cleanup_failure_injected() {
 }
 
 transaction_is_owned() {
-  [ -n "${TRANSACTION_DIR}" ] \
+  [ -d "${INSTALL_PARENT}" ] \
+    && [ ! -L "${INSTALL_PARENT}" ] \
+    && [ -n "${TRANSACTION_DIR}" ] \
     && [ -d "${TRANSACTION_DIR}" ] \
     && [ ! -L "${TRANSACTION_DIR}" ] \
     && [ -f "${TRANSACTION_DIR}/transaction-owner" ] \
@@ -139,7 +148,9 @@ transaction_is_owned() {
 }
 
 lock_is_owned() {
-  [ "${LOCK_DIR}" = "${INSTALL_PARENT}/.elvern-vlc-opener-install.lock" ] \
+  [ -d "${INSTALL_PARENT}" ] \
+    && [ ! -L "${INSTALL_PARENT}" ] \
+    && [ "${LOCK_DIR}" = "${INSTALL_PARENT}/.elvern-vlc-opener-install.lock" ] \
     && [ -d "${LOCK_DIR}" ] \
     && [ ! -L "${LOCK_DIR}" ] \
     && [ -f "${LOCK_DIR}/owner" ] \
@@ -188,7 +199,10 @@ desktop_handler_exists() {
     [ -n "${data_root}" ] || data_root="${HOME}/.local/share"
     case "${data_root}" in
       /*) ;;
-      *) return 1 ;;
+      *)
+        IFS=:
+        continue
+        ;;
     esac
     if ! safe_existing_directory_chain "${data_root}" \
       || ! safe_existing_directory_chain "${data_root}/applications" \
@@ -455,7 +469,7 @@ cleanup() {
 trap cleanup 0
 
 for command in \
-  awk cat chmod cp date dirname grep mkdir mktemp mv rm rmdir stat xdg-mime
+  awk cat chmod cp date dirname grep mkdir mktemp mv rm rmdir stat tr xdg-mime
 do
   require_command "${command}"
 done
@@ -471,7 +485,7 @@ LOCK_HELD=1
 printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
   "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TRANSACTION_NONCE}" \
   > "${LOCK_DIR}/owner"
-chmod 644 "${LOCK_DIR}/owner"
+chmod 600 "${LOCK_DIR}/owner"
 
 CURRENT_DEFAULT=$(query_default_handler)
 STALE_MAPPING=0

@@ -11,6 +11,7 @@ PLISTBUDDY="/usr/libexec/PlistBuddy"
 INFO_PLIST="${DEST_APP}/Contents/Info.plist"
 STATE_PLIST="${DEST_APP}/Contents/Resources/install-state.plist"
 BACKUP_APP=""
+BACKUP_OWNER=""
 LOCK_HELD=0
 UNREGISTERED=0
 APP_MOVED=0
@@ -65,17 +66,72 @@ inject_failure() {
   fi
 }
 
+cleanup_failure_injected() {
+  local point="$1"
+  [[
+    "${ELVERN_UNINSTALL_TEST_MODE:-0}" == "1"
+    && "${ELVERN_UNINSTALL_TEST_FAIL_CLEANUP_AT:-}" == "${point}"
+  ]]
+}
+
+backup_is_owned() {
+  [[
+    -d "${DEST_DIR}"
+    && ! -L "${DEST_DIR}"
+    && -n "${BACKUP_APP}"
+    && "${BACKUP_APP}" == "${DEST_DIR}"/.elvern-vlc-opener-uninstall-backup.*.app
+    && -d "${BACKUP_APP}"
+    && ! -L "${BACKUP_APP}"
+    && "${BACKUP_OWNER}" == "${BACKUP_APP}.transaction-owner"
+    && -f "${BACKUP_OWNER}"
+    && ! -L "${BACKUP_OWNER}"
+    && "$(<"${BACKUP_OWNER}")" == "${TRANSACTION_NONCE}"
+  ]]
+}
+
+backup_owner_marker_is_owned() {
+  [[
+    -d "${DEST_DIR}"
+    && ! -L "${DEST_DIR}"
+    && -n "${BACKUP_OWNER}"
+    && -n "${BACKUP_APP}"
+    && "${BACKUP_OWNER}" == "${BACKUP_APP}.transaction-owner"
+    && -f "${BACKUP_OWNER}"
+    && ! -L "${BACKUP_OWNER}"
+    && "$(<"${BACKUP_OWNER}")" == "${TRANSACTION_NONCE}"
+  ]]
+}
+
+lock_is_owned() {
+  [[
+    -d "${DEST_DIR}"
+    && ! -L "${DEST_DIR}"
+    && "${LOCK_DIR}" == "${DEST_DIR}/.elvern-vlc-opener-install.lock"
+    && -d "${LOCK_DIR}"
+    && ! -L "${LOCK_DIR}"
+    && -f "${LOCK_DIR}/owner"
+    && ! -L "${LOCK_DIR}/owner"
+  ]] \
+    && grep -F -x "transaction_nonce=${TRANSACTION_NONCE}" "${LOCK_DIR}/owner" \
+      >/dev/null 2>&1
+}
+
 cleanup() {
   local status=$?
   trap - EXIT
   if [[ ${UNINSTALL_COMMITTED} -eq 0 ]]; then
     if [[ ${APP_MOVED} -eq 1 ]]; then
-      if [[ -e "${DEST_APP}" || ! -d "${BACKUP_APP}" ]]; then
+      if [[ -e "${DEST_APP}" ]] || ! backup_is_owned; then
         ROLLBACK_FAILED=1
       elif ! mv "${BACKUP_APP}" "${DEST_APP}"; then
         ROLLBACK_FAILED=1
       else
         APP_MOVED=0
+        if backup_owner_marker_is_owned; then
+          rm -f "${BACKUP_OWNER}" || ROLLBACK_FAILED=1
+        else
+          ROLLBACK_FAILED=1
+        fi
       fi
     fi
     if [[ ${UNREGISTERED} -eq 1 ]]; then
@@ -90,9 +146,26 @@ cleanup() {
         || ROLLBACK_FAILED=1
     fi
   fi
+  if [[
+    ${UNINSTALL_COMMITTED} -eq 0
+    && ${APP_MOVED} -eq 0
+    && -n "${BACKUP_OWNER}"
+    && -e "${BACKUP_OWNER}"
+  ]]; then
+    if ! backup_owner_marker_is_owned || ! rm -f "${BACKUP_OWNER}"; then
+      ROLLBACK_FAILED=1
+    fi
+  fi
   if [[ ${LOCK_HELD} -eq 1 ]]; then
-    rm -f "${LOCK_DIR}/owner"
-    rmdir "${LOCK_DIR}" 2>/dev/null || :
+    if ! lock_is_owned \
+      || cleanup_failure_injected "lock" \
+      || ! rm -f "${LOCK_DIR}/owner" \
+      || ! rmdir "${LOCK_DIR}" 2>/dev/null; then
+      echo "Warning: uninstall lock cleanup failed: ${LOCK_DIR}" >&2
+      if [[ ${UNINSTALL_COMMITTED} -eq 0 ]]; then
+        ROLLBACK_FAILED=1
+      fi
+    fi
   fi
   if [[ ${ROLLBACK_FAILED} -ne 0 ]]; then
     echo "Elvern VLC Opener uninstall rollback could not be verified." >&2
@@ -112,7 +185,7 @@ LOCK_HELD=1
 printf 'pid=%s\nstarted_at=%s\ntransaction_nonce=%s\n' \
   "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TRANSACTION_NONCE}" \
   > "${LOCK_DIR}/owner"
-chmod 644 "${LOCK_DIR}/owner"
+chmod 600 "${LOCK_DIR}/owner"
 
 if [[ ! -e "${DEST_APP}" ]]; then
   echo "${DEST_APP} is not installed."
@@ -145,6 +218,9 @@ fi
   || fail "Launch Services registration support is unavailable."
 
 BACKUP_APP="$(prepare_backup_target ".elvern-vlc-opener-uninstall-backup")"
+BACKUP_OWNER="${BACKUP_APP}.transaction-owner"
+printf '%s\n' "${TRANSACTION_NONCE}" > "${BACKUP_OWNER}"
+chmod 600 "${BACKUP_OWNER}"
 inject_failure "backup_target_prepared"
 inject_failure "unregister"
 "${LSREGISTER}" -u "${DEST_APP}" >/dev/null 2>&1 \
@@ -160,10 +236,14 @@ APP_MOVED=1
 inject_failure "final_verification"
 UNINSTALL_COMMITTED=1
 if [[ "${ELVERN_UNINSTALL_TEST_MODE:-0}" == "1" \
-  && "${ELVERN_UNINSTALL_TEST_FAIL_AT:-}" == "backup_delete" ]]; then
+  && "${ELVERN_UNINSTALL_TEST_FAIL_AT:-}" == "backup_delete" ]] \
+  || cleanup_failure_injected "backup" \
+  || ! backup_is_owned; then
   echo "Warning: the committed App backup could not be removed: ${BACKUP_APP}" >&2
 elif ! rm -rf "${BACKUP_APP}"; then
   echo "Warning: the committed App backup could not be removed: ${BACKUP_APP}" >&2
+elif ! rm -f "${BACKUP_OWNER}"; then
+  echo "Warning: the committed App backup ownership marker could not be removed: ${BACKUP_OWNER}" >&2
 else
   APP_MOVED=0
   BACKUP_APP=""

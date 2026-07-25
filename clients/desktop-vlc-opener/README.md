@@ -40,7 +40,11 @@ configured runtime release directory:
 required for activation. Docker deployments use `/data/helper_releases`.
 Activation copies immutable, content-hash-named ZIPs first, flushes package bytes
 and directory metadata, and atomically replaces the active manifest last. A lock
-with non-sensitive owner diagnostics prevents concurrent activation. Failure
+in the runtime destination's parent uses a hash of the canonical destination path
+and non-sensitive owner diagnostics. The same lock is used by explicit runtime
+migration, so publisher/publisher, publisher/migration, and migration/migration
+writers cannot overlap. Unknown stale locks are never removed automatically.
+Failure
 before the final manifest rename leaves the previous active manifest authoritative
 and removes temporary active files. The dangerous
 `--allow-partial-activate` option exists only for explicit rollback/recovery work.
@@ -60,7 +64,10 @@ by explicit migration `--apply`. `migrate` is a dry-run unless `--apply` is
 supplied, requires absolute non-symlink paths whose direct parents exist plus the
 expected origin hash, validates all three packages, never chmods the source, and
 writes the manifest last. A pre-existing manifest with any referenced package
-missing is an incomplete active authority and fails closed.
+missing is an incomplete active authority and fails closed. An absent authority is
+always `not_checked`; an invalid or unreadable authority is `unknown` when an
+expected hash was supplied. Only a valid manifest whose legal origin hash differs
+is `incompatible`.
 
 Publishing requires the .NET 10 SDK and every requested RID runtime pack. Any
 missing RID fails the entire selected publish; the script never substitutes a
@@ -153,8 +160,12 @@ Any failure after either user `mimeapps.list` replacement restores both MIME fil
 their modes, the desktop entry, and effective default. Old state that names Elvern
 as its own previous handler is safely ignored. XDG/TMP paths reject control
 characters and relative roots before mutation, and handler discovery rejects
-symlinked user parent chains. Cleanup failures after commit only warn and preserve
-the exact residual path.
+symlinked user parent chains. Installer and uninstaller both reject any existing
+symlink component in user-controlled `HOME`, install, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, MIME, and temporary authority paths; such layouts are unsupported.
+Unsafe system `XDG_DATA_DIRS` entries are skipped instead of used for handler
+recovery. Cleanup failures after commit only warn and preserve the exact residual
+path.
 
 Windows and macOS uninstallers also use the installers' per-user locks and stage
 registration/install backups before removal. A failed rollback preserves recovery

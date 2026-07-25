@@ -259,7 +259,11 @@ For a compatibility assertion, pass the expected canonical origin SHA-256 to
 `inspect`. Without it, `origin_compatible` is `null`, not true. Runtime manifests
 and content-addressed ZIPs must be mode `0444`; inspect reports mutable files and
 explicit migration apply can repair only identical content. Missing intermediate
-parents and any symlinked path component fail closed.
+parents and any symlinked path component fail closed. Publisher activation and
+runtime migration share one hashed sibling authority lock. Unknown stale locks are
+not automatically removed; confirm no writer is active before manual recovery.
+Absent authority is `not_checked`, invalid authority is `unknown`, and only a
+validated differing origin hash is `incompatible`.
 
 If direct play fails for a file that looked safe, the frontend will try to force an HLS fallback automatically. If playback still fails:
 

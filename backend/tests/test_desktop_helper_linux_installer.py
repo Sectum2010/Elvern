@@ -190,6 +190,7 @@ def _create_linux_package(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
         f"""#!{sys.executable}
 import os
 import pathlib
+import shutil
 import sys
 
 state = pathlib.Path(os.environ["ELVERN_TEST_XDG_STATE"])
@@ -258,6 +259,19 @@ if args == ["query", "default", mime]:
     raise SystemExit(0)
 if len(args) == 3 and args[0] == "default" and args[2] == mime:
     write_default(args[1])
+    replace_for = os.environ.get("ELVERN_TEST_REPLACE_LOCK_FOR_HANDLER")
+    if replace_for and args[1] == replace_for:
+        lock_dir = pathlib.Path(os.environ["HOME"]) / ".local/lib/.elvern-vlc-opener-install.lock"
+        mode = os.environ.get("ELVERN_TEST_REPLACE_LOCK_MODE", "owner")
+        if mode == "directory":
+            shutil.rmtree(lock_dir)
+            lock_dir.mkdir(mode=0o700)
+        owner = lock_dir / "owner"
+        owner.write_text(
+            "pid=999999\\nstarted_at=foreign\\ntransaction_nonce=foreign-owner\\n",
+            encoding="utf-8",
+        )
+        owner.chmod(0o600)
     if (
         os.environ.get("ELVERN_TEST_XDG_ROLLBACK_MISMATCH") == "1"
         and args[1] != "elvern-vlc-opener.desktop"
@@ -285,6 +299,7 @@ def _run_installer(
     env: dict[str, str],
     *,
     fail_at: str | None = None,
+    cleanup_fail_at: str | None = None,
     runtime_id: str | None = "linux-x64",
 ) -> subprocess.CompletedProcess[str]:
     run_env = dict(env)
@@ -292,6 +307,11 @@ def _run_installer(
         run_env.update({
             "ELVERN_INSTALL_TEST_MODE": "1",
             "ELVERN_INSTALL_TEST_FAIL_AT": fail_at,
+        })
+    if cleanup_fail_at:
+        run_env.update({
+            "ELVERN_INSTALL_TEST_MODE": "1",
+            "ELVERN_INSTALL_TEST_FAIL_CLEANUP_AT": cleanup_fail_at,
         })
     command = ["/bin/sh", str(package_root / "Install-ElvernVlcOpener.sh")]
     if runtime_id is not None:
@@ -1275,7 +1295,6 @@ def test_linux_post_commit_cleanup_failures_are_warning_only(
     [
         ("XDG_CONFIG_HOME", "/tmp/elvern\tconfig"),
         ("XDG_DATA_HOME", "/tmp/elvern\ndata"),
-        ("XDG_DATA_DIRS", "/usr/share\r:/usr/local/share"),
         ("XDG_CONFIG_HOME", "relative/config"),
     ],
 )
@@ -1352,3 +1371,163 @@ def test_linux_handler_search_skips_untrusted_system_root_and_uses_safe_root(
 
     assert result.returncode == 0, result.stderr
     assert _read_default_handler(state) == "old-handler.desktop"
+
+
+@pytest.mark.parametrize("cleanup_point", ["stage", "backup", "transaction", "lock"])
+def test_linux_installer_post_commit_cleanup_failures_are_warning_only(
+    tmp_path: Path,
+    cleanup_point: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    install_dir = Path(env["HOME"]) / ".local/lib/elvern-vlc-opener"
+
+    result = _run_installer(
+        package_root,
+        env,
+        cleanup_fail_at=cleanup_point,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert install_dir.is_dir()
+    assert (install_dir / "Elvern.VlcOpener").is_file()
+    assert _read_default_handler(state) == "elvern-vlc-opener.desktop"
+    assert "Warning:" in result.stderr
+    assert "rollback could not be verified" not in result.stderr
+
+
+@pytest.mark.parametrize("replacement_mode", ["owner", "directory"])
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_linux_committed_transaction_does_not_remove_replaced_lock(
+    tmp_path: Path,
+    operation: str,
+    replacement_mode: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    if operation == "uninstall":
+        previous_handler = (
+            Path(env["HOME"])
+            / ".local/share/applications/old-handler.desktop"
+        )
+        previous_handler.parent.mkdir(parents=True, exist_ok=True)
+        previous_handler.write_text(
+            "[Desktop Entry]\nName=Previous handler\n",
+            encoding="utf-8",
+        )
+        assert _run_installer(package_root, env).returncode == 0
+        expected_handler = "old-handler.desktop"
+    else:
+        expected_handler = "elvern-vlc-opener.desktop"
+    env.update({
+        "ELVERN_TEST_REPLACE_LOCK_FOR_HANDLER": expected_handler,
+        "ELVERN_TEST_REPLACE_LOCK_MODE": replacement_mode,
+    })
+
+    result = (
+        _run_installer(package_root, env)
+        if operation == "install"
+        else _run_uninstaller(env)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "lock cleanup failed" in result.stderr
+    lock_dir = Path(env["HOME"]) / ".local/lib/.elvern-vlc-opener-install.lock"
+    assert lock_dir.is_dir()
+    assert "transaction_nonce=foreign-owner" in (
+        lock_dir / "owner"
+    ).read_text(encoding="utf-8")
+    if operation == "install":
+        assert (Path(env["HOME"]) / ".local/lib/elvern-vlc-opener").is_dir()
+        assert _read_default_handler(state) == "elvern-vlc-opener.desktop"
+    else:
+        assert not (Path(env["HOME"]) / ".local/lib/elvern-vlc-opener").exists()
+        assert _read_default_handler(state) == "old-handler.desktop"
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize(
+    "unsafe_kind",
+    ["home", "xdg_config", "xdg_data", "install_parent", "mime_leaf"],
+)
+def test_linux_user_authority_symlink_chain_is_rejected_before_mutation(
+    tmp_path: Path,
+    operation: str,
+    unsafe_kind: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    before = state.read_bytes()
+    home = Path(env["HOME"])
+    if unsafe_kind == "home":
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(home, target_is_directory=True)
+        env["HOME"] = str(linked_home)
+    elif unsafe_kind in {"xdg_config", "xdg_data"}:
+        target = tmp_path / f"{unsafe_kind}-target"
+        target.mkdir()
+        link = tmp_path / f"{unsafe_kind}-link"
+        link.symlink_to(target, target_is_directory=True)
+        env["XDG_CONFIG_HOME" if unsafe_kind == "xdg_config" else "XDG_DATA_HOME"] = str(link)
+    elif unsafe_kind == "install_parent":
+        local_root = home / ".local"
+        lib = local_root / "lib"
+        if lib.exists():
+            shutil.rmtree(lib)
+        target = tmp_path / "linked-lib-target"
+        target.mkdir()
+        lib.symlink_to(target, target_is_directory=True)
+    else:
+        config = tmp_path / "safe-config"
+        config.mkdir()
+        target = tmp_path / "mime-target"
+        target.write_text("[Default Applications]\n", encoding="utf-8")
+        (config / "mimeapps.list").symlink_to(target)
+        env["XDG_CONFIG_HOME"] = str(config)
+
+    if operation == "install":
+        result = _run_installer(package_root, env)
+    else:
+        result = subprocess.run(
+            ["/bin/sh", str(LINUX_UNINSTALLER)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    assert result.returncode != 0
+    assert "unsafe link" in result.stderr
+    assert state.read_bytes() == before
+    install_parent = Path(env["HOME"]) / ".local/lib"
+    assert not (install_parent / ".elvern-vlc-opener-install.lock").exists()
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_linux_missing_tr_fails_preflight_before_mutation(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    fake_bin = Path(env["PATH"].split(":", 1)[0])
+    system_bin = Path(env["PATH"].split(os.pathsep)[1])
+    (system_bin / "tr").unlink()
+    before = state.read_bytes()
+
+    if operation == "install":
+        result = _run_installer(package_root, env)
+        expected = "tr is required to install Elvern VLC Opener."
+    else:
+        result = subprocess.run(
+            ["/bin/sh", str(LINUX_UNINSTALLER)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        expected = "tr is required to remove Elvern VLC Opener."
+
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert state.read_bytes() == before
+    assert not (
+        Path(env["HOME"]) / ".local/lib/.elvern-vlc-opener-install.lock"
+    ).exists()

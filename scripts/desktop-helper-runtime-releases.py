@@ -7,16 +7,30 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from elvern_shared.desktop_helper_package_contract import (  # noqa: E402
+    AUTHORITY_MUTATION_LOCK_SCHEMA,
+    authority_mutation_lock_basename,
+    authority_runtime_path_sha256,
+)
+
+
 VALIDATOR = REPO_ROOT / "clients/desktop-vlc-opener/scripts/validate-package.py"
 MANIFEST_NAME = "release-manifest.json"
 EXPECTED_TARGETS = ("windows-x64", "macos-dual-arch", "linux-universal")
@@ -31,6 +45,20 @@ class AuthorityError(RuntimeError):
 
 class AuthorityOriginMismatch(AuthorityError):
     pass
+
+
+class AuthorityInterrupted(AuthorityError):
+    pass
+
+
+class _ModeRepair(NamedTuple):
+    path: Path
+    original_mode: int
+    fingerprint: tuple[int, int, int, int]
+
+
+def _content_fingerprint(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
 
 
 def _safe_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -151,6 +179,41 @@ def _read_regular_file_at(
         os.close(directory_fd)
 
 
+def _stat_regular_file_at(directory: Path, filename: str) -> os.stat_result:
+    if not filename or "/" in filename or filename in {".", ".."}:
+        raise AuthorityError("Release authority filename is unsafe.")
+    directory_fd = _open_directory_fd(directory)
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(
+                filename,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            raise AuthorityError(
+                "Release authority file could not be opened safely."
+            ) from exc
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AuthorityError("Release authority file is not a safe regular file.")
+        current = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            current.st_dev != metadata.st_dev
+            or current.st_ino != metadata.st_ino
+            or not stat.S_ISREG(current.st_mode)
+        ):
+            raise AuthorityError(
+                "Release authority file changed while it was being inspected."
+            )
+        return metadata
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
 def _load_manifest(directory: Path) -> tuple[dict[str, object], bytes]:
     content, _metadata = _read_regular_file_at(
         directory,
@@ -172,11 +235,6 @@ def _validate(
     expected_origin: str | None,
 ) -> dict[str, object]:
     payload, manifest_bytes = _load_manifest(directory)
-    manifest_origin = payload.get("bound_origin_sha256")
-    if expected_origin is not None and manifest_origin != expected_origin:
-        raise AuthorityOriginMismatch(
-            "Release manifest origin identity is incompatible with this server."
-        )
     (REPO_ROOT / "tmp").mkdir(mode=0o755, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".desktop-helper-authority-",
@@ -195,11 +253,14 @@ def _validate(
         ]
         for target in EXPECTED_TARGETS:
             command.extend(("--expected-package-target", target))
-        if expected_origin:
-            command.extend(("--expected-origin-sha256", expected_origin))
         result = subprocess.run(command, text=True, capture_output=True, check=False)
     if result.returncode != 0:
         raise AuthorityError("Strict package validation failed.")
+    manifest_origin = payload.get("bound_origin_sha256")
+    if expected_origin is not None and manifest_origin != expected_origin:
+        raise AuthorityOriginMismatch(
+            "Release manifest origin identity is incompatible with this server."
+        )
     return payload
 
 
@@ -229,7 +290,7 @@ def _mutable_authority_files(
 ) -> list[str]:
     mutable: list[str] = []
     for filename in (*_package_names(payload), MANIFEST_NAME):
-        _content, metadata = _read_regular_file_at(directory, filename)
+        metadata = _stat_regular_file_at(directory, filename)
         if stat.S_IMODE(metadata.st_mode) != IMMUTABLE_FILE_MODE:
             mutable.append(filename)
     return mutable
@@ -269,8 +330,8 @@ def inspect_authority(directory: Path, expected_origin: str | None) -> int:
         print(json.dumps({
             "runtime_dir": str(directory),
             "manifest_state": "absent",
-            "origin_check": "not_checked" if expected_origin is None else "incompatible",
-            "origin_compatible": None if expected_origin is None else False,
+            "origin_check": "not_checked",
+            "origin_compatible": None,
         }, indent=2))
         return 2
     try:
@@ -280,8 +341,8 @@ def inspect_authority(directory: Path, expected_origin: str | None) -> int:
         print(json.dumps({
             "runtime_dir": str(directory),
             "manifest_state": "absent",
-            "origin_check": "not_checked" if expected_origin is None else "incompatible",
-            "origin_compatible": None if expected_origin is None else False,
+            "origin_check": "not_checked",
+            "origin_compatible": None,
         }, indent=2))
         return 2
     except AuthorityOriginMismatch as exc:
@@ -292,13 +353,13 @@ def inspect_authority(directory: Path, expected_origin: str | None) -> int:
             "origin_compatible": False,
             "error": str(exc),
         }, indent=2))
-        return 3
+        return 5
     except AuthorityError as exc:
         print(json.dumps({
             "runtime_dir": str(directory),
             "manifest_state": "invalid",
-            "origin_check": "not_checked" if expected_origin is None else "incompatible",
-            "origin_compatible": None if expected_origin is None else False,
+            "origin_check": "unknown" if expected_origin is not None else "not_checked",
+            "origin_compatible": None,
             "error": str(exc),
         }, indent=2))
         return 3
@@ -392,20 +453,194 @@ def _copy_verified_file(source_file: Path, destination: Path, index: int) -> Non
         temporary_path.unlink(missing_ok=True)
 
 
-def migrate_authority(
+class _AuthorityMutationLock:
+    def __init__(self, destination: Path) -> None:
+        self.destination = destination
+        self.parent = destination.parent
+        self.runtime_path_sha256 = authority_runtime_path_sha256(str(destination))
+        self.basename = authority_mutation_lock_basename(str(destination))
+        self.path = self.parent / self.basename
+        self.nonce = secrets.token_hex(24)
+        self._identity: tuple[int, int] | None = None
+
+    def acquire(self) -> None:
+        try:
+            os.mkdir(self.path, 0o700)
+        except FileExistsError as exc:
+            raise AuthorityError(
+                "Another Desktop Helper authority mutation is active, or an "
+                "unknown stale lock remains. Confirm no publisher or migration "
+                "is running before removing the hashed lock manually."
+            ) from exc
+        metadata = os.lstat(self.path)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise AuthorityError("Desktop Helper authority mutation lock is unsafe.")
+        self._identity = (metadata.st_dev, metadata.st_ino)
+        owner = self.path / "owner"
+        payload = (
+            f"schema={AUTHORITY_MUTATION_LOCK_SCHEMA}\n"
+            f"pid={os.getpid()}\n"
+            f"started_at={datetime.now(timezone.utc).isoformat()}\n"
+            f"transaction_nonce={self.nonce}\n"
+            f"runtime_path_sha256={self.runtime_path_sha256}\n"
+        ).encode("ascii")
+        try:
+            descriptor = os.open(
+                owner,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                os.write(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            _fsync_directory(self.path)
+            _fsync_directory(self.parent)
+        except BaseException:
+            try:
+                owner.unlink(missing_ok=True)
+                self.path.rmdir()
+                _fsync_directory(self.parent)
+            except OSError:
+                pass
+            self._identity = None
+            raise
+
+    def is_owned(self) -> bool:
+        if self._identity is None:
+            return False
+        try:
+            lock_metadata = os.lstat(self.path)
+            if (
+                stat.S_ISLNK(lock_metadata.st_mode)
+                or not stat.S_ISDIR(lock_metadata.st_mode)
+                or (lock_metadata.st_dev, lock_metadata.st_ino) != self._identity
+            ):
+                return False
+            content, owner_metadata = _read_regular_file_at(
+                self.path,
+                "owner",
+                max_bytes=4096,
+            )
+            if stat.S_IMODE(owner_metadata.st_mode) != 0o600:
+                return False
+            fields: dict[str, str] = {}
+            for line in content.decode("ascii").splitlines():
+                key, separator, value = line.partition("=")
+                if not separator or key in fields:
+                    return False
+                fields[key] = value
+            return fields == {
+                "schema": AUTHORITY_MUTATION_LOCK_SCHEMA,
+                "pid": str(os.getpid()),
+                "started_at": fields.get("started_at", ""),
+                "transaction_nonce": self.nonce,
+                "runtime_path_sha256": self.runtime_path_sha256,
+            } and bool(fields["started_at"])
+        except (AuthorityError, OSError, UnicodeDecodeError, ValueError):
+            return False
+
+    def release(self) -> bool:
+        if not self.is_owned():
+            return False
+        try:
+            os.unlink(self.path / "owner")
+            os.rmdir(self.path)
+            _fsync_directory(self.parent)
+        except OSError:
+            return False
+        self._identity = None
+        return True
+
+
+@contextmanager
+def _authority_mutation_lock(destination: Path):
+    lock = _AuthorityMutationLock(destination)
+    lock.acquire()
+    previous_handlers: dict[int, object] = {}
+
+    def interrupt(signum, _frame):
+        raise AuthorityInterrupted(
+            f"Desktop Helper authority mutation interrupted by signal {signum}."
+        )
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, interrupt)
+    try:
+        yield lock
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        if not lock.release():
+            print(
+                "Warning: Desktop Helper authority lock was not removed because "
+                "transaction ownership could not be verified.",
+                file=sys.stderr,
+            )
+
+
+def _record_mode_repair(path: Path) -> _ModeRepair:
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise AuthorityError("Runtime release mode repair target is unsafe.")
+    return _ModeRepair(
+        path=path,
+        original_mode=stat.S_IMODE(metadata.st_mode),
+        fingerprint=_content_fingerprint(metadata),
+    )
+
+
+def _restore_modes(
+    repairs: list[_ModeRepair],
+    destination: Path,
+    lock: _AuthorityMutationLock,
+) -> list[str]:
+    failures: list[str] = []
+    if not lock.is_owned():
+        return ["authority lock ownership changed before rollback"]
+    for repair in reversed(repairs):
+        try:
+            current = os.lstat(repair.path)
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or _content_fingerprint(current) != repair.fingerprint
+            ):
+                failures.append(f"{repair.path.name}: fingerprint changed")
+                continue
+            os.chmod(repair.path, repair.original_mode, follow_symlinks=False)
+            with _open_regular_path(repair.path) as handle:
+                os.fsync(handle.fileno())
+        except (AuthorityError, OSError) as exc:
+            failures.append(f"{repair.path.name}: {type(exc).__name__}")
+    try:
+        _fsync_directory(destination)
+    except (AuthorityError, OSError) as exc:
+        failures.append(f"directory fsync: {type(exc).__name__}")
+    return failures
+
+
+def _repair_mode(path: Path, repairs: list[_ModeRepair]) -> None:
+    repair = _record_mode_repair(path)
+    repairs.append(repair)
+    os.chmod(path, IMMUTABLE_FILE_MODE, follow_symlinks=False)
+    with _open_regular_path(path) as handle:
+        os.fsync(handle.fileno())
+
+
+def _migrate_authority_locked(
     source: Path,
     destination: Path,
     expected_origin: str,
-    *,
-    apply: bool,
+    payload: dict[str, object],
+    all_source_files: list[Path],
+    source_files: list[Path],
+    lock: _AuthorityMutationLock,
 ) -> int:
-    payload = _validate(source, expected_origin=expected_origin)
     package_names = _package_names(payload)
-    source_files = [source / name for name in package_names]
-    manifest_source = source / MANIFEST_NAME
-    all_source_files = [*source_files, manifest_source]
     repairs: list[Path] = []
-
     if destination.exists():
         destination_metadata = os.lstat(destination)
         if stat.S_ISLNK(destination_metadata.st_mode) or not stat.S_ISDIR(destination_metadata.st_mode):
@@ -425,55 +660,39 @@ def migrate_authority(
             _path_entry_exists(destination / item.name)
             for item in all_source_files
         )
-        if (
-            _path_entry_exists(destination / MANIFEST_NAME)
-            and not all_files_present
-        ):
+        if _path_entry_exists(destination / MANIFEST_NAME) and not all_files_present:
             raise AuthorityError(
                 "Runtime release destination has an incomplete active manifest."
             )
         if all_files_present:
-            if not apply:
-                if repairs:
-                    print(
-                        f"Dry run: would repair immutable mode on {len(repairs)} "
-                        f"runtime authority files in {destination}."
-                    )
-                else:
-                    print("Runtime release authority is already identical.")
-                return 0
             if not repairs:
                 print("Runtime release authority is already identical.")
                 return 0
-            original_modes: dict[Path, int] = {}
+            repaired_modes: list[_ModeRepair] = []
             try:
                 for path in repairs:
-                    original_modes[path] = stat.S_IMODE(os.lstat(path).st_mode)
-                    os.chmod(path, IMMUTABLE_FILE_MODE, follow_symlinks=False)
-                    with _open_regular_path(path) as handle:
-                        os.fsync(handle.fileno())
+                    _repair_mode(path, repaired_modes)
                 _fsync_directory(destination)
                 _validate(destination, expected_origin=expected_origin)
                 if _mutable_authority_files(destination, payload):
                     raise AuthorityError("Runtime release immutable mode repair failed.")
-            except BaseException:
-                for path, mode in original_modes.items():
-                    if _path_entry_exists(path) and not path.is_symlink():
-                        os.chmod(path, mode, follow_symlinks=False)
-                _fsync_directory(destination)
+            except BaseException as exc:
+                rollback_failures = _restore_modes(repaired_modes, destination, lock)
+                if rollback_failures:
+                    raise AuthorityError(
+                        f"{exc} Mode rollback could not be verified: "
+                        + "; ".join(rollback_failures)
+                    ) from exc
                 raise
             print(f"Repaired immutable mode on {len(repairs)} runtime authority files.")
             return 0
 
-    if not apply:
-        print(
-            f"Dry run: validated {len(source_files)} packages for migration "
-            f"into {destination}."
-        )
-        return 0
+    if not destination.exists():
+        destination.mkdir(mode=0o755, parents=False, exist_ok=False)
+        _fsync_directory(destination.parent)
 
-    destination.mkdir(mode=0o755, parents=False, exist_ok=True)
     created: list[Path] = []
+    repaired_modes: list[_ModeRepair] = []
     try:
         for index, source_file in enumerate(all_source_files):
             final_path = destination / source_file.name
@@ -481,9 +700,7 @@ def migrate_authority(
                 if _same_file(final_path, source_file):
                     continue
                 if _same_content(final_path, source_file):
-                    os.chmod(final_path, IMMUTABLE_FILE_MODE, follow_symlinks=False)
-                    with _open_regular_path(final_path) as handle:
-                        os.fsync(handle.fileno())
+                    _repair_mode(final_path, repaired_modes)
                     _fsync_directory(destination)
                     continue
                 raise AuthorityError("Runtime release destination artifact conflicts.")
@@ -492,13 +709,92 @@ def migrate_authority(
         _validate(destination, expected_origin=expected_origin)
         if _mutable_authority_files(destination, payload):
             raise AuthorityError("Migrated runtime authority is mutable.")
-    except BaseException:
-        for path in reversed(created):
-            path.unlink(missing_ok=True)
-        _fsync_directory(destination)
+    except BaseException as exc:
+        cleanup_failures: list[str] = []
+        if lock.is_owned():
+            for path in reversed(created):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    cleanup_failures.append(
+                        f"{path.name}: {type(cleanup_exc).__name__}"
+                    )
+            cleanup_failures.extend(_restore_modes(repaired_modes, destination, lock))
+        else:
+            cleanup_failures.append("authority lock ownership changed before cleanup")
+        if cleanup_failures:
+            raise AuthorityError(
+                f"{exc} Migration rollback could not be verified: "
+                + "; ".join(cleanup_failures)
+            ) from exc
         raise
     print(f"Migrated {len(source_files)} immutable packages; manifest activated last.")
     return 0
+
+
+def migrate_authority(
+    source: Path,
+    destination: Path,
+    expected_origin: str,
+    *,
+    apply: bool,
+) -> int:
+    payload = _validate(source, expected_origin=expected_origin)
+    package_names = _package_names(payload)
+    source_files = [source / name for name in package_names]
+    manifest_source = source / MANIFEST_NAME
+    all_source_files = [*source_files, manifest_source]
+    if not apply:
+        repairs: list[Path] = []
+        if destination.exists():
+            destination_metadata = os.lstat(destination)
+            if stat.S_ISLNK(destination_metadata.st_mode) or not stat.S_ISDIR(destination_metadata.st_mode):
+                raise AuthorityError("Runtime release destination is unsafe.")
+            entries = tuple(destination.iterdir())
+            allowed = set(package_names) | {MANIFEST_NAME}
+            if any(entry.name not in allowed for entry in entries):
+                raise AuthorityError("Runtime release destination contains another authority.")
+            for source_file in all_source_files:
+                final_path = destination / source_file.name
+                if _path_entry_exists(final_path):
+                    if not _same_content(final_path, source_file):
+                        raise AuthorityError(
+                            "Runtime release destination artifact conflicts."
+                        )
+                    if not _same_file(final_path, source_file):
+                        repairs.append(final_path)
+            all_files_present = all(
+                _path_entry_exists(destination / item.name)
+                for item in all_source_files
+            )
+            if _path_entry_exists(destination / MANIFEST_NAME) and not all_files_present:
+                raise AuthorityError(
+                    "Runtime release destination has an incomplete active manifest."
+                )
+            if all_files_present:
+                if repairs:
+                    print(
+                        f"Dry run: would repair immutable mode on {len(repairs)} "
+                        f"runtime authority files in {destination}."
+                    )
+                else:
+                    print("Runtime release authority is already identical.")
+                return 0
+        print(
+            f"Dry run: validated {len(source_files)} packages for migration "
+            f"into {destination}."
+        )
+        return 0
+    with _authority_mutation_lock(destination) as lock:
+        return _migrate_authority_locked(
+            source,
+            destination,
+            expected_origin,
+            payload,
+            all_source_files,
+            source_files,
+            lock,
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
