@@ -3,22 +3,22 @@ import {
   apiRequest,
   isAbortError,
   isTransientNetworkError,
-} from "../lib/api";
-import { getOrCreateDeviceId } from "../lib/device";
+} from "../../lib/api";
+import { getOrCreateDeviceId } from "../../lib/device";
 import {
   buildMacTerminalInstallCommand,
   copyTextToClipboard,
   isPackageLevelDesktopHelperRelease,
-} from "../lib/desktopHelperInstall";
+} from "../../lib/desktopHelperInstall";
 import {
   detectClientPlatform,
   isDesktopClientPlatform,
-} from "../lib/platformDetection";
-import { PAGE_RESUME_EVENT } from "../lib/pageResume.js";
+} from "../../lib/platformDetection";
+import { PAGE_RESUME_EVENT } from "../../lib/pageResume.js";
 import {
   getConnectivityIncidentRecoveryGeneration,
   subscribeConnectivityRecovery,
-} from "../lib/connectivityRecoveryStore.js";
+} from "../../lib/connectivityRecoveryStore.js";
 
 
 const IOS_APP_LINKS = {
@@ -471,7 +471,7 @@ function verifyMobileAppInstall({ openUrl, statusKey, onStatusChange }) {
   }, 2200);
 }
 
-export function InstallPage() {
+export function InstallSettingsPanel() {
   const platform = useMemo(() => detectInstallPlatform(), []);
   const iosStoreRegion = useMemo(() => detectIosStoreRegion(), []);
   const isDesktop = isDesktopPlatform(platform);

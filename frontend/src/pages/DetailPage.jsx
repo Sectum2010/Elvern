@@ -2330,7 +2330,7 @@ export function DetailPage() {
       stopBrowserPlaybackForDesktopHandoff("This movie is hidden for your account");
       setItem((current) => (current ? { ...current, hidden_for_user: true } : current));
       setHiddenActionMessage(
-        payload.message || "This movie is hidden for your account. Restore it from Settings > Hidden for me.",
+        payload.message || "This movie is hidden for your account. Restore it from Settings > Libraries > Hidden for me.",
       );
       void invalidateLibraryQueries();
     } catch (requestError) {
@@ -3136,7 +3136,7 @@ export function DetailPage() {
             >
               {globalHiddenActionPending ? "Restoring..." : "Show for everyone"}
             </button>
-            <Link className="ghost-button ghost-button--inline" to="/settings">
+            <Link className="ghost-button ghost-button--inline" to="/settings?section=libraries">
               Open Hidden for everyone in Settings
             </Link>
             {renderBackToLibraryButton()}
@@ -3164,7 +3164,7 @@ export function DetailPage() {
             <p className="eyebrow">Hidden</p>
             <h2>This movie is hidden for your account</h2>
             <p className="page-subnote">
-              It stays hidden until you restore it from Settings &gt; Hidden for me, or use Show again here.
+              It stays hidden until you restore it from Settings &gt; Libraries &gt; Hidden for me, or use Show again here.
             </p>
             <div className="detail-list">
               {item.year ? <span>{item.year}</span> : null}
@@ -3181,7 +3181,7 @@ export function DetailPage() {
             >
               {hiddenActionPending ? "Restoring..." : "Show again"}
             </button>
-            <Link className="ghost-button ghost-button--inline" to="/settings">
+            <Link className="ghost-button ghost-button--inline" to="/settings?section=libraries">
               Open Hidden for me in Settings
             </Link>
             {renderBackToLibraryButton()}

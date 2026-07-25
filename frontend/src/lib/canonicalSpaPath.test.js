@@ -16,6 +16,7 @@ describe("canonical SPA paths", () => {
     ["/library/42/", "/library/42"],
     ["/settings/", "/settings"],
     ["/install/", "/install"],
+    ["/desktop/", "/desktop"],
     ["/admin/", "/admin"],
     ["/assistant/", "/assistant"],
     ["/", "/"],

@@ -25,8 +25,8 @@ def _cleanup_audit_logs_in_connection(connection, *, now_iso: str | None = None)
     )
 
 
-def log_audit_event(
-    settings: Settings,
+def write_audit_event_in_connection(
+    connection,
     *,
     action: str,
     outcome: str,
@@ -44,42 +44,74 @@ def log_audit_event(
     details_json = None
     if details:
         details_json = json.dumps(details, sort_keys=True, ensure_ascii=True)
+    _cleanup_audit_logs_in_connection(connection)
+    connection.execute(
+        """
+        INSERT INTO audit_logs (
+            created_at,
+            user_id,
+            username,
+            role,
+            action,
+            outcome,
+            target_type,
+            target_id,
+            media_item_id,
+            session_id,
+            ip_address,
+            user_agent,
+            details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            utcnow_iso(),
+            user_id,
+            username,
+            role,
+            action,
+            outcome,
+            target_type,
+            str(target_id) if target_id is not None else None,
+            media_item_id,
+            session_id,
+            ip_address,
+            user_agent,
+            details_json,
+        ),
+    )
 
+
+def log_audit_event(
+    settings: Settings,
+    *,
+    action: str,
+    outcome: str,
+    user_id: int | None = None,
+    username: str | None = None,
+    role: str | None = None,
+    target_type: str | None = None,
+    target_id: str | int | None = None,
+    media_item_id: int | None = None,
+    session_id: int | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
     with get_connection(settings) as connection:
-        _cleanup_audit_logs_in_connection(connection)
-        connection.execute(
-            """
-            INSERT INTO audit_logs (
-                created_at,
-                user_id,
-                username,
-                role,
-                action,
-                outcome,
-                target_type,
-                target_id,
-                media_item_id,
-                session_id,
-                ip_address,
-                user_agent,
-                details_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                utcnow_iso(),
-                user_id,
-                username,
-                role,
-                action,
-                outcome,
-                target_type,
-                str(target_id) if target_id is not None else None,
-                media_item_id,
-                session_id,
-                ip_address,
-                user_agent,
-                details_json,
-            ),
+        write_audit_event_in_connection(
+            connection,
+            action=action,
+            outcome=outcome,
+            user_id=user_id,
+            username=username,
+            role=role,
+            target_type=target_type,
+            target_id=target_id,
+            media_item_id=media_item_id,
+            session_id=session_id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=details,
         )
         connection.commit()
 

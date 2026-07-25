@@ -691,6 +691,21 @@ class HiddenMovieListResponse(BaseModel):
     items: list[HiddenMovieSummary] = Field(default_factory=list)
 
 
+HiddenItemScope = Literal["global", "personal"]
+
+
+class HiddenItemScopeUpdateRequest(BaseModel):
+    target_scope: HiddenItemScope
+
+
+class HiddenItemScopeUpdateResponse(BaseModel):
+    item_id: int
+    target_scope: HiddenItemScope
+    changed: bool
+    hidden_at: str
+    message: str
+
+
 class MediaItemDetail(LibraryItemSummary):
     file_path: str | None = None
     stream_url: str

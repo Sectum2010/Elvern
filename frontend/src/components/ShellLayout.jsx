@@ -54,7 +54,6 @@ export function ShellLayout({ children }) {
   const [floatingNavIndicatorFrame, setFloatingNavIndicatorFrame] = useState({ left: 0, width: 0 });
   const navigation = [
     { to: "/library", label: "Library" },
-    { to: "/install", label: "Install" },
     { to: "/settings", label: "Settings" },
     ...(user?.assistant_beta_enabled ? [{ to: "/assistant", label: "Assistant", state: { fromPath: location.pathname } }] : []),
     ...(user?.role === "admin" ? [{ to: "/admin", label: "Admin" }] : []),

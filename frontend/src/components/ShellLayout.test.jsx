@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -14,11 +14,20 @@ const mockPlatformState = vi.hoisted(() => ({
   deviceClass: "desktop",
   platform: "linux",
 }));
+const mockAuthState = vi.hoisted(() => ({
+  role: "standard_user",
+  assistantEnabled: false,
+}));
 
 
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({
-    user: { id: 2, username: "viewer", role: "standard_user" },
+    user: {
+      id: 2,
+      username: "viewer",
+      role: mockAuthState.role,
+      assistant_beta_enabled: mockAuthState.assistantEnabled,
+    },
     logout: vi.fn(),
   }),
 }));
@@ -68,6 +77,8 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
     queryClient.clear();
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "linux";
+    mockAuthState.role = "standard_user";
+    mockAuthState.assistantEnabled = false;
     apiRequest.mockReset();
     apiRequest.mockResolvedValue({
       floating_controls_position: "top",
@@ -112,6 +123,24 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
     renderShell();
 
     expect(document.querySelector(".app-shell")).not.toHaveClass("app-shell--selection-guard");
+  });
+
+  test.each([
+    ["standard", "standard_user", false, ["Library", "Settings"]],
+    ["assistant", "standard_user", true, ["Library", "Settings", "Assistant"]],
+    ["admin", "admin", false, ["Library", "Settings", "Admin"]],
+    ["assistant admin", "admin", true, ["Library", "Settings", "Assistant", "Admin"]],
+  ])("uses the approved %s navigation without Install", (_name, role, assistantEnabled, expected) => {
+    mockAuthState.role = role;
+    mockAuthState.assistantEnabled = assistantEnabled;
+    renderShell({ initialEntry: "/settings" });
+
+    const navigation = screen.getByRole("navigation", { name: "Primary" });
+    expect(within(navigation).getAllByRole("link").map((link) => link.textContent)).toEqual(expected);
+    expect(within(navigation).queryByRole("link", { name: "Install" })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole("link", { name: "Settings" })).toHaveClass(
+      "floating-island__link--active",
+    );
   });
 
   test("a trailing-slash Library root does not render a duplicate Elvern header", () => {

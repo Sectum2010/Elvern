@@ -25,6 +25,7 @@ from .library_hidden_service import (
     hide_media_item_globally,
     list_globally_hidden_media_items as _list_globally_hidden_media_items,
     list_hidden_media_items as _list_hidden_media_items,
+    set_hidden_media_item_scope,
     show_media_item_for_user,
     show_media_item_globally,
 )

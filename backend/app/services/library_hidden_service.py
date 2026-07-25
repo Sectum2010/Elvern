@@ -11,8 +11,9 @@ from .library_movie_identity_service import (
 from .local_library_source_service import ensure_current_shared_local_source_binding
 from .library_presentation_service import _poster_directory, _poster_url_for_row
 from .title_normalization import resolve_title_metadata
+from .audit_service import write_audit_event_in_connection
 from ..config import Settings
-from ..db import get_connection
+from ..db import get_connection, utcnow_iso
 
 
 def _load_hidden_media_item_ids(connection, *, user_id: int) -> set[int]:
@@ -422,147 +423,428 @@ def list_globally_hidden_media_items(
     return payload
 
 
+def _load_hidden_media_identity(connection, *, item_id: int):
+    media_item = connection.execute(
+        "SELECT id, title, year, original_filename FROM media_items WHERE id = ? LIMIT 1",
+        (item_id,),
+    ).fetchone()
+    if media_item is None:
+        return None, None
+    return media_item, _movie_identity_payload(
+        title=media_item["title"],
+        year=media_item["year"],
+        original_filename=media_item["original_filename"],
+    )
+
+
+def _hide_for_user_in_connection(
+    connection,
+    *,
+    user_id: int,
+    item_id: int,
+    movie_identity,
+    hidden_at: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO user_hidden_media_items (user_id, media_item_id, hidden_at)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, item_id, hidden_at),
+    )
+    if movie_identity is not None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO user_hidden_movie_keys (
+                user_id,
+                movie_key,
+                display_title,
+                year,
+                edition_identity,
+                hidden_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                str(movie_identity["movie_key"]),
+                str(movie_identity["display_title"]),
+                int(movie_identity["year"]),
+                str(movie_identity["edition_identity"]),
+                hidden_at,
+            ),
+        )
+
+
+def _show_for_user_in_connection(
+    connection,
+    *,
+    user_id: int,
+    item_id: int,
+    movie_identity,
+) -> None:
+    connection.execute(
+        """
+        DELETE FROM user_hidden_media_items
+        WHERE user_id = ? AND media_item_id = ?
+        """,
+        (user_id, item_id),
+    )
+    if movie_identity is not None:
+        connection.execute(
+            """
+            DELETE FROM user_hidden_movie_keys
+            WHERE user_id = ? AND movie_key = ?
+            """,
+            (user_id, str(movie_identity["movie_key"])),
+        )
+
+
+def _hide_globally_in_connection(
+    connection,
+    *,
+    actor_user_id: int,
+    item_id: int,
+    movie_identity,
+    hidden_at: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO global_hidden_media_items (
+            media_item_id,
+            hidden_by_user_id,
+            hidden_at
+        ) VALUES (?, ?, ?)
+        """,
+        (item_id, actor_user_id, hidden_at),
+    )
+    if movie_identity is not None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO global_hidden_movie_keys (
+                movie_key,
+                display_title,
+                year,
+                edition_identity,
+                hidden_by_user_id,
+                hidden_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(movie_identity["movie_key"]),
+                str(movie_identity["display_title"]),
+                int(movie_identity["year"]),
+                str(movie_identity["edition_identity"]),
+                actor_user_id,
+                hidden_at,
+            ),
+        )
+
+
+def _show_globally_in_connection(connection, *, item_id: int, movie_identity) -> None:
+    connection.execute(
+        "DELETE FROM global_hidden_media_items WHERE media_item_id = ?",
+        (item_id,),
+    )
+    if movie_identity is not None:
+        connection.execute(
+            "DELETE FROM global_hidden_movie_keys WHERE movie_key = ?",
+            (str(movie_identity["movie_key"]),),
+        )
+
+
+def _hidden_scope_state(connection, *, user_id: int, item_id: int, movie_identity) -> dict[str, object]:
+    personal_item = connection.execute(
+        """
+        SELECT hidden_at
+        FROM user_hidden_media_items
+        WHERE user_id = ? AND media_item_id = ?
+        """,
+        (user_id, item_id),
+    ).fetchone()
+    global_item = connection.execute(
+        "SELECT hidden_at FROM global_hidden_media_items WHERE media_item_id = ?",
+        (item_id,),
+    ).fetchone()
+    personal_key = None
+    global_key = None
+    if movie_identity is not None:
+        movie_key = str(movie_identity["movie_key"])
+        personal_key = connection.execute(
+            """
+            SELECT hidden_at
+            FROM user_hidden_movie_keys
+            WHERE user_id = ? AND movie_key = ?
+            """,
+            (user_id, movie_key),
+        ).fetchone()
+        global_key = connection.execute(
+            "SELECT hidden_at FROM global_hidden_movie_keys WHERE movie_key = ?",
+            (movie_key,),
+        ).fetchone()
+    return {
+        "personal_item": personal_item,
+        "personal_key": personal_key,
+        "global_item": global_item,
+        "global_key": global_key,
+    }
+
+
+def _scope_is_exact(state: dict[str, object], *, target_scope: str, has_movie_key: bool) -> bool:
+    personal_complete = state["personal_item"] is not None and (
+        not has_movie_key or state["personal_key"] is not None
+    )
+    personal_absent = state["personal_item"] is None and (
+        not has_movie_key or state["personal_key"] is None
+    )
+    global_complete = state["global_item"] is not None and (
+        not has_movie_key or state["global_key"] is not None
+    )
+    global_absent = state["global_item"] is None and (
+        not has_movie_key or state["global_key"] is None
+    )
+    return (
+        global_complete and personal_absent
+        if target_scope == "global"
+        else personal_complete and global_absent
+    )
+
+
+def _scope_hidden_at(state: dict[str, object], *, target_scope: str) -> str:
+    candidates = (
+        (state["global_item"], state["global_key"])
+        if target_scope == "global"
+        else (state["personal_item"], state["personal_key"])
+    )
+    for row in candidates:
+        if row is not None:
+            return str(row["hidden_at"])
+    return utcnow_iso()
+
+
+def _set_hidden_scope_in_connection(
+    connection,
+    *,
+    actor_user_id: int,
+    item_id: int,
+    target_scope: str,
+    movie_identity,
+) -> tuple[bool, str]:
+    state = _hidden_scope_state(
+        connection,
+        user_id=actor_user_id,
+        item_id=item_id,
+        movie_identity=movie_identity,
+    )
+    if _scope_is_exact(
+        state,
+        target_scope=target_scope,
+        has_movie_key=movie_identity is not None,
+    ):
+        return False, _scope_hidden_at(state, target_scope=target_scope)
+
+    hidden_at = _scope_hidden_at(state, target_scope=target_scope)
+    if target_scope == "global":
+        _hide_globally_in_connection(
+            connection,
+            actor_user_id=actor_user_id,
+            item_id=item_id,
+            movie_identity=movie_identity,
+            hidden_at=hidden_at,
+        )
+        _show_for_user_in_connection(
+            connection,
+            user_id=actor_user_id,
+            item_id=item_id,
+            movie_identity=movie_identity,
+        )
+    elif target_scope == "personal":
+        _hide_for_user_in_connection(
+            connection,
+            user_id=actor_user_id,
+            item_id=item_id,
+            movie_identity=movie_identity,
+            hidden_at=hidden_at,
+        )
+        _show_globally_in_connection(
+            connection,
+            item_id=item_id,
+            movie_identity=movie_identity,
+        )
+    else:
+        raise ValueError("invalid_scope")
+    return True, hidden_at
+
+
 def hide_media_item_for_user(settings: Settings, *, user_id: int, item_id: int) -> None:
     with get_connection(settings) as connection:
-        media_item = connection.execute(
-            "SELECT id, title, year, original_filename FROM media_items WHERE id = ? LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        if media_item is None:
-            raise ValueError("not_found")
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO user_hidden_media_items (user_id, media_item_id, hidden_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            """,
-            (user_id, item_id),
-        )
-        movie_identity = _movie_identity_payload(
-            title=media_item["title"],
-            year=media_item["year"],
-            original_filename=media_item["original_filename"],
-        )
-        if movie_identity is not None:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO user_hidden_movie_keys (
-                    user_id,
-                    movie_key,
-                    display_title,
-                    year,
-                    edition_identity,
-                    hidden_at
-                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """,
-                (
-                    user_id,
-                    str(movie_identity["movie_key"]),
-                    str(movie_identity["display_title"]),
-                    int(movie_identity["year"]),
-                    str(movie_identity["edition_identity"]),
-                ),
+        try:
+            media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
+            if media_item is None:
+                raise ValueError("not_found")
+            _hide_for_user_in_connection(
+                connection,
+                user_id=user_id,
+                item_id=item_id,
+                movie_identity=movie_identity,
+                hidden_at=utcnow_iso(),
             )
-        connection.commit()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
-def hide_media_item_globally(settings: Settings, *, actor_user_id: int, item_id: int) -> None:
+def hide_media_item_globally(
+    settings: Settings,
+    *,
+    actor_user_id: int,
+    item_id: int,
+    actor_username: str | None = None,
+    actor_role: str | None = None,
+    actor_session_id: int | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
     with get_connection(settings) as connection:
-        media_item = connection.execute(
-            "SELECT id, title, year, original_filename FROM media_items WHERE id = ? LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        if media_item is None:
-            raise ValueError("not_found")
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO global_hidden_media_items (media_item_id, hidden_by_user_id, hidden_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            """,
-            (item_id, actor_user_id),
-        )
-        movie_identity = _movie_identity_payload(
-            title=media_item["title"],
-            year=media_item["year"],
-            original_filename=media_item["original_filename"],
-        )
-        if movie_identity is not None:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO global_hidden_movie_keys (
-                    movie_key,
-                    display_title,
-                    year,
-                    edition_identity,
-                    hidden_by_user_id,
-                    hidden_at
-                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """,
-                (
-                    str(movie_identity["movie_key"]),
-                    str(movie_identity["display_title"]),
-                    int(movie_identity["year"]),
-                    str(movie_identity["edition_identity"]),
-                    actor_user_id,
-                ),
+        try:
+            media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
+            if media_item is None:
+                raise ValueError("not_found")
+            _hide_globally_in_connection(
+                connection,
+                actor_user_id=actor_user_id,
+                item_id=item_id,
+                movie_identity=movie_identity,
+                hidden_at=utcnow_iso(),
             )
-        connection.commit()
+            write_audit_event_in_connection(
+                connection,
+                action="admin.library.hide_global",
+                outcome="success",
+                user_id=actor_user_id,
+                username=actor_username,
+                role=actor_role,
+                session_id=actor_session_id,
+                target_type="media_item",
+                target_id=item_id,
+                media_item_id=item_id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
 def show_media_item_for_user(settings: Settings, *, user_id: int, item_id: int) -> None:
     with get_connection(settings) as connection:
-        media_item = connection.execute(
-            "SELECT title, year, original_filename FROM media_items WHERE id = ? LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        connection.execute(
-            """
-            DELETE FROM user_hidden_media_items
-            WHERE user_id = ? AND media_item_id = ?
-            """,
-            (user_id, item_id),
-        )
-        if media_item is not None:
-            movie_identity = _movie_identity_payload(
-                title=media_item["title"],
-                year=media_item["year"],
-                original_filename=media_item["original_filename"],
+        try:
+            _media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
+            _show_for_user_in_connection(
+                connection,
+                user_id=user_id,
+                item_id=item_id,
+                movie_identity=movie_identity,
             )
-            if movie_identity is not None:
-                connection.execute(
-                    """
-                    DELETE FROM user_hidden_movie_keys
-                    WHERE user_id = ? AND movie_key = ?
-                    """,
-                    (user_id, str(movie_identity["movie_key"])),
-                )
-        connection.commit()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
-def show_media_item_globally(settings: Settings, *, item_id: int) -> None:
+def show_media_item_globally(
+    settings: Settings,
+    *,
+    item_id: int,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
+    actor_role: str | None = None,
+    actor_session_id: int | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
     with get_connection(settings) as connection:
-        media_item = connection.execute(
-            "SELECT title, year, original_filename FROM media_items WHERE id = ? LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        connection.execute(
-            """
-            DELETE FROM global_hidden_media_items
-            WHERE media_item_id = ?
-            """,
-            (item_id,),
-        )
-        if media_item is not None:
-            movie_identity = _movie_identity_payload(
-                title=media_item["title"],
-                year=media_item["year"],
-                original_filename=media_item["original_filename"],
+        try:
+            _media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
+            _show_globally_in_connection(
+                connection,
+                item_id=item_id,
+                movie_identity=movie_identity,
             )
-            if movie_identity is not None:
-                connection.execute(
-                    """
-                    DELETE FROM global_hidden_movie_keys
-                    WHERE movie_key = ?
-                    """,
-                    (str(movie_identity["movie_key"]),),
+            write_audit_event_in_connection(
+                connection,
+                action="admin.library.show_global",
+                outcome="success",
+                user_id=actor_user_id,
+                username=actor_username,
+                role=actor_role,
+                session_id=actor_session_id,
+                target_type="media_item",
+                target_id=item_id,
+                media_item_id=item_id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def set_hidden_media_item_scope(
+    settings: Settings,
+    *,
+    actor_user_id: int,
+    actor_username: str,
+    actor_role: str,
+    actor_session_id: int | None,
+    item_id: int,
+    target_scope: str,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, object]:
+    with get_connection(settings) as connection:
+        try:
+            media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
+            if media_item is None:
+                raise ValueError("not_found")
+            changed, hidden_at = _set_hidden_scope_in_connection(
+                connection,
+                actor_user_id=actor_user_id,
+                item_id=item_id,
+                target_scope=target_scope,
+                movie_identity=movie_identity,
+            )
+            if changed:
+                write_audit_event_in_connection(
+                    connection,
+                    action="admin.library.set_hidden_scope",
+                    outcome="success",
+                    user_id=actor_user_id,
+                    username=actor_username,
+                    role=actor_role,
+                    session_id=actor_session_id,
+                    target_type="media_item",
+                    target_id=item_id,
+                    media_item_id=item_id,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    details={"target_scope": target_scope},
                 )
-        connection.commit()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    message = (
+        "This movie is hidden for everyone."
+        if target_scope == "global"
+        else "This movie is now hidden only for your account."
+    )
+    return {
+        "item_id": item_id,
+        "target_scope": target_scope,
+        "changed": changed,
+        "hidden_at": hidden_at,
+        "message": message,
+    }

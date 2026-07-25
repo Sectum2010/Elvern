@@ -354,6 +354,26 @@ describe("DetailPage source metadata privacy", () => {
     expect(screen.getByRole("button", { name: "Download movie" })).toBeInTheDocument();
   });
 
+  test("personal hidden state links to the canonical Libraries Settings section", async () => {
+    renderDetailPage(detailItem({ hidden_for_user: true }));
+
+    const hiddenLink = await screen.findByRole("link", {
+      name: "Open Hidden for me in Settings",
+    });
+    expect(hiddenLink).toHaveAttribute("href", "/settings?section=libraries");
+    expect(screen.getByText(/Settings > Libraries > Hidden for me/)).toBeInTheDocument();
+  });
+
+  test("global hidden state links admins to the canonical Libraries Settings section", async () => {
+    mockAuthState.user = { id: 2, username: "admin", role: "admin" };
+    renderDetailPage(detailItem({ hidden_globally: true }));
+
+    const hiddenLink = await screen.findByRole("link", {
+      name: "Open Hidden for everyone in Settings",
+    });
+    expect(hiddenLink).toHaveAttribute("href", "/settings?section=libraries");
+  });
+
   test("resets detail scroll once per item before async detail content renders", async () => {
     window.scrollTo = vi.fn();
     Object.defineProperty(window, "scrollY", { configurable: true, value: 640 });

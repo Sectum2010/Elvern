@@ -287,12 +287,15 @@ the client. Flatpak VLC is outside this release.
 
 ## UI behavior
 
-The Install page shows one primary package per desktop platform and keeps technical
+**Settings → Install** shows one primary package per desktop platform and keeps technical
 details collapsed. It reports unknown/not verified state without claiming that an
 unseen Helper is absent. Test feedback is an `aria-live` status inside the Helper
 card. A coalesced page-resume event turns focus/pageshow/visible transitions into
 one lightweight refresh; there is no healthy-state polling and no automatic
 custom-protocol launch.
+
+The protected legacy paths `/install` and `/desktop` remain supported as
+replace-redirects to `/settings?section=install`.
 
 Third-party HTTP(S) VLC/store links open in a separate `noopener noreferrer` tab.
 Helper ZIP downloads remain ordinary file links, and custom protocol checks still
@@ -342,6 +345,6 @@ real-device checks:
   fallback, Apple Event protocol delivery, and Finder reveal.
 - glibc x64/ARM64 and musl x64/ARM64 install and protocol registration.
 - Windows x64 install, upgrade rollback, and protocol delivery.
-- Safari, Chrome, and Firefox returning to the Install page after installation.
+- Safari, Chrome, and Firefox returning to **Settings → Install** after installation.
 - Firefox 152.0.6 Ubuntu Snap over Tailscale HTTPS, including the external VLC tab,
   lifecycle cancellation, and Library/Detail/poster recovery chain.

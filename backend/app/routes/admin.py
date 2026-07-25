@@ -55,6 +55,8 @@ from ..schemas import (
     PasswordHelpRequestListResponse,
     GoogleDriveSetupResponse,
     GoogleDriveSetupUpdateRequest,
+    HiddenItemScopeUpdateRequest,
+    HiddenItemScopeUpdateResponse,
     HiddenMovieListResponse,
     LocalDirectoryBrowseResponse,
     LocalDirectoryPickerCapabilityResponse,
@@ -137,6 +139,7 @@ from ..services.exposure_maintenance_service import (
 from ..services.library_service import (
     hide_media_item_globally,
     list_globally_hidden_media_items,
+    set_hidden_media_item_scope,
     show_media_item_globally,
 )
 from ..services.media_technical_metadata_service import (
@@ -1463,25 +1466,16 @@ def admin_hide_movie_for_everyone(
             request.app.state.settings,
             actor_user_id=user.id,
             item_id=item_id,
+            actor_username=user.username,
+            actor_role=user.role,
+            actor_session_id=user.session_id,
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
         )
     except ValueError as exc:
         if str(exc) == "not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found") from exc
         raise
-    log_audit_event(
-        request.app.state.settings,
-        action="admin.library.hide_global",
-        outcome="success",
-        user_id=user.id,
-        username=user.username,
-        role=user.role,
-        session_id=user.session_id,
-        target_type="media_item",
-        target_id=item_id,
-        media_item_id=item_id,
-        ip_address=resolve_client_ip(request),
-        user_agent=request.headers.get("user-agent"),
-    )
     return MessageResponse(message="This movie is hidden for everyone")
 
 
@@ -1491,19 +1485,43 @@ def admin_show_movie_for_everyone(
     request: Request,
     user=CurrentAdmin,
 ) -> MessageResponse:
-    show_media_item_globally(request.app.state.settings, item_id=item_id)
-    log_audit_event(
+    show_media_item_globally(
         request.app.state.settings,
-        action="admin.library.show_global",
-        outcome="success",
-        user_id=user.id,
-        username=user.username,
-        role=user.role,
-        session_id=user.session_id,
-        target_type="media_item",
-        target_id=item_id,
-        media_item_id=item_id,
+        item_id=item_id,
+        actor_user_id=user.id,
+        actor_username=user.username,
+        actor_role=user.role,
+        actor_session_id=user.session_id,
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     return MessageResponse(message="This movie is visible again for everyone")
+
+
+@router.put(
+    "/hidden-items/{item_id}/scope",
+    response_model=HiddenItemScopeUpdateResponse,
+)
+def admin_set_hidden_movie_scope(
+    item_id: int,
+    payload: HiddenItemScopeUpdateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> HiddenItemScopeUpdateResponse:
+    try:
+        result = set_hidden_media_item_scope(
+            request.app.state.settings,
+            actor_user_id=user.id,
+            actor_username=user.username,
+            actor_role=user.role,
+            actor_session_id=user.session_id,
+            item_id=item_id,
+            target_scope=payload.target_scope,
+            ip_address=resolve_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    except ValueError as exc:
+        if str(exc) == "not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found") from exc
+        raise
+    return HiddenItemScopeUpdateResponse(**result)

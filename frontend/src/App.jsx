@@ -4,6 +4,7 @@ import { AuthProvider } from "./auth/AuthContext";
 import { ProviderAuthProvider } from "./auth/ProviderAuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { CanonicalSpaRouteGuard } from "./components/CanonicalSpaRouteGuard";
+import { LegacyInstallRedirect } from "./components/LegacyInstallRedirect";
 import { ShellLayout } from "./components/ShellLayout";
 import { StartupConnectionGate } from "./components/StartupConnectionGate";
 import { DetailPage } from "./pages/DetailPage";
@@ -19,7 +20,6 @@ import { AdminAssistantRequestDetailPage } from "./pages/AdminAssistantRequestDe
 import { AdminAssistantRequestsPage } from "./pages/AdminAssistantRequestsPage";
 import { AssistantPage } from "./pages/AssistantPage";
 import { AssistantAttachmentViewerPage } from "./pages/AssistantAttachmentViewerPage";
-import { InstallPage } from "./pages/DesktopPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { queryClient } from "./lib/queryClient";
 import { LibraryRevisionSynchronizer } from "./lib/libraryRevisionQueries.js";
@@ -49,6 +49,22 @@ export default function App() {
             <Route path="/login/totp" element={<TotpChallengePage />} />
             <Route path="/new-user" element={<NewUserPage />} />
             <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route
+              path="/install"
+              element={(
+                <ProtectedRoute>
+                  <LegacyInstallRedirect />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              path="/desktop"
+              element={(
+                <ProtectedRoute>
+                  <LegacyInstallRedirect />
+                </ProtectedRoute>
+              )}
+            />
             <Route element={<ProtectedShell />}>
               <Route path="/setup/totp" element={<TotpSetupPage />} />
               <Route path="/" element={<Navigate to="/library" replace />} />
@@ -65,8 +81,6 @@ export default function App() {
                 )}
               />
               <Route path="/attachments/:attachmentId/view" element={<AssistantAttachmentViewerPage />} />
-              <Route path="/install" element={<InstallPage />} />
-              <Route path="/desktop" element={<Navigate to="/install" replace />} />
               <Route
                 path="/admin"
                 element={(

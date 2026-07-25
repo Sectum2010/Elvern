@@ -1,24 +1,24 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-import { ApiNetworkError, apiRequest } from "../lib/api";
-import { PAGE_RESUME_EVENT } from "../lib/pageResume";
+import { ApiNetworkError, apiRequest } from "../../lib/api";
+import { PAGE_RESUME_EVENT } from "../../lib/pageResume";
 import {
   publishConnectivityRecovery,
   registerConnectivityFailure,
   resetConnectivityRecoveryStoreForTests,
-} from "../lib/connectivityRecoveryStore";
-import { InstallPage } from "./DesktopPage.jsx";
+} from "../../lib/connectivityRecoveryStore";
+import { InstallSettingsPanel } from "./InstallSettingsPanel.jsx";
 
 
 const platformState = vi.hoisted(() => ({ value: "mac" }));
 
-vi.mock("../lib/api", async (importOriginal) => ({
+vi.mock("../../lib/api", async (importOriginal) => ({
   ...(await importOriginal()),
   apiRequest: vi.fn(),
 }));
-vi.mock("../lib/device", () => ({ getOrCreateDeviceId: () => "device-test" }));
-vi.mock("../lib/platformDetection", async (importOriginal) => ({
+vi.mock("../../lib/device", () => ({ getOrCreateDeviceId: () => "device-test" }));
+vi.mock("../../lib/platformDetection", async (importOriginal) => ({
   ...(await importOriginal()),
   detectClientPlatform: () => platformState.value,
 }));
@@ -77,7 +77,7 @@ beforeEach(() => {
 
 describe("desktop helper install page", () => {
   test("macOS shows one self-contained package and no removed setup card", async () => {
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     expect(await screen.findByRole("link", { name: "Download for macOS" })).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: /Download for macOS/i })).toHaveLength(1);
@@ -91,7 +91,7 @@ describe("desktop helper install page", () => {
   });
 
   test("third-party VLC opens in a new tab while the Helper ZIP remains a same-page download", async () => {
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     const helperDownload = await screen.findByRole("link", { name: "Download for macOS" });
     const vlcDownload = screen.getByRole("link", { name: "Download VLC" });
@@ -112,7 +112,7 @@ describe("desktop helper install page", () => {
     ["android", "Google Play"],
   ])("%s third-party store links open independently from Elvern", (platform, linkName) => {
     platformState.value = platform;
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     const storeLinks = screen.getAllByRole("link", { name: linkName });
     expect(storeLinks.length).toBeGreaterThan(0);
@@ -141,7 +141,7 @@ describe("desktop helper install page", () => {
         supported_runtime_ids: ["linux-x64", "linux-arm64", "linux-musl-x64", "linux-musl-arm64"],
       })],
     }));
-    const rendered = render(<InstallPage />);
+    const rendered = render(<InstallSettingsPanel />);
 
     expect(await screen.findByRole("link", { name: "Download for Linux" })).toBeInTheDocument();
     expect(screen.getByText(/x64 and ARM64.*glibc and musl/i)).toBeInTheDocument();
@@ -154,7 +154,7 @@ describe("desktop helper install page", () => {
       same_host: true,
       latest_releases: [],
     }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     expect(await screen.findByText("Not required on this Elvern host")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Download for Linux" })).not.toBeInTheDocument();
@@ -171,7 +171,7 @@ describe("desktop helper install page", () => {
           vlc_detection_checked_at: "2026-07-22T00:00:00Z",
         }),
       });
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Test helper" }));
 
@@ -182,7 +182,7 @@ describe("desktop helper install page", () => {
 
   test("unknown platform is reported instead of falling back to Linux", () => {
     platformState.value = "unknown";
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     expect(screen.getByText("Platform could not be detected.")).toBeInTheDocument();
     expect(apiRequest).not.toHaveBeenCalled();
@@ -212,7 +212,7 @@ describe("desktop helper install page", () => {
         }),
       ],
     }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     expect(await screen.findByRole("link", { name: "Download for macOS" })).toBeInTheDocument();
     expect(screen.getByText("More options...")).toBeInTheDocument();
@@ -220,7 +220,7 @@ describe("desktop helper install page", () => {
   });
 
   test("returning to the page refreshes status once without continuous polling", async () => {
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
     fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
@@ -235,7 +235,7 @@ describe("desktop helper install page", () => {
     apiRequest.mockImplementationOnce(() => new Promise((resolve) => {
       resolveInitial = resolve;
     }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
     fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
@@ -255,7 +255,7 @@ describe("desktop helper install page", () => {
         rejectInitial = reject;
       }))
       .mockResolvedValueOnce(status({ state: "up_to_date" }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
     publishConnectivityRecovery({
@@ -275,7 +275,7 @@ describe("desktop helper install page", () => {
         rejectInitial = reject;
       }))
       .mockResolvedValueOnce(status({ state: "up_to_date" }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
     fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
@@ -292,7 +292,7 @@ describe("desktop helper install page", () => {
       cause: new TypeError("NetworkError when attempting to fetch resource"),
       ...failure,
     }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
 
     expect(await screen.findByText("Elvern could not load Helper status.")).toBeInTheDocument();
     expect(screen.queryByText(/NetworkError when attempting/i)).not.toBeInTheDocument();
@@ -304,7 +304,7 @@ describe("desktop helper install page", () => {
     apiRequest
       .mockRejectedValueOnce(new ApiNetworkError(undefined, failure))
       .mockResolvedValueOnce(status({ state: "up_to_date" }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
     expect(await screen.findByText("Reconnecting…")).toBeInTheDocument();
 
     publishConnectivityRecovery({
@@ -332,7 +332,7 @@ describe("desktop helper install page", () => {
         resolveVerify = resolve;
       }))
       .mockResolvedValueOnce(status({ state: "up_to_date" }));
-    render(<InstallPage />);
+    render(<InstallSettingsPanel />);
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(1));
 
     fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
@@ -365,7 +365,7 @@ describe("desktop helper install page", () => {
         }
         return Promise.reject(new Error(`Unexpected request: ${path}`));
       });
-      render(<InstallPage />);
+      render(<InstallSettingsPanel />);
       await vi.advanceTimersByTimeAsync(0);
 
       fireEvent.click(screen.getByRole("button", { name: "Test helper" }));
@@ -394,7 +394,7 @@ describe("desktop helper install page", () => {
         }
         return Promise.reject(new Error(`Unexpected request: ${path}`));
       });
-      const rendered = render(<InstallPage />);
+      const rendered = render(<InstallSettingsPanel />);
       await vi.advanceTimersByTimeAsync(0);
 
       fireEvent.click(screen.getByRole("button", { name: "Test helper" }));

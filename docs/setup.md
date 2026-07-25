@@ -229,7 +229,7 @@ is the host-mounted `"$ELVERN_ROOT/docker-data/data/helper_releases"`, correspon
 to `/data/helper_releases` inside the container. Staging output is never the runtime
 release authority.
 
-2. Download the active Windows package from Elvern's Install page.
+2. Download the active Windows package from **Settings → Install** in Elvern.
 3. Unzip it.
 4. Double-click `Install-ElvernVlcOpener.cmd`. The verified package includes its
    runtime and installs per user.
@@ -278,7 +278,7 @@ paths, or the selected temporary root are rejected consistently by both installe
 and uninstaller. Paths containing spaces remain supported. Unsafe system
 `XDG_DATA_DIRS` entries are skipped during previous-handler discovery.
 
-2. Download the active macOS package from Elvern's Install page.
+2. Download the active macOS package from **Settings → Install** in Elvern.
 3. Unzip it.
 4. Double-click `Install-ElvernVlcOpener.command`. It verifies the complete package
    tree, selects Apple Silicon or Intel locally, and installs to `~/Applications`
@@ -293,12 +293,17 @@ export ELVERN_BACKEND_ORIGIN="https://the-effective-helper-backend-origin.exampl
 ```
 
 This validates a Linux universal ZIP in staging without publishing it. After a
-complete `--activate` release, download the active Linux package from Elvern,
+complete `--activate` release, download the active Linux package from
+**Settings → Install** in Elvern,
 unzip it, and run `./Install-ElvernVlcOpener.sh`. It verifies the complete package
 tree, selects x64/ARM64 and glibc/musl locally, installs under `~/.local`, and needs
 neither Python, a separate .NET Runtime, nor `sudo`. Linux sessions on the Elvern
 host itself continue to use host VLC directly and do not need the Helper. Flatpak
 VLC is not supported in this release.
+
+`/install` and `/desktop` remain protected compatibility paths. They replace-redirect
+to `/settings?section=install`; the standalone Install page is no longer a separate
+navigation destination.
 
 Helper uninstall is per-user and transactional on Windows, macOS, and Linux. Linux
 restores a recorded safe previous `elvern-vlc://` handler only if Elvern remains the

@@ -4,10 +4,16 @@ import { fileURLToPath } from "node:url";
 
 import { fireEvent, render as testingLibraryRender, screen, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigationType,
+} from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-import { apiRequest } from "../lib/api";
+import { ApiNetworkError, ApiResponseError, apiRequest } from "../lib/api";
 import {
   buildBackgroundPreviewStyle,
   deriveGradientEndFromSingleColor,
@@ -16,21 +22,30 @@ import { SettingsPage } from "./SettingsPage";
 import { queryClient } from "../lib/queryClient";
 import { buildUserSettingsQueryKey } from "../lib/userSettingsQueries";
 
-const mockAuthState = vi.hoisted(() => ({ role: "standard_user" }));
+const mockAuthState = vi.hoisted(() => ({ id: 7, role: "standard_user" }));
 const mockPlatformState = vi.hoisted(() => ({ deviceClass: "desktop" }));
+const mockInstallState = vi.hoisted(() => ({ renders: 0 }));
 
 vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({
     user: {
-      id: 7,
+      id: mockAuthState.id,
       username: "display-user",
       role: mockAuthState.role,
     },
   }),
 }));
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...(await importOriginal()),
   apiRequest: vi.fn(),
+}));
+
+vi.mock("../features/install/InstallSettingsPanel", () => ({
+  InstallSettingsPanel: () => {
+    mockInstallState.renders += 1;
+    return <div>Complete install panel</div>;
+  },
 }));
 
 vi.mock("../lib/platformDetection", async (importOriginal) => ({
@@ -71,9 +86,21 @@ function render(ui, options) {
   );
 }
 
-function mockApi(initialSettings = defaultSettings, options = {}) {
+function LocationProbe() {
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  return (
+    <p data-testid="settings-location">
+      {`${location.pathname}${location.search}${location.hash}|${navigationType}|${location.state?.marker || ""}`}
+    </p>
+  );
+}
+
+function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
   let settings = { ...initialSettings };
-  let ageGroupItems = options.ageGroupItems || [
+  let hiddenItems = [...(mockOptions.hiddenItems || [])];
+  let globalHiddenItems = [...(mockOptions.globalHiddenItems || [])];
+  let ageGroupItems = mockOptions.ageGroupItems || [
     {
       age_group_key: "age:title:galaxy|2026",
       display_title: "Galaxy",
@@ -134,10 +161,54 @@ function mockApi(initialSettings = defaultSettings, options = {}) {
       return Promise.resolve(settings);
     }
     if (requestPath === "/api/user-hidden-items") {
-      return Promise.resolve({ items: [] });
+      return Promise.resolve({ items: hiddenItems });
     }
     if (requestPath === "/api/admin/global-hidden-items") {
-      return Promise.resolve({ items: [] });
+      return Promise.resolve({ items: globalHiddenItems });
+    }
+    if (
+      requestPath.startsWith("/api/admin/hidden-items/")
+      && requestPath.endsWith("/scope")
+      && options.method === "PUT"
+    ) {
+      const itemId = Number(requestPath.split("/").at(-2));
+      const targetScope = options.data?.target_scope;
+      const sourceItems = targetScope === "global" ? hiddenItems : globalHiddenItems;
+      const hiddenItem = sourceItems.find((item) => item.id === itemId) || {
+        id: itemId,
+        title: "Scope Movie",
+        year: 2026,
+        edition_label: null,
+        poster_url: null,
+      };
+      const movedItem = { ...hiddenItem, hidden_at: "2026-07-24T00:00:00+00:00" };
+      if (mockOptions.scopeCommitsBeforeFailure !== false) {
+        if (targetScope === "global") {
+          hiddenItems = hiddenItems.filter((item) => item.id !== itemId);
+          globalHiddenItems = [movedItem, ...globalHiddenItems.filter((item) => item.id !== itemId)];
+        } else {
+          globalHiddenItems = globalHiddenItems.filter((item) => item.id !== itemId);
+          hiddenItems = [movedItem, ...hiddenItems.filter((item) => item.id !== itemId)];
+        }
+      }
+      if (mockOptions.scopeError === "network") {
+        return Promise.reject(new ApiNetworkError());
+      }
+      if (mockOptions.scopeError === "malformed") {
+        return Promise.reject(new ApiResponseError(200));
+      }
+      if (mockOptions.scopeError === "http") {
+        return Promise.reject(Object.assign(new Error("Explicit server failure"), { status: 500 }));
+      }
+      return Promise.resolve({
+        item_id: itemId,
+        target_scope: targetScope,
+        changed: true,
+        hidden_at: movedItem.hidden_at,
+        message: targetScope === "global"
+          ? "This movie is hidden for everyone."
+          : "This movie is now hidden only for your account.",
+      });
     }
     if (requestPath === "/api/admin/media-library-reference") {
       return Promise.resolve({
@@ -288,9 +359,407 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
 beforeEach(() => {
   queryClient.clear();
   apiRequest.mockReset();
+  mockAuthState.id = 7;
   mockAuthState.role = "standard_user";
   mockPlatformState.deviceClass = "desktop";
+  mockInstallState.renders = 0;
   window.localStorage.clear();
+});
+
+describe("SettingsPage section navigation and consolidation", () => {
+  test("shows the canonical tab order without a Hidden tab", () => {
+    mockApi();
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Preferences",
+      "Display",
+      "Libraries",
+      "Install",
+      "Advanced",
+    ]);
+    expect(screen.queryByRole("tab", { name: "Hidden" })).not.toBeInTheDocument();
+
+    const installIcon = screen.getByRole("tab", { name: "Install" }).querySelector("svg");
+    expect(installIcon).toHaveAttribute("viewBox", "0 0 24 24");
+    expect(installIcon?.innerHTML).toContain("M12 4v9");
+    expect(installIcon?.innerHTML).toContain("M5 14.5v2.2");
+  });
+
+  test("clicking the active tab only toggles its expanded label without navigation", () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <LocationProbe />
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    const preferences = screen.getByRole("tab", { name: "Preferences" });
+    fireEvent.click(preferences);
+
+    expect(preferences).toHaveAttribute("aria-expanded", "true");
+    expect(preferences).not.toHaveClass("admin-nav-card__button--expanded");
+    expect(screen.getByTestId("settings-location")).toHaveTextContent("/settings|POP|");
+  });
+
+  test("canonicalizes the legacy Hidden URL before showing Libraries", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={[{
+        pathname: "/settings",
+        search: "?other=1&section=hidden",
+        hash: "#hidden-list",
+        state: { marker: "preserved" },
+      }]}>
+        <Routes>
+          <Route
+            path="/settings"
+            element={(
+              <>
+                <LocationProbe />
+                <SettingsPage />
+              </>
+            )}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent(
+      "/settings?other=1&section=libraries#hidden-list|REPLACE|preserved",
+    ));
+    expect(screen.getByRole("tab", { name: "Libraries" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("tab", { name: "Hidden" })).not.toBeInTheDocument();
+  });
+
+  test("section changes replace history while preserving query, hash, and state", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={[{
+        pathname: "/settings",
+        search: "?source=bookmark&section=preferences",
+        hash: "#oauth",
+        state: { marker: "preserved" },
+      }]}>
+        <LocationProbe />
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Install" }));
+
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent(
+      "/settings?source=bookmark&section=install#oauth|REPLACE|preserved",
+    ));
+  });
+
+  test("direct Install access mounts only Install and skips unrelated ancillary requests", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=install"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Complete install panel")).toBeInTheDocument();
+    await Promise.resolve();
+    const unrelatedPaths = new Set([
+      "/api/user-hidden-items",
+      "/api/admin/global-hidden-items",
+      "/api/cloud-libraries",
+      "/api/admin/google-drive-setup",
+      "/api/library/age-groups",
+      "/api/admin/media-library-reference",
+      "/api/admin/poster-reference-location",
+      "/api/auth/totp/status",
+    ]);
+    expect(apiRequest.mock.calls.some(([requestPath]) => unrelatedPaths.has(requestPath))).toBe(false);
+  });
+
+  test("leaving Install starts ancillary loading once and does not keep Install mounted", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=install"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("Complete install panel")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Libraries" }));
+    await screen.findByRole("heading", { name: "Library" });
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/user-hidden-items",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    expect(screen.queryByText("Complete install panel")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Install" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Libraries" }));
+    await waitFor(() => {
+      expect(apiRequest.mock.calls.filter(([path]) => path === "/api/user-hidden-items")).toHaveLength(1);
+    });
+  });
+
+  test("Libraries keeps Shared and Hidden cards in the approved order for admins", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    const shared = await screen.findByText("Shared Libraries");
+    const personal = screen.getByText("Hidden for me");
+    const global = screen.getByText("Hidden for everyone");
+    const google = screen.getByText("Google Drive OAuth Setup");
+    expect(shared.compareDocumentPosition(personal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(personal.compareDocumentPosition(global) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(global.compareDocumentPosition(google) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(personal.closest("section")).not.toBe(global.closest("section"));
+  });
+
+  test("ordinary users see only their personal Hidden card", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Hidden for me")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden for everyone")).not.toBeInTheDocument();
+    expect(apiRequest.mock.calls.some(([path]) => path === "/api/admin/global-hidden-items")).toBe(false);
+  });
+
+  test("a stale Hidden response from the previous identity cannot replace the new identity list", async () => {
+    let resolveFirstHiddenRequest;
+    const firstHiddenRequest = new Promise((resolve) => {
+      resolveFirstHiddenRequest = resolve;
+    });
+    apiRequest.mockImplementation((requestPath) => {
+      if (requestPath === "/api/user-settings") {
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/user-hidden-items") {
+        return mockAuthState.id === 7
+          ? firstHiddenRequest
+          : Promise.resolve({
+            items: [{
+              id: 82,
+              title: "New Identity Movie",
+              year: 2026,
+              edition_label: null,
+              poster_url: null,
+              hidden_at: "2026-07-24T00:00:00+00:00",
+            }],
+          });
+      }
+      if (requestPath === "/api/cloud-libraries") {
+        return Promise.resolve({ google: {}, my_libraries: [], shared_libraries: [] });
+      }
+      if (requestPath === "/api/auth/totp/status") {
+        return Promise.resolve({ enabled: false, setup_available: false });
+      }
+      return Promise.resolve({});
+    });
+    const renderTree = () => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const view = testingLibraryRender(renderTree());
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/user-hidden-items",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+
+    mockAuthState.id = 8;
+    view.rerender(renderTree());
+    expect(await screen.findByText("New Identity Movie")).toBeInTheDocument();
+
+    resolveFirstHiddenRequest({
+      items: [{
+        id: 81,
+        title: "Old Identity Movie",
+        year: 2026,
+        edition_label: null,
+        poster_url: null,
+        hidden_at: "2026-07-23T00:00:00+00:00",
+      }],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.queryByText("Old Identity Movie")).not.toBeInTheDocument();
+    expect(screen.getByText("New Identity Movie")).toBeInTheDocument();
+  });
+});
+
+describe("SettingsPage Hidden scope transfer", () => {
+  const personalHiddenItem = {
+    id: 42,
+    title: "Scope Movie",
+    year: 2026,
+    edition_label: "Extended",
+    poster_url: null,
+    hidden_at: "2026-07-23T00:00:00+00:00",
+  };
+
+  async function renderAdminLibraries(mockOptions = {}) {
+    mockAuthState.role = "admin";
+    mockApi(defaultSettings, mockOptions);
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText("Hidden for me");
+  }
+
+  test("Hide universally sends one PUT and no compensating hide/show requests", async () => {
+    await renderAdminLibraries({ hiddenItems: [personalHiddenItem] });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/admin/hidden-items/42/scope",
+      {
+        method: "PUT",
+        data: { target_scope: "global" },
+      },
+    ));
+    expect(apiRequest.mock.calls.filter(([path]) => path === "/api/admin/hidden-items/42/scope")).toHaveLength(1);
+    expect(apiRequest).not.toHaveBeenCalledWith(
+      "/api/admin/global-hidden-items/42",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(apiRequest).not.toHaveBeenCalledWith(
+      "/api/user-hidden-items/42",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(await screen.findByText("This movie is hidden for everyone.")).toBeInTheDocument();
+    expect(screen.getAllByText("Scope Movie")).toHaveLength(1);
+  });
+
+  test("Hide for me sends one PUT with the personal target", async () => {
+    await renderAdminLibraries({ globalHiddenItems: [personalHiddenItem] });
+    fireEvent.click(screen.getByText("Hidden for everyone"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide for me" }));
+
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/admin/hidden-items/42/scope",
+      {
+        method: "PUT",
+        data: { target_scope: "personal" },
+      },
+    ));
+    expect(apiRequest.mock.calls.filter(([path]) => path === "/api/admin/hidden-items/42/scope")).toHaveLength(1);
+    expect(apiRequest).not.toHaveBeenCalledWith(
+      "/api/user-hidden-items/42",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(apiRequest).not.toHaveBeenCalledWith(
+      "/api/admin/global-hidden-items/42",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(await screen.findByText("This movie is now hidden only for your account.")).toBeInTheDocument();
+  });
+
+  test("scope transfer keeps the approved pending label and disabled state", async () => {
+    await renderAdminLibraries({ hiddenItems: [personalHiddenItem] });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    const originalImplementation = apiRequest.getMockImplementation();
+    let resolveScopeRequest;
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/admin/hidden-items/42/scope") {
+        return new Promise((resolve) => {
+          resolveScopeRequest = resolve;
+        });
+      }
+      return originalImplementation(requestPath, options);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+
+    const pendingButton = await screen.findByRole("button", { name: "Hiding globally..." });
+    expect(pendingButton).toBeDisabled();
+    resolveScopeRequest({
+      item_id: 42,
+      target_scope: "global",
+      changed: true,
+      hidden_at: "2026-07-24T03:04:05+00:00",
+      message: "This movie is hidden for everyone.",
+    });
+    expect(await screen.findByText("This movie is hidden for everyone.")).toBeInTheDocument();
+  });
+
+  test("successful scope transfer uses the backend authoritative hidden timestamp", () => {
+    const source = fs.readFileSync(settingsPagePath, "utf8");
+    expect(source.match(/hidden_at:\s*payload\.hidden_at/g)).toHaveLength(4);
+    expect(source).not.toContain("hidden_at: new Date().toISOString()");
+  });
+
+  test.each(["network", "malformed"])(
+    "%s uncertainty reconciles authoritative lists and accepts a committed target",
+    async (scopeError) => {
+      await renderAdminLibraries({
+        hiddenItems: [personalHiddenItem],
+        scopeError,
+      });
+      const personalGetsBefore = apiRequest.mock.calls.filter(
+        ([path]) => path === "/api/user-hidden-items",
+      ).length;
+      fireEvent.click(screen.getByText("Hidden for me"));
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+
+      expect(await screen.findByText("This movie is hidden for everyone.")).toBeInTheDocument();
+      expect(apiRequest.mock.calls.filter(
+        ([path]) => path === "/api/user-hidden-items",
+      )).toHaveLength(personalGetsBefore + 1);
+      expect(screen.queryByText("Elvern could not complete the request.")).not.toBeInTheDocument();
+      expect(screen.queryByText("Elvern received an unreadable response from the server.")).not.toBeInTheDocument();
+    },
+  );
+
+  test("explicit HTTP failure does not trigger reconciliation or fake success", async () => {
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      scopeError: "http",
+      scopeCommitsBeforeFailure: false,
+    });
+    const personalGetsBefore = apiRequest.mock.calls.filter(
+      ([path]) => path === "/api/user-hidden-items",
+    ).length;
+    fireEvent.click(screen.getByText("Hidden for me"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+
+    expect(await screen.findByText("Explicit server failure")).toBeInTheDocument();
+    expect(apiRequest.mock.calls.filter(
+      ([path]) => path === "/api/user-hidden-items",
+    )).toHaveLength(personalGetsBefore);
+    expect(screen.queryByText("This movie is hidden for everyone.")).not.toBeInTheDocument();
+  });
+
+  test("uncertain result that did not commit keeps authoritative source and reports the error", async () => {
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      scopeError: "network",
+      scopeCommitsBeforeFailure: false,
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+
+    expect(await screen.findByText("Elvern could not complete the request.")).toBeInTheDocument();
+    expect(screen.getByText("Scope Movie")).toBeInTheDocument();
+    expect(screen.queryByText("This movie is hidden for everyone.")).not.toBeInTheDocument();
+  });
 });
 
 describe("SettingsPage Display background controls", () => {

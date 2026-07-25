@@ -1,7 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
-import { apiRequest } from "../lib/api";
+import {
+  ApiResponseError,
+  apiRequest,
+  isAbortError,
+  isTransientNetworkError,
+} from "../lib/api";
 import {
   formatGoogleConnectionHealthLabel,
   formatGoogleDriveSetupLabel,
@@ -18,12 +23,14 @@ import {
   getBackgroundPickerPositionFromColor,
   normalizeUserBackgroundSettings,
 } from "../lib/userBackground";
-import {
-  readPersistedPanelState,
-  writePersistedPanelState,
-} from "../lib/persistedPanelState";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
+import { InstallSettingsPanel } from "../features/install/InstallSettingsPanel";
 import { normalizePosterDisplayWidth } from "../lib/posterUrls";
+import {
+  buildSettingsSectionLocation,
+  resolveSettingsSection,
+  writePersistedSettingsSection,
+} from "../lib/settingsSectionState";
 import { detectClientDeviceClass } from "../lib/platformDetection";
 import {
   resolveUserSettings,
@@ -37,11 +44,9 @@ const SETTINGS_SECTIONS = [
   { key: "preferences", label: "Preferences", icon: "preferences" },
   { key: "display", label: "Display", icon: "display" },
   { key: "libraries", label: "Libraries", icon: "libraries" },
-  { key: "hidden", label: "Hidden", icon: "hidden" },
+  { key: "install", label: "Install", icon: "install" },
   { key: "advanced", label: "Advanced", icon: "advanced" },
 ];
-const SETTINGS_SECTION_KEYS = SETTINGS_SECTIONS.map((section) => section.key);
-const SETTINGS_ACTIVE_SECTION_STORAGE_KEY = "elvern:settings-active-section";
 const AGE_REQUIREMENT_OPTIONS = [null, ...Array.from({ length: 18 }, (_, index) => index + 1)];
 
 const POSTER_CARD_APPEARANCE_OPTIONS = [
@@ -105,6 +110,44 @@ function buildRestrictedAgeBuckets(items = []) {
 function formatCountLabel(count, singular, plural = `${singular}s`) {
   const value = Number(count) || 0;
   return `${value} ${value === 1 ? singular : plural}`;
+}
+
+
+function normalizeHiddenIdentityText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+
+function hiddenItemsShareIdentity(left, right) {
+  if (Number(left?.id) === Number(right?.id)) {
+    return true;
+  }
+  return (
+    normalizeHiddenIdentityText(left?.title) === normalizeHiddenIdentityText(right?.title)
+    && String(left?.year ?? "") === String(right?.year ?? "")
+    && normalizeHiddenIdentityText(left?.edition_label) === normalizeHiddenIdentityText(right?.edition_label)
+  );
+}
+
+
+function isUncertainHiddenScopeError(error) {
+  return (
+    isTransientNetworkError(error)
+    || (
+      error instanceof ApiResponseError
+      && Number(error.status) >= 200
+      && Number(error.status) < 300
+    )
+  );
+}
+
+
+function hiddenScopeReached(lists, hiddenItem, targetScope) {
+  const inPersonal = lists.personalItems.some((item) => hiddenItemsShareIdentity(item, hiddenItem));
+  const inGlobal = lists.globalItems.some((item) => hiddenItemsShareIdentity(item, hiddenItem));
+  return targetScope === "global"
+    ? inGlobal && !inPersonal
+    : inPersonal && !inGlobal;
 }
 
 
@@ -440,10 +483,11 @@ function SettingsSectionIcon({ icon }) {
       </svg>
     );
   }
-  if (icon === "hidden") {
+  if (icon === "install") {
     return (
       <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
-        <path d="M3.5 12s3-5 8.5-5 8.5 5 8.5 5a13 13 0 0 1-2.6 2.9M14.2 14.2A3 3 0 0 1 9.8 9.8M5 5l14 14" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+        <path d="M12 4v9M8.5 9.5 12 13l3.5-3.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+        <path d="M5 14.5v2.2A2.3 2.3 0 0 0 7.3 19h9.4a2.3 2.3 0 0 0 2.3-2.3v-2.2" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
       </svg>
     );
   }
@@ -1046,7 +1090,15 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const librarySearchSettingVisible = !["phone", "tablet"].includes(detectClientDeviceClass());
   const userSettingsQuery = useUserSettingsQuery(user);
+  const settingsIdentity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
+  const settingsSectionResolution = resolveSettingsSection({ search: location.search });
   const settingsHydratedIdentityRef = useRef("");
+  const previousSettingsIdentityRef = useRef(settingsIdentity);
+  const mountedRef = useRef(true);
+  const currentIdentityRef = useRef(settingsIdentity);
+  const ancillaryLoadedIdentityRef = useRef("");
+  const ancillaryControllerRef = useRef(null);
+  const hiddenListGenerationRef = useRef(0);
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
@@ -1064,13 +1116,15 @@ export function SettingsPage() {
   const [backgroundSaving, setBackgroundSaving] = useState(false);
   const [backgroundError, setBackgroundError] = useState("");
   const [backgroundResetConfirmOpen, setBackgroundResetConfirmOpen] = useState(false);
-  const [activeSettingsSection, setActiveSettingsSection] = useState(() => (
-    readPersistedPanelState(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, SETTINGS_SECTION_KEYS, "preferences")
-  ));
+  const [activeSettingsSection, setActiveSettingsSection] = useState(
+    () => settingsSectionResolution.section,
+  );
   const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
   const [globalHiddenItems, setGlobalHiddenItems] = useState([]);
-  const [ancillaryLoading, setAncillaryLoading] = useState(true);
+  const [ancillaryLoading, setAncillaryLoading] = useState(
+    () => settingsSectionResolution.section !== "install",
+  );
   const [saving, setSaving] = useState(false);
   const [restoringItemId, setRestoringItemId] = useState(null);
   const [restoringGlobalItemId, setRestoringGlobalItemId] = useState(null);
@@ -1212,20 +1266,42 @@ export function SettingsPage() {
   const activeAgeBucket = ageBucketManager.open
     ? restrictedAgeBuckets.find((bucket) => bucket.age === ageBucketManager.age)
     : null;
-  const loading = ancillaryLoading || (!userSettingsQuery.data && userSettingsQuery.isPending);
+  const loading = activeSettingsSection !== "install"
+    && (ancillaryLoading || (!userSettingsQuery.data && userSettingsQuery.isPending));
+
+  currentIdentityRef.current = settingsIdentity;
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    ancillaryControllerRef.current?.abort();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (previousSettingsIdentityRef.current === settingsIdentity) {
+      return;
+    }
+    previousSettingsIdentityRef.current = settingsIdentity;
+    ancillaryControllerRef.current?.abort();
+    ancillaryLoadedIdentityRef.current = "";
+    hiddenListGenerationRef.current += 1;
+    setHiddenItems([]);
+    setGlobalHiddenItems([]);
+    setError("");
+    setMessage("");
+    setAncillaryLoading(activeSettingsSection !== "install");
+  }, [activeSettingsSection, settingsIdentity]);
 
   useEffect(() => {
     if (!userSettingsQuery.data) {
       return;
     }
-    const identity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
     const resolvedSettings = resolveUserSettings(userSettingsQuery.data);
     setSettings(resolvedSettings);
-    if (settingsHydratedIdentityRef.current !== identity) {
-      settingsHydratedIdentityRef.current = identity;
+    if (settingsHydratedIdentityRef.current !== settingsIdentity) {
+      settingsHydratedIdentityRef.current = settingsIdentity;
       setBackgroundDraft(normalizeUserBackgroundSettings(resolvedSettings));
     }
-  }, [user?.id, user?.role, userSettingsQuery.data]);
+  }, [settingsIdentity, userSettingsQuery.data]);
 
   useEffect(() => {
     if (userSettingsQuery.error && userSettingsQuery.error.name !== "AbortError") {
@@ -1233,7 +1309,49 @@ export function SettingsPage() {
     }
   }, [userSettingsQuery.error]);
 
+  const fetchHiddenLists = useCallback(async ({ signal } = {}) => {
+    const [personalPayload, globalPayload] = await Promise.all([
+      apiRequest("/api/user-hidden-items", { signal }),
+      user?.role === "admin"
+        ? apiRequest("/api/admin/global-hidden-items", { signal })
+        : Promise.resolve({ items: [] }),
+    ]);
+    return {
+      personalItems: personalPayload.items || [],
+      globalItems: globalPayload.items || [],
+    };
+  }, [user?.role]);
+
+  const refreshHiddenLists = useCallback(async ({ signal } = {}) => {
+    const expectedIdentity = settingsIdentity;
+    const generation = hiddenListGenerationRef.current + 1;
+    hiddenListGenerationRef.current = generation;
+    const lists = await fetchHiddenLists({ signal });
+    if (
+      !mountedRef.current
+      || currentIdentityRef.current !== expectedIdentity
+      || hiddenListGenerationRef.current !== generation
+    ) {
+      return null;
+    }
+    setHiddenItems(lists.personalItems);
+    setGlobalHiddenItems(lists.globalItems);
+    return lists;
+  }, [fetchHiddenLists, settingsIdentity]);
+
   useEffect(() => {
+    ancillaryControllerRef.current?.abort();
+    if (activeSettingsSection === "install") {
+      setAncillaryLoading(false);
+      return undefined;
+    }
+    if (ancillaryLoadedIdentityRef.current === settingsIdentity) {
+      setAncillaryLoading(false);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    ancillaryControllerRef.current = controller;
     let active = true;
 
     async function loadSettings() {
@@ -1241,8 +1359,7 @@ export function SettingsPage() {
       setError("");
       try {
         const [
-          hiddenPayload,
-          globalHiddenPayload,
+          hiddenLists,
           mediaLibraryReferencePayload,
           posterPayload,
           cloudPayload,
@@ -1250,66 +1367,83 @@ export function SettingsPage() {
           totpPayload,
           ageGroupsPayload,
         ] = await Promise.all([
-          apiRequest("/api/user-hidden-items"),
+          refreshHiddenLists({ signal: controller.signal }),
           user?.role === "admin"
-            ? apiRequest("/api/admin/global-hidden-items")
-            : Promise.resolve({ items: [] }),
-          user?.role === "admin"
-            ? apiRequest("/api/admin/media-library-reference")
+            ? apiRequest("/api/admin/media-library-reference", { signal: controller.signal })
             : Promise.resolve(null),
           user?.role === "admin"
-            ? apiRequest("/api/admin/poster-reference-location")
+            ? apiRequest("/api/admin/poster-reference-location", { signal: controller.signal })
             : Promise.resolve(null),
-          apiRequest("/api/cloud-libraries"),
+          apiRequest("/api/cloud-libraries", { signal: controller.signal }),
           user?.role === "admin"
-            ? apiRequest("/api/admin/google-drive-setup")
+            ? apiRequest("/api/admin/google-drive-setup", { signal: controller.signal })
             : Promise.resolve(null),
-          apiRequest("/api/auth/totp/status"),
+          apiRequest("/api/auth/totp/status", { signal: controller.signal }),
           user?.role === "admin"
-            ? apiRequest("/api/library/age-groups")
+            ? apiRequest("/api/library/age-groups", { signal: controller.signal })
             : Promise.resolve({ items: [], total: 0 }),
         ]);
-        if (active) {
-          setHiddenItems(hiddenPayload.items || []);
-          setGlobalHiddenItems(globalHiddenPayload.items || []);
-          setCloudLibraries(cloudPayload);
-          setAgeGroups(ageGroupsPayload || { items: [], total: 0 });
-          if (user?.role === "admin" && mediaLibraryReferencePayload) {
-            setSharedMediaLibraryReference(mediaLibraryReferencePayload);
-            setSharedMediaLibraryReferenceInput(
-              mediaLibraryReferencePayload.configured_value || mediaLibraryReferencePayload.default_value || "",
-            );
-          }
-          if (user?.role === "admin" && posterPayload) {
-            setPosterReference(posterPayload);
-            setPosterReferenceInput(posterPayload.configured_value || posterPayload.default_value || "");
-          }
-          if (user?.role === "admin" && googleSetupPayload) {
-            setGoogleDriveSetup(googleSetupPayload);
-            setGoogleDriveSetupDraft({
-              https_origin: googleSetupPayload.https_origin || "",
-              client_id: googleSetupPayload.client_id || "",
-              client_secret: googleSetupPayload.client_secret || "",
-            });
-          }
-          setTotpStatus(totpPayload);
+        if (
+          !active
+          || !mountedRef.current
+          || currentIdentityRef.current !== settingsIdentity
+        ) {
+          return;
         }
+        if (!hiddenLists) {
+          return;
+        }
+        setCloudLibraries(cloudPayload);
+        setAgeGroups(ageGroupsPayload || { items: [], total: 0 });
+        if (user?.role === "admin" && mediaLibraryReferencePayload) {
+          setSharedMediaLibraryReference(mediaLibraryReferencePayload);
+          setSharedMediaLibraryReferenceInput(
+            mediaLibraryReferencePayload.configured_value || mediaLibraryReferencePayload.default_value || "",
+          );
+        }
+        if (user?.role === "admin" && posterPayload) {
+          setPosterReference(posterPayload);
+          setPosterReferenceInput(posterPayload.configured_value || posterPayload.default_value || "");
+        }
+        if (user?.role === "admin" && googleSetupPayload) {
+          setGoogleDriveSetup(googleSetupPayload);
+          setGoogleDriveSetupDraft({
+            https_origin: googleSetupPayload.https_origin || "",
+            client_id: googleSetupPayload.client_id || "",
+            client_secret: googleSetupPayload.client_secret || "",
+          });
+        }
+        setTotpStatus(totpPayload);
+        ancillaryLoadedIdentityRef.current = settingsIdentity;
       } catch (requestError) {
-        if (active) {
+        if (
+          active
+          && mountedRef.current
+          && currentIdentityRef.current === settingsIdentity
+          && !isAbortError(requestError)
+        ) {
           setError(requestError.message || "Failed to load settings");
         }
       } finally {
-        if (active) {
+        if (
+          active
+          && mountedRef.current
+          && currentIdentityRef.current === settingsIdentity
+        ) {
           setAncillaryLoading(false);
         }
       }
     }
 
-    loadSettings();
+    void loadSettings();
     return () => {
       active = false;
+      controller.abort();
+      if (ancillaryControllerRef.current === controller) {
+        ancillaryControllerRef.current = null;
+      }
     };
-  }, [user?.id, user?.role]);
+  }, [activeSettingsSection, refreshHiddenLists, settingsIdentity, user?.role]);
 
   useEffect(() => {
     if (user?.role !== "admin") {
@@ -1368,16 +1502,18 @@ export function SettingsPage() {
     }
   }, [user?.role]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const section = params.get("section");
-    if (!section || !SETTINGS_SECTION_KEYS.includes(section)) {
-      return;
+  useLayoutEffect(() => {
+    const resolution = resolveSettingsSection({ search: location.search });
+    writePersistedSettingsSection(resolution.section);
+    if (activeSettingsSection !== resolution.section) {
+      setActiveSettingsSection(resolution.section);
+      setActiveSettingsButtonExpanded(true);
     }
-    writePersistedPanelState(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, section, SETTINGS_SECTION_KEYS);
-    setActiveSettingsSection(section);
-    setActiveSettingsButtonExpanded(true);
-  }, [location.search]);
+  }, [
+    activeSettingsSection,
+    location,
+    navigate,
+  ]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -1416,8 +1552,8 @@ export function SettingsPage() {
     nextParams.delete("googleDriveMessage");
     const nextSearch = nextParams.toString();
     const nextUrl = `${location.pathname}${nextSearch ? `?${nextSearch}` : ""}${location.hash || ""}`;
-    window.history.replaceState({}, "", nextUrl);
-  }, [location.hash, location.pathname, location.search, user?.role]);
+    navigate(nextUrl, { replace: true, state: location.state });
+  }, [location.hash, location.pathname, location.search, location.state, navigate, user?.role]);
 
   function applyUserSettingsPayload(payload) {
     const resolvedSettings = resolveUserSettings(payload);
@@ -1737,30 +1873,46 @@ export function SettingsPage() {
     setMovingToGlobalItemId(hiddenItem.id);
     setError("");
     setMessage("");
+    const successMessage = "This movie is hidden for everyone.";
     try {
-      const payload = await apiRequest(`/api/admin/global-hidden-items/${hiddenItem.id}`, {
-        method: "POST",
-      });
-      await apiRequest(`/api/user-hidden-items/${hiddenItem.id}`, {
-        method: "DELETE",
+      const payload = await apiRequest(`/api/admin/hidden-items/${hiddenItem.id}/scope`, {
+        method: "PUT",
+        data: { target_scope: "global" },
       });
       setHiddenItems((current) => current.filter((item) => item.id !== hiddenItem.id));
       setGlobalHiddenItems((current) => {
-        const existing = current.find((item) => item.id === hiddenItem.id);
+        const existing = current.find((item) => hiddenItemsShareIdentity(item, hiddenItem));
         if (existing) {
-          return current;
+          return current.map((item) => (
+            hiddenItemsShareIdentity(item, hiddenItem)
+              ? { ...item, hidden_at: payload.hidden_at }
+              : item
+          ));
         }
         return [
           {
             ...hiddenItem,
-            hidden_at: new Date().toISOString(),
+            hidden_at: payload.hidden_at,
           },
           ...current,
         ];
       });
-      setMessage(payload.message || "This movie is hidden for everyone.");
+      setMessage(payload.message || successMessage);
       void invalidateLibraryQueries();
+      void refreshHiddenLists().catch(() => {});
     } catch (requestError) {
+      if (isUncertainHiddenScopeError(requestError)) {
+        try {
+          const lists = await refreshHiddenLists();
+          if (lists && hiddenScopeReached(lists, hiddenItem, "global")) {
+            setMessage(successMessage);
+            void invalidateLibraryQueries();
+            return;
+          }
+        } catch {
+          // Preserve the original uncertain operation error below.
+        }
+      }
       setError(requestError.message || "Failed to hide this movie for everyone");
     } finally {
       setMovingToGlobalItemId(null);
@@ -1771,30 +1923,46 @@ export function SettingsPage() {
     setMovingToPersonalItemId(hiddenItem.id);
     setError("");
     setMessage("");
+    const successMessage = "This movie is now hidden only for your account.";
     try {
-      await apiRequest(`/api/user-hidden-items/${hiddenItem.id}`, {
-        method: "POST",
-      });
-      const payload = await apiRequest(`/api/admin/global-hidden-items/${hiddenItem.id}`, {
-        method: "DELETE",
+      const payload = await apiRequest(`/api/admin/hidden-items/${hiddenItem.id}/scope`, {
+        method: "PUT",
+        data: { target_scope: "personal" },
       });
       setGlobalHiddenItems((current) => current.filter((item) => item.id !== hiddenItem.id));
       setHiddenItems((current) => {
-        const existing = current.find((item) => item.id === hiddenItem.id);
+        const existing = current.find((item) => hiddenItemsShareIdentity(item, hiddenItem));
         if (existing) {
-          return current;
+          return current.map((item) => (
+            hiddenItemsShareIdentity(item, hiddenItem)
+              ? { ...item, hidden_at: payload.hidden_at }
+              : item
+          ));
         }
         return [
           {
             ...hiddenItem,
-            hidden_at: new Date().toISOString(),
+            hidden_at: payload.hidden_at,
           },
           ...current,
         ];
       });
-      setMessage(payload.message || "This movie is now hidden only for your account.");
+      setMessage(payload.message || successMessage);
       void invalidateLibraryQueries();
+      void refreshHiddenLists().catch(() => {});
     } catch (requestError) {
+      if (isUncertainHiddenScopeError(requestError)) {
+        try {
+          const lists = await refreshHiddenLists();
+          if (lists && hiddenScopeReached(lists, hiddenItem, "personal")) {
+            setMessage(successMessage);
+            void invalidateLibraryQueries();
+            return;
+          }
+        } catch {
+          // Preserve the original uncertain operation error below.
+        }
+      }
       setError(requestError.message || "Failed to hide this movie only for your account");
     } finally {
       setMovingToPersonalItemId(null);
@@ -2407,15 +2575,27 @@ export function SettingsPage() {
   }
 
   function handleSettingsPanelToggle(sectionKey) {
-    writePersistedPanelState(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, sectionKey, SETTINGS_SECTION_KEYS);
-    setActiveSettingsSection((currentSection) => {
-      if (currentSection === sectionKey) {
-        setActiveSettingsButtonExpanded((currentExpanded) => !currentExpanded);
-        return currentSection;
-      }
-      setActiveSettingsButtonExpanded(true);
-      return sectionKey;
+    if (activeSettingsSection === sectionKey) {
+      setActiveSettingsButtonExpanded((currentExpanded) => !currentExpanded);
+      return;
+    }
+    writePersistedSettingsSection(sectionKey);
+    setActiveSettingsSection(sectionKey);
+    setActiveSettingsButtonExpanded(true);
+    navigate(buildSettingsSectionLocation(location, sectionKey), {
+      replace: true,
+      state: location.state,
     });
+  }
+
+  if (settingsSectionResolution.shouldReplace) {
+    return (
+      <Navigate
+        replace
+        state={location.state}
+        to={buildSettingsSectionLocation(location, settingsSectionResolution.section)}
+      />
+    );
   }
 
   return (
@@ -2501,8 +2681,8 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {error ? <p className="form-error">{error}</p> : null}
-      {message ? <p className="page-note">{message}</p> : null}
+      {activeSettingsSection !== "install" && error ? <p className="form-error">{error}</p> : null}
+      {activeSettingsSection !== "install" && message ? <p className="page-note">{message}</p> : null}
 
       {activeSettingsSection === "preferences" ? (
       <div className="settings-grid">
@@ -2757,6 +2937,8 @@ export function SettingsPage() {
         </div>
       </div>
       ) : null}
+
+      {activeSettingsSection === "install" ? <InstallSettingsPanel /> : null}
 
       {activeSettingsSection === "libraries" ? (
       <div className="settings-grid">
@@ -3079,6 +3261,142 @@ export function SettingsPage() {
           </div>
         </SettingsAccordionSection>
 
+        <section className="settings-card settings-card--wide">
+          <details className="settings-disclosure">
+            <summary className="settings-disclosure__summary">
+              <span className="settings-disclosure__header">
+                <span className="settings-disclosure__title">Hidden for me</span>
+                <span className="settings-disclosure__copy">
+                  This is your personal hidden list. These items stay out of your library until you restore them or move them to the global hidden list.
+                </span>
+              </span>
+              <span className="status-pill">{hiddenItems.length}</span>
+            </summary>
+
+            <div className="settings-disclosure__body">
+              {loading ? (
+                <p className="page-subnote">Loading hidden movies...</p>
+              ) : hiddenItems.length > 0 ? (
+                <div className="hidden-movie-list">
+                  {hiddenItems.map((hiddenItem) => (
+                    <article className="hidden-movie-row" key={hiddenItem.id}>
+                      {hiddenItem.poster_url ? (
+                        <img
+                          alt=""
+                          className="hidden-movie-row__poster"
+                          loading="lazy"
+                          src={hiddenItem.poster_url}
+                        />
+                      ) : (
+                        <div className="hidden-movie-row__poster hidden-movie-row__poster--fallback" aria-hidden="true">
+                          <span>{hiddenItem.title.trim().charAt(0).toUpperCase() || "E"}</span>
+                        </div>
+                      )}
+                      <div className="hidden-movie-row__copy">
+                        <strong>{hiddenItem.title}</strong>
+                        <div className="detail-list">
+                          {hiddenItem.year ? <span>{hiddenItem.year}</span> : null}
+                          {hiddenItem.edition_label ? <span>{hiddenItem.edition_label}</span> : null}
+                        </div>
+                      </div>
+                      <div className="hidden-movie-row__actions">
+                        <button
+                          className="ghost-button ghost-button--inline"
+                          disabled={restoringItemId === hiddenItem.id || movingToGlobalItemId === hiddenItem.id}
+                          onClick={() => handleShowAgain(hiddenItem.id)}
+                          type="button"
+                        >
+                          {restoringItemId === hiddenItem.id ? "Restoring..." : "Show again"}
+                        </button>
+                        {user?.role === "admin" ? (
+                          <button
+                            className="ghost-button ghost-button--inline ghost-button--danger"
+                            disabled={movingToGlobalItemId === hiddenItem.id || restoringItemId === hiddenItem.id}
+                            onClick={() => handleHideUniversally(hiddenItem)}
+                            type="button"
+                          >
+                            {movingToGlobalItemId === hiddenItem.id ? "Hiding globally..." : "Hide universally"}
+                          </button>
+                        ) : null}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="page-subnote">You have no hidden movies right now.</p>
+              )}
+            </div>
+          </details>
+        </section>
+
+        {user?.role === "admin" ? (
+          <section className="settings-card settings-card--wide">
+            <details className="settings-disclosure">
+              <summary className="settings-disclosure__summary">
+                <span className="settings-disclosure__header">
+                  <span className="settings-disclosure__title">Hidden for everyone</span>
+                  <span className="settings-disclosure__copy">
+                    Admin-only restore list for movies hidden globally from regular users.
+                  </span>
+                </span>
+                <span className="status-pill">{globalHiddenItems.length}</span>
+              </summary>
+
+              <div className="settings-disclosure__body">
+                {loading ? (
+                  <p className="page-subnote">Loading globally hidden movies...</p>
+                ) : globalHiddenItems.length > 0 ? (
+                  <div className="hidden-movie-list">
+                    {globalHiddenItems.map((hiddenItem) => (
+                      <article className="hidden-movie-row" key={hiddenItem.id}>
+                        {hiddenItem.poster_url ? (
+                          <img
+                            alt=""
+                            className="hidden-movie-row__poster"
+                            loading="lazy"
+                            src={hiddenItem.poster_url}
+                          />
+                        ) : (
+                          <div className="hidden-movie-row__poster hidden-movie-row__poster--fallback" aria-hidden="true">
+                            <span>{hiddenItem.title.trim().charAt(0).toUpperCase() || "E"}</span>
+                          </div>
+                        )}
+                        <div className="hidden-movie-row__copy">
+                          <strong>{hiddenItem.title}</strong>
+                          <div className="detail-list">
+                          {hiddenItem.year ? <span>{hiddenItem.year}</span> : null}
+                          {hiddenItem.edition_label ? <span>{hiddenItem.edition_label}</span> : null}
+                        </div>
+                      </div>
+                        <div className="hidden-movie-row__actions">
+                          <button
+                            className="ghost-button ghost-button--inline"
+                            disabled={restoringGlobalItemId === hiddenItem.id || movingToPersonalItemId === hiddenItem.id}
+                            onClick={() => handleShowForEveryone(hiddenItem.id)}
+                            type="button"
+                          >
+                            {restoringGlobalItemId === hiddenItem.id ? "Restoring..." : "Show again"}
+                          </button>
+                          <button
+                            className="ghost-button ghost-button--inline ghost-button--subtle"
+                            disabled={movingToPersonalItemId === hiddenItem.id || restoringGlobalItemId === hiddenItem.id}
+                            onClick={() => handleHideForMe(hiddenItem)}
+                            type="button"
+                          >
+                            {movingToPersonalItemId === hiddenItem.id ? "Hiding for me..." : "Hide for me"}
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="page-subnote">No globally hidden movies right now.</p>
+                )}
+              </div>
+            </details>
+          </section>
+        ) : null}
+
         {user?.role === "admin" ? (
           <SettingsAccordionSection
             badge={googleSetupBadgeLabel}
@@ -3229,146 +3547,6 @@ export function SettingsPage() {
               </form>
             </div>
           </SettingsAccordionSection>
-        ) : null}
-      </div>
-      ) : null}
-
-      {activeSettingsSection === "hidden" ? (
-      <div className="settings-grid">
-        <section className="settings-card settings-card--wide">
-          <details className="settings-disclosure">
-            <summary className="settings-disclosure__summary">
-              <span className="settings-disclosure__header">
-                <span className="settings-disclosure__title">Hidden for me</span>
-                <span className="settings-disclosure__copy">
-                  This is your personal hidden list. These items stay out of your library until you restore them or move them to the global hidden list.
-                </span>
-              </span>
-              <span className="status-pill">{hiddenItems.length}</span>
-            </summary>
-
-            <div className="settings-disclosure__body">
-              {loading ? (
-                <p className="page-subnote">Loading hidden movies...</p>
-              ) : hiddenItems.length > 0 ? (
-                <div className="hidden-movie-list">
-                  {hiddenItems.map((hiddenItem) => (
-                    <article className="hidden-movie-row" key={hiddenItem.id}>
-                      {hiddenItem.poster_url ? (
-                        <img
-                          alt=""
-                          className="hidden-movie-row__poster"
-                          loading="lazy"
-                          src={hiddenItem.poster_url}
-                        />
-                      ) : (
-                        <div className="hidden-movie-row__poster hidden-movie-row__poster--fallback" aria-hidden="true">
-                          <span>{hiddenItem.title.trim().charAt(0).toUpperCase() || "E"}</span>
-                        </div>
-                      )}
-                      <div className="hidden-movie-row__copy">
-                        <strong>{hiddenItem.title}</strong>
-                        <div className="detail-list">
-                          {hiddenItem.year ? <span>{hiddenItem.year}</span> : null}
-                          {hiddenItem.edition_label ? <span>{hiddenItem.edition_label}</span> : null}
-                        </div>
-                      </div>
-                      <div className="hidden-movie-row__actions">
-                        <button
-                          className="ghost-button ghost-button--inline"
-                          disabled={restoringItemId === hiddenItem.id || movingToGlobalItemId === hiddenItem.id}
-                          onClick={() => handleShowAgain(hiddenItem.id)}
-                          type="button"
-                        >
-                          {restoringItemId === hiddenItem.id ? "Restoring..." : "Show again"}
-                        </button>
-                        {user?.role === "admin" ? (
-                          <button
-                            className="ghost-button ghost-button--inline ghost-button--danger"
-                            disabled={movingToGlobalItemId === hiddenItem.id || restoringItemId === hiddenItem.id}
-                            onClick={() => handleHideUniversally(hiddenItem)}
-                            type="button"
-                          >
-                            {movingToGlobalItemId === hiddenItem.id ? "Hiding globally..." : "Hide universally"}
-                          </button>
-                        ) : null}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="page-subnote">You have no hidden movies right now.</p>
-              )}
-            </div>
-          </details>
-        </section>
-
-        {user?.role === "admin" ? (
-          <section className="settings-card settings-card--wide">
-            <details className="settings-disclosure">
-              <summary className="settings-disclosure__summary">
-                <span className="settings-disclosure__header">
-                  <span className="settings-disclosure__title">Hidden for everyone</span>
-                  <span className="settings-disclosure__copy">
-                    Admin-only restore list for movies hidden globally from regular users.
-                  </span>
-                </span>
-                <span className="status-pill">{globalHiddenItems.length}</span>
-              </summary>
-
-              <div className="settings-disclosure__body">
-                {loading ? (
-                  <p className="page-subnote">Loading globally hidden movies...</p>
-                ) : globalHiddenItems.length > 0 ? (
-                  <div className="hidden-movie-list">
-                    {globalHiddenItems.map((hiddenItem) => (
-                      <article className="hidden-movie-row" key={hiddenItem.id}>
-                        {hiddenItem.poster_url ? (
-                          <img
-                            alt=""
-                            className="hidden-movie-row__poster"
-                            loading="lazy"
-                            src={hiddenItem.poster_url}
-                          />
-                        ) : (
-                          <div className="hidden-movie-row__poster hidden-movie-row__poster--fallback" aria-hidden="true">
-                            <span>{hiddenItem.title.trim().charAt(0).toUpperCase() || "E"}</span>
-                          </div>
-                        )}
-                        <div className="hidden-movie-row__copy">
-                          <strong>{hiddenItem.title}</strong>
-                          <div className="detail-list">
-                          {hiddenItem.year ? <span>{hiddenItem.year}</span> : null}
-                          {hiddenItem.edition_label ? <span>{hiddenItem.edition_label}</span> : null}
-                        </div>
-                      </div>
-                        <div className="hidden-movie-row__actions">
-                          <button
-                            className="ghost-button ghost-button--inline"
-                            disabled={restoringGlobalItemId === hiddenItem.id || movingToPersonalItemId === hiddenItem.id}
-                            onClick={() => handleShowForEveryone(hiddenItem.id)}
-                            type="button"
-                          >
-                            {restoringGlobalItemId === hiddenItem.id ? "Restoring..." : "Show again"}
-                          </button>
-                          <button
-                            className="ghost-button ghost-button--inline ghost-button--subtle"
-                            disabled={movingToPersonalItemId === hiddenItem.id || restoringGlobalItemId === hiddenItem.id}
-                            onClick={() => handleHideForMe(hiddenItem)}
-                            type="button"
-                          >
-                            {movingToPersonalItemId === hiddenItem.id ? "Hiding for me..." : "Hide for me"}
-                          </button>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="page-subnote">No globally hidden movies right now.</p>
-                )}
-              </div>
-            </details>
-          </section>
         ) : null}
       </div>
       ) : null}

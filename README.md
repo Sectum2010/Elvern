@@ -526,7 +526,7 @@ The container ships `ffmpeg` and `ffprobe` baked in. SQLite, transcodes, and hel
 2. Sign in with the bootstrap admin credentials.
 3. Click **Library → Rescan** to index your media.
 4. *(optional)* Open the **Admin** page and create accounts for the rest of the family.
-5. *(optional)* Install the desktop VLC helper on each playback machine — see [Desktop helper](#desktop-helper-vlc-handoff).
+5. *(optional)* Open **Settings → Install** to install the desktop VLC helper on each playback machine — see [Desktop helper](#desktop-helper-vlc-handoff). Existing `/install` and `/desktop` bookmarks redirect there.
 
 ### Desktop helper (VLC handoff)
 
@@ -548,6 +548,8 @@ Distributable self-contained bundles land under `clients/desktop-vlc-opener/arti
 | **macOS** | Double-click `Install-ElvernVlcOpener.command` |
 | **Linux remote desktop** | Run `./Install-ElvernVlcOpener.sh` |
 | **Linux same-host** | No Helper required; use the host VLC check in Elvern |
+
+The in-app download, status, and verification surface lives at **Settings → Install**. The legacy protected `/install` and `/desktop` paths remain compatible redirects to that Settings section.
 
 After that, **Open in VLC** Just Works™ from any browser tab on that desktop.
 
