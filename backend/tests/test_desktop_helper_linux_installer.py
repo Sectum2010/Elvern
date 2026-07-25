@@ -397,12 +397,18 @@ def _run_uninstaller(
     env: dict[str, str],
     *,
     fail_at: str | None = None,
+    cleanup_fail_at: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     run_env = dict(env)
     if fail_at:
         run_env.update({
             "ELVERN_UNINSTALL_TEST_MODE": "1",
             "ELVERN_UNINSTALL_TEST_FAIL_AT": fail_at,
+        })
+    if cleanup_fail_at:
+        run_env.update({
+            "ELVERN_UNINSTALL_TEST_MODE": "1",
+            "ELVERN_UNINSTALL_TEST_FAIL_CLEANUP_AT": cleanup_fail_at,
         })
     uninstaller = (
         Path(env["HOME"])
@@ -1141,3 +1147,208 @@ def test_linux_installer_source_is_posix_and_uses_real_xdg_mime_contract() -> No
         "#!/usr/bin/env bash",
     ):
         assert bashism not in combined
+
+
+@pytest.mark.parametrize(
+    "fail_at",
+    [
+        "after_mime_config_replace",
+        "before_mime_data_replace",
+        "after_mime_data_replace",
+    ],
+)
+def test_linux_uninstaller_rolls_back_both_distinct_mime_files_after_partial_update(
+    tmp_path: Path,
+    fail_at: str,
+) -> None:
+    package_root, config_mime, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    data_mime = Path(env["XDG_DATA_HOME"]) / "applications" / "mimeapps.list"
+    data_mime.write_bytes(
+        b"[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=elvern-vlc-opener.desktop;data-handler.desktop;\n"
+        b"text/plain=keep-editor.desktop;\n"
+    )
+    data_mime.chmod(0o600)
+    config_before = config_mime.read_bytes()
+    data_before = data_mime.read_bytes()
+    config_mode = stat.S_IMODE(config_mime.stat().st_mode)
+
+    result = _run_uninstaller(env, fail_at=fail_at)
+
+    assert result.returncode != 0
+    assert config_mime.read_bytes() == config_before
+    assert data_mime.read_bytes() == data_before
+    assert stat.S_IMODE(config_mime.stat().st_mode) == config_mode
+    assert stat.S_IMODE(data_mime.stat().st_mode) == 0o600
+    assert _read_default_handler(config_mime) == "elvern-vlc-opener.desktop"
+
+
+def test_linux_registration_only_partial_update_rolls_back_every_file(
+    tmp_path: Path,
+) -> None:
+    _package_root, config_mime, env = _create_linux_package(tmp_path)
+    data_mime = Path(env["XDG_DATA_HOME"]) / "applications" / "mimeapps.list"
+    data_mime.parent.mkdir(parents=True, exist_ok=True)
+    config_mime.write_bytes(
+        b"[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=elvern-vlc-opener.desktop;third.desktop;\n"
+        b"image/png=keep.desktop;\n"
+    )
+    data_mime.write_bytes(
+        b"[Default Applications]\n"
+        b"x-scheme-handler/elvern-vlc=elvern-vlc-opener.desktop;data.desktop;\n"
+    )
+    before = (config_mime.read_bytes(), data_mime.read_bytes())
+    run_env = {
+        **env,
+        "ELVERN_UNINSTALL_TEST_MODE": "1",
+        "ELVERN_UNINSTALL_TEST_FAIL_AT": "before_mime_data_replace",
+        "ELVERN_TEST_XDG_QUERY_VALUE": "elvern-vlc-opener.desktop",
+    }
+
+    result = subprocess.run(
+        ["/bin/sh", str(LINUX_UNINSTALLER)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=run_env,
+    )
+
+    assert result.returncode != 0
+    assert (config_mime.read_bytes(), data_mime.read_bytes()) == before
+
+
+def test_linux_uninstaller_accepts_legacy_self_referential_previous_handler(
+    tmp_path: Path,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    install_state = Path(env["HOME"]) / ".local/lib/elvern-vlc-opener/install-state.tsv"
+    source = install_state.read_text(encoding="utf-8")
+    install_state.write_text(
+        source.replace(
+            "previous_protocol_default\told-handler.desktop",
+            "previous_protocol_default\telvern-vlc-opener.desktop",
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_uninstaller(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "older Helper state was invalid" in result.stderr
+    assert _read_default_handler(state) != "elvern-vlc-opener.desktop"
+    assert not (Path(env["HOME"]) / ".local/lib/elvern-vlc-opener").exists()
+
+
+@pytest.mark.parametrize(
+    ("cleanup_point", "warning", "residual_pattern"),
+    [
+        ("backup", "installation backup cleanup failed", ".elvern-vlc-opener-uninstall-backup.*"),
+        ("transaction", "registration transaction cleanup failed", ".elvern-vlc-opener-uninstall.*"),
+        ("lock", "uninstall lock cleanup failed", ".elvern-vlc-opener-install.lock"),
+    ],
+)
+def test_linux_post_commit_cleanup_failures_are_warning_only(
+    tmp_path: Path,
+    cleanup_point: str,
+    warning: str,
+    residual_pattern: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    assert _run_installer(package_root, env).returncode == 0
+    install_parent = Path(env["HOME"]) / ".local/lib"
+
+    result = _run_uninstaller(env, cleanup_fail_at=cleanup_point)
+
+    assert result.returncode == 0, result.stderr
+    assert warning in result.stderr
+    assert not (install_parent / "elvern-vlc-opener").exists()
+    assert _read_default_handler(state) != "elvern-vlc-opener.desktop"
+    assert list(install_parent.glob(residual_pattern))
+    assert "rollback could not be verified" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("XDG_CONFIG_HOME", "/tmp/elvern\tconfig"),
+        ("XDG_DATA_HOME", "/tmp/elvern\ndata"),
+        ("XDG_DATA_DIRS", "/usr/share\r:/usr/local/share"),
+        ("XDG_CONFIG_HOME", "relative/config"),
+    ],
+)
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_linux_xdg_unsafe_paths_are_rejected_before_mutation(
+    tmp_path: Path,
+    field: str,
+    unsafe_value: str,
+    operation: str,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    before = state.read_bytes()
+    env[field] = unsafe_value
+    if operation == "install":
+        result = _run_installer(package_root, env)
+    else:
+        result = subprocess.run(
+            ["/bin/sh", str(LINUX_UNINSTALLER)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    assert result.returncode != 0
+    assert "path is unsafe" in result.stderr
+    assert state.read_bytes() == before
+    assert not (Path(env["HOME"]) / ".local/lib/elvern-vlc-opener").exists()
+
+
+def test_linux_uninstaller_rejects_user_xdg_parent_symlink_before_mutation(
+    tmp_path: Path,
+) -> None:
+    _package_root, state, env = _create_linux_package(tmp_path)
+    real_data = tmp_path / "real-data"
+    real_data.mkdir()
+    linked_data = tmp_path / "linked-data"
+    linked_data.symlink_to(real_data, target_is_directory=True)
+    env["XDG_DATA_HOME"] = str(linked_data)
+    before = state.read_bytes()
+
+    result = subprocess.run(
+        ["/bin/sh", str(LINUX_UNINSTALLER)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "unsafe link" in result.stderr
+    assert state.read_bytes() == before
+
+
+def test_linux_handler_search_skips_untrusted_system_root_and_uses_safe_root(
+    tmp_path: Path,
+) -> None:
+    package_root, state, env = _create_linux_package(tmp_path)
+    unsafe_target = tmp_path / "unsafe-system-target"
+    unsafe_target.mkdir()
+    unsafe_root = tmp_path / "unsafe-system-root"
+    unsafe_root.symlink_to(unsafe_target, target_is_directory=True)
+    safe_root = tmp_path / "safe-system-root"
+    safe_applications = safe_root / "applications"
+    safe_applications.mkdir(parents=True)
+    (safe_applications / "old-handler.desktop").write_text(
+        "[Desktop Entry]\nName=Safe system handler\n",
+        encoding="utf-8",
+    )
+    env["XDG_DATA_DIRS"] = f"{unsafe_root}:{safe_root}"
+    assert _run_installer(package_root, env).returncode == 0
+
+    result = _run_uninstaller(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _read_default_handler(state) == "old-handler.desktop"

@@ -38,6 +38,40 @@ inject_failure() {
   fi
 }
 
+prepare_backup_target() {
+  local prefix="$1"
+  local reserved=""
+  local candidate=""
+  local attempt=0
+  [[ -d "${DEST_DIR}" && ! -L "${DEST_DIR}" \
+    && "${DEST_DIR}" != *$'\t'* \
+    && "${DEST_DIR}" != *$'\r'* \
+    && "${DEST_DIR}" != *$'\n'* ]] \
+    || fail "The App backup parent is unsafe."
+  while [[ ${attempt} -lt 8 ]]; do
+    attempt=$((attempt + 1))
+    reserved="$(mktemp -d "${DEST_DIR}/${prefix}.XXXXXX")" \
+      || fail "A unique App backup path could not be reserved."
+    [[ "$(dirname "${reserved}")" == "${DEST_DIR}" && ! -L "${reserved}" ]] \
+      || fail "The App backup parent is unsafe."
+    rmdir "${reserved}" || fail "A unique App backup path could not be prepared."
+    candidate="${reserved}.app"
+    if [[ "${ELVERN_INSTALL_TEST_MODE:-0}" == "1" \
+      && "${ELVERN_INSTALL_TEST_BACKUP_COLLISIONS:-0}" -ge "${attempt}" ]]; then
+      continue
+    fi
+    if [[ ! -e "${candidate}" && ! -L "${candidate}" \
+      && "$(dirname "${candidate}")" == "${DEST_DIR}" \
+      && "${candidate}" != *$'\t'* \
+      && "${candidate}" != *$'\r'* \
+      && "${candidate}" != *$'\n'* ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  fail "A unique safe App backup path could not be prepared."
+}
+
 show_error() {
   local message="$1"
   echo "Elvern VLC Opener was not installed: ${message}" >&2
@@ -373,9 +407,8 @@ verify_quarantine_cleared "${STAGED_APP}"
 OLD_REGISTRATION_CAPTURED=1
 if [[ -d "${DEST_APP}" ]]; then
   OLD_INSTALL_EXISTED=1
-  BACKUP_APP="$(mktemp -d "${DEST_DIR}/.elvern-vlc-opener-backup.XXXXXX")"
-  rmdir "${BACKUP_APP}" || fail "A unique App backup path could not be prepared."
-  BACKUP_APP="${BACKUP_APP}.app"
+  BACKUP_APP="$(prepare_backup_target ".elvern-vlc-opener-backup")"
+  inject_failure "backup_target_prepared"
   inject_failure "first_backup_move"
   mv "${DEST_APP}" "${BACKUP_APP}" || fail "The existing Helper App could not be staged for upgrade."
   OLD_INSTALL_BACKED_UP=1

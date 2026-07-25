@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -21,6 +22,17 @@ from elvern_shared.desktop_helper_package_contract import (
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_ROOT = ROOT / "clients" / "desktop-vlc-opener"
 RUNTIME_RELEASE_TOOL = ROOT / "scripts" / "desktop-helper-runtime-releases.py"
+
+
+def _load_runtime_release_tool_module():
+    spec = importlib.util.spec_from_file_location(
+        "elvern_desktop_helper_runtime_releases_test",
+        RUNTIME_RELEASE_TOOL,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -374,6 +386,285 @@ def test_runtime_authority_tool_reports_invalid_and_rejects_origin_or_symlink(
     assert not (tmp_path / "linked-destination").exists()
 
 
+def test_runtime_inspect_origin_tristate_and_incompatible_exit(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    origin = manifest["bound_origin_sha256"]
+
+    unchecked = _run_runtime_tool("inspect", "--runtime-dir", str(source))
+    unchecked_payload = json.loads(unchecked.stdout)
+    assert unchecked.returncode != 0  # Staging files are intentionally writable.
+    assert unchecked_payload["origin_check"] == "not_checked"
+    assert unchecked_payload["origin_compatible"] is None
+
+    compatible = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(source),
+        "--expected-origin-sha256", origin,
+    )
+    compatible_payload = json.loads(compatible.stdout)
+    assert compatible_payload["origin_check"] == "compatible"
+    assert compatible_payload["origin_compatible"] is True
+
+    incompatible = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(source),
+        "--expected-origin-sha256", "0" * 64,
+    )
+    incompatible_payload = json.loads(incompatible.stdout)
+    assert incompatible.returncode != 0
+    assert incompatible_payload["manifest_state"] == "invalid"
+    assert incompatible_payload["origin_check"] == "incompatible"
+    assert incompatible_payload["origin_compatible"] is False
+
+
+def test_runtime_authority_mutable_modes_are_reported_and_repaired(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    origin = manifest["bound_origin_sha256"]
+    source_modes = {
+        path.name: stat.S_IMODE(path.stat().st_mode)
+        for path in source.iterdir()
+        if path.is_file()
+    }
+    runtime = tmp_path / "runtime"
+    applied = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+        "--apply",
+    )
+    assert applied.returncode == 0, applied.stderr
+    mutable_paths = [
+        runtime / "release-manifest.json",
+        runtime / manifest["packages"][0]["filename"],
+    ]
+    mutable_paths[0].chmod(0o644)
+    mutable_paths[1].chmod(0o666)
+
+    inspected = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+    )
+    payload = json.loads(inspected.stdout)
+    assert inspected.returncode != 0
+    assert payload["manifest_state"] == "valid_but_mutable"
+    assert payload["mutable_file_count"] == 2
+
+    dry_run = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+    )
+    assert dry_run.returncode == 0
+    assert "would repair immutable mode on 2" in dry_run.stdout
+    assert [stat.S_IMODE(path.stat().st_mode) for path in mutable_paths] == [0o644, 0o666]
+
+    repaired = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(runtime),
+        "--expected-origin-sha256", origin,
+        "--apply",
+    )
+    assert repaired.returncode == 0, repaired.stderr
+    assert "Repaired immutable mode on 2" in repaired.stdout
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o444 for path in mutable_paths)
+    assert source_modes == {
+        path.name: stat.S_IMODE(path.stat().st_mode)
+        for path in source.iterdir()
+        if path.is_file()
+    }
+
+
+def test_runtime_path_requires_existing_safe_parent(tmp_path: Path) -> None:
+    missing_leaf = tmp_path / "runtime"
+    absent = _run_runtime_tool("inspect", "--runtime-dir", str(missing_leaf))
+    assert absent.returncode == 2
+    assert json.loads(absent.stdout)["manifest_state"] == "absent"
+
+    missing_parent = tmp_path / "missing" / "runtime"
+    invalid = _run_runtime_tool("inspect", "--runtime-dir", str(missing_parent))
+    assert invalid.returncode != 0
+    assert "parent does not exist" in invalid.stderr
+
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+    rejected = _run_runtime_tool(
+        "inspect",
+        "--runtime-dir", str(linked_parent / "runtime"),
+    )
+    assert rejected.returncode != 0
+    assert "symlink" in rejected.stderr
+
+
+def test_runtime_migration_rejects_broken_destination_artifact_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    package_name = manifest["packages"][0]["filename"]
+    broken_link = destination / package_name
+    broken_link.symlink_to(destination / "missing-package.zip")
+
+    rejected = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(destination),
+        "--expected-origin-sha256", manifest["bound_origin_sha256"],
+        "--apply",
+    )
+
+    assert rejected.returncode != 0
+    assert broken_link.is_symlink()
+    assert not (destination / "missing-package.zip").exists()
+
+
+def test_runtime_migration_rejects_incomplete_active_manifest(
+    tmp_path: Path,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    shutil.copy2(
+        source / "release-manifest.json",
+        destination / "release-manifest.json",
+    )
+
+    rejected = _run_runtime_tool(
+        "migrate",
+        "--source-dir", str(source),
+        "--runtime-dir", str(destination),
+        "--expected-origin-sha256", manifest["bound_origin_sha256"],
+        "--apply",
+    )
+
+    assert rejected.returncode != 0
+    assert "incomplete active manifest" in rejected.stderr
+    assert sorted(path.name for path in destination.iterdir()) == [
+        "release-manifest.json"
+    ]
+
+
+@pytest.mark.parametrize("replacement_kind", ["atomic_replace", "same_inode_rewrite"])
+def test_runtime_manifest_read_retries_when_file_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    module = _load_runtime_release_tool_module()
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_bytes(b'{"value":"before"}')
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b'{"value":"after!"}')
+    original_read = module.os.read
+    changed = False
+
+    def mutating_read(descriptor: int, size: int) -> bytes:
+        nonlocal changed
+        content = original_read(descriptor, size)
+        if content and not changed:
+            changed = True
+            if replacement_kind == "atomic_replace":
+                os.replace(replacement, manifest)
+            else:
+                manifest.write_bytes(b'{"value":"after!"}')
+        return content
+
+    monkeypatch.setattr(module.os, "read", mutating_read)
+    content, _metadata = module._read_regular_file_at(
+        tmp_path,
+        "release-manifest.json",
+        max_bytes=module.MAX_MANIFEST_BYTES,
+    )
+
+    assert content == b'{"value":"after!"}'
+
+
+def test_runtime_safe_manifest_reader_rejects_bad_inputs_and_closes_handles(
+    tmp_path: Path,
+) -> None:
+    module = _load_runtime_release_tool_module()
+    before_handles = len(list(Path("/proc/self/fd").iterdir()))
+    (tmp_path / "release-manifest.json").write_bytes(b"\xff")
+    with pytest.raises(module.AuthorityError, match="invalid"):
+        module._load_manifest(tmp_path)
+    (tmp_path / "release-manifest.json").write_text("{", encoding="utf-8")
+    with pytest.raises(module.AuthorityError, match="invalid"):
+        module._load_manifest(tmp_path)
+    (tmp_path / "release-manifest.json").unlink()
+    (tmp_path / "release-manifest.json").symlink_to(tmp_path / "missing.json")
+    with pytest.raises(module.AuthorityError):
+        module._load_manifest(tmp_path)
+    after_handles = len(list(Path("/proc/self/fd").iterdir()))
+    assert after_handles == before_handles
+
+
+@pytest.mark.parametrize(
+    ("runtime_manifest", "legacy_manifest", "expect_warning"),
+    [
+        (None, "{}", True),
+        ("{", "{}", False),
+        (None, None, False),
+    ],
+)
+def test_lifecycle_authority_warning_only_reports_a_real_absent_runtime_gap(
+    tmp_path: Path,
+    runtime_manifest: str | None,
+    legacy_manifest: str | None,
+    expect_warning: bool,
+) -> None:
+    fake_root = tmp_path / "repo"
+    scripts_dir = fake_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts" / "elvern-common.sh", scripts_dir / "elvern-common.sh")
+    runtime = fake_root / "runtime-releases"
+    runtime.mkdir()
+    legacy = fake_root / "clients/desktop-vlc-opener/artifacts/packages"
+    legacy.mkdir(parents=True)
+    if runtime_manifest is not None:
+        (runtime / "release-manifest.json").write_text(runtime_manifest, encoding="utf-8")
+    if legacy_manifest is not None:
+        (legacy / "release-manifest.json").write_text(legacy_manifest, encoding="utf-8")
+    command = (
+        f'source "{scripts_dir / "elvern-common.sh"}"; '
+        'elvern_log_message() { printf "%s:%s\\n" "$1" "$2"; }; '
+        "elvern_warn_helper_release_authority_gap"
+    )
+    result = subprocess.run(
+        ["bash", "-c", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ELVERN_HELPER_RELEASES_DIR": str(runtime),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert ("runtime releases are absent" in result.stdout) is expect_warning
+    assert "https://" not in result.stdout
+
+
 def test_runtime_authority_tool_activates_manifest_last_and_cleans_packages(
     tmp_path: Path,
 ) -> None:
@@ -448,6 +739,14 @@ def test_strict_package_validator_rejects_non_list_runtime_ids(
     assert "Traceback" not in validated.stderr
 
 
+def _uppercase_filename_hash(filename: str) -> str:
+    hash_prefix = filename[-16:-4]
+    uppercase_hash_prefix = hash_prefix.upper()
+    if uppercase_hash_prefix == hash_prefix:
+        uppercase_hash_prefix = f"A{hash_prefix[1:]}"
+    return f"{filename[:-16]}{uppercase_hash_prefix}.zip"
+
+
 @pytest.mark.parametrize(
     "filename_mutator",
     [
@@ -456,7 +755,7 @@ def test_strict_package_validator_rejects_non_list_runtime_ids(
             + ("0" if filename[-5] != "0" else "1")
             + ".zip"
         ),
-        lambda filename: filename[:-16] + filename[-16:-4].upper() + ".zip",
+        _uppercase_filename_hash,
         lambda filename: filename[:-17] + ".zip",
         lambda filename: filename[:-4] + "0.zip",
         lambda filename: "renamed-" + filename,

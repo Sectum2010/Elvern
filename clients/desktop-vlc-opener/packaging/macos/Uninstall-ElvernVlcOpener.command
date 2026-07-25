@@ -23,6 +23,40 @@ fail() {
   exit 1
 }
 
+prepare_backup_target() {
+  local prefix="$1"
+  local reserved=""
+  local candidate=""
+  local attempt=0
+  [[ -d "${DEST_DIR}" && ! -L "${DEST_DIR}" \
+    && "${DEST_DIR}" != *$'\t'* \
+    && "${DEST_DIR}" != *$'\r'* \
+    && "${DEST_DIR}" != *$'\n'* ]] \
+    || fail "the App backup parent is unsafe."
+  while [[ ${attempt} -lt 8 ]]; do
+    attempt=$((attempt + 1))
+    reserved="$(mktemp -d "${DEST_DIR}/${prefix}.XXXXXX")" \
+      || fail "the App backup path could not be reserved."
+    [[ "$(dirname "${reserved}")" == "${DEST_DIR}" && ! -L "${reserved}" ]] \
+      || fail "the App backup parent is unsafe."
+    rmdir "${reserved}" || fail "the App backup path could not be prepared."
+    candidate="${reserved}.app"
+    if [[ "${ELVERN_UNINSTALL_TEST_MODE:-0}" == "1" \
+      && "${ELVERN_UNINSTALL_TEST_BACKUP_COLLISIONS:-0}" -ge "${attempt}" ]]; then
+      continue
+    fi
+    if [[ ! -e "${candidate}" && ! -L "${candidate}" \
+      && "$(dirname "${candidate}")" == "${DEST_DIR}" \
+      && "${candidate}" != *$'\t'* \
+      && "${candidate}" != *$'\r'* \
+      && "${candidate}" != *$'\n'* ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  fail "a unique safe App backup path could not be prepared."
+}
+
 inject_failure() {
   local point="$1"
   if [[ "${ELVERN_UNINSTALL_TEST_MODE:-0}" == "1" \
@@ -110,15 +144,13 @@ fi
 [[ -x "${LSREGISTER}" ]] \
   || fail "Launch Services registration support is unavailable."
 
+BACKUP_APP="$(prepare_backup_target ".elvern-vlc-opener-uninstall-backup")"
+inject_failure "backup_target_prepared"
 inject_failure "unregister"
 "${LSREGISTER}" -u "${DEST_APP}" >/dev/null 2>&1 \
   || fail "Launch Services could not unregister the Elvern Helper App."
 UNREGISTERED=1
 
-BACKUP_APP="$(mktemp -d "${DEST_DIR}/.elvern-vlc-opener-uninstall-backup.XXXXXX")"
-rmdir "${BACKUP_APP}" \
-  || fail "the App backup path could not be prepared."
-BACKUP_APP="${BACKUP_APP}.app"
 inject_failure "backup_move"
 mv "${DEST_APP}" "${BACKUP_APP}" \
   || fail "the Elvern Helper App could not be staged for removal."

@@ -267,6 +267,29 @@ def test_macos_transaction_commits_before_finder_reveal_and_backup_flag_is_safe(
     assert 'if [[ ${LOCK_HELD} -eq 1 && -d "${LOCK_DIR}" ]]' in source
 
 
+def test_macos_backup_targets_are_prepared_before_unregister_or_move() -> None:
+    installer = (
+        HELPER_ROOT / "packaging" / "macos" / "Install-ElvernVlcOpener.command"
+    ).read_text(encoding="utf-8")
+    uninstaller = (
+        HELPER_ROOT / "packaging" / "macos" / "Uninstall-ElvernVlcOpener.command"
+    ).read_text(encoding="utf-8")
+
+    for source in (installer, uninstaller):
+        assert "prepare_backup_target()" in source
+        assert '[[ -d "${DEST_DIR}" && ! -L "${DEST_DIR}"' in source
+        assert '[[ ! -e "${candidate}" && ! -L "${candidate}"' in source
+        assert 'while [[ ${attempt} -lt 8 ]]' in source
+        assert '"$(dirname "${candidate}")" == "${DEST_DIR}"' in source
+    assert uninstaller.index(
+        'BACKUP_APP="$(prepare_backup_target ".elvern-vlc-opener-uninstall-backup")"'
+    ) < uninstaller.index('"${LSREGISTER}" -u "${DEST_APP}"')
+    assert installer.index(
+        'BACKUP_APP="$(prepare_backup_target ".elvern-vlc-opener-backup")"'
+    ) < installer.index('mv "${DEST_APP}" "${BACKUP_APP}"')
+    assert "lsregister -kill" not in uninstaller.lower()
+
+
 def test_linux_installer_uses_one_xdg_data_root_and_preserves_failed_rollback_materials() -> None:
     source = (
         HELPER_ROOT / "packaging" / "linux" / "Install-ElvernVlcOpener.sh"
@@ -449,12 +472,18 @@ def test_ci_keeps_docker_and_production_browser_jobs_independent() -> None:
     assert "npx playwright install --with-deps chromium firefox" in browser_job
     assert "--project chromium-desktop-production" in browser_job
     assert "--project firefox-desktop-production" in browser_job
-    assert "VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=on" in browser_job
-    assert "VITE_ELVERN_LIBRARY_REVISION_MODE=on" in browser_job
+    assert "node scripts/build-phase7-production.mjs" in browser_job
+    assert "--use-existing-build" in browser_job
     assert "tmp/playwright-phase7-*" in browser_job
     assert 'name: "chromium-desktop-production"' in browser_config
     assert 'name: "firefox-desktop-production"' in browser_config
+    assert 'name: "chromium-service-worker-network-guard"' in browser_config
+    assert 'name: "firefox-service-worker-network-guard"' in browser_config
     assert 'serviceWorkers: "block"' in browser_config
+    assert 'serviceWorkers: "allow"' in browser_config
+    assert "ELVERN_PHASE7_NETWORK_PROXY" in browser_config
+    assert "--project chromium-service-worker-network-guard" in browser_job
+    assert "--project firefox-service-worker-network-guard" in browser_job
     for public_probe in (
         "https://www.cloudflare.com/cdn-cgi/trace",
         "https://api64.ipify.org/",

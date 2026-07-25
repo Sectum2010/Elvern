@@ -255,6 +255,12 @@ Use `migrate` without `--apply` for review; add `--apply` only after validating 
 canonical origin hash. Migration does not delete the source or read the live
 database.
 
+For a compatibility assertion, pass the expected canonical origin SHA-256 to
+`inspect`. Without it, `origin_compatible` is `null`, not true. Runtime manifests
+and content-addressed ZIPs must be mode `0444`; inspect reports mutable files and
+explicit migration apply can repair only identical content. Missing intermediate
+parents and any symlinked path component fail closed.
+
 If direct play fails for a file that looked safe, the frontend will try to force an HLS fallback automatically. If playback still fails:
 
 1. Confirm `ffmpeg` and `ffprobe` are installed and match the paths in `deploy/env/elvern.env`.

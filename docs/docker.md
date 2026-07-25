@@ -99,6 +99,10 @@ An existing old source-tree authority can be checked with
 `"$ELVERN_ROOT/docker-data/data/helper_releases"`. Migration never deletes the
 source and requires `--apply`; `/data/helper_releases` remains the container-side
 runtime path.
+Pass the expected canonical origin SHA-256 when compatibility with the running
+server must be proven. Integrity-only inspect deliberately reports origin as not
+checked. Runtime manifests and ZIPs are immutable `0444`; identical mutable files
+are repaired only by explicit `--apply`.
 
 The standard packages and their per-user uninstallers are transactional. On Linux,
 uninstall restores a recorded safe previous protocol handler only when Elvern is

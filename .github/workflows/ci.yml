@@ -182,17 +182,17 @@ jobs:
 
       - name: Build production frontend
         working-directory: frontend
-        run: >-
-          VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE=on
-          VITE_ELVERN_LIBRARY_REVISION_MODE=on
-          npm run build
+        run: node scripts/build-phase7-production.mjs
 
       - name: Run isolated production browser regression
         working-directory: frontend
         run: >-
           node scripts/run-cross-browser-playwright.mjs
+          --use-existing-build
           --project chromium-desktop-production
           --project firefox-desktop-production
+          --project chromium-service-worker-network-guard
+          --project firefox-service-worker-network-guard
 
       - name: Upload sanitized browser failure artifacts
         if: failure()

@@ -255,7 +255,8 @@ dry-run migration before applying anything:
 
 ```bash
 python scripts/desktop-helper-runtime-releases.py inspect \
-  --runtime-dir "$ELVERN_ROOT/backend/data/helper_releases"
+  --runtime-dir "$ELVERN_ROOT/backend/data/helper_releases" \
+  --expected-origin-sha256 "<canonical-origin-sha256>"
 python scripts/desktop-helper-runtime-releases.py migrate \
   --source-dir "$ELVERN_ROOT/clients/desktop-vlc-opener/artifacts/packages" \
   --runtime-dir "$ELVERN_ROOT/backend/data/helper_releases" \
@@ -263,6 +264,11 @@ python scripts/desktop-helper-runtime-releases.py migrate \
 ```
 
 The second command is read-only until `--apply` is explicitly added.
+Omitting the expected hash from `inspect` performs integrity-only validation and
+reports that origin compatibility was not checked. A mutable but otherwise valid
+authority exits nonzero; migration dry-run reports the required `0444` repairs,
+and `--apply` performs them without changing the source. The runtime directory's
+direct parent must already exist.
 
 2. Download the active macOS package from Elvern's Install page.
 3. Unzip it.

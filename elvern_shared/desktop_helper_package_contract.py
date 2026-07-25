@@ -18,6 +18,36 @@ _SAFE_COMPONENT = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
+def derive_standard_package_maps(
+    contracts: dict[str, tuple[str, tuple[str, ...]]],
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]], dict[str, str]]:
+    runtime_to_platform: dict[str, str] = {}
+    platform_runtime_order: dict[str, tuple[str, ...]] = {}
+    platform_package_target: dict[str, str] = {}
+    for package_target, (platform, runtime_ids) in contracts.items():
+        if platform in platform_package_target:
+            raise ValueError(
+                f"Multiple standard package targets are defined for platform {platform}"
+            )
+        platform_package_target[platform] = package_target
+        platform_runtime_order[platform] = tuple(runtime_ids)
+        for runtime_id in runtime_ids:
+            existing = runtime_to_platform.get(runtime_id)
+            if existing is not None:
+                raise ValueError(
+                    f"Standard runtime {runtime_id} is repeated for {existing} and {platform}"
+                )
+            runtime_to_platform[runtime_id] = platform
+    return runtime_to_platform, platform_runtime_order, platform_package_target
+
+
+(
+    STANDARD_RUNTIME_TO_PLATFORM,
+    STANDARD_PLATFORM_RUNTIME_ORDER,
+    STANDARD_PLATFORM_PACKAGE_TARGET,
+) = derive_standard_package_maps(PACKAGE_RUNTIME_CONTRACTS)
+
+
 def expected_package_filename(
     prefix: str,
     helper_version: str,

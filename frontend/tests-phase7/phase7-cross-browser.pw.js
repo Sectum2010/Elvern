@@ -14,7 +14,7 @@ const NETWORK_GUARD_STATE = new WeakMap();
 
 function classifyTestNetworkRequest(rawUrl, allowedOrigins) {
   const url = new URL(rawUrl);
-  if (!["http:", "https:"].includes(url.protocol)) {
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
     return { allowed: true };
   }
   if (allowedOrigins.has(url.origin)) {
@@ -23,6 +23,7 @@ function classifyTestNetworkRequest(rawUrl, allowedOrigins) {
   return {
     allowed: false,
     diagnostic: {
+      scheme: url.protocol.replace(/:$/, ""),
       origin: url.origin,
       pathname_hash: createHash("sha256").update(url.pathname).digest("hex").slice(0, 12),
     },
@@ -557,18 +558,23 @@ test.afterEach(async ({ context }) => {
 });
 
 
-test("external network guard rejects unknown public HTTP without issuing it", async ({ baseURL }) => {
-  const result = classifyTestNetworkRequest(
-    "https://unknown.invalid/private?token=must-not-be-recorded",
-    new Set([new URL(baseURL).origin]),
-  );
-  expect(result.allowed).toBe(false);
-  expect(result.diagnostic).toEqual({
-    origin: "https://unknown.invalid",
-    pathname_hash: expect.stringMatching(/^[0-9a-f]{12}$/),
+for (const scheme of ["http", "https", "ws", "wss"]) {
+  test(`external network guard rejects unknown public ${scheme.toUpperCase()} without issuing it`, async ({
+    baseURL,
+  }) => {
+    const result = classifyTestNetworkRequest(
+      `${scheme}://unknown.invalid/private?token=must-not-be-recorded`,
+      new Set([new URL(baseURL).origin]),
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.diagnostic).toEqual({
+      scheme,
+      origin: `${scheme}://unknown.invalid`,
+      pathname_hash: expect.stringMatching(/^[0-9a-f]{12}$/),
+    });
+    expect(JSON.stringify(result)).not.toContain("token");
   });
-  expect(JSON.stringify(result)).not.toContain("token");
-});
+}
 
 
 test("canonical Root Local and Cloud use the production v2 route", async ({ page, baseURL }) => {

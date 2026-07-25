@@ -180,11 +180,15 @@ runtime directory without reading the database:
 
 ```bash
 python scripts/desktop-helper-runtime-releases.py inspect \
-  --runtime-dir "/absolute/runtime/helper_releases"
+  --runtime-dir "/absolute/runtime/helper_releases" \
+  --expected-origin-sha256 "<canonical-origin-sha256>"
 ```
 
-Exit `0` means valid, `2` means absent, and `3` means present but invalid. Review a
-migration with:
+Exit `0` means valid and immutable, `2` means absent, `3` means present but
+invalid or origin-incompatible, and `4` means content-valid but mutable. Without
+`--expected-origin-sha256`, inspect reports `origin_check=not_checked` and
+`origin_compatible=null`: that verifies integrity only and does not prove
+compatibility with the current Elvern server. Review a migration with:
 
 ```bash
 python scripts/desktop-helper-runtime-releases.py migrate \
@@ -195,8 +199,34 @@ python scripts/desktop-helper-runtime-releases.py migrate \
 
 Add `--apply` only after review. Apply validates all three packages and their inner
 trees, copies read-only content-addressed ZIPs with fsync, and renames the manifest
-last. It never deletes the source, edits env, invokes publisher activation, or
-reads the live database. Docker uses `/data/helper_releases`.
+last. Existing identical files whose mode is not `0444` are reported by dry-run
+and repaired only by explicit `--apply`; conflicting content still fails closed.
+An existing manifest whose referenced package set is incomplete is treated as an
+invalid active authority and is never repaired in place; this preserves
+manifest-last activation.
+Manifest reads use no-follow directory/file descriptors and retry only a bounded
+number of times if file identity or metadata changes. The runtime leaf may be
+absent only when its direct parent already exists; migration does not recursively
+create missing authority parents. It never deletes the source, edits env, invokes
+publisher activation, or reads the live database. Docker uses
+`/data/helper_releases`.
+
+## Local production-browser verification
+
+`node frontend/scripts/build-phase7-production.mjs` builds with Library summary v2
+and Library revision mode fixed to `on`, then writes the non-private
+`dist/.elvern-build-contract.json`. The cross-browser runner builds this way by
+default. CI may pass `--use-existing-build`, which fails unless that exact contract
+is present.
+
+Chromium and Firefox launch behind a dynamic loopback-only proxy in addition to
+the Playwright context route guard. Unknown HTTP, HTTPS, WS, and WSS destinations
+are rejected with diagnostics limited to scheme, origin, and a pathname hash.
+Dedicated Chromium and Firefox projects allow only a test worker and prove that
+its external fetch is rejected by the browser-level authority, while normal
+production regression projects continue to block Service Workers for isolation.
+The production Service Worker source itself contains no public absolute network
+destination.
 
 ## macOS trust boundary
 

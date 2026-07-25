@@ -16,6 +16,11 @@ from fastapi import HTTPException
 
 from elvern_shared.desktop_helper_package_contract import (
     PACKAGE_NAME_PREFIX,
+    PACKAGE_RUNTIME_CONTRACTS,
+    STANDARD_PLATFORM_PACKAGE_TARGET,
+    STANDARD_PLATFORM_RUNTIME_ORDER,
+    STANDARD_RUNTIME_TO_PLATFORM,
+    derive_standard_package_maps,
     expected_package_filename,
 )
 from backend.app.schemas import DesktopHelperReleaseResponse, DesktopHelperStatusResponse
@@ -47,6 +52,38 @@ ORIGIN_BUILD_NORMALIZER = (
     / "scripts"
     / "normalize-origin.py"
 )
+
+
+def test_standard_package_maps_are_derived_from_the_shared_contract() -> None:
+    runtime_to_platform, platform_runtime_order, platform_package_target = (
+        derive_standard_package_maps(PACKAGE_RUNTIME_CONTRACTS)
+    )
+    assert runtime_to_platform == STANDARD_RUNTIME_TO_PLATFORM
+    assert platform_runtime_order == STANDARD_PLATFORM_RUNTIME_ORDER
+    assert platform_package_target == STANDARD_PLATFORM_PACKAGE_TARGET
+    assert desktop_helper_service.STANDARD_PLATFORM_PACKAGE_TARGET is (
+        STANDARD_PLATFORM_PACKAGE_TARGET
+    )
+    assert desktop_helper_service.LEGACY_PLATFORM_RUNTIME_ORDER == {
+        "windows": ("win-x64",),
+        "mac": ("osx-arm64", "osx-x64"),
+        "linux": (
+            "linux-x64",
+            "linux-arm64",
+            "linux-musl-x64",
+            "linux-musl-arm64",
+        ),
+    }
+    assert not hasattr(desktop_helper_service, "RUNTIME_TO_PLATFORM")
+    assert not hasattr(desktop_helper_service, "PLATFORM_RUNTIME_ORDER")
+
+
+def test_shared_standard_package_map_fails_fast_on_duplicate_platform() -> None:
+    with pytest.raises(ValueError, match="Multiple standard package targets"):
+        derive_standard_package_maps({
+            **PACKAGE_RUNTIME_CONTRACTS,
+            "another-linux": ("linux", ("linux-riscv64",)),
+        })
 
 
 def _write_manifest(

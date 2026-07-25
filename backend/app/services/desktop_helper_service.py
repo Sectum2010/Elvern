@@ -14,7 +14,10 @@ from fastapi import HTTPException, status
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 
-from elvern_shared.desktop_helper_package_contract import PACKAGE_NAME_PREFIX
+from elvern_shared.desktop_helper_package_contract import (
+    PACKAGE_NAME_PREFIX,
+    STANDARD_PLATFORM_PACKAGE_TARGET,
+)
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
@@ -30,7 +33,7 @@ from .desktop_helper_manifest_service import (
 )
 
 
-RUNTIME_TO_PLATFORM = {
+LEGACY_RUNTIME_TO_PLATFORM = {
     "win-x64": "windows",
     "osx-arm64": "mac",
     "osx-x64": "mac",
@@ -39,15 +42,10 @@ RUNTIME_TO_PLATFORM = {
     "linux-musl-x64": "linux",
     "linux-musl-arm64": "linux",
 }
-PLATFORM_RUNTIME_ORDER = {
+LEGACY_PLATFORM_RUNTIME_ORDER = {
     "windows": ("win-x64",),
     "mac": ("osx-arm64", "osx-x64"),
     "linux": ("linux-x64", "linux-arm64", "linux-musl-x64", "linux-musl-arm64"),
-}
-PLATFORM_PACKAGE_TARGET = {
-    "windows": "windows-x64",
-    "mac": "macos-dual-arch",
-    "linux": "linux-universal",
 }
 SUPPORTED_HELPER_PLATFORMS = frozenset({"windows", "mac", "linux"})
 RELEASE_NAME_PATTERN = re.compile(
@@ -213,7 +211,7 @@ def _build_desktop_helper_release_payloads_with_diagnostics(
     release_source = manifest_releases
     if release_source is None:
         release_source = list_helper_releases(settings, platform=normalized_platform, channel=channel)
-    package_target = PLATFORM_PACKAGE_TARGET[normalized_platform]
+    package_target = STANDARD_PLATFORM_PACKAGE_TARGET[normalized_platform]
     package_releases = [
         row
         for row in release_source
@@ -229,7 +227,7 @@ def _build_desktop_helper_release_payloads_with_diagnostics(
 
     latest_by_runtime = _latest_release_by_runtime(release_source)
     payloads: list[dict[str, object]] = []
-    for runtime_id in PLATFORM_RUNTIME_ORDER.get(normalized_platform, ()):
+    for runtime_id in LEGACY_PLATFORM_RUNTIME_ORDER.get(normalized_platform, ()):
         row = latest_by_runtime.get(runtime_id)
         if row is None:
             continue
@@ -1075,7 +1073,7 @@ def _parse_release_artifact_name(name: str) -> dict[str, str]:
             "Helper release names must look like elvern-vlc-opener-<version>-<runtime>.zip"
         )
     runtime_id = match.group("runtime")
-    platform = RUNTIME_TO_PLATFORM.get(runtime_id)
+    platform = LEGACY_RUNTIME_TO_PLATFORM.get(runtime_id)
     if platform is None:
         raise ValueError(f"Unsupported helper runtime: {runtime_id}")
     return {

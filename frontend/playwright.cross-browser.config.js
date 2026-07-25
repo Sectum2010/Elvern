@@ -4,11 +4,11 @@ import { defineConfig } from "@playwright/test";
 const port = Number(process.env.ELVERN_PHASE7_BROWSER_PORT || 4199);
 const prefix = process.env.ELVERN_PHASE7_BROWSER_PREFIX || "phase7brwser";
 const origin = `http://127.0.0.1:${port}`;
+const networkProxy = process.env.ELVERN_PHASE7_NETWORK_PROXY;
 
 
 export default defineConfig({
   testDir: "./tests-phase7",
-  testMatch: "phase7-cross-browser.pw.js",
   outputDir: process.env.ELVERN_PHASE7_BROWSER_OUTPUT_DIR || "../tmp/playwright-phase7-cross-browser-results",
   timeout: 45_000,
   expect: { timeout: 10_000 },
@@ -28,15 +28,48 @@ export default defineConfig({
   projects: [
     {
       name: "chromium-desktop-production",
-      use: { browserName: "chromium", viewport: { width: 1440, height: 900 } },
+      testMatch: "phase7-cross-browser.pw.js",
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1440, height: 900 },
+        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+      },
     },
     {
       name: "firefox-desktop-production",
-      use: { browserName: "firefox", viewport: { width: 1440, height: 900 } },
+      testMatch: "phase7-cross-browser.pw.js",
+      use: {
+        browserName: "firefox",
+        viewport: { width: 1440, height: 900 },
+        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+      },
     },
     {
       name: "webkit-desktop-production",
-      use: { browserName: "webkit", viewport: { width: 1440, height: 900 } },
+      testMatch: "phase7-cross-browser.pw.js",
+      use: {
+        browserName: "webkit",
+        viewport: { width: 1440, height: 900 },
+        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+      },
+    },
+    {
+      name: "chromium-service-worker-network-guard",
+      testMatch: "service-worker-network-guard.pw.js",
+      use: {
+        browserName: "chromium",
+        serviceWorkers: "allow",
+        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+      },
+    },
+    {
+      name: "firefox-service-worker-network-guard",
+      testMatch: "service-worker-network-guard.pw.js",
+      use: {
+        browserName: "firefox",
+        serviceWorkers: "allow",
+        ...(networkProxy ? { proxy: { server: networkProxy } } : {}),
+      },
     },
   ],
 });

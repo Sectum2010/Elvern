@@ -1,5 +1,32 @@
 #!/bin/sh
 
+elvern_path_has_control_characters() {
+  elvern_path_value=$1
+  elvern_tab=$(printf '\t')
+  elvern_cr=$(printf '\r')
+  elvern_lf='
+'
+  case "${elvern_path_value}" in
+    *"${elvern_tab}"*|*"${elvern_cr}"*|*"${elvern_lf}"*) return 0 ;;
+  esac
+  elvern_printable_path=$(LC_ALL=C printf '%s' "${elvern_path_value}" | tr -d '\001-\010\013\014\016-\037\177')
+  [ "${elvern_printable_path}" != "${elvern_path_value}" ]
+}
+
+elvern_safe_absolute_path_value() {
+  elvern_path_value=${1:-}
+  [ -n "${elvern_path_value}" ] || return 1
+  case "${elvern_path_value}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  elvern_path_has_control_characters "${elvern_path_value}" && return 1
+  case "/${elvern_path_value#/}/" in
+    */../*|*/./*) return 1 ;;
+  esac
+  return 0
+}
+
 select_macos_runtime() {
   selector_translated="${1:-0}"
   selector_machine="${2:-}"

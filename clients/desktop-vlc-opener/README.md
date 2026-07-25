@@ -52,9 +52,15 @@ any artifacts from it.
 
 To inspect or migrate an older source-tree authority without activating or deleting
 it, use `scripts/desktop-helper-runtime-releases.py` from the repository root.
-`inspect` succeeds only for a valid runtime authority. `migrate` is a dry-run unless
-`--apply` is supplied, requires absolute non-symlink paths and the expected origin
-hash, validates all three packages, and writes the manifest last.
+`inspect` succeeds only for a valid immutable runtime authority. Pass
+`--expected-origin-sha256` to prove server compatibility; without it the JSON says
+`origin_check=not_checked` and `origin_compatible=null`. Mutable
+`release-manifest.json` or ZIP modes are reported separately and can be repaired
+by explicit migration `--apply`. `migrate` is a dry-run unless `--apply` is
+supplied, requires absolute non-symlink paths whose direct parents exist plus the
+expected origin hash, validates all three packages, never chmods the source, and
+writes the manifest last. A pre-existing manifest with any referenced package
+missing is an incomplete active authority and fails closed.
 
 Publishing requires the .NET 10 SDK and every requested RID runtime pack. Any
 missing RID fails the entire selected publish; the script never substitutes a
@@ -143,6 +149,12 @@ the original previous handler unless the user explicitly selects a new third-par
 handler. Restoration searches `XDG_DATA_HOME` and ordered `XDG_DATA_DIRS`. Cleanup
 removes only the exact Elvern token from user `mimeapps.list` values, and it can
 repair stale mappings even if the installed files were manually removed.
+Any failure after either user `mimeapps.list` replacement restores both MIME files,
+their modes, the desktop entry, and effective default. Old state that names Elvern
+as its own previous handler is safely ignored. XDG/TMP paths reject control
+characters and relative roots before mutation, and handler discovery rejects
+symlinked user parent chains. Cleanup failures after commit only warn and preserve
+the exact residual path.
 
 Windows and macOS uninstallers also use the installers' per-user locks and stage
 registration/install backups before removal. A failed rollback preserves recovery

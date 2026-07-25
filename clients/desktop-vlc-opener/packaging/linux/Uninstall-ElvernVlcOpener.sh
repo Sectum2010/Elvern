@@ -20,7 +20,9 @@ MIME_STATE_FILE=""
 LOCK_HELD=0
 INSTALL_MOVED=0
 DESKTOP_REMOVED=0
-MIME_MODIFIED=0
+MIME_TRANSACTION_STARTED=0
+MIME_CONFIG_REPLACED=0
+MIME_DATA_REPLACED=0
 UNINSTALL_COMMITTED=0
 ROLLBACK_FAILED=0
 CURRENT_DEFAULT=""
@@ -30,6 +32,83 @@ CR=$(printf '\r')
 LF='
 '
 TRANSACTION_NONCE="$$-$(date -u +%Y%m%dT%H%M%SZ)"
+
+elvern_path_has_control_characters() {
+  elvern_path_value=$1
+  elvern_tab=$(printf '\t')
+  elvern_cr=$(printf '\r')
+  elvern_lf='
+'
+  case "${elvern_path_value}" in
+    *"${elvern_tab}"*|*"${elvern_cr}"*|*"${elvern_lf}"*) return 0 ;;
+  esac
+  elvern_printable_path=$(LC_ALL=C printf '%s' "${elvern_path_value}" | tr -d '\001-\010\013\014\016-\037\177')
+  [ "${elvern_printable_path}" != "${elvern_path_value}" ]
+}
+
+elvern_safe_absolute_path_value() {
+  elvern_path_value=${1:-}
+  [ -n "${elvern_path_value}" ] || return 1
+  case "${elvern_path_value}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  elvern_path_has_control_characters "${elvern_path_value}" && return 1
+  case "/${elvern_path_value#/}/" in
+    */../*|*/./*) return 1 ;;
+  esac
+  return 0
+}
+
+safe_existing_directory_chain() {
+  chain_path=$1
+  elvern_safe_absolute_path_value "${chain_path}" || return 1
+  chain_cursor=""
+  old_chain_ifs=${IFS}
+  IFS=/
+  for chain_component in ${chain_path#/}; do
+    IFS=${old_chain_ifs}
+    [ -n "${chain_component}" ] || {
+      IFS=/
+      continue
+    }
+    chain_cursor="${chain_cursor}/${chain_component}"
+    if [ -L "${chain_cursor}" ]; then
+      return 1
+    fi
+    if [ -e "${chain_cursor}" ] && [ ! -d "${chain_cursor}" ]; then
+      return 1
+    fi
+    IFS=/
+  done
+  IFS=${old_chain_ifs}
+  return 0
+}
+
+validate_path_environment() {
+  for safe_path in \
+    "${HOME:-}" "${INSTALL_PARENT}" "${XDG_CONFIG_ROOT}" "${XDG_DATA_ROOT}" \
+    "${DESKTOP_DIR}" "${MIME_CONFIG_FILE}" "${MIME_DATA_FILE}" "${TMPDIR:-/tmp}"
+  do
+    elvern_safe_absolute_path_value "${safe_path}" \
+      || fail "a user installation path is unsafe."
+  done
+  safe_existing_directory_chain "${HOME}" \
+    && safe_existing_directory_chain "${INSTALL_PARENT}" \
+    && safe_existing_directory_chain "${XDG_CONFIG_ROOT}" \
+    && safe_existing_directory_chain "${XDG_DATA_ROOT}" \
+    || fail "a user installation path contains an unsafe link."
+  old_path_ifs=${IFS}
+  IFS=:
+  for safe_path in ${XDG_DATA_SEARCH_PATH}; do
+    IFS=${old_path_ifs}
+    [ -n "${safe_path}" ] || safe_path="${HOME}/.local/share"
+    elvern_safe_absolute_path_value "${safe_path}" \
+      || fail "an XDG data search path is unsafe."
+    IFS=:
+  done
+  IFS=${old_path_ifs}
+}
 
 fail() {
   echo "Elvern VLC Opener was not removed: $1" >&2
@@ -42,6 +121,31 @@ inject_failure() {
     && [ "${ELVERN_UNINSTALL_TEST_FAIL_AT:-}" = "${point}" ]; then
     fail "injected failure at ${point}."
   fi
+}
+
+cleanup_failure_injected() {
+  point=$1
+  [ "${ELVERN_UNINSTALL_TEST_MODE:-0}" = "1" ] \
+    && [ "${ELVERN_UNINSTALL_TEST_FAIL_CLEANUP_AT:-}" = "${point}" ]
+}
+
+transaction_is_owned() {
+  [ -n "${TRANSACTION_DIR}" ] \
+    && [ -d "${TRANSACTION_DIR}" ] \
+    && [ ! -L "${TRANSACTION_DIR}" ] \
+    && [ -f "${TRANSACTION_DIR}/transaction-owner" ] \
+    && [ ! -L "${TRANSACTION_DIR}/transaction-owner" ] \
+    && [ "$(cat "${TRANSACTION_DIR}/transaction-owner")" = "${TRANSACTION_NONCE}" ]
+}
+
+lock_is_owned() {
+  [ "${LOCK_DIR}" = "${INSTALL_PARENT}/.elvern-vlc-opener-install.lock" ] \
+    && [ -d "${LOCK_DIR}" ] \
+    && [ ! -L "${LOCK_DIR}" ] \
+    && [ -f "${LOCK_DIR}/owner" ] \
+    && [ ! -L "${LOCK_DIR}/owner" ] \
+    && grep -F -x "transaction_nonce=${TRANSACTION_NONCE}" "${LOCK_DIR}/owner" \
+      >/dev/null 2>&1
 }
 
 require_command() {
@@ -68,6 +172,11 @@ query_default_handler() {
 desktop_handler_exists() {
   handler=$1
   safe_desktop_basename "${handler}" || return 1
+  safe_existing_directory_chain "${XDG_DATA_ROOT}" \
+    && safe_existing_directory_chain "${XDG_DATA_ROOT}/applications" \
+    && [ -d "${XDG_DATA_ROOT}/applications" ] \
+    && [ ! -L "${XDG_DATA_ROOT}/applications" ] \
+    || fail "the user XDG data path contains an unsafe link."
   if [ -f "${XDG_DATA_ROOT}/applications/${handler}" ] \
     && [ ! -L "${XDG_DATA_ROOT}/applications/${handler}" ]; then
     return 0
@@ -81,6 +190,13 @@ desktop_handler_exists() {
       /*) ;;
       *) return 1 ;;
     esac
+    if ! safe_existing_directory_chain "${data_root}" \
+      || ! safe_existing_directory_chain "${data_root}/applications" \
+      || [ ! -d "${data_root}/applications" ] \
+      || [ -L "${data_root}/applications" ]; then
+      IFS=:
+      continue
+    fi
     candidate="${data_root}/applications/${handler}"
     if [ -f "${candidate}" ] && [ ! -L "${candidate}" ]; then
       return 0
@@ -253,6 +369,10 @@ ${key}"
   if [ -n "${PREVIOUS_DEFAULT}" ] && ! safe_desktop_basename "${PREVIOUS_DEFAULT}"; then
     fail "the previous protocol handler in installed state is unsafe."
   fi
+  if [ "${PREVIOUS_DEFAULT}" = "elvern-vlc-opener.desktop" ]; then
+    PREVIOUS_DEFAULT=""
+    echo "Warning: The previous protocol handler in this older Helper state was invalid and will not be restored." >&2
+  fi
 }
 
 cleanup() {
@@ -261,7 +381,9 @@ cleanup() {
   if [ "${UNINSTALL_COMMITTED}" -eq 0 ] \
     && { [ "${INSTALL_MOVED}" -eq 1 ] \
       || [ "${DESKTOP_REMOVED}" -eq 1 ] \
-      || [ "${MIME_MODIFIED}" -eq 1 ]; }; then
+      || [ "${MIME_TRANSACTION_STARTED}" -eq 1 ] \
+      || [ "${MIME_CONFIG_REPLACED}" -eq 1 ] \
+      || [ "${MIME_DATA_REPLACED}" -eq 1 ]; }; then
     if [ -n "${CURRENT_DEFAULT}" ]; then
       xdg-mime default "${CURRENT_DEFAULT}" x-scheme-handler/elvern-vlc \
         >/dev/null 2>&1 || ROLLBACK_FAILED=1
@@ -285,17 +407,40 @@ cleanup() {
   fi
 
   if [ "${UNINSTALL_COMMITTED}" -eq 1 ]; then
-    [ -z "${INSTALL_BACKUP}" ] || [ ! -d "${INSTALL_BACKUP}" ] \
-      || rm -rf "${INSTALL_BACKUP}"
-    [ -z "${TRANSACTION_DIR}" ] || [ ! -d "${TRANSACTION_DIR}" ] \
-      || rm -rf "${TRANSACTION_DIR}"
+    if [ -n "${INSTALL_BACKUP}" ] && [ -d "${INSTALL_BACKUP}" ]; then
+      if [ -L "${INSTALL_BACKUP}" ] \
+        || [ "${INSTALL_BACKUP#${INSTALL_PARENT}/.elvern-vlc-opener-uninstall-backup.}" = "${INSTALL_BACKUP}" ] \
+        || ! transaction_is_owned \
+        || cleanup_failure_injected "backup" \
+        || ! rm -rf "${INSTALL_BACKUP}"; then
+        echo "Warning: committed installation backup cleanup failed: ${INSTALL_BACKUP}" >&2
+      fi
+    fi
+    if [ -n "${TRANSACTION_DIR}" ] && [ -d "${TRANSACTION_DIR}" ]; then
+      if [ -L "${TRANSACTION_DIR}" ] \
+        || [ "${TRANSACTION_DIR#${INSTALL_PARENT}/.elvern-vlc-opener-uninstall.}" = "${TRANSACTION_DIR}" ] \
+        || ! transaction_is_owned \
+        || cleanup_failure_injected "transaction" \
+        || ! rm -rf "${TRANSACTION_DIR}"; then
+        echo "Warning: committed registration transaction cleanup failed: ${TRANSACTION_DIR}" >&2
+      fi
+    fi
   elif [ "${ROLLBACK_FAILED}" -eq 0 ]; then
-    [ -z "${TRANSACTION_DIR}" ] || [ ! -d "${TRANSACTION_DIR}" ] \
-      || rm -rf "${TRANSACTION_DIR}"
+    if [ -n "${TRANSACTION_DIR}" ] && [ -d "${TRANSACTION_DIR}" ]; then
+      if ! transaction_is_owned \
+        || cleanup_failure_injected "transaction" \
+        || ! rm -rf "${TRANSACTION_DIR}"; then
+        echo "Warning: rollback registration transaction cleanup failed: ${TRANSACTION_DIR}" >&2
+      fi
+    fi
   fi
   if [ "${LOCK_HELD}" -eq 1 ]; then
-    rm -f "${LOCK_DIR}/owner"
-    rmdir "${LOCK_DIR}" 2>/dev/null || :
+    if ! lock_is_owned \
+      || cleanup_failure_injected "lock" \
+      || ! rm -f "${LOCK_DIR}/owner" \
+      || ! rmdir "${LOCK_DIR}" 2>/dev/null; then
+      echo "Warning: uninstall lock cleanup failed: ${LOCK_DIR}" >&2
+    fi
   fi
   if [ "${ROLLBACK_FAILED}" -ne 0 ]; then
     echo "Elvern VLC Opener uninstall rollback could not be verified." >&2
@@ -314,6 +459,8 @@ for command in \
 do
   require_command "${command}"
 done
+
+validate_path_environment
 
 mkdir -p "${INSTALL_PARENT}" "${DESKTOP_DIR}" "${XDG_CONFIG_ROOT}" \
   || fail "the user-level directories are unavailable."
@@ -351,6 +498,8 @@ fi
 
 TRANSACTION_DIR=$(mktemp -d "${INSTALL_PARENT}/.elvern-vlc-opener-uninstall.XXXXXX") \
   || fail "the uninstall transaction could not be created."
+printf '%s\n' "${TRANSACTION_NONCE}" > "${TRANSACTION_DIR}/transaction-owner"
+chmod 600 "${TRANSACTION_DIR}/transaction-owner"
 MIME_STATE_FILE="${TRANSACTION_DIR}/file-state.tsv"
 : > "${MIME_STATE_FILE}"
 backup_regular_file "${MIME_CONFIG_FILE}" "mime-config"
@@ -381,11 +530,19 @@ if [ -d "${INSTALL_DIR}" ]; then
   INSTALL_MOVED=1
 fi
 
+MIME_TRANSACTION_STARTED=1
+inject_failure "before_mime_config_replace"
 remove_elvern_default_from_file "${MIME_CONFIG_FILE}"
+MIME_CONFIG_REPLACED=1
+inject_failure "after_mime_config_replace"
 if [ "${MIME_DATA_FILE}" != "${MIME_CONFIG_FILE}" ]; then
+  inject_failure "before_mime_data_replace"
   remove_elvern_default_from_file "${MIME_DATA_FILE}"
+  MIME_DATA_REPLACED=1
+  inject_failure "after_mime_data_replace"
+else
+  MIME_DATA_REPLACED=1
 fi
-MIME_MODIFIED=1
 if [ "${CURRENT_DEFAULT}" = "elvern-vlc-opener.desktop" ] \
   && [ -n "${PREVIOUS_DEFAULT}" ]; then
   if desktop_handler_exists "${PREVIOUS_DEFAULT}"; then

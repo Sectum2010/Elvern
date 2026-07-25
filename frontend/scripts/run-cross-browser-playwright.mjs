@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,13 +7,42 @@ import {
   createCrossBrowserPrefix,
   releaseReservedPort,
   reserveAvailablePort,
+  startLoopbackOnlyProxy,
+  verifyPhase7BuildContract,
 } from "./cross-browser-runner-core.mjs";
 
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const frontendDirectory = resolve(scriptDirectory, "..");
 const cliPath = resolve(frontendDirectory, "node_modules/@playwright/test/cli.js");
+const rawArguments = process.argv.slice(2);
+const useExistingBuild = rawArguments.includes("--use-existing-build");
+const playwrightArguments = rawArguments.filter((argument) => argument !== "--use-existing-build");
+if (useExistingBuild) {
+  verifyPhase7BuildContract(frontendDirectory);
+} else {
+  const build = spawnSync(
+    process.execPath,
+    [resolve(scriptDirectory, "build-phase7-production.mjs")],
+    { cwd: frontendDirectory, env: process.env, stdio: "inherit" },
+  );
+  if (build.error || build.status !== 0) {
+    console.error(build.error
+      ? `Unable to build phase7 production frontend: ${build.error.message}`
+      : "Phase7 production frontend build failed.");
+    process.exit(build.status || 1);
+  }
+  verifyPhase7BuildContract(frontendDirectory);
+}
 const port = await reserveAvailablePort();
+const networkProxy = await startLoopbackOnlyProxy();
+let networkProxyClosePromise;
+const closeNetworkProxy = () => {
+  if (!networkProxyClosePromise) {
+    networkProxyClosePromise = networkProxy.close();
+  }
+  return networkProxyClosePromise;
+};
 let portReleased = false;
 const releasePort = () => {
   if (portReleased) {
@@ -22,15 +51,6 @@ const releasePort = () => {
   portReleased = true;
   releaseReservedPort(port);
 };
-process.once("exit", releasePort);
-process.once("SIGINT", () => {
-  releasePort();
-  process.exit(130);
-});
-process.once("SIGTERM", () => {
-  releasePort();
-  process.exit(143);
-});
 const prefix = createCrossBrowserPrefix();
 const outputDirectory = resolve(
   frontendDirectory,
@@ -39,13 +59,71 @@ const outputDirectory = resolve(
   `playwright-phase7-${prefix}-${port}`,
 );
 mkdirSync(outputDirectory, { recursive: true });
+const serviceWorkerFixtureDirectory = resolve(
+  frontendDirectory,
+  "dist",
+  "network-guard-fixture",
+);
+const serviceWorkerFixturePath = resolve(
+  serviceWorkerFixtureDirectory,
+  "service-worker.js",
+);
+const serviceWorkerFixturePagePath = resolve(
+  serviceWorkerFixtureDirectory,
+  "index.html",
+);
+mkdirSync(serviceWorkerFixtureDirectory, { recursive: true });
+writeFileSync(
+  serviceWorkerFixturePagePath,
+  "<!doctype html><html><head><meta charset=\"utf-8\"><title>Network guard fixture</title></head><body></body></html>\n",
+  { encoding: "utf8", mode: 0o600 },
+);
+writeFileSync(
+  serviceWorkerFixturePath,
+  [
+    'self.addEventListener("install", () => self.skipWaiting());',
+    'self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));',
+    'self.addEventListener("message", async (event) => {',
+    "  try {",
+    '    await fetch("http://elvern-guard-test.invalid/service-worker-probe?token=hidden");',
+    "    event.source.postMessage({ blocked: false });",
+    "  } catch {",
+    "    event.source.postMessage({ blocked: true });",
+    "  }",
+    "});",
+    "",
+  ].join("\n"),
+  { encoding: "utf8", mode: 0o600 },
+);
+let serviceWorkerFixtureRemoved = false;
+const removeServiceWorkerFixture = () => {
+  if (serviceWorkerFixtureRemoved) {
+    return;
+  }
+  serviceWorkerFixtureRemoved = true;
+  rmSync(serviceWorkerFixtureDirectory, { recursive: true, force: true });
+};
+const cleanupLocalResources = () => {
+  removeServiceWorkerFixture();
+  releasePort();
+};
+process.once("exit", cleanupLocalResources);
+process.once("SIGINT", () => {
+  cleanupLocalResources();
+  process.exit(130);
+});
+process.once("SIGTERM", () => {
+  cleanupLocalResources();
+  process.exit(143);
+});
 
 console.log(`Cross-browser Playwright: port=${port} prefix=${prefix}`);
+console.log(`External-network authority: loopback proxy port=${networkProxy.port}`);
 console.log(`Cross-browser output: ${outputDirectory}`);
 
 const child = spawn(
   process.execPath,
-  [cliPath, "test", "--config", "playwright.cross-browser.config.js", ...process.argv.slice(2)],
+  [cliPath, "test", "--config", "playwright.cross-browser.config.js", ...playwrightArguments],
   {
     cwd: frontendDirectory,
     env: {
@@ -55,19 +133,35 @@ const child = spawn(
       ELVERN_PHASE7_BROWSER_PORT: String(port),
       ELVERN_PHASE7_BROWSER_PREFIX: prefix,
       ELVERN_PHASE7_BROWSER_OUTPUT_DIR: outputDirectory,
+      ELVERN_PHASE7_NETWORK_PROXY: `http://127.0.0.1:${networkProxy.port}`,
+      ELVERN_PHASE7_NETWORK_PROXY_CONTROL: `http://127.0.0.1:${networkProxy.port}`,
     },
     stdio: "inherit",
   },
 );
 
-child.once("error", (error) => {
+child.once("error", async (error) => {
+  removeServiceWorkerFixture();
+  releasePort();
+  await closeNetworkProxy();
   console.error(`Unable to start Playwright: ${error.message}`);
   process.exitCode = 1;
 });
-child.once("exit", (code, signal) => {
+child.once("exit", async (code, signal) => {
+  removeServiceWorkerFixture();
   releasePort();
+  const unexpectedAttempts = [...networkProxy.attempts];
+  await closeNetworkProxy();
   if (signal) {
     console.error(`Playwright stopped by signal ${signal}.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (unexpectedAttempts.length) {
+    console.error(
+      `External-network authority blocked ${unexpectedAttempts.length} unexpected attempt(s): `
+      + JSON.stringify(unexpectedAttempts),
+    );
     process.exitCode = 1;
     return;
   }

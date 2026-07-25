@@ -46,6 +46,53 @@ CR=$(printf '\r')
 LF='
 '
 
+elvern_path_has_control_characters() {
+  elvern_path_value=$1
+  elvern_tab=$(printf '\t')
+  elvern_cr=$(printf '\r')
+  elvern_lf='
+'
+  case "${elvern_path_value}" in
+    *"${elvern_tab}"*|*"${elvern_cr}"*|*"${elvern_lf}"*) return 0 ;;
+  esac
+  elvern_printable_path=$(LC_ALL=C printf '%s' "${elvern_path_value}" | tr -d '\001-\010\013\014\016-\037\177')
+  [ "${elvern_printable_path}" != "${elvern_path_value}" ]
+}
+
+elvern_safe_absolute_path_value() {
+  elvern_path_value=${1:-}
+  [ -n "${elvern_path_value}" ] || return 1
+  case "${elvern_path_value}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  elvern_path_has_control_characters "${elvern_path_value}" && return 1
+  case "/${elvern_path_value#/}/" in
+    */../*|*/./*) return 1 ;;
+  esac
+  return 0
+}
+
+validate_path_environment() {
+  for safe_path in \
+    "${HOME:-}" "${INSTALL_PARENT}" "${XDG_CONFIG_ROOT}" "${XDG_DATA_ROOT}" \
+    "${DESKTOP_DIR}" "${MIME_CONFIG_FILE}" "${MIME_DATA_FILE}" "${TMPDIR:-/tmp}"
+  do
+    elvern_safe_absolute_path_value "${safe_path}" \
+      || fail "a user installation path is unsafe."
+  done
+  old_path_ifs=${IFS}
+  IFS=:
+  for safe_path in ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
+    IFS=${old_path_ifs}
+    [ -n "${safe_path}" ] || safe_path="${HOME}/.local/share"
+    elvern_safe_absolute_path_value "${safe_path}" \
+      || fail "an XDG data search path is unsafe."
+    IFS=:
+  done
+  IFS=${old_path_ifs}
+}
+
 fail() {
   echo "Elvern VLC Opener was not installed: $1" >&2
   exit 1
@@ -125,6 +172,9 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 \
     || fail "$1 is required to install Elvern VLC Opener."
 }
+
+require_command tr
+validate_path_environment
 
 safe_desktop_basename() {
   case "$1" in
