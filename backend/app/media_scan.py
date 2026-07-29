@@ -10,6 +10,7 @@ from .config import Settings
 from .db import get_connection, preserve_hidden_movie_keys_for_media_item, utcnow_iso
 from .db_hidden_movie_keys import (
     find_local_copy_identity_candidates,
+    LocalCopyEvidenceMemo,
     prune_recreated_local_hidden_movie_keys,
     resolve_hidden_copy_identity,
 )
@@ -45,6 +46,147 @@ def _preserve_known_year(*, inferred_year: int | None, existing_year: object) ->
     if inferred_year is not None:
         return inferred_year
     return _coerce_scan_year(existing_year)
+
+
+def _write_scanned_local_media_item(
+    connection,
+    *,
+    media_item_id: int | None,
+    resolved: Path,
+    file_stat,
+    scan_metadata: dict[str, object],
+    media_metadata: dict[str, object],
+    shared_local_source_id: int,
+    preserved_year: int | None,
+    now: str,
+) -> int:
+    values = (
+        resolved.stem,
+        resolved.name,
+        str(resolved),
+        shared_local_source_id,
+        file_stat.st_size,
+        file_stat.st_mtime,
+        media_metadata["duration_seconds"],
+        media_metadata["width"],
+        media_metadata["height"],
+        media_metadata["video_codec"],
+        media_metadata["audio_codec"],
+        media_metadata["container"],
+        preserved_year,
+        scan_metadata["series_folder_key"],
+        scan_metadata["series_folder_name"],
+        scan_metadata["library_category"],
+        scan_metadata["library_category_path"],
+        scan_metadata["library_category_name"],
+        scan_metadata["library_folder_role"],
+        scan_metadata["library_folder_path"],
+        scan_metadata["library_folder_name"],
+        now,
+        now,
+    )
+    if media_item_id is not None:
+        connection.execute(
+            """
+            UPDATE media_items
+            SET title = ?,
+                original_filename = ?,
+                file_path = ?,
+                source_kind = 'local',
+                library_source_id = ?,
+                file_size = ?,
+                file_mtime = ?,
+                duration_seconds = ?,
+                width = ?,
+                height = ?,
+                video_codec = ?,
+                audio_codec = ?,
+                container = ?,
+                year = ?,
+                series_folder_key = ?,
+                series_folder_name = ?,
+                library_category = ?,
+                library_category_path = ?,
+                library_category_name = ?,
+                library_folder_role = ?,
+                library_folder_path = ?,
+                library_folder_name = ?,
+                updated_at = ?,
+                last_scanned_at = ?
+            WHERE id = ?
+            """,
+            (*values, media_item_id),
+        )
+        return media_item_id
+    cursor = connection.execute(
+        """
+        INSERT INTO media_items (
+            title,
+            original_filename,
+            file_path,
+            source_kind,
+            library_source_id,
+            file_size,
+            file_mtime,
+            duration_seconds,
+            width,
+            height,
+            video_codec,
+            audio_codec,
+            container,
+            year,
+            series_folder_key,
+            series_folder_name,
+            library_category,
+            library_category_path,
+            library_category_name,
+            library_folder_role,
+            library_folder_path,
+            library_folder_name,
+            created_at,
+            updated_at,
+            last_scanned_at
+        ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            *values[:-2],
+            now,
+            now,
+            now,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _replace_scanned_subtitles(
+    connection,
+    *,
+    media_item_id: int,
+    subtitles: list[dict[str, object]],
+) -> None:
+    connection.execute(
+        "DELETE FROM subtitle_tracks WHERE media_item_id = ?",
+        (media_item_id,),
+    )
+    for subtitle in subtitles:
+        connection.execute(
+            """
+            INSERT INTO subtitle_tracks (
+                media_item_id,
+                language,
+                title,
+                codec,
+                disposition_default
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                media_item_id,
+                subtitle["language"],
+                subtitle["title"],
+                subtitle["codec"],
+                subtitle["disposition_default"],
+            ),
+        )
 
 
 def infer_title_and_year(filename_stem: str) -> tuple[str, int | None]:
@@ -362,9 +504,9 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
             (started_at, reason, "Scan started"),
         )
         job_id = cursor.lastrowid
+        connection.execute("SAVEPOINT media_scan_mutations")
         try:
             current_files: list[tuple[Path, object, dict[str, object]]] = []
-            current_paths: set[str] = set()
             for discovered_file in discovery.files:
                 resolved = discovered_file.path.resolve()
                 if not _inside_any_media_root(resolved, library_reference_locations):
@@ -374,47 +516,7 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     continue
                 stat = resolved.stat()
                 current_files.append((resolved, stat, _scan_metadata_for_file(discovered_file)))
-                current_paths.add(str(resolved))
 
-            existing_rows = connection.execute(
-                """
-                SELECT
-                    id,
-                    file_path,
-                    original_filename,
-                    file_size,
-                    file_mtime,
-                    year,
-                    series_folder_key,
-                    series_folder_name,
-                    library_category,
-                    library_category_path,
-                    library_category_name,
-                    library_folder_role,
-                    library_folder_path,
-                    library_folder_name,
-                    COALESCE(source_kind, 'local') AS source_kind,
-                    library_source_id,
-                    hidden_copy_identity
-                FROM media_items
-                WHERE COALESCE(source_kind, 'local') = 'local'
-                """
-            ).fetchall()
-            current_files_by_path = {
-                str(resolved): (resolved, file_stat)
-                for resolved, file_stat, _scan_metadata in current_files
-            }
-            for row in existing_rows:
-                current_file = current_files_by_path.get(str(row["file_path"]))
-                if current_file is None:
-                    continue
-                resolved, file_stat = current_file
-                resolve_hidden_copy_identity(
-                    connection,
-                    media_row=row,
-                    local_file_path=resolved,
-                    local_file_stat=file_stat,
-                )
             existing_rows = connection.execute(
                 """
                 SELECT
@@ -440,24 +542,89 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                 """
             ).fetchall()
             existing_by_path = {row["file_path"]: row for row in existing_rows}
-            missing_existing_by_identity: dict[str, list] = {}
-            for row in existing_rows:
-                if row["file_path"] in current_paths:
-                    continue
-                identity = str(row["hidden_copy_identity"] or "").strip()
-                if identity:
-                    missing_existing_by_identity.setdefault(identity, []).append(row)
-            seen_paths: set[str] = set()
-            rename_matched_existing_ids: set[int] = set()
+            evidence_memo = LocalCopyEvidenceMemo()
+            current_records: list[dict[str, object]] = []
+            stable_existing_ids: set[int] = set()
 
-            for resolved, stat, scan_metadata in current_files:
+            # Classify continuity before writing aliases or mutating media rows.
+            for resolved, file_stat, scan_metadata in current_files:
                 file_path = str(resolved)
-                seen_paths.add(file_path)
                 files_seen += 1
                 existing = existing_by_path.get(file_path)
-                rename_target = None
-                if existing is None:
-                    identity_candidates = find_local_copy_identity_candidates(
+                record: dict[str, object] = {
+                    "resolved": resolved,
+                    "file_stat": file_stat,
+                    "scan_metadata": scan_metadata,
+                    "file_path": file_path,
+                    "existing": existing,
+                    "stable": False,
+                    "candidate_identities": (),
+                    "candidate_row_ids": set(),
+                    "rename_target": None,
+                    "legacy_same_path_target": None,
+                }
+                stat_unchanged = bool(
+                    existing
+                    and existing["file_size"] == file_stat.st_size
+                    and existing["file_mtime"] == file_stat.st_mtime
+                )
+                metadata_unchanged = bool(
+                    stat_unchanged and _scan_metadata_matches(existing, scan_metadata)
+                )
+                if metadata_unchanged:
+                    existing_identity = str(existing["hidden_copy_identity"] or "").strip()
+                    if existing_identity:
+                        locator_candidates = find_local_copy_identity_candidates(
+                            connection,
+                            media_row=existing,
+                            file_path=resolved,
+                            file_stat=file_stat,
+                            require_locator=True,
+                            evidence_memo=evidence_memo,
+                            include_content_sample=False,
+                        )
+                        if existing_identity in locator_candidates:
+                            record["stable"] = True
+                        else:
+                            strong_locator_candidates = find_local_copy_identity_candidates(
+                                connection,
+                                media_row=existing,
+                                file_path=resolved,
+                                file_stat=file_stat,
+                                require_locator=True,
+                                evidence_memo=evidence_memo,
+                                require_sample=True,
+                            )
+                            record["stable"] = existing_identity in strong_locator_candidates
+                            if record["stable"]:
+                                resolve_hidden_copy_identity(
+                                    connection,
+                                    media_row=existing,
+                                    local_file_path=resolved,
+                                    local_file_stat=file_stat,
+                                    evidence_memo=evidence_memo,
+                                )
+                    else:
+                        resolve_hidden_copy_identity(
+                            connection,
+                            media_row=existing,
+                            local_file_path=resolved,
+                            local_file_stat=file_stat,
+                            evidence_memo=evidence_memo,
+                            include_content_sample=False,
+                        )
+                        record["stable"] = True
+                elif (
+                    stat_unchanged
+                    and not str(existing["hidden_copy_identity"] or "").strip()
+                ):
+                    # Legacy rows without identity evidence cannot be matched by alias.
+                    # Keep the same row while scanner-owned folder metadata is upgraded.
+                    record["legacy_same_path_target"] = existing
+                if record["stable"]:
+                    stable_existing_ids.add(int(existing["id"]))
+                elif record["legacy_same_path_target"] is None:
+                    record["candidate_identities"] = find_local_copy_identity_candidates(
                         connection,
                         media_row={
                             "source_kind": "local",
@@ -465,231 +632,83 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                             "file_path": file_path,
                         },
                         file_path=resolved,
-                        file_stat=stat,
+                        file_stat=file_stat,
                         require_locator=False,
+                        evidence_memo=evidence_memo,
+                        require_sample=True,
                     )
-                    candidates = [
-                        row
-                        for identity in identity_candidates
-                        for row in missing_existing_by_identity.get(identity, [])
-                        if int(row["id"]) not in rename_matched_existing_ids
-                    ]
-                    if len(candidates) == 1:
-                        rename_target = candidates[0]
-                        rename_matched_existing_ids.add(int(rename_target["id"]))
-                if (
-                    existing
-                    and existing["file_size"] == stat.st_size
-                    and existing["file_mtime"] == stat.st_mtime
-                    and _scan_metadata_matches(existing, scan_metadata)
-                ):
-                    continue
+                current_records.append(record)
 
-                metadata = extract_media_metadata(resolved, settings)
-                # Preserve the source-provided title stem in storage. Clean display titles
-                # stay derived at read time so parser changes do not destructively rewrite
-                # the raw library title truth.
-                title = resolved.stem
-                _, inferred_year = infer_title_and_year(resolved.stem)
-                existing_year = None
-                if existing is not None:
-                    existing_year = existing["year"]
-                elif rename_target is not None:
-                    existing_year = rename_target["year"]
-                preserved_year = _preserve_known_year(
-                    inferred_year=inferred_year,
-                    existing_year=existing_year,
-                )
-                now = utcnow_iso()
-                media_item_id: int | None = None
-                claim_catalog_revision()
-                if rename_target is not None:
-                    # Keep the same media row when a local rename is strongly detectable.
-                    # This preserves progress/history/poster/year continuity instead of
-                    # turning a rename into delete+insert.
-                    media_item_id = int(rename_target["id"])
-                    connection.execute(
-                        """
-                        UPDATE media_items
-                        SET title = ?,
-                            original_filename = ?,
-                            file_path = ?,
-                            source_kind = 'local',
-                            library_source_id = ?,
-                            file_size = ?,
-                            file_mtime = ?,
-                            duration_seconds = ?,
-                            width = ?,
-                            height = ?,
-                            video_codec = ?,
-                            audio_codec = ?,
-                            container = ?,
-                            year = ?,
-                            series_folder_key = ?,
-                            series_folder_name = ?,
-                            library_category = ?,
-                            library_category_path = ?,
-                            library_category_name = ?,
-                            library_folder_role = ?,
-                            library_folder_path = ?,
-                            library_folder_name = ?,
-                            updated_at = ?,
-                            last_scanned_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            title,
-                            resolved.name,
-                            file_path,
-                            shared_local_source_id,
-                            stat.st_size,
-                            stat.st_mtime,
-                            metadata["duration_seconds"],
-                            metadata["width"],
-                            metadata["height"],
-                            metadata["video_codec"],
-                            metadata["audio_codec"],
-                            metadata["container"],
-                            preserved_year,
-                            scan_metadata["series_folder_key"],
-                            scan_metadata["series_folder_name"],
-                            scan_metadata["library_category"],
-                            scan_metadata["library_category_path"],
-                            scan_metadata["library_category_name"],
-                            scan_metadata["library_folder_role"],
-                            scan_metadata["library_folder_path"],
-                            scan_metadata["library_folder_name"],
-                            now,
-                            now,
-                            media_item_id,
-                        ),
-                    )
-                else:
-                    connection.execute(
-                        """
-                        INSERT INTO media_items (
-                            title,
-                            original_filename,
-                            file_path,
-                            source_kind,
-                            library_source_id,
-                            file_size,
-                            file_mtime,
-                            duration_seconds,
-                            width,
-                            height,
-                            video_codec,
-                            audio_codec,
-                            container,
-                            year,
-                            series_folder_key,
-                            series_folder_name,
-                            library_category,
-                            library_category_path,
-                            library_category_name,
-                            library_folder_role,
-                            library_folder_path,
-                            library_folder_name,
-                            created_at,
-                            updated_at,
-                            last_scanned_at
-                        ) VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(file_path) DO UPDATE SET
-                            title = excluded.title,
-                            original_filename = excluded.original_filename,
-                            source_kind = 'local',
-                            library_source_id = excluded.library_source_id,
-                            file_size = excluded.file_size,
-                            file_mtime = excluded.file_mtime,
-                            duration_seconds = excluded.duration_seconds,
-                            width = excluded.width,
-                            height = excluded.height,
-                            video_codec = excluded.video_codec,
-                            audio_codec = excluded.audio_codec,
-                            container = excluded.container,
-                            year = excluded.year,
-                            series_folder_key = excluded.series_folder_key,
-                            series_folder_name = excluded.series_folder_name,
-                            library_category = excluded.library_category,
-                            library_category_path = excluded.library_category_path,
-                            library_category_name = excluded.library_category_name,
-                            library_folder_role = excluded.library_folder_role,
-                            library_folder_path = excluded.library_folder_path,
-                            library_folder_name = excluded.library_folder_name,
-                            updated_at = excluded.updated_at,
-                            last_scanned_at = excluded.last_scanned_at
-                        """,
-                        (
-                            title,
-                            resolved.name,
-                            file_path,
-                            shared_local_source_id,
-                            stat.st_size,
-                            stat.st_mtime,
-                            metadata["duration_seconds"],
-                            metadata["width"],
-                            metadata["height"],
-                            metadata["video_codec"],
-                            metadata["audio_codec"],
-                            metadata["container"],
-                            preserved_year,
-                            scan_metadata["series_folder_key"],
-                            scan_metadata["series_folder_name"],
-                            scan_metadata["library_category"],
-                            scan_metadata["library_category_path"],
-                            scan_metadata["library_category_name"],
-                            scan_metadata["library_folder_role"],
-                            scan_metadata["library_folder_path"],
-                            scan_metadata["library_folder_name"],
-                            now,
-                            now,
-                            now,
-                        ),
-                    )
-                    media_item = connection.execute(
-                        "SELECT id FROM media_items WHERE file_path = ?",
-                        (file_path,),
-                    ).fetchone()
-                    media_item_id = int(media_item["id"]) if media_item else None
-                if media_item_id is not None:
-                    resolve_hidden_copy_identity(
-                        connection,
-                        media_item_id=media_item_id,
-                        local_file_path=resolved,
-                        local_file_stat=stat,
-                    )
-                    connection.execute(
-                        "DELETE FROM subtitle_tracks WHERE media_item_id = ?",
-                        (media_item_id,),
-                    )
-                    for subtitle in metadata["subtitles"]:
-                        connection.execute(
-                            """
-                            INSERT INTO subtitle_tracks (
-                                media_item_id,
-                                language,
-                                title,
-                                codec,
-                                disposition_default
-                            ) VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (
-                                media_item_id,
-                                subtitle["language"],
-                                subtitle["title"],
-                                subtitle["codec"],
-                                subtitle["disposition_default"],
-                            ),
-                        )
-                files_changed += 1
-
-            removable_rows = [
+            displaced_rows = [
                 row
                 for row in existing_rows
-                if row["file_path"] not in seen_paths and int(row["id"]) not in rename_matched_existing_ids
+                if int(row["id"]) not in stable_existing_ids
             ]
-            for row in removable_rows:
+            displaced_rows_by_identity: dict[str, list] = {}
+            for row in displaced_rows:
+                identity = str(row["hidden_copy_identity"] or "").strip()
+                if identity:
+                    displaced_rows_by_identity.setdefault(identity, []).append(row)
+
+            candidate_paths_by_row_id: dict[int, set[str]] = {}
+            for record in current_records:
+                if record["stable"]:
+                    continue
+                legacy_same_path_target = record["legacy_same_path_target"]
+                candidate_row_ids = (
+                    {int(legacy_same_path_target["id"])}
+                    if legacy_same_path_target is not None
+                    else {
+                        int(row["id"])
+                        for identity in record["candidate_identities"]
+                        for row in displaced_rows_by_identity.get(str(identity), [])
+                    }
+                )
+                record["candidate_row_ids"] = candidate_row_ids
+                for row_id in candidate_row_ids:
+                    candidate_paths_by_row_id.setdefault(row_id, set()).add(
+                        str(record["file_path"])
+                    )
+
+            matched_existing_ids: set[int] = set()
+            for record in current_records:
+                candidate_row_ids = record["candidate_row_ids"]
+                if record["stable"] or len(candidate_row_ids) != 1:
+                    continue
+                candidate_row_id = next(iter(candidate_row_ids))
+                if len(candidate_paths_by_row_id.get(candidate_row_id, ())) != 1:
+                    continue
+                rename_target = next(
+                    row for row in displaced_rows if int(row["id"]) == candidate_row_id
+                )
+                record["rename_target"] = rename_target
+                matched_existing_ids.add(candidate_row_id)
+
+            changed_records = [record for record in current_records if not record["stable"]]
+            removable_rows = [
+                row for row in displaced_rows if int(row["id"]) not in matched_existing_ids
+            ]
+            if changed_records or removable_rows:
                 claim_catalog_revision()
+
+            # Stage matched rows first so rename cycles and path replacements cannot
+            # violate the unique file_path constraint during the final apply.
+            for record in changed_records:
+                rename_target = record["rename_target"]
+                if (
+                    rename_target is None
+                    or str(rename_target["file_path"]) == str(record["file_path"])
+                ):
+                    continue
+                connection.execute(
+                    "UPDATE media_items SET file_path = ? WHERE id = ?",
+                    (
+                        f"__elvern_scan_staging__:{job_id}:{int(rename_target['id'])}",
+                        int(rename_target["id"]),
+                    ),
+                )
+
+            for row in removable_rows:
                 preserve_hidden_movie_keys_for_media_item(
                     connection,
                     media_item_id=int(row["id"]),
@@ -699,6 +718,54 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     (row["id"],),
                 )
                 files_removed += 1
+
+            for record in changed_records:
+                resolved = record["resolved"]
+                file_stat = record["file_stat"]
+                scan_metadata = record["scan_metadata"]
+                rename_target = record["rename_target"]
+                media_metadata = extract_media_metadata(resolved, settings)
+                _, inferred_year = infer_title_and_year(resolved.stem)
+                existing_year = rename_target["year"] if rename_target is not None else None
+                preserved_year = _preserve_known_year(
+                    inferred_year=inferred_year,
+                    existing_year=existing_year,
+                )
+                now = utcnow_iso()
+                media_item_id = _write_scanned_local_media_item(
+                    connection,
+                    media_item_id=(
+                        int(rename_target["id"]) if rename_target is not None else None
+                    ),
+                    resolved=resolved,
+                    file_stat=file_stat,
+                    scan_metadata=scan_metadata,
+                    media_metadata=media_metadata,
+                    shared_local_source_id=shared_local_source_id,
+                    preserved_year=preserved_year,
+                    now=now,
+                )
+                blocked_identities = {
+                    str(identity)
+                    for identity in record["candidate_identities"]
+                    if displaced_rows_by_identity.get(str(identity))
+                }
+                resolve_hidden_copy_identity(
+                    connection,
+                    media_item_id=media_item_id,
+                    local_file_path=resolved,
+                    local_file_stat=file_stat,
+                    evidence_memo=evidence_memo,
+                    disallowed_alias_identities=(
+                        blocked_identities if rename_target is None else None
+                    ),
+                )
+                _replace_scanned_subtitles(
+                    connection,
+                    media_item_id=media_item_id,
+                    subtitles=media_metadata["subtitles"],
+                )
+                files_changed += 1
 
             prune_summary = prune_recreated_local_hidden_movie_keys(
                 connection,
@@ -726,8 +793,11 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     job_id,
                 ),
             )
+            connection.execute("RELEASE SAVEPOINT media_scan_mutations")
             connection.commit()
         except Exception as exc:
+            connection.execute("ROLLBACK TO SAVEPOINT media_scan_mutations")
+            connection.execute("RELEASE SAVEPOINT media_scan_mutations")
             finished_at = utcnow_iso()
             connection.execute(
                 """

@@ -24,6 +24,7 @@ import {
   normalizeUserBackgroundSettings,
 } from "../lib/userBackground";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
+import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
 import { InstallSettingsPanel } from "../features/install/InstallSettingsPanel";
 import {
   CONNECTIVITY_RECOVERED_EVENT,
@@ -1092,7 +1093,6 @@ export function SettingsPage() {
   const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const librarySearchSettingVisible = !["phone", "tablet"].includes(detectClientDeviceClass());
   const userSettingsQuery = useUserSettingsQuery(user);
   const settingsIdentity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
   const settingsSectionResolution = resolveSettingsSection({ search: location.search });
@@ -1113,6 +1113,7 @@ export function SettingsPage() {
     hide_duplicate_movies: true,
     hide_recently_added: false,
     floating_library_search_enabled: true,
+    desktop_floating_island_position: "top",
     poster_card_appearance: "classic",
     poster_card_display_max_width: "1400",
     ...DEFAULT_BACKGROUND_SETTINGS,
@@ -1358,6 +1359,7 @@ export function SettingsPage() {
       hide_duplicate_movies: true,
       hide_recently_added: false,
       floating_library_search_enabled: true,
+      desktop_floating_island_position: "top",
       poster_card_appearance: "classic",
       poster_card_display_max_width: "1400",
       ...DEFAULT_BACKGROUND_SETTINGS,
@@ -2154,20 +2156,23 @@ export function SettingsPage() {
     }
   }
 
-  async function handleFloatingLibrarySearchToggle(event) {
-    const nextValue = event.target.checked;
+  async function handleDesktopFloatingIslandPositionChange(nextValue) {
+    const normalizedValue = nextValue === "bottom" ? "bottom" : "top";
+    if (normalizedValue === settings.desktop_floating_island_position) {
+      return;
+    }
     setSaving(true);
     setError("");
     setMessage("");
     try {
       const payload = await apiRequest("/api/user-settings", {
         method: "PATCH",
-        data: { floating_library_search_enabled: nextValue },
+        data: { desktop_floating_island_position: normalizedValue },
       });
       applyUserSettingsPayload(payload);
-      setMessage(nextValue ? "Dynamic search button is enabled." : "Dynamic search button is disabled.");
+      setMessage(`Desktop Floating Island moved to the ${normalizedValue}.`);
     } catch (requestError) {
-      setError(requestError.message || "Failed to update floating search setting");
+      setError(requestError.message || "Failed to update Desktop Floating Island position");
     } finally {
       setSaving(false);
     }
@@ -3302,6 +3307,7 @@ export function SettingsPage() {
             );
           })}
         </div>
+        <DesktopBackToLibraryButton className="admin-nav-card__back" />
       </div>
 
       {activeSettingsSection !== "install" && userSettingsLoadError ? (
@@ -3414,18 +3420,16 @@ export function SettingsPage() {
               <p className="page-subnote">Loading interface preferences...</p>
             ) : (
               <div className="settings-card-stack">
-                {librarySearchSettingVisible ? <label className="settings-toggle">
-                  <span>
-                    <strong>Dynamic search button</strong>
-                    <small>Show the compact search button on Library pages.</small>
-                  </span>
-                  <input
-                    checked={settings.floating_library_search_enabled !== false}
-                    disabled={saving}
-                    onChange={handleFloatingLibrarySearchToggle}
-                    type="checkbox"
-                  />
-                </label> : null}
+                <SettingsSegmentedControl
+                  ariaLabel="Desktop Floating Island position"
+                  disabled={saving}
+                  onChange={handleDesktopFloatingIslandPositionChange}
+                  options={[
+                    { value: "top", label: "Top" },
+                    { value: "bottom", label: "Bottom" },
+                  ]}
+                  value={settings.desktop_floating_island_position === "bottom" ? "bottom" : "top"}
+                />
               </div>
             )}
           </section>

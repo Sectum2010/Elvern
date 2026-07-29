@@ -17,8 +17,8 @@ const identity = {
   role: "standard_user",
   category: "movies",
   source: "all",
-  genre: "",
-  quality: "all",
+  genres: [],
+  qualities: [],
   sort: "smart",
   query: "",
 };
@@ -30,7 +30,14 @@ function v1Payload() {
     cloud_series_rails: [],
     continue_watching: [],
     recently_added: [],
-    arrange: { source: "all", genre: null, quality: "all", sort: "smart" },
+    arrange: {
+      source: "all",
+      genres: [],
+      qualities: [],
+      genre: null,
+      quality: null,
+      sort: "smart",
+    },
     available_genres: [],
     total_items: 0,
     scan_in_progress: false,
@@ -41,7 +48,15 @@ function v2Payload() {
   return {
     schema_version: "library-summary-v2",
     revision: "a".repeat(64),
-    view: { category: "movies", source: "all", genre: null, quality: "all", sort: "smart" },
+    view: {
+      category: "movies",
+      source: "all",
+      genres: [],
+      qualities: [],
+      genre: null,
+      quality: null,
+      sort: "smart",
+    },
     items_by_id: {},
     sections: {
       item_ids: [],

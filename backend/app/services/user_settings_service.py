@@ -13,6 +13,7 @@ from ..db import get_connection, utcnow_iso
 HIDE_DUPLICATE_MOVIES_KEY = "hide_duplicate_movies"
 HIDE_RECENTLY_ADDED_KEY = "hide_recently_added"
 FLOATING_LIBRARY_SEARCH_ENABLED_KEY = "floating_library_search_enabled"
+DESKTOP_FLOATING_ISLAND_POSITION_KEY = "desktop_floating_island_position"
 POSTER_CARD_APPEARANCE_KEY = "poster_card_appearance"
 POSTER_CARD_DISPLAY_MAX_WIDTH_KEY = "poster_card_display_max_width"
 MEDIA_LIBRARY_REFERENCE_PRIVATE_KEY = "media_library_reference_private"
@@ -83,6 +84,7 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
         HIDE_DUPLICATE_MOVIES_KEY: True,
         HIDE_RECENTLY_ADDED_KEY: False,
         FLOATING_LIBRARY_SEARCH_ENABLED_KEY: True,
+        DESKTOP_FLOATING_ISLAND_POSITION_KEY: "top",
         POSTER_CARD_APPEARANCE_KEY: "classic",
         POSTER_CARD_DISPLAY_MAX_WIDTH_KEY: "1400",
         BACKGROUND_MODE_KEY: "preset",
@@ -119,6 +121,10 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
             values[HIDE_RECENTLY_ADDED_KEY] = row["value"] == "1"
         if row["key"] == FLOATING_LIBRARY_SEARCH_ENABLED_KEY:
             values[FLOATING_LIBRARY_SEARCH_ENABLED_KEY] = row["value"] == "1"
+        if row["key"] == DESKTOP_FLOATING_ISLAND_POSITION_KEY:
+            values[DESKTOP_FLOATING_ISLAND_POSITION_KEY] = (
+                row["value"] if row["value"] in {"top", "bottom"} else "top"
+            )
         if row["key"] == POSTER_CARD_APPEARANCE_KEY and row["value"] in POSTER_CARD_APPEARANCES:
             values[POSTER_CARD_APPEARANCE_KEY] = row["value"]
         if row["key"] == POSTER_CARD_DISPLAY_MAX_WIDTH_KEY and row["value"] in POSTER_CARD_DISPLAY_MAX_WIDTHS:
@@ -167,6 +173,7 @@ def update_user_settings(
     hide_duplicate_movies: bool | None = None,
     hide_recently_added: bool | None = None,
     floating_library_search_enabled: bool | None = None,
+    desktop_floating_island_position: str | None = None,
     poster_card_appearance: str | None = None,
     poster_card_display_max_width: str | int | None = None,
     background_mode: str | None = None,
@@ -181,6 +188,7 @@ def update_user_settings(
         hide_duplicate_movies is None
         and hide_recently_added is None
         and floating_library_search_enabled is None
+        and desktop_floating_island_position is None
         and poster_card_appearance is None
         and poster_card_display_max_width is None
         and background_mode is None
@@ -202,6 +210,12 @@ def update_user_settings(
         updates.append((HIDE_RECENTLY_ADDED_KEY, "1" if hide_recently_added else "0"))
     if floating_library_search_enabled is not None:
         updates.append((FLOATING_LIBRARY_SEARCH_ENABLED_KEY, "1" if floating_library_search_enabled else "0"))
+    if desktop_floating_island_position is not None:
+        normalized_position = desktop_floating_island_position.strip().lower()
+        updates.append((
+            DESKTOP_FLOATING_ISLAND_POSITION_KEY,
+            normalized_position if normalized_position in {"top", "bottom"} else "top",
+        ))
     if poster_card_appearance is not None:
         normalized_appearance = poster_card_appearance.strip().lower()
         if normalized_appearance not in POSTER_CARD_APPEARANCES:

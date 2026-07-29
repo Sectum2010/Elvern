@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { AssistantAttachmentGallery } from "../components/AssistantAttachmentGallery";
+import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
 import { LoadingView } from "../components/LoadingView";
 import { apiRequest } from "../lib/api";
 import { deriveAssistantContext } from "../lib/assistantAccess";
@@ -276,6 +277,9 @@ export function AssistantPage() {
   return (
     <section className="page-section page-section--assistant">
       <div className="assistant-page-stack">
+        <div className="assistant-top-level-back-row">
+          <DesktopBackToLibraryButton />
+        </div>
         <details
           className="settings-card settings-card--wide assistant-request-form-card settings-disclosure"
           onToggle={(event) => setSubmitPanelExpanded(event.currentTarget.open)}

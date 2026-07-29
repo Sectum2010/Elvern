@@ -1,4 +1,8 @@
 import { isCompleteLibraryQualityRank } from "./qualityRank.js";
+import {
+  normalizeLibraryGenres,
+  normalizeLibraryQualities,
+} from "./desktopLibraryViewState.js";
 
 
 export const LIBRARY_SUMMARY_V2_SCHEMA_VERSION = "library-summary-v2";
@@ -34,7 +38,15 @@ const REQUIRED_TOP_LEVEL_FIELDS = Object.freeze([
   "total_items",
   "scan_in_progress",
 ]);
-const REQUIRED_VIEW_FIELDS = Object.freeze(["category", "source", "genre", "quality", "sort"]);
+const REQUIRED_VIEW_FIELDS = Object.freeze([
+  "category",
+  "source",
+  "genres",
+  "qualities",
+  "genre",
+  "quality",
+  "sort",
+]);
 const REQUIRED_QUALITY_FIELDS = Object.freeze([
   "key",
   "label",
@@ -88,6 +100,8 @@ export function isLibrarySummaryV2DebugEnabled(storage = globalThis?.localStorag
 export function buildLibrarySummaryV2RequestPath({
   category = "movies",
   source = "all",
+  genres = [],
+  qualities = [],
   genre = "",
   quality = "all",
   sort = "smart",
@@ -95,18 +109,20 @@ export function buildLibrarySummaryV2RequestPath({
   const params = new URLSearchParams();
   params.set("category", String(category || "movies").trim().toLowerCase() || "movies");
   const normalizedSource = String(source || "all").trim().toLowerCase() || "all";
-  const normalizedGenre = String(genre || "").trim();
-  const normalizedQuality = String(quality || "all").trim().toLowerCase() || "all";
+  const normalizedGenres = normalizeLibraryGenres(
+    Array.isArray(genres) && genres.length ? genres : (genre ? [genre] : []),
+  );
+  const normalizedQualities = normalizeLibraryQualities(
+    Array.isArray(qualities) && qualities.length
+      ? qualities
+      : (quality && quality !== "all" ? [quality] : []),
+  );
   const normalizedSort = String(sort || "smart").trim().toLowerCase() || "smart";
   if (normalizedSource !== "all") {
     params.set("source", normalizedSource);
   }
-  if (normalizedGenre) {
-    params.set("genre", normalizedGenre);
-  }
-  if (normalizedQuality !== "all") {
-    params.set("quality", normalizedQuality);
-  }
+  normalizedGenres.forEach((value) => params.append("genre", value));
+  normalizedQualities.forEach((value) => params.append("quality", value));
   if (normalizedSort !== "smart") {
     params.set("sort", normalizedSort);
   }
@@ -184,6 +200,11 @@ export function validateLibrarySummaryV2Payload(payload) {
   }
   requireObject(payload.view, "view");
   requireExactFields(payload.view, REQUIRED_VIEW_FIELDS, "view");
+  if (!Array.isArray(payload.view.genres) || !Array.isArray(payload.view.qualities)) {
+    throw new LibrarySummaryV2ContractError("Library summary view filters must be arrays", {
+      category: "view",
+    });
+  }
   const itemsById = requireObject(payload.items_by_id, "items_by_id");
   Object.entries(itemsById).forEach(([mapId, item]) => {
     requireObject(item, "item");
@@ -260,6 +281,8 @@ export function adaptLibrarySummaryV2ToLegacyView(payload) {
     recently_added: resolveItems(sections.recently_added_item_ids, itemsById),
     arrange: {
       source: validated.view.source,
+      genres: validated.view.genres,
+      qualities: validated.view.qualities,
       genre: validated.view.genre,
       quality: validated.view.quality,
       sort: validated.view.sort,
@@ -338,11 +361,27 @@ export function compareLibraryV1AndV2(v1Payload, v2Payload, { viewIdentity = {} 
     record(error?.details?.category || "contract", { itemId: error?.details?.itemId });
     return { matches: false, mismatchCount: mismatches.length, mismatches };
   }
+  const v1Genres = normalizeLibraryGenres(
+    Array.isArray(v1Payload?.arrange?.genres)
+      ? v1Payload.arrange.genres
+      : (v1Payload?.arrange?.genre ? [v1Payload.arrange.genre] : []),
+  );
+  const v1Qualities = normalizeLibraryQualities(
+    Array.isArray(v1Payload?.arrange?.qualities)
+      ? v1Payload.arrange.qualities
+      : (
+          v1Payload?.arrange?.quality && v1Payload.arrange.quality !== "all"
+            ? [v1Payload.arrange.quality]
+            : []
+        ),
+  );
   const expectedView = {
     category: String(viewIdentity.category || "movies"),
     source: String(v1Payload?.arrange?.source || "all"),
-    genre: v1Payload?.arrange?.genre ?? null,
-    quality: String(v1Payload?.arrange?.quality || "all"),
+    genres: v1Genres,
+    qualities: v1Qualities,
+    genre: v1Genres.length === 1 ? v1Genres[0] : null,
+    quality: v1Qualities.length === 1 ? v1Qualities[0] : null,
     sort: String(v1Payload?.arrange?.sort || "smart"),
   };
   if (!sameValue(expectedView, validated.view)) record("view");

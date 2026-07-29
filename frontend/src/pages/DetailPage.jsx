@@ -984,17 +984,23 @@ export function DetailPage() {
   }, [itemId, mobileSession?.session_id, videoElementKey]);
 
   const activeLibraryReturn = useMemo(() => {
-    const fromLocation = extractLibraryReturnState(location.state);
+    const fromLocation = extractLibraryReturnState(location.state, {
+      userId: user?.id,
+      role: user?.role,
+    });
     if (fromLocation) {
       return fromLocation;
     }
-    return readLibraryReturnTarget() || {
+    return readLibraryReturnTarget({
+      userId: user?.id,
+      role: user?.role,
+    }) || {
       listPath: "/library",
       anchorItemId: null,
       scrollY: 0,
       pendingRestore: false,
     };
-  }, [location.state]);
+  }, [location.state, user?.id, user?.role]);
   const libraryReturnPath = activeLibraryReturn?.listPath || "/library";
   const libraryReturnLinkState = useMemo(
     () => ({ restoreLibraryReturn: true }),
@@ -1007,6 +1013,8 @@ export function DetailPage() {
       ...activeLibraryReturn,
       listPath: libraryReturnPath,
       pendingRestore: true,
+      userId: user?.id,
+      role: user?.role,
     });
   }
 
@@ -1232,6 +1240,8 @@ export function DetailPage() {
     rememberLibraryReturnTarget({
       ...activeLibraryReturn,
       listPath: libraryReturnPath,
+      userId: user?.id,
+      role: user?.role,
       pendingRestore: false,
     });
   }, [activeLibraryReturn, libraryReturnPath]);

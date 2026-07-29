@@ -82,8 +82,8 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
   beforeEach(() => {
     queryClient.clear();
     window.sessionStorage.clear();
-    mockPlatformState.deviceClass = "desktop";
-    mockPlatformState.platform = "linux";
+    mockPlatformState.deviceClass = "tablet";
+    mockPlatformState.platform = "ipad";
     mockAuthState.role = "standard_user";
     mockAuthState.assistantEnabled = false;
     apiRequest.mockReset();
@@ -127,9 +127,47 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
   });
 
   test("does not add selection guard on desktop", () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "linux";
     renderShell();
 
     expect(document.querySelector(".app-shell")).not.toHaveClass("app-shell--selection-guard");
+  });
+
+  test.each([
+    ["/library", true],
+    ["/library/42", true],
+    ["/settings", false],
+    ["/admin", false],
+    ["/admin/assistant", false],
+    ["/assistant", false],
+    ["/attachments/42/view", false],
+  ])("shows the complete desktop Library Island only on approved route %s", (route, expected) => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "linux";
+    renderShell({ initialEntry: route });
+
+    expect(Boolean(screen.queryByTestId("desktop-library-island"))).toBe(expected);
+    expect(document.querySelector(".floating-island")).toBeNull();
+  });
+
+  test("uses the per-user top or bottom desktop Island setting without changing tablet placement", async () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "linux";
+    apiRequest.mockResolvedValue({
+      desktop_floating_island_position: "bottom",
+      poster_card_appearance: "classic",
+      background_mode: "preset",
+      background_preset: "neon",
+    });
+    renderShell();
+
+    await waitFor(() => expect(screen.getByTestId("desktop-library-island")).toHaveClass(
+      "desktop-library-island-wrap--bottom",
+    ));
+    expect(document.querySelector(".app-shell")).toHaveClass(
+      "app-shell--desktop-library-island-bottom",
+    );
   });
 
   test.each([
@@ -206,20 +244,24 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
 
   test("Floating Library uses the remembered source/search return target from Detail", async () => {
     window.sessionStorage.setItem("elvern:library-return-target", JSON.stringify({
-      listPath: "/library/cloud?category=movies&q=phase",
+      listPath: "/library?category=movies&q=phase&source=cloud",
       anchorItemId: 42,
       anchorInstanceKey: "other-movies:42",
       pendingRestore: false,
+      userId: "2",
+      role: "standard_user",
     }));
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "linux";
     renderShell({
       initialEntry: "/library/42",
       children: <LocationProbe />,
     });
 
-    screen.getByRole("link", { name: "Library" }).click();
+    screen.getByRole("tab", { name: "Movies" }).click();
 
     await waitFor(() => expect(screen.getByTestId("shell-location")).toHaveTextContent(
-      "/library/cloud?category=movies&q=phase",
+      "/library?category=movies&q=phase&source=cloud",
     ));
     expect(JSON.parse(
       window.sessionStorage.getItem("elvern:library-return-target"),
@@ -227,6 +269,8 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
   });
 
   test("a trailing-slash Library root does not render a duplicate Elvern header", () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "linux";
     renderShell({
       initialEntry: "/library/",
       children: <div className="topbar library-desktop-hero">Elvern</div>,

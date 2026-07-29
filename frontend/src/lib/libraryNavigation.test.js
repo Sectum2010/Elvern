@@ -14,8 +14,8 @@ import {
 test.each([
   ["/library/", "/library"],
   ["/library/?category=anime", "/library?category=anime"],
-  ["/library/local/?q=akira", "/library/local?q=akira"],
-  ["/library/cloud/", "/library/cloud"],
+  ["/library/local/?q=akira", "/library?q=akira&source=local"],
+  ["/library/cloud/", "/library?source=cloud"],
 ])("canonicalizes Library return list path %s", (input, expected) => {
   assert.equal(normalizeLibraryListPath(input), expected);
 });
@@ -56,7 +56,7 @@ test("library return state stores exact card instance and viewport ratios", () =
 
   assert.deepEqual(state, {
     libraryReturn: {
-      listPath: "/library/cloud",
+      listPath: "/library?source=cloud",
       anchorItemId: 42,
       anchorInstanceKey: "series:dragon:42",
       scrollY: 1200,
@@ -130,7 +130,7 @@ test("source-page return state preserves q and relocation fields", () => {
       railScrollLeft: 288,
     }),
     {
-      listPath: "/library/local?q=akira",
+      listPath: "/library?q=akira&source=local#ignored",
       anchorItemId: 42,
       anchorInstanceKey: "series:akira:42",
       scrollY: 0,
@@ -185,6 +185,22 @@ test("session return target preserves enhanced exact-instance fields", () => wit
 
   assert.deepEqual(readLibraryReturnTarget(), remembered);
   assert.equal(clearLibraryReturnPending()?.pendingRestore, false);
+}));
+
+test("session return targets are isolated by user and role", () => withSessionStorage(() => {
+  rememberLibraryReturnTarget({
+    listPath: "/library?category=anime",
+    anchorItemId: 12,
+    userId: 7,
+    role: "standard_user",
+  });
+
+  assert.equal(readLibraryReturnTarget({ userId: 8, role: "standard_user" }), null);
+  assert.equal(readLibraryReturnTarget({ userId: 7, role: "admin" }), null);
+  assert.equal(
+    readLibraryReturnTarget({ userId: 7, role: "standard_user" })?.anchorItemId,
+    12,
+  );
 }));
 
 test("location state is enriched from matching session target", () => withSessionStorage(() => {

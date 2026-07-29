@@ -20,6 +20,37 @@ from .services.title_normalization import (
 HIDDEN_COPY_IDENTITY_PREFIX = "copy-v2:"
 LOCAL_COPY_EVIDENCE_SAMPLE_BYTES = 64 * 1024
 LOCAL_COPY_IDENTITY_RANDOM_BYTES = 32
+LOCAL_COPY_EVIDENCE_ALGORITHM_VERSION = "local-copy-evidence-v2"
+
+
+class LocalCopyEvidenceMemo:
+    """Cache bounded content samples for the lifetime of one local scan."""
+
+    def __init__(self) -> None:
+        self._sample_hashes: dict[tuple[object, ...], str | None] = {}
+
+    def sample_hash(
+        self,
+        row,
+        *,
+        path: Path,
+        metadata: os.stat_result,
+    ) -> str | None:
+        source_kind, source_id = _local_source_scope(row)
+        key = (
+            LOCAL_COPY_EVIDENCE_ALGORITHM_VERSION,
+            source_kind,
+            source_id,
+            _normalized_local_locator(path),
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+        )
+        if key not in self._sample_hashes:
+            self._sample_hashes[key] = _bounded_local_content_hash(path, metadata)
+        return self._sample_hashes[key]
 
 
 def _row_value(row, key: str, default=None):
@@ -216,6 +247,8 @@ def local_copy_evidence_hashes(
     *,
     file_path: object | None = None,
     file_stat: os.stat_result | None = None,
+    evidence_memo: LocalCopyEvidenceMemo | None = None,
+    include_content_sample: bool = True,
 ) -> tuple[str, ...]:
     source_kind, source_id = _local_source_scope(row)
     if source_kind != "local":
@@ -236,6 +269,19 @@ def local_copy_evidence_hashes(
     evidence: list[str] = []
     if int(metadata.st_ino) > 0:
         evidence.append(
+            "inode-v2:"
+            + _opaque_digest(
+                "local-inode-v2",
+                source_kind,
+                source_id,
+                int(metadata.st_dev),
+                int(metadata.st_ino),
+                int(metadata.st_size),
+                int(metadata.st_mtime_ns),
+                int(metadata.st_ctime_ns),
+            )
+        )
+        evidence.append(
             "inode-v1:"
             + _opaque_digest(
                 "local-inode-v1",
@@ -245,7 +291,13 @@ def local_copy_evidence_hashes(
                 int(metadata.st_ino),
             )
         )
-    sampled = _bounded_local_content_hash(path, metadata)
+    sampled = None
+    if include_content_sample:
+        sampled = (
+            evidence_memo.sample_hash(row, path=path, metadata=metadata)
+            if evidence_memo is not None
+            else _bounded_local_content_hash(path, metadata)
+        )
     if sampled:
         evidence.append(
             "sample-v1:"
@@ -292,6 +344,8 @@ def record_local_copy_identity_aliases(
     identity: str,
     file_path: object | None = None,
     file_stat: os.stat_result | None = None,
+    evidence_memo: LocalCopyEvidenceMemo | None = None,
+    include_content_sample: bool = True,
 ) -> None:
     source_kind, source_id = _local_source_scope(media_row)
     locator_hash = _local_locator_hash(media_row, file_path=file_path)
@@ -301,6 +355,8 @@ def record_local_copy_identity_aliases(
         media_row,
         file_path=file_path,
         file_stat=file_stat,
+        evidence_memo=evidence_memo,
+        include_content_sample=include_content_sample,
     )
     if not evidence_hashes:
         return
@@ -344,6 +400,9 @@ def _matching_alias_identities(
     file_path: object | None = None,
     file_stat: os.stat_result | None = None,
     require_locator: bool,
+    evidence_memo: LocalCopyEvidenceMemo | None = None,
+    include_content_sample: bool = True,
+    require_sample: bool = False,
 ) -> tuple[str, ...]:
     source_kind, source_id = _local_source_scope(media_row)
     if source_kind != "local":
@@ -352,6 +411,8 @@ def _matching_alias_identities(
         media_row,
         file_path=file_path,
         file_stat=file_stat,
+        evidence_memo=evidence_memo,
+        include_content_sample=include_content_sample,
     )
     if not evidence_hashes:
         return ()
@@ -394,7 +455,14 @@ def _matching_alias_identities(
         for evidence_hash in evidence_hashes
         if evidence_hash.startswith("sample-v1:")
     }
-    inode_hashes = {
+    if require_sample and not sample_hashes:
+        return ()
+    inode_v2_hashes = {
+        evidence_hash
+        for evidence_hash in evidence_hashes
+        if evidence_hash.startswith("inode-v2:")
+    }
+    inode_v1_hashes = {
         evidence_hash
         for evidence_hash in evidence_hashes
         if evidence_hash.startswith("inode-v1:")
@@ -404,7 +472,9 @@ def _matching_alias_identities(
         if sample_hashes:
             if not matched_hashes.intersection(sample_hashes):
                 continue
-        elif inode_hashes and not matched_hashes.intersection(inode_hashes):
+        elif inode_v2_hashes and not matched_hashes.intersection(inode_v2_hashes):
+            continue
+        elif inode_v1_hashes and not matched_hashes.intersection(inode_v1_hashes):
             continue
         matches.append(identity)
     return tuple(sorted(set(matches)))
@@ -417,6 +487,9 @@ def find_local_copy_identity_candidates(
     file_path: object | None = None,
     file_stat: os.stat_result | None = None,
     require_locator: bool,
+    evidence_memo: LocalCopyEvidenceMemo | None = None,
+    include_content_sample: bool = True,
+    require_sample: bool = False,
 ) -> tuple[str, ...]:
     return _matching_alias_identities(
         connection,
@@ -424,6 +497,9 @@ def find_local_copy_identity_candidates(
         file_path=file_path,
         file_stat=file_stat,
         require_locator=require_locator,
+        evidence_memo=evidence_memo,
+        include_content_sample=include_content_sample,
+        require_sample=require_sample,
     )
 
 
@@ -480,6 +556,10 @@ def resolve_hidden_copy_identity(
     media_row=None,
     local_file_path: object | None = None,
     local_file_stat: os.stat_result | None = None,
+    evidence_memo: LocalCopyEvidenceMemo | None = None,
+    include_content_sample: bool = True,
+    record_local_aliases: bool = True,
+    disallowed_alias_identities: set[str] | frozenset[str] | None = None,
 ) -> str | None:
     """Return and persist the one authoritative opaque Hidden copy identity."""
     row = media_row
@@ -506,13 +586,16 @@ def resolve_hidden_copy_identity(
         return None
     existing = str(_row_value(row, "hidden_copy_identity", "") or "").strip()
     if existing.startswith(HIDDEN_COPY_IDENTITY_PREFIX):
-        record_local_copy_identity_aliases(
-            connection,
-            media_row=row,
-            identity=existing,
-            file_path=local_file_path,
-            file_stat=local_file_stat,
-        )
+        if record_local_aliases:
+            record_local_copy_identity_aliases(
+                connection,
+                media_row=row,
+                identity=existing,
+                file_path=local_file_path,
+                file_stat=local_file_stat,
+                evidence_memo=evidence_memo,
+                include_content_sample=include_content_sample,
+            )
         return existing
     row_id = int(_row_value(row, "id", media_item_id or 0) or 0)
     source_kind, _source_id = _local_source_scope(row)
@@ -525,12 +608,15 @@ def resolve_hidden_copy_identity(
                 file_path=local_file_path,
                 file_stat=local_file_stat,
                 require_locator=True,
+                evidence_memo=evidence_memo,
+                include_content_sample=include_content_sample,
             )
             if _active_identity_owner(
                 connection,
                 identity,
                 excluding_media_item_id=row_id,
             ) is None
+            and identity not in (disallowed_alias_identities or ())
         ]
         identity = candidates[0] if len(candidates) == 1 else _new_hidden_copy_identity()
     else:
@@ -547,13 +633,16 @@ def resolve_hidden_copy_identity(
                 if source_kind != "local":
                     raise
                 identity = _new_hidden_copy_identity()
-        record_local_copy_identity_aliases(
-            connection,
-            media_row=row,
-            identity=identity,
-            file_path=local_file_path,
-            file_stat=local_file_stat,
-        )
+        if record_local_aliases:
+            record_local_copy_identity_aliases(
+                connection,
+                media_row=row,
+                identity=identity,
+                file_path=local_file_path,
+                file_stat=local_file_stat,
+                evidence_memo=evidence_memo,
+                include_content_sample=include_content_sample,
+            )
     return identity
 
 
@@ -673,6 +762,29 @@ def _legacy_candidate_index(rows: list[sqlite3.Row]) -> dict[str, list[sqlite3.R
 
 def migrate_legacy_hidden_movie_keys(connection: sqlite3.Connection) -> dict[str, int]:
     """Conservatively materialize legacy group/filename records as copy-v2 keys."""
+    has_legacy_keys = connection.execute(
+        """
+        SELECT (
+            EXISTS(
+                SELECT 1
+                FROM user_hidden_movie_keys
+                WHERE movie_key NOT LIKE 'copy-v2:%'
+            )
+            OR EXISTS(
+                SELECT 1
+                FROM global_hidden_movie_keys
+                WHERE movie_key NOT LIKE 'copy-v2:%'
+            )
+        ) AS value
+        """
+    ).fetchone()
+    if not has_legacy_keys or not bool(has_legacy_keys["value"]):
+        return {
+            "user_legacy_keys_migrated": 0,
+            "user_legacy_keys_retained": 0,
+            "global_legacy_keys_migrated": 0,
+            "global_legacy_keys_retained": 0,
+        }
     rows = _load_identity_rows(connection)
     rows_by_id = {int(row["id"]): row for row in rows}
     candidates_by_key = _legacy_candidate_index(rows)
@@ -1015,9 +1127,28 @@ def preserve_hidden_movie_keys_for_media_item(
     ).fetchone()
     if media_row is None:
         return {"user_hidden_restored": 0, "global_hidden_restored": 0}
-    payload = resolve_hidden_copy_identity_payload(connection, media_row)
-    if payload is None:
+    copy_identity = resolve_hidden_copy_identity(
+        connection,
+        media_row=media_row,
+        include_content_sample=False,
+        record_local_aliases=False,
+    )
+    if not copy_identity:
         return {"user_hidden_restored": 0, "global_hidden_restored": 0}
+    base_title, resolved_year, edition_identity = _legacy_identity_metadata(
+        title=_row_value(media_row, "title"),
+        year=_row_value(media_row, "year"),
+        original_filename=_row_value(media_row, "original_filename"),
+    )
+    payload = {
+        "movie_key": copy_identity,
+        "display_title": (
+            str(base_title or _row_value(media_row, "title") or "Untitled").strip()
+            or "Untitled"
+        ),
+        "year": resolved_year if resolved_year is not None else 0,
+        "edition_identity": edition_identity,
+    }
 
     user_count = 0
     for row in connection.execute(

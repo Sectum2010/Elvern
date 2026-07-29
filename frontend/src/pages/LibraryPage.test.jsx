@@ -90,6 +90,8 @@ const emptyLibraryPayload = {
   recently_added: [],
   arrange: {
     source: "all",
+    genres: [],
+    qualities: [],
     genre: null,
     quality: "all",
     sort: "smart",
@@ -182,8 +184,24 @@ function summaryV2Payload(v1Payload = emptyLibraryPayload) {
     view: {
       category: "movies",
       source: v1Payload.arrange?.source || "all",
-      genre: v1Payload.arrange?.genre ?? null,
-      quality: v1Payload.arrange?.quality || "all",
+      genres: v1Payload.arrange?.genres || (
+        v1Payload.arrange?.genre ? [v1Payload.arrange.genre] : []
+      ),
+      qualities: v1Payload.arrange?.qualities || (
+        v1Payload.arrange?.quality && v1Payload.arrange.quality !== "all"
+          ? [v1Payload.arrange.quality]
+          : []
+      ),
+      genre: (v1Payload.arrange?.genres || []).length === 1
+        ? v1Payload.arrange.genres[0]
+        : (v1Payload.arrange?.genre ?? null),
+      quality: (v1Payload.arrange?.qualities || []).length === 1
+        ? v1Payload.arrange.qualities[0]
+        : (
+            v1Payload.arrange?.quality && v1Payload.arrange.quality !== "all"
+              ? v1Payload.arrange.quality
+              : null
+          ),
       sort: v1Payload.arrange?.sort || "smart",
     },
     items_by_id: itemsById,
@@ -396,6 +414,33 @@ describe("LibraryPage category switching", () => {
     });
   });
 
+  test("real desktop renders only the compact indexed and Rescan cluster", async () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "linux";
+    renderLibrary("/library", libraryPayload({
+      total_items: 27,
+    }));
+
+    expect(await screen.findByText("27 indexed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeInTheDocument();
+    expect(screen.queryByRole("searchbox", { name: "Search library" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Arrange library" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Search library" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Rescan library")).not.toBeInTheDocument();
+  });
+
+  test("real desktop indexed cluster shows the authoritative scan pending state", async () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "mac";
+    renderLibrary("/library?source=cloud", libraryPayload({
+      total_items: 8,
+      scan_in_progress: true,
+    }));
+
+    expect(await screen.findByText("8 indexed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Scanning…" })).toBeDisabled();
+  });
+
   test("on mode renders a non-search root view from normalized v2 only", async () => {
     vi.stubEnv("VITE_ELVERN_LIBRARY_SUMMARY_V2_MODE", "on");
     const v1 = libraryPayload({ items: [libraryItem({ id: 71, title: "V2 Root" })], total_items: 1 });
@@ -431,7 +476,7 @@ describe("LibraryPage category switching", () => {
 
     expect(await screen.findByRole("link", { name: "Akira" })).toBeInTheDocument();
     expect(apiRequest).toHaveBeenCalledWith(
-      "/api/library/search?q=akira&category=movies",
+      "/api/library/search?category=movies&q=akira",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(apiRequest.mock.calls.some(([path]) => path.includes("/api/library/v2/summary"))).toBe(false);
@@ -562,7 +607,7 @@ describe("LibraryPage category switching", () => {
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=akira&category=cartoon",
+        "/api/library/search?category=cartoon&q=akira",
         expect.any(Object),
       );
     });
@@ -579,7 +624,7 @@ describe("LibraryPage category switching", () => {
     expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=akira&category=anime",
+        "/api/library/search?category=anime&q=akira",
         expect.any(Object),
       );
     });
@@ -610,7 +655,7 @@ describe("LibraryPage category switching", () => {
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=matrix&category=movies",
+        "/api/library/search?category=movies&q=matrix",
         expect.any(Object),
       );
     });
@@ -622,7 +667,7 @@ describe("LibraryPage category switching", () => {
     const { locations } = renderLibrary("/library?category=anime&source=local&q=akira");
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=akira&category=anime&source=local",
+        "/api/library/search?category=anime&source=local&q=akira",
         expect.any(Object),
       );
     });
@@ -653,7 +698,7 @@ describe("LibraryPage category switching", () => {
     await waitFor(() => {
       expect(screen.getAllByRole("searchbox", { name: "Search library" })[0]).toHaveValue("akira");
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=akira&category=anime",
+        "/api/library/search?category=anime&q=akira",
         expect.any(Object),
       );
     });
@@ -694,7 +739,7 @@ describe("LibraryPage category switching", () => {
     fireEvent.keyDown(screen.getAllByRole("searchbox", { name: "Search library" })[0], { key: "Enter" });
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=akira&category=anime",
+        "/api/library/search?category=anime&q=akira",
         expect.any(Object),
       );
     });
@@ -703,7 +748,7 @@ describe("LibraryPage category switching", () => {
     await user.click(within(screen.getByRole("dialog", { name: "Arrange library" })).getByRole("button", { name: "Local" }));
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=akira&category=anime&source=local",
+        "/api/library/search?category=anime&source=local&q=akira",
         expect.any(Object),
       );
     });
@@ -878,7 +923,7 @@ describe("LibraryPage category switching", () => {
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(
-        "/api/library/search?q=akira&category=anime&source=local&genre=Adventure&quality=gold&sort=az",
+        "/api/library/search?category=anime&source=local&genre=Adventure&quality=gold&sort=az&q=akira",
         expect.any(Object),
       );
     });

@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LoadingView } from "../components/LoadingView";
 import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
+import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
@@ -5365,6 +5366,7 @@ export function AdminPage() {
             {statusRefreshPending ? "Refreshing..." : "Refresh status"}
           </RefreshSweepButton>
         ) : null}
+        <DesktopBackToLibraryButton className="admin-nav-card__back" />
       </div>
 
       <FeedbackBanner banner={banner} />

@@ -1,4 +1,8 @@
 import { queryClient } from "./queryClient";
+import {
+  normalizeLibraryGenres,
+  normalizeLibraryQualities,
+} from "./desktopLibraryViewState.js";
 
 
 export const LIBRARY_QUERY_STALE_TIME_MS = 5 * 60 * 1000;
@@ -20,6 +24,8 @@ export function normalizeLibraryQueryIdentity({
   role,
   category,
   source,
+  genres,
+  qualities,
   genre,
   quality,
   sort,
@@ -30,8 +36,14 @@ export function normalizeLibraryQueryIdentity({
     role: normalizeString(role).toLowerCase(),
     category: normalizeString(category, "movies").toLowerCase(),
     source: normalizeString(source, "all").toLowerCase(),
-    genre: normalizeString(genre),
-    quality: normalizeString(quality, "all").toLowerCase(),
+    genres: normalizeLibraryGenres(
+      Array.isArray(genres) ? genres : (genre ? [genre] : []),
+    ).map((value) => value.toLocaleLowerCase()),
+    qualities: normalizeLibraryQualities(
+      Array.isArray(qualities)
+        ? qualities
+        : (quality && quality !== "all" ? [quality] : []),
+    ),
     sort: normalizeString(sort, "smart").toLowerCase(),
     query: normalizeString(query),
   };

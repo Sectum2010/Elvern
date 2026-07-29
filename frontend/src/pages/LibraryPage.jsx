@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate, useNavigationType } from "react-router-
 import { useAuth } from "../auth/AuthContext";
 import { useProviderAuth } from "../auth/ProviderAuthContext";
 import { EmptyState } from "../components/EmptyState";
+import { useDesktopLibraryIslandContext } from "../components/DesktopLibraryIslandContext";
 import { FloatingLibrarySearch } from "../components/FloatingLibrarySearch";
 import { LoadingView } from "../components/LoadingView";
 import { MediaCard } from "../components/MediaCard";
@@ -33,6 +34,7 @@ import {
 import {
   clearLibraryReturnPending,
   readLibraryReturnTarget,
+  rememberLibraryReturnTarget,
 } from "../lib/libraryNavigation";
 import { detectClientDeviceClass, detectClientPlatform } from "../lib/platformDetection";
 import {
@@ -77,32 +79,35 @@ import { useLibraryViewQuery } from "../lib/useLibraryViewQuery";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { useCommittedLibrarySearch } from "../lib/useCommittedLibrarySearch";
 import { LIBRARY_REVISION_CHECK_EVENT } from "../lib/libraryRevisionQueries.js";
+import {
+  DEFAULT_LIBRARY_ARRANGE,
+  DEFAULT_LIBRARY_CATEGORY,
+  LIBRARY_CATEGORY_OPTIONS,
+  LIBRARY_QUALITY_OPTIONS,
+  LIBRARY_SORT_OPTIONS,
+  LIBRARY_SOURCE_OPTIONS,
+  applyLibraryArrangeParams,
+  buildLibraryRequestPath,
+  buildLibraryViewSearch,
+  resolveLibraryArrangeFromSearch,
+  resolveLibraryCategoryFromSearch,
+  resolveLibraryQueryFromSearch,
+} from "../lib/desktopLibraryViewState.js";
 
 
-export const LIBRARY_CATEGORY_OPTIONS = [
-  { key: "movies", label: "Movies", otherHeading: "Other Movies" },
-  { key: "tv", label: "TV Shows", otherHeading: "Other TV Shows" },
-  { key: "anime", label: "Anime", otherHeading: "Other Anime" },
-  { key: "cartoon", label: "Cartoon", otherHeading: "Other Cartoon" },
-];
+export {
+  LIBRARY_CATEGORY_OPTIONS,
+  resolveLibraryArrangeFromSearch,
+  resolveLibraryCategoryFromSearch,
+  resolveLibraryQueryFromSearch,
+};
 
-const DEFAULT_LIBRARY_CATEGORY = "movies";
-const LIBRARY_CATEGORY_KEYS = new Set(LIBRARY_CATEGORY_OPTIONS.map((category) => category.key));
-const LIBRARY_SOURCE_OPTIONS = [
-  { key: "all", label: "All" },
-  { key: "local", label: "Local" },
-  { key: "cloud", label: "Cloud" },
-];
-const LIBRARY_QUALITY_OPTIONS = [
+const SCROLLABLE_ARRANGE_DEVICE_CLASSES = new Set(["phone", "tablet"]);
+const MOBILE_LIBRARY_QUALITY_OPTIONS = [
   { key: "all", label: "All quality", activeLabel: "" },
-  { key: "diamond", label: "Diamond", activeLabel: "Diamond" },
-  { key: "gold", label: "Gold", activeLabel: "Gold" },
-  { key: "silver", label: "Silver", activeLabel: "Silver" },
-  { key: "iron", label: "Iron", activeLabel: "Iron" },
-  { key: "bronze", label: "Bronze", activeLabel: "Bronze" },
-  { key: "wood", label: "Wood", activeLabel: "Wood" },
+  ...LIBRARY_QUALITY_OPTIONS.map((option) => ({ ...option, activeLabel: option.label })),
 ];
-const LIBRARY_SORT_OPTIONS = [
+const MOBILE_LIBRARY_SORT_OPTIONS = [
   { key: "smart", label: "Smart Default", activeLabel: "" },
   { key: "az", label: "A → Z", activeLabel: "A → Z" },
   { key: "za", label: "Z → A", activeLabel: "Z → A" },
@@ -113,16 +118,6 @@ const LIBRARY_SORT_OPTIONS = [
   { key: "size_desc", label: "File size: largest first", activeLabel: "Largest" },
   { key: "size_asc", label: "File size: smallest first", activeLabel: "Smallest" },
 ];
-const LIBRARY_SOURCE_KEYS = new Set(LIBRARY_SOURCE_OPTIONS.map((option) => option.key));
-const LIBRARY_QUALITY_KEYS = new Set(LIBRARY_QUALITY_OPTIONS.map((option) => option.key));
-const LIBRARY_SORT_KEYS = new Set(LIBRARY_SORT_OPTIONS.map((option) => option.key));
-const DEFAULT_LIBRARY_ARRANGE = {
-  source: "all",
-  genre: "",
-  quality: "all",
-  sort: "smart",
-};
-const SCROLLABLE_ARRANGE_DEVICE_CLASSES = new Set(["phone", "tablet"]);
 const EMPTY_LIBRARY_PAYLOAD = Object.freeze({
   items: [],
   series_rails: [],
@@ -136,100 +131,22 @@ const EMPTY_LIBRARY_PAYLOAD = Object.freeze({
 });
 
 
-export function resolveLibraryCategoryFromSearch(search = "") {
-  const params = new URLSearchParams(search);
-  const category = String(params.get("category") || "").trim().toLowerCase();
-  return LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY;
-}
-
-
-export function resolveLibraryArrangeFromSearch(search = "") {
-  const params = new URLSearchParams(search);
-  const source = String(params.get("source") || "").trim().toLowerCase();
-  const quality = String(params.get("quality") || "").trim().toLowerCase();
-  const sort = String(params.get("sort") || "").trim().toLowerCase();
-  const genre = String(params.get("genre") || "").trim();
-  return {
-    source: LIBRARY_SOURCE_KEYS.has(source) ? source : DEFAULT_LIBRARY_ARRANGE.source,
-    genre,
-    quality: LIBRARY_QUALITY_KEYS.has(quality) ? quality : DEFAULT_LIBRARY_ARRANGE.quality,
-    sort: LIBRARY_SORT_KEYS.has(sort) ? sort : DEFAULT_LIBRARY_ARRANGE.sort,
-  };
-}
-
-
-export function resolveLibraryQueryFromSearch(search = "") {
-  const params = new URLSearchParams(search);
-  return String(params.get("q") || "").trim();
-}
-
-
-function applyLibraryArrangeParams(params, arrange = DEFAULT_LIBRARY_ARRANGE) {
-  if (arrange.source && arrange.source !== DEFAULT_LIBRARY_ARRANGE.source) {
-    params.set("source", arrange.source);
-  } else {
-    params.delete("source");
-  }
-  if (arrange.genre) {
-    params.set("genre", arrange.genre);
-  } else {
-    params.delete("genre");
-  }
-  if (arrange.quality && arrange.quality !== DEFAULT_LIBRARY_ARRANGE.quality) {
-    params.set("quality", arrange.quality);
-  } else {
-    params.delete("quality");
-  }
-  if (arrange.sort && arrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort) {
-    params.set("sort", arrange.sort);
-  } else {
-    params.delete("sort");
-  }
-}
-
-
 export function buildLibraryCategorySearch(currentSearch = "", category = DEFAULT_LIBRARY_CATEGORY) {
-  const params = new URLSearchParams(currentSearch);
-  params.set("category", LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY);
-  const nextSearch = params.toString();
-  return nextSearch ? `?${nextSearch}` : "";
+  return buildLibraryViewSearch({ currentSearch, category });
 }
 
 
 export function buildLibraryArrangeSearch(currentSearch = "", arrange = DEFAULT_LIBRARY_ARRANGE) {
-  const params = new URLSearchParams(currentSearch);
-  applyLibraryArrangeParams(params, arrange);
-  const nextSearch = params.toString();
-  return nextSearch ? `?${nextSearch}` : "";
+  return buildLibraryViewSearch({ currentSearch, arrange });
 }
 
 
 export function buildLibraryQuerySearch(currentSearch = "", query = "") {
-  const params = new URLSearchParams(currentSearch);
-  const normalizedQuery = String(query || "").trim();
-  if (normalizedQuery) {
-    params.set("q", normalizedQuery);
-  } else {
-    params.delete("q");
-  }
-  const nextSearch = params.toString();
-  return nextSearch ? `?${nextSearch}` : "";
+  return buildLibraryViewSearch({ currentSearch, query });
 }
 
 
-export function buildLibraryRequestPath({ category = DEFAULT_LIBRARY_CATEGORY, query = "", arrange = DEFAULT_LIBRARY_ARRANGE } = {}) {
-  const normalizedCategory = LIBRARY_CATEGORY_KEYS.has(category) ? category : DEFAULT_LIBRARY_CATEGORY;
-  const trimmedQuery = query.trim();
-  const params = new URLSearchParams();
-  if (trimmedQuery) {
-    params.set("q", trimmedQuery);
-  }
-  params.set("category", normalizedCategory);
-  applyLibraryArrangeParams(params, arrange);
-  return trimmedQuery
-    ? `/api/library/search?${params.toString()}`
-    : `/api/library?${params.toString()}`;
-}
+export { buildLibraryRequestPath };
 
 
 function LibraryCategorySwitch({ activeCategory, dragEnabled = false, onChange }) {
@@ -385,13 +302,13 @@ function getOptionActiveLabel(options, key, fallback = "") {
 
 function getArrangeActiveLabel(arrange) {
   if (arrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort) {
-    return getOptionActiveLabel(LIBRARY_SORT_OPTIONS, arrange.sort);
+    return getOptionActiveLabel(MOBILE_LIBRARY_SORT_OPTIONS, arrange.sort);
   }
-  if (arrange.genre) {
-    return arrange.genre;
+  if (arrange.genres.length) {
+    return arrange.genres[0];
   }
-  if (arrange.quality !== DEFAULT_LIBRARY_ARRANGE.quality) {
-    return getOptionActiveLabel(LIBRARY_QUALITY_OPTIONS, arrange.quality);
+  if (arrange.qualities.length) {
+    return getOptionActiveLabel(MOBILE_LIBRARY_QUALITY_OPTIONS, arrange.qualities[0]);
   }
   if (arrange.source !== DEFAULT_LIBRARY_ARRANGE.source) {
     return getOptionLabel(LIBRARY_SOURCE_OPTIONS, arrange.source);
@@ -543,31 +460,37 @@ function LibraryArrangeControl({
             </ArrangeSection>
             <ArrangeSection title="Genre">
               <ArrangeOption
-                active={!arrange.genre}
+                active={!arrange.genres.length}
                 label="All genres"
-                onClick={() => updateArrange({ genre: "" })}
+                onClick={() => updateArrange({ genres: [] })}
               />
               {availableGenres.map((genre) => (
                 <ArrangeOption
-                  active={arrange.genre.toLowerCase() === genre.toLowerCase()}
+                  active={arrange.genres[0]?.toLowerCase() === genre.toLowerCase()}
                   key={genre}
                   label={genre}
-                  onClick={() => updateArrange({ genre })}
+                  onClick={() => updateArrange({ genres: [genre] })}
                 />
               ))}
             </ArrangeSection>
             <ArrangeSection title="Quality">
-              {LIBRARY_QUALITY_OPTIONS.map((option) => (
+              {MOBILE_LIBRARY_QUALITY_OPTIONS.map((option) => (
                 <ArrangeOption
-                  active={arrange.quality === option.key}
+                  active={
+                    option.key === "all"
+                      ? !arrange.qualities.length
+                      : arrange.qualities[0] === option.key
+                  }
                   key={option.key}
                   label={option.label}
-                  onClick={() => updateArrange({ quality: option.key })}
+                  onClick={() => updateArrange({
+                    qualities: option.key === "all" ? [] : [option.key],
+                  })}
                 />
               ))}
             </ArrangeSection>
             <ArrangeSection title="Sort">
-              {LIBRARY_SORT_OPTIONS.map((option) => (
+              {MOBILE_LIBRARY_SORT_OPTIONS.map((option) => (
                 <ArrangeOption
                   active={arrange.sort === option.key}
                   key={option.key}
@@ -588,6 +511,7 @@ function MediaGrid({
   items,
   activeBrowserPlaybackItemId = null,
   posterDisplayWidth = "1400",
+  protectedIdentity = null,
   smartPosterLoadingEnabled = false,
   sectionKey = "library",
 }) {
@@ -600,6 +524,7 @@ function MediaGrid({
           item={item}
           key={item.id}
           posterDisplayWidth={posterDisplayWidth}
+          protectedIdentity={protectedIdentity}
           smartPosterLoadingEnabled={smartPosterLoadingEnabled}
         />
       ))}
@@ -637,6 +562,10 @@ function useIpadPortraitLibraryLayout() {
 
 export function LibraryPage() {
   const { refreshAuth, user } = useAuth();
+  const protectedLibraryIdentity = useMemo(
+    () => ({ userId: user?.id, role: user?.role }),
+    [user?.id, user?.role],
+  );
   const {
     providerAuthRequirement,
     providerAuthDismissedThisSession,
@@ -664,8 +593,8 @@ export function LibraryPage() {
     [activeLibraryCategory],
   );
   const currentLibraryListPath = useMemo(
-    () => `${location.pathname}${location.search || ""}`,
-    [location.pathname, location.search],
+    () => `${location.pathname}${location.search || ""}${location.hash || ""}`,
+    [location.hash, location.pathname, location.search],
   );
   const activeBrowserPlaybackItemId = useActiveBrowserPlaybackItemId();
   const userSettingsQuery = useUserSettingsQuery(user);
@@ -673,6 +602,8 @@ export function LibraryPage() {
   const clientPlatform = detectClientPlatform();
   const clientDeviceClass = detectClientDeviceClass();
   const compactSearchOnly = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
+  const desktopLibraryClient = clientDeviceClass === "desktop"
+    && ["windows", "mac", "linux"].includes(clientPlatform);
   const floatingSearchEnabled = compactSearchOnly || settings.floating_library_search_enabled !== false;
   const committedSearch = useCommittedLibrarySearch({
     committedQuery: activeLibraryQuery,
@@ -745,8 +676,8 @@ export function LibraryPage() {
     () => buildLibrarySummaryV2RequestPath({
       category: activeLibraryCategory,
       source: activeLibraryArrange.source,
-      genre: activeLibraryArrange.genre,
-      quality: activeLibraryArrange.quality,
+      genres: activeLibraryArrange.genres,
+      qualities: activeLibraryArrange.qualities,
       sort: activeLibraryArrange.sort,
     }),
     [activeLibraryArrange, activeLibraryCategory],
@@ -757,8 +688,8 @@ export function LibraryPage() {
       role: user?.role,
       category: activeLibraryCategory,
       source: activeLibraryArrange.source,
-      genre: activeLibraryArrange.genre,
-      quality: activeLibraryArrange.quality,
+      genres: activeLibraryArrange.genres,
+      qualities: activeLibraryArrange.qualities,
       sort: activeLibraryArrange.sort,
       query: activeLibraryQuery,
     }),
@@ -798,6 +729,10 @@ export function LibraryPage() {
     platform: clientPlatform,
     deviceClass: clientDeviceClass,
     navigationType,
+    protectedIdentity: {
+      userId: user?.id,
+      role: user?.role,
+    },
     queryState: {
       hasExactData: Boolean(libraryQuery.data),
       isFresh: Boolean(libraryQuery.data) && !libraryQuery.isStale,
@@ -1006,30 +941,6 @@ export function LibraryPage() {
       visualViewport?.removeEventListener("scroll", updateFloatingSearchAlignment);
     };
   }, [clientDeviceClass]);
-
-  useEffect(() => {
-    if (loading || activeLibraryQuery || !activeLibraryArrange.genre) {
-      return;
-    }
-    const availableGenreKeys = new Set(
-      (library.available_genres || []).map((genre) => String(genre).toLowerCase()),
-    );
-    if (availableGenreKeys.has(activeLibraryArrange.genre.toLowerCase())) {
-      return;
-    }
-    const nextArrange = {
-      ...activeLibraryArrange,
-      genre: "",
-    };
-    navigate(
-      {
-        pathname: location.pathname,
-        search: buildLibraryArrangeSearch(location.search, nextArrange),
-        hash: location.hash,
-      },
-      { replace: true },
-    );
-  }, [activeLibraryArrange, activeLibraryQuery, library.available_genres, loading, location.hash, location.pathname, location.search, navigate]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -1540,7 +1451,10 @@ export function LibraryPage() {
     })) {
       return undefined;
     }
-    const rememberedTarget = readLibraryReturnTarget();
+    const rememberedTarget = readLibraryReturnTarget({
+      userId: user?.id,
+      role: user?.role,
+    });
     const shouldRestore = Boolean(location.state?.restoreLibraryReturn) || Boolean(rememberedTarget?.pendingRestore);
     if (!shouldRestore || !rememberedTarget || rememberedTarget.listPath !== currentLibraryListPath) {
       return undefined;
@@ -1581,7 +1495,10 @@ export function LibraryPage() {
         } else {
           window.scrollTo({ top: 0, behavior: "auto" });
         }
-        clearLibraryReturnPending();
+        clearLibraryReturnPending({
+          userId: user?.id,
+          role: user?.role,
+        });
       });
     }, 0);
     return () => {
@@ -1594,6 +1511,8 @@ export function LibraryPage() {
     library.items,
     loading,
     location.state,
+    user?.id,
+    user?.role,
   ]);
 
   async function handleRescan() {
@@ -1678,6 +1597,60 @@ export function LibraryPage() {
     );
   }
 
+  const { publishLibraryState } = useDesktopLibraryIslandContext();
+
+  function prepareDesktopLibraryExit(nextListPath = currentLibraryListPath) {
+    const currentTarget = readLibraryReturnTarget({
+      userId: user?.id,
+      role: user?.role,
+    });
+    const capturedAnchor = captureCenterMovieAnchor({
+      orientation: getSmartPosterOrientation(),
+    });
+    const sameViewTarget = currentTarget?.listPath === nextListPath ? currentTarget : null;
+    rememberLibraryReturnTarget({
+      ...sameViewTarget,
+      listPath: nextListPath,
+      anchorItemId: capturedAnchor?.itemId || sameViewTarget?.anchorItemId || null,
+      anchorInstanceKey: capturedAnchor?.instanceKey || sameViewTarget?.anchorInstanceKey || null,
+      anchorViewportRatioY: capturedAnchor?.viewportRatioY ?? sameViewTarget?.anchorViewportRatioY ?? null,
+      anchorViewportRatioX: capturedAnchor?.viewportRatioX ?? sameViewTarget?.anchorViewportRatioX ?? null,
+      viewportWidth: typeof window !== "undefined" ? window.innerWidth : null,
+      viewportHeight: typeof window !== "undefined" ? window.innerHeight : null,
+      scrollY: typeof window !== "undefined" ? window.scrollY : 0,
+      pendingRestore: false,
+      userId: user?.id,
+      role: user?.role,
+    });
+  }
+
+  useEffect(() => {
+    if (!desktopLibraryClient) {
+      return undefined;
+    }
+    publishLibraryState({
+      availableGenres: library.available_genres || [],
+      listPath: currentLibraryListPath,
+      prepareExit: prepareDesktopLibraryExit,
+      rescanPending,
+      role: String(user?.role || "").trim().toLowerCase(),
+      scanInProgress: Boolean(library.scan_in_progress),
+      totalItems: Number(library.total_items || 0),
+      userId: String(user?.id ?? ""),
+    });
+    return undefined;
+  }, [
+    currentLibraryListPath,
+    desktopLibraryClient,
+    library.available_genres,
+    library.scan_in_progress,
+    library.total_items,
+    publishLibraryState,
+    rescanPending,
+    user?.id,
+    user?.role,
+  ]);
+
   const isSearching = activeLibraryQuery.length > 0;
   const isFlatSortedView = activeLibraryArrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort;
 
@@ -1689,9 +1662,29 @@ export function LibraryPage() {
       data-library-device={libraryDevice}
       ref={librarySectionRef}
     >
-      <div className="topbar library-desktop-hero" aria-label="Library overview" ref={libraryHeroRef}>
+      <div
+        className={[
+          "topbar",
+          "library-desktop-hero",
+          desktopLibraryClient ? "library-desktop-hero--island-controls" : "",
+        ].filter(Boolean).join(" ")}
+        aria-label="Library overview"
+        ref={libraryHeroRef}
+      >
         <p className="eyebrow library-desktop-hero__eyebrow">Private Media Library</p>
-        <div className="library-desktop-hero__row">
+        {desktopLibraryClient ? (
+          <div className="library-desktop-hero__index-cluster">
+            <span>{library.total_items} indexed</span>
+            <RefreshSweepButton
+              className="library-desktop-hero__rescan"
+              disabled={rescanPending || Boolean(library.scan_in_progress)}
+              onClick={handleRescan}
+              type="button"
+            >
+              {rescanPending || library.scan_in_progress ? "Scanning…" : "Rescan"}
+            </RefreshSweepButton>
+          </div>
+        ) : <div className="library-desktop-hero__row">
           <div className="library-desktop-hero__brand">
             <Link className="brand" to="/library">
               Elvern
@@ -1711,8 +1704,8 @@ export function LibraryPage() {
           >
             {rescanPending ? "Starting scan..." : "Rescan library"}
           </RefreshSweepButton>
-        </div>
-        <div className="library-desktop-hero__category-row">
+        </div>}
+        {!desktopLibraryClient ? <div className="library-desktop-hero__category-row">
           <LibraryCategorySwitch
             activeCategory={activeLibraryCategory}
             dragEnabled={categorySwitchDragEnabled}
@@ -1725,14 +1718,14 @@ export function LibraryPage() {
             panelSize={arrangePanelSize}
             onChange={handleArrangeChange}
           />
-        </div>
+        </div> : null}
       </div>
 
       {maintenanceModeActive ? (
         <p className="library-maintenance-warning-line">Maintenance mode is still turned on</p>
       ) : null}
 
-      <FloatingLibrarySearch
+      {!desktopLibraryClient ? <FloatingLibrarySearch
         expanded={committedSearch.floatingExpanded}
         desktopInteractionMode={floatingSearchDesktopMode}
         enabled={floatingSearchEnabled}
@@ -1746,7 +1739,7 @@ export function LibraryPage() {
         onToggleExpanded={committedSearch.toggleFloatingExpanded}
         placeholder="Search title or filename"
         value={committedSearch.floatingDraft}
-      />
+      /> : null}
 
       {cloudReconnectPrompt && providerAuthDismissedThisSession ? (
         <section className="content-section cloud-auth-warning">
@@ -1804,6 +1797,7 @@ export function LibraryPage() {
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={library.items}
               posterDisplayWidth={settings.poster_card_display_max_width}
+              protectedIdentity={protectedLibraryIdentity}
               sectionKey="search-results"
               smartPosterLoadingEnabled
             />
@@ -1823,6 +1817,7 @@ export function LibraryPage() {
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={library.items}
               posterDisplayWidth={settings.poster_card_display_max_width}
+              protectedIdentity={protectedLibraryIdentity}
               sectionKey="sorted-library"
               smartPosterLoadingEnabled
             />
@@ -1846,6 +1841,7 @@ export function LibraryPage() {
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                 items={visibleContinueWatchingItems}
                 posterDisplayWidth={settings.poster_card_display_max_width}
+                protectedIdentity={protectedLibraryIdentity}
                 sectionKey="continue-watching"
                 smartPosterLoadingEnabled
               />
@@ -1872,6 +1868,7 @@ export function LibraryPage() {
                     enableTouchReleaseAssist
                     rail={block.rail}
                     posterDisplayWidth={settings.poster_card_display_max_width}
+                    protectedIdentity={protectedLibraryIdentity}
                     sectionKey={`series:${block.rail.key}`}
                     smartPosterLoadingEnabled
                   />
@@ -1889,6 +1886,7 @@ export function LibraryPage() {
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                 items={library.recently_added}
                 posterDisplayWidth={settings.poster_card_display_max_width}
+                protectedIdentity={protectedLibraryIdentity}
                 sectionKey="recently-added"
                 smartPosterLoadingEnabled
               />
@@ -1904,6 +1902,7 @@ export function LibraryPage() {
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={visibleLibraryGridItems}
               posterDisplayWidth={settings.poster_card_display_max_width}
+              protectedIdentity={protectedLibraryIdentity}
               sectionKey="other-movies"
               smartPosterLoadingEnabled
             />

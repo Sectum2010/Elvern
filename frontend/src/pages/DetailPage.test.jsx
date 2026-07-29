@@ -921,6 +921,8 @@ describe("DetailPage source metadata privacy", () => {
       viewportHeight: 900,
       railKey: "series:akira",
       railScrollLeft: 288,
+      userId: 2,
+      role: "standard_user",
     });
     renderDetailPage(detailItem(), {
       initialEntry: {
@@ -932,7 +934,7 @@ describe("DetailPage source metadata privacy", () => {
     await screen.findByRole("heading", { level: 1, name: "Privacy Movie" });
     fireEvent.click(await screen.findByRole("link", { name: "Back to library" }));
 
-    expect(readLibraryReturnTarget()).toEqual({
+    expect(readLibraryReturnTarget({ userId: 2, role: "standard_user" })).toEqual({
       ...target,
       pendingRestore: true,
     });

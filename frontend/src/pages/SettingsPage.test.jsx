@@ -1707,10 +1707,10 @@ describe("SettingsPage Display background controls", () => {
     expect(shellSource).toContain("onPointerDown={canDragCurrentItem ? handleFloatingActivePointerDown : undefined}");
   });
 
-  test("interface search toggle uses the dynamic search button label", async () => {
+  test("desktop interface removes the obsolete dynamic search toggle", async () => {
     await renderDisplaySettings();
 
-    expect(screen.getByText("Dynamic search button")).toBeInTheDocument();
+    expect(screen.queryByText("Dynamic search button")).not.toBeInTheDocument();
     expect(screen.queryByText("Floating library search")).not.toBeInTheDocument();
   });
 
@@ -1721,12 +1721,25 @@ describe("SettingsPage Display background controls", () => {
     expect(screen.queryByText("Dynamic search button")).not.toBeInTheDocument();
   });
 
-  test("interface settings no longer expose a floating island position control", async () => {
+  test("desktop interface exposes the floating island position control", async () => {
     await renderDisplaySettings();
 
-    expect(screen.queryByText("Floating island position")).not.toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Top" })).not.toBeInTheDocument();
-    expect(screen.getByText("Dynamic search button")).toBeInTheDocument();
+    const settingsDock = screen.getByLabelText("Settings sections");
+    expect(within(settingsDock).getByRole("link", { name: "Back to Library" }))
+      .toBeInTheDocument();
+    const position = screen.getByRole("radiogroup", {
+      name: "Desktop Floating Island position",
+    });
+    expect(within(position).getByRole("radio", { name: "Top" })).toBeChecked();
+    expect(within(position).getByRole("radio", { name: "Bottom" })).not.toBeChecked();
+    expect(screen.queryByText("Dynamic search button")).not.toBeInTheDocument();
+  });
+
+  test("phone Settings dock does not render the desktop Library back button", async () => {
+    mockPlatformState.deviceClass = "phone";
+    await renderDisplaySettings();
+
+    expect(screen.queryByRole("link", { name: "Back to Library" })).not.toBeInTheDocument();
   });
 
   test("admin Libraries panel shows and manages age groups", async () => {

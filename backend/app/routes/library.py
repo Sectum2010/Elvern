@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 
 from ..auth import CurrentAdmin, CurrentUser, resolve_client_ip
@@ -110,10 +110,10 @@ def _validated_library_category(category: str | None) -> str:
 def _validated_library_arrange(
     *,
     source: str | None,
-    genre: str | None,
-    quality: str | None,
+    genre: list[str],
+    quality: list[str],
     sort: str | None,
-) -> dict[str, str | None]:
+) -> dict[str, object]:
     try:
         return normalize_library_arrange(source=source, genre=genre, quality=quality, sort=sort)
     except ValueError as error:
@@ -264,8 +264,8 @@ def get_library(
     request: Request,
     category: str | None = None,
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: list[str] = Query(default=[]),
+    quality: list[str] = Query(default=[]),
     sort: str | None = None,
     user=CurrentUser,
 ) -> LibraryListResponse:
@@ -277,8 +277,8 @@ def get_library(
         user_id=user.id,
         category=normalized_category,
         source=arrange["source"],
-        genre=arrange["genre"],
-        quality=arrange["quality"],
+        genre=arrange["genres"],
+        quality=arrange["qualities"],
         sort=arrange["sort"],
     )
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]
@@ -317,8 +317,8 @@ def get_library_summary_v2(
     background_tasks: BackgroundTasks,
     category: str | None = None,
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: list[str] = Query(default=[]),
+    quality: list[str] = Query(default=[]),
     sort: str | None = None,
     q: str | None = None,
     user=CurrentUser,
@@ -346,8 +346,8 @@ def get_library_summary_v2(
         user_id=user.id,
         category=normalized_category,
         source=arrange["source"],
-        genre=arrange["genre"],
-        quality=arrange["quality"],
+        genre=arrange["genres"],
+        quality=arrange["qualities"],
         sort=arrange["sort"],
         scan_in_progress=scan_in_progress,
         prewarm_candidates=prewarm_candidates,
@@ -369,8 +369,8 @@ def search(
     q: str,
     category: str | None = None,
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: list[str] = Query(default=[]),
+    quality: list[str] = Query(default=[]),
     sort: str | None = None,
     user=CurrentUser,
 ) -> LibraryListResponse:
@@ -382,8 +382,8 @@ def search(
         query=q,
         category=normalized_category,
         source=arrange["source"],
-        genre=arrange["genre"],
-        quality=arrange["quality"],
+        genre=arrange["genres"],
+        quality=arrange["qualities"],
         sort=arrange["sort"],
     )
     payload["scan_in_progress"] = request.app.state.scan_service.get_state()["running"]

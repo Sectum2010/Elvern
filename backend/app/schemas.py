@@ -341,8 +341,14 @@ class LibrarySummaryV2Item(BaseModel):
 class LibrarySummaryV2View(BaseModel):
     category: Literal["movies", "tv", "anime", "cartoon"] = "movies"
     source: Literal["all", "local", "cloud"] = "all"
+    genres: list[str] = Field(default_factory=list)
+    qualities: list[
+        Literal["diamond", "gold", "silver", "iron", "bronze", "wood"]
+    ] = Field(default_factory=list)
     genre: str | None = None
-    quality: Literal["all", "diamond", "gold", "silver", "iron", "bronze", "wood"] = "all"
+    quality: Literal[
+        "all", "diamond", "gold", "silver", "iron", "bronze", "wood"
+    ] | None = "all"
     sort: Literal[
         "smart",
         "az",
@@ -409,6 +415,7 @@ class UserSettingsResponse(BaseModel):
     hide_duplicate_movies: bool = True
     hide_recently_added: bool = False
     floating_library_search_enabled: bool = True
+    desktop_floating_island_position: Literal["top", "bottom"] = "top"
     poster_card_appearance: Literal["classic", "modern", "clean"] = "classic"
     poster_card_display_max_width: Literal[
         "800",
@@ -439,6 +446,7 @@ class UserSettingsUpdateRequest(BaseModel):
     hide_duplicate_movies: bool | None = None
     hide_recently_added: bool | None = None
     floating_library_search_enabled: bool | None = None
+    desktop_floating_island_position: str | None = None
     poster_card_appearance: str | None = None
     poster_card_display_max_width: str | int | None = None
     background_mode: str | None = None

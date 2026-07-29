@@ -73,3 +73,28 @@ def test_floating_position_retirement_migration_deletes_legacy_rows_once(
 
     assert legacy_count == 0
     assert migration_count == 1
+
+
+def test_desktop_floating_island_position_defaults_saves_and_normalizes(
+    client,
+    admin_credentials,
+) -> None:
+    _login_admin(client, admin_credentials)
+
+    initial = client.get("/api/user-settings")
+    assert initial.status_code == 200
+    assert initial.json()["desktop_floating_island_position"] == "top"
+
+    bottom = client.patch(
+        "/api/user-settings",
+        json={"desktop_floating_island_position": "bottom"},
+    )
+    assert bottom.status_code == 200
+    assert bottom.json()["desktop_floating_island_position"] == "bottom"
+
+    invalid = client.patch(
+        "/api/user-settings",
+        json={"desktop_floating_island_position": "sideways"},
+    )
+    assert invalid.status_code == 200
+    assert invalid.json()["desktop_floating_island_position"] == "top"

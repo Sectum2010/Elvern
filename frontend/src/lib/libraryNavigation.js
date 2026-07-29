@@ -32,17 +32,22 @@ function normalizeString(value) {
 }
 
 export function normalizeLibraryListPath(pathname = "") {
-  const normalizedPath = String(pathname || "").split("#", 1)[0];
+  const rawPath = String(pathname || "");
+  const hashIndex = rawPath.indexOf("#");
+  const hash = hashIndex >= 0 ? rawPath.slice(hashIndex) : "";
+  const normalizedPath = hashIndex >= 0 ? rawPath.slice(0, hashIndex) : rawPath;
   const queryIndex = normalizedPath.indexOf("?");
   const pathOnly = canonicalizeSpaPathname(
     queryIndex >= 0 ? normalizedPath.slice(0, queryIndex) : normalizedPath,
   );
   const search = queryIndex >= 0 ? normalizedPath.slice(queryIndex) : "";
   if (pathOnly === "/library/local" || pathOnly === "/library/cloud") {
-    return search ? `${pathOnly}${search}` : pathOnly;
+    const params = new URLSearchParams(search);
+    params.set("source", pathOnly.endsWith("/cloud") ? "cloud" : "local");
+    return `/library?${params.toString()}${hash}`;
   }
   if (pathOnly === "/library") {
-    return search ? `/library${search}` : "/library";
+    return `${search ? `/library${search}` : "/library"}${hash}`;
   }
   return "/library";
 }
@@ -51,7 +56,7 @@ export function normalizeLibraryReturnTarget(payload = {}) {
   if (!payload || typeof payload !== "object") {
     return null;
   }
-  return {
+  const target = {
     listPath: normalizeLibraryListPath(payload.listPath),
     anchorItemId: normalizePositiveNumber(payload.anchorItemId),
     anchorInstanceKey: normalizeString(payload.anchorInstanceKey),
@@ -64,6 +69,13 @@ export function normalizeLibraryReturnTarget(payload = {}) {
     railKey: normalizeString(payload.railKey),
     railScrollLeft: normalizeNonNegativeNumber(payload.railScrollLeft, null),
   };
+  const userId = normalizeString(payload.userId);
+  const role = normalizeString(payload.role)?.toLowerCase() || null;
+  if (userId !== null || role !== null) {
+    target.userId = userId;
+    target.role = role;
+  }
+  return target;
 }
 
 function mergeStoredReturnTarget(locationTarget, storedTarget) {
@@ -110,16 +122,36 @@ export function buildLibraryReturnState(payload = {}) {
   };
 }
 
-export function extractLibraryReturnState(locationState) {
+export function extractLibraryReturnState(locationState, identity = {}) {
   const payload = locationState?.libraryReturn;
   if (!payload) {
     return null;
   }
   const normalizedTarget = normalizeLibraryReturnTarget(payload);
-  return mergeStoredReturnTarget(normalizedTarget, readLibraryReturnTarget());
+  if (!returnTargetMatchesIdentity(normalizedTarget, identity)) {
+    return null;
+  }
+  return mergeStoredReturnTarget(
+    normalizedTarget,
+    readLibraryReturnTarget(identity),
+  );
 }
 
-export function readLibraryReturnTarget() {
+function returnTargetMatchesIdentity(target, { userId, role } = {}) {
+  if (userId === undefined && role === undefined) {
+    return true;
+  }
+  const normalizedUserId = normalizeString(userId);
+  const normalizedRole = normalizeString(role)?.toLowerCase() || null;
+  return Boolean(
+    target?.userId
+    && target?.role
+    && target.userId === normalizedUserId
+    && target.role === normalizedRole
+  );
+}
+
+export function readLibraryReturnTarget(identity = {}) {
   if (typeof window === "undefined") {
     return null;
   }
@@ -132,7 +164,10 @@ export function readLibraryReturnTarget() {
     if (!payload) {
       return null;
     }
-    return normalizeLibraryReturnTarget(payload);
+    const normalizedTarget = normalizeLibraryReturnTarget(payload);
+    return returnTargetMatchesIdentity(normalizedTarget, identity)
+      ? normalizedTarget
+      : null;
   } catch {
     return null;
   }
@@ -150,6 +185,8 @@ export function rememberLibraryReturnTarget({
   viewportHeight = null,
   railKey = null,
   railScrollLeft = null,
+  userId = null,
+  role = null,
 } = {}) {
   if (typeof window === "undefined") {
     return null;
@@ -166,6 +203,8 @@ export function rememberLibraryReturnTarget({
     viewportHeight,
     railKey,
     railScrollLeft,
+    userId,
+    role,
   });
   try {
     window.sessionStorage.setItem(LIBRARY_RETURN_STORAGE_KEY, JSON.stringify(payload));
@@ -175,16 +214,16 @@ export function rememberLibraryReturnTarget({
   return payload;
 }
 
-export function markLibraryReturnPending() {
-  const current = readLibraryReturnTarget();
+export function markLibraryReturnPending(identity = {}) {
+  const current = readLibraryReturnTarget(identity);
   if (!current) {
     return null;
   }
   return rememberLibraryReturnTarget({ ...current, pendingRestore: true });
 }
 
-export function clearLibraryReturnPending() {
-  const current = readLibraryReturnTarget();
+export function clearLibraryReturnPending(identity = {}) {
+  const current = readLibraryReturnTarget(identity);
   if (!current) {
     return null;
   }

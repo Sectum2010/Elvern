@@ -117,6 +117,7 @@ export function MediaCard({
   posterDisplayWidth = "1400",
   smartPosterLoadingEnabled = false,
   cardInstanceKey = null,
+  protectedIdentity = null,
 }) {
   const location = useLocation();
   const { openPosterContextMenu } = usePosterContextMenu();
@@ -178,12 +179,14 @@ export function MediaCard({
   const storageKind = (item.source_kind || "local") === "cloud" ? "cloud" : "local";
   const storageLabel = storageKind === "cloud" ? "Cloud" : "Local";
   const detailPath = `/library/${item.id}`;
-  const libraryListPath = `${location.pathname}${location.search || ""}`;
+  const libraryListPath = `${location.pathname}${location.search || ""}${location.hash || ""}`;
   const detailState = buildLibraryReturnState({
     listPath: libraryListPath,
     anchorItemId: item.id,
     anchorInstanceKey: cardInstanceKey,
     scrollY: typeof window !== "undefined" ? window.scrollY : 0,
+    userId: protectedIdentity?.userId,
+    role: protectedIdentity?.role,
   });
 
   function handleOpenDetail(event) {
@@ -194,7 +197,11 @@ export function MediaCard({
       itemId: item.id,
       fallbackInstanceKey: cardInstanceKey,
     });
-    rememberLibraryReturnTarget(target);
+    rememberLibraryReturnTarget({
+      ...target,
+      userId: protectedIdentity?.userId,
+      role: protectedIdentity?.role,
+    });
     const cardNode = event?.currentTarget?.closest?.(".media-card")
       || event?.target?.closest?.(".media-card")
       || null;

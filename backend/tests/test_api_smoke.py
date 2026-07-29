@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib
+from collections import Counter
 from io import BytesIO
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -12,6 +14,8 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import backend.app.main as main_module
+import backend.app.db_hidden_movie_keys as hidden_identity_module
+import backend.app.media_scan as media_scan_module
 from backend.app.auth import ensure_admin_user
 from backend.app.config import get_settings, refresh_settings
 from backend.app.db import get_connection, utcnow_iso
@@ -911,6 +915,349 @@ def test_local_hidden_identity_separates_renamed_copy_from_reused_path_and_recre
     assert int(recreated_b["id"]) != copy_b_id
     assert str(recreated_b["hidden_copy_identity"]) == copy_b_identity
     assert client.get("/api/library").json()["total_items"] == 1
+
+
+def test_same_scan_rename_and_path_replacement_preserve_only_the_renamed_copy_identity(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    _login(client, **admin_credentials)
+    assert client.patch(
+        "/api/user-settings",
+        json={"hide_duplicate_movies": False},
+    ).status_code == 200
+    media_root = Path(initialized_settings.media_root)
+    original_path = media_root / "Same.Scan.Path.2026.mkv"
+    renamed_path = media_root / "Same.Scan.Path.Renamed.2026.mkv"
+    original_content = b"copy-a-content-0000"
+    replacement_content = b"copy-b-content-0000"
+    assert len(original_content) == len(replacement_content)
+    original_path.write_bytes(original_content)
+    initial_stat = original_path.stat()
+    scan_media_library(initialized_settings, reason="manual")
+
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        original = connection.execute(
+            """
+            SELECT id, hidden_copy_identity
+            FROM media_items
+            WHERE file_path = ?
+            """,
+            (str(original_path.resolve()),),
+        ).fetchone()
+        assert original is not None
+        original_id = int(original["id"])
+        original_identity = str(original["hidden_copy_identity"])
+        connection.execute(
+            """
+            INSERT INTO playback_progress (
+                user_id, media_item_id, position_seconds, duration_seconds,
+                watch_seconds_total, completed, updated_at
+            ) VALUES (1, ?, 321, 1200, 321, 0, ?)
+            """,
+            (original_id, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO playback_watch_events (
+                user_id, media_item_id, watched_seconds, recorded_at_epoch
+            ) VALUES (1, ?, 321, 1700000000)
+            """,
+            (original_id,),
+        )
+        before_revision = int(connection.execute(
+            """
+            SELECT COALESCE(counter, 0) AS counter
+            FROM library_revision_counters
+            WHERE scope_kind = 'global' AND scope_id = 0 AND layer = 'catalog'
+            """
+        ).fetchone()["counter"])
+        connection.commit()
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=original_id)
+
+    original_path.rename(renamed_path)
+    original_path.write_bytes(replacement_content)
+    os.utime(
+        original_path,
+        ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns),
+    )
+    sample_paths: list[Path] = []
+    real_sampler = hidden_identity_module._bounded_local_content_hash
+
+    def counted_sampler(path, metadata):
+        sample_paths.append(Path(path))
+        return real_sampler(path, metadata)
+
+    monkeypatch.setattr(
+        hidden_identity_module,
+        "_bounded_local_content_hash",
+        counted_sampler,
+    )
+    result = scan_media_library(initialized_settings, reason="manual")
+    assert result["files_changed"] == 2
+    assert result["files_removed"] == 0
+    assert all(count <= 1 for count in Counter(sample_paths).values()), Counter(sample_paths)
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, file_path, hidden_copy_identity
+            FROM media_items
+            ORDER BY id
+            """
+        ).fetchall()
+        renamed = next(row for row in rows if row["file_path"] == str(renamed_path.resolve()))
+        replacement = next(row for row in rows if row["file_path"] == str(original_path.resolve()))
+        progress = connection.execute(
+            "SELECT position_seconds FROM playback_progress WHERE media_item_id = ?",
+            (original_id,),
+        ).fetchone()
+        watch_event = connection.execute(
+            "SELECT watched_seconds FROM playback_watch_events WHERE media_item_id = ?",
+            (original_id,),
+        ).fetchone()
+        after_revision = int(connection.execute(
+            """
+            SELECT counter
+            FROM library_revision_counters
+            WHERE scope_kind = 'global' AND scope_id = 0 AND layer = 'catalog'
+            """
+        ).fetchone()["counter"])
+
+    replacement_id = int(replacement["id"])
+    assert int(renamed["id"]) == original_id
+    assert str(renamed["hidden_copy_identity"]) == original_identity
+    assert replacement_id != original_id
+    assert str(replacement["hidden_copy_identity"]) != original_identity
+    assert float(progress["position_seconds"]) == 321
+    assert float(watch_event["watched_seconds"]) == 321
+    assert after_revision - before_revision == 1
+    assert {int(item["id"]) for item in client.get("/api/library").json()["items"]} == {
+        replacement_id
+    }
+
+    show_media_item_for_user(initialized_settings, user_id=1, item_id=original_id)
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=replacement_id)
+    assert {int(item["id"]) for item in client.get("/api/library").json()["items"]} == {
+        original_id
+    }
+
+    sample_paths.clear()
+    second = scan_media_library(initialized_settings, reason="manual")
+    assert second["files_changed"] == 0
+    assert sample_paths == []
+
+
+def test_unchanged_local_scan_does_not_sample_3000_media_files(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    media_root = Path(initialized_settings.media_root)
+    for index in range(3000):
+        (media_root / f"Stable.Movie.{index:04d}.2026.mkv").write_bytes(
+            f"stable-{index}".encode("ascii")
+        )
+    scan_media_library(initialized_settings, reason="manual")
+
+    sample_calls = 0
+
+    def fail_if_sampled(_path, _metadata):
+        nonlocal sample_calls
+        sample_calls += 1
+        raise AssertionError("unchanged media must not be sampled")
+
+    monkeypatch.setattr(
+        hidden_identity_module,
+        "_bounded_local_content_hash",
+        fail_if_sampled,
+    )
+    result = scan_media_library(initialized_settings, reason="manual")
+    assert result["files_seen"] == 3000
+    assert result["files_changed"] == 0
+    assert sample_calls == 0
+
+
+def test_local_inode_reuse_requires_current_ctime_evidence(
+    initialized_settings,
+) -> None:
+    media_root = Path(initialized_settings.media_root)
+    movie_path = media_root / "Reused.Inode.2026.mkv"
+    movie_path.write_bytes(b"original-inode-content")
+    scan_media_library(initialized_settings, reason="manual")
+    actual_stat = movie_path.stat()
+
+    with get_connection(initialized_settings) as connection:
+        media_row = connection.execute(
+            """
+            SELECT
+                id,
+                file_path,
+                COALESCE(source_kind, 'local') AS source_kind,
+                library_source_id,
+                hidden_copy_identity
+            FROM media_items
+            WHERE file_path = ?
+            """,
+            (str(movie_path.resolve()),),
+        ).fetchone()
+        assert media_row is not None
+        actual_candidates = hidden_identity_module.find_local_copy_identity_candidates(
+            connection,
+            media_row=media_row,
+            file_path=movie_path,
+            file_stat=actual_stat,
+            require_locator=True,
+            include_content_sample=False,
+        )
+        reused_inode_stat = SimpleNamespace(
+            st_mode=actual_stat.st_mode,
+            st_dev=actual_stat.st_dev,
+            st_ino=actual_stat.st_ino,
+            st_size=actual_stat.st_size,
+            st_mtime_ns=actual_stat.st_mtime_ns,
+            st_ctime_ns=actual_stat.st_ctime_ns + 1,
+        )
+        reused_inode_candidates = (
+            hidden_identity_module.find_local_copy_identity_candidates(
+                connection,
+                media_row=media_row,
+                file_path=movie_path,
+                file_stat=reused_inode_stat,
+                require_locator=True,
+                include_content_sample=False,
+            )
+        )
+
+    identity = str(media_row["hidden_copy_identity"])
+    assert identity in actual_candidates
+    assert identity not in reused_inode_candidates
+
+
+def test_changed_local_file_is_sampled_at_most_once_per_scan(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    media_root = Path(initialized_settings.media_root)
+    movie_path = media_root / "Changed.Once.2026.mkv"
+    movie_path.write_bytes(b"before")
+    scan_media_library(initialized_settings, reason="manual")
+    movie_path.write_bytes(b"after-with-a-different-size")
+
+    sample_paths: list[Path] = []
+    real_sampler = hidden_identity_module._bounded_local_content_hash
+
+    def counted_sampler(path, metadata):
+        sample_paths.append(Path(path))
+        return real_sampler(path, metadata)
+
+    monkeypatch.setattr(
+        hidden_identity_module,
+        "_bounded_local_content_hash",
+        counted_sampler,
+    )
+    result = scan_media_library(initialized_settings, reason="manual")
+
+    assert result["files_changed"] == 1
+    assert Counter(sample_paths)[movie_path] <= 1
+
+
+def test_local_rename_with_unavailable_content_evidence_does_not_inherit_identity(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    media_root = Path(initialized_settings.media_root)
+    original_path = media_root / "Evidence.Source.2026.mkv"
+    renamed_path = media_root / "Evidence.Target.2026.mkv"
+    original_path.write_bytes(b"evidence-read-failure")
+    scan_media_library(initialized_settings, reason="manual")
+    with get_connection(initialized_settings) as connection:
+        original = connection.execute(
+            "SELECT id, hidden_copy_identity FROM media_items WHERE file_path = ?",
+            (str(original_path.resolve()),),
+        ).fetchone()
+    assert original is not None
+
+    original_path.rename(renamed_path)
+    monkeypatch.setattr(
+        hidden_identity_module,
+        "_bounded_local_content_hash",
+        lambda _path, _metadata: None,
+    )
+    scan_media_library(initialized_settings, reason="manual")
+    with get_connection(initialized_settings) as connection:
+        renamed = connection.execute(
+            "SELECT id, hidden_copy_identity FROM media_items WHERE file_path = ?",
+            (str(renamed_path.resolve()),),
+        ).fetchone()
+    assert renamed is not None
+    assert int(renamed["id"]) != int(original["id"])
+    assert str(renamed["hidden_copy_identity"]) != str(original["hidden_copy_identity"])
+
+
+def test_local_scan_rolls_back_catalog_mutations_when_apply_fails(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    media_root = Path(initialized_settings.media_root)
+    movie_path = media_root / "Rollback.Movie.2026.mkv"
+    movie_path.write_bytes(b"before")
+    scan_media_library(initialized_settings, reason="manual")
+    with get_connection(initialized_settings) as connection:
+        before = connection.execute(
+            """
+            SELECT id, file_size, hidden_copy_identity
+            FROM media_items
+            WHERE file_path = ?
+            """,
+            (str(movie_path.resolve()),),
+        ).fetchone()
+        before_revision = int(connection.execute(
+            """
+            SELECT counter
+            FROM library_revision_counters
+            WHERE scope_kind = 'global' AND scope_id = 0 AND layer = 'catalog'
+            """
+        ).fetchone()["counter"])
+    assert before is not None
+
+    movie_path.write_bytes(b"after-with-different-size")
+
+    def fail_after_media_write(*_args, **_kwargs):
+        raise RuntimeError("injected subtitle apply failure")
+
+    monkeypatch.setattr(
+        media_scan_module,
+        "_replace_scanned_subtitles",
+        fail_after_media_write,
+    )
+    with pytest.raises(RuntimeError, match="injected subtitle apply failure"):
+        scan_media_library(initialized_settings, reason="manual")
+
+    with get_connection(initialized_settings) as connection:
+        after = connection.execute(
+            """
+            SELECT id, file_size, hidden_copy_identity
+            FROM media_items
+            WHERE file_path = ?
+            """,
+            (str(movie_path.resolve()),),
+        ).fetchone()
+        after_revision = int(connection.execute(
+            """
+            SELECT counter
+            FROM library_revision_counters
+            WHERE scope_kind = 'global' AND scope_id = 0 AND layer = 'catalog'
+            """
+        ).fetchone()["counter"])
+        latest_job = connection.execute(
+            "SELECT status FROM scan_jobs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert tuple(after) == tuple(before)
+    assert after_revision == before_revision
+    assert latest_job["status"] == "failed"
 
 
 def test_ambiguous_identical_local_renames_do_not_reuse_or_merge_hidden_identity(

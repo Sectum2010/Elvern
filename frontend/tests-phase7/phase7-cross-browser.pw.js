@@ -154,7 +154,15 @@ function v2Summary(source = "all", state = {}) {
   return {
     schema_version: "library-summary-v2",
     revision: (source === "local" ? "b" : source === "cloud" ? "c" : "a").repeat(64),
-    view: { category: "movies", source, genre: null, quality: "all", sort: "smart" },
+    view: {
+      category: "movies",
+      source,
+      genres: [],
+      qualities: [],
+      genre: null,
+      quality: "all",
+      sort: "smart",
+    },
     items_by_id: Object.fromEntries(visible.map((entry) => [String(entry.id), entry])),
     sections: {
       item_ids: visible.map((entry) => entry.id),
@@ -163,7 +171,7 @@ function v2Summary(source = "all", state = {}) {
       continue_watching_item_ids: continueWatchingItemIds,
       recently_added_item_ids: [],
     },
-    available_genres: [],
+    available_genres: ["Action", "Drama", "Comedy"],
     total_items: visible.length,
     scan_in_progress: false,
   };
@@ -193,7 +201,14 @@ function v1SearchPayload(query) {
     cloud_series_rails: [],
     continue_watching: [],
     recently_added: [],
-    arrange: { source: "all", genre: null, quality: "all", sort: "smart" },
+    arrange: {
+      source: "all",
+      genres: [],
+      qualities: [],
+      genre: null,
+      quality: "all",
+      sort: "smart",
+    },
     available_genres: [],
     scan_in_progress: false,
     total_items: visible.length,
@@ -292,6 +307,7 @@ async function installFixture(page, requests, state = {}) {
         hide_duplicate_movies: true,
         hide_recently_added: true,
         floating_library_search_enabled: state.floatingSearchEnabled !== false,
+        desktop_floating_island_position: state.desktopIslandPosition || "top",
         poster_card_appearance: "classic",
         poster_card_display_max_width: "1400",
       };
@@ -708,7 +724,7 @@ async function expectPrimaryNavigationDoesNotOverlap(page) {
 }
 
 
-test("@assistant-navigation admin uses the standalone Assistant destination and active item", async ({
+test("@assistant-navigation admin uses the desktop Avatar menu and standalone queue", async ({
   page,
   baseURL,
 }) => {
@@ -717,34 +733,27 @@ test("@assistant-navigation admin uses the standalone Assistant destination and 
   await installFixture(page, [], state);
   await page.goto("library");
 
-  const navigation = page.getByRole("navigation", { name: "Primary" });
-  await expect(navigation.getByRole("link", { name: "Library" })).toBeVisible();
-  expect(await navigation.getByRole("link").allTextContents()).toEqual([
-    "Library",
-    "Settings",
-    "Assistant",
-    "Admin",
-  ]);
-  await expectPrimaryNavigationDoesNotOverlap(page);
+  const navigation = page.getByRole("navigation", { name: "Library controls" });
+  await expect(navigation).toBeVisible();
   await expect(page.getByText(/Assistant\s*\(Beta\)/i)).toHaveCount(0);
-
-  await navigation.getByRole("link", { name: "Assistant" }).click();
+  await navigation.getByRole("button", { name: /Account:/ }).click();
+  const accountMenu = page.getByRole("menu", { name: "Account menu" });
+  await expect(accountMenu.getByLabel("Administrator")).toBeVisible();
+  expect(await accountMenu.getByRole("menuitem").allTextContents()).toEqual([
+    "Settings",
+    "Admin Panel",
+    "Assistant",
+    "Sign out",
+  ]);
+  await accountMenu.getByRole("menuitem", { name: "Assistant" }).click();
   await expect(page).toHaveURL(`${baseURL}admin/assistant`);
   await expect(page.getByRole("heading", { name: "Request queue" })).toBeVisible();
-  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
-    /floating-island__link--active/,
-  );
-  await expect(navigation.getByRole("link", { name: "Admin" })).not.toHaveClass(
-    /floating-island__link--active/,
-  );
+  await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Back to Library" })).toBeVisible();
 
   await page.goto("admin/assistant/42");
-  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
-    /floating-island__link--active/,
-  );
-  await expect(navigation.getByRole("link", { name: "Admin" })).not.toHaveClass(
-    /floating-island__link--active/,
-  );
+  await expect(page.getByRole("link", { name: "Back to Assistant requests" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to Library" })).toHaveCount(0);
 
   await page.evaluate(() => {
     window.localStorage.setItem("elvern:admin-active-section", "assistant");
@@ -772,24 +781,23 @@ test("@assistant-navigation enabled regular user opens the request form without 
   });
   await page.goto("library");
 
-  const navigation = page.getByRole("navigation", { name: "Primary" });
-  await expect(navigation.getByRole("link", { name: "Library" })).toBeVisible();
-  expect(await navigation.getByRole("link").allTextContents()).toEqual([
-    "Library",
+  const navigation = page.getByRole("navigation", { name: "Library controls" });
+  await navigation.getByRole("button", { name: /Account:/ }).click();
+  const accountMenu = page.getByRole("menu", { name: "Account menu" });
+  expect(await accountMenu.getByRole("menuitem").allTextContents()).toEqual([
     "Settings",
     "Assistant",
+    "Sign out",
   ]);
-  await expect(navigation.getByRole("link", { name: "Admin" })).toHaveCount(0);
-  await navigation.getByRole("link", { name: "Assistant" }).click();
+  await expect(accountMenu.getByLabel("Administrator")).toHaveCount(0);
+  await accountMenu.getByRole("menuitem", { name: "Assistant" }).click();
   await expect(page).toHaveURL(`${baseURL}assistant`);
   await expect(page.getByText("Submit a request", { exact: true })).toBeVisible();
-  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
-    /floating-island__link--active/,
-  );
+  await expect(page.getByRole("link", { name: "Back to Library" })).toBeVisible();
 });
 
 
-test("@assistant-navigation attachment route activates Assistant without defaulting to Library", async ({
+test("@assistant-navigation attachment route keeps its safe nested back behavior", async ({
   page,
 }) => {
   await page.unrouteAll({ behavior: "wait" });
@@ -799,18 +807,13 @@ test("@assistant-navigation attachment route activates Assistant without default
   });
   await page.goto("attachments/42/view?name=report.txt");
 
-  const navigation = page.getByRole("navigation", { name: "Primary" });
-  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
-    /floating-island__link--active/,
-  );
-  await expect(navigation.getByRole("link", { name: "Library" })).not.toHaveClass(
-    /floating-island__link--active/,
-  );
-  await expect(page.locator(".floating-island__nav-indicator")).toHaveCount(1);
+  await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Back to Library" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /Back to/ })).toBeVisible();
 });
 
 
-test("@assistant-navigation revoked attachment route has no false active navigation item", async ({
+test("@assistant-navigation revoked attachment route has no desktop Library Island", async ({
   page,
 }) => {
   await page.unrouteAll({ behavior: "wait" });
@@ -820,12 +823,8 @@ test("@assistant-navigation revoked attachment route has no false active navigat
   });
   await page.goto("attachments/42/view?name=report.txt");
 
-  const navigation = page.getByRole("navigation", { name: "Primary" });
-  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveCount(0);
-  await expect(navigation.getByRole("link", { name: "Library" })).not.toHaveClass(
-    /floating-island__link--active/,
-  );
-  await expect(page.locator(".floating-island__nav-indicator")).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Back to Library" })).toHaveCount(0);
 });
 
 
@@ -839,9 +838,8 @@ test("@assistant-navigation strips Library query and hash from Assistant UI and 
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, [], state);
   await page.goto("library?q=private-search#token-like-secret");
-  await page.getByRole("navigation", { name: "Primary" })
-    .getByRole("link", { name: "Assistant" })
-    .click();
+  await page.getByRole("button", { name: /Account:/ }).click();
+  await page.getByRole("menuitem", { name: "Assistant" }).click();
 
   await page.getByText("Submit a request", { exact: true }).click();
   await expect(page.getByText("Page /library", { exact: true })).toBeVisible();
@@ -871,9 +869,10 @@ test("@assistant-navigation disabled regular user cannot see or directly open As
   await page.goto("assistant");
 
   await expect(page).toHaveURL(`${baseURL}library`);
-  const navigation = page.getByRole("navigation", { name: "Primary" });
-  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveCount(0);
-  await expect(navigation.getByRole("link", { name: "Admin" })).toHaveCount(0);
+  await page.getByRole("button", { name: /Account:/ }).click();
+  const accountMenu = page.getByRole("menu", { name: "Account menu" });
+  await expect(accountMenu.getByRole("menuitem", { name: "Assistant" })).toHaveCount(0);
+  await expect(accountMenu.getByRole("menuitem", { name: "Admin Panel" })).toHaveCount(0);
 });
 
 
@@ -1009,25 +1008,57 @@ test("@settings-navigation legacy Hidden hash and Install routes replace canonic
 });
 
 
+test("@settings-navigation desktop Settings and Admin use their dock Back to Library control", async ({
+  page,
+  baseURL,
+}) => {
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], { role: "admin" });
+  const libraryUrl = `${baseURL}library?category=anime&source=cloud&sort=az&genre=Drama&quality=gold`;
+  await page.goto("library?category=anime&source=cloud&sort=az&genre=Drama&quality=gold");
+  await expect(page).toHaveURL(libraryUrl);
+
+  await page.getByRole("button", { name: /Account:/ }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
+  const settingsDock = page.getByLabel("Settings sections");
+  await expect(settingsDock.getByRole("link", { name: "Back to Library" })).toBeVisible();
+  await settingsDock.getByRole("link", { name: "Back to Library" }).click();
+  await expect(page).toHaveURL(libraryUrl);
+
+  await page.getByRole("button", { name: /Account:/ }).click();
+  await page.getByRole("menuitem", { name: "Admin Panel" }).click();
+  await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
+  const adminDock = page.getByLabel("Admin sections");
+  await expect(adminDock.getByRole("link", { name: "Back to Library" })).toBeVisible();
+  await adminDock.getByRole("link", { name: "Back to Library" }).click();
+  await expect(page).toHaveURL(libraryUrl);
+});
+
+
 for (const returnCase of [
   {
     label: "Root",
-    listPath: "library?category=movies&sort=title",
+    listPath: "library?category=movies&sort=az",
+    canonicalListPath: "library?category=movies&sort=az",
     title: "Phase Seven Alpha",
   },
   {
     label: "Local",
-    listPath: "library/local?category=movies&sort=title",
+    listPath: "library/local?category=movies&sort=az",
+    canonicalListPath: "library?category=movies&sort=az&source=local",
     title: "Phase Seven Alpha",
   },
   {
     label: "Cloud",
-    listPath: "library/cloud?category=movies&sort=title",
+    listPath: "library/cloud?category=movies&sort=az",
+    canonicalListPath: "library?category=movies&sort=az&source=cloud",
     title: "Phase Seven Beta",
   },
   {
     label: "formal search",
     listPath: "library?category=movies&q=Alpha",
+    canonicalListPath: "library?category=movies&q=Alpha",
     title: "Phase Seven Alpha",
   },
 ]) {
@@ -1036,16 +1067,14 @@ for (const returnCase of [
     baseURL,
   }) => {
     await page.goto(returnCase.listPath);
-    const expectedListUrl = `${baseURL}${returnCase.listPath}`;
+    const expectedListUrl = `${baseURL}${returnCase.canonicalListPath}`;
     await expect(page).toHaveURL(expectedListUrl);
     const card = page.locator(".media-card").filter({ hasText: returnCase.title }).first();
     await expect(card).toBeVisible();
     await card.locator(".media-card__poster-link").click();
     await expect(page).toHaveURL(/\/library\/\d+$/);
 
-    await page.getByRole("navigation", { name: "Primary" })
-      .getByRole("link", { name: "Library" })
-      .click();
+    await page.getByRole("tab", { name: "Movies" }).click();
     await expect(page).toHaveURL(expectedListUrl);
     await expect(page.locator(".media-card").filter({ hasText: returnCase.title }).first())
       .toBeVisible();
@@ -1063,11 +1092,11 @@ test("canonical Root Local and Cloud use the production v2 route", async ({ page
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
 
   await page.goto("library/local/");
-  await expect(page).toHaveURL(`${baseURL}library/local`);
+  await expect(page).toHaveURL(`${baseURL}library?source=local`);
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
 
   await page.goto("library/cloud/");
-  await expect(page).toHaveURL(`${baseURL}library/cloud`);
+  await expect(page).toHaveURL(`${baseURL}library?source=cloud`);
   await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
 
   const summaries = requests.filter((request) => request.startsWith("/api/library/v2/summary"));
@@ -1077,7 +1106,7 @@ test("canonical Root Local and Cloud use the production v2 route", async ({ page
 });
 
 
-test("desktop search commits only on Enter and survives Detail return", async ({ page, baseURL }) => {
+test("desktop Island search debounces once and survives Detail return", async ({ page, baseURL }) => {
   const requests = [];
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, requests);
@@ -1086,13 +1115,17 @@ test("desktop search commits only on Enter and survives Detail return", async ({
 
   const search = page.getByRole("searchbox", { name: "Search library" }).first();
   await search.fill("Beta");
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(200);
   expect(requests.filter((request) => request.startsWith("/api/library/search")).length).toBe(0);
-  await search.press("Enter");
 
-  await expect(page).toHaveURL(`${baseURL}library?q=Beta`);
+  await expect(page).toHaveURL(`${baseURL}library?category=movies&q=Beta`);
   await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
-  expect(requests.filter((request) => request.startsWith("/api/library/search?q=Beta")).length).toBe(1);
+  expect(requests.filter((request) => {
+    if (!request.startsWith("/api/library/search")) {
+      return false;
+    }
+    return new URL(request, "https://elvern.invalid").searchParams.get("q") === "Beta";
+  }).length).toBe(1);
 
   await page.locator(".media-card__poster-link").first().click();
   await expect(page).toHaveURL(`${baseURL}library/2`);
@@ -1100,7 +1133,7 @@ test("desktop search commits only on Enter and survives Detail return", async ({
   await expect(page.getByRole("button", { name: "Lite Playback" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Full Playback" })).toBeVisible();
   await page.getByRole("link", { name: "Back to Library" }).click();
-  await expect(page).toHaveURL(`${baseURL}library?q=Beta`);
+  await expect(page).toHaveURL(`${baseURL}library?category=movies&q=Beta`);
   await expect(page.getByRole("searchbox", { name: "Search library" }).first()).toHaveValue("Beta");
   await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
 });
@@ -1289,7 +1322,7 @@ test("two independent same-account contexts apply progress reset and catalog rev
     await expect(pageB.locator(".media-card__progress")).toHaveCount(0);
     await expect(pageB.getByText("Loading library...")).toHaveCount(0);
 
-    await pageA.getByRole("button", { name: "Rescan library" }).click();
+    await pageA.getByRole("button", { name: "Rescan" }).click();
     await dispatchGenuinePageReturn(pageB);
     await expect(pageB.getByText("Phase Seven Alpha Scan 1", { exact: true })).toBeVisible();
     await expect(pageB.getByText("Loading library...")).toHaveCount(0);
@@ -1344,31 +1377,45 @@ test("two different identity contexts keep same-item progress UI isolated", asyn
 });
 
 
-test("Root static search is interactive without a clear button at desktop and laptop widths", async ({ page }, testInfo) => {
+test("Desktop Floating Island stays usable at desktop and narrow laptop widths", async ({ page }, testInfo) => {
   const requests = [];
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, requests);
   for (const viewport of [
+    { width: 1920, height: 1080 },
     { width: 1440, height: 900 },
+    { width: 1180, height: 760 },
     { width: 1024, height: 768 },
-    { width: 900, height: 700 },
+    { width: 800, height: 700 },
   ]) {
     await page.setViewportSize(viewport);
     await page.goto("library");
     await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+    const island = page.getByRole("navigation", { name: "Library controls" });
+    await expect(island).toBeVisible();
+    await expect(island.getByText("Elvern", { exact: true })).toBeVisible();
+    await expect(island.getByRole("tab")).toHaveCount(4);
+    await expect(island.getByRole("button", { name: "Arrange library" })).toBeVisible();
+    await expect(island.getByRole("button", { name: /Account:/ })).toBeVisible();
     const search = page.getByRole("searchbox", { name: "Search library" });
     await expect(search).toHaveCount(1);
     await expect(search).toBeEnabled();
     await expect(page.getByRole("button", { name: "Clear search" })).toHaveCount(0);
+    const collapsedWidth = (await search.boundingBox()).width;
     await search.click();
     await expect(search).toBeFocused();
+    await expect.poll(async () => (await search.boundingBox()).width).toBeGreaterThan(collapsedWidth);
     const searchRequestCount = requests.filter((request) => request.startsWith("/api/library/search")).length;
     await search.fill("Beta");
-    await page.waitForTimeout(500);
-    expect(requests.filter((request) => request.startsWith("/api/library/search")).length).toBe(searchRequestCount);
-    await search.press("Enter");
-    await expect(page).toHaveURL(/library\?q=Beta$/);
+    await page.waitForTimeout(200);
+    expect(requests.filter((request) => request.startsWith("/api/library/search"))).toHaveLength(
+      searchRequestCount,
+    );
+    await expect(page).toHaveURL(/library\?category=movies&q=Beta$/);
     await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
+    expect(requests.filter((request) => request.startsWith("/api/library/search"))).toHaveLength(
+      searchRequestCount + 1,
+    );
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({
       path: testInfo.outputPath(`library-root-${viewport.width}x${viewport.height}.png`),
@@ -1378,48 +1425,94 @@ test("Root static search is interactive without a clear button at desktop and la
 });
 
 
-test("collapsing an uncommitted Floating draft immediately unlocks Static search", async ({ page, baseURL }) => {
-  const requests = [];
-  await page.unrouteAll({ behavior: "wait" });
-  await installFixture(page, requests);
-  await page.setViewportSize({ width: 1024, height: 600 });
-  await page.goto("library");
-  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+test("Desktop Island popovers stay solid, clamped, and directional at top and bottom", async ({
+  page,
+}) => {
+  for (const position of ["top", "bottom"]) {
+    await page.unrouteAll({ behavior: "wait" });
+    await installFixture(page, [], { desktopIslandPosition: position });
+    await page.setViewportSize({ width: 800, height: 700 });
+    await page.goto("library");
+    await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
 
-  const staticSearch = page.locator(".library-desktop-hero__search input");
-  await page.locator(".media-card").last().scrollIntoViewIfNeeded();
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
-  await page.getByRole("button", { name: "Search library" }).click();
-  const floatingSearch = page.locator(".floating-library-search input");
-  await floatingSearch.fill("uncommitted floating value");
-  await expect(staticSearch).toBeDisabled();
-  const summaryRequestCount = requests.filter(
-    (request) => request.startsWith("/api/library/v2/summary"),
-  ).length;
-  const searchRequestCount = requests.filter(
-    (request) => request.startsWith("/api/library/search"),
-  ).length;
+    const island = page.getByTestId("desktop-library-island");
+    await expect(island).toHaveClass(new RegExp(`desktop-library-island-wrap--${position}`));
+    const islandBox = await island.boundingBox();
 
-  await page.getByRole("button", { name: "Collapse search" }).click();
+    await page.getByRole("button", { name: "Arrange library" }).click();
+    const arrange = page.getByRole("dialog", { name: "Arrange library" });
+    await expect(arrange).toHaveCSS("background-color", "rgb(17, 23, 34)");
+    const arrangeBox = await arrange.boundingBox();
+    expect(arrangeBox.x).toBeGreaterThanOrEqual(12);
+    expect(arrangeBox.x + arrangeBox.width).toBeLessThanOrEqual(788);
+    if (position === "top") {
+      expect(arrangeBox.y).toBeGreaterThanOrEqual(islandBox.y + islandBox.height);
+    } else {
+      expect(arrangeBox.y + arrangeBox.height).toBeLessThanOrEqual(islandBox.y);
+    }
 
-  await expect(staticSearch).toBeEnabled();
-  await expect(staticSearch).toHaveValue("");
-  expect(requests.filter(
-    (request) => request.startsWith("/api/library/v2/summary"),
-  )).toHaveLength(summaryRequestCount);
-  expect(requests.filter(
-    (request) => request.startsWith("/api/library/search"),
-  )).toHaveLength(searchRequestCount);
-  await staticSearch.fill("Beta");
-  await page.waitForTimeout(500);
-  expect(requests.filter((request) => request.includes("uncommitted"))).toHaveLength(0);
-  await staticSearch.press("Enter");
-  await expect(page).toHaveURL(`${baseURL}library?q=Beta`);
-  await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /Account:/ }).click();
+    await expect(arrange).toHaveCount(0);
+    const accountMenu = page.getByRole("menu", { name: "Account menu" });
+    await expect(accountMenu).toHaveCSS("background-color", "rgb(17, 23, 34)");
+    const menuBox = await accountMenu.boundingBox();
+    expect(menuBox.x).toBeGreaterThanOrEqual(12);
+    expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(788);
+    if (position === "top") {
+      expect(menuBox.y).toBeGreaterThanOrEqual(islandBox.y + islandBox.height);
+    } else {
+      expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(islandBox.y);
+    }
+  }
 });
 
 
-test("Local and Cloud static search commits locally without another source payload request", async ({ page, baseURL }) => {
+test("Arrange keeps multi-filters draft-only and commits one canonical request", async ({ page, baseURL }) => {
+  const requests = [];
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests);
+  await page.setViewportSize({ width: 1180, height: 760 });
+  await page.goto("library");
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+
+  const summaryRequestCount = requests.filter(
+    (request) => request.startsWith("/api/library/v2/summary"),
+  ).length;
+  await page.getByRole("button", { name: "Arrange library" }).click();
+  const panel = page.getByRole("dialog", { name: "Arrange library" });
+  await panel.getByRole("button", { name: "Cloud" }).click();
+  await panel.getByRole("button", { name: "Action" }).click();
+  await panel.getByRole("button", { name: "Drama" }).click();
+  await panel.getByRole("button", { name: "Diamond" }).click();
+  await panel.getByRole("button", { name: "Gold" }).click();
+  expect(requests.filter(
+    (request) => request.startsWith("/api/library/v2/summary"),
+  )).toHaveLength(summaryRequestCount);
+  await expect(panel).toHaveCSS("background-color", "rgb(17, 23, 34)");
+  await panel.getByRole("button", { name: "Done" }).click();
+  await expect(page).toHaveURL(
+    `${baseURL}library?category=movies&source=cloud&genre=Action&genre=Drama`
+      + "&quality=diamond&quality=gold",
+  );
+  await expect.poll(() => requests.filter(
+    (request) => request.startsWith("/api/library/v2/summary"),
+  ).length).toBe(summaryRequestCount + 1);
+
+  await page.getByRole("button", { name: "Arrange library" }).click();
+  await panel.getByRole("button", { name: "Reset" }).click();
+  await panel.getByRole("button", { name: "Local" }).click();
+  expect(requests.filter(
+    (request) => request.startsWith("/api/library/v2/summary"),
+  )).toHaveLength(summaryRequestCount + 1);
+  await page.locator("main").click({ position: { x: 12, y: 220 } });
+  await expect(page).toHaveURL(`${baseURL}library?category=movies&source=local`);
+  await expect.poll(() => requests.filter(
+    (request) => request.startsWith("/api/library/v2/summary"),
+  ).length).toBe(summaryRequestCount + 2);
+});
+
+
+test("Legacy Local and Cloud redirects preserve source through formal search", async ({ page, baseURL }) => {
   const requests = [];
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, requests);
@@ -1428,32 +1521,32 @@ test("Local and Cloud static search commits locally without another source paylo
     ["cloud", "Beta", "Phase Seven Beta"],
   ]) {
     await page.goto(`library/${source}`);
+    await expect(page).toHaveURL(`${baseURL}library?source=${source}`);
     await expect(page.getByText(title, { exact: true })).toBeVisible();
-    const staticSearch = page.getByRole("searchbox", { name: `Search ${source === "local" ? "Local" : "Cloud"} Library` });
-    await expect(staticSearch).toBeEnabled();
-    const sourcePayloadCount = requests.filter((request) => (
-      request.startsWith("/api/library/v2/summary") && request.includes(`source=${source}`)
-    )).length;
-    await staticSearch.fill(query);
-    await page.waitForTimeout(500);
-    expect(requests.filter((request) => request.startsWith("/api/library/search"))).toHaveLength(0);
-    await staticSearch.press("Enter");
-    await expect(page).toHaveURL(`${baseURL}library/${source}?q=${query}`);
+    const search = page.getByRole("searchbox", { name: "Search library" });
+    const searchCount = requests.filter(
+      (request) => request.startsWith("/api/library/search"),
+    ).length;
+    await search.fill(query);
+    await expect(page).toHaveURL(
+      `${baseURL}library?source=${source}&category=movies&q=${query}`,
+    );
     await expect(page.getByText(title, { exact: true })).toBeVisible();
-    expect(requests.filter((request) => (
-      request.startsWith("/api/library/v2/summary") && request.includes(`source=${source}`)
-    )).length).toBe(sourcePayloadCount);
+    expect(requests.filter(
+      (request) => request.startsWith("/api/library/search"),
+    )).toHaveLength(searchCount + 1);
   }
 });
 
 
-test("desktop setting false hides Floating while Static remains usable", async ({ page }) => {
+test("legacy floating-search setting does not disable the desktop Island", async ({ page }) => {
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, [], { floatingSearchEnabled: false });
   await page.goto("library");
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
 
   await expect(page.locator(".floating-library-search")).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Library controls" })).toBeVisible();
   await expect(page.getByRole("searchbox", { name: "Search library" })).toBeEnabled();
 });
 
@@ -1602,9 +1695,9 @@ test("a no-cache Source failure recovers on the exact source URL without duplica
     mode: "fetch",
   }]);
 
-  await page.goto("library/cloud?genre=Drama&q=Beta");
+  await page.goto("library?source=cloud&genre=Drama");
 
-  await expect(page).toHaveURL(`${baseURL}library/cloud?genre=Drama&q=Beta`);
+  await expect(page).toHaveURL(`${baseURL}library?source=cloud&genre=Drama`);
   await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
   await expect(page.getByText("No media indexed yet")).toHaveCount(0);
   await expect(page.getByText("No matches yet")).toHaveCount(0);
@@ -1900,9 +1993,8 @@ test("malformed 401 body clears protected Library cache without exposing parser 
   await page.evaluate(() => {
     window.__elvernFetchFaults.malformed401.armed = true;
   });
-  await page.getByRole("navigation", { name: "Primary" })
-    .getByRole("link", { name: "Settings" })
-    .click();
+  await page.getByRole("button", { name: /Account:/ }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
   await page.getByRole("tab", { name: "Install" }).click();
   await expect(page).toHaveURL(/\/settings\?section=install$/);
   await expect(page.getByText("Elvern received an unreadable response from the server.")).toBeVisible();
@@ -1930,7 +2022,7 @@ test("a poster error before recovery retries exactly once", async ({ page }) => 
     }));
   });
   await page.getByRole("link", { name: "Library" }).click();
-  await expect(page).toHaveURL(/\/library$/);
+  await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
 
@@ -1965,7 +2057,7 @@ test("a recovered attach-time poster incident still retries a late onError once"
     }));
   });
   await page.getByRole("link", { name: "Library" }).click();
-  await expect(page).toHaveURL(/\/library$/);
+  await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
 
   state.healthHealthy = true;
@@ -2003,7 +2095,7 @@ test("consecutive poster incidents each retain their own single recovery retry",
     }));
   });
   await page.getByRole("link", { name: "Library" }).click();
-  await expect(page).toHaveURL(/\/library$/);
+  await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
 
   state.healthHealthy = true;
@@ -2053,7 +2145,7 @@ test("poster recovery stays authoritative while no MediaCard subscriber exists",
   await expect.poll(() => page.evaluate(() => window.__posterRecoveryEvents)).toBe(1);
 
   await page.getByRole("link", { name: "Library" }).click();
-  await expect(page).toHaveURL(/\/library$/);
+  await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect(page.locator(".media-card__poster-image--loaded").first()).toBeVisible();
   expect(state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
 });

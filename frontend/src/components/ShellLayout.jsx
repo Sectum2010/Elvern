@@ -19,6 +19,11 @@ import { detectClientPlatform, isDesktopClientPlatform } from "../lib/platformDe
 import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { classifyLibrarySpaPath } from "../lib/canonicalSpaPath.js";
+import { DesktopLibraryIsland } from "./DesktopLibraryIsland.jsx";
+import {
+  DesktopLibraryIslandProvider,
+  useDesktopLibraryIslandContext,
+} from "./DesktopLibraryIslandContext.jsx";
 import {
   canAccessAssistant,
   classifyPrimaryNavigationRoute,
@@ -32,12 +37,16 @@ function normalizePosterCardAppearance(value) {
   return "classic";
 }
 
-export function ShellLayout({ children }) {
+function ShellLayoutContent({ children }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const userSettingsQuery = useUserSettingsQuery(user);
   const userSettings = resolveUserSettings(userSettingsQuery.data);
+  const desktopFloatingIslandPosition = (
+    userSettings.desktop_floating_island_position === "bottom" ? "bottom" : "top"
+  );
+  const { libraryState } = useDesktopLibraryIslandContext();
   const posterCardAppearance = normalizePosterCardAppearance(userSettings.poster_card_appearance);
   const backgroundSettings = useMemo(
     () => normalizeUserBackgroundSettings(userSettings),
@@ -97,7 +106,16 @@ export function ShellLayout({ children }) {
   const isLibrarySourcePage = libraryPath.kind === "source";
   const hideFloatingIsland = location.pathname === "/setup/totp";
   const clientDeviceClass = detectClientDeviceClass();
-  const desktopPosterContextMenuEnabled = isDesktopClientPlatform(detectClientPlatform());
+  const clientPlatform = detectClientPlatform();
+  const desktopPosterContextMenuEnabled = isDesktopClientPlatform(clientPlatform);
+  const desktopLibraryClient = clientDeviceClass === "desktop"
+    && isDesktopClientPlatform(clientPlatform);
+  const showDesktopLibraryIsland = desktopLibraryClient
+    && (libraryPath.kind === "root" || libraryPath.kind === "detail");
+  const protectedDesktopLibraryState = (
+    libraryState?.userId === String(user?.id ?? "")
+    && libraryState?.role === String(user?.role ?? "").trim().toLowerCase()
+  ) ? libraryState : null;
   const mobileSelectionGuardEnabled = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const floatingNavDragEnabled = clientDeviceClass !== "phone" && clientDeviceClass !== "tablet";
   const floatingActiveIndex = navigation.findIndex(
@@ -225,9 +243,13 @@ export function ShellLayout({ children }) {
       navigate(item.to, { state: item.state });
       return;
     }
-    const rememberedTarget = readLibraryReturnTarget();
+    const protectedIdentity = {
+      userId: user?.id,
+      role: user?.role,
+    };
+    const rememberedTarget = readLibraryReturnTarget(protectedIdentity);
     if (rememberedTarget) {
-      markLibraryReturnPending();
+      markLibraryReturnPending(protectedIdentity);
     }
     navigate(rememberedTarget?.listPath || "/library", {
       state: { restoreLibraryReturn: true },
@@ -445,6 +467,10 @@ export function ShellLayout({ children }) {
             : "",
           isLibraryRootPage ? "app-shell--library-root" : "",
           isLibrarySourcePage ? "app-shell--library-source" : "",
+          desktopLibraryClient ? "app-shell--desktop-client" : "",
+          showDesktopLibraryIsland
+            ? `app-shell--desktop-library-island-${desktopFloatingIslandPosition}`
+            : "",
           mobileSelectionGuardEnabled ? "app-shell--selection-guard" : "",
         ].filter(Boolean).join(" ")}
       >
@@ -514,7 +540,16 @@ export function ShellLayout({ children }) {
         </div>
       ) : null}
 
-      {!hideFloatingIsland ? (
+      {showDesktopLibraryIsland ? (
+        <DesktopLibraryIsland
+          libraryState={protectedDesktopLibraryState}
+          onLogout={handleLogout}
+          position={desktopFloatingIslandPosition}
+          user={user}
+        />
+      ) : null}
+
+      {!desktopLibraryClient && !hideFloatingIsland ? (
         <div
           className="floating-island floating-island--bottom"
           aria-label="Primary navigation and account controls"
@@ -580,5 +615,14 @@ export function ShellLayout({ children }) {
         <main className="page-shell">{children}</main>
       </div>
     </PosterContextMenuProvider>
+  );
+}
+
+
+export function ShellLayout({ children }) {
+  return (
+    <DesktopLibraryIslandProvider>
+      <ShellLayoutContent>{children}</ShellLayoutContent>
+    </DesktopLibraryIslandProvider>
   );
 }

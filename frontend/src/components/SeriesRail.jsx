@@ -40,6 +40,7 @@ export function SeriesRail({
   enableTouchReleaseAssist = false,
   activeBrowserPlaybackItemId = null,
   posterDisplayWidth = "1400",
+  protectedIdentity = null,
   smartPosterLoadingEnabled = false,
   sectionKey = null,
 }) {
@@ -521,6 +522,7 @@ export function SeriesRail({
                 cardInstanceKey={`${sectionKey || `series:${rail.key}`}:${item.id}`}
                 item={item}
                 posterDisplayWidth={posterDisplayWidth}
+                protectedIdentity={protectedIdentity}
                 smartPosterLoadingEnabled={smartPosterLoadingEnabled}
               />
             </div>

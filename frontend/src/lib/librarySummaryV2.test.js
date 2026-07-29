@@ -43,7 +43,15 @@ function v2Payload() {
   return {
     schema_version: "library-summary-v2",
     revision: REVISION,
-    view: { category: "movies", source: "all", genre: null, quality: "all", sort: "smart" },
+    view: {
+      category: "movies",
+      source: "all",
+      genres: [],
+      qualities: [],
+      genre: null,
+      quality: null,
+      sort: "smart",
+    },
     items_by_id: { "1": item(1), "2": item(2) },
     sections: {
       item_ids: [1, 2],
@@ -85,7 +93,14 @@ function v1Payload() {
     cloud_series_rails: [],
     continue_watching: [second],
     recently_added: [second, first],
-    arrange: { source: "all", genre: null, quality: "all", sort: "smart" },
+    arrange: {
+      source: "all",
+      genres: [],
+      qualities: [],
+      genre: null,
+      quality: "all",
+      sort: "smart",
+    },
     available_genres: ["Action"],
     total_items: 2,
     scan_in_progress: false,

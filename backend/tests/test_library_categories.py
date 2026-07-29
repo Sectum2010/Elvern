@@ -919,10 +919,158 @@ def test_library_arrange_filters_compose_before_sorting(
     assert [item["id"] for item in payload["items"]] == [alpha_id, beta_id]
     assert payload["arrange"] == {
         "source": "cloud",
+        "genres": ["Action"],
+        "qualities": ["gold"],
         "genre": "Action",
         "quality": "gold",
         "sort": "az",
     }
+
+
+def test_library_multi_filters_use_or_within_groups_and_and_across_groups(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    cloud_source_id = _insert_cloud_source(initialized_settings)
+    action_diamond_id = _insert_media_item(
+        initialized_settings,
+        title="Multi Probe Action Diamond",
+        original_filename="Multi.Probe.Action.Diamond.2026.2160p.UHD.REMUX.x265.TrueHD.Atmos.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=90 * 1024**3,
+        width=3840,
+        height=2160,
+        video_codec="hevc",
+        audio_codec="truehd atmos",
+    )
+    drama_gold_id = _insert_media_item(
+        initialized_settings,
+        title="Multi Probe Drama Gold",
+        original_filename="Multi.Probe.Drama.Gold.2026.1080p.WEB-DL.x265.DTS.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=25 * 1024**3,
+        width=1920,
+        height=1080,
+        video_codec="hevc",
+        audio_codec="dts",
+    )
+    action_wood_id = _insert_media_item(
+        initialized_settings,
+        title="Multi Probe Action Wood",
+        original_filename="Multi.Probe.Action.Wood.2026.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=256 * 1024**2,
+        width=640,
+        height=360,
+        video_codec="h264",
+        audio_codec="aac",
+    )
+    comedy_diamond_id = _insert_media_item(
+        initialized_settings,
+        title="Multi Probe Comedy Diamond",
+        original_filename="Multi.Probe.Comedy.Diamond.2026.2160p.UHD.REMUX.x265.TrueHD.Atmos.mkv",
+        category="movies",
+        source_kind="cloud",
+        library_source_id=cloud_source_id,
+        file_size=90 * 1024**3,
+        width=3840,
+        height=2160,
+        video_codec="hevc",
+        audio_codec="truehd atmos",
+    )
+    local_action_diamond_id = _insert_media_item(
+        initialized_settings,
+        title="Multi Probe Local Action Diamond",
+        original_filename="Multi.Probe.Local.Action.Diamond.2026.2160p.UHD.REMUX.x265.TrueHD.Atmos.mkv",
+        category="movies",
+        file_size=90 * 1024**3,
+        width=3840,
+        height=2160,
+        video_codec="hevc",
+        audio_codec="truehd atmos",
+    )
+    _set_genres(
+        initialized_settings,
+        media_item_id=action_diamond_id,
+        genres=["Action"],
+    )
+    _set_genres(
+        initialized_settings,
+        media_item_id=drama_gold_id,
+        genres=["Drama"],
+    )
+    _set_genres(
+        initialized_settings,
+        media_item_id=action_wood_id,
+        genres=["Action"],
+    )
+    _set_genres(
+        initialized_settings,
+        media_item_id=comedy_diamond_id,
+        genres=["Comedy"],
+    )
+    _set_genres(
+        initialized_settings,
+        media_item_id=local_action_diamond_id,
+        genres=["Action"],
+    )
+    common_params = [
+        ("category", "movies"),
+        ("source", "cloud"),
+        ("genre", "Drama"),
+        ("genre", "action"),
+        ("quality", "gold"),
+        ("quality", "diamond"),
+        ("sort", "az"),
+    ]
+
+    v1_response = client.get("/api/library", params=common_params)
+    search_response = client.get(
+        "/api/library/search",
+        params=[("q", "Multi Probe"), *common_params],
+    )
+    v2_response = client.get("/api/library/v2/summary", params=common_params)
+
+    assert v1_response.status_code == 200
+    assert search_response.status_code == 200
+    assert v2_response.status_code == 200
+    expected_ids = [action_diamond_id, drama_gold_id]
+    assert [item["id"] for item in v1_response.json()["items"]] == expected_ids
+    assert [item["id"] for item in search_response.json()["items"]] == expected_ids
+    assert v2_response.json()["sections"]["item_ids"] == expected_ids
+    expected_arrange = {
+        "source": "cloud",
+        "genres": ["action", "Drama"],
+        "qualities": ["diamond", "gold"],
+        "genre": None,
+        "quality": None,
+        "sort": "az",
+    }
+    assert v1_response.json()["arrange"] == expected_arrange
+    assert search_response.json()["arrange"] == expected_arrange
+    assert v2_response.json()["view"] == {
+        "category": "movies",
+        **expected_arrange,
+    }
+    returned_ids = set(expected_ids)
+    assert action_wood_id not in returned_ids
+    assert comedy_diamond_id not in returned_ids
+    assert local_action_diamond_id not in returned_ids
+
+    invalid_response = client.get(
+        "/api/library",
+        params=[("quality", "diamond"), ("quality", "platinum")],
+    )
+    assert invalid_response.status_code == 400
+    assert "Invalid library quality" in invalid_response.json()["detail"]
 
 
 @pytest.mark.parametrize(

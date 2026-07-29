@@ -5,11 +5,11 @@ import { ProviderAuthProvider } from "./auth/ProviderAuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { CanonicalSpaRouteGuard } from "./components/CanonicalSpaRouteGuard";
 import { LegacyInstallRedirect } from "./components/LegacyInstallRedirect";
+import { LegacyLibrarySourceRedirect } from "./components/LegacyLibrarySourceRedirect";
 import { ShellLayout } from "./components/ShellLayout";
 import { StartupConnectionGate } from "./components/StartupConnectionGate";
 import { DetailPage } from "./pages/DetailPage";
 import { LibraryPage } from "./pages/LibraryPage";
-import { LibrarySourcePage } from "./pages/LibrarySourcePage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewUserPage } from "./pages/NewUserPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
@@ -69,8 +69,8 @@ export default function App() {
               <Route path="/setup/totp" element={<TotpSetupPage />} />
               <Route path="/" element={<Navigate to="/library" replace />} />
               <Route path="/library" element={<LibraryPage />} />
-              <Route path="/library/local" element={<LibrarySourcePage sourceKind="local" />} />
-              <Route path="/library/cloud" element={<LibrarySourcePage sourceKind="cloud" />} />
+              <Route path="/library/local" element={<LegacyLibrarySourceRedirect source="local" />} />
+              <Route path="/library/cloud" element={<LegacyLibrarySourceRedirect source="cloud" />} />
               <Route path="/library/:itemId" element={<DetailPage />} />
               <Route
                 path="/assistant"

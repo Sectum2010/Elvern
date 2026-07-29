@@ -13,6 +13,7 @@ export const DEFAULT_USER_SETTINGS = Object.freeze({
   hide_duplicate_movies: true,
   hide_recently_added: false,
   floating_library_search_enabled: true,
+  desktop_floating_island_position: "top",
   poster_card_appearance: "classic",
   poster_card_display_max_width: "1400",
   ...DEFAULT_BACKGROUND_SETTINGS,
@@ -48,10 +49,14 @@ export function isUserSettingsQueryKey(queryKey) {
 
 
 export function resolveUserSettings(payload) {
-  return {
+  const resolved = {
     ...DEFAULT_USER_SETTINGS,
     ...(payload && typeof payload === "object" ? payload : {}),
   };
+  resolved.desktop_floating_island_position = (
+    resolved.desktop_floating_island_position === "bottom" ? "bottom" : "top"
+  );
+  return resolved;
 }
 
 

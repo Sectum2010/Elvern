@@ -457,6 +457,7 @@ export function useDesktopLibraryReturnRestore({
   platform,
   deviceClass,
   navigationType = null,
+  protectedIdentity = {},
   queryState = {},
   settingsState = {},
 } = {}) {
@@ -473,7 +474,7 @@ export function useDesktopLibraryReturnRestore({
     ) {
       return undefined;
     }
-    const target = readLibraryReturnTarget();
+    const target = readLibraryReturnTarget(protectedIdentity);
     const shouldRestore = Boolean(locationState?.restoreLibraryReturn) || Boolean(target?.pendingRestore);
     if (!shouldRestore || !target || target.listPath !== currentListPath) {
       return undefined;
@@ -508,7 +509,7 @@ export function useDesktopLibraryReturnRestore({
       onComplete: (result) => {
         completedRestoreKeyRef.current = restoreKey;
         transactionRef.current = null;
-        clearLibraryReturnPending();
+        clearLibraryReturnPending(protectedIdentity);
         debugLog(window, "pending return cleared", result);
       },
     });
@@ -528,6 +529,8 @@ export function useDesktopLibraryReturnRestore({
     locationState,
     navigationType,
     platform,
+    protectedIdentity?.role,
+    protectedIdentity?.userId,
     rootRef,
   ]);
 

@@ -87,7 +87,7 @@ LIBRARY_SORT_VALUES = (
 @dataclass(slots=True)
 class LibraryViewPlan:
     category: str
-    arrange: dict[str, str | None]
+    arrange: dict[str, object]
     poster_dir: Path
     poster_index: PosterIndexSnapshot | None
     item_rows: list[object]
@@ -116,12 +116,27 @@ def normalize_library_source_filter(source: str | None = None) -> str:
     return normalized
 
 
+def normalize_library_quality_filters(
+    quality: str | list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    candidates = quality if isinstance(quality, (list, tuple)) else [quality]
+    selected: set[str] = set()
+    for candidate in candidates:
+        normalized = str(candidate or "").strip().lower()
+        if not normalized or normalized == "all":
+            continue
+        if normalized not in LIBRARY_QUALITY_FILTER_VALUES:
+            expected = ", ".join(LIBRARY_QUALITY_FILTER_VALUES)
+            raise ValueError(
+                f"Invalid library quality '{candidate}'. Expected one of: {expected}."
+            )
+        selected.add(normalized)
+    return [quality_key for quality_key in QUALITY_TIER_VALUES if quality_key in selected]
+
+
 def normalize_library_quality_filter(quality: str | None = None) -> str:
-    normalized = str(quality or "").strip().lower() or "all"
-    if normalized not in LIBRARY_QUALITY_FILTER_VALUES:
-        expected = ", ".join(LIBRARY_QUALITY_FILTER_VALUES)
-        raise ValueError(f"Invalid library quality '{quality}'. Expected one of: {expected}.")
-    return normalized
+    normalized = normalize_library_quality_filters(quality)
+    return normalized[0] if normalized else "all"
 
 
 def normalize_library_sort(sort: str | None = None) -> str:
@@ -132,31 +147,47 @@ def normalize_library_sort(sort: str | None = None) -> str:
     return normalized
 
 
+def normalize_library_genre_filters(
+    genre: str | list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    candidates = genre if isinstance(genre, (list, tuple)) else [genre]
+    selected: dict[str, str] = {}
+    for candidate in candidates:
+        normalized = " ".join(str(candidate or "").strip().split())
+        if normalized:
+            selected.setdefault(normalized.casefold(), normalized)
+    return sorted(selected.values(), key=str.casefold)
+
+
 def normalize_library_genre_filter(genre: str | None = None) -> str | None:
-    normalized = " ".join(str(genre or "").strip().split())
-    return normalized or None
+    normalized = normalize_library_genre_filters(genre)
+    return normalized[0] if normalized else None
 
 
 def normalize_library_arrange(
     *,
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: str | list[str] | tuple[str, ...] | None = None,
+    quality: str | list[str] | tuple[str, ...] | None = None,
     sort: str | None = None,
-) -> dict[str, str | None]:
+) -> dict[str, object]:
+    genres = normalize_library_genre_filters(genre)
+    qualities = normalize_library_quality_filters(quality)
     return {
         "source": normalize_library_source_filter(source),
-        "genre": normalize_library_genre_filter(genre),
-        "quality": normalize_library_quality_filter(quality),
+        "genres": genres,
+        "qualities": qualities,
+        "genre": genres[0] if len(genres) == 1 else None,
+        "quality": qualities[0] if len(qualities) == 1 else ("all" if not qualities else None),
         "sort": normalize_library_sort(sort),
     }
 
 
-def _arrange_is_default(arrange: dict[str, str | None]) -> bool:
+def _arrange_is_default(arrange: dict[str, object]) -> bool:
     return (
         arrange["source"] == "all"
-        and arrange["genre"] is None
-        and arrange["quality"] == "all"
+        and not arrange["genres"]
+        and not arrange["qualities"]
         and arrange["sort"] == "smart"
     )
 
@@ -226,14 +257,21 @@ def _row_genre_keys(row) -> set[str]:
 
 def _apply_library_arrange_filters(
     rows: list,
-    arrange: dict[str, str | None],
+    arrange: dict[str, object],
     *,
     timing: LibraryViewPlanTiming | None = None,
 ) -> list:
     source_filter = str(arrange["source"] or "all")
-    genre_filter = arrange["genre"]
-    quality_filter = str(arrange["quality"] or "all")
-    genre_key = str(genre_filter).casefold() if genre_filter else None
+    genre_keys = {
+        str(genre).casefold()
+        for genre in (arrange.get("genres") or [])
+        if str(genre).strip()
+    }
+    quality_filters = {
+        str(quality).strip().lower()
+        for quality in (arrange.get("qualities") or [])
+        if str(quality).strip()
+    }
     filtered_rows = []
     for row in rows:
         started_ns = time.perf_counter_ns() if timing and timing.enabled else 0
@@ -245,15 +283,15 @@ def _apply_library_arrange_filters(
         if not source_matches:
             continue
         started_ns = time.perf_counter_ns() if timing and timing.enabled else 0
-        genre_matches = not genre_key or genre_key in _row_genre_keys(row)
+        genre_matches = not genre_keys or bool(genre_keys.intersection(_row_genre_keys(row)))
         if started_ns:
             timing.add_ns("genre_filter", time.perf_counter_ns() - started_ns)
         if not genre_matches:
             continue
         started_ns = time.perf_counter_ns() if timing and timing.enabled else 0
-        quality_matches = quality_filter == "all" or str(
+        quality_matches = not quality_filters or str(
             _row_value(row, "quality_tier", "") or ""
-        ) == quality_filter
+        ) in quality_filters
         if started_ns:
             timing.add_ns("quality_filter", time.perf_counter_ns() - started_ns)
         if not quality_matches:
@@ -548,8 +586,8 @@ def build_library_view_plan(
     user_id: int,
     category: str = "movies",
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: str | list[str] | tuple[str, ...] | None = None,
+    quality: str | list[str] | tuple[str, ...] | None = None,
     sort: str | None = None,
 ) -> LibraryViewPlan:
     timing = LibraryViewPlanTiming(enabled=settings.library_plan_timing_enabled)
@@ -668,6 +706,7 @@ def build_library_view_plan(
         list(visible_all_rows),
         {
             **arrange,
+            "genres": [],
             "genre": None,
         },
         timing=timing,
@@ -725,7 +764,11 @@ def build_library_view_plan(
             hidden_media_item_ids=hidden_media_item_ids,
             hidden_movie_keys=set(hidden_movie_key_records),
         )
-    has_arrange_filters = arrange["source"] != "all" or arrange["genre"] is not None or arrange["quality"] != "all"
+    has_arrange_filters = (
+        arrange["source"] != "all"
+        or bool(arrange["genres"])
+        or bool(arrange["qualities"])
+    )
     if has_arrange_filters:
         visible_recent_rows = sorted(
             filtered_all_rows,
@@ -951,6 +994,12 @@ def serialize_library_view_v2(
 ) -> dict[str, object]:
     timing_enabled = bool(plan.timing and plan.timing.enabled)
     serialization_started_ns = time.perf_counter_ns() if timing_enabled else 0
+    normalized_arrange = normalize_library_arrange(
+        source=str(plan.arrange.get("source") or "all"),
+        genre=plan.arrange.get("genres", plan.arrange.get("genre")),
+        quality=plan.arrange.get("qualities", plan.arrange.get("quality")),
+        sort=str(plan.arrange.get("sort") or "smart"),
+    )
     rows_by_id = _v2_rows_by_id(plan)
     poster_url_memo: dict[int, str | None] = {}
     poster_path_memo: dict[int, Path | None] = {}
@@ -968,10 +1017,12 @@ def serialize_library_view_v2(
         "schema_version": "library-summary-v2",
         "view": {
             "category": plan.category,
-            "source": plan.arrange["source"],
-            "genre": plan.arrange["genre"],
-            "quality": plan.arrange["quality"],
-            "sort": plan.arrange["sort"],
+            "source": normalized_arrange["source"],
+            "genres": normalized_arrange["genres"],
+            "qualities": normalized_arrange["qualities"],
+            "genre": normalized_arrange["genre"],
+            "quality": normalized_arrange["quality"],
+            "sort": normalized_arrange["sort"],
         },
         "items_by_id": items_by_id,
         "sections": {
@@ -1021,8 +1072,8 @@ def list_library(
     user_id: int,
     category: str = "movies",
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: str | list[str] | tuple[str, ...] | None = None,
+    quality: str | list[str] | tuple[str, ...] | None = None,
     sort: str | None = None,
 ) -> dict[str, object]:
     route_started_ns = time.perf_counter_ns() if settings.library_plan_timing_enabled else 0
@@ -1055,8 +1106,8 @@ def list_library_summary_v2(
     user_id: int,
     category: str = "movies",
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: str | list[str] | tuple[str, ...] | None = None,
+    quality: str | list[str] | tuple[str, ...] | None = None,
     sort: str | None = None,
     scan_in_progress: bool = False,
     prewarm_candidates: list[tuple[int, Path]] | None = None,
@@ -1105,8 +1156,8 @@ def search_library(
     query: str,
     category: str = "movies",
     source: str | None = None,
-    genre: str | None = None,
-    quality: str | None = None,
+    genre: str | list[str] | tuple[str, ...] | None = None,
+    quality: str | list[str] | tuple[str, ...] | None = None,
     sort: str | None = None,
 ) -> dict[str, object]:
     normalized_category = normalize_library_category(category)
@@ -1177,6 +1228,7 @@ def search_library(
         list(visible_rows),
         {
             **arrange,
+            "genres": [],
             "genre": None,
         },
     )

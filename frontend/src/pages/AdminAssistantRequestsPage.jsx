@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { LoadingView } from "../components/LoadingView";
+import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
 import { apiRequest } from "../lib/api";
 import { formatDate } from "../lib/format";
 
@@ -51,7 +52,7 @@ export function AdminAssistantRequestsPage() {
                 Safe placeholder workflow only. No model execution or privileged actions run from this screen.
               </p>
             </div>
-            <Link aria-label="Back to Admin Panel" className="assistant-back-button" to="/admin">&lt;</Link>
+            <DesktopBackToLibraryButton />
           </div>
           {error ? <p className="form-error">{error}</p> : null}
         </section>

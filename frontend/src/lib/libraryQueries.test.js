@@ -43,8 +43,8 @@ describe("library query identity", () => {
       role: "admin",
       category: "anime",
       source: "cloud",
-      genre: "Adventure",
-      quality: "gold",
+      genres: ["adventure"],
+      qualities: ["gold"],
       sort: "az",
       query: "Akira",
     });
