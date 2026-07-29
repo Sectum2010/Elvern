@@ -191,8 +191,14 @@ jobs:
           --use-existing-build
           --project chromium-desktop-production
           --project firefox-desktop-production
+          --project chromium-assistant-navigation
+          --project firefox-assistant-navigation
+          --project chromium-settings-navigation
+          --project firefox-settings-navigation
           --project chromium-service-worker-network-guard
           --project firefox-service-worker-network-guard
+          --project chromium-wss-network-guard
+          --project firefox-wss-network-guard
 
       - name: Upload sanitized browser failure artifacts
         if: failure()

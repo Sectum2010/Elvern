@@ -7,6 +7,10 @@ from backend.app.services import library_hidden_service
 from backend.app.services.library_hidden_service import (
     hide_media_item_for_user,
     set_hidden_media_item_scope,
+    show_media_item_for_user,
+)
+from backend.app.services.local_library_source_service import (
+    ensure_current_shared_local_source_binding,
 )
 
 
@@ -41,6 +45,41 @@ def _insert_media_item(settings, *, suffix: str) -> int:
         )
         connection.commit()
         return int(cursor.lastrowid)
+
+
+def _insert_copy_pair(settings) -> tuple[int, int]:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        source_id = ensure_current_shared_local_source_binding(
+            settings,
+            connection=connection,
+        )
+        item_ids = []
+        for resolution, width, height in (("1080p", 1920, 1080), ("720p", 1280, 720)):
+            cursor = connection.execute(
+                """
+                INSERT INTO media_items (
+                    title, original_filename, file_path, source_kind,
+                    library_source_id, file_size, file_mtime, width, height,
+                    year, created_at, updated_at, last_scanned_at
+                ) VALUES (
+                    'Movie A', ?, ?, 'local', ?, 1, 1, ?, ?, 2026, ?, ?, ?
+                )
+                """,
+                (
+                    f"Movie.A.2026.{resolution}.BluRay.mkv",
+                    f"/safe/movie-a-{resolution}.mkv",
+                    source_id,
+                    width,
+                    height,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            item_ids.append(int(cursor.lastrowid))
+        connection.commit()
+    return item_ids[0], item_ids[1]
 
 
 def _scope_truth(settings, *, item_id: int, user_id: int = 1) -> dict[str, object]:
@@ -160,6 +199,63 @@ def test_hidden_scope_endpoint_requires_admin_and_validates_scope(
         json={"target_scope": "global"},
     )
     assert missing.status_code == 404
+
+
+def test_hidden_scope_service_rejects_invalid_scope_before_database_access(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    def fail_if_opened(*_args, **_kwargs):
+        raise AssertionError("database must not be opened for an invalid scope")
+
+    monkeypatch.setattr(library_hidden_service, "get_connection", fail_if_opened)
+
+    with pytest.raises(ValueError, match="invalid_scope"):
+        _set_scope(initialized_settings, item_id=1, target_scope="shared")
+
+
+def test_hidden_copy_scope_is_independent_for_matching_1080p_and_720p_copies(
+    client,
+    initialized_settings,
+    admin_credentials,
+) -> None:
+    _login(client, **admin_credentials)
+    copy_1080p, copy_720p = _insert_copy_pair(initialized_settings)
+    settings_response = client.patch(
+        "/api/user-settings",
+        json={"hide_duplicate_movies": False},
+    )
+    assert settings_response.status_code == 200
+
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=copy_1080p)
+    library_after_1080p_hide = client.get("/api/library")
+    assert library_after_1080p_hide.status_code == 200
+    visible_ids = {int(item["id"]) for item in library_after_1080p_hide.json()["items"]}
+    assert copy_1080p not in visible_ids
+    assert copy_720p in visible_ids
+
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=copy_720p)
+    personal_list = client.get("/api/user-hidden-items")
+    assert personal_list.status_code == 200
+    assert {int(item["id"]) for item in personal_list.json()["items"]}.issuperset(
+        {copy_1080p, copy_720p}
+    )
+
+    _set_scope(initialized_settings, item_id=copy_1080p, target_scope="global")
+    assert _scope_truth(initialized_settings, item_id=copy_1080p)["global_item_at"] is not None
+    assert _scope_truth(initialized_settings, item_id=copy_1080p)["personal_item_at"] is None
+    sibling_truth = _scope_truth(initialized_settings, item_id=copy_720p)
+    assert sibling_truth["personal_item_at"] is not None
+    assert sibling_truth["global_item_at"] is None
+
+    _set_scope(initialized_settings, item_id=copy_1080p, target_scope="personal")
+    sibling_after_reverse = _scope_truth(initialized_settings, item_id=copy_720p)
+    assert sibling_after_reverse["personal_item_at"] == sibling_truth["personal_item_at"]
+    assert sibling_after_reverse["global_item_at"] is None
+
+    show_media_item_for_user(initialized_settings, user_id=1, item_id=copy_1080p)
+    assert _scope_truth(initialized_settings, item_id=copy_1080p)["personal_item_at"] is None
+    assert _scope_truth(initialized_settings, item_id=copy_720p)["personal_item_at"] is not None
 
 
 @pytest.mark.parametrize(

@@ -23,12 +23,15 @@ async function proxyControl(path, init) {
 
 test("browser-level authority blocks a Service Worker external fetch", async ({
   page,
-  baseURL,
 }) => {
+  const fixtureOrigin = process.env.ELVERN_PHASE7_SW_FIXTURE_ORIGIN;
+  if (!fixtureOrigin) {
+    throw new Error("The independent Service Worker fixture origin is required.");
+  }
   await proxyControl("/__elvern_network_guard_clear", { method: "POST" });
   try {
-    await page.goto("network-guard-fixture/index.html");
-    const scriptUrl = `${baseURL}network-guard-fixture/service-worker.js`;
+    await page.goto(`${fixtureOrigin}/index.html`);
+    const scriptUrl = `${fixtureOrigin}/service-worker.js`;
     const blocked = await page.evaluate(async ({ url }) => {
       const registration = await navigator.serviceWorker.register(url, {
         scope: new URL("./", url).pathname,

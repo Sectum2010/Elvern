@@ -630,6 +630,35 @@ def _repair_mode(path: Path, repairs: list[_ModeRepair]) -> None:
         os.fsync(handle.fileno())
 
 
+def _remove_created_destination_after_rollback(
+    destination: Path,
+    destination_identity: tuple[int, int],
+    lock: _AuthorityMutationLock,
+) -> list[str]:
+    if not lock.is_owned():
+        return ["authority lock ownership changed before destination cleanup"]
+    try:
+        metadata = os.lstat(destination)
+    except OSError as exc:
+        return [f"destination stat: {type(exc).__name__}"]
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_dev, metadata.st_ino) != destination_identity
+    ):
+        return ["destination identity changed before cleanup"]
+    if _path_entry_exists(destination / MANIFEST_NAME):
+        return ["destination manifest remained during cleanup"]
+    try:
+        if any(destination.iterdir()):
+            return ["destination is not empty after cleanup"]
+        destination.rmdir()
+        _fsync_directory(destination.parent)
+    except (AuthorityError, OSError) as exc:
+        return [f"destination cleanup: {type(exc).__name__}"]
+    return []
+
+
 def _migrate_authority_locked(
     source: Path,
     destination: Path,
@@ -687,13 +716,20 @@ def _migrate_authority_locked(
             print(f"Repaired immutable mode on {len(repairs)} runtime authority files.")
             return 0
 
-    if not destination.exists():
-        destination.mkdir(mode=0o755, parents=False, exist_ok=False)
-        _fsync_directory(destination.parent)
-
+    destination_created = False
+    destination_identity: tuple[int, int] | None = None
     created: list[Path] = []
     repaired_modes: list[_ModeRepair] = []
     try:
+        if not destination.exists():
+            destination.mkdir(mode=0o755, parents=False, exist_ok=False)
+            destination_created = True
+            created_metadata = os.lstat(destination)
+            if stat.S_ISLNK(created_metadata.st_mode) or not stat.S_ISDIR(created_metadata.st_mode):
+                raise AuthorityError("Runtime release destination is unsafe.")
+            destination_identity = (created_metadata.st_dev, created_metadata.st_ino)
+            _fsync_directory(destination.parent)
+
         for index, source_file in enumerate(all_source_files):
             final_path = destination / source_file.name
             if _path_entry_exists(final_path):
@@ -720,6 +756,17 @@ def _migrate_authority_locked(
                         f"{path.name}: {type(cleanup_exc).__name__}"
                     )
             cleanup_failures.extend(_restore_modes(repaired_modes, destination, lock))
+            if destination_created:
+                if destination_identity is None:
+                    cleanup_failures.append(
+                        "destination identity was not captured before cleanup"
+                    )
+                else:
+                    cleanup_failures.extend(_remove_created_destination_after_rollback(
+                        destination,
+                        destination_identity,
+                        lock,
+                    ))
         else:
             cleanup_failures.append("authority lock ownership changed before cleanup")
         if cleanup_failures:

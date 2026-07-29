@@ -11,10 +11,12 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
+  classifyConnectAuthority,
   classifyProxyTarget,
   createNetworkGuardControlToken,
   createPhase7BuildContract,
   PHASE7_BUILD_CONTRACT,
+  startNetworkGuardFixtureServer,
   startLoopbackOnlyProxy,
   verifyPhase7BuildContract,
 } from "./cross-browser-runner-core.mjs";
@@ -111,13 +113,14 @@ describe("phase7 production build contract", () => {
     expect(() => verifyPhase7BuildContract(second)).toThrow(/asset contract/i);
   });
 
-  test("rejects symlink assets and ignores only the runtime network fixture", () => {
+  test("rejects symlink assets and treats any extra fixture as a contract change", () => {
     const frontendDirectory = frontendFixture();
+    writeValidContract(frontendDirectory);
     const fixture = join(frontendDirectory, "dist", "network-guard-fixture");
     mkdirSync(fixture);
     writeFileSync(join(fixture, "service-worker.js"), "fixture\n");
-    writeValidContract(frontendDirectory);
-    expect(() => verifyPhase7BuildContract(frontendDirectory)).not.toThrow();
+    expect(() => verifyPhase7BuildContract(frontendDirectory)).toThrow(/asset contract/i);
+    rmSync(fixture, { recursive: true });
     symlinkSync(
       join(frontendDirectory, "dist", "index.html"),
       join(frontendDirectory, "dist", "assets", "linked.js"),
@@ -133,6 +136,8 @@ describe("phase7 production build contract", () => {
     expect(runner).toContain('rawArguments.includes("--use-existing-build")');
     expect(runner).toContain('resolve(scriptDirectory, "build-phase7-production.mjs")');
     expect(runner).toContain("verifyPhase7BuildContract(frontendDirectory)");
+    expect(runner).not.toContain('frontendDirectory, "dist", "network-guard-fixture"');
+    expect(runner).not.toContain("writeFileSync(");
   });
 });
 
@@ -212,6 +217,56 @@ describe("browser-level network authority", () => {
       )).status).toBe(400);
     } finally {
       await proxy.close();
+    }
+  });
+
+  test("CONNECT authority is exact and reference-counted across https and wss origins", async () => {
+    const token = createNetworkGuardControlToken();
+    const proxy = await startLoopbackOnlyProxy({ controlToken: token });
+    const control = `http://127.0.0.1:${proxy.port}`;
+    const request = (path, origin) => fetch(`${control}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Elvern-Network-Guard-Token": token,
+      },
+      body: JSON.stringify({ origin }),
+    });
+    try {
+      await request("/__elvern_network_guard_register", "https://127.0.0.1:7443");
+      await request("/__elvern_network_guard_register", "wss://127.0.0.1:7443");
+      expect(classifyConnectAuthority("127.0.0.1:7443", {
+        allowedConnectAuthorities: proxy.allowedConnectAuthorities,
+      }).allowed).toBe(true);
+      expect(classifyConnectAuthority("127.0.0.1:7444", {
+        allowedConnectAuthorities: proxy.allowedConnectAuthorities,
+      }).allowed).toBe(false);
+      const malformed = classifyConnectAuthority(
+        "secret@127.0.0.1:7443?token=hidden",
+        { allowedConnectAuthorities: proxy.allowedConnectAuthorities },
+      );
+      expect(malformed.allowed).toBe(false);
+      expect(JSON.stringify(malformed.diagnostic)).not.toContain("secret");
+      expect(JSON.stringify(malformed.diagnostic)).not.toContain("token");
+
+      await request("/__elvern_network_guard_unregister", "wss://127.0.0.1:7443");
+      expect(proxy.allowedConnectAuthorities.get("127.0.0.1:7443")).toBe(1);
+      await request("/__elvern_network_guard_unregister", "https://127.0.0.1:7443");
+      expect(proxy.allowedConnectAuthorities.has("127.0.0.1:7443")).toBe(false);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  test("independent Service Worker fixture runs without writing a dist directory", async () => {
+    const fixture = await startNetworkGuardFixtureServer();
+    try {
+      expect((await fetch(`${fixture.origin}/index.html`)).status).toBe(200);
+      expect(await (await fetch(`${fixture.origin}/service-worker.js`)).text())
+        .toContain('self.addEventListener("message"');
+    } finally {
+      await fixture.close();
+      await fixture.close();
     }
   });
 

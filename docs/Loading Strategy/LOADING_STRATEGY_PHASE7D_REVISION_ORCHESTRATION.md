@@ -73,7 +73,7 @@ role keeps both its object reference and `dataUpdatedAt`.
 The Library query-key schema is unchanged. It does not currently carry the
 revision query's age/assistant permission identity, so the cache-level second
 defense compares user ID and role. The synchronizer effect identity still
-contains user ID, normalized role, age credential, and assistant-beta state.
+contains user ID, normalized role, age credential, and Assistant access state.
 Auth identity changes clear protected queries, while a lifecycle generation
 check rejects old work after every awaited boundary and before patch,
 invalidation, or baseline commit.

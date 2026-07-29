@@ -333,7 +333,23 @@ def test_assistant_attachment_view_permissions_remain_unchanged(initialized_sett
     _login(client, username=str(owner["username"]), password=owner_password)
     disabled_access_response = client.get(f"/api/assistant/attachments/{attachment_id}")
     assert disabled_access_response.status_code == 403
-    assert disabled_access_response.json()["detail"] == "Assistant (Beta) is not enabled for this account"
+    assert disabled_access_response.json()["detail"] == "Assistant is not enabled for this account"
+
+
+def test_admin_has_assistant_access_without_account_flag(
+    initialized_settings,
+    client,
+) -> None:
+    _login(
+        client,
+        username=initialized_settings.admin_username,
+        password=initialized_settings.admin_bootstrap_password or "",
+    )
+
+    response = client.get("/api/assistant/requests")
+
+    assert response.status_code == 200
+    assert response.json() == {"requests": []}
 
 
 def test_assistant_external_open_new_ticket_stores_hmac_and_opens(

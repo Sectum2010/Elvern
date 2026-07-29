@@ -422,11 +422,11 @@ Media/
 
 After renaming folders, open **Library → Rescan** so Elvern refreshes the tabs and grouped rows.
 
-### 🤖 The Assistant workflow *(beta)*
+### 🤖 The Assistant workflow
 
 Family members can submit structured requests right inside Elvern — bug reports, improvement suggestions, account requests, library issues, playback issues, security concerns. The admin gets a triage queue with urgency levels, risk ratings, reversibility-impact tagging, and proposed-action records. Each request supports up to 8 MB of attachments (screenshots, log snippets) with a separate viewer page.
 
-Currently in beta and gated by a per-user access flag — admins decide who gets to use it.
+Admins always have access. Admins decide which standard users can use it through the existing account setting.
 
 ### 🧰 Operational extras
 
@@ -667,7 +667,7 @@ flowchart TB
             DesktopAPI[desktop handoff<br/>signed elvern-vlc:// tokens]
             Cloud[cloud library<br/>Google Drive OAuth2]
             AdminSvc[admin · audit · events]
-            Assistant[assistant beta]
+            Assistant[assistant requests]
             Posters[poster display cache<br/>Pillow]
         end
 
@@ -756,7 +756,7 @@ The repo carries substantial internal documentation under `docs/`:
 
 The admin console is the operational hub for the family deployment:
 
-- 👥 **User management** — create, disable, re-enable, delete; per-user role (`admin` / `standard_user`) and per-user assistant beta access
+- 👥 **User management** — create, disable, re-enable, delete; per-user role (`admin` / `standard_user`) and per-user Assistant access
 - 🔑 **Session control** — list every live session across the system, see last-activity time and source IP, revoke any session in one click
 - 📜 **Audit log** — durable trail of logins, password changes, session revocations, account state changes, playback handoffs, and assistant triage events
 - 📡 **Live events** — Server-Sent-Events stream that surfaces real-time admin events (sessions opening, transcodes starting, etc.)
@@ -765,7 +765,7 @@ The admin console is the operational hub for the family deployment:
 </td>
 <td width="50%" valign="top">
 
-### Assistant workflow *(beta)*
+### Assistant workflow
 
 A structured request queue inside Elvern itself. Family members can submit:
 
@@ -779,7 +779,7 @@ A structured request queue inside Elvern itself. Family members can submit:
 
 Each request supports up to **8 MB of attachments** (screenshots, log snippets) viewed in a dedicated attachment viewer. Admins triage with urgency levels (`low` / `normal` / `high`), risk ratings (`low` / `medium` / `high` / `critical`), reversibility-impact tagging, and a record of proposed actions (backup checkpoint, library rescan, service restart, prepare-patch sandbox, change-record draft, admin notification).
 
-> Beta-gated by `assistant_beta_enabled_for_user` — admins decide who gets it.
+> Admins always have Assistant access. Admins decide which standard users receive access through the existing account setting.
 
 </td>
 </tr>

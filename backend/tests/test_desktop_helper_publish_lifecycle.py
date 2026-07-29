@@ -339,7 +339,112 @@ def test_runtime_authority_tool_rejects_conflict_and_cleans_failed_copy(
         env=failure_env,
     )
     assert interrupted.returncode != 0
-    assert list(failed.iterdir()) == []
+    assert not failed.exists()
+
+
+def test_runtime_created_destination_cleanup_preserves_foreign_or_replaced_directories(
+    tmp_path: Path,
+) -> None:
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    metadata = destination.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    lock = module._AuthorityMutationLock(destination)
+    lock.acquire()
+    try:
+        (destination / "foreign.txt").write_text("foreign", encoding="utf-8")
+        failures = module._remove_created_destination_after_rollback(
+            destination,
+            identity,
+            lock,
+        )
+        assert failures == ["destination is not empty after cleanup"]
+        assert (destination / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+
+        (destination / "foreign.txt").unlink()
+        displaced = tmp_path / "displaced-runtime"
+        os.replace(destination, displaced)
+        destination.mkdir()
+        failures = module._remove_created_destination_after_rollback(
+            destination,
+            identity,
+            lock,
+        )
+        assert failures == ["destination identity changed before cleanup"]
+        assert destination.is_dir()
+    finally:
+        assert lock.release()
+
+
+def test_runtime_created_destination_cleanup_requires_lock_ownership(
+    tmp_path: Path,
+) -> None:
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    metadata = destination.stat()
+
+    class LostLock:
+        @staticmethod
+        def is_owned() -> bool:
+            return False
+
+    failures = module._remove_created_destination_after_rollback(
+        destination,
+        (metadata.st_dev, metadata.st_ino),
+        LostLock(),
+    )
+
+    assert failures == ["authority lock ownership changed before destination cleanup"]
+    assert destination.is_dir()
+
+
+def test_runtime_created_destination_cleanup_covers_parent_fsync_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    payload = module._validate(
+        source,
+        expected_origin=manifest["bound_origin_sha256"],
+    )
+    package_names = module._package_names(payload)
+    source_files = [source / name for name in package_names]
+    all_source_files = [*source_files, source / "release-manifest.json"]
+    destination = tmp_path / "runtime"
+    original_fsync_directory = module._fsync_directory
+    injected = False
+
+    def fail_first_created_parent_fsync(path: Path) -> None:
+        nonlocal injected
+        if not injected and destination.exists() and path == destination.parent:
+            injected = True
+            raise OSError("injected parent fsync failure")
+        original_fsync_directory(path)
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_first_created_parent_fsync)
+    lock = module._AuthorityMutationLock(destination)
+    lock.acquire()
+    try:
+        with pytest.raises(OSError, match="injected parent fsync failure"):
+            module._migrate_authority_locked(
+                source,
+                destination,
+                manifest["bound_origin_sha256"],
+                payload,
+                all_source_files,
+                source_files,
+                lock,
+            )
+        assert injected is True
+        assert not destination.exists()
+    finally:
+        assert lock.release()
 
 
 def test_runtime_authority_tool_reports_invalid_and_rejects_origin_or_symlink(
@@ -883,7 +988,7 @@ def test_runtime_authority_tool_activates_manifest_last_and_cleans_packages(
     )
 
     assert interrupted.returncode != 0
-    assert list(destination.iterdir()) == []
+    assert not destination.exists()
     assert (source / "release-manifest.json").is_file()
     assert all((source / row["filename"]).is_file() for row in manifest["packages"])
 

@@ -12,6 +12,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
@@ -28,7 +29,6 @@ export const PHASE7_BUILD_CONTRACT = Object.freeze({
   build_kind: "phase7-production",
 });
 export const PHASE7_BUILD_CONTRACT_FILENAME = ".elvern-build-contract.json";
-const PHASE7_EXCLUDED_PREFIXES = Object.freeze(["network-guard-fixture/"]);
 const NETWORK_GUARD_CONTROL_HEADER = "x-elvern-network-guard-token";
 
 
@@ -117,8 +117,7 @@ function hashRegularFile(path) {
 
 
 function isExcludedPhase7Asset(relativePath) {
-  return relativePath === PHASE7_BUILD_CONTRACT_FILENAME
-    || PHASE7_EXCLUDED_PREFIXES.some((prefix) => relativePath.startsWith(prefix));
+  return relativePath === PHASE7_BUILD_CONTRACT_FILENAME;
 }
 
 
@@ -264,15 +263,254 @@ export function createNetworkGuardControlToken() {
 }
 
 
+function connectAuthorityForOrigin(origin) {
+  const url = new URL(origin);
+  if (!["https:", "wss:"].includes(url.protocol)) {
+    return null;
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const port = Number(url.port || 443);
+  return `${hostname}:${port}`;
+}
+
+
+function parseConnectAuthority(authority) {
+  const rawAuthority = String(authority || "");
+  const ipv4Match = rawAuthority.match(/^127\.0\.0\.1:(\d{1,5})$/);
+  const ipv6Match = rawAuthority.match(/^\[::1\]:(\d{1,5})$/);
+  const match = ipv4Match || ipv6Match;
+  if (!match) {
+    return null;
+  }
+  const hostname = ipv4Match ? "127.0.0.1" : "::1";
+  const port = Number(match[1]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+  return { hostname, port, key: `${hostname}:${port}` };
+}
+
+
+function sanitizeConnectDiagnosticAuthority(authority) {
+  const rawAuthority = String(authority || "").split(/[/?#]/, 1)[0];
+  try {
+    const parsed = new URL(`https://${rawAuthority}/`);
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const port = Number(parsed.port || 443);
+    if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
+      return "invalid";
+    }
+    return hostname === "::1" ? `[::1]:${port}` : `${hostname}:${port}`;
+  } catch {
+    return "invalid";
+  }
+}
+
+
+export function classifyConnectAuthority(
+  authority,
+  { allowedConnectAuthorities = new Map() } = {},
+) {
+  const parsed = parseConnectAuthority(authority);
+  const allowed = parsed !== null
+    && Number(allowedConnectAuthorities.get(parsed.key) || 0) > 0;
+  const diagnosticAuthority = parsed
+    ? parsed.key
+    : sanitizeConnectDiagnosticAuthority(authority);
+  return {
+    allowed,
+    parsed,
+    diagnostic: allowed ? null : {
+      scheme: "connect",
+      origin: `connect://${diagnosticAuthority}`,
+      pathname_hash: createHash("sha256").update("/").digest("hex").slice(0, 12),
+    },
+  };
+}
+
+
+export async function startNetworkGuardFixtureServer() {
+  const sockets = new Set();
+  const trackSocket = (socket) => {
+    if (sockets.has(socket)) return;
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  };
+  const page = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Network guard fixture</title></head><body></body></html>\n";
+  const serviceWorker = [
+    'self.addEventListener("install", () => self.skipWaiting());',
+    'self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));',
+    'self.addEventListener("message", async (event) => {',
+    "  try {",
+    '    const target = event.data?.url || "http://elvern-guard-test.invalid/service-worker-probe?token=hidden";',
+    "    await fetch(target);",
+    "    event.source.postMessage({ blocked: false });",
+    "  } catch {",
+    "    event.source.postMessage({ blocked: true });",
+    "  }",
+    "});",
+    "",
+  ].join("\n");
+  const server = http.createServer((request, response) => {
+    const pathname = new URL(request.url || "/", "http://127.0.0.1").pathname;
+    if (pathname === "/" || pathname === "/index.html") {
+      response.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      response.end(page);
+      return;
+    }
+    if (pathname === "/service-worker.js") {
+      response.writeHead(200, {
+        "Content-Type": "text/javascript; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Service-Worker-Allowed": "/",
+      });
+      response.end(serviceWorker);
+      return;
+    }
+    response.writeHead(404, { "Cache-Control": "no-store" });
+    response.end();
+  });
+  server.on("connection", (socket) => {
+    trackSocket(socket);
+  });
+  await new Promise((resolvePromise, rejectPromise) => {
+    server.once("error", rejectPromise);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? Number(address.port) : 0;
+  if (!port) {
+    server.close();
+    throw new Error("Network guard fixture server did not reserve a port.");
+  }
+  let closePromise = null;
+  const close = () => {
+    if (!closePromise) {
+      closePromise = new Promise((resolvePromise) => {
+        for (const socket of sockets) socket.destroy();
+        if (!server.listening) {
+          resolvePromise();
+          return;
+        }
+        server.close(() => resolvePromise());
+      });
+    }
+    return closePromise;
+  };
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    close,
+  };
+}
+
+
+export async function startTlsWebSocketFixtureServer({ certificatePath, keyPath }) {
+  const sockets = new Set();
+  const trackSocket = (socket) => {
+    if (sockets.has(socket)) return;
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  };
+  const server = https.createServer({
+    cert: readFileSync(certificatePath),
+    key: readFileSync(keyPath),
+  }, (_request, response) => {
+    response.writeHead(200, {
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    response.end("ok\n");
+  });
+  server.on("connection", (socket) => {
+    trackSocket(socket);
+  });
+  server.on("upgrade", (request, socket) => {
+    const websocketKey = String(request.headers["sec-websocket-key"] || "");
+    if (!websocketKey) {
+      socket.destroy();
+      return;
+    }
+    const accept = createHash("sha1")
+      .update(`${websocketKey}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    socket.write([
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${accept}`,
+      "",
+      "",
+    ].join("\r\n"));
+  });
+  await new Promise((resolvePromise, rejectPromise) => {
+    server.once("error", rejectPromise);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? Number(address.port) : 0;
+  if (!port) {
+    server.close();
+    throw new Error("TLS WebSocket fixture server did not reserve a port.");
+  }
+  let closePromise = null;
+  const close = () => {
+    if (!closePromise) {
+      closePromise = new Promise((resolvePromise) => {
+        for (const socket of sockets) socket.destroy();
+        if (!server.listening) {
+          resolvePromise();
+          return;
+        }
+        server.close(() => resolvePromise());
+      });
+    }
+    return closePromise;
+  };
+  return {
+    origin: `wss://127.0.0.1:${port}`,
+    httpsOrigin: `https://127.0.0.1:${port}`,
+    port,
+    close,
+  };
+}
+
+
 export async function startLoopbackOnlyProxy({
   initialAllowedOrigins = [],
   controlToken = createNetworkGuardControlToken(),
 } = {}) {
   const attempts = [];
+  const sockets = new Set();
+  const trackSocket = (socket) => {
+    if (sockets.has(socket)) return;
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  };
   const initialOrigins = new Set(
     initialAllowedOrigins.map(normalizeRegisteredLoopbackOrigin),
   );
   const allowedOrigins = new Set(initialOrigins);
+  const allowedConnectAuthorities = new Map();
+  const addConnectAuthority = (origin) => {
+    const authority = connectAuthorityForOrigin(origin);
+    if (!authority) return;
+    allowedConnectAuthorities.set(
+      authority,
+      Number(allowedConnectAuthorities.get(authority) || 0) + 1,
+    );
+  };
+  const removeConnectAuthority = (origin) => {
+    const authority = connectAuthorityForOrigin(origin);
+    if (!authority) return;
+    const nextCount = Number(allowedConnectAuthorities.get(authority) || 0) - 1;
+    if (nextCount > 0) allowedConnectAuthorities.set(authority, nextCount);
+    else allowedConnectAuthorities.delete(authority);
+  };
+  for (const origin of initialOrigins) addConnectAuthority(origin);
   const authorizedControlRequest = (request) => (
     typeof request.headers[NETWORK_GUARD_CONTROL_HEADER] === "string"
     && request.headers[NETWORK_GUARD_CONTROL_HEADER] === controlToken
@@ -319,6 +557,7 @@ export async function startLoopbackOnlyProxy({
         sendJson(response, 200, {
           attempts,
           allowed_origins: [...allowedOrigins].sort(),
+          allowed_connect_authorities: [...allowedConnectAuthorities.keys()].sort(),
           initial_allowed_origins: [...initialOrigins].sort(),
         });
         return;
@@ -326,7 +565,11 @@ export async function startLoopbackOnlyProxy({
       if (controlPath === "/__elvern_network_guard_clear" && request.method === "POST") {
         attempts.length = 0;
         allowedOrigins.clear();
-        for (const origin of initialOrigins) allowedOrigins.add(origin);
+        allowedConnectAuthorities.clear();
+        for (const origin of initialOrigins) {
+          allowedOrigins.add(origin);
+          addConnectAuthority(origin);
+        }
         response.writeHead(204, { "Cache-Control": "no-store" });
         response.end();
         return;
@@ -339,9 +582,13 @@ export async function startLoopbackOnlyProxy({
         readControlJson(request, response, (payload) => {
           const origin = normalizeRegisteredLoopbackOrigin(payload?.origin);
           if (controlPath.endsWith("_register")) {
-            allowedOrigins.add(origin);
-          } else if (!initialOrigins.has(origin)) {
+            if (!allowedOrigins.has(origin)) {
+              allowedOrigins.add(origin);
+              addConnectAuthority(origin);
+            }
+          } else if (!initialOrigins.has(origin) && allowedOrigins.has(origin)) {
             allowedOrigins.delete(origin);
+            removeConnectAuthority(origin);
           }
           sendJson(response, 200, { origin });
         });
@@ -379,33 +626,37 @@ export async function startLoopbackOnlyProxy({
       upstreamResponse.once("error", abortDownstream);
       upstreamResponse.pipe(response);
     });
+    upstream.on("socket", (socket) => {
+      trackSocket(socket);
+    });
     upstream.on("error", () => {
       if (!response.headersSent) response.writeHead(502);
       response.end();
     });
     request.pipe(upstream);
   });
+  server.on("connection", (socket) => {
+    trackSocket(socket);
+  });
 
   server.on("connect", (request, clientSocket, head) => {
     const authority = String(request.url || "");
-    const separator = authority.lastIndexOf(":");
-    const rawHost = separator > 0 ? authority.slice(0, separator) : authority;
-    const host = rawHost.replace(/^\[|\]$/g, "");
-    const port = Number(separator > 0 ? authority.slice(separator + 1) : 443);
-    const classification = classifyProxyTarget(`https://${host}:${port}/`, {
-      allowedOrigins,
+    const classification = classifyConnectAuthority(authority, {
+      allowedConnectAuthorities,
     });
-    if (!classification.allowed) {
+    if (!classification.allowed || !classification.parsed) {
       attempts.push(classification.diagnostic);
       clientSocket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       return;
     }
+    const { hostname: host, port } = classification.parsed;
     const upstream = net.connect(port, host, () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length) upstream.write(head);
       upstream.pipe(clientSocket);
       clientSocket.pipe(upstream);
     });
+    trackSocket(upstream);
     upstream.on("error", () => clientSocket.destroy());
   });
 
@@ -442,6 +693,7 @@ export async function startLoopbackOnlyProxy({
       upstream.pipe(socket);
       socket.pipe(upstream);
     });
+    trackSocket(upstream);
     upstream.on("error", () => socket.destroy());
   });
 
@@ -455,11 +707,26 @@ export async function startLoopbackOnlyProxy({
     server.close();
     throw new Error("Loopback-only browser proxy did not reserve a port.");
   }
+  let closePromise = null;
+  const close = () => {
+    if (!closePromise) {
+      closePromise = new Promise((resolvePromise) => {
+        for (const socket of sockets) socket.destroy();
+        if (!server.listening) {
+          resolvePromise();
+          return;
+        }
+        server.close(() => resolvePromise());
+      });
+    }
+    return closePromise;
+  };
   return {
     port,
     attempts,
     allowedOrigins,
+    allowedConnectAuthorities,
     controlToken,
-    close: () => new Promise((resolvePromise) => server.close(resolvePromise)),
+    close,
   };
 }

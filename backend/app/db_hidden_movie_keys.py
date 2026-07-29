@@ -6,6 +6,7 @@ import sqlite3
 from .services.title_normalization import (
     extract_edition_identity_anywhere,
     normalize_title_key,
+    normalize_title_source,
     resolve_title_metadata,
 )
 
@@ -36,10 +37,16 @@ def _build_hidden_movie_key(
             for part in dict.fromkeys([*edition_identity.split("|"), *strict_edition_identity.split("|")])
             if part
         )
-    if not base_title or resolved_year is None:
+    filename_signature = normalize_title_key(
+        normalize_title_source(str(original_filename or "").strip())
+    )
+    if not base_title or resolved_year is None or not filename_signature:
         return None, None, None, edition_identity
     return (
-        f"{normalize_title_key(base_title)}|{resolved_year}|{edition_identity}",
+        (
+            f"{normalize_title_key(base_title)}|{resolved_year}|{edition_identity}"
+            f"|copy:{filename_signature}"
+        ),
         base_title,
         resolved_year,
         edition_identity,

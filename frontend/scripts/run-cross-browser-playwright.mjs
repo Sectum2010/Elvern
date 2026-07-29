@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,7 +8,9 @@ import {
   createNetworkGuardControlToken,
   releaseReservedPort,
   reserveAvailablePort,
+  startNetworkGuardFixtureServer,
   startLoopbackOnlyProxy,
+  startTlsWebSocketFixtureServer,
   verifyPhase7BuildContract,
 } from "./cross-browser-runner-core.mjs";
 
@@ -37,9 +39,10 @@ if (useExistingBuild) {
 }
 const port = await reserveAvailablePort();
 const productionOrigin = `http://127.0.0.1:${port}`;
+const networkGuardFixture = await startNetworkGuardFixtureServer();
 const networkProxyControlToken = createNetworkGuardControlToken();
 const networkProxy = await startLoopbackOnlyProxy({
-  initialAllowedOrigins: [productionOrigin],
+  initialAllowedOrigins: [productionOrigin, networkGuardFixture.origin],
   controlToken: networkProxyControlToken,
 });
 let networkProxyClosePromise;
@@ -65,63 +68,62 @@ const outputDirectory = resolve(
   `playwright-phase7-${prefix}-${port}`,
 );
 mkdirSync(outputDirectory, { recursive: true });
-const serviceWorkerFixtureDirectory = resolve(
-  frontendDirectory,
-  "dist",
-  "network-guard-fixture",
-);
-const serviceWorkerFixturePath = resolve(
-  serviceWorkerFixtureDirectory,
-  "service-worker.js",
-);
-const serviceWorkerFixturePagePath = resolve(
-  serviceWorkerFixtureDirectory,
-  "index.html",
-);
-mkdirSync(serviceWorkerFixtureDirectory, { recursive: true });
-writeFileSync(
-  serviceWorkerFixturePagePath,
-  "<!doctype html><html><head><meta charset=\"utf-8\"><title>Network guard fixture</title></head><body></body></html>\n",
-  { encoding: "utf8", mode: 0o600 },
-);
-writeFileSync(
-  serviceWorkerFixturePath,
-  [
-    'self.addEventListener("install", () => self.skipWaiting());',
-    'self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));',
-    'self.addEventListener("message", async (event) => {',
-    "  try {",
-    '    const target = event.data?.url || "http://elvern-guard-test.invalid/service-worker-probe?token=hidden";',
-    "    await fetch(target);",
-    "    event.source.postMessage({ blocked: false });",
-    "  } catch {",
-    "    event.source.postMessage({ blocked: true });",
-    "  }",
-    "});",
-    "",
-  ].join("\n"),
-  { encoding: "utf8", mode: 0o600 },
-);
+const tlsKeyPath = resolve(outputDirectory, "network-guard-wss.key");
+const tlsCertificatePath = resolve(outputDirectory, "network-guard-wss.crt");
+const tlsCertificate = spawnSync("openssl", [
+  "req",
+  "-x509",
+  "-newkey",
+  "rsa:2048",
+  "-nodes",
+  "-keyout",
+  tlsKeyPath,
+  "-out",
+  tlsCertificatePath,
+  "-subj",
+  "/CN=127.0.0.1",
+  "-addext",
+  "subjectAltName=IP:127.0.0.1",
+  "-days",
+  "1",
+], {
+  cwd: outputDirectory,
+  encoding: "utf8",
+});
+if (tlsCertificate.error || tlsCertificate.status !== 0) {
+  throw new Error(
+    tlsCertificate.error
+      ? `Unable to create local WSS fixture certificate: ${tlsCertificate.error.message}`
+      : `Unable to create local WSS fixture certificate: ${tlsCertificate.stderr.trim()}`,
+  );
+}
+const tlsWebSocketFixture = await startTlsWebSocketFixtureServer({
+  certificatePath: tlsCertificatePath,
+  keyPath: tlsKeyPath,
+});
 verifyPhase7BuildContract(frontendDirectory);
-let serviceWorkerFixtureRemoved = false;
-const removeServiceWorkerFixture = () => {
-  if (serviceWorkerFixtureRemoved) {
-    return;
-  }
-  serviceWorkerFixtureRemoved = true;
-  rmSync(serviceWorkerFixtureDirectory, { recursive: true, force: true });
-  verifyPhase7BuildContract(frontendDirectory);
-};
 const cleanupLocalResources = () => {
-  removeServiceWorkerFixture();
   releasePort();
 };
+let child = null;
 process.once("exit", cleanupLocalResources);
-process.once("SIGINT", () => {
+process.once("SIGINT", async () => {
+  child?.kill("SIGINT");
+  await Promise.all([
+    closeNetworkProxy(),
+    networkGuardFixture.close(),
+    tlsWebSocketFixture.close(),
+  ]);
   cleanupLocalResources();
   process.exit(130);
 });
-process.once("SIGTERM", () => {
+process.once("SIGTERM", async () => {
+  child?.kill("SIGTERM");
+  await Promise.all([
+    closeNetworkProxy(),
+    networkGuardFixture.close(),
+    tlsWebSocketFixture.close(),
+  ]);
   cleanupLocalResources();
   process.exit(143);
 });
@@ -130,7 +132,7 @@ console.log(`Cross-browser Playwright: port=${port} prefix=${prefix}`);
 console.log(`External-network authority: loopback proxy port=${networkProxy.port}`);
 console.log(`Cross-browser output: ${outputDirectory}`);
 
-const child = spawn(
+child = spawn(
   process.execPath,
   [cliPath, "test", "--config", "playwright.cross-browser.config.js", ...playwrightArguments],
   {
@@ -145,23 +147,33 @@ const child = spawn(
       ELVERN_PHASE7_NETWORK_PROXY: `http://127.0.0.1:${networkProxy.port}`,
       ELVERN_PHASE7_NETWORK_PROXY_CONTROL: `http://127.0.0.1:${networkProxy.port}`,
       ELVERN_PHASE7_NETWORK_PROXY_CONTROL_TOKEN: networkProxyControlToken,
+      ELVERN_PHASE7_SW_FIXTURE_ORIGIN: networkGuardFixture.origin,
+      ELVERN_PHASE7_WSS_FIXTURE_ORIGIN: tlsWebSocketFixture.origin,
+      ELVERN_PHASE7_HTTPS_FIXTURE_ORIGIN: tlsWebSocketFixture.httpsOrigin,
     },
     stdio: "inherit",
   },
 );
 
 child.once("error", async (error) => {
-  removeServiceWorkerFixture();
   releasePort();
-  await closeNetworkProxy();
+  await Promise.all([
+    closeNetworkProxy(),
+    networkGuardFixture.close(),
+    tlsWebSocketFixture.close(),
+  ]);
   console.error(`Unable to start Playwright: ${error.message}`);
   process.exitCode = 1;
 });
 child.once("exit", async (code, signal) => {
-  removeServiceWorkerFixture();
   releasePort();
   const unexpectedAttempts = [...networkProxy.attempts];
-  await closeNetworkProxy();
+  await Promise.all([
+    closeNetworkProxy(),
+    networkGuardFixture.close(),
+    tlsWebSocketFixture.close(),
+  ]);
+  verifyPhase7BuildContract(frontendDirectory);
   if (signal) {
     console.error(`Playwright stopped by signal ${signal}.`);
     process.exitCode = 1;

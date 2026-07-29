@@ -1,5 +1,6 @@
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { canAccessAssistant } from "../lib/assistantAccess";
 import { LoadingView } from "./LoadingView";
 
 
@@ -18,7 +19,7 @@ export function ProtectedRoute({ children, requireAdmin = false, requireAssistan
     return <Navigate to="/library" replace />;
   }
 
-  if (requireAssistant && !user.assistant_beta_enabled) {
+  if (requireAssistant && !canAccessAssistant(user)) {
     return <Navigate to="/library" replace />;
   }
 

@@ -58,7 +58,6 @@ const ADMIN_SECTIONS = [
   { key: "security", label: "Security", icon: "security" },
   { key: "logs", label: "Logs", icon: "logs" },
   { key: "recovery", label: "Recovery", icon: "recovery" },
-  { key: "assistant", label: "Assistant (Beta)", icon: "assistant" },
 ];
 const ADMIN_SECTION_KEYS = ADMIN_SECTIONS.map((section) => section.key);
 const ADMIN_ACTIVE_SECTION_STORAGE_KEY = "elvern:admin-active-section";
@@ -586,13 +585,6 @@ function AdminSectionIcon({ name }) {
       </svg>
     );
   }
-  if (name === "assistant") {
-    return (
-      <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
-        <path d="M12 4l1.8 4.2L18 10l-4.2 1.8L12 16l-1.8-4.2L6 10l4.2-1.8zM18.5 4.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6zM18.5 14.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
-      </svg>
-    );
-  }
   if (name === "recovery") {
     return (
       <svg aria-hidden="true" className="admin-nav-card__icon-svg" viewBox="0 0 24 24">
@@ -776,19 +768,52 @@ export function AdminPage() {
   const [expandedSection, setExpandedSection] = useState(null);
 
   useEffect(() => {
+    try {
+      if (window.localStorage.getItem(ADMIN_ACTIVE_SECTION_STORAGE_KEY) === "assistant") {
+        writePersistedPanelState(
+          ADMIN_ACTIVE_SECTION_STORAGE_KEY,
+          "panel",
+          ADMIN_SECTION_KEYS,
+        );
+      }
+    } catch {
+      // Section persistence is optional; the in-memory default remains usable.
+    }
+  }, []);
+
+  useEffect(() => {
     const params = new URLSearchParams(location.search);
     const requestedSection = params.get("section");
     if (!requestedSection) {
       return;
     }
+    if (requestedSection === "assistant") {
+      params.set("section", "panel");
+      writePersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, "panel", ADMIN_SECTION_KEYS);
+      setActiveSection("panel");
+      setExpandedSection("panel");
+      navigate(`${location.pathname}?${params.toString()}${location.hash || ""}`, {
+        replace: true,
+        state: location.state,
+      });
+      return;
+    }
     const isKnownSection = ADMIN_SECTIONS.some((section) => section.key === requestedSection);
     if (!isKnownSection) {
+      params.set("section", "panel");
+      writePersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, "panel", ADMIN_SECTION_KEYS);
+      setActiveSection("panel");
+      setExpandedSection("panel");
+      navigate(`${location.pathname}?${params.toString()}${location.hash || ""}`, {
+        replace: true,
+        state: location.state,
+      });
       return;
     }
     writePersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, requestedSection, ADMIN_SECTION_KEYS);
     setActiveSection(requestedSection);
     setExpandedSection(requestedSection);
-  }, [location.search]);
+  }, [location.hash, location.pathname, location.search, location.state, navigate]);
 
   const hasAnotherEnabledAdmin = useMemo(
     () => usersPayload.some((entry) => entry.id !== user?.id && entry.role === "admin" && entry.enabled),
@@ -1537,7 +1562,7 @@ export function AdminPage() {
   }, [activeSection, recoveryLoaded, recoveryLoading]);
 
   useEffect(() => {
-    if (user?.role !== "admin" || activeSection !== "assistant") {
+    if (user?.role !== "admin" || activeSection !== "panel") {
       return;
     }
     loadInviteCodes();
@@ -2168,7 +2193,7 @@ export function AdminPage() {
       setFeedbackForUser(
         entry.id,
         "success",
-        `${entry.username} ${entry.assistant_beta_enabled ? "lost" : "gained"} Assistant (Beta) access.`,
+        `${entry.username} ${entry.assistant_beta_enabled ? "lost" : "gained"} Assistant access.`,
       );
       await loadAdminData({ silent: true });
     } catch (requestError) {
@@ -3509,7 +3534,7 @@ export function AdminPage() {
 
 	          <section className="admin-user-actions-modal__section">
 	            <div className="admin-user-actions-modal__section-header">
-	              <h3>Assistant (Beta)</h3>
+	              <h3>Assistant</h3>
 	              <p className="page-subnote">Secondary access only for the safe structured request form.</p>
 	            </div>
             {selectedUserActionsEntry.role === "standard_user" ? (
@@ -3533,7 +3558,7 @@ export function AdminPage() {
               </div>
             ) : (
 	              <p className="page-subnote">
-	                Assistant access is only configurable for standard users in this phase.
+	                Admins always have Assistant access. The account switch is only configurable for standard users.
 	              </p>
 	            )}
 	          </section>
@@ -5358,20 +5383,7 @@ export function AdminPage() {
 
           {activeSection === "recovery" ? recoverySection : null}
 
-	          {activeSection === "assistant" ? (
-	            <>
-	              <section className="settings-card admin-assistant-placeholder">
-	                <p className="eyebrow">Assistant (Beta)</p>
-	                <h2>Request workflow</h2>
-	                <p className="page-subnote">
-	                  Review structured user requests, placeholder triage drafts, proposed action requests, approval records, and change drafts.
-	                </p>
-	                <div className="admin-list__actions">
-	                  <Link className="primary-button" to="/admin/assistant">
-	                    Open request queue
-	                  </Link>
-	                </div>
-	              </section>
+	          {activeSection === "panel" ? (
 	              <section className="settings-card">
 	                <div className="settings-inline-header admin-invite-code-header">
 	                  <button
@@ -5487,8 +5499,7 @@ export function AdminPage() {
                     )}
                   </div>
                 ) : null}
-              </section>
-	            </>
+	              </section>
 	          ) : null}
         </div>
       ) : null}

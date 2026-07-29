@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
   SETTINGS_ACTIVE_SECTION_STORAGE_KEY,
   SETTINGS_SECTION_KEYS,
+  applySettingsSectionStorageMigration,
   buildSettingsSectionLocation,
   canonicalizeSettingsSection,
   readPersistedSettingsSection,
@@ -20,17 +21,23 @@ describe("Settings section state", () => {
     expect(canonicalizeSettingsSection("hidden")).toBe("libraries");
   });
 
-  test("migrates a legacy hidden storage value once", () => {
+  test("reads a legacy hidden storage value without writing during resolution", () => {
     const storage = {
       getItem: vi.fn(() => "hidden"),
       setItem: vi.fn(),
     };
 
     expect(readPersistedSettingsSection(storage)).toBe("libraries");
-    expect(storage.setItem).toHaveBeenCalledWith(
-      SETTINGS_ACTIVE_SECTION_STORAGE_KEY,
-      "libraries",
-    );
+    expect(storage.setItem).not.toHaveBeenCalled();
+    const resolution = resolveSettingsSection({ storage });
+    expect(resolution).toMatchObject({
+      section: "libraries",
+      needsStorageMigration: true,
+      storageMigrationTarget: "libraries",
+    });
+    expect(storage.setItem).not.toHaveBeenCalled();
+    expect(applySettingsSectionStorageMigration(resolution, storage)).toBe(true);
+    expect(storage.setItem).toHaveBeenCalledWith(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, "libraries");
   });
 
   test("uses a valid URL section before storage", () => {
@@ -42,7 +49,7 @@ describe("Settings section state", () => {
     expect(resolveSettingsSection({
       search: "?section=display",
       storage,
-    })).toEqual({
+    })).toMatchObject({
       section: "display",
       shouldReplace: false,
     });
@@ -54,7 +61,7 @@ describe("Settings section state", () => {
       setItem: vi.fn(),
     };
 
-    expect(resolveSettingsSection({ search: "?other=1", storage })).toEqual({
+    expect(resolveSettingsSection({ search: "?other=1", storage })).toMatchObject({
       section: "install",
       shouldReplace: false,
     });
@@ -66,14 +73,32 @@ describe("Settings section state", () => {
       setItem: vi.fn(),
     };
 
-    expect(resolveSettingsSection({ search: "?section=garbage", storage })).toEqual({
+    expect(resolveSettingsSection({ search: "?section=garbage", storage })).toMatchObject({
       section: "advanced",
       shouldReplace: true,
     });
-    expect(resolveSettingsSection({ search: "?section=hidden", storage })).toEqual({
+    expect(resolveSettingsSection({ search: "?section=hidden", storage })).toMatchObject({
       section: "libraries",
       shouldReplace: true,
     });
+  });
+
+  test("removes invalid storage only when migration is applied", () => {
+    const storage = {
+      getItem: vi.fn(() => "garbage"),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    };
+    const resolution = resolveSettingsSection({ storage });
+
+    expect(resolution).toMatchObject({
+      section: "preferences",
+      needsStorageMigration: true,
+      storageMigrationTarget: null,
+    });
+    expect(storage.removeItem).not.toHaveBeenCalled();
+    applySettingsSectionStorageMigration(resolution, storage);
+    expect(storage.removeItem).toHaveBeenCalledWith(SETTINGS_ACTIVE_SECTION_STORAGE_KEY);
   });
 
   test("builds a replacement that preserves other query parameters and hash", () => {

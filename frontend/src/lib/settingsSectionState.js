@@ -49,13 +49,7 @@ export function readPersistedSettingsSection(storage = defaultStorage()) {
   try {
     const storedValue = storage.getItem(SETTINGS_ACTIVE_SECTION_STORAGE_KEY);
     const canonical = canonicalizeSettingsSection(storedValue);
-    if (!canonical) {
-      return "preferences";
-    }
-    if (canonical !== storedValue) {
-      writePersistedSettingsSection(canonical, storage);
-    }
-    return canonical;
+    return canonical || "preferences";
   } catch {
     return "preferences";
   }
@@ -63,11 +57,22 @@ export function readPersistedSettingsSection(storage = defaultStorage()) {
 
 
 export function resolveSettingsSection({ search = "", storage = defaultStorage() } = {}) {
+  let storedValue = null;
+  try {
+    storedValue = storage?.getItem?.(SETTINGS_ACTIVE_SECTION_STORAGE_KEY) ?? null;
+  } catch {
+    storedValue = null;
+  }
+  const storedCanonical = canonicalizeSettingsSection(storedValue);
+  const needsStorageMigration = storedValue !== null && storedValue !== storedCanonical;
+  const storageMigrationTarget = storedCanonical;
   const params = new URLSearchParams(search);
   if (!params.has("section")) {
     return {
-      section: readPersistedSettingsSection(storage),
+      section: storedCanonical || "preferences",
       shouldReplace: false,
+      needsStorageMigration,
+      storageMigrationTarget,
     };
   }
 
@@ -77,12 +82,39 @@ export function resolveSettingsSection({ search = "", storage = defaultStorage()
     return {
       section: canonical,
       shouldReplace: canonical !== rawSection,
+      needsStorageMigration,
+      storageMigrationTarget,
     };
   }
   return {
-    section: readPersistedSettingsSection(storage),
+    section: storedCanonical || "preferences",
     shouldReplace: true,
+    needsStorageMigration,
+    storageMigrationTarget,
   };
+}
+
+
+export function applySettingsSectionStorageMigration(
+  resolution,
+  storage = defaultStorage(),
+) {
+  if (!resolution?.needsStorageMigration || !storage) {
+    return false;
+  }
+  try {
+    if (resolution.storageMigrationTarget) {
+      storage.setItem(
+        SETTINGS_ACTIVE_SECTION_STORAGE_KEY,
+        resolution.storageMigrationTarget,
+      );
+    } else {
+      storage.removeItem(SETTINGS_ACTIVE_SECTION_STORAGE_KEY);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { fireEvent, render as testingLibraryRender, screen, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
+import { StrictMode } from "react";
 import {
   MemoryRouter,
   Route,
@@ -14,6 +15,7 @@ import {
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ApiNetworkError, ApiResponseError, apiRequest } from "../lib/api";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/connectivityRecoveryStore";
 import {
   buildBackgroundPreviewStyle,
   deriveGradientEndFromSingleColor,
@@ -23,7 +25,7 @@ import { queryClient } from "../lib/queryClient";
 import { buildUserSettingsQueryKey } from "../lib/userSettingsQueries";
 
 const mockAuthState = vi.hoisted(() => ({ id: 7, role: "standard_user" }));
-const mockPlatformState = vi.hoisted(() => ({ deviceClass: "desktop" }));
+const mockPlatformState = vi.hoisted(() => ({ deviceClass: "desktop", platform: "linux" }));
 const mockInstallState = vi.hoisted(() => ({ renders: 0 }));
 
 vi.mock("../auth/AuthContext", () => ({
@@ -51,6 +53,7 @@ vi.mock("../features/install/InstallSettingsPanel", () => ({
 vi.mock("../lib/platformDetection", async (importOriginal) => ({
   ...(await importOriginal()),
   detectClientDeviceClass: () => mockPlatformState.deviceClass,
+  detectClientPlatform: () => mockPlatformState.platform,
 }));
 
 const pagesDir = path.dirname(fileURLToPath(import.meta.url));
@@ -100,6 +103,10 @@ function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
   let settings = { ...initialSettings };
   let hiddenItems = [...(mockOptions.hiddenItems || [])];
   let globalHiddenItems = [...(mockOptions.globalHiddenItems || [])];
+  let cloudNetworkFailures = Number(mockOptions.cloudNetworkFailures) || 0;
+  let cloudHttpFailures = Number(mockOptions.cloudHttpFailures) || 0;
+  let hiddenReadFailuresAfterScope = Number(mockOptions.hiddenReadFailuresAfterScope) || 0;
+  let scopeAttempted = false;
   let ageGroupItems = mockOptions.ageGroupItems || [
     {
       age_group_key: "age:title:galaxy|2026",
@@ -161,6 +168,13 @@ function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
       return Promise.resolve(settings);
     }
     if (requestPath === "/api/user-hidden-items") {
+      if (scopeAttempted && hiddenReadFailuresAfterScope > 0) {
+        hiddenReadFailuresAfterScope -= 1;
+        return Promise.reject(new ApiNetworkError(undefined, {
+          failureId: 41,
+          incidentId: 31,
+        }));
+      }
       return Promise.resolve({ items: hiddenItems });
     }
     if (requestPath === "/api/admin/global-hidden-items") {
@@ -171,6 +185,7 @@ function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
       && requestPath.endsWith("/scope")
       && options.method === "PUT"
     ) {
+      scopeAttempted = true;
       const itemId = Number(requestPath.split("/").at(-2));
       const targetScope = options.data?.target_scope;
       const sourceItems = targetScope === "global" ? hiddenItems : globalHiddenItems;
@@ -192,7 +207,10 @@ function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
         }
       }
       if (mockOptions.scopeError === "network") {
-        return Promise.reject(new ApiNetworkError());
+        return Promise.reject(new ApiNetworkError(undefined, {
+          failureId: 41,
+          incidentId: 31,
+        }));
       }
       if (mockOptions.scopeError === "malformed") {
         return Promise.reject(new ApiResponseError(200));
@@ -208,6 +226,13 @@ function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
         message: targetScope === "global"
           ? "This movie is hidden for everyone."
           : "This movie is now hidden only for your account.",
+      });
+    }
+    if (requestPath.startsWith("/api/admin/local-directories?")) {
+      return Promise.resolve({
+        current_path: "/srv",
+        parent_path: "/",
+        directories: [],
       });
     }
     if (requestPath === "/api/admin/media-library-reference") {
@@ -271,6 +296,19 @@ function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
       });
     }
     if (requestPath === "/api/cloud-libraries") {
+      if (cloudNetworkFailures > 0) {
+        cloudNetworkFailures -= 1;
+        return Promise.reject(new ApiNetworkError(undefined, {
+          failureId: 41,
+          incidentId: 31,
+        }));
+      }
+      if (cloudHttpFailures > 0) {
+        cloudHttpFailures -= 1;
+        return Promise.reject(Object.assign(new Error("Cloud access was rejected."), {
+          status: 403,
+        }));
+      }
       return Promise.resolve({
         google: { enabled: false, connected: false },
         my_libraries: [],
@@ -354,6 +392,9 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
   );
   fireEvent.click(screen.getByRole("tab", { name: "Display" }));
   await screen.findByRole("heading", { name: "Background" });
+  await waitFor(() => {
+    expect(screen.queryByText("Loading display preferences...")).not.toBeInTheDocument();
+  });
 }
 
 beforeEach(() => {
@@ -362,6 +403,7 @@ beforeEach(() => {
   mockAuthState.id = 7;
   mockAuthState.role = "standard_user";
   mockPlatformState.deviceClass = "desktop";
+  mockPlatformState.platform = "linux";
   mockInstallState.renders = 0;
   window.localStorage.clear();
 });
@@ -383,6 +425,7 @@ describe("SettingsPage section navigation and consolidation", () => {
       "Advanced",
     ]);
     expect(screen.queryByRole("tab", { name: "Hidden" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tablist")).toHaveAttribute("aria-orientation", "horizontal");
 
     const installIcon = screen.getByRole("tab", { name: "Install" }).querySelector("svg");
     expect(installIcon).toHaveAttribute("viewBox", "0 0 24 24");
@@ -402,7 +445,7 @@ describe("SettingsPage section navigation and consolidation", () => {
     const preferences = screen.getByRole("tab", { name: "Preferences" });
     fireEvent.click(preferences);
 
-    expect(preferences).toHaveAttribute("aria-expanded", "true");
+    expect(preferences).not.toHaveAttribute("aria-expanded");
     expect(preferences).not.toHaveClass("admin-nav-card__button--expanded");
     expect(screen.getByTestId("settings-location")).toHaveTextContent("/settings|POP|");
   });
@@ -458,6 +501,39 @@ describe("SettingsPage section navigation and consolidation", () => {
     ));
   });
 
+  test("tabs use roving focus and activate Arrow, Home, and End destinations", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=preferences"]}>
+        <LocationProbe />
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    const preferences = screen.getByRole("tab", { name: "Preferences" });
+    const display = screen.getByRole("tab", { name: "Display" });
+    const advanced = screen.getByRole("tab", { name: "Advanced" });
+    expect(preferences).toHaveAttribute("tabindex", "0");
+    expect(display).toHaveAttribute("tabindex", "-1");
+
+    fireEvent.keyDown(preferences, { key: "ArrowRight" });
+    await waitFor(() => expect(display).toHaveAttribute("aria-selected", "true"));
+    expect(display).toHaveFocus();
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "settings-tab-display");
+
+    fireEvent.keyDown(display, { key: "End" });
+    await waitFor(() => expect(advanced).toHaveAttribute("aria-selected", "true"));
+    expect(advanced).toHaveFocus();
+    expect(screen.getByTestId("settings-location")).toHaveTextContent(
+      "/settings?section=advanced|REPLACE|",
+    );
+
+    fireEvent.keyDown(advanced, { key: "Home" });
+    await waitFor(() => expect(preferences).toHaveAttribute("aria-selected", "true"));
+    fireEvent.keyDown(preferences, { key: "ArrowLeft" });
+    await waitFor(() => expect(advanced).toHaveAttribute("aria-selected", "true"));
+  });
+
   test("direct Install access mounts only Install and skips unrelated ancillary requests", async () => {
     mockApi();
     render(
@@ -503,6 +579,186 @@ describe("SettingsPage section navigation and consolidation", () => {
     await waitFor(() => {
       expect(apiRequest.mock.calls.filter(([path]) => path === "/api/user-hidden-items")).toHaveLength(1);
     });
+  });
+
+  test("Preferences and Display do not load Libraries or Advanced resources", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=preferences"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText("Your account");
+    fireEvent.click(screen.getByRole("tab", { name: "Display" }));
+    await screen.findByRole("heading", { name: "Background" });
+
+    const ancillaryPaths = new Set([
+      "/api/user-hidden-items",
+      "/api/admin/global-hidden-items",
+      "/api/cloud-libraries",
+      "/api/admin/google-drive-setup",
+      "/api/library/age-groups",
+      "/api/admin/media-library-reference",
+      "/api/admin/poster-reference-location",
+      "/api/auth/totp/status",
+    ]);
+    expect(apiRequest.mock.calls.some(([requestPath]) => ancillaryPaths.has(requestPath))).toBe(false);
+  });
+
+  test("StrictMode delayed Libraries data commits on the second setup", async () => {
+    const hiddenItem = {
+      id: 83,
+      title: "Strict Mode Hidden Copy",
+      year: 2026,
+      edition_label: null,
+      poster_url: null,
+      hidden_at: "2026-07-24T00:00:00+00:00",
+    };
+    mockApi(defaultSettings, { hiddenItems: [hiddenItem] });
+    const originalImplementation = apiRequest.getMockImplementation();
+    apiRequest.mockImplementation((requestPath, options) => {
+      const result = originalImplementation(requestPath, options);
+      if (requestPath !== "/api/user-hidden-items") {
+        return result;
+      }
+      return new Promise((resolve, reject) => {
+        window.setTimeout(() => Promise.resolve(result).then(resolve, reject), 20);
+      });
+    });
+
+    const view = render(
+      <StrictMode>
+        <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </StrictMode>,
+    );
+    fireEvent.click(await screen.findByText("Hidden for me"));
+    expect(await screen.findByText("Strict Mode Hidden Copy")).toBeInTheDocument();
+    expect(apiRequest.mock.calls.filter(([requestPath]) => (
+      requestPath === "/api/user-hidden-items"
+    )).length).toBeGreaterThanOrEqual(2);
+    view.unmount();
+  });
+
+  test("connectivity recovery retries only the failed Libraries resource", async () => {
+    mockApi(defaultSettings, {
+      cloudNetworkFailures: 1,
+      hiddenItems: [{
+        id: 84,
+        title: "Preserved Hidden Copy",
+        year: 2026,
+        edition_label: null,
+        poster_url: null,
+        hidden_at: "2026-07-24T00:00:00+00:00",
+      }],
+    });
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("Hidden for me"));
+    expect(await screen.findByText("Preserved Hidden Copy")).toBeInTheDocument();
+    expect(await screen.findByText("Elvern could not complete the request.")).toBeInTheDocument();
+    const hiddenReadsBefore = apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/user-hidden-items",
+    ).length;
+
+    window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: {
+        generation: 1,
+        incidentId: 31,
+        recoveredThroughFailureId: 41,
+      },
+    }));
+
+    await waitFor(() => expect(apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/cloud-libraries",
+    )).toHaveLength(2));
+    expect(apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/user-hidden-items",
+    )).toHaveLength(hiddenReadsBefore);
+    expect(screen.getByText("Preserved Hidden Copy")).toBeInTheDocument();
+  });
+
+  test("connectivity recovery does not retry a business response failure", async () => {
+    mockApi(defaultSettings, { cloudHttpFailures: 1 });
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Cloud access was rejected.")).toBeInTheDocument();
+    window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: {
+        generation: 1,
+        incidentId: 31,
+        recoveredThroughFailureId: 41,
+      },
+    }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/cloud-libraries",
+    )).toHaveLength(1);
+  });
+
+  test("legacy Hidden hash restore yields to wheel input and is not replayed", async () => {
+    const frameCallbacks = new Map();
+    let frameId = 0;
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        frameId += 1;
+        frameCallbacks.set(frameId, callback);
+        return frameId;
+      });
+    const cancelAnimationFrameSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((id) => {
+        frameCallbacks.delete(id);
+      });
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      mockApi(defaultSettings, {
+        hiddenItems: [{
+          id: 85,
+          title: "Hash Restore Hidden Copy",
+          year: 2026,
+          edition_label: null,
+          poster_url: null,
+          hidden_at: "2026-07-24T00:00:00+00:00",
+        }],
+      });
+      render(
+        <MemoryRouter
+          initialEntries={["/settings?section=hidden#hidden-list"]}
+        >
+          <SettingsPage />
+        </MemoryRouter>,
+      );
+
+      fireEvent.click(await screen.findByText("Hidden for me"));
+      expect(await screen.findByText("Hash Restore Hidden Copy")).toBeInTheDocument();
+      await waitFor(() => expect(frameCallbacks.size).toBeGreaterThan(0));
+      fireEvent.wheel(window);
+      expect(cancelAnimationFrameSpy).toHaveBeenCalled();
+      expect(frameCallbacks.size).toBe(0);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      requestAnimationFrameSpy.mockRestore();
+      cancelAnimationFrameSpy.mockRestore();
+      if (originalScrollIntoView) {
+        Element.prototype.scrollIntoView = originalScrollIntoView;
+      } else {
+        delete Element.prototype.scrollIntoView;
+      }
+    }
   });
 
   test("Libraries keeps Shared and Hidden cards in the approved order for admins", async () => {
@@ -759,6 +1015,34 @@ describe("SettingsPage Hidden scope transfer", () => {
     expect(await screen.findByText("Elvern could not complete the request.")).toBeInTheDocument();
     expect(screen.getByText("Scope Movie")).toBeInTheDocument();
     expect(screen.queryByText("This movie is hidden for everyone.")).not.toBeInTheDocument();
+  });
+
+  test("recovery reconciles an uncertain committed scope without replaying the PUT", async () => {
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      hiddenReadFailuresAfterScope: 1,
+      scopeError: "network",
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+
+    expect(await screen.findByText("Waiting to confirm the hidden scope change.")).toBeInTheDocument();
+    expect(apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
+    )).toHaveLength(1);
+
+    window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+      detail: {
+        generation: 1,
+        incidentId: 31,
+        recoveredThroughFailureId: 41,
+      },
+    }));
+
+    expect(await screen.findByText("This movie is hidden for everyone.")).toBeInTheDocument();
+    expect(apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
+    )).toHaveLength(1);
   });
 });
 
@@ -1029,6 +1313,40 @@ describe("SettingsPage Display background controls", () => {
     expect(pickerCall?.[1]?.data).not.toHaveProperty("title");
     expect(await screen.findByLabelText("Poster directory")).toHaveValue("/srv/posters/selected");
   });
+
+  test.each(["unknown", "windows", "mac", "iphone", "ipad", "android"])(
+    "%s uses the server directory browser without Linux capability claims",
+    async (platform) => {
+      mockAuthState.role = "admin";
+      mockPlatformState.platform = platform;
+      mockApi();
+      render(
+        <MemoryRouter initialEntries={["/settings?section=advanced"]}>
+          <SettingsPage />
+        </MemoryRouter>,
+      );
+
+      await screen.findByText("Library reference locations");
+      fireEvent.click(screen.getByText("Library reference locations"));
+      fireEvent.click(screen.getByRole(
+        "button",
+        { name: "Browse library reference directories on the Elvern host" },
+      ));
+
+      await waitFor(() => expect(apiRequest.mock.calls.some(
+        ([requestPath]) => requestPath.startsWith("/api/admin/local-directories?"),
+      )).toBe(true));
+      expect(apiRequest.mock.calls.some(
+        ([requestPath]) => requestPath.startsWith("/api/admin/local-directory-picker/capability"),
+      )).toBe(false);
+      expect(apiRequest.mock.calls.some(
+        ([requestPath, options]) => (
+          requestPath === "/api/admin/local-directory-picker"
+          && (options?.data?.platform === "linux" || options?.data?.same_host_hint === true)
+        ),
+      )).toBe(false);
+    },
+  );
 
   test("poster appearance controls still save through the existing settings endpoint", async () => {
     await renderDisplaySettings();

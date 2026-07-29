@@ -32,6 +32,7 @@ export default defineConfig({
     {
       name: "chromium-desktop-production",
       testMatch: "phase7-cross-browser.pw.js",
+      grepInvert: /@(assistant|settings)-navigation/,
       use: {
         browserName: "chromium",
         viewport: { width: 1440, height: 900 },
@@ -41,6 +42,7 @@ export default defineConfig({
     {
       name: "firefox-desktop-production",
       testMatch: "phase7-cross-browser.pw.js",
+      grepInvert: /@(assistant|settings)-navigation/,
       use: {
         browserName: "firefox",
         viewport: { width: 1440, height: 900 },
@@ -55,6 +57,7 @@ export default defineConfig({
     {
       name: "webkit-desktop-production",
       testMatch: "phase7-cross-browser.pw.js",
+      grepInvert: /@(assistant|settings)-navigation/,
       use: {
         browserName: "webkit",
         viewport: { width: 1440, height: 900 },
@@ -76,6 +79,79 @@ export default defineConfig({
       use: {
         browserName: "firefox",
         serviceWorkers: "allow",
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+        launchOptions: {
+          firefoxUserPrefs: {
+            "network.proxy.allow_hijacking_localhost": true,
+          },
+        },
+      },
+    },
+    {
+      name: "chromium-assistant-navigation",
+      testMatch: "phase7-cross-browser.pw.js",
+      grep: /@assistant-navigation/,
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1440, height: 900 },
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+      },
+    },
+    {
+      name: "firefox-assistant-navigation",
+      testMatch: "phase7-cross-browser.pw.js",
+      grep: /@assistant-navigation/,
+      use: {
+        browserName: "firefox",
+        viewport: { width: 1440, height: 900 },
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+        launchOptions: {
+          firefoxUserPrefs: {
+            "network.proxy.allow_hijacking_localhost": true,
+          },
+        },
+      },
+    },
+    {
+      name: "chromium-settings-navigation",
+      testMatch: "phase7-cross-browser.pw.js",
+      grep: /@settings-navigation/,
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1440, height: 900 },
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+      },
+    },
+    {
+      name: "firefox-settings-navigation",
+      testMatch: "phase7-cross-browser.pw.js",
+      grep: /@settings-navigation/,
+      use: {
+        browserName: "firefox",
+        viewport: { width: 1440, height: 900 },
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+        launchOptions: {
+          firefoxUserPrefs: {
+            "network.proxy.allow_hijacking_localhost": true,
+          },
+        },
+      },
+    },
+    {
+      name: "chromium-wss-network-guard",
+      testMatch: "network-guard-wss.pw.js",
+      use: {
+        browserName: "chromium",
+        ignoreHTTPSErrors: true,
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+      },
+    },
+    {
+      name: "firefox-wss-network-guard",
+      testMatch: "network-guard-wss.pw.js",
+      use: {
+        browserName: "firefox",
+        ignoreHTTPSErrors: true,
         ...(guardedProxy ? { proxy: guardedProxy } : {}),
         launchOptions: {
           firefoxUserPrefs: {

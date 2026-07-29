@@ -282,7 +282,7 @@ async function installFixture(page, requests, state = {}) {
         username: state.username || "phase7-browser",
         display_name: state.displayName || "Phase 7 Browser",
         role: state.role || "standard_user",
-        assistant_beta_enabled: false,
+        assistant_beta_enabled: Boolean(state.assistantEnabled),
         age_credential: 18,
       } };
     } else if (path === "/api/auth/heartbeat") {
@@ -298,9 +298,77 @@ async function installFixture(page, requests, state = {}) {
     } else if (path === "/api/provider-auth/status") {
       payload = { provider_auth_required: false, reconnect_required: false };
     } else if (path === "/api/cloud-libraries") {
-      payload = { libraries: [], connected: true };
+      payload = {
+        google: { enabled: false, connected: false },
+        my_libraries: [],
+        shared_libraries: [],
+      };
+    } else if (path === "/api/user-hidden-items") {
+      if (state.settingsAncillaryDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, state.settingsAncillaryDelayMs));
+      }
+      payload = { items: state.hiddenItems || [] };
+    } else if (path === "/api/admin/global-hidden-items") {
+      payload = { items: [] };
+    } else if (path === "/api/library/age-groups") {
+      payload = { total: 0, items: [] };
+    } else if (path === "/api/admin/google-drive-setup") {
+      payload = {
+        configuration_state: "not_configured",
+        configuration_label: "Not configured",
+        connected: false,
+        missing_fields: [],
+        instructions: [],
+      };
+    } else if (path === "/api/auth/totp/status") {
+      payload = { enabled: false, setup_available: false };
     } else if (path === "/api/admin/media-library-reference") {
-      payload = { effective_value: "Configured", default_value: "Configured" };
+      payload = {
+        configured_value: "Configured",
+        effective_value: "Configured",
+        default_value: "Configured",
+        configured_locations: ["Configured"],
+        effective_locations: ["Configured"],
+        category_summary: {},
+        validation_rules: [],
+      };
+    } else if (path === "/api/admin/poster-reference-location") {
+      payload = {
+        configured_value: null,
+        effective_value: "",
+        default_value: "",
+        validation_rules: [],
+      };
+    } else if (path === "/api/assistant/requests") {
+      payload = { requests: [] };
+    } else if (path === "/api/admin/assistant/requests") {
+      payload = { requests: [] };
+    } else if (/^\/api\/admin\/assistant\/requests\/\d+$/.test(path)) {
+      payload = { request: null };
+    } else if (path === "/api/system/status") {
+      payload = {
+        total_media_items: 0,
+        total_users: 1,
+        scan: { running: false },
+        last_scan: null,
+        library: { total_items: 0 },
+        security: {
+          multiuser_enabled: true,
+          session_ttl_hours: 24,
+        },
+      };
+    } else if (path === "/api/admin/users") {
+      payload = { users: [] };
+    } else if (path === "/api/admin/sessions") {
+      payload = { sessions: [] };
+    } else if (path === "/api/admin/audit") {
+      payload = { events: [] };
+    } else if (path === "/api/admin/url-prefix") {
+      payload = {};
+    } else if (path === "/api/admin/playback-workers") {
+      payload = { workers: [] };
+    } else if (path === "/api/admin/invite-codes") {
+      payload = { invite_codes: [] };
     } else if (path === "/api/library/v2/summary") {
       payload = v2Summary(url.searchParams.get("source") || "all", state);
     } else if (path === "/api/library/search") {
@@ -601,6 +669,310 @@ for (const scheme of ["http", "https", "ws", "wss"]) {
       pathname_hash: expect.stringMatching(/^[0-9a-f]{12}$/),
     });
     expect(JSON.stringify(result)).not.toContain("token");
+  });
+}
+
+
+async function expectPrimaryNavigationDoesNotOverlap(page) {
+  const navigation = page.getByRole("navigation", { name: "Primary" });
+  const controls = [
+    ...await navigation.getByRole("link").all(),
+    page.getByRole("button", { name: "Logout" }),
+  ];
+  const boxes = [];
+  for (const control of controls) {
+    await expect(control).toBeVisible();
+    const box = await control.boundingBox();
+    expect(box).not.toBeNull();
+    boxes.push(box);
+  }
+  for (let leftIndex = 0; leftIndex < boxes.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < boxes.length; rightIndex += 1) {
+      const left = boxes[leftIndex];
+      const right = boxes[rightIndex];
+      const overlaps = (
+        left.x < right.x + right.width
+        && left.x + left.width > right.x
+        && left.y < right.y + right.height
+        && left.y + left.height > right.y
+      );
+      expect(overlaps).toBe(false);
+    }
+  }
+}
+
+
+test("@assistant-navigation admin uses the standalone Assistant destination and active item", async ({
+  page,
+  baseURL,
+}) => {
+  const state = { role: "admin", assistantEnabled: false };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], state);
+  await page.goto("library");
+
+  const navigation = page.getByRole("navigation", { name: "Primary" });
+  await expect(navigation.getByRole("link", { name: "Library" })).toBeVisible();
+  expect(await navigation.getByRole("link").allTextContents()).toEqual([
+    "Library",
+    "Settings",
+    "Assistant",
+    "Admin",
+  ]);
+  await expectPrimaryNavigationDoesNotOverlap(page);
+  await expect(page.getByText(/Assistant\s*\(Beta\)/i)).toHaveCount(0);
+
+  await navigation.getByRole("link", { name: "Assistant" }).click();
+  await expect(page).toHaveURL(`${baseURL}admin/assistant`);
+  await expect(page.getByRole("heading", { name: "Request queue" })).toBeVisible();
+  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
+    /floating-island__link--active/,
+  );
+  await expect(navigation.getByRole("link", { name: "Admin" })).not.toHaveClass(
+    /floating-island__link--active/,
+  );
+
+  await page.goto("admin/assistant/42");
+  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
+    /floating-island__link--active/,
+  );
+  await expect(navigation.getByRole("link", { name: "Admin" })).not.toHaveClass(
+    /floating-island__link--active/,
+  );
+
+  await page.evaluate(() => {
+    window.localStorage.setItem("elvern:admin-active-section", "assistant");
+  });
+  await page.goto("admin?section=assistant");
+  await expect(page).toHaveURL(`${baseURL}admin?section=panel`);
+  await expect.poll(() => page.evaluate(
+    () => window.localStorage.getItem("elvern:admin-active-section"),
+  )).toBe("panel");
+  const adminSections = page.getByLabel("Admin sections");
+  await expect(adminSections.getByRole("button", { name: "Admin Panel" })).toBeVisible();
+  await expect(adminSections.getByRole("button", { name: "Assistant" })).toHaveCount(0);
+  await expect(page.getByText("Open request queue")).toHaveCount(0);
+});
+
+
+test("@assistant-navigation enabled regular user opens the request form without Admin", async ({
+  page,
+  baseURL,
+}) => {
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], {
+    role: "standard_user",
+    assistantEnabled: true,
+  });
+  await page.goto("library");
+
+  const navigation = page.getByRole("navigation", { name: "Primary" });
+  await expect(navigation.getByRole("link", { name: "Library" })).toBeVisible();
+  expect(await navigation.getByRole("link").allTextContents()).toEqual([
+    "Library",
+    "Settings",
+    "Assistant",
+  ]);
+  await expect(navigation.getByRole("link", { name: "Admin" })).toHaveCount(0);
+  await navigation.getByRole("link", { name: "Assistant" }).click();
+  await expect(page).toHaveURL(`${baseURL}assistant`);
+  await expect(page.getByText("Submit a request", { exact: true })).toBeVisible();
+  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
+    /floating-island__link--active/,
+  );
+});
+
+
+test("@assistant-navigation disabled regular user cannot see or directly open Assistant", async ({
+  page,
+  baseURL,
+}) => {
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], {
+    role: "standard_user",
+    assistantEnabled: false,
+  });
+  await page.goto("assistant");
+
+  await expect(page).toHaveURL(`${baseURL}library`);
+  const navigation = page.getByRole("navigation", { name: "Primary" });
+  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveCount(0);
+  await expect(navigation.getByRole("link", { name: "Admin" })).toHaveCount(0);
+});
+
+
+for (const deviceCase of [
+  {
+    label: "phone",
+    platform: "iPhone",
+    userAgent: "iPhone",
+    maxTouchPoints: 5,
+    viewport: { width: 390, height: 844 },
+  },
+  {
+    label: "tablet",
+    platform: "MacIntel",
+    userAgent: "Macintosh",
+    maxTouchPoints: 5,
+    viewport: { width: 820, height: 1180 },
+  },
+]) {
+  test(`@assistant-navigation admin ${deviceCase.label} navigation remains usable and does not drag`, async ({
+    page,
+    baseURL,
+  }) => {
+    await page.addInitScript(({ nextPlatform, nextUserAgent, nextMaxTouchPoints }) => {
+      Object.defineProperties(window.navigator, {
+        platform: { configurable: true, get: () => nextPlatform },
+        userAgent: { configurable: true, get: () => nextUserAgent },
+        maxTouchPoints: { configurable: true, get: () => nextMaxTouchPoints },
+      });
+    }, {
+      nextPlatform: deviceCase.platform,
+      nextUserAgent: deviceCase.userAgent,
+      nextMaxTouchPoints: deviceCase.maxTouchPoints,
+    });
+    await page.setViewportSize(deviceCase.viewport);
+    await page.unrouteAll({ behavior: "wait" });
+    await installFixture(page, [], { role: "admin" });
+    await page.goto("library");
+
+    await expectPrimaryNavigationDoesNotOverlap(page);
+    const navigation = page.getByRole("navigation", { name: "Primary" });
+    const libraryLink = navigation.getByRole("link", { name: "Library" });
+    const assistantLink = navigation.getByRole("link", { name: "Assistant" });
+    const libraryBox = await libraryLink.boundingBox();
+    const assistantBox = await assistantLink.boundingBox();
+    await libraryLink.dispatchEvent("pointerdown", {
+      pointerId: 1,
+      pointerType: "touch",
+      clientX: libraryBox.x + libraryBox.width / 2,
+      clientY: libraryBox.y + libraryBox.height / 2,
+    });
+    await libraryLink.dispatchEvent("pointermove", {
+      pointerId: 1,
+      pointerType: "touch",
+      clientX: assistantBox.x + assistantBox.width / 2,
+      clientY: assistantBox.y + assistantBox.height / 2,
+    });
+    await libraryLink.dispatchEvent("pointerup", {
+      pointerId: 1,
+      pointerType: "touch",
+      clientX: assistantBox.x + assistantBox.width / 2,
+      clientY: assistantBox.y + assistantBox.height / 2,
+    });
+    await expect(page).toHaveURL(`${baseURL}library`);
+  });
+}
+
+
+test("@settings-navigation tabs use keyboard activation and canonical URLs", async ({
+  page,
+  baseURL,
+}) => {
+  await page.goto("settings?section=preferences");
+  const preferences = page.getByRole("tab", { name: "Preferences" });
+  await expect(preferences).toHaveAttribute("aria-selected", "true");
+  await expect(preferences).toHaveAttribute("tabindex", "0");
+
+  await preferences.press("End");
+  await expect(page).toHaveURL(`${baseURL}settings?section=advanced`);
+  const advanced = page.getByRole("tab", { name: "Advanced" });
+  await expect(advanced).toBeFocused();
+  await expect(advanced).toHaveAttribute("aria-controls", "settings-panel-advanced");
+  await expect(page.locator("#settings-panel-advanced")).toHaveAttribute(
+    "aria-labelledby",
+    "settings-tab-advanced",
+  );
+
+  await advanced.press("Home");
+  await expect(page).toHaveURL(`${baseURL}settings?section=preferences`);
+  await expect(preferences).toBeFocused();
+  await preferences.press("ArrowLeft");
+  await expect(page).toHaveURL(`${baseURL}settings?section=advanced`);
+  await advanced.press("ArrowRight");
+  await expect(page).toHaveURL(`${baseURL}settings?section=preferences`);
+});
+
+
+test("@settings-navigation delayed Libraries data survives the production StrictMode tree", async ({
+  page,
+}) => {
+  const state = {
+    settingsAncillaryDelayMs: 200,
+    hiddenItems: [{
+      id: 91,
+      title: "Delayed Hidden Copy",
+      year: 2026,
+      edition_label: null,
+      poster_url: null,
+      hidden_at: "2026-07-28T00:00:00Z",
+    }],
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], state);
+  await page.goto("settings?section=libraries");
+  await expect(page.getByText("Hidden for me", { exact: true })).toBeVisible();
+  await page.getByText("Hidden for me", { exact: true }).click();
+  await expect(page.getByText("Delayed Hidden Copy")).toBeVisible();
+  expect(state.pathRequestCounts?.["/api/user-hidden-items"] || 0).toBeGreaterThanOrEqual(1);
+});
+
+
+test("@settings-navigation legacy Hidden hash and Install routes replace canonically", async ({
+  page,
+  baseURL,
+}) => {
+  await page.goto("settings?other=1&section=hidden#hidden-list");
+  await expect(page).toHaveURL(`${baseURL}settings?other=1&section=libraries#hidden-list`);
+  await expect(page.locator("#hidden-list")).toHaveCount(1);
+
+  await page.goto("install?from=legacy#helper");
+  await expect(page).toHaveURL(`${baseURL}settings?from=legacy&section=install#helper`);
+  await expect(page.getByText("Elvern VLC Opener", { exact: true })).toBeVisible();
+});
+
+
+for (const returnCase of [
+  {
+    label: "Root",
+    listPath: "library?category=movies&sort=title",
+    title: "Phase Seven Alpha",
+  },
+  {
+    label: "Local",
+    listPath: "library/local?category=movies&sort=title",
+    title: "Phase Seven Alpha",
+  },
+  {
+    label: "Cloud",
+    listPath: "library/cloud?category=movies&sort=title",
+    title: "Phase Seven Beta",
+  },
+  {
+    label: "formal search",
+    listPath: "library?category=movies&q=Alpha",
+    title: "Phase Seven Alpha",
+  },
+]) {
+  test(`@settings-navigation Floating Library returns to exact ${returnCase.label} list state`, async ({
+    page,
+    baseURL,
+  }) => {
+    await page.goto(returnCase.listPath);
+    const expectedListUrl = `${baseURL}${returnCase.listPath}`;
+    await expect(page).toHaveURL(expectedListUrl);
+    const card = page.locator(".media-card").filter({ hasText: returnCase.title }).first();
+    await expect(card).toBeVisible();
+    await card.locator(".media-card__poster-link").click();
+    await expect(page).toHaveURL(/\/library\/\d+$/);
+
+    await page.getByRole("navigation", { name: "Primary" })
+      .getByRole("link", { name: "Library" })
+      .click();
+    await expect(page).toHaveURL(expectedListUrl);
+    await expect(page.locator(".media-card").filter({ hasText: returnCase.title }).first())
+      .toBeVisible();
   });
 }
 
@@ -1043,7 +1415,7 @@ test("third-party VLC stays in a separate tab while the Elvern route remains hea
   );
 
   await page.goto("install");
-  const originalUrl = `${baseURL}install`;
+  const originalUrl = `${baseURL}settings?section=install`;
   await expect(page).toHaveURL(originalUrl);
   const vlcLink = page.getByRole("link", { name: "Download VLC" });
   await expect(vlcLink).toHaveAttribute("target", "_blank");
@@ -1452,7 +1824,11 @@ test("malformed 401 body clears protected Library cache without exposing parser 
   await page.evaluate(() => {
     window.__elvernFetchFaults.malformed401.armed = true;
   });
-  await page.getByRole("link", { name: "Install" }).click();
+  await page.getByRole("navigation", { name: "Primary" })
+    .getByRole("link", { name: "Settings" })
+    .click();
+  await page.getByRole("tab", { name: "Install" }).click();
+  await expect(page).toHaveURL(/\/settings\?section=install$/);
   await expect(page.getByText("Elvern received an unreadable response from the server.")).toBeVisible();
   await expect(page.getByText(/SyntaxError|Unexpected end|NetworkError when attempting/i)).toHaveCount(0);
 

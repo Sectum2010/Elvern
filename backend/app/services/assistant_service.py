@@ -193,7 +193,7 @@ def update_assistant_user_access(
         if (user_row["role"] or "standard_user") != "standard_user":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Assistant (Beta) access can only be changed for standard users",
+                detail="Assistant access can only be changed for standard users",
             )
         existing = connection.execute(
             """

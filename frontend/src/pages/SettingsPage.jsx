@@ -25,13 +25,15 @@ import {
 } from "../lib/userBackground";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { InstallSettingsPanel } from "../features/install/InstallSettingsPanel";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/connectivityRecoveryStore";
 import { normalizePosterDisplayWidth } from "../lib/posterUrls";
 import {
+  applySettingsSectionStorageMigration,
   buildSettingsSectionLocation,
   resolveSettingsSection,
   writePersistedSettingsSection,
 } from "../lib/settingsSectionState";
-import { detectClientDeviceClass } from "../lib/platformDetection";
+import { detectClientDeviceClass, detectClientPlatform } from "../lib/platformDetection";
 import {
   resolveUserSettings,
   setUserSettingsQueryData,
@@ -39,6 +41,15 @@ import {
 } from "../lib/userSettingsQueries";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
+const SETTINGS_RESOURCE_KEYS = Object.freeze([
+  "hidden",
+  "cloud",
+  "ageGroups",
+  "googleSetup",
+  "mediaReference",
+  "posterReference",
+  "totp",
+]);
 
 const SETTINGS_SECTIONS = [
   { key: "preferences", label: "Preferences", icon: "preferences" },
@@ -47,6 +58,36 @@ const SETTINGS_SECTIONS = [
   { key: "install", label: "Install", icon: "install" },
   { key: "advanced", label: "Advanced", icon: "advanced" },
 ];
+const EMPTY_RESOURCE_STATUS = Object.freeze({
+  loading: false,
+  loaded: false,
+  error: "",
+});
+
+
+function createSettingsResourceStatus() {
+  return Object.fromEntries(
+    SETTINGS_RESOURCE_KEYS.map((key) => [key, { ...EMPTY_RESOURCE_STATUS }]),
+  );
+}
+
+
+function settingsResourcesForSection(section, role) {
+  if (section === "libraries") {
+    return [
+      "hidden",
+      "cloud",
+      ...(role === "admin" ? ["ageGroups", "googleSetup"] : []),
+    ];
+  }
+  if (section === "advanced") {
+    return [
+      "totp",
+      ...(role === "admin" ? ["mediaReference", "posterReference"] : []),
+    ];
+  }
+  return [];
+}
 const AGE_REQUIREMENT_OPTIONS = [null, ...Array.from({ length: 18 }, (_, index) => index + 1)];
 
 const POSTER_CARD_APPEARANCE_OPTIONS = [
@@ -113,20 +154,10 @@ function formatCountLabel(count, singular, plural = `${singular}s`) {
 }
 
 
-function normalizeHiddenIdentityText(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-
 function hiddenItemsShareIdentity(left, right) {
-  if (Number(left?.id) === Number(right?.id)) {
-    return true;
-  }
-  return (
-    normalizeHiddenIdentityText(left?.title) === normalizeHiddenIdentityText(right?.title)
-    && String(left?.year ?? "") === String(right?.year ?? "")
-    && normalizeHiddenIdentityText(left?.edition_label) === normalizeHiddenIdentityText(right?.edition_label)
-  );
+  const leftId = Number(left?.id);
+  const rightId = Number(right?.id);
+  return Number.isInteger(leftId) && leftId > 0 && leftId === rightId;
 }
 
 
@@ -142,9 +173,10 @@ function isUncertainHiddenScopeError(error) {
 }
 
 
-function hiddenScopeReached(lists, hiddenItem, targetScope) {
-  const inPersonal = lists.personalItems.some((item) => hiddenItemsShareIdentity(item, hiddenItem));
-  const inGlobal = lists.globalItems.some((item) => hiddenItemsShareIdentity(item, hiddenItem));
+function hiddenScopeReached(lists, itemId, targetScope) {
+  const identity = { id: itemId };
+  const inPersonal = lists.personalItems.some((item) => hiddenItemsShareIdentity(item, identity));
+  const inGlobal = lists.globalItems.some((item) => hiddenItemsShareIdentity(item, identity));
   return targetScope === "global"
     ? inGlobal && !inPersonal
     : inPersonal && !inGlobal;
@@ -587,38 +619,6 @@ function validatePosterReferenceLocationInput(value) {
   } catch {
     return "Use an absolute Linux path or file:// URI.";
   }
-}
-
-
-function detectSettingsBrowsePlatform() {
-  if (typeof navigator === "undefined") {
-    return "linux";
-  }
-  const agent = (navigator.userAgent || "").toLowerCase();
-  const platform = (navigator.platform || "").toLowerCase();
-  const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
-  const iPadDesktopClassAgent =
-    maxTouchPoints > 1 && (agent.includes("macintosh") || platform.includes("mac"));
-
-  if (agent.includes("iphone") || agent.includes("ipod")) {
-    return "iphone";
-  }
-  if (agent.includes("ipad") || iPadDesktopClassAgent) {
-    return "ipad";
-  }
-  if (agent.includes("android")) {
-    return "android";
-  }
-  if (agent.includes("windows")) {
-    return "windows";
-  }
-  if (agent.includes("macintosh") || (agent.includes("mac os x") && !agent.includes("iphone") && !agent.includes("ipad"))) {
-    return "mac";
-  }
-  if (agent.includes("linux") || platform.includes("linux") || agent.includes("x11")) {
-    return "linux";
-  }
-  return "linux";
 }
 
 
@@ -1096,9 +1096,11 @@ export function SettingsPage() {
   const previousSettingsIdentityRef = useRef(settingsIdentity);
   const mountedRef = useRef(true);
   const currentIdentityRef = useRef(settingsIdentity);
-  const ancillaryLoadedIdentityRef = useRef("");
-  const ancillaryControllerRef = useRef(null);
+  const resourceRequestsRef = useRef(new Map());
   const hiddenListGenerationRef = useRef(0);
+  const pendingHiddenReconciliationRef = useRef(null);
+  const pendingReconcileHandlerRef = useRef(null);
+  const hiddenHashRestoreKeyRef = useRef("");
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
@@ -1122,9 +1124,8 @@ export function SettingsPage() {
   const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
   const [globalHiddenItems, setGlobalHiddenItems] = useState([]);
-  const [ancillaryLoading, setAncillaryLoading] = useState(
-    () => settingsSectionResolution.section !== "install",
-  );
+  const [resourceStatus, setResourceStatus] = useState(createSettingsResourceStatus);
+  const [pendingHiddenReconciliation, setPendingHiddenReconciliation] = useState(null);
   const [saving, setSaving] = useState(false);
   const [restoringItemId, setRestoringItemId] = useState(null);
   const [restoringGlobalItemId, setRestoringGlobalItemId] = useState(null);
@@ -1266,14 +1267,28 @@ export function SettingsPage() {
   const activeAgeBucket = ageBucketManager.open
     ? restrictedAgeBuckets.find((bucket) => bucket.age === ageBucketManager.age)
     : null;
-  const loading = activeSettingsSection !== "install"
-    && (ancillaryLoading || (!userSettingsQuery.data && userSettingsQuery.isPending));
+  const userSettingsLoading = !userSettingsQuery.data && userSettingsQuery.isPending;
+  const loading = userSettingsLoading;
+  const hiddenLoading = resourceStatus.hidden.loading;
+  const ageGroupsLoading = resourceStatus.ageGroups.loading;
+  const activeResourceKeys = settingsResourcesForSection(activeSettingsSection, user?.role);
+  const activeResourceErrors = Object.entries(resourceStatus)
+    .filter(([key]) => activeResourceKeys.includes(key))
+    .filter(([, status]) => status.error)
+    .map(([key, status]) => ({ key, message: status.error }));
 
   currentIdentityRef.current = settingsIdentity;
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    ancillaryControllerRef.current?.abort();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      for (const request of resourceRequestsRef.current.values()) {
+        request.controller?.abort();
+      }
+      resourceRequestsRef.current.clear();
+      pendingHiddenReconciliationRef.current = null;
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -1281,15 +1296,35 @@ export function SettingsPage() {
       return;
     }
     previousSettingsIdentityRef.current = settingsIdentity;
-    ancillaryControllerRef.current?.abort();
-    ancillaryLoadedIdentityRef.current = "";
+    for (const request of resourceRequestsRef.current.values()) {
+      request.controller?.abort();
+    }
+    resourceRequestsRef.current.clear();
     hiddenListGenerationRef.current += 1;
+    pendingHiddenReconciliationRef.current = null;
+    setPendingHiddenReconciliation(null);
+    setResourceStatus(createSettingsResourceStatus());
     setHiddenItems([]);
     setGlobalHiddenItems([]);
+    setCloudLibraries({
+      google: {
+        enabled: false,
+        connected: false,
+        connection_status: "not_configured",
+        reconnect_required: false,
+        provider_auth_required: false,
+        account_email: null,
+        account_name: null,
+        stale_state_warning: null,
+        status_message: "",
+      },
+      my_libraries: [],
+      shared_libraries: [],
+    });
+    setTotpStatus({ enabled: false, setup_available: false });
     setError("");
     setMessage("");
-    setAncillaryLoading(activeSettingsSection !== "install");
-  }, [activeSettingsSection, settingsIdentity]);
+  }, [settingsIdentity]);
 
   useEffect(() => {
     if (!userSettingsQuery.data) {
@@ -1339,123 +1374,210 @@ export function SettingsPage() {
     return lists;
   }, [fetchHiddenLists, settingsIdentity]);
 
-  useEffect(() => {
-    ancillaryControllerRef.current?.abort();
-    if (activeSettingsSection === "install") {
-      setAncillaryLoading(false);
-      return undefined;
+  const reconcilePendingHiddenScope = useCallback(async (
+    pending = pendingHiddenReconciliationRef.current,
+  ) => {
+    if (!pending || pendingHiddenReconciliationRef.current?.itemId !== pending.itemId) {
+      return false;
     }
-    if (ancillaryLoadedIdentityRef.current === settingsIdentity) {
-      setAncillaryLoading(false);
-      return undefined;
-    }
-
-    const controller = new AbortController();
-    ancillaryControllerRef.current = controller;
-    let active = true;
-
-    async function loadSettings() {
-      setAncillaryLoading(true);
-      setError("");
-      try {
-        const [
-          hiddenLists,
-          mediaLibraryReferencePayload,
-          posterPayload,
-          cloudPayload,
-          googleSetupPayload,
-          totpPayload,
-          ageGroupsPayload,
-        ] = await Promise.all([
-          refreshHiddenLists({ signal: controller.signal }),
-          user?.role === "admin"
-            ? apiRequest("/api/admin/media-library-reference", { signal: controller.signal })
-            : Promise.resolve(null),
-          user?.role === "admin"
-            ? apiRequest("/api/admin/poster-reference-location", { signal: controller.signal })
-            : Promise.resolve(null),
-          apiRequest("/api/cloud-libraries", { signal: controller.signal }),
-          user?.role === "admin"
-            ? apiRequest("/api/admin/google-drive-setup", { signal: controller.signal })
-            : Promise.resolve(null),
-          apiRequest("/api/auth/totp/status", { signal: controller.signal }),
-          user?.role === "admin"
-            ? apiRequest("/api/library/age-groups", { signal: controller.signal })
-            : Promise.resolve({ items: [], total: 0 }),
-        ]);
-        if (
-          !active
-          || !mountedRef.current
-          || currentIdentityRef.current !== settingsIdentity
-        ) {
-          return;
-        }
-        if (!hiddenLists) {
-          return;
-        }
-        setCloudLibraries(cloudPayload);
-        setAgeGroups(ageGroupsPayload || { items: [], total: 0 });
-        if (user?.role === "admin" && mediaLibraryReferencePayload) {
-          setSharedMediaLibraryReference(mediaLibraryReferencePayload);
-          setSharedMediaLibraryReferenceInput(
-            mediaLibraryReferencePayload.configured_value || mediaLibraryReferencePayload.default_value || "",
-          );
-        }
-        if (user?.role === "admin" && posterPayload) {
-          setPosterReference(posterPayload);
-          setPosterReferenceInput(posterPayload.configured_value || posterPayload.default_value || "");
-        }
-        if (user?.role === "admin" && googleSetupPayload) {
-          setGoogleDriveSetup(googleSetupPayload);
-          setGoogleDriveSetupDraft({
-            https_origin: googleSetupPayload.https_origin || "",
-            client_id: googleSetupPayload.client_id || "",
-            client_secret: googleSetupPayload.client_secret || "",
-          });
-        }
-        setTotpStatus(totpPayload);
-        ancillaryLoadedIdentityRef.current = settingsIdentity;
-      } catch (requestError) {
-        if (
-          active
-          && mountedRef.current
-          && currentIdentityRef.current === settingsIdentity
-          && !isAbortError(requestError)
-        ) {
-          setError(requestError.message || "Failed to load settings");
-        }
-      } finally {
-        if (
-          active
-          && mountedRef.current
-          && currentIdentityRef.current === settingsIdentity
-        ) {
-          setAncillaryLoading(false);
-        }
+    try {
+      const lists = await refreshHiddenLists();
+      if (!lists || pendingHiddenReconciliationRef.current?.itemId !== pending.itemId) {
+        return false;
       }
+      if (hiddenScopeReached(lists, pending.itemId, pending.requestedScope)) {
+        const successMessage = pending.requestedScope === "global"
+          ? "This movie is hidden for everyone."
+          : "This movie is now hidden only for your account.";
+        pendingHiddenReconciliationRef.current = null;
+        setPendingHiddenReconciliation(null);
+        setError("");
+        setMessage(successMessage);
+        void invalidateLibraryQueries();
+        return true;
+      }
+      if (hiddenScopeReached(lists, pending.itemId, pending.sourceScope)) {
+        pendingHiddenReconciliationRef.current = null;
+        setPendingHiddenReconciliation(null);
+        setMessage("");
+        setError(pending.errorMessage || "The scope change was not saved.");
+        return true;
+      }
+      setMessage("Waiting to confirm the hidden scope change.");
+      return false;
+    } catch (requestError) {
+      if (!isAbortError(requestError)) {
+        setMessage("Waiting to confirm the hidden scope change.");
+      }
+      return false;
     }
+  }, [refreshHiddenLists]);
 
-    void loadSettings();
-    return () => {
-      active = false;
-      controller.abort();
-      if (ancillaryControllerRef.current === controller) {
-        ancillaryControllerRef.current = null;
+  pendingReconcileHandlerRef.current = reconcilePendingHiddenScope;
+
+  const loadSettingsResource = useCallback(async (
+    resourceKey,
+    { force = false, recoveryGeneration = 0 } = {},
+  ) => {
+    const existing = resourceRequestsRef.current.get(resourceKey);
+    if (
+      !force
+      && existing?.identity === settingsIdentity
+      && (existing.loaded || existing.loading)
+    ) {
+      return;
+    }
+    existing?.controller?.abort();
+    const controller = new AbortController();
+    const generation = Number(existing?.generation || 0) + 1;
+    const requestState = {
+      identity: settingsIdentity,
+      controller,
+      generation,
+      loaded: false,
+      loading: true,
+      transient: false,
+      failureId: 0,
+      incidentId: 0,
+      recoveryGeneration,
+    };
+    resourceRequestsRef.current.set(resourceKey, requestState);
+    setResourceStatus((current) => ({
+      ...current,
+      [resourceKey]: { loading: true, loaded: Boolean(existing?.loaded), error: "" },
+    }));
+
+    try {
+      let payload;
+      if (resourceKey === "hidden") {
+        payload = await refreshHiddenLists({ signal: controller.signal });
+      } else if (resourceKey === "cloud") {
+        payload = await apiRequest("/api/cloud-libraries", { signal: controller.signal });
+      } else if (resourceKey === "ageGroups") {
+        payload = await apiRequest("/api/library/age-groups", { signal: controller.signal });
+      } else if (resourceKey === "googleSetup") {
+        payload = await apiRequest("/api/admin/google-drive-setup", { signal: controller.signal });
+      } else if (resourceKey === "mediaReference") {
+        payload = await apiRequest("/api/admin/media-library-reference", { signal: controller.signal });
+      } else if (resourceKey === "posterReference") {
+        payload = await apiRequest("/api/admin/poster-reference-location", { signal: controller.signal });
+      } else if (resourceKey === "totp") {
+        payload = await apiRequest("/api/auth/totp/status", { signal: controller.signal });
+      } else {
+        return;
+      }
+      const current = resourceRequestsRef.current.get(resourceKey);
+      if (
+        !payload
+        || !mountedRef.current
+        || currentIdentityRef.current !== settingsIdentity
+        || current?.generation !== generation
+      ) {
+        return;
+      }
+      if (resourceKey === "cloud") {
+        setCloudLibraries(payload);
+      } else if (resourceKey === "ageGroups") {
+        setAgeGroups(payload || { items: [], total: 0 });
+      } else if (resourceKey === "googleSetup") {
+        setGoogleDriveSetup(payload);
+        setGoogleDriveSetupDraft({
+          https_origin: payload.https_origin || "",
+          client_id: payload.client_id || "",
+          client_secret: payload.client_secret || "",
+        });
+      } else if (resourceKey === "mediaReference") {
+        setSharedMediaLibraryReference(payload);
+        setSharedMediaLibraryReferenceInput(payload.configured_value || payload.default_value || "");
+      } else if (resourceKey === "posterReference") {
+        setPosterReference(payload);
+        setPosterReferenceInput(payload.configured_value || payload.default_value || "");
+      } else if (resourceKey === "totp") {
+        setTotpStatus(payload);
+      }
+      resourceRequestsRef.current.set(resourceKey, {
+        ...current,
+        controller: null,
+        loaded: true,
+        loading: false,
+        transient: false,
+      });
+      setResourceStatus((status) => ({
+        ...status,
+        [resourceKey]: { loading: false, loaded: true, error: "" },
+      }));
+    } catch (requestError) {
+      if (
+        isAbortError(requestError)
+        || !mountedRef.current
+        || currentIdentityRef.current !== settingsIdentity
+        || resourceRequestsRef.current.get(resourceKey)?.generation !== generation
+      ) {
+        return;
+      }
+      const transient = isTransientNetworkError(requestError);
+      const messageText = requestError.message || "Failed to load this settings section";
+      resourceRequestsRef.current.set(resourceKey, {
+        ...requestState,
+        controller: null,
+        loading: false,
+        transient,
+        failureId: Number(requestError.failureId) || 0,
+        incidentId: Number(requestError.incidentId) || 0,
+      });
+      setResourceStatus((status) => ({
+        ...status,
+        [resourceKey]: { loading: false, loaded: false, error: messageText },
+      }));
+    }
+  }, [refreshHiddenLists, settingsIdentity]);
+
+  useEffect(() => {
+    const resources = settingsResourcesForSection(activeSettingsSection, user?.role);
+    resources.forEach((resourceKey) => {
+      void loadSettingsResource(resourceKey);
+    });
+  }, [activeSettingsSection, loadSettingsResource, user?.role]);
+
+  useEffect(() => {
+    const handleConnectivityRecovered = (event) => {
+      const detail = event?.detail || {};
+      const recoveredGeneration = Number(detail.generation) || 0;
+      for (const [resourceKey, request] of resourceRequestsRef.current.entries()) {
+        if (
+          !request.transient
+          || request.identity !== settingsIdentity
+          || request.recoveryGeneration >= recoveredGeneration
+          || (request.incidentId && request.incidentId !== Number(detail.incidentId))
+          || (request.failureId && request.failureId > Number(detail.recoveredThroughFailureId))
+        ) {
+          continue;
+        }
+        request.recoveryGeneration = recoveredGeneration;
+        void loadSettingsResource(resourceKey, {
+          force: true,
+          recoveryGeneration: recoveredGeneration,
+        });
+      }
+      if (pendingHiddenReconciliationRef.current) {
+        void pendingReconcileHandlerRef.current?.();
       }
     };
-  }, [activeSettingsSection, refreshHiddenLists, settingsIdentity, user?.role]);
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+    return () => window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
+  }, [loadSettingsResource, settingsIdentity]);
 
   useEffect(() => {
     if (user?.role !== "admin") {
-          setSharedMediaLibraryReference({
-            configured_value: null,
-            effective_value: "",
-            default_value: "",
-            configured_locations: [],
-            effective_locations: [],
-            category_summary: {},
-            validation_rules: [],
-          });
+      setSharedMediaLibraryReference({
+        configured_value: null,
+        effective_value: "",
+        default_value: "",
+        configured_locations: [],
+        effective_locations: [],
+        category_summary: {},
+        validation_rules: [],
+      });
       setSharedMediaLibraryReferenceInput("");
       setPosterReference({
         configured_value: null,
@@ -1498,12 +1620,12 @@ export function SettingsPage() {
         searchResults: [],
         searching: false,
       });
-    } else {
     }
   }, [user?.role]);
 
   useLayoutEffect(() => {
     const resolution = resolveSettingsSection({ search: location.search });
+    applySettingsSectionStorageMigration(resolution);
     writePersistedSettingsSection(resolution.section);
     if (activeSettingsSection !== resolution.section) {
       setActiveSettingsSection(resolution.section);
@@ -1513,6 +1635,88 @@ export function SettingsPage() {
     activeSettingsSection,
     location,
     navigate,
+  ]);
+
+  useLayoutEffect(() => {
+    if (
+      activeSettingsSection !== "libraries"
+      || location.hash !== "#hidden-list"
+      || (!resourceStatus.hidden.loaded && !resourceStatus.hidden.error)
+    ) {
+      return undefined;
+    }
+    const restoreKey = [
+      settingsIdentity,
+      location.key,
+      location.pathname,
+      location.search,
+      location.hash,
+    ].join("|");
+    if (hiddenHashRestoreKeyRef.current === restoreKey) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let frameId = 0;
+    let correctionCount = 0;
+    const cancelRestore = () => {
+      cancelled = true;
+      hiddenHashRestoreKeyRef.current = restoreKey;
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+    const cancelEvents = ["wheel", "touchstart", "pointerdown", "keydown"];
+    cancelEvents.forEach((eventName) => {
+      window.addEventListener(eventName, cancelRestore, { capture: true, passive: true });
+    });
+
+    const correctTarget = () => {
+      if (cancelled) {
+        return;
+      }
+      const target = document.getElementById("hidden-list");
+      if (!target) {
+        return;
+      }
+      if (correctionCount === 0) {
+        target.scrollIntoView?.({ block: "start" });
+      } else {
+        const top = target.getBoundingClientRect().top;
+        const scrollMarginTop = Number.parseFloat(
+          window.getComputedStyle(target).scrollMarginTop,
+        ) || 0;
+        const correction = top - scrollMarginTop;
+        if (Math.abs(correction) > 8) {
+          window.scrollBy?.({ top: correction, behavior: "auto" });
+        }
+      }
+      correctionCount += 1;
+      if (correctionCount < 2) {
+        frameId = window.requestAnimationFrame(correctTarget);
+      } else {
+        hiddenHashRestoreKeyRef.current = restoreKey;
+      }
+    };
+    frameId = window.requestAnimationFrame(correctTarget);
+
+    return () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+      cancelEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, cancelRestore, { capture: true });
+      });
+    };
+  }, [
+    activeSettingsSection,
+    location.hash,
+    location.key,
+    location.pathname,
+    location.search,
+    resourceStatus.hidden.error,
+    resourceStatus.hidden.loaded,
+    settingsIdentity,
   ]);
 
   useEffect(() => {
@@ -1526,22 +1730,9 @@ export function SettingsPage() {
       setMessage(statusMessage || "Google Drive connected.");
       setError("");
       void invalidateLibraryQueries();
-      apiRequest("/api/cloud-libraries")
-        .then((payload) => {
-          setCloudLibraries(payload);
-        })
-        .catch(() => {});
+      void loadSettingsResource("cloud", { force: true });
       if (user?.role === "admin") {
-        apiRequest("/api/admin/google-drive-setup")
-          .then((payload) => {
-            setGoogleDriveSetup(payload);
-            setGoogleDriveSetupDraft({
-              https_origin: payload.https_origin || "",
-              client_id: payload.client_id || "",
-              client_secret: payload.client_secret || "",
-            });
-          })
-          .catch(() => {});
+        void loadSettingsResource("googleSetup", { force: true });
       }
     } else if (statusMessage) {
       setError(statusMessage);
@@ -1553,7 +1744,15 @@ export function SettingsPage() {
     const nextSearch = nextParams.toString();
     const nextUrl = `${location.pathname}${nextSearch ? `?${nextSearch}` : ""}${location.hash || ""}`;
     navigate(nextUrl, { replace: true, state: location.state });
-  }, [location.hash, location.pathname, location.search, location.state, navigate, user?.role]);
+  }, [
+    loadSettingsResource,
+    location.hash,
+    location.pathname,
+    location.search,
+    location.state,
+    navigate,
+    user?.role,
+  ]);
 
   function applyUserSettingsPayload(payload) {
     const resolvedSettings = resolveUserSettings(payload);
@@ -1870,6 +2069,9 @@ export function SettingsPage() {
   }
 
   async function handleHideUniversally(hiddenItem) {
+    if (pendingHiddenReconciliationRef.current?.itemId === hiddenItem.id) {
+      return;
+    }
     setMovingToGlobalItemId(hiddenItem.id);
     setError("");
     setMessage("");
@@ -1902,16 +2104,22 @@ export function SettingsPage() {
       void refreshHiddenLists().catch(() => {});
     } catch (requestError) {
       if (isUncertainHiddenScopeError(requestError)) {
-        try {
-          const lists = await refreshHiddenLists();
-          if (lists && hiddenScopeReached(lists, hiddenItem, "global")) {
-            setMessage(successMessage);
-            void invalidateLibraryQueries();
-            return;
-          }
-        } catch {
-          // Preserve the original uncertain operation error below.
+        const pending = {
+          itemId: hiddenItem.id,
+          requestedScope: "global",
+          sourceScope: "personal",
+          incidentId: Number(requestError.incidentId) || 0,
+          failureId: Number(requestError.failureId) || 0,
+          startedAt: Date.now(),
+          errorMessage: requestError.message || "Failed to hide this movie for everyone",
+        };
+        pendingHiddenReconciliationRef.current = pending;
+        setPendingHiddenReconciliation(pending);
+        if (await reconcilePendingHiddenScope(pending)) {
+          return;
         }
+        setError("");
+        return;
       }
       setError(requestError.message || "Failed to hide this movie for everyone");
     } finally {
@@ -1920,6 +2128,9 @@ export function SettingsPage() {
   }
 
   async function handleHideForMe(hiddenItem) {
+    if (pendingHiddenReconciliationRef.current?.itemId === hiddenItem.id) {
+      return;
+    }
     setMovingToPersonalItemId(hiddenItem.id);
     setError("");
     setMessage("");
@@ -1952,16 +2163,22 @@ export function SettingsPage() {
       void refreshHiddenLists().catch(() => {});
     } catch (requestError) {
       if (isUncertainHiddenScopeError(requestError)) {
-        try {
-          const lists = await refreshHiddenLists();
-          if (lists && hiddenScopeReached(lists, hiddenItem, "personal")) {
-            setMessage(successMessage);
-            void invalidateLibraryQueries();
-            return;
-          }
-        } catch {
-          // Preserve the original uncertain operation error below.
+        const pending = {
+          itemId: hiddenItem.id,
+          requestedScope: "personal",
+          sourceScope: "global",
+          incidentId: Number(requestError.incidentId) || 0,
+          failureId: Number(requestError.failureId) || 0,
+          startedAt: Date.now(),
+          errorMessage: requestError.message || "Failed to hide this movie only for your account",
+        };
+        pendingHiddenReconciliationRef.current = pending;
+        setPendingHiddenReconciliation(pending);
+        if (await reconcilePendingHiddenScope(pending)) {
+          return;
         }
+        setError("");
+        return;
       }
       setError(requestError.message || "Failed to hide this movie only for your account");
     } finally {
@@ -2056,7 +2273,7 @@ export function SettingsPage() {
   }
 
   async function handleOpenDirectoryPicker(target) {
-    const platform = detectSettingsBrowsePlatform();
+    const platform = detectClientPlatform();
     const sameHostHint = isSettingsLocalDevelopmentLoopback(platform);
     const initialPath = target === "poster-reference"
       ? posterReferenceInput || posterReference.effective_value || posterReference.default_value || ""
@@ -2588,6 +2805,43 @@ export function SettingsPage() {
     });
   }
 
+  function activateSettingsPanel(sectionKey) {
+    if (activeSettingsSection === sectionKey) {
+      return;
+    }
+    writePersistedSettingsSection(sectionKey);
+    setActiveSettingsSection(sectionKey);
+    setActiveSettingsButtonExpanded(true);
+    navigate(buildSettingsSectionLocation(location, sectionKey), {
+      replace: true,
+      state: location.state,
+    });
+  }
+
+  function handleSettingsTabKeyDown(event, sectionIndex) {
+    const lastIndex = SETTINGS_SECTIONS.length - 1;
+    let nextIndex = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = sectionIndex === lastIndex ? 0 : sectionIndex + 1;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = sectionIndex === 0 ? lastIndex : sectionIndex - 1;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = lastIndex;
+    }
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    const nextSection = SETTINGS_SECTIONS[nextIndex];
+    const nextTab = event.currentTarget
+      .closest('[role="tablist"]')
+      ?.querySelector(`#settings-tab-${nextSection.key}`);
+    nextTab?.focus();
+    activateSettingsPanel(nextSection.key);
+  }
+
   if (settingsSectionResolution.shouldReplace) {
     return (
       <Navigate
@@ -2652,22 +2906,29 @@ export function SettingsPage() {
       />
 
       <div className="admin-nav-card settings-section-nav-card" aria-label="Settings sections">
-        <div className="admin-nav-card__actions settings-section-nav-card__actions" role="tablist">
-          {SETTINGS_SECTIONS.map((section) => {
+        <div
+          aria-orientation="horizontal"
+          className="admin-nav-card__actions settings-section-nav-card__actions"
+          role="tablist"
+        >
+          {SETTINGS_SECTIONS.map((section, sectionIndex) => {
             const isActive = activeSettingsSection === section.key;
             return (
               <button
                 aria-label={section.label}
-                aria-expanded={isActive}
+                aria-controls={`settings-panel-${section.key}`}
                 aria-selected={isActive}
                 className={[
                   "admin-nav-card__button",
                   isActive ? "admin-nav-card__button--active" : "",
                   isActive && activeSettingsButtonExpanded ? "admin-nav-card__button--expanded" : "",
                 ].filter(Boolean).join(" ")}
+                id={`settings-tab-${section.key}`}
                 key={section.key}
                 onClick={() => handleSettingsPanelToggle(section.key)}
+                onKeyDown={(event) => handleSettingsTabKeyDown(event, sectionIndex)}
                 role="tab"
+                tabIndex={isActive ? 0 : -1}
                 title={section.label}
                 type="button"
               >
@@ -2683,9 +2944,42 @@ export function SettingsPage() {
 
       {activeSettingsSection !== "install" && error ? <p className="form-error">{error}</p> : null}
       {activeSettingsSection !== "install" && message ? <p className="page-note">{message}</p> : null}
+      {activeSettingsSection !== "install" && activeResourceErrors.length > 0 ? (
+        <div className="settings-resource-errors" role="status" aria-live="polite">
+          {activeResourceErrors.map((resourceError) => (
+            <div className="settings-resource-error" key={resourceError.key}>
+              <span>{resourceError.message}</span>
+              <button
+                className="ghost-button ghost-button--inline"
+                onClick={() => loadSettingsResource(resourceError.key, { force: true })}
+                type="button"
+              >
+                Retry
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {pendingHiddenReconciliation ? (
+        <div className="settings-resource-error" role="status" aria-live="polite">
+          <span>Waiting to confirm the hidden scope change.</span>
+          <button
+            className="ghost-button ghost-button--inline"
+            onClick={() => reconcilePendingHiddenScope()}
+            type="button"
+          >
+            Retry confirmation
+          </button>
+        </div>
+      ) : null}
 
       {activeSettingsSection === "preferences" ? (
-      <div className="settings-grid">
+      <div
+        aria-labelledby="settings-tab-preferences"
+        className="settings-grid"
+        id="settings-panel-preferences"
+        role="tabpanel"
+      >
         <section className="settings-card">
           <h2>Your account</h2>
           <StatusRow label="Username" value={user?.username || "Unknown"} />
@@ -2698,7 +2992,12 @@ export function SettingsPage() {
       ) : null}
 
       {activeSettingsSection === "display" ? (
-      <div className="settings-grid settings-grid--display settings-grid--compact-columns">
+      <div
+        aria-labelledby="settings-tab-display"
+        className="settings-grid settings-grid--display settings-grid--compact-columns"
+        id="settings-panel-display"
+        role="tabpanel"
+      >
         <div className="settings-grid__column">
           <section className="settings-card settings-display-card">
             <div className="settings-inline-header">
@@ -2938,10 +3237,23 @@ export function SettingsPage() {
       </div>
       ) : null}
 
-      {activeSettingsSection === "install" ? <InstallSettingsPanel /> : null}
+      {activeSettingsSection === "install" ? (
+        <div
+          aria-labelledby="settings-tab-install"
+          id="settings-panel-install"
+          role="tabpanel"
+        >
+          <InstallSettingsPanel />
+        </div>
+      ) : null}
 
       {activeSettingsSection === "libraries" ? (
-      <div className="settings-grid">
+      <div
+        aria-labelledby="settings-tab-libraries"
+        className="settings-grid"
+        id="settings-panel-libraries"
+        role="tabpanel"
+      >
         <section className="settings-card">
           <h2>Library</h2>
           {loading ? (
@@ -2984,7 +3296,7 @@ export function SettingsPage() {
                 Refresh
               </RefreshSweepButton>
             </div>
-            {ageGroupsPanelOpen && loading ? (
+            {ageGroupsPanelOpen && ageGroupsLoading ? (
               <p className="page-subnote">Loading age groups...</p>
             ) : ageGroupsPanelOpen && restrictedAgeBuckets.length > 0 ? (
               <div className="settings-age-bucket-list">
@@ -3261,6 +3573,7 @@ export function SettingsPage() {
           </div>
         </SettingsAccordionSection>
 
+        <div className="settings-hidden-list-target" id="hidden-list">
         <section className="settings-card settings-card--wide">
           <details className="settings-disclosure">
             <summary className="settings-disclosure__summary">
@@ -3274,7 +3587,7 @@ export function SettingsPage() {
             </summary>
 
             <div className="settings-disclosure__body">
-              {loading ? (
+              {hiddenLoading ? (
                 <p className="page-subnote">Loading hidden movies...</p>
               ) : hiddenItems.length > 0 ? (
                 <div className="hidden-movie-list">
@@ -3302,7 +3615,11 @@ export function SettingsPage() {
                       <div className="hidden-movie-row__actions">
                         <button
                           className="ghost-button ghost-button--inline"
-                          disabled={restoringItemId === hiddenItem.id || movingToGlobalItemId === hiddenItem.id}
+                            disabled={
+                              restoringItemId === hiddenItem.id
+                              || movingToGlobalItemId === hiddenItem.id
+                              || pendingHiddenReconciliation?.itemId === hiddenItem.id
+                            }
                           onClick={() => handleShowAgain(hiddenItem.id)}
                           type="button"
                         >
@@ -3311,7 +3628,11 @@ export function SettingsPage() {
                         {user?.role === "admin" ? (
                           <button
                             className="ghost-button ghost-button--inline ghost-button--danger"
-                            disabled={movingToGlobalItemId === hiddenItem.id || restoringItemId === hiddenItem.id}
+                            disabled={
+                              movingToGlobalItemId === hiddenItem.id
+                              || restoringItemId === hiddenItem.id
+                              || pendingHiddenReconciliation?.itemId === hiddenItem.id
+                            }
                             onClick={() => handleHideUniversally(hiddenItem)}
                             type="button"
                           >
@@ -3343,7 +3664,7 @@ export function SettingsPage() {
               </summary>
 
               <div className="settings-disclosure__body">
-                {loading ? (
+                {hiddenLoading ? (
                   <p className="page-subnote">Loading globally hidden movies...</p>
                 ) : globalHiddenItems.length > 0 ? (
                   <div className="hidden-movie-list">
@@ -3371,7 +3692,11 @@ export function SettingsPage() {
                         <div className="hidden-movie-row__actions">
                           <button
                             className="ghost-button ghost-button--inline"
-                            disabled={restoringGlobalItemId === hiddenItem.id || movingToPersonalItemId === hiddenItem.id}
+                            disabled={
+                              restoringGlobalItemId === hiddenItem.id
+                              || movingToPersonalItemId === hiddenItem.id
+                              || pendingHiddenReconciliation?.itemId === hiddenItem.id
+                            }
                             onClick={() => handleShowForEveryone(hiddenItem.id)}
                             type="button"
                           >
@@ -3379,7 +3704,11 @@ export function SettingsPage() {
                           </button>
                           <button
                             className="ghost-button ghost-button--inline ghost-button--subtle"
-                            disabled={movingToPersonalItemId === hiddenItem.id || restoringGlobalItemId === hiddenItem.id}
+                            disabled={
+                              movingToPersonalItemId === hiddenItem.id
+                              || restoringGlobalItemId === hiddenItem.id
+                              || pendingHiddenReconciliation?.itemId === hiddenItem.id
+                            }
                             onClick={() => handleHideForMe(hiddenItem)}
                             type="button"
                           >
@@ -3396,6 +3725,7 @@ export function SettingsPage() {
             </details>
           </section>
         ) : null}
+        </div>
 
         {user?.role === "admin" ? (
           <SettingsAccordionSection
@@ -3552,7 +3882,12 @@ export function SettingsPage() {
       ) : null}
 
       {activeSettingsSection === "advanced" ? (
-      <div className="settings-grid">
+      <div
+        aria-labelledby="settings-tab-advanced"
+        className="settings-grid"
+        id="settings-panel-advanced"
+        role="tabpanel"
+      >
         {totpStatus?.setup_available && !totpStatus?.enabled ? (
           <SettingsAccordionSection
             description="Your admin has enabled two-factor setup for this account. You can finish setup here whenever you're ready."

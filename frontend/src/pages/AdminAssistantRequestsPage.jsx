@@ -45,13 +45,13 @@ export function AdminAssistantRequestsPage() {
         <section className="settings-card settings-card--wide">
           <div className="settings-inline-header">
             <div>
-              <p className="eyebrow">Admin · Assistant (Beta)</p>
+              <p className="eyebrow">Admin · Assistant</p>
               <h1>Request queue</h1>
               <p className="page-subnote">
                 Safe placeholder workflow only. No model execution or privileged actions run from this screen.
               </p>
             </div>
-            <Link aria-label="Back to Assistant page" className="assistant-back-button" to="/admin?section=assistant">&lt;</Link>
+            <Link aria-label="Back to Admin Panel" className="assistant-back-button" to="/admin">&lt;</Link>
           </div>
           {error ? <p className="form-error">{error}</p> : null}
         </section>

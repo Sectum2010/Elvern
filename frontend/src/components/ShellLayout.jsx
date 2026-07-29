@@ -19,6 +19,10 @@ import { detectClientPlatform, isDesktopClientPlatform } from "../lib/platformDe
 import { usePlaybackReadyNotice } from "../features/playback/usePlaybackReadyNotice";
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { classifyLibrarySpaPath } from "../lib/canonicalSpaPath.js";
+import {
+  canAccessAssistant,
+  resolveAssistantNavigationTarget,
+} from "../lib/assistantAccess.js";
 
 function normalizePosterCardAppearance(value) {
   if (value === "modern" || value === "clean") {
@@ -52,11 +56,39 @@ export function ShellLayout({ children }) {
   const [floatingNavDragOffset, setFloatingNavDragOffset] = useState(0);
   const [floatingNavPreviewIndex, setFloatingNavPreviewIndex] = useState(null);
   const [floatingNavIndicatorFrame, setFloatingNavIndicatorFrame] = useState({ left: 0, width: 0 });
+  const assistantNavigationTarget = resolveAssistantNavigationTarget(user);
   const navigation = [
-    { to: "/library", label: "Library" },
-    { to: "/settings", label: "Settings" },
-    ...(user?.assistant_beta_enabled ? [{ to: "/assistant", label: "Assistant", state: { fromPath: location.pathname } }] : []),
-    ...(user?.role === "admin" ? [{ to: "/admin", label: "Admin" }] : []),
+    {
+      to: "/library",
+      label: "Library",
+      isActive: (pathname) => classifyLibrarySpaPath(pathname).kind !== "other",
+    },
+    {
+      to: "/settings",
+      label: "Settings",
+      isActive: (pathname) => pathname === "/settings",
+    },
+    ...(canAccessAssistant(user) ? [{
+      to: assistantNavigationTarget,
+      label: "Assistant",
+      state: user?.role === "admin"
+        ? undefined
+        : { fromPath: `${location.pathname}${location.search}${location.hash}` },
+      isActive: (pathname) => (
+        pathname === "/assistant"
+        || pathname === "/admin/assistant"
+        || pathname.startsWith("/admin/assistant/")
+      ),
+    }] : []),
+    ...(user?.role === "admin" ? [{
+      to: "/admin",
+      label: "Admin",
+      isActive: (pathname) => (
+        (pathname === "/admin" || pathname.startsWith("/admin/"))
+        && pathname !== "/admin/assistant"
+        && !pathname.startsWith("/admin/assistant/")
+      ),
+    }] : []),
   ];
   const {
     playbackReadyNotice,
@@ -74,11 +106,10 @@ export function ShellLayout({ children }) {
   const desktopPosterContextMenuEnabled = isDesktopClientPlatform(detectClientPlatform());
   const mobileSelectionGuardEnabled = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const floatingNavDragEnabled = clientDeviceClass !== "phone" && clientDeviceClass !== "tablet";
-  const floatingActiveIndex = Math.max(0, navigation.findIndex((item) => (
-    item.to === "/library"
-      ? location.pathname.startsWith("/library")
-      : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
-  )));
+  const floatingActiveIndex = Math.max(
+    0,
+    navigation.findIndex((item) => item.isActive(location.pathname)),
+  );
   const floatingVisualIndex =
     floatingNavDragging && floatingNavPreviewIndex !== null
       ? floatingNavPreviewIndex
@@ -196,16 +227,11 @@ export function ShellLayout({ children }) {
     }
   }
 
-  async function handleNavigationClick(event, item) {
-    if (floatingIgnoreNextClickRef.current) {
-      event.preventDefault();
-      floatingIgnoreNextClickRef.current = false;
+  function navigateToFloatingItem(item) {
+    if (item.to !== "/library" || libraryPath.kind !== "detail") {
+      navigate(item.to, { state: item.state });
       return;
     }
-    if (item.to !== "/library" || location.pathname.startsWith("/library") || libraryPath.kind !== "detail") {
-      return;
-    }
-    event.preventDefault();
     const rememberedTarget = readLibraryReturnTarget();
     if (rememberedTarget) {
       markLibraryReturnPending();
@@ -213,6 +239,19 @@ export function ShellLayout({ children }) {
     navigate(rememberedTarget?.listPath || "/library", {
       state: { restoreLibraryReturn: true },
     });
+  }
+
+  function handleNavigationClick(event, item) {
+    if (floatingIgnoreNextClickRef.current) {
+      event.preventDefault();
+      floatingIgnoreNextClickRef.current = false;
+      return;
+    }
+    if (item.to !== "/library" || libraryPath.kind !== "detail") {
+      return;
+    }
+    event.preventDefault();
+    navigateToFloatingItem(item);
   }
 
   function getFloatingNavigationIndexFromPoint(clientX) {
@@ -282,8 +321,13 @@ export function ShellLayout({ children }) {
     setFloatingNavDragging(false);
     setFloatingNavDragOffset(0);
     setFloatingNavPreviewIndex(null);
-    if (nextItem && nextIndex !== floatingActiveIndex) {
-      navigate(nextItem.to, { state: nextItem.state });
+    const activatesCurrentLibraryDetail = Boolean(
+      nextItem?.to === "/library"
+      && libraryPath.kind === "detail"
+      && nextIndex === floatingActiveIndex
+    );
+    if (nextItem && (nextIndex !== floatingActiveIndex || activatesCurrentLibraryDetail)) {
+      navigateToFloatingItem(nextItem);
     }
     if (typeof window !== "undefined") {
       window.setTimeout(() => {
@@ -504,11 +548,7 @@ export function ShellLayout({ children }) {
                   canDragCurrentItem ? "floating-island__link--current" : "",
                   canDragCurrentItem && floatingNavDragging ? "floating-island__link--dragging" : "",
                 ].filter(Boolean).join(" ")}
-                onClick={(event) => {
-                  handleNavigationClick(event, item).catch(() => {
-                    // Fall back to the default route if validation fails unexpectedly.
-                  });
-                }}
+                onClick={(event) => handleNavigationClick(event, item)}
                 onPointerCancel={canDragCurrentItem ? handleFloatingActivePointerCancel : undefined}
                 onPointerDown={canDragCurrentItem ? handleFloatingActivePointerDown : undefined}
                 onPointerMove={canDragCurrentItem ? handleFloatingActivePointerMove : undefined}

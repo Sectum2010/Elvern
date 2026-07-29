@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { apiRequest } from "../lib/api";
@@ -72,9 +72,16 @@ function renderShell({ initialEntry = "/library", children = null } = {}) {
 }
 
 
+function LocationProbe() {
+  const location = useLocation();
+  return <p data-testid="shell-location">{`${location.pathname}${location.search}${location.hash}`}</p>;
+}
+
+
 describe("ShellLayout fixed island and mobile selection guard", () => {
   beforeEach(() => {
     queryClient.clear();
+    window.sessionStorage.clear();
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "linux";
     mockAuthState.role = "standard_user";
@@ -128,7 +135,7 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
   test.each([
     ["standard", "standard_user", false, ["Library", "Settings"]],
     ["assistant", "standard_user", true, ["Library", "Settings", "Assistant"]],
-    ["admin", "admin", false, ["Library", "Settings", "Admin"]],
+    ["admin", "admin", false, ["Library", "Settings", "Assistant", "Admin"]],
     ["assistant admin", "admin", true, ["Library", "Settings", "Assistant", "Admin"]],
   ])("uses the approved %s navigation without Install", (_name, role, assistantEnabled, expected) => {
     mockAuthState.role = role;
@@ -141,6 +148,47 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
     expect(within(navigation).getByRole("link", { name: "Settings" })).toHaveClass(
       "floating-island__link--active",
     );
+  });
+
+  test.each([
+    ["/admin/assistant", "Assistant"],
+    ["/admin/assistant/42", "Assistant"],
+    ["/admin/security", "Admin"],
+  ])("uses explicit active matching for %s", (initialEntry, activeLabel) => {
+    mockAuthState.role = "admin";
+    mockAuthState.assistantEnabled = false;
+    renderShell({ initialEntry });
+
+    const navigation = screen.getByRole("navigation", { name: "Primary" });
+    expect(within(navigation).getByRole("link", { name: activeLabel })).toHaveClass(
+      "floating-island__link--active",
+    );
+    const inactiveLabel = activeLabel === "Assistant" ? "Admin" : "Assistant";
+    expect(within(navigation).getByRole("link", { name: inactiveLabel })).not.toHaveClass(
+      "floating-island__link--active",
+    );
+  });
+
+  test("Floating Library uses the remembered source/search return target from Detail", async () => {
+    window.sessionStorage.setItem("elvern:library-return-target", JSON.stringify({
+      listPath: "/library/cloud?category=movies&q=phase",
+      anchorItemId: 42,
+      anchorInstanceKey: "other-movies:42",
+      pendingRestore: false,
+    }));
+    renderShell({
+      initialEntry: "/library/42",
+      children: <LocationProbe />,
+    });
+
+    screen.getByRole("link", { name: "Library" }).click();
+
+    await waitFor(() => expect(screen.getByTestId("shell-location")).toHaveTextContent(
+      "/library/cloud?category=movies&q=phase",
+    ));
+    expect(JSON.parse(
+      window.sessionStorage.getItem("elvern:library-return-target"),
+    ).pendingRestore).toBe(true);
   });
 
   test("a trailing-slash Library root does not render a duplicate Elvern header", () => {

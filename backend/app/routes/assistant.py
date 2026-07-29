@@ -28,11 +28,13 @@ ATTACHMENT_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _require_assistant_access(request: Request, *, user) -> None:
+    if user.role == "admin":
+        return
     if assistant_beta_enabled_for_user(request.app.state.settings, user_id=user.id):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Assistant (Beta) is not enabled for this account",
+        detail="Assistant is not enabled for this account",
     )
 
 

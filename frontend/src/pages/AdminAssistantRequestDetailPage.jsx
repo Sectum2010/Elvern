@@ -195,7 +195,7 @@ export function AdminAssistantRequestDetailPage() {
         <section className="settings-card settings-card--wide">
           <div className="settings-inline-header">
             <div>
-              <p className="eyebrow">Admin · Assistant (Beta)</p>
+              <p className="eyebrow">Admin · Assistant</p>
               <div className="assistant-request-detail__title-row">
                 <h1>{detail.request_number}</h1>
                 <span className={`status-pill status-pill--assistant status-pill--assistant-${detail.status}`}>{humanize(detail.status)}</span>

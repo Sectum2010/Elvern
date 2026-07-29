@@ -6565,6 +6565,28 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   min-width: 0;
 }
 
+.settings-hidden-list-target {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 1rem;
+  min-width: 0;
+  scroll-margin-top: 1rem;
+}
+
+.settings-resource-errors {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.settings-resource-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--danger-text, #f0a6aa);
+}
+
 .detail-block {
   display: grid;
   gap: 0.7rem;

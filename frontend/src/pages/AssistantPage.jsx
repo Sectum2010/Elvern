@@ -331,9 +331,9 @@ export function AssistantPage() {
           </summary>
 
           <div className="settings-disclosure__body">
-            <p className="eyebrow">Assistant (Beta)</p>
+            <p className="eyebrow">Assistant</p>
             <p className="page-subnote">
-              This beta only stores safe request records and placeholder workflow data. It does not run models or system actions yet.
+              Assistant stores structured requests and workflow records. It does not execute system actions without the existing approval flow.
             </p>
             {message ? <p className="page-note">{message}</p> : null}
             {error ? <p className="form-error">{error}</p> : null}

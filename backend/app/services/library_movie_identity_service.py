@@ -194,8 +194,14 @@ def _movie_identity_payload(
             for part in dict.fromkeys([*edition_identity.split("|"), *strict_edition_identity.split("|")])
             if part
         )
+    filename_signature = _local_original_filename_signature(original_filename)
+    if not filename_signature:
+        return None
     return {
-        "movie_key": f"{normalize_title_key(base_title)}|{normalized_year}|{edition_identity}",
+        "movie_key": (
+            f"{normalize_title_key(base_title)}|{normalized_year}|{edition_identity}"
+            f"|copy:{filename_signature}"
+        ),
         "display_title": base_title,
         "year": normalized_year,
         "edition_identity": edition_identity,

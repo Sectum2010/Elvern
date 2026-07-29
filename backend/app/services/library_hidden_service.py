@@ -804,6 +804,8 @@ def set_hidden_media_item_scope(
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> dict[str, object]:
+    if target_scope not in {"personal", "global"}:
+        raise ValueError("invalid_scope")
     with get_connection(settings) as connection:
         try:
             media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
