@@ -739,8 +739,6 @@ The repo carries substantial internal documentation under `docs/`:
 - 💾 `docs/backup-and-recovery.md` — backup checkpoint workflow
 - 🗺️ `docs/ROADMAP.md` — what's next
 - ⚡ `docs/ROUTE2_ADAPTIVE_RESOURCE_POLICY.md` — the Route 2 policy spec
-- 📊 `docs/ROUTE2_ADAPTIVE_BENCHMARK_NOTES.md` — performance benchmarks
-- 🎬 `docs/PLAYBACK_REGRESSION_NOTES.md` — known playback edge cases
 
 <br/>
 

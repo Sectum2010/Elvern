@@ -59,7 +59,6 @@ data/
 LLM/
 
 # Local/private security review notes
-docs/security-audit-2026-05-08.md
 
 # Editor / local agent state
 .vscode/
