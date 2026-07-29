@@ -500,6 +500,83 @@ def test_runtime_rename_is_ledgered_before_directory_fsync(
     assert list(destination.iterdir()) == []
 
 
+def test_runtime_prepared_ledger_never_deletes_foreign_matching_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    foreign_path: Path | None = None
+
+    def add_foreign_matching_file(entry) -> None:
+        nonlocal foreign_path
+        foreign_path = entry.path
+        shutil.copy2(source / entry.path.name, entry.path)
+        entry.path.chmod(module.IMMUTABLE_FILE_MODE)
+        raise module.AuthorityError("injected pre-placement failure")
+
+    monkeypatch.setattr(module, "_before_artifact_placement", add_foreign_matching_file)
+    with pytest.raises(module.AuthorityError, match="injected pre-placement failure"):
+        _run_locked_runtime_migration(module, source, destination, manifest)
+
+    assert foreign_path is not None
+    assert foreign_path.exists()
+    assert foreign_path.read_bytes() == (source / foreign_path.name).read_bytes()
+
+
+def test_runtime_placement_started_rolls_back_owned_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+
+    def fail_before_state_promotion(_entry) -> None:
+        raise module.AuthorityError("injected placement boundary failure")
+
+    monkeypatch.setattr(module, "_after_artifact_placement", fail_before_state_promotion)
+    with pytest.raises(module.AuthorityError, match="injected placement boundary failure"):
+        _run_locked_runtime_migration(module, source, destination, manifest)
+
+    assert list(destination.iterdir()) == []
+
+
+def test_runtime_no_clobber_race_preserves_foreign_final_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    foreign_path: Path | None = None
+
+    def add_foreign_before_no_clobber(entry) -> None:
+        nonlocal foreign_path
+        foreign_path = entry.path
+        entry.path.write_bytes(b"foreign actor")
+
+    monkeypatch.setattr(module, "_before_artifact_placement", add_foreign_before_no_clobber)
+    with pytest.raises(module.AuthorityError, match="rollback could not be verified"):
+        _run_locked_runtime_migration(module, source, destination, manifest)
+
+    assert foreign_path is not None
+    assert foreign_path.read_bytes() == b"foreign actor"
+
+
 @pytest.mark.parametrize(
     "failure",
     ["signal", "content", "inode", "symlink"],

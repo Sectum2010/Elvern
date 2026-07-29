@@ -70,7 +70,7 @@ class _ArtifactLedgerEntry:
         self.expected_size = expected_size
         self.expected_sha256 = expected_sha256
         self.expected_mode = expected_mode
-        self.state = "pending"
+        self.state = "prepared"
         self.device: int | None = None
         self.inode: int | None = None
 
@@ -447,6 +447,14 @@ def _same_file(path: Path, source: Path) -> bool:
     return stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == IMMUTABLE_FILE_MODE
 
 
+def _before_artifact_placement(_entry: _ArtifactLedgerEntry) -> None:
+    """Failure-injection boundary before the no-clobber placement."""
+
+
+def _after_artifact_placement(_entry: _ArtifactLedgerEntry) -> None:
+    """Failure-injection boundary after placement and before state promotion."""
+
+
 def _after_artifact_rename(_entry: _ArtifactLedgerEntry) -> None:
     """Failure-injection boundary after ledger capture and before directory fsync."""
 
@@ -479,21 +487,32 @@ def _copy_verified_file(
             expected_sha256=expected_sha256,
             expected_mode=IMMUTABLE_FILE_MODE,
         )
+        entry.device = expected_metadata.st_dev
+        entry.inode = expected_metadata.st_ino
         ledger.append(entry)
         if os.environ.get("ELVERN_RUNTIME_MIGRATION_TEST_FAIL_AT") == str(index):
             raise AuthorityError("Injected migration failure.")
-        os.replace(temporary_path, entry.path)
+        _before_artifact_placement(entry)
+        entry.state = "placement_started"
+        try:
+            os.link(temporary_path, entry.path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise AuthorityError(
+                "Runtime release destination artifact appeared before placement."
+            ) from exc
+        _after_artifact_placement(entry)
         renamed_metadata = os.lstat(entry.path)
         if stat.S_ISLNK(renamed_metadata.st_mode) or not stat.S_ISREG(renamed_metadata.st_mode):
             raise AuthorityError("Renamed release artifact is not a safe regular file.")
-        entry.state = "renamed"
-        entry.device = renamed_metadata.st_dev
-        entry.inode = renamed_metadata.st_ino
         if (
-            renamed_metadata.st_size != entry.expected_size
+            (renamed_metadata.st_dev, renamed_metadata.st_ino)
+            != (entry.device, entry.inode)
+            or renamed_metadata.st_size != entry.expected_size
             or stat.S_IMODE(renamed_metadata.st_mode) != entry.expected_mode
         ):
             raise AuthorityError("Renamed release artifact metadata failed verification.")
+        entry.state = "placed"
+        temporary_path.unlink()
         _after_artifact_rename(entry)
         _fsync_directory(destination)
     finally:
@@ -679,6 +698,8 @@ def _rollback_artifact_ledger(
     failures: list[str] = []
     removed_any = False
     for entry in reversed(ledger):
+        if entry.state in {"prepared", "committed"}:
+            continue
         if not _path_entry_exists(entry.path):
             continue
         try:
@@ -687,11 +708,18 @@ def _rollback_artifact_ledger(
                 failures.append(f"{entry.path.name}: unsafe replacement")
                 continue
             if (
-                entry.device is not None
-                and entry.inode is not None
-                and (metadata.st_dev, metadata.st_ino) != (entry.device, entry.inode)
+                entry.device is None
+                or entry.inode is None
+                or (metadata.st_dev, metadata.st_ino) != (entry.device, entry.inode)
             ):
                 failures.append(f"{entry.path.name}: inode changed")
+                continue
+            if entry.state == "placement_started":
+                entry.path.unlink()
+                removed_any = True
+                continue
+            if entry.state != "placed":
+                failures.append(f"{entry.path.name}: unknown ledger state")
                 continue
             if (
                 metadata.st_size != entry.expected_size
@@ -841,6 +869,9 @@ def _migrate_authority_locked(
         _validate(destination, expected_origin=expected_origin)
         if _mutable_authority_files(destination, payload):
             raise AuthorityError("Migrated runtime authority is mutable.")
+        for entry in artifact_ledger:
+            if entry.state == "placed":
+                entry.state = "committed"
     except BaseException as exc:
         cleanup_failures: list[str] = []
         if lock.is_owned():

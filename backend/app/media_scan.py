@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import Settings
 from .db import get_connection, preserve_hidden_movie_keys_for_media_item, utcnow_iso
 from .db_hidden_movie_keys import (
+    find_local_copy_identity_candidates,
     prune_recreated_local_hidden_movie_keys,
     resolve_hidden_copy_identity,
 )
@@ -44,19 +45,6 @@ def _preserve_known_year(*, inferred_year: int | None, existing_year: object) ->
     if inferred_year is not None:
         return inferred_year
     return _coerce_scan_year(existing_year)
-
-
-def _local_file_signature(*, file_size: object, file_mtime: object, filename: object) -> tuple[int, float, str]:
-    try:
-        normalized_size = int(file_size or 0)
-    except (TypeError, ValueError):
-        normalized_size = 0
-    try:
-        normalized_mtime = round(float(file_mtime or 0.0), 6)
-    except (TypeError, ValueError):
-        normalized_mtime = 0.0
-    suffix = Path(str(filename or "")).suffix.lower()
-    return normalized_size, normalized_mtime, suffix
 
 
 def infer_title_and_year(filename_stem: str) -> tuple[str, int | None]:
@@ -404,22 +392,61 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     library_category_name,
                     library_folder_role,
                     library_folder_path,
-                    library_folder_name
+                    library_folder_name,
+                    COALESCE(source_kind, 'local') AS source_kind,
+                    library_source_id,
+                    hidden_copy_identity
+                FROM media_items
+                WHERE COALESCE(source_kind, 'local') = 'local'
+                """
+            ).fetchall()
+            current_files_by_path = {
+                str(resolved): (resolved, file_stat)
+                for resolved, file_stat, _scan_metadata in current_files
+            }
+            for row in existing_rows:
+                current_file = current_files_by_path.get(str(row["file_path"]))
+                if current_file is None:
+                    continue
+                resolved, file_stat = current_file
+                resolve_hidden_copy_identity(
+                    connection,
+                    media_row=row,
+                    local_file_path=resolved,
+                    local_file_stat=file_stat,
+                )
+            existing_rows = connection.execute(
+                """
+                SELECT
+                    id,
+                    file_path,
+                    original_filename,
+                    file_size,
+                    file_mtime,
+                    year,
+                    series_folder_key,
+                    series_folder_name,
+                    library_category,
+                    library_category_path,
+                    library_category_name,
+                    library_folder_role,
+                    library_folder_path,
+                    library_folder_name,
+                    COALESCE(source_kind, 'local') AS source_kind,
+                    library_source_id,
+                    hidden_copy_identity
                 FROM media_items
                 WHERE COALESCE(source_kind, 'local') = 'local'
                 """
             ).fetchall()
             existing_by_path = {row["file_path"]: row for row in existing_rows}
-            missing_existing_by_signature: dict[tuple[int, float, str], list] = {}
+            missing_existing_by_identity: dict[str, list] = {}
             for row in existing_rows:
                 if row["file_path"] in current_paths:
                     continue
-                signature = _local_file_signature(
-                    file_size=row["file_size"],
-                    file_mtime=row["file_mtime"],
-                    filename=row["original_filename"],
-                )
-                missing_existing_by_signature.setdefault(signature, []).append(row)
+                identity = str(row["hidden_copy_identity"] or "").strip()
+                if identity:
+                    missing_existing_by_identity.setdefault(identity, []).append(row)
             seen_paths: set[str] = set()
             rename_matched_existing_ids: set[int] = set()
 
@@ -430,14 +457,21 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                 existing = existing_by_path.get(file_path)
                 rename_target = None
                 if existing is None:
-                    signature = _local_file_signature(
-                        file_size=stat.st_size,
-                        file_mtime=stat.st_mtime,
-                        filename=resolved.name,
+                    identity_candidates = find_local_copy_identity_candidates(
+                        connection,
+                        media_row={
+                            "source_kind": "local",
+                            "library_source_id": shared_local_source_id,
+                            "file_path": file_path,
+                        },
+                        file_path=resolved,
+                        file_stat=stat,
+                        require_locator=False,
                     )
                     candidates = [
                         row
-                        for row in missing_existing_by_signature.get(signature, [])
+                        for identity in identity_candidates
+                        for row in missing_existing_by_identity.get(identity, [])
                         if int(row["id"]) not in rename_matched_existing_ids
                     ]
                     if len(candidates) == 1:
@@ -621,6 +655,8 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     resolve_hidden_copy_identity(
                         connection,
                         media_item_id=media_item_id,
+                        local_file_path=resolved,
+                        local_file_stat=stat,
                     )
                     connection.execute(
                         "DELETE FROM subtitle_tracks WHERE media_item_id = ?",

@@ -26,7 +26,10 @@ from backend.app.services import cloud_source_sync_service
 from backend.app.services.desktop_playback_service import resolve_same_host_request
 from backend.app.services.google_drive_service import build_google_drive_provider_auth_required_detail
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
-from backend.app.services.library_hidden_service import hide_media_item_for_user
+from backend.app.services.library_hidden_service import (
+    hide_media_item_for_user,
+    show_media_item_for_user,
+)
 from backend.tests.conftest import (
     DummyAdminEventHub,
     DummyMobilePlaybackManager,
@@ -828,6 +831,86 @@ def test_local_hidden_copy_survives_scanner_delete_and_same_path_recreation(
     assert int(recreated["id"]) != original_id
     assert recreated["hidden_copy_identity"] == original_identity
     assert client.get("/api/library").json()["total_items"] == 0
+
+
+def test_local_hidden_identity_separates_renamed_copy_from_reused_path_and_recreates_second_copy(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    assert client.patch(
+        "/api/user-settings",
+        json={"hide_duplicate_movies": False},
+    ).status_code == 200
+    media_root = Path(initialized_settings.media_root)
+    original_path = media_root / "Path.Reuse.2026.mkv"
+    renamed_path = media_root / "Path.Reuse.Renamed.2026.mkv"
+    original_path.write_bytes(b"copy-a-distinct-content")
+    scan_media_library(initialized_settings, reason="manual")
+
+    with get_connection(initialized_settings) as connection:
+        copy_a = connection.execute(
+            "SELECT id, hidden_copy_identity FROM media_items WHERE file_path = ?",
+            (str(original_path.resolve()),),
+        ).fetchone()
+    assert copy_a is not None
+    copy_a_id = int(copy_a["id"])
+    copy_a_identity = str(copy_a["hidden_copy_identity"])
+
+    original_path.rename(renamed_path)
+    scan_media_library(initialized_settings, reason="manual")
+    original_path.write_bytes(b"copy-b-distinct-content")
+    scan_media_library(initialized_settings, reason="manual")
+
+    with get_connection(initialized_settings) as connection:
+        active = connection.execute(
+            """
+            SELECT id, file_path, hidden_copy_identity
+            FROM media_items
+            ORDER BY id
+            """
+        ).fetchall()
+    assert len(active) == 2
+    renamed_copy = next(row for row in active if row["file_path"] == str(renamed_path.resolve()))
+    reused_copy = next(row for row in active if row["file_path"] == str(original_path.resolve()))
+    copy_b_id = int(reused_copy["id"])
+    copy_b_identity = str(reused_copy["hidden_copy_identity"])
+    assert int(renamed_copy["id"]) == copy_a_id
+    assert str(renamed_copy["hidden_copy_identity"]) == copy_a_identity
+    assert copy_b_identity != copy_a_identity
+
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=copy_a_id)
+    visible_after_a_hide = {
+        int(item["id"]) for item in client.get("/api/library").json()["items"]
+    }
+    assert copy_a_id not in visible_after_a_hide
+    assert copy_b_id in visible_after_a_hide
+    show_media_item_for_user(initialized_settings, user_id=1, item_id=copy_a_id)
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=copy_b_id)
+    visible_after_b_hide = {
+        int(item["id"]) for item in client.get("/api/library").json()["items"]
+    }
+    assert copy_a_id in visible_after_b_hide
+    assert copy_b_id not in visible_after_b_hide
+
+    original_path.unlink()
+    scan_media_library(initialized_settings, reason="manual")
+    original_path.write_bytes(b"copy-b-distinct-content")
+    scan_media_library(initialized_settings, reason="manual")
+    with get_connection(initialized_settings) as connection:
+        recreated_b = connection.execute(
+            "SELECT id, hidden_copy_identity FROM media_items WHERE file_path = ?",
+            (str(original_path.resolve()),),
+        ).fetchone()
+    assert recreated_b is not None
+    assert int(recreated_b["id"]) != copy_b_id
+    assert str(recreated_b["hidden_copy_identity"]) == copy_b_identity
+    assert client.get("/api/library").json()["total_items"] == 1
 
 
 def test_ambiguous_identical_local_renames_do_not_reuse_or_merge_hidden_identity(

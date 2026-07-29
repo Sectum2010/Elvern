@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
 import pytest
 
+from backend.app import db_hidden_movie_keys
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.db_hidden_movie_keys import (
     _legacy_hidden_keys_for_row,
+    materialize_legacy_hidden_coverage_for_item,
     migrate_legacy_hidden_movie_keys,
     preserve_hidden_movie_keys_for_media_item,
+    repair_hidden_copy_identity_collisions,
     resolve_hidden_copy_identity,
 )
 from backend.app.services import library_hidden_service
@@ -48,6 +54,10 @@ def _insert_media_item(settings, *, suffix: str) -> int:
                 now,
                 now,
             ),
+        )
+        resolve_hidden_copy_identity(
+            connection,
+            media_item_id=int(cursor.lastrowid),
         )
         connection.commit()
         return int(cursor.lastrowid)
@@ -379,23 +389,43 @@ def test_hidden_copy_identity_separates_same_basename_by_directory_and_source(
 def test_hidden_copy_identity_survives_recreation_and_strong_row_rename(
     initialized_settings,
 ) -> None:
+    source_root = Path(initialized_settings.media_root) / "identity-recreation"
+    source_root.mkdir()
     source_id = _insert_local_source(
         initialized_settings,
         resource_id="identity-recreation",
-        local_path="/safe/recreation",
+        local_path=str(source_root),
     )
-    original_path = "/safe/recreation/Original.2026.mkv"
+    original_path = source_root / "Original.2026.mkv"
+    renamed_path = source_root / "Renamed.2026.mkv"
+    original_path.write_bytes(b"identity-recreation-content")
     item_id = _insert_identity_item(
         initialized_settings,
-        file_path=original_path,
+        file_path=str(original_path),
         source_id=source_id,
     )
     original_identity = _copy_identity(initialized_settings, item_id=item_id)
+    with get_connection(initialized_settings) as connection:
+        aliases = connection.execute(
+            """
+            SELECT locator_hash, evidence_hash
+            FROM hidden_copy_identity_aliases
+            WHERE hidden_copy_identity = ?
+            """,
+            (original_identity,),
+        ).fetchall()
+    assert aliases
+    serialized_aliases = "\n".join(
+        f"{row['locator_hash']}:{row['evidence_hash']}" for row in aliases
+    ).lower()
+    assert str(source_root).lower() not in serialized_aliases
+    assert "original.2026.mkv" not in serialized_aliases
 
+    original_path.rename(renamed_path)
     with get_connection(initialized_settings) as connection:
         connection.execute(
             "UPDATE media_items SET file_path = ?, original_filename = ? WHERE id = ?",
-            ("/safe/recreation/Renamed.2026.mkv", "Renamed.2026.mkv", item_id),
+            (str(renamed_path), "Renamed.2026.mkv", item_id),
         )
         renamed_identity = resolve_hidden_copy_identity(connection, media_item_id=item_id)
         assert renamed_identity == original_identity
@@ -403,9 +433,11 @@ def test_hidden_copy_identity_survives_recreation_and_strong_row_rename(
         connection.execute("DELETE FROM media_items WHERE id = ?", (item_id,))
         connection.commit()
 
+    renamed_path.unlink()
+    original_path.write_bytes(b"identity-recreation-content")
     recreated = _insert_identity_item(
         initialized_settings,
-        file_path=original_path,
+        file_path=str(original_path),
         source_id=source_id,
     )
     assert _copy_identity(initialized_settings, item_id=recreated) == original_identity
@@ -447,6 +479,36 @@ def test_cloud_hidden_copy_identity_uses_source_scoped_external_id_not_filename(
         external_media_id="provider-file-1",
     )
     assert _copy_identity(initialized_settings, item_id=other_source) != same_provider_copy_renamed
+
+
+def test_non_local_path_fallback_identity_remains_deterministic(
+    initialized_settings,
+) -> None:
+    source_id = _insert_local_source(
+        initialized_settings,
+        resource_id="provider-path-fallback",
+        local_path="/unused/provider-path-fallback",
+    )
+    item_id = _insert_identity_item(
+        initialized_settings,
+        file_path="provider://source/item-one",
+        source_id=source_id,
+        source_kind="provider",
+    )
+    original_identity = _copy_identity(initialized_settings, item_id=item_id)
+
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE media_items SET hidden_copy_identity = NULL WHERE id = ?",
+            (item_id,),
+        )
+        rebuilt_identity = resolve_hidden_copy_identity(
+            connection,
+            media_item_id=item_id,
+        )
+        connection.commit()
+
+    assert rebuilt_identity == original_identity
 
 
 def test_legacy_group_materializes_all_copies_before_selected_show_again(
@@ -557,6 +619,240 @@ def test_legacy_transitional_key_migrates_once_and_orphan_is_retained(
     assert second["user_legacy_keys_retained"] == 1
     assert migrated["hidden_at"] == "2026-02-03 04:05:06"
     assert orphan["hidden_at"] == "2026-02-03 04:05:07"
+
+
+@pytest.mark.parametrize("unrelated_legacy_count", [0, 1, 1000, 3000])
+def test_normal_hidden_mutations_skip_full_identity_scan_without_relevant_legacy_key(
+    initialized_settings,
+    monkeypatch,
+    unrelated_legacy_count: int,
+) -> None:
+    item_id = _insert_media_item(
+        initialized_settings,
+        suffix=f"fast-path-{unrelated_legacy_count}",
+    )
+    if unrelated_legacy_count:
+        now = utcnow_iso()
+        with get_connection(initialized_settings) as connection:
+            for index in range(unrelated_legacy_count):
+                connection.execute(
+                    """
+                    INSERT INTO user_hidden_movie_keys (
+                        user_id, movie_key, display_title, year,
+                        edition_identity, hidden_at
+                    ) VALUES (1, ?, 'Unrelated', 1999, 'standard', ?)
+                    """,
+                    (f"unrelated-{unrelated_legacy_count}-{index}", now),
+                )
+            connection.commit()
+
+    def fail_full_scan(_connection):
+        raise AssertionError("ordinary Hidden mutation must not scan all media_items")
+
+    monkeypatch.setattr(db_hidden_movie_keys, "_load_identity_rows", fail_full_scan)
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=item_id)
+    show_media_item_for_user(initialized_settings, user_id=1, item_id=item_id)
+    _set_scope(initialized_settings, item_id=item_id, target_scope="personal")
+    _set_scope(initialized_settings, item_id=item_id, target_scope="global")
+
+
+def test_personal_legacy_fast_path_does_not_query_global_records(
+    initialized_settings,
+) -> None:
+    item_id = _insert_media_item(initialized_settings, suffix="personal-fast-path")
+    statements: list[str] = []
+    with get_connection(initialized_settings) as connection:
+        connection.set_trace_callback(statements.append)
+        materialize_legacy_hidden_coverage_for_item(
+            connection,
+            media_item_id=item_id,
+            user_id=1,
+            include_global=False,
+        )
+        connection.set_trace_callback(None)
+    assert not any("global_hidden_movie_keys" in statement for statement in statements)
+    assert not any(
+        "FROM media_items" in statement and "WHERE id =" not in statement
+        for statement in statements
+    )
+
+
+def test_historical_identity_collision_repair_preserves_scope_and_enforces_uniqueness(
+    initialized_settings,
+) -> None:
+    first, second = _insert_copy_pair(initialized_settings)
+    now = utcnow_iso()
+    shared_identity = "copy-v2:" + ("a" * 64)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "DROP INDEX idx_media_items_active_hidden_copy_identity"
+        )
+        connection.execute(
+            "UPDATE media_items SET hidden_copy_identity = ? WHERE id IN (?, ?)",
+            (shared_identity, first, second),
+        )
+        connection.execute(
+            """
+            INSERT INTO users (
+                username, password_hash, role, enabled, age_credential,
+                created_at, updated_at
+            ) VALUES ('collision-user', 'unused', 'standard_user', 1, 18, ?, ?)
+            """,
+            (now, now),
+        )
+        second_user_id = int(connection.execute(
+            "SELECT id FROM users WHERE username = 'collision-user'"
+        ).fetchone()["id"])
+        for user_id, hidden_at in (
+            (1, "2026-01-01T00:00:00+00:00"),
+            (second_user_id, "2026-01-02T00:00:00+00:00"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO user_hidden_movie_keys (
+                    user_id, movie_key, display_title, year,
+                    edition_identity, hidden_at
+                ) VALUES (?, ?, 'Movie A', 2026, 'standard', ?)
+                """,
+                (user_id, shared_identity, hidden_at),
+            )
+        connection.execute(
+            """
+            INSERT INTO global_hidden_movie_keys (
+                movie_key, display_title, year, edition_identity,
+                hidden_by_user_id, hidden_at
+            ) VALUES (?, 'Movie A', 2026, 'standard', 1, ?)
+            """,
+            (shared_identity, "2026-01-03T00:00:00+00:00"),
+        )
+        connection.execute(
+            """
+            INSERT INTO user_hidden_media_items (
+                user_id, media_item_id, hidden_at
+            ) VALUES (?, ?, ?)
+            """,
+            (second_user_id, second, "2026-01-02T00:00:00+00:00"),
+        )
+        first_result = repair_hidden_copy_identity_collisions(connection)
+        second_result = repair_hidden_copy_identity_collisions(connection)
+        identities = [
+            str(row["hidden_copy_identity"])
+            for row in connection.execute(
+                "SELECT hidden_copy_identity FROM media_items WHERE id IN (?, ?) ORDER BY id",
+                (first, second),
+            ).fetchall()
+        ]
+        assert len(set(identities)) == 2
+        assert shared_identity in identities
+        assert first_result["identity_collisions_repaired"] == 1
+        assert second_result["identity_collisions_repaired"] == 0
+        for user_id, hidden_at in (
+            (1, "2026-01-01T00:00:00+00:00"),
+            (second_user_id, "2026-01-02T00:00:00+00:00"),
+        ):
+            records = connection.execute(
+                """
+                SELECT movie_key, hidden_at
+                FROM user_hidden_movie_keys
+                WHERE user_id = ? AND movie_key IN (?, ?)
+                ORDER BY movie_key
+                """,
+                (user_id, *identities),
+            ).fetchall()
+            assert len(records) == 2
+            assert {str(row["hidden_at"]) for row in records} == {hidden_at}
+        global_records = connection.execute(
+            """
+            SELECT movie_key, hidden_at
+            FROM global_hidden_movie_keys
+            WHERE movie_key IN (?, ?)
+            """,
+            identities,
+        ).fetchall()
+        assert len(global_records) == 2
+        assert {
+            str(row["hidden_at"]) for row in global_records
+        } == {"2026-01-03T00:00:00+00:00"}
+        direct = connection.execute(
+            """
+            SELECT hidden_at
+            FROM user_hidden_media_items
+            WHERE user_id = ? AND media_item_id = ?
+            """,
+            (second_user_id, second),
+        ).fetchone()
+        assert direct is not None
+        assert direct["hidden_at"] == "2026-01-02T00:00:00+00:00"
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX idx_media_items_active_hidden_copy_identity
+            ON media_items (hidden_copy_identity)
+            WHERE hidden_copy_identity LIKE 'copy-v2:%'
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE media_items SET hidden_copy_identity = ? WHERE id = ?",
+                (identities[0], second),
+            )
+        connection.rollback()
+
+
+def test_historical_identity_collision_repair_rolls_back_atomically(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    first, second = _insert_copy_pair(initialized_settings)
+    shared_identity = "copy-v2:" + ("b" * 64)
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "DROP INDEX idx_media_items_active_hidden_copy_identity"
+        )
+        connection.execute(
+            "UPDATE media_items SET hidden_copy_identity = ? WHERE id IN (?, ?)",
+            (shared_identity, first, second),
+        )
+        connection.execute(
+            """
+            INSERT INTO user_hidden_movie_keys (
+                user_id, movie_key, display_title, year,
+                edition_identity, hidden_at
+            ) VALUES (1, ?, 'Movie A', 2026, 'standard', ?)
+            """,
+            (shared_identity, now),
+        )
+
+        def fail_materialization(*_args, **_kwargs):
+            raise RuntimeError("injected collision repair failure")
+
+        monkeypatch.setattr(
+            db_hidden_movie_keys,
+            "_insert_user_copy_key",
+            fail_materialization,
+        )
+        with pytest.raises(RuntimeError, match="injected collision repair failure"):
+            repair_hidden_copy_identity_collisions(connection)
+
+        identities = {
+            str(row["hidden_copy_identity"])
+            for row in connection.execute(
+                "SELECT hidden_copy_identity FROM media_items WHERE id IN (?, ?)",
+                (first, second),
+            ).fetchall()
+        }
+        assert identities == {shared_identity}
+        records = connection.execute(
+            """
+            SELECT movie_key, hidden_at
+            FROM user_hidden_movie_keys
+            WHERE user_id = 1
+            """
+        ).fetchall()
+        assert [(row["movie_key"], row["hidden_at"]) for row in records] == [
+            (shared_identity, now),
+        ]
+        connection.rollback()
 
 
 @pytest.mark.parametrize(

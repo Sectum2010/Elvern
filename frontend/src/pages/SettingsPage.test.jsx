@@ -2,7 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fireEvent, render as testingLibraryRender, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render as testingLibraryRender,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import {
@@ -403,6 +410,7 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
 }
 
 beforeEach(() => {
+  vi.useRealTimers();
   queryClient.clear();
   resetConnectivityRecoveryStoreForTests();
   apiRequest.mockReset();
@@ -1054,12 +1062,22 @@ describe("SettingsPage Hidden scope transfer", () => {
   async function renderAdminLibraries(mockOptions = {}) {
     mockAuthState.role = "admin";
     mockApi(defaultSettings, mockOptions);
-    render(
+    const view = render(
       <MemoryRouter initialEntries={["/settings?section=libraries"]}>
         <SettingsPage />
       </MemoryRouter>,
     );
     await screen.findByText("Hidden for me");
+    return view;
+  }
+
+  async function settlePendingWork() {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
   }
 
   test("Hide universally sends one PUT and no compensating hide/show requests", async () => {
@@ -1269,35 +1287,39 @@ describe("SettingsPage Hidden scope transfer", () => {
   });
 
   test("expired pending reconciliation stops automatic retry and keeps PUT single-send", async () => {
-    const now = 1_000_000;
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      hiddenReadFailuresAfterScope: 2,
+      scopeError: "network",
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
     try {
-      await renderAdminLibraries({
-        hiddenItems: [personalHiddenItem],
-        hiddenReadFailuresAfterScope: 2,
-        scopeError: "network",
-      });
-      fireEvent.click(screen.getByText("Hidden for me"));
       fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
-      expect(await screen.findByText("Waiting to confirm the hidden scope change.")).toBeInTheDocument();
+      await settlePendingWork();
+      expect(screen.getByText(
+        "Waiting to confirm the hidden scope change.",
+      )).toBeInTheDocument();
 
-      nowSpy.mockReturnValue(now + (2 * 60 * 1000) + 1);
-      window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
-        detail: {
-          generation: 8,
-          incidentId: 31,
-          recoveredThroughFailureId: 41,
-        },
-      }));
+      act(() => {
+        vi.advanceTimersByTime((2 * 60 * 1000) - 1);
+      });
+      expect(screen.getByText(
+        "Waiting to confirm the hidden scope change.",
+      )).toBeInTheDocument();
 
-      expect(await screen.findByText(
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.getByText(
         "Could not confirm the change. Refresh or retry confirmation.",
       )).toBeInTheDocument();
       expect(apiRequest.mock.calls.filter(
         ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
       )).toHaveLength(1);
     } finally {
-      nowSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 
@@ -1390,6 +1412,245 @@ describe("SettingsPage Hidden scope transfer", () => {
     expect(screen.queryByText("Loading hidden movies...")).not.toBeInTheDocument();
     },
   );
+
+  test.each(["newer-first", "older-first"])(
+    "a superseded Hidden failure cannot resurrect an error with %s completion",
+    async (completionOrder) => {
+      await renderAdminLibraries({
+        hiddenItems: [personalHiddenItem, secondPersonalHiddenItem],
+      });
+      fireEvent.click(screen.getByText("Hidden for me"));
+      const originalImplementation = apiRequest.getMockImplementation();
+      let resolveNewerRefresh;
+      let rejectOlderRefresh;
+      const olderRefresh = new Promise((_resolve, reject) => {
+        rejectOlderRefresh = reject;
+      });
+      const newerRefresh = new Promise((resolve) => {
+        resolveNewerRefresh = resolve;
+      });
+      let refreshReads = 0;
+      apiRequest.mockImplementation((requestPath, options) => {
+        if (requestPath === "/api/user-hidden-items") {
+          refreshReads += 1;
+          return refreshReads === 1 ? olderRefresh : newerRefresh;
+        }
+        return originalImplementation(requestPath, options);
+      });
+
+      fireEvent.click(screen.getAllByRole("button", { name: "Hide universally" })[0]);
+      await waitFor(() => expect(refreshReads).toBe(1));
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+      await waitFor(() => expect(refreshReads).toBe(2));
+
+      if (completionOrder === "older-first") {
+        rejectOlderRefresh(new ApiNetworkError(undefined, {
+          failureId: 91,
+          incidentId: 81,
+        }));
+        await settlePendingWork();
+      }
+      resolveNewerRefresh({ items: [] });
+      await waitFor(() => expect(
+        screen.queryByRole("button", { name: "Hide universally" }),
+      ).not.toBeInTheDocument());
+      if (completionOrder === "newer-first") {
+        rejectOlderRefresh(new ApiNetworkError(undefined, {
+          failureId: 91,
+          incidentId: 81,
+        }));
+        await settlePendingWork();
+      }
+
+      expect(screen.queryByText("Elvern could not complete the request.")).not.toBeInTheDocument();
+      expect(screen.queryByText("Loading hidden movies...")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Hide universally" })).not.toBeInTheDocument();
+    },
+  );
+
+  test("successful reconciliation clears its deadline timer", async () => {
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      hiddenReadFailuresAfterScope: 1,
+      scopeError: "network",
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+      await settlePendingWork();
+      expect(screen.getByText(
+        "Waiting to confirm the hidden scope change.",
+      )).toBeInTheDocument();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+        detail: {
+          generation: 1,
+          incidentId: 31,
+          recoveredThroughFailureId: 41,
+        },
+      }));
+      await settlePendingWork();
+
+      expect(screen.getByText("This movie is hidden for everyone.")).toBeInTheDocument();
+      expect(screen.queryByText(
+        "Waiting to confirm the hidden scope change.",
+      )).not.toBeInTheDocument();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("identity switch cancels a pending deadline", async () => {
+    const view = await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      hiddenReadFailuresAfterScope: 2,
+      scopeError: "network",
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+      await settlePendingWork();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+
+      mockAuthState.id = 8;
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+            <SettingsPage />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      await settlePendingWork();
+      expect(screen.queryByText(
+        "Waiting to confirm the hidden scope change.",
+      )).not.toBeInTheDocument();
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+      clearTimeoutSpy.mockRestore();
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("unmount cancels a pending deadline", async () => {
+    const view = await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      hiddenReadFailuresAfterScope: 2,
+      scopeError: "network",
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+      await settlePendingWork();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+
+      view.unmount();
+
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+      clearTimeoutSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("an old deadline cannot expire a newer pending scope change", async () => {
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem, secondPersonalHiddenItem],
+      hiddenReadFailuresAfterScope: 4,
+      scopeError: "network",
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    try {
+      fireEvent.click(screen.getAllByRole("button", { name: "Hide universally" })[0]);
+      await settlePendingWork();
+      expect(screen.getByText(
+        "Waiting to confirm the hidden scope change.",
+      )).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      const nextScopeButton = screen.getAllByRole(
+        "button",
+        { name: "Hide universally" },
+      ).find((button) => !button.disabled);
+      expect(nextScopeButton).toBeDefined();
+      fireEvent.click(nextScopeButton);
+      await settlePendingWork();
+
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(screen.getByText(
+        "Waiting to confirm the hidden scope change.",
+      )).toBeInTheDocument();
+      expect(screen.queryByText(
+        "Could not confirm the change. Refresh or retry confirmation.",
+      )).not.toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(screen.getByText(
+        "Could not confirm the change. Refresh or retry confirmation.",
+      )).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("expired manual confirmation retries one GET without replaying the PUT", async () => {
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem],
+      hiddenReadFailuresAfterScope: 1,
+      scopeError: "network",
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+      await settlePendingWork();
+      act(() => {
+        vi.advanceTimersByTime(2 * 60 * 1000);
+      });
+      expect(screen.getByText(
+        "Could not confirm the change. Refresh or retry confirmation.",
+      )).toBeInTheDocument();
+      const hiddenGetsBefore = apiRequest.mock.calls.filter(
+        ([requestPath]) => requestPath === "/api/user-hidden-items",
+      ).length;
+      const scopePutsBefore = apiRequest.mock.calls.filter(
+        ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
+      ).length;
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry confirmation" }));
+      await settlePendingWork();
+
+      expect(apiRequest.mock.calls.filter(
+        ([requestPath]) => requestPath === "/api/user-hidden-items",
+      )).toHaveLength(hiddenGetsBefore + 1);
+      expect(apiRequest.mock.calls.filter(
+        ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
+      )).toHaveLength(scopePutsBefore);
+      expect(screen.getByText("This movie is hidden for everyone.")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Retry confirmation" })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("SettingsPage Display background controls", () => {

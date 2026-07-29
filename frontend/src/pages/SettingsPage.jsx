@@ -1102,8 +1102,11 @@ export function SettingsPage() {
   const currentIdentityRef = useRef(settingsIdentity);
   const resourceRequestsRef = useRef(new Map());
   const resourceRequestTokenRef = useRef(0);
-  const hiddenListGenerationRef = useRef(0);
+  const hiddenReadOperationRef = useRef(null);
+  const hiddenReadOperationTokenRef = useRef(0);
   const pendingHiddenReconciliationRef = useRef(null);
+  const pendingHiddenReconciliationTokenRef = useRef(0);
+  const pendingHiddenExpiryTimerRef = useRef(null);
   const pendingReconcileHandlerRef = useRef(null);
   const hiddenHashRestoreKeyRef = useRef("");
   const [settings, setSettings] = useState({
@@ -1287,17 +1290,52 @@ export function SettingsPage() {
 
   currentIdentityRef.current = settingsIdentity;
 
+  const clearPendingHiddenExpiryTimer = useCallback(() => {
+    if (pendingHiddenExpiryTimerRef.current !== null) {
+      window.clearTimeout(pendingHiddenExpiryTimerRef.current);
+      pendingHiddenExpiryTimerRef.current = null;
+    }
+  }, []);
+
+  const clearPendingHiddenReconciliation = useCallback(() => {
+    clearPendingHiddenExpiryTimer();
+    pendingHiddenReconciliationRef.current = null;
+    setPendingHiddenReconciliation(null);
+  }, [clearPendingHiddenExpiryTimer]);
+
+  const schedulePendingHiddenExpiry = useCallback((pending) => {
+    clearPendingHiddenExpiryTimer();
+    const delay = Math.max(Number(pending.expiresAt) - Date.now(), 0);
+    pendingHiddenExpiryTimerRef.current = window.setTimeout(() => {
+      pendingHiddenExpiryTimerRef.current = null;
+      if (
+        !mountedRef.current
+        || currentIdentityRef.current !== pending.identity
+        || pendingHiddenReconciliationRef.current !== pending
+        || pendingHiddenReconciliationTokenRef.current !== pending.token
+        || pending.expired
+      ) {
+        return;
+      }
+      pending.expired = true;
+      setPendingHiddenReconciliation({ ...pending });
+    }, delay);
+  }, [clearPendingHiddenExpiryTimer]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      hiddenReadOperationRef.current?.controller?.abort();
+      hiddenReadOperationRef.current = null;
+      clearPendingHiddenExpiryTimer();
       for (const request of resourceRequestsRef.current.values()) {
         request.controller?.abort();
       }
       resourceRequestsRef.current.clear();
       pendingHiddenReconciliationRef.current = null;
     };
-  }, []);
+  }, [clearPendingHiddenExpiryTimer]);
 
   useLayoutEffect(() => {
     if (previousSettingsIdentityRef.current === settingsIdentity) {
@@ -1307,8 +1345,10 @@ export function SettingsPage() {
     for (const request of resourceRequestsRef.current.values()) {
       request.controller?.abort();
     }
+    hiddenReadOperationRef.current?.controller?.abort();
+    hiddenReadOperationRef.current = null;
+    clearPendingHiddenExpiryTimer();
     resourceRequestsRef.current.clear();
-    hiddenListGenerationRef.current += 1;
     pendingHiddenReconciliationRef.current = null;
     settingsHydratedIdentityRef.current = "";
     hiddenHashRestoreKeyRef.current = "";
@@ -1437,7 +1477,7 @@ export function SettingsPage() {
     setUserSettingsLoadError("");
     setError("");
     setMessage("");
-  }, [settingsIdentity]);
+  }, [clearPendingHiddenExpiryTimer, settingsIdentity]);
 
   useEffect(() => {
     if (!userSettingsQuery.data) {
@@ -1476,58 +1516,83 @@ export function SettingsPage() {
     };
   }, [user?.role]);
 
-  const refreshHiddenLists = useCallback(async ({ signal } = {}) => {
+  const refreshHiddenLists = useCallback(async ({
+    signal,
+    ownerKind = "mutation_refresh",
+  } = {}) => {
     const expectedIdentity = settingsIdentity;
-    const generation = hiddenListGenerationRef.current + 1;
-    hiddenListGenerationRef.current = generation;
-    let lists;
+    const operationToken = hiddenReadOperationTokenRef.current + 1;
+    hiddenReadOperationTokenRef.current = operationToken;
+    hiddenReadOperationRef.current?.controller?.abort();
+    const controller = new AbortController();
+    const operation = {
+      operationToken,
+      generation: operationToken,
+      identity: expectedIdentity,
+      ownerKind,
+      controller,
+      startedAt: Date.now(),
+    };
+    hiddenReadOperationRef.current = operation;
+    const abortFromParent = () => controller.abort();
+    if (signal?.aborted) {
+      controller.abort();
+    } else {
+      signal?.addEventListener("abort", abortFromParent, { once: true });
+    }
+
+    const isCurrentOwner = () => (
+      mountedRef.current
+      && currentIdentityRef.current === expectedIdentity
+      && hiddenReadOperationRef.current === operation
+    );
     try {
-      lists = await fetchHiddenLists({ signal });
-    } catch (requestError) {
-      if (isAbortError(requestError)) {
-        return { outcome: "aborted", lists: null };
+      const lists = await fetchHiddenLists({ signal: controller.signal });
+      if (!isCurrentOwner()) {
+        return { outcome: "superseded", lists: null, error: null };
       }
-      throw requestError;
+      setHiddenItems(lists.personalItems);
+      setGlobalHiddenItems(lists.globalItems);
+      const request = resourceRequestsRef.current.get("hidden");
+      if (request?.identity === expectedIdentity) {
+        request.loaded = true;
+        request.transient = false;
+        request.failureId = 0;
+        request.incidentId = 0;
+      }
+      setResourceStatus((current) => ({
+        ...current,
+        hidden: {
+          loading: Boolean(request?.loading),
+          loaded: true,
+          error: "",
+        },
+      }));
+      return { outcome: "applied", lists, error: null };
+    } catch (requestError) {
+      if (!isCurrentOwner()) {
+        return { outcome: "superseded", lists: null, error: null };
+      }
+      if (isAbortError(requestError)) {
+        return { outcome: "aborted", lists: null, error: requestError };
+      }
+      return { outcome: "failed", lists: null, error: requestError };
+    } finally {
+      signal?.removeEventListener("abort", abortFromParent);
     }
-    if (
-      !mountedRef.current
-      || currentIdentityRef.current !== expectedIdentity
-      || hiddenListGenerationRef.current !== generation
-    ) {
-      return { outcome: "superseded", lists: null };
-    }
-    setHiddenItems(lists.personalItems);
-    setGlobalHiddenItems(lists.globalItems);
-    const request = resourceRequestsRef.current.get("hidden");
-    if (request?.identity === expectedIdentity) {
-      request.loaded = true;
-      request.transient = false;
-      request.failureId = 0;
-      request.incidentId = 0;
-    }
-    setResourceStatus((current) => ({
-      ...current,
-      hidden: {
-        loading: Boolean(request?.loading),
-        loaded: true,
-        error: "",
-      },
-    }));
-    return { outcome: "applied", lists };
   }, [fetchHiddenLists, settingsIdentity]);
 
   const reconcilePendingHiddenScope = useCallback(async (
     pending = pendingHiddenReconciliationRef.current,
     { manual = false } = {},
   ) => {
-    if (!pending || pendingHiddenReconciliationRef.current?.itemId !== pending.itemId) {
+    if (!pending || pendingHiddenReconciliationRef.current !== pending) {
       return false;
     }
-    const expired = Date.now() - pending.startedAt >= HIDDEN_RECONCILIATION_MAX_AGE_MS;
+    const expired = Date.now() >= pending.expiresAt;
     if (expired && !manual) {
       pending.expired = true;
       setPendingHiddenReconciliation({ ...pending });
-      setMessage("Could not confirm the change. Refresh or retry confirmation.");
       return false;
     }
     if (pending.reconciling) {
@@ -1535,11 +1600,44 @@ export function SettingsPage() {
     }
     pending.reconciling = true;
     try {
-      const result = await refreshHiddenLists();
+      const result = await refreshHiddenLists({
+        ownerKind: manual ? "manual_retry" : "reconciliation",
+      });
       if (
         result.outcome !== "applied"
-        || pendingHiddenReconciliationRef.current?.itemId !== pending.itemId
+        || pendingHiddenReconciliationRef.current !== pending
       ) {
+        if (result.outcome === "failed") {
+          const requestError = result.error;
+          const hasExpired = Date.now() >= pending.expiresAt;
+          if (hasExpired) {
+            pending.expired = true;
+            setPendingHiddenReconciliation({ ...pending });
+          }
+          if (isTransientNetworkError(requestError)) {
+            pending.incidentId = Number(requestError.incidentId) || pending.incidentId || 0;
+            pending.failureId = Number(requestError.failureId) || pending.failureId || 0;
+            const recoveredGeneration = getConnectivityIncidentRecoveryGeneration(
+              pending.incidentId,
+              pending.failureId,
+            );
+            if (
+              !hasExpired
+              && recoveredGeneration > Number(pending.lastRecoveryGeneration || 0)
+            ) {
+              pending.lastRecoveryGeneration = recoveredGeneration;
+              queueMicrotask(() => {
+                if (
+                  mountedRef.current
+                  && currentIdentityRef.current === pending.identity
+                  && pendingHiddenReconciliationRef.current === pending
+                ) {
+                  void pendingReconcileHandlerRef.current?.(pending);
+                }
+              });
+            }
+          }
+        }
         return false;
       }
       const lists = result.lists;
@@ -1547,66 +1645,25 @@ export function SettingsPage() {
         const successMessage = pending.requestedScope === "global"
           ? "This movie is hidden for everyone."
           : "This movie is now hidden only for your account.";
-        pendingHiddenReconciliationRef.current = null;
-        setPendingHiddenReconciliation(null);
+        clearPendingHiddenReconciliation();
         setError("");
         setMessage(successMessage);
         void invalidateLibraryQueries();
         return true;
       }
       if (hiddenScopeReached(lists, pending.itemId, pending.sourceScope)) {
-        pendingHiddenReconciliationRef.current = null;
-        setPendingHiddenReconciliation(null);
+        clearPendingHiddenReconciliation();
         setMessage("");
         setError(pending.errorMessage || "The scope change was not saved.");
         return true;
       }
-      setMessage("Waiting to confirm the hidden scope change.");
-      return false;
-    } catch (requestError) {
-      if (isAbortError(requestError)) {
-        return false;
-      }
-      const hasExpired = Date.now() - pending.startedAt >= HIDDEN_RECONCILIATION_MAX_AGE_MS;
-      if (hasExpired) {
-        pending.expired = true;
-        setPendingHiddenReconciliation({ ...pending });
-      }
-      if (isTransientNetworkError(requestError)) {
-        pending.incidentId = Number(requestError.incidentId) || pending.incidentId || 0;
-        pending.failureId = Number(requestError.failureId) || pending.failureId || 0;
-        const recoveredGeneration = getConnectivityIncidentRecoveryGeneration(
-          pending.incidentId,
-          pending.failureId,
-        );
-        if (
-          !hasExpired
-          && recoveredGeneration > Number(pending.lastRecoveryGeneration || 0)
-        ) {
-          pending.lastRecoveryGeneration = recoveredGeneration;
-          queueMicrotask(() => {
-            if (
-              mountedRef.current
-              && currentIdentityRef.current === pending.identity
-              && pendingHiddenReconciliationRef.current === pending
-            ) {
-              void pendingReconcileHandlerRef.current?.(pending);
-            }
-          });
-        }
-      }
-      setMessage(
-        hasExpired
-          ? "Could not confirm the change. Refresh or retry confirmation."
-          : "Waiting to confirm the hidden scope change.",
-      );
       return false;
     } finally {
       if (pendingHiddenReconciliationRef.current === pending) {
         pending.reconciling = false;
       }
     }
-  }, [refreshHiddenLists]);
+  }, [clearPendingHiddenReconciliation, refreshHiddenLists]);
 
   pendingReconcileHandlerRef.current = reconcilePendingHiddenScope;
 
@@ -1651,7 +1708,13 @@ export function SettingsPage() {
     try {
       let result;
       if (resourceKey === "hidden") {
-        result = await refreshHiddenLists({ signal: controller.signal });
+        result = await refreshHiddenLists({
+          signal: controller.signal,
+          ownerKind: "resource_load",
+        });
+        if (result.outcome === "failed") {
+          throw result.error;
+        }
       } else if (resourceKey === "cloud") {
         result = {
           outcome: "applied",
@@ -1833,20 +1896,13 @@ export function SettingsPage() {
       if (
         pending
         && !pending.expired
-        && Date.now() - pending.startedAt < HIDDEN_RECONCILIATION_MAX_AGE_MS
+        && Date.now() < pending.expiresAt
         && Number(pending.lastRecoveryGeneration || 0) < recoveredGeneration
         && (!pending.incidentId || pending.incidentId === Number(detail.incidentId))
         && (!pending.failureId || pending.failureId <= Number(detail.recoveredThroughFailureId))
       ) {
         pending.lastRecoveryGeneration = recoveredGeneration;
         void pendingReconcileHandlerRef.current?.(pending);
-      } else if (
-        pending
-        && Date.now() - pending.startedAt >= HIDDEN_RECONCILIATION_MAX_AGE_MS
-      ) {
-        pending.expired = true;
-        setPendingHiddenReconciliation({ ...pending });
-        setMessage("Could not confirm the change. Refresh or retry confirmation.");
       }
     };
     window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
@@ -2387,24 +2443,30 @@ export function SettingsPage() {
       });
       setMessage(payload.message || successMessage);
       void invalidateLibraryQueries();
-      void refreshHiddenLists().catch(() => {});
+      void refreshHiddenLists({ ownerKind: "mutation_refresh" });
     } catch (requestError) {
       if (isUncertainHiddenScopeError(requestError)) {
+        const startedAt = Date.now();
         const pending = {
+          token: pendingHiddenReconciliationTokenRef.current + 1,
           itemId: hiddenItem.id,
           identity: settingsIdentity,
           requestedScope: "global",
           sourceScope: "personal",
           incidentId: Number(requestError.incidentId) || 0,
           failureId: Number(requestError.failureId) || 0,
-          startedAt: Date.now(),
+          startedAt,
+          expiresAt: startedAt + HIDDEN_RECONCILIATION_MAX_AGE_MS,
           lastRecoveryGeneration: 0,
           reconciling: false,
           expired: false,
           errorMessage: requestError.message || "Failed to hide this movie for everyone",
         };
+        pendingHiddenReconciliationTokenRef.current = pending.token;
+        clearPendingHiddenExpiryTimer();
         pendingHiddenReconciliationRef.current = pending;
         setPendingHiddenReconciliation(pending);
+        schedulePendingHiddenExpiry(pending);
         if (await reconcilePendingHiddenScope(pending)) {
           return;
         }
@@ -2450,24 +2512,30 @@ export function SettingsPage() {
       });
       setMessage(payload.message || successMessage);
       void invalidateLibraryQueries();
-      void refreshHiddenLists().catch(() => {});
+      void refreshHiddenLists({ ownerKind: "mutation_refresh" });
     } catch (requestError) {
       if (isUncertainHiddenScopeError(requestError)) {
+        const startedAt = Date.now();
         const pending = {
+          token: pendingHiddenReconciliationTokenRef.current + 1,
           itemId: hiddenItem.id,
           identity: settingsIdentity,
           requestedScope: "personal",
           sourceScope: "global",
           incidentId: Number(requestError.incidentId) || 0,
           failureId: Number(requestError.failureId) || 0,
-          startedAt: Date.now(),
+          startedAt,
+          expiresAt: startedAt + HIDDEN_RECONCILIATION_MAX_AGE_MS,
           lastRecoveryGeneration: 0,
           reconciling: false,
           expired: false,
           errorMessage: requestError.message || "Failed to hide this movie only for your account",
         };
+        pendingHiddenReconciliationTokenRef.current = pending.token;
+        clearPendingHiddenExpiryTimer();
         pendingHiddenReconciliationRef.current = pending;
         setPendingHiddenReconciliation(pending);
+        schedulePendingHiddenExpiry(pending);
         if (await reconcilePendingHiddenScope(pending)) {
           return;
         }
@@ -3261,7 +3329,11 @@ export function SettingsPage() {
       ) : null}
       {pendingHiddenReconciliation ? (
         <div className="settings-resource-error" role="status" aria-live="polite">
-          <span>Waiting to confirm the hidden scope change.</span>
+          <span>
+            {pendingHiddenReconciliation.expired
+              ? "Could not confirm the change. Refresh or retry confirmation."
+              : "Waiting to confirm the hidden scope change."}
+          </span>
           <button
             className="ghost-button ghost-button--inline"
             onClick={() => reconcilePendingHiddenScope(undefined, { manual: true })}

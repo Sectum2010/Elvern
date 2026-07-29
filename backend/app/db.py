@@ -157,6 +157,25 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS hidden_copy_identity_aliases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hidden_copy_identity TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        library_source_id INTEGER NOT NULL DEFAULT 0,
+        locator_hash TEXT NOT NULL,
+        evidence_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        UNIQUE (
+            hidden_copy_identity,
+            source_kind,
+            library_source_id,
+            locator_hash,
+            evidence_hash
+        )
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS subtitle_tracks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         media_item_id INTEGER NOT NULL,
@@ -956,6 +975,28 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_media_items_source_kind ON media_items (source_kind)",
     "CREATE INDEX IF NOT EXISTS idx_media_items_library_source_id ON media_items (library_source_id)",
     "CREATE INDEX IF NOT EXISTS idx_media_items_external_media_id ON media_items (external_media_id)",
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_media_items_active_hidden_copy_identity
+    ON media_items (hidden_copy_identity)
+    WHERE hidden_copy_identity LIKE 'copy-v2:%'
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_hidden_copy_alias_lookup
+    ON hidden_copy_identity_aliases (
+        source_kind,
+        library_source_id,
+        locator_hash,
+        evidence_hash
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_hidden_copy_alias_evidence
+    ON hidden_copy_identity_aliases (
+        source_kind,
+        library_source_id,
+        evidence_hash
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_media_item_technical_metadata_probe_status ON media_item_technical_metadata (probe_status)",
     "CREATE INDEX IF NOT EXISTS idx_media_item_technical_metadata_probed_at ON media_item_technical_metadata (probed_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_media_item_technical_metadata_source_fingerprint ON media_item_technical_metadata (source_fingerprint)",
