@@ -3,6 +3,7 @@ import { useLocation, useSearchParams } from "react-router-dom";
 import { AssistantAttachmentGallery } from "../components/AssistantAttachmentGallery";
 import { LoadingView } from "../components/LoadingView";
 import { apiRequest } from "../lib/api";
+import { deriveAssistantContext } from "../lib/assistantAccess";
 import { formatDate } from "../lib/format";
 
 
@@ -47,44 +48,6 @@ function summarizePlatform() {
     return "Linux";
   }
   return navigator.platform || "Web";
-}
-
-
-function deriveAssistantContext(fromPath) {
-  const path = typeof fromPath === "string" && fromPath && fromPath !== "/assistant" ? fromPath : "";
-  if (!path) {
-    return {
-      page_context: null,
-      source_context: null,
-      related_entity_type: null,
-      related_entity_id: null,
-    };
-  }
-  const detailMatch = path.match(/^\/library\/(\d+)$/);
-  if (detailMatch) {
-    return {
-      page_context: path,
-      source_context: "library_detail",
-      related_entity_type: "media_item",
-      related_entity_id: detailMatch[1],
-    };
-  }
-  if (path === "/library/local") {
-    return { page_context: path, source_context: "library_local", related_entity_type: null, related_entity_id: null };
-  }
-  if (path === "/library/cloud") {
-    return { page_context: path, source_context: "library_cloud", related_entity_type: null, related_entity_id: null };
-  }
-  if (path.startsWith("/library")) {
-    return { page_context: path, source_context: "library", related_entity_type: null, related_entity_id: null };
-  }
-  if (path.startsWith("/settings")) {
-    return { page_context: path, source_context: "settings", related_entity_type: null, related_entity_id: null };
-  }
-  if (path.startsWith("/install")) {
-    return { page_context: path, source_context: "install", related_entity_type: null, related_entity_id: null };
-  }
-  return { page_context: path, source_context: "other", related_entity_type: null, related_entity_id: null };
 }
 
 

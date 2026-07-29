@@ -57,6 +57,24 @@ class _ModeRepair(NamedTuple):
     fingerprint: tuple[int, int, int, int]
 
 
+class _ArtifactLedgerEntry:
+    def __init__(
+        self,
+        *,
+        path: Path,
+        expected_size: int,
+        expected_sha256: str,
+        expected_mode: int,
+    ) -> None:
+        self.path = path
+        self.expected_size = expected_size
+        self.expected_sha256 = expected_sha256
+        self.expected_mode = expected_mode
+        self.state = "pending"
+        self.device: int | None = None
+        self.inode: int | None = None
+
+
 def _content_fingerprint(value: os.stat_result) -> tuple[int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
 
@@ -429,7 +447,16 @@ def _same_file(path: Path, source: Path) -> bool:
     return stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == IMMUTABLE_FILE_MODE
 
 
-def _copy_verified_file(source_file: Path, destination: Path, index: int) -> None:
+def _after_artifact_rename(_entry: _ArtifactLedgerEntry) -> None:
+    """Failure-injection boundary after ledger capture and before directory fsync."""
+
+
+def _copy_verified_file(
+    source_file: Path,
+    destination: Path,
+    index: int,
+    ledger: list[_ArtifactLedgerEntry],
+) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{source_file.name}.new.",
         dir=destination,
@@ -445,9 +472,29 @@ def _copy_verified_file(source_file: Path, destination: Path, index: int) -> Non
         os.chmod(temporary_path, IMMUTABLE_FILE_MODE)
         with _open_regular_path(temporary_path) as verified:
             os.fsync(verified.fileno())
+            expected_sha256, expected_metadata = _hash_handle(verified)
+        entry = _ArtifactLedgerEntry(
+            path=destination / source_file.name,
+            expected_size=expected_metadata.st_size,
+            expected_sha256=expected_sha256,
+            expected_mode=IMMUTABLE_FILE_MODE,
+        )
+        ledger.append(entry)
         if os.environ.get("ELVERN_RUNTIME_MIGRATION_TEST_FAIL_AT") == str(index):
             raise AuthorityError("Injected migration failure.")
-        os.replace(temporary_path, destination / source_file.name)
+        os.replace(temporary_path, entry.path)
+        renamed_metadata = os.lstat(entry.path)
+        if stat.S_ISLNK(renamed_metadata.st_mode) or not stat.S_ISREG(renamed_metadata.st_mode):
+            raise AuthorityError("Renamed release artifact is not a safe regular file.")
+        entry.state = "renamed"
+        entry.device = renamed_metadata.st_dev
+        entry.inode = renamed_metadata.st_ino
+        if (
+            renamed_metadata.st_size != entry.expected_size
+            or stat.S_IMODE(renamed_metadata.st_mode) != entry.expected_mode
+        ):
+            raise AuthorityError("Renamed release artifact metadata failed verification.")
+        _after_artifact_rename(entry)
         _fsync_directory(destination)
     finally:
         temporary_path.unlink(missing_ok=True)
@@ -622,6 +669,56 @@ def _restore_modes(
     return failures
 
 
+def _rollback_artifact_ledger(
+    ledger: list[_ArtifactLedgerEntry],
+    destination: Path,
+    lock: _AuthorityMutationLock,
+) -> list[str]:
+    if not lock.is_owned():
+        return ["authority lock ownership changed before artifact rollback"]
+    failures: list[str] = []
+    removed_any = False
+    for entry in reversed(ledger):
+        if not _path_entry_exists(entry.path):
+            continue
+        try:
+            metadata = os.lstat(entry.path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                failures.append(f"{entry.path.name}: unsafe replacement")
+                continue
+            if (
+                entry.device is not None
+                and entry.inode is not None
+                and (metadata.st_dev, metadata.st_ino) != (entry.device, entry.inode)
+            ):
+                failures.append(f"{entry.path.name}: inode changed")
+                continue
+            if (
+                metadata.st_size != entry.expected_size
+                or stat.S_IMODE(metadata.st_mode) != entry.expected_mode
+            ):
+                failures.append(f"{entry.path.name}: metadata changed")
+                continue
+            with _open_regular_path(entry.path) as handle:
+                digest, verified_metadata = _hash_handle(handle)
+            if (
+                digest != entry.expected_sha256
+                or verified_metadata.st_size != entry.expected_size
+            ):
+                failures.append(f"{entry.path.name}: content changed")
+                continue
+            entry.path.unlink()
+            removed_any = True
+        except (AuthorityError, OSError) as exc:
+            failures.append(f"{entry.path.name}: {type(exc).__name__}")
+    if removed_any:
+        try:
+            _fsync_directory(destination)
+        except (AuthorityError, OSError) as exc:
+            failures.append(f"directory fsync: {type(exc).__name__}")
+    return failures
+
+
 def _repair_mode(path: Path, repairs: list[_ModeRepair]) -> None:
     repair = _record_mode_repair(path)
     repairs.append(repair)
@@ -718,7 +815,7 @@ def _migrate_authority_locked(
 
     destination_created = False
     destination_identity: tuple[int, int] | None = None
-    created: list[Path] = []
+    artifact_ledger: list[_ArtifactLedgerEntry] = []
     repaired_modes: list[_ModeRepair] = []
     try:
         if not destination.exists():
@@ -740,21 +837,16 @@ def _migrate_authority_locked(
                     _fsync_directory(destination)
                     continue
                 raise AuthorityError("Runtime release destination artifact conflicts.")
-            _copy_verified_file(source_file, destination, index)
-            created.append(final_path)
+            _copy_verified_file(source_file, destination, index, artifact_ledger)
         _validate(destination, expected_origin=expected_origin)
         if _mutable_authority_files(destination, payload):
             raise AuthorityError("Migrated runtime authority is mutable.")
     except BaseException as exc:
         cleanup_failures: list[str] = []
         if lock.is_owned():
-            for path in reversed(created):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError as cleanup_exc:
-                    cleanup_failures.append(
-                        f"{path.name}: {type(cleanup_exc).__name__}"
-                    )
+            cleanup_failures.extend(
+                _rollback_artifact_ledger(artifact_ledger, destination, lock)
+            )
             cleanup_failures.extend(_restore_modes(repaired_modes, destination, lock))
             if destination_created:
                 if destination_identity is None:

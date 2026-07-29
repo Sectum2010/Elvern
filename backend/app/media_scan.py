@@ -8,7 +8,10 @@ from pathlib import Path
 
 from .config import Settings
 from .db import get_connection, preserve_hidden_movie_keys_for_media_item, utcnow_iso
-from .db_hidden_movie_keys import prune_recreated_local_hidden_movie_keys
+from .db_hidden_movie_keys import (
+    prune_recreated_local_hidden_movie_keys,
+    resolve_hidden_copy_identity,
+)
 from .services.local_library_source_service import (
     ensure_current_shared_local_source_binding,
     get_effective_library_reference_locations,
@@ -615,6 +618,10 @@ def scan_media_library(settings: Settings, *, reason: str) -> dict[str, object]:
                     ).fetchone()
                     media_item_id = int(media_item["id"]) if media_item else None
                 if media_item_id is not None:
+                    resolve_hidden_copy_identity(
+                        connection,
+                        media_item_id=media_item_id,
+                    )
                     connection.execute(
                         "DELETE FROM subtitle_tracks WHERE media_item_id = ?",
                         (media_item_id,),

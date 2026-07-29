@@ -447,6 +447,132 @@ def test_runtime_created_destination_cleanup_covers_parent_fsync_failure(
         assert lock.release()
 
 
+def _run_locked_runtime_migration(module, source: Path, destination: Path, manifest: dict):
+    payload = module._validate(
+        source,
+        expected_origin=manifest["bound_origin_sha256"],
+    )
+    source_files = [
+        source / name
+        for name in module._package_names(payload)
+    ]
+    all_source_files = [*source_files, source / "release-manifest.json"]
+    lock = module._AuthorityMutationLock(destination)
+    lock.acquire()
+    try:
+        return module._migrate_authority_locked(
+            source,
+            destination,
+            manifest["bound_origin_sha256"],
+            payload,
+            all_source_files,
+            source_files,
+            lock,
+        )
+    finally:
+        assert lock.release()
+
+
+def test_runtime_rename_is_ledgered_before_directory_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    original_fsync = module._fsync_directory
+    failed = False
+
+    def fail_after_first_rename(path: Path) -> None:
+        nonlocal failed
+        if path == destination and not failed and any(destination.iterdir()):
+            failed = True
+            raise OSError("injected directory fsync failure")
+        original_fsync(path)
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_after_first_rename)
+    with pytest.raises(OSError, match="injected directory fsync failure"):
+        _run_locked_runtime_migration(module, source, destination, manifest)
+    assert list(destination.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["signal", "content", "inode", "symlink"],
+)
+def test_runtime_rollback_removes_only_verified_renamed_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+    replacement_target = tmp_path / "foreign"
+
+    def fail_after_rename(entry) -> None:
+        if failure == "signal":
+            raise module.AuthorityInterrupted("injected signal")
+        if failure == "content":
+            entry.path.chmod(0o600)
+            entry.path.write_bytes(b"foreign content")
+            entry.path.chmod(module.IMMUTABLE_FILE_MODE)
+        elif failure == "inode":
+            replacement_target.write_bytes(entry.path.read_bytes())
+            replacement_target.chmod(module.IMMUTABLE_FILE_MODE)
+            os.replace(replacement_target, entry.path)
+        else:
+            entry.path.unlink()
+            entry.path.symlink_to(replacement_target)
+        raise module.AuthorityError("injected post-rename failure")
+
+    monkeypatch.setattr(module, "_after_artifact_rename", fail_after_rename)
+    if failure == "signal":
+        with pytest.raises(module.AuthorityInterrupted, match="injected signal"):
+            _run_locked_runtime_migration(module, source, destination, manifest)
+        assert list(destination.iterdir()) == []
+        return
+
+    with pytest.raises(module.AuthorityError, match="rollback could not be verified"):
+        _run_locked_runtime_migration(module, source, destination, manifest)
+    entries = list(destination.iterdir())
+    assert len(entries) == 1
+    if failure == "symlink":
+        assert entries[0].is_symlink()
+    else:
+        assert entries[0].is_file()
+
+
+def test_runtime_manifest_rename_failure_rolls_back_all_transaction_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, env = _create_publish_workspace(tmp_path)
+    assert _run_publisher(workspace, env).returncode == 0
+    source = _staged_manifests(workspace)[0].parent
+    manifest = json.loads((source / "release-manifest.json").read_text())
+    module = _load_runtime_release_tool_module()
+    destination = tmp_path / "runtime"
+    destination.mkdir()
+
+    def fail_manifest_after_rename(entry) -> None:
+        if entry.path.name == "release-manifest.json":
+            raise OSError("injected manifest fsync boundary failure")
+
+    monkeypatch.setattr(module, "_after_artifact_rename", fail_manifest_after_rename)
+    with pytest.raises(OSError, match="injected manifest fsync boundary failure"):
+        _run_locked_runtime_migration(module, source, destination, manifest)
+    assert list(destination.iterdir()) == []
+
+
 def test_runtime_authority_tool_reports_invalid_and_rejects_origin_or_symlink(
     tmp_path: Path,
 ) -> None:

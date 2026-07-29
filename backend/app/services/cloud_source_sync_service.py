@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, preserve_hidden_movie_keys_for_media_item, utcnow_iso
+from ..db_hidden_movie_keys import resolve_hidden_copy_identity
 from ..media_scan import infer_title_and_year
 from .google_drive_service import (
     PROVIDER_AUTH_REQUIRED_CODE,
@@ -955,6 +956,10 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
                 int(existing_row["id"]),
             ),
         )
+        resolve_hidden_copy_identity(
+            connection,
+            media_item_id=int(existing_row["id"]),
+        )
         return
 
     connection.execute(
@@ -1025,6 +1030,23 @@ def _upsert_cloud_media_item(connection, *, source_id: int, resource_id: str, ro
             now,
         ),
     )
+    inserted = connection.execute(
+        """
+        SELECT id
+        FROM media_items
+        WHERE COALESCE(source_kind, 'local') = 'cloud'
+          AND library_source_id = ?
+          AND external_media_id = ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (source_id, external_media_id),
+    ).fetchone()
+    if inserted is not None:
+        resolve_hidden_copy_identity(
+            connection,
+            media_item_id=int(inserted["id"]),
+        )
 
 
 def _parse_google_modified_time(value: object) -> float:

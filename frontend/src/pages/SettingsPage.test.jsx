@@ -15,7 +15,12 @@ import {
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ApiNetworkError, ApiResponseError, apiRequest } from "../lib/api";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/connectivityRecoveryStore";
+import {
+  CONNECTIVITY_RECOVERED_EVENT,
+  publishConnectivityRecovery,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+} from "../lib/connectivityRecoveryStore";
 import {
   buildBackgroundPreviewStyle,
   deriveGradientEndFromSingleColor,
@@ -399,6 +404,7 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
 
 beforeEach(() => {
   queryClient.clear();
+  resetConnectivityRecoveryStoreForTests();
   apiRequest.mockReset();
   mockAuthState.id = 7;
   mockAuthState.role = "standard_user";
@@ -706,6 +712,81 @@ describe("SettingsPage section navigation and consolidation", () => {
     )).toHaveLength(1);
   });
 
+  test("retries once when recovery is recorded before the resource failure reaches catch", async () => {
+    mockApi();
+    const originalImplementation = apiRequest.getMockImplementation();
+    const failure = registerConnectivityFailure();
+    let rejectInitialCloud;
+    const initialCloudRequest = new Promise((_resolve, reject) => {
+      rejectInitialCloud = reject;
+    });
+    let cloudReads = 0;
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/cloud-libraries") {
+        cloudReads += 1;
+        if (cloudReads === 1) {
+          return initialCloudRequest;
+        }
+      }
+      return originalImplementation(requestPath, options);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(cloudReads).toBe(1));
+
+    publishConnectivityRecovery({
+      generation: 5,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    rejectInitialCloud(new ApiNetworkError(undefined, failure));
+
+    await waitFor(() => expect(cloudReads).toBe(2));
+    await waitFor(() => expect(
+      screen.queryByText("Elvern could not complete the request."),
+    ).not.toBeInTheDocument());
+  });
+
+  test("retries an event-after-catch resource once and ignores duplicate recovery publication", async () => {
+    mockApi();
+    const originalImplementation = apiRequest.getMockImplementation();
+    const failure = registerConnectivityFailure();
+    let cloudReads = 0;
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/cloud-libraries") {
+        cloudReads += 1;
+        if (cloudReads === 1) {
+          return Promise.reject(new ApiNetworkError(undefined, failure));
+        }
+      }
+      return originalImplementation(requestPath, options);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Elvern could not complete the request.")).toBeInTheDocument();
+
+    const recovery = publishConnectivityRecovery({
+      generation: 6,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    expect(recovery).not.toBeNull();
+    await waitFor(() => expect(cloudReads).toBe(2));
+    expect(publishConnectivityRecovery({
+      generation: 6,
+      recoveredThroughFailureId: failure.failureId,
+    })).toBeNull();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cloudReads).toBe(2);
+  });
+
   test("legacy Hidden hash restore yields to wheel input and is not replayed", async () => {
     const frameCallbacks = new Map();
     let frameId = 0;
@@ -855,6 +936,103 @@ describe("SettingsPage section navigation and consolidation", () => {
     await Promise.resolve();
     expect(screen.queryByText("Old Identity Movie")).not.toBeInTheDocument();
     expect(screen.getByText("New Identity Movie")).toBeInTheDocument();
+    expect(screen.queryByText("Loading hidden movies...")).not.toBeInTheDocument();
+  });
+
+  test("identity switch clears an old admin secret before the next admin resource settles", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    const originalImplementation = apiRequest.getMockImplementation();
+    let rejectSecondSetup;
+    const secondSetup = new Promise((_resolve, reject) => {
+      rejectSecondSetup = reject;
+    });
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/admin/google-drive-setup") {
+        if (mockAuthState.id === 7) {
+          return Promise.resolve({
+            https_origin: "https://admin-a.example",
+            client_id: "admin-a-client",
+            client_secret: "admin-a-secret",
+            javascript_origin: "https://admin-a.example",
+            redirect_uri: "https://admin-a.example/oauth/callback",
+            callback_source: "configured",
+            callback_warning: null,
+            configuration_state: "configured",
+            configuration_label: "Configured",
+            status_message: "",
+            missing_fields: [],
+            connected: false,
+            account_email: null,
+            account_name: null,
+            instructions: [],
+          });
+        }
+        return secondSetup;
+      }
+      return originalImplementation(requestPath, options);
+    });
+    const renderTree = () => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const view = testingLibraryRender(renderTree());
+    fireEvent.click(await screen.findByText("Google Drive OAuth Setup"));
+    expect(await screen.findByDisplayValue("admin-a-secret")).toBeInTheDocument();
+
+    mockAuthState.id = 8;
+    view.rerender(renderTree());
+    expect(screen.queryByDisplayValue("admin-a-secret")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText("Google Drive OAuth Setup"));
+    const secretInput = screen.getByLabelText(/Google OAuth Client Secret/);
+    expect(secretInput).toHaveValue("");
+
+    rejectSecondSetup(new Error("Admin B setup unavailable"));
+    expect(await screen.findByText("Admin B setup unavailable")).toBeInTheDocument();
+    expect(secretInput).toHaveValue("");
+  });
+
+  test("user-settings recovery clears only its load error and preserves a mutation error", async () => {
+    mockApi();
+    const originalImplementation = apiRequest.getMockImplementation();
+    let settingsReads = 0;
+    apiRequest.mockImplementation((requestPath, options = {}) => {
+      if (requestPath === "/api/user-settings" && !options.method) {
+        settingsReads += 1;
+        if (settingsReads === 1) {
+          return Promise.reject(new Error("Failed to load settings"));
+        }
+        return Promise.resolve(defaultSettings);
+      }
+      if (requestPath === "/api/user-settings" && options.method === "PATCH") {
+        return Promise.reject(new Error("Mutation stayed visible"));
+      }
+      return originalImplementation(requestPath, options);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Failed to load settings")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Hide duplicate copies/ }));
+    expect(await screen.findByText("Mutation stayed visible")).toBeInTheDocument();
+
+    await queryClient.refetchQueries({
+      queryKey: buildUserSettingsQueryKey({
+        userId: mockAuthState.id,
+        role: mockAuthState.role,
+      }),
+    });
+
+    await waitFor(() => expect(
+      screen.queryByText("Failed to load settings"),
+    ).not.toBeInTheDocument());
+    expect(screen.getByText("Mutation stayed visible")).toBeInTheDocument();
   });
 });
 
@@ -866,6 +1044,11 @@ describe("SettingsPage Hidden scope transfer", () => {
     edition_label: "Extended",
     poster_url: null,
     hidden_at: "2026-07-23T00:00:00+00:00",
+  };
+  const secondPersonalHiddenItem = {
+    ...personalHiddenItem,
+    id: 43,
+    title: "Scope Movie Two",
   };
 
   async function renderAdminLibraries(mockOptions = {}) {
@@ -1044,6 +1227,169 @@ describe("SettingsPage Hidden scope transfer", () => {
       ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
     )).toHaveLength(1);
   });
+
+  test("recovery-before-catch reconciles a committed scope without replaying the PUT", async () => {
+    await renderAdminLibraries({ hiddenItems: [personalHiddenItem] });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    const originalImplementation = apiRequest.getMockImplementation();
+    const failure = registerConnectivityFailure();
+    let releaseScopeFailure;
+    let scopeAttempted = false;
+    let hiddenReadsAfterScope = 0;
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/admin/hidden-items/42/scope") {
+        scopeAttempted = true;
+        void originalImplementation(requestPath, options);
+        return new Promise((_resolve, reject) => {
+          releaseScopeFailure = () => reject(new ApiNetworkError(undefined, failure));
+        });
+      }
+      if (requestPath === "/api/user-hidden-items" && scopeAttempted) {
+        hiddenReadsAfterScope += 1;
+        if (hiddenReadsAfterScope === 1) {
+          return Promise.reject(new ApiNetworkError(undefined, failure));
+        }
+      }
+      return originalImplementation(requestPath, options);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+    await waitFor(() => expect(releaseScopeFailure).toBeTypeOf("function"));
+    publishConnectivityRecovery({
+      generation: 7,
+      recoveredThroughFailureId: failure.failureId,
+    });
+    releaseScopeFailure();
+
+    expect(await screen.findByText("This movie is hidden for everyone.")).toBeInTheDocument();
+    expect(hiddenReadsAfterScope).toBe(2);
+    expect(apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
+    )).toHaveLength(1);
+  });
+
+  test("expired pending reconciliation stops automatic retry and keeps PUT single-send", async () => {
+    const now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await renderAdminLibraries({
+        hiddenItems: [personalHiddenItem],
+        hiddenReadFailuresAfterScope: 2,
+        scopeError: "network",
+      });
+      fireEvent.click(screen.getByText("Hidden for me"));
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+      expect(await screen.findByText("Waiting to confirm the hidden scope change.")).toBeInTheDocument();
+
+      nowSpy.mockReturnValue(now + (2 * 60 * 1000) + 1);
+      window.dispatchEvent(new CustomEvent(CONNECTIVITY_RECOVERED_EVENT, {
+        detail: {
+          generation: 8,
+          incidentId: 31,
+          recoveredThroughFailureId: 41,
+        },
+      }));
+
+      expect(await screen.findByText(
+        "Could not confirm the change. Refresh or retry confirmation.",
+      )).toBeInTheDocument();
+      expect(apiRequest.mock.calls.filter(
+        ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
+      )).toHaveLength(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("pending reconciliation that crosses its bound while reading expires accurately", async () => {
+    const now = 2_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await renderAdminLibraries({ hiddenItems: [personalHiddenItem] });
+      fireEvent.click(screen.getByText("Hidden for me"));
+      const originalImplementation = apiRequest.getMockImplementation();
+      const failure = { failureId: 41, incidentId: 31 };
+      let scopeAttempted = false;
+      let rejectHiddenRead;
+      apiRequest.mockImplementation((requestPath, options) => {
+        if (requestPath === "/api/admin/hidden-items/42/scope") {
+          scopeAttempted = true;
+          void originalImplementation(requestPath, options);
+          return Promise.reject(new ApiNetworkError(undefined, failure));
+        }
+        if (requestPath === "/api/user-hidden-items" && scopeAttempted) {
+          return new Promise((_resolve, reject) => {
+            rejectHiddenRead = reject;
+          });
+        }
+        return originalImplementation(requestPath, options);
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+      await waitFor(() => expect(rejectHiddenRead).toBeTypeOf("function"));
+      nowSpy.mockReturnValue(now + (2 * 60 * 1000) + 1);
+      rejectHiddenRead(new ApiNetworkError(undefined, failure));
+
+      expect(await screen.findByText(
+        "Could not confirm the change. Refresh or retry confirmation.",
+      )).toBeInTheDocument();
+      expect(apiRequest.mock.calls.filter(
+        ([requestPath]) => requestPath === "/api/admin/hidden-items/42/scope",
+      )).toHaveLength(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test.each(["newer-first", "older-first"])(
+    "newer Hidden refresh wins with %s completion without leaving loading stuck",
+    async (completionOrder) => {
+    await renderAdminLibraries({
+      hiddenItems: [personalHiddenItem, secondPersonalHiddenItem],
+    });
+    fireEvent.click(screen.getByText("Hidden for me"));
+    const originalImplementation = apiRequest.getMockImplementation();
+    let resolveFirstRefresh;
+    let resolveSecondRefresh;
+    const firstRefresh = new Promise((resolve) => {
+      resolveFirstRefresh = resolve;
+    });
+    const secondRefresh = new Promise((resolve) => {
+      resolveSecondRefresh = resolve;
+    });
+    let refreshReads = 0;
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/user-hidden-items") {
+        refreshReads += 1;
+        return refreshReads === 1 ? firstRefresh : secondRefresh;
+      }
+      return originalImplementation(requestPath, options);
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hide universally" })[0]);
+    await waitFor(() => expect(refreshReads).toBe(1));
+    fireEvent.click(screen.getByRole("button", { name: "Hide universally" }));
+    await waitFor(() => expect(refreshReads).toBe(2));
+
+    if (completionOrder === "older-first") {
+      resolveFirstRefresh({ items: [secondPersonalHiddenItem] });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    resolveSecondRefresh({ items: [] });
+    await waitFor(() => expect(
+      screen.queryByRole("button", { name: "Hide universally" }),
+    ).not.toBeInTheDocument());
+    if (completionOrder === "newer-first") {
+      resolveFirstRefresh({ items: [secondPersonalHiddenItem] });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    expect(screen.queryByRole("button", { name: "Hide universally" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading hidden movies...")).not.toBeInTheDocument();
+    },
+  );
 });
 
 describe("SettingsPage Display background controls", () => {

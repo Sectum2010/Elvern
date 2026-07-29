@@ -12,7 +12,7 @@ from .library_hidden_service import (
     _load_globally_hidden_movie_keys,
     _load_hidden_movie_keys,
 )
-from .library_movie_identity_service import _row_hidden_movie_key
+from .library_movie_identity_service import _row_matches_hidden_keys
 from .local_library_source_service import ensure_current_shared_local_source_binding
 from .media_age_access_service import load_accessible_media_item_ids_by_age
 
@@ -101,7 +101,8 @@ def get_library_progress_state(settings: Settings, *, user: AuthenticatedUser) -
                 p.completed,
                 m.title,
                 m.year,
-                m.original_filename
+                m.original_filename,
+                m.hidden_copy_identity
             FROM playback_progress p
             JOIN media_items m ON m.id = p.media_item_id
             LEFT JOIN library_sources s ON s.id = m.library_source_id
@@ -148,8 +149,10 @@ def get_library_progress_state(settings: Settings, *, user: AuthenticatedUser) -
     items: list[dict[str, object]] = []
     for row in rows:
         item_id = int(row["media_item_id"])
-        movie_key = _row_hidden_movie_key(row)
-        if movie_key and (movie_key in globally_hidden_movie_keys or movie_key in hidden_movie_keys):
+        if (
+            _row_matches_hidden_keys(row, globally_hidden_movie_keys)
+            or _row_matches_hidden_keys(row, hidden_movie_keys)
+        ):
             continue
         if item_id not in accessible_item_ids:
             continue

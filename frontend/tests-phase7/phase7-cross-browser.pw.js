@@ -340,7 +340,13 @@ async function installFixture(page, requests, state = {}) {
         validation_rules: [],
       };
     } else if (path === "/api/assistant/requests") {
-      payload = { requests: [] };
+      if (route.request().method() === "POST") {
+        state.assistantRequestBodies ||= [];
+        state.assistantRequestBodies.push(route.request().postData() || "");
+        payload = { request: { request_number: "REQ-PHASE7" } };
+      } else {
+        payload = { requests: [] };
+      }
     } else if (path === "/api/admin/assistant/requests") {
       payload = { requests: [] };
     } else if (/^\/api\/admin\/assistant\/requests\/\d+$/.test(path)) {
@@ -780,6 +786,76 @@ test("@assistant-navigation enabled regular user opens the request form without 
   await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
     /floating-island__link--active/,
   );
+});
+
+
+test("@assistant-navigation attachment route activates Assistant without defaulting to Library", async ({
+  page,
+}) => {
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], {
+    role: "standard_user",
+    assistantEnabled: true,
+  });
+  await page.goto("attachments/42/view?name=report.txt");
+
+  const navigation = page.getByRole("navigation", { name: "Primary" });
+  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveClass(
+    /floating-island__link--active/,
+  );
+  await expect(navigation.getByRole("link", { name: "Library" })).not.toHaveClass(
+    /floating-island__link--active/,
+  );
+  await expect(page.locator(".floating-island__nav-indicator")).toHaveCount(1);
+});
+
+
+test("@assistant-navigation revoked attachment route has no false active navigation item", async ({
+  page,
+}) => {
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], {
+    role: "standard_user",
+    assistantEnabled: false,
+  });
+  await page.goto("attachments/42/view?name=report.txt");
+
+  const navigation = page.getByRole("navigation", { name: "Primary" });
+  await expect(navigation.getByRole("link", { name: "Assistant" })).toHaveCount(0);
+  await expect(navigation.getByRole("link", { name: "Library" })).not.toHaveClass(
+    /floating-island__link--active/,
+  );
+  await expect(page.locator(".floating-island__nav-indicator")).toHaveCount(0);
+});
+
+
+test("@assistant-navigation strips Library query and hash from Assistant UI and payload", async ({
+  page,
+}) => {
+  const state = {
+    role: "standard_user",
+    assistantEnabled: true,
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], state);
+  await page.goto("library?q=private-search#token-like-secret");
+  await page.getByRole("navigation", { name: "Primary" })
+    .getByRole("link", { name: "Assistant" })
+    .click();
+
+  await page.getByText("Submit a request", { exact: true }).click();
+  await expect(page.getByText("Page /library", { exact: true })).toBeVisible();
+  await expect(page.getByText(/private-search|token-like-secret/)).toHaveCount(0);
+  await page.getByLabel("Title").fill("Safe context");
+  await page.getByLabel("Description").fill("Context should contain only the safe pathname.");
+  await page.getByRole("button", { name: "Submit request" }).click();
+  await expect.poll(() => state.assistantRequestBodies?.length || 0).toBe(1);
+
+  const submittedBody = state.assistantRequestBodies[0];
+  expect(submittedBody).toContain('name="page_context"');
+  expect(submittedBody).toContain("/library");
+  expect(submittedBody).not.toContain("private-search");
+  expect(submittedBody).not.toContain("token-like-secret");
 });
 
 

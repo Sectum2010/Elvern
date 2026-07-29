@@ -96,6 +96,7 @@ TABLE_STATEMENTS = (
         external_media_id TEXT,
         cloud_mime_type TEXT,
         cloud_resource_key TEXT,
+        hidden_copy_identity TEXT,
         series_folder_key TEXT,
         series_folder_name TEXT,
         library_category TEXT,
@@ -1120,6 +1121,7 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "media_items", "external_media_id", "TEXT")
     _ensure_column(connection, "media_items", "cloud_mime_type", "TEXT")
     _ensure_column(connection, "media_items", "cloud_resource_key", "TEXT")
+    _ensure_column(connection, "media_items", "hidden_copy_identity", "TEXT")
     _ensure_column(connection, "media_items", "series_folder_key", "TEXT")
     _ensure_column(connection, "media_items", "series_folder_name", "TEXT")
     _ensure_column(connection, "media_items", "library_category", "TEXT")

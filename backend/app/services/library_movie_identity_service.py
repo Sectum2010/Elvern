@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from .title_normalization import (
-    extract_edition_identity_anywhere,
-    normalize_title_key,
-    normalize_title_source,
-    resolve_title_metadata,
-)
+from .title_normalization import normalize_title_key, normalize_title_source, resolve_title_metadata
 from .library_quality_rank_service import build_library_quality_rank
 from .user_settings_service import get_user_settings
 from ..config import Settings
+from ..db_hidden_movie_keys import hidden_key_candidates_for_row
 
 
 def _resolve_base_title_and_edition(
@@ -168,68 +164,15 @@ def _dedupe_group_key(row) -> str | None:
     return base_key
 
 
-def _movie_identity_payload(
-    *,
-    title: object,
-    year: object,
-    original_filename: object,
-) -> dict[str, object] | None:
-    base_title, edition_identity = _resolve_base_title_and_edition(
-        title=title,
-        year=year,
-        original_filename=original_filename,
-    )
-    if not base_title or year in {None, ""}:
-        return None
-    try:
-        normalized_year = int(year)
-    except (TypeError, ValueError):
-        return None
-    strict_edition_identity = extract_edition_identity_anywhere(title, original_filename)
-    if edition_identity == "standard":
-        edition_identity = strict_edition_identity
-    elif strict_edition_identity != "standard":
-        edition_identity = "|".join(
-            part
-            for part in dict.fromkeys([*edition_identity.split("|"), *strict_edition_identity.split("|")])
-            if part
-        )
-    filename_signature = _local_original_filename_signature(original_filename)
-    if not filename_signature:
-        return None
-    return {
-        "movie_key": (
-            f"{normalize_title_key(base_title)}|{normalized_year}|{edition_identity}"
-            f"|copy:{filename_signature}"
-        ),
-        "display_title": base_title,
-        "year": normalized_year,
-        "edition_identity": edition_identity,
-    }
-
-
-def _movie_identity_key(
-    *,
-    title: object,
-    year: object,
-    original_filename: object,
-) -> str | None:
-    payload = _movie_identity_payload(
-        title=title,
-        year=year,
-        original_filename=original_filename,
-    )
-    if payload is None:
-        return None
-    return str(payload["movie_key"])
-
-
 def _row_hidden_movie_key(row) -> str | None:
-    return _movie_identity_key(
-        title=row["title"],
-        year=row["year"],
-        original_filename=row["original_filename"],
-    )
+    for key in hidden_key_candidates_for_row(row):
+        if key.startswith("copy-v2:"):
+            return key
+    return None
+
+
+def _row_matches_hidden_keys(row, hidden_keys: set[str]) -> bool:
+    return any(key in hidden_keys for key in hidden_key_candidates_for_row(row))
 
 
 def _dedupe_rows(rows, *, prefer_progress: bool = False) -> list:

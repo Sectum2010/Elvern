@@ -11,13 +11,13 @@ from backend.app.db import (
     LIBRARY_REVISION_TRIGGER_NAMES,
     utcnow_iso,
 )
+from backend.app.db_hidden_movie_keys import resolve_hidden_copy_identity
 from backend.app.models import AuthenticatedUser
 from backend.app.progress import save_progress
 from backend.app.services.app_settings_service import (
     update_media_library_reference,
     update_poster_reference_location,
 )
-from backend.app.services.library_movie_identity_service import _row_hidden_movie_key
 from backend.app.services.library_revision_mutation_service import bump_library_revision_layers
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
 from backend.app.services.media_age_access_service import load_accessible_media_item_ids_by_age
@@ -769,11 +769,10 @@ def test_progress_state_excludes_inaccessible_source_and_hidden_movie_key(
             "UPDATE media_items SET library_source_id = ?, year = 2024 WHERE id = ?",
             (shared_source_id, hidden_id),
         )
-        hidden_row = connection.execute(
-            "SELECT title, year, original_filename FROM media_items WHERE id = ?",
-            (hidden_id,),
-        ).fetchone()
-        hidden_movie_key = _row_hidden_movie_key(hidden_row)
+        hidden_movie_key = resolve_hidden_copy_identity(
+            connection,
+            media_item_id=hidden_id,
+        )
         assert hidden_movie_key
         connection.execute(
             """

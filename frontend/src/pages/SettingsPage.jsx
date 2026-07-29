@@ -25,7 +25,10 @@ import {
 } from "../lib/userBackground";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { InstallSettingsPanel } from "../features/install/InstallSettingsPanel";
-import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/connectivityRecoveryStore";
+import {
+  CONNECTIVITY_RECOVERED_EVENT,
+  getConnectivityIncidentRecoveryGeneration,
+} from "../lib/connectivityRecoveryStore";
 import { normalizePosterDisplayWidth } from "../lib/posterUrls";
 import {
   applySettingsSectionStorageMigration,
@@ -63,6 +66,7 @@ const EMPTY_RESOURCE_STATUS = Object.freeze({
   loaded: false,
   error: "",
 });
+const HIDDEN_RECONCILIATION_MAX_AGE_MS = 2 * 60 * 1000;
 
 
 function createSettingsResourceStatus() {
@@ -1097,6 +1101,7 @@ export function SettingsPage() {
   const mountedRef = useRef(true);
   const currentIdentityRef = useRef(settingsIdentity);
   const resourceRequestsRef = useRef(new Map());
+  const resourceRequestTokenRef = useRef(0);
   const hiddenListGenerationRef = useRef(0);
   const pendingHiddenReconciliationRef = useRef(null);
   const pendingReconcileHandlerRef = useRef(null);
@@ -1220,7 +1225,10 @@ export function SettingsPage() {
     enabled: false,
     setup_available: false,
   });
-  const [error, setError] = useState("");
+  const [userSettingsLoadError, setUserSettingsLoadError] = useState("");
+  const [mutationError, setMutationError] = useState("");
+  const error = mutationError;
+  const setError = setMutationError;
   const [message, setMessage] = useState("");
   const [openSections, setOpenSections] = useState({
     myLibraries: false,
@@ -1302,10 +1310,53 @@ export function SettingsPage() {
     resourceRequestsRef.current.clear();
     hiddenListGenerationRef.current += 1;
     pendingHiddenReconciliationRef.current = null;
+    settingsHydratedIdentityRef.current = "";
+    hiddenHashRestoreKeyRef.current = "";
     setPendingHiddenReconciliation(null);
     setResourceStatus(createSettingsResourceStatus());
+    setSettings({
+      hide_duplicate_movies: true,
+      hide_recently_added: false,
+      floating_library_search_enabled: true,
+      poster_card_appearance: "classic",
+      poster_card_display_max_width: "1400",
+      ...DEFAULT_BACKGROUND_SETTINGS,
+      media_library_reference_private_value: null,
+      media_library_reference_shared_default_value: "",
+      media_library_reference_effective_value: "",
+      media_library_reference_effective_source: "shared_default",
+      media_library_reference_effective_label: "Shared default",
+    });
+    setBackgroundDraft(DEFAULT_BACKGROUND_SETTINGS);
+    setBackgroundSaving(false);
+    setBackgroundError("");
+    setBackgroundResetConfirmOpen(false);
     setHiddenItems([]);
     setGlobalHiddenItems([]);
+    setSaving(false);
+    setRestoringItemId(null);
+    setRestoringGlobalItemId(null);
+    setMovingToGlobalItemId(null);
+    setMovingToPersonalItemId(null);
+    setSharedMediaLibraryReference({
+      configured_value: null,
+      effective_value: "",
+      default_value: "",
+      configured_locations: [],
+      effective_locations: [],
+      category_summary: {},
+      validation_rules: [],
+    });
+    setSharedMediaLibraryReferenceInput("");
+    setSharedMediaLibraryReferenceSaving(false);
+    setPosterReference({
+      configured_value: null,
+      effective_value: "",
+      default_value: "",
+      validation_rules: [],
+    });
+    setPosterReferenceInput("");
+    setPosterReferenceSaving(false);
     setCloudLibraries({
       google: {
         enabled: false,
@@ -1321,7 +1372,69 @@ export function SettingsPage() {
       my_libraries: [],
       shared_libraries: [],
     });
+    setCloudBusyKey("");
+    setAgeGroups({ items: [], total: 0 });
+    setAgeGroupsPanelOpen(false);
+    setAgeBucketManager({
+      open: false,
+      age: null,
+      savingKey: "",
+      error: "",
+    });
+    setAgeGroupManager({
+      open: false,
+      loading: false,
+      error: "",
+      group: null,
+      ageRequirementValue: "",
+      saving: false,
+      searchQuery: "",
+      searchResults: [],
+      searching: false,
+    });
+    setMyLibraryDraft({ resource_type: "folder", resource_id: "" });
+    setSharedLibraryDraft({ resource_type: "folder", resource_id: "" });
+    setGoogleDriveSetup({
+      https_origin: "",
+      client_id: "",
+      client_secret: "",
+      javascript_origin: "",
+      redirect_uri: "",
+      callback_source: "unconfigured",
+      callback_warning: null,
+      configuration_state: "not_configured",
+      configuration_label: "Not configured",
+      status_message: "",
+      missing_fields: [],
+      connected: false,
+      account_email: null,
+      account_name: null,
+      instructions: [],
+    });
+    setGoogleDriveSetupDraft({ https_origin: "", client_id: "", client_secret: "" });
+    setGoogleDriveSetupSaving(false);
     setTotpStatus({ enabled: false, setup_available: false });
+    setOpenSections({
+      myLibraries: false,
+      sharedLibraries: false,
+      googleDriveSetup: false,
+      mediaLibraryReference: false,
+      posterReference: false,
+      totpSetup: false,
+    });
+    setDirectoryPicker({
+      open: false,
+      target: "shared-library",
+      title: "",
+      loading: false,
+      error: "",
+      current_path: "",
+      parent_path: null,
+      directories: [],
+    });
+    setDirectoryPickerFallback({ target: "", reason: "" });
+    setNativePickerPendingTarget("");
+    setUserSettingsLoadError("");
     setError("");
     setMessage("");
   }, [settingsIdentity]);
@@ -1340,9 +1453,15 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (userSettingsQuery.error && userSettingsQuery.error.name !== "AbortError") {
-      setError(userSettingsQuery.error.message || "Failed to load settings");
+      setUserSettingsLoadError(
+        userSettingsQuery.error.message || "Failed to load settings",
+      );
+      return;
     }
-  }, [userSettingsQuery.error]);
+    if (userSettingsQuery.data) {
+      setUserSettingsLoadError("");
+    }
+  }, [settingsIdentity, userSettingsQuery.data, userSettingsQuery.error]);
 
   const fetchHiddenLists = useCallback(async ({ signal } = {}) => {
     const [personalPayload, globalPayload] = await Promise.all([
@@ -1361,30 +1480,69 @@ export function SettingsPage() {
     const expectedIdentity = settingsIdentity;
     const generation = hiddenListGenerationRef.current + 1;
     hiddenListGenerationRef.current = generation;
-    const lists = await fetchHiddenLists({ signal });
+    let lists;
+    try {
+      lists = await fetchHiddenLists({ signal });
+    } catch (requestError) {
+      if (isAbortError(requestError)) {
+        return { outcome: "aborted", lists: null };
+      }
+      throw requestError;
+    }
     if (
       !mountedRef.current
       || currentIdentityRef.current !== expectedIdentity
       || hiddenListGenerationRef.current !== generation
     ) {
-      return null;
+      return { outcome: "superseded", lists: null };
     }
     setHiddenItems(lists.personalItems);
     setGlobalHiddenItems(lists.globalItems);
-    return lists;
+    const request = resourceRequestsRef.current.get("hidden");
+    if (request?.identity === expectedIdentity) {
+      request.loaded = true;
+      request.transient = false;
+      request.failureId = 0;
+      request.incidentId = 0;
+    }
+    setResourceStatus((current) => ({
+      ...current,
+      hidden: {
+        loading: Boolean(request?.loading),
+        loaded: true,
+        error: "",
+      },
+    }));
+    return { outcome: "applied", lists };
   }, [fetchHiddenLists, settingsIdentity]);
 
   const reconcilePendingHiddenScope = useCallback(async (
     pending = pendingHiddenReconciliationRef.current,
+    { manual = false } = {},
   ) => {
     if (!pending || pendingHiddenReconciliationRef.current?.itemId !== pending.itemId) {
       return false;
     }
+    const expired = Date.now() - pending.startedAt >= HIDDEN_RECONCILIATION_MAX_AGE_MS;
+    if (expired && !manual) {
+      pending.expired = true;
+      setPendingHiddenReconciliation({ ...pending });
+      setMessage("Could not confirm the change. Refresh or retry confirmation.");
+      return false;
+    }
+    if (pending.reconciling) {
+      return false;
+    }
+    pending.reconciling = true;
     try {
-      const lists = await refreshHiddenLists();
-      if (!lists || pendingHiddenReconciliationRef.current?.itemId !== pending.itemId) {
+      const result = await refreshHiddenLists();
+      if (
+        result.outcome !== "applied"
+        || pendingHiddenReconciliationRef.current?.itemId !== pending.itemId
+      ) {
         return false;
       }
+      const lists = result.lists;
       if (hiddenScopeReached(lists, pending.itemId, pending.requestedScope)) {
         const successMessage = pending.requestedScope === "global"
           ? "This movie is hidden for everyone."
@@ -1406,10 +1564,47 @@ export function SettingsPage() {
       setMessage("Waiting to confirm the hidden scope change.");
       return false;
     } catch (requestError) {
-      if (!isAbortError(requestError)) {
-        setMessage("Waiting to confirm the hidden scope change.");
+      if (isAbortError(requestError)) {
+        return false;
       }
+      const hasExpired = Date.now() - pending.startedAt >= HIDDEN_RECONCILIATION_MAX_AGE_MS;
+      if (hasExpired) {
+        pending.expired = true;
+        setPendingHiddenReconciliation({ ...pending });
+      }
+      if (isTransientNetworkError(requestError)) {
+        pending.incidentId = Number(requestError.incidentId) || pending.incidentId || 0;
+        pending.failureId = Number(requestError.failureId) || pending.failureId || 0;
+        const recoveredGeneration = getConnectivityIncidentRecoveryGeneration(
+          pending.incidentId,
+          pending.failureId,
+        );
+        if (
+          !hasExpired
+          && recoveredGeneration > Number(pending.lastRecoveryGeneration || 0)
+        ) {
+          pending.lastRecoveryGeneration = recoveredGeneration;
+          queueMicrotask(() => {
+            if (
+              mountedRef.current
+              && currentIdentityRef.current === pending.identity
+              && pendingHiddenReconciliationRef.current === pending
+            ) {
+              void pendingReconcileHandlerRef.current?.(pending);
+            }
+          });
+        }
+      }
+      setMessage(
+        hasExpired
+          ? "Could not confirm the change. Refresh or retry confirmation."
+          : "Waiting to confirm the hidden scope change.",
+      );
       return false;
+    } finally {
+      if (pendingHiddenReconciliationRef.current === pending) {
+        pending.reconciling = false;
+      }
     }
   }, [refreshHiddenLists]);
 
@@ -1430,16 +1625,22 @@ export function SettingsPage() {
     existing?.controller?.abort();
     const controller = new AbortController();
     const generation = Number(existing?.generation || 0) + 1;
+    const requestToken = resourceRequestTokenRef.current + 1;
+    resourceRequestTokenRef.current = requestToken;
     const requestState = {
       identity: settingsIdentity,
+      requestToken,
       controller,
       generation,
-      loaded: false,
+      loaded: Boolean(existing?.loaded),
       loading: true,
       transient: false,
       failureId: 0,
       incidentId: 0,
-      recoveryGeneration,
+      lastRecoveryGeneration: Math.max(
+        Number(existing?.lastRecoveryGeneration || 0),
+        Number(recoveryGeneration || 0),
+      ),
     };
     resourceRequestsRef.current.set(resourceKey, requestState);
     setResourceStatus((current) => ({
@@ -1448,33 +1649,54 @@ export function SettingsPage() {
     }));
 
     try {
-      let payload;
+      let result;
       if (resourceKey === "hidden") {
-        payload = await refreshHiddenLists({ signal: controller.signal });
+        result = await refreshHiddenLists({ signal: controller.signal });
       } else if (resourceKey === "cloud") {
-        payload = await apiRequest("/api/cloud-libraries", { signal: controller.signal });
+        result = {
+          outcome: "applied",
+          payload: await apiRequest("/api/cloud-libraries", { signal: controller.signal }),
+        };
       } else if (resourceKey === "ageGroups") {
-        payload = await apiRequest("/api/library/age-groups", { signal: controller.signal });
+        result = {
+          outcome: "applied",
+          payload: await apiRequest("/api/library/age-groups", { signal: controller.signal }),
+        };
       } else if (resourceKey === "googleSetup") {
-        payload = await apiRequest("/api/admin/google-drive-setup", { signal: controller.signal });
+        result = {
+          outcome: "applied",
+          payload: await apiRequest("/api/admin/google-drive-setup", { signal: controller.signal }),
+        };
       } else if (resourceKey === "mediaReference") {
-        payload = await apiRequest("/api/admin/media-library-reference", { signal: controller.signal });
+        result = {
+          outcome: "applied",
+          payload: await apiRequest("/api/admin/media-library-reference", { signal: controller.signal }),
+        };
       } else if (resourceKey === "posterReference") {
-        payload = await apiRequest("/api/admin/poster-reference-location", { signal: controller.signal });
+        result = {
+          outcome: "applied",
+          payload: await apiRequest("/api/admin/poster-reference-location", { signal: controller.signal }),
+        };
       } else if (resourceKey === "totp") {
-        payload = await apiRequest("/api/auth/totp/status", { signal: controller.signal });
+        result = {
+          outcome: "applied",
+          payload: await apiRequest("/api/auth/totp/status", { signal: controller.signal }),
+        };
       } else {
         return;
       }
       const current = resourceRequestsRef.current.get(resourceKey);
       if (
-        !payload
-        || !mountedRef.current
+        !mountedRef.current
         || currentIdentityRef.current !== settingsIdentity
-        || current?.generation !== generation
+        || current?.requestToken !== requestToken
       ) {
         return;
       }
+      if (result.outcome !== "applied") {
+        return;
+      }
+      const payload = resourceKey === "hidden" ? result.lists : result.payload;
       if (resourceKey === "cloud") {
         setCloudLibraries(payload);
       } else if (resourceKey === "ageGroups") {
@@ -1499,36 +1721,84 @@ export function SettingsPage() {
         ...current,
         controller: null,
         loaded: true,
-        loading: false,
+        loading: true,
         transient: false,
+        failureId: 0,
+        incidentId: 0,
       });
       setResourceStatus((status) => ({
         ...status,
-        [resourceKey]: { loading: false, loaded: true, error: "" },
+        [resourceKey]: { loading: true, loaded: true, error: "" },
       }));
     } catch (requestError) {
       if (
         isAbortError(requestError)
         || !mountedRef.current
         || currentIdentityRef.current !== settingsIdentity
-        || resourceRequestsRef.current.get(resourceKey)?.generation !== generation
+        || resourceRequestsRef.current.get(resourceKey)?.requestToken !== requestToken
       ) {
         return;
       }
       const transient = isTransientNetworkError(requestError);
       const messageText = requestError.message || "Failed to load this settings section";
-      resourceRequestsRef.current.set(resourceKey, {
+      const failedRequest = {
         ...requestState,
         controller: null,
-        loading: false,
+        loading: true,
         transient,
+        loaded: Boolean(existing?.loaded),
         failureId: Number(requestError.failureId) || 0,
         incidentId: Number(requestError.incidentId) || 0,
-      });
+      };
+      resourceRequestsRef.current.set(resourceKey, failedRequest);
       setResourceStatus((status) => ({
         ...status,
-        [resourceKey]: { loading: false, loaded: false, error: messageText },
+        [resourceKey]: {
+          loading: true,
+          loaded: Boolean(existing?.loaded),
+          error: messageText,
+        },
       }));
+      if (transient) {
+        const recoveredGeneration = getConnectivityIncidentRecoveryGeneration(
+          failedRequest.incidentId,
+          failedRequest.failureId,
+        );
+        if (recoveredGeneration > failedRequest.lastRecoveryGeneration) {
+          failedRequest.lastRecoveryGeneration = recoveredGeneration;
+          queueMicrotask(() => {
+            const current = resourceRequestsRef.current.get(resourceKey);
+            if (
+              mountedRef.current
+              && currentIdentityRef.current === settingsIdentity
+              && current?.requestToken === requestToken
+            ) {
+              void loadSettingsResource(resourceKey, {
+                force: true,
+                recoveryGeneration: recoveredGeneration,
+              });
+            }
+          });
+        }
+      }
+    } finally {
+      const current = resourceRequestsRef.current.get(resourceKey);
+      if (
+        mountedRef.current
+        && currentIdentityRef.current === settingsIdentity
+        && current?.requestToken === requestToken
+      ) {
+        current.loading = false;
+        current.controller = null;
+        setResourceStatus((status) => ({
+          ...status,
+          [resourceKey]: {
+            ...status[resourceKey],
+            loading: false,
+            loaded: Boolean(current.loaded || status[resourceKey]?.loaded),
+          },
+        }));
+      }
     }
   }, [refreshHiddenLists, settingsIdentity]);
 
@@ -1547,20 +1817,36 @@ export function SettingsPage() {
         if (
           !request.transient
           || request.identity !== settingsIdentity
-          || request.recoveryGeneration >= recoveredGeneration
+          || request.lastRecoveryGeneration >= recoveredGeneration
           || (request.incidentId && request.incidentId !== Number(detail.incidentId))
           || (request.failureId && request.failureId > Number(detail.recoveredThroughFailureId))
         ) {
           continue;
         }
-        request.recoveryGeneration = recoveredGeneration;
+        request.lastRecoveryGeneration = recoveredGeneration;
         void loadSettingsResource(resourceKey, {
           force: true,
           recoveryGeneration: recoveredGeneration,
         });
       }
-      if (pendingHiddenReconciliationRef.current) {
-        void pendingReconcileHandlerRef.current?.();
+      const pending = pendingHiddenReconciliationRef.current;
+      if (
+        pending
+        && !pending.expired
+        && Date.now() - pending.startedAt < HIDDEN_RECONCILIATION_MAX_AGE_MS
+        && Number(pending.lastRecoveryGeneration || 0) < recoveredGeneration
+        && (!pending.incidentId || pending.incidentId === Number(detail.incidentId))
+        && (!pending.failureId || pending.failureId <= Number(detail.recoveredThroughFailureId))
+      ) {
+        pending.lastRecoveryGeneration = recoveredGeneration;
+        void pendingReconcileHandlerRef.current?.(pending);
+      } else if (
+        pending
+        && Date.now() - pending.startedAt >= HIDDEN_RECONCILIATION_MAX_AGE_MS
+      ) {
+        pending.expired = true;
+        setPendingHiddenReconciliation({ ...pending });
+        setMessage("Could not confirm the change. Refresh or retry confirmation.");
       }
     };
     window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, handleConnectivityRecovered);
@@ -2106,11 +2392,15 @@ export function SettingsPage() {
       if (isUncertainHiddenScopeError(requestError)) {
         const pending = {
           itemId: hiddenItem.id,
+          identity: settingsIdentity,
           requestedScope: "global",
           sourceScope: "personal",
           incidentId: Number(requestError.incidentId) || 0,
           failureId: Number(requestError.failureId) || 0,
           startedAt: Date.now(),
+          lastRecoveryGeneration: 0,
+          reconciling: false,
+          expired: false,
           errorMessage: requestError.message || "Failed to hide this movie for everyone",
         };
         pendingHiddenReconciliationRef.current = pending;
@@ -2165,11 +2455,15 @@ export function SettingsPage() {
       if (isUncertainHiddenScopeError(requestError)) {
         const pending = {
           itemId: hiddenItem.id,
+          identity: settingsIdentity,
           requestedScope: "personal",
           sourceScope: "global",
           incidentId: Number(requestError.incidentId) || 0,
           failureId: Number(requestError.failureId) || 0,
           startedAt: Date.now(),
+          lastRecoveryGeneration: 0,
+          reconciling: false,
+          expired: false,
           errorMessage: requestError.message || "Failed to hide this movie only for your account",
         };
         pendingHiddenReconciliationRef.current = pending;
@@ -2942,6 +3236,11 @@ export function SettingsPage() {
         </div>
       </div>
 
+      {activeSettingsSection !== "install" && userSettingsLoadError ? (
+        <p className="form-error settings-user-settings-load-error">
+          {userSettingsLoadError}
+        </p>
+      ) : null}
       {activeSettingsSection !== "install" && error ? <p className="form-error">{error}</p> : null}
       {activeSettingsSection !== "install" && message ? <p className="page-note">{message}</p> : null}
       {activeSettingsSection !== "install" && activeResourceErrors.length > 0 ? (
@@ -2965,7 +3264,7 @@ export function SettingsPage() {
           <span>Waiting to confirm the hidden scope change.</span>
           <button
             className="ghost-button ghost-button--inline"
-            onClick={() => reconcilePendingHiddenScope()}
+            onClick={() => reconcilePendingHiddenScope(undefined, { manual: true })}
             type="button"
           >
             Retry confirmation

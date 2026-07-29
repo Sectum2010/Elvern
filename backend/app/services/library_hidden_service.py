@@ -4,9 +4,9 @@ from .library_movie_identity_service import (
     _dedupe_group_key,
     _dedupe_rows,
     _edition_label,
-    _movie_identity_payload,
     _quality_sort_key,
     _row_hidden_movie_key,
+    _row_matches_hidden_keys,
 )
 from .local_library_source_service import ensure_current_shared_local_source_binding
 from .library_presentation_service import _poster_directory, _poster_url_for_row
@@ -14,6 +14,18 @@ from .title_normalization import resolve_title_metadata
 from .audit_service import write_audit_event_in_connection
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
+from ..db_hidden_movie_keys import (
+    hidden_key_candidates_for_row,
+    materialize_legacy_hidden_coverage_for_item,
+    resolve_hidden_copy_identity_payload,
+)
+
+
+def _matching_hidden_key(row, hidden_key_records: dict[str, object]) -> str | None:
+    return next(
+        (key for key in hidden_key_candidates_for_row(row) if key in hidden_key_records),
+        None,
+    )
 
 
 def _load_hidden_media_item_ids(connection, *, user_id: int) -> set[int]:
@@ -88,8 +100,7 @@ def _apply_global_hidden_filter(
     for row in rows:
         if int(row["id"]) in globally_hidden_media_item_ids:
             continue
-        row_key = _row_hidden_movie_key(row)
-        if row_key and row_key in globally_hidden_movie_keys:
+        if _row_matches_hidden_keys(row, globally_hidden_movie_keys):
             continue
         visible_rows.append(row)
     return visible_rows
@@ -107,8 +118,7 @@ def _apply_manual_hidden_filter(
     for row in rows:
         if int(row["id"]) in hidden_media_item_ids:
             continue
-        row_key = _row_hidden_movie_key(row)
-        if row_key and row_key in hidden_movie_keys:
+        if _row_matches_hidden_keys(row, hidden_movie_keys):
             continue
         visible_rows.append(row)
     return visible_rows
@@ -184,6 +194,7 @@ def list_hidden_media_items(
                 m.id,
                 m.title,
                 m.original_filename,
+                m.hidden_copy_identity,
                 COALESCE(m.source_kind, 'local') AS source_kind,
                 m.library_source_id,
                 s.display_name AS library_source_name,
@@ -245,7 +256,7 @@ def list_hidden_media_items(
         if int(row["id"]) in globally_hidden_media_item_ids:
             continue
         row_key = _row_hidden_movie_key(row)
-        if row_key and row_key in globally_hidden_movie_key_records:
+        if _row_matches_hidden_keys(row, set(globally_hidden_movie_key_records)):
             continue
         metadata = resolve_title_metadata(
             title=row["title"],
@@ -268,14 +279,15 @@ def list_hidden_media_items(
 
     representatives_by_key: dict[str, object] = {}
     for row in visible_candidate_rows:
+        matching_key = _matching_hidden_key(row, hidden_movie_key_records)
         row_key = _row_hidden_movie_key(row)
-        if not row_key or row_key not in hidden_movie_key_records:
+        if not matching_key:
             continue
-        if row_key in globally_hidden_movie_key_records:
+        if _row_matches_hidden_keys(row, set(globally_hidden_movie_key_records)):
             continue
-        current = representatives_by_key.get(row_key)
+        current = representatives_by_key.get(matching_key)
         if current is None or _quality_sort_key(row) > _quality_sort_key(current):
-            representatives_by_key[row_key] = row
+            representatives_by_key[matching_key] = row
 
     for row_key, row in representatives_by_key.items():
         if row_key in seen_movie_keys or int(row["id"]) in seen_ids:
@@ -314,6 +326,7 @@ def list_globally_hidden_media_items(
                 m.id,
                 m.title,
                 m.original_filename,
+                m.hidden_copy_identity,
                 COALESCE(m.source_kind, 'local') AS source_kind,
                 m.library_source_id,
                 NULL AS library_source_name,
@@ -345,6 +358,7 @@ def list_globally_hidden_media_items(
                 m.id,
                 m.title,
                 m.original_filename,
+                m.hidden_copy_identity,
                 COALESCE(m.source_kind, 'local') AS source_kind,
                 m.library_source_id,
                 NULL AS library_source_name,
@@ -393,12 +407,13 @@ def list_globally_hidden_media_items(
         )
     representatives_by_key: dict[str, object] = {}
     for row in visible_candidate_rows:
+        matching_key = _matching_hidden_key(row, global_hidden_movie_key_records)
         row_key = _row_hidden_movie_key(row)
-        if not row_key or row_key not in global_hidden_movie_key_records:
+        if not matching_key:
             continue
-        current = representatives_by_key.get(row_key)
+        current = representatives_by_key.get(matching_key)
         if current is None or _quality_sort_key(row) > _quality_sort_key(current):
-            representatives_by_key[row_key] = row
+            representatives_by_key[matching_key] = row
 
     for row_key, row in representatives_by_key.items():
         if row_key in seen_movie_keys or int(row["id"]) in seen_ids:
@@ -425,16 +440,21 @@ def list_globally_hidden_media_items(
 
 def _load_hidden_media_identity(connection, *, item_id: int):
     media_item = connection.execute(
-        "SELECT id, title, year, original_filename FROM media_items WHERE id = ? LIMIT 1",
+        """
+        SELECT
+            id, title, year, original_filename, file_path,
+            COALESCE(source_kind, 'local') AS source_kind,
+            library_source_id, external_media_id, cloud_resource_key,
+            hidden_copy_identity
+        FROM media_items
+        WHERE id = ?
+        LIMIT 1
+        """,
         (item_id,),
     ).fetchone()
     if media_item is None:
         return None, None
-    return media_item, _movie_identity_payload(
-        title=media_item["title"],
-        year=media_item["year"],
-        original_filename=media_item["original_filename"],
-    )
+    return media_item, resolve_hidden_copy_identity_payload(connection, media_item)
 
 
 def _hide_for_user_in_connection(
@@ -678,6 +698,12 @@ def _set_hidden_scope_in_connection(
 def hide_media_item_for_user(settings: Settings, *, user_id: int, item_id: int) -> None:
     with get_connection(settings) as connection:
         try:
+            materialize_legacy_hidden_coverage_for_item(
+                connection,
+                media_item_id=item_id,
+                user_id=user_id,
+                include_global=False,
+            )
             media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
             if media_item is None:
                 raise ValueError("not_found")
@@ -707,6 +733,12 @@ def hide_media_item_globally(
 ) -> None:
     with get_connection(settings) as connection:
         try:
+            materialize_legacy_hidden_coverage_for_item(
+                connection,
+                media_item_id=item_id,
+                user_id=None,
+                include_global=True,
+            )
             media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
             if media_item is None:
                 raise ValueError("not_found")
@@ -740,6 +772,12 @@ def hide_media_item_globally(
 def show_media_item_for_user(settings: Settings, *, user_id: int, item_id: int) -> None:
     with get_connection(settings) as connection:
         try:
+            materialize_legacy_hidden_coverage_for_item(
+                connection,
+                media_item_id=item_id,
+                user_id=user_id,
+                include_global=False,
+            )
             _media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
             _show_for_user_in_connection(
                 connection,
@@ -766,6 +804,12 @@ def show_media_item_globally(
 ) -> None:
     with get_connection(settings) as connection:
         try:
+            materialize_legacy_hidden_coverage_for_item(
+                connection,
+                media_item_id=item_id,
+                user_id=None,
+                include_global=True,
+            )
             _media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
             _show_globally_in_connection(
                 connection,
@@ -808,6 +852,12 @@ def set_hidden_media_item_scope(
         raise ValueError("invalid_scope")
     with get_connection(settings) as connection:
         try:
+            materialize_legacy_hidden_coverage_for_item(
+                connection,
+                media_item_id=item_id,
+                user_id=actor_user_id,
+                include_global=True,
+            )
             media_item, movie_identity = _load_hidden_media_identity(connection, item_id=item_id)
             if media_item is None:
                 raise ValueError("not_found")

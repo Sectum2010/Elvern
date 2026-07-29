@@ -169,6 +169,41 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
     );
   });
 
+  test.each([
+    ["standard_user", true],
+    ["admin", false],
+  ])("marks attachment viewing as Assistant for an authorized %s", (role, assistantEnabled) => {
+    mockAuthState.role = role;
+    mockAuthState.assistantEnabled = assistantEnabled;
+    renderShell({ initialEntry: "/attachments/42/view?name=report.txt" });
+
+    const navigation = screen.getByRole("navigation", { name: "Primary" });
+    expect(within(navigation).getByRole("link", { name: "Assistant" })).toHaveClass(
+      "floating-island__link--active",
+    );
+    expect(within(navigation).getByRole("link", { name: "Library" })).not.toHaveClass(
+      "floating-island__link--active",
+    );
+  });
+
+  test.each([
+    ["/attachments/42/view", "standard_user", false],
+    ["/utility/unknown", "standard_user", true],
+  ])("leaves %s without a false active item", (initialEntry, role, assistantEnabled) => {
+    mockAuthState.role = role;
+    mockAuthState.assistantEnabled = assistantEnabled;
+    renderShell({ initialEntry });
+
+    const navigation = screen.getByRole("navigation", { name: "Primary" });
+    expect(
+      within(navigation).getAllByRole("link").every(
+        (link) => !link.classList.contains("floating-island__link--active"),
+      ),
+    ).toBe(true);
+    expect(document.querySelector(".floating-island__nav-indicator")).toBeNull();
+    expect(document.querySelector(".floating-island__link--current")).toBeNull();
+  });
+
   test("Floating Library uses the remembered source/search return target from Detail", async () => {
     window.sessionStorage.setItem("elvern:library-return-target", JSON.stringify({
       listPath: "/library/cloud?category=movies&q=phase",

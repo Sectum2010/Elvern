@@ -3,6 +3,12 @@ from __future__ import annotations
 import pytest
 
 from backend.app.db import get_connection, utcnow_iso
+from backend.app.db_hidden_movie_keys import (
+    _legacy_hidden_keys_for_row,
+    migrate_legacy_hidden_movie_keys,
+    preserve_hidden_movie_keys_for_media_item,
+    resolve_hidden_copy_identity,
+)
 from backend.app.services import library_hidden_service
 from backend.app.services.library_hidden_service import (
     hide_media_item_for_user,
@@ -82,18 +88,87 @@ def _insert_copy_pair(settings) -> tuple[int, int]:
     return item_ids[0], item_ids[1]
 
 
+def _insert_local_source(settings, *, resource_id: str, local_path: str) -> int:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO library_sources (
+                owner_user_id, provider, resource_type, resource_id,
+                display_name, local_path, is_shared, created_at, updated_at
+            ) VALUES (1, 'local', 'directory', ?, ?, ?, 1, ?, ?)
+            """,
+            (resource_id, resource_id, local_path, now, now),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+
+
+def _insert_identity_item(
+    settings,
+    *,
+    file_path: str,
+    source_id: int,
+    filename: str = "Identity.Movie.2026.1080p.mkv",
+    source_kind: str = "local",
+    external_media_id: str | None = None,
+    cloud_resource_key: str | None = None,
+) -> int:
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO media_items (
+                title, original_filename, file_path, source_kind,
+                library_source_id, external_media_id, cloud_resource_key,
+                file_size, file_mtime, width, height, year,
+                created_at, updated_at, last_scanned_at
+            ) VALUES (
+                'Identity Movie', ?, ?, ?, ?, ?, ?,
+                4096, 1700000000, 1920, 1080, 2026, ?, ?, ?
+            )
+            """,
+            (
+                filename,
+                file_path,
+                source_kind,
+                source_id,
+                external_media_id,
+                cloud_resource_key,
+                now,
+                now,
+                now,
+            ),
+        )
+        item_id = int(cursor.lastrowid)
+        resolve_hidden_copy_identity(connection, media_item_id=item_id)
+        connection.commit()
+        return item_id
+
+
+def _copy_identity(settings, *, item_id: int) -> str:
+    with get_connection(settings) as connection:
+        identity = resolve_hidden_copy_identity(connection, media_item_id=item_id)
+        connection.commit()
+    assert identity is not None
+    return identity
+
+
 def _scope_truth(settings, *, item_id: int, user_id: int = 1) -> dict[str, object]:
     with get_connection(settings) as connection:
         media_row = connection.execute(
-            "SELECT title, year, original_filename FROM media_items WHERE id = ?",
+            """
+            SELECT
+                id, title, year, original_filename, file_path,
+                COALESCE(source_kind, 'local') AS source_kind,
+                library_source_id, external_media_id, cloud_resource_key,
+                hidden_copy_identity
+            FROM media_items
+            WHERE id = ?
+            """,
             (item_id,),
         ).fetchone()
-        identity = library_hidden_service._movie_identity_payload(
-            title=media_row["title"],
-            year=media_row["year"],
-            original_filename=media_row["original_filename"],
-        )
-        movie_key = str(identity["movie_key"])
+        movie_key = str(resolve_hidden_copy_identity(connection, media_row=media_row))
         personal_item = connection.execute(
             "SELECT hidden_at FROM user_hidden_media_items WHERE user_id = ? AND media_item_id = ?",
             (user_id, item_id),
@@ -256,6 +331,232 @@ def test_hidden_copy_scope_is_independent_for_matching_1080p_and_720p_copies(
     show_media_item_for_user(initialized_settings, user_id=1, item_id=copy_1080p)
     assert _scope_truth(initialized_settings, item_id=copy_1080p)["personal_item_at"] is None
     assert _scope_truth(initialized_settings, item_id=copy_720p)["personal_item_at"] is not None
+
+
+def test_hidden_copy_identity_separates_same_basename_by_directory_and_source(
+    initialized_settings,
+) -> None:
+    first_source = _insert_local_source(
+        initialized_settings,
+        resource_id="identity-source-a",
+        local_path="/safe/source-a",
+    )
+    second_source = _insert_local_source(
+        initialized_settings,
+        resource_id="identity-source-b",
+        local_path="/safe/source-b",
+    )
+    first = _insert_identity_item(
+        initialized_settings,
+        file_path="/safe/source-a/one/Same.Name.2026.mkv",
+        source_id=first_source,
+        filename="Same.Name.2026.mkv",
+    )
+    second_directory = _insert_identity_item(
+        initialized_settings,
+        file_path="/safe/source-a/two/Same.Name.2026.mkv",
+        source_id=first_source,
+        filename="Same.Name.2026.mkv",
+    )
+    second_source_copy = _insert_identity_item(
+        initialized_settings,
+        file_path="/safe/source-b/one/Same.Name.2026.mkv",
+        source_id=second_source,
+        filename="Same.Name.2026.mkv",
+    )
+
+    identities = {
+        _copy_identity(initialized_settings, item_id=item_id)
+        for item_id in (first, second_directory, second_source_copy)
+    }
+    assert len(identities) == 3
+    assert all(identity.startswith("copy-v2:") for identity in identities)
+    serialized = "\n".join(identities)
+    assert "/safe/" not in serialized
+    assert "same.name" not in serialized.lower()
+
+
+def test_hidden_copy_identity_survives_recreation_and_strong_row_rename(
+    initialized_settings,
+) -> None:
+    source_id = _insert_local_source(
+        initialized_settings,
+        resource_id="identity-recreation",
+        local_path="/safe/recreation",
+    )
+    original_path = "/safe/recreation/Original.2026.mkv"
+    item_id = _insert_identity_item(
+        initialized_settings,
+        file_path=original_path,
+        source_id=source_id,
+    )
+    original_identity = _copy_identity(initialized_settings, item_id=item_id)
+
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE media_items SET file_path = ?, original_filename = ? WHERE id = ?",
+            ("/safe/recreation/Renamed.2026.mkv", "Renamed.2026.mkv", item_id),
+        )
+        renamed_identity = resolve_hidden_copy_identity(connection, media_item_id=item_id)
+        assert renamed_identity == original_identity
+        preserve_hidden_movie_keys_for_media_item(connection, media_item_id=item_id)
+        connection.execute("DELETE FROM media_items WHERE id = ?", (item_id,))
+        connection.commit()
+
+    recreated = _insert_identity_item(
+        initialized_settings,
+        file_path=original_path,
+        source_id=source_id,
+    )
+    assert _copy_identity(initialized_settings, item_id=recreated) == original_identity
+
+
+def test_cloud_hidden_copy_identity_uses_source_scoped_external_id_not_filename(
+    initialized_settings,
+) -> None:
+    first_source = _insert_local_source(
+        initialized_settings,
+        resource_id="cloud-identity-a",
+        local_path="/unused/cloud-a",
+    )
+    second_source = _insert_local_source(
+        initialized_settings,
+        resource_id="cloud-identity-b",
+        local_path="/unused/cloud-b",
+    )
+    first = _insert_identity_item(
+        initialized_settings,
+        file_path="gdrive://source-a/folder/Before.mkv",
+        source_id=first_source,
+        source_kind="cloud",
+        external_media_id="provider-file-1",
+    )
+    same_provider_copy_renamed = _copy_identity(initialized_settings, item_id=first)
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE media_items SET file_path = ?, original_filename = ? WHERE id = ?",
+            ("gdrive://source-a/renamed/After.mkv", "After.mkv", first),
+        )
+        assert resolve_hidden_copy_identity(connection, media_item_id=first) == same_provider_copy_renamed
+        connection.commit()
+    other_source = _insert_identity_item(
+        initialized_settings,
+        file_path="gdrive://source-b/folder/Before.mkv",
+        source_id=second_source,
+        source_kind="cloud",
+        external_media_id="provider-file-1",
+    )
+    assert _copy_identity(initialized_settings, item_id=other_source) != same_provider_copy_renamed
+
+
+def test_legacy_group_materializes_all_copies_before_selected_show_again(
+    initialized_settings,
+) -> None:
+    first, second = _insert_copy_pair(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                id, title, year, original_filename, file_path,
+                COALESCE(source_kind, 'local') AS source_kind,
+                library_source_id, external_media_id, cloud_resource_key,
+                hidden_copy_identity
+            FROM media_items
+            WHERE id = ?
+            """,
+            (first,),
+        ).fetchone()
+        legacy_group_key = _legacy_hidden_keys_for_row(row)[0]
+        connection.execute(
+            """
+            INSERT INTO user_hidden_movie_keys (
+                user_id, movie_key, display_title, year, edition_identity, hidden_at
+            ) VALUES (1, ?, 'Movie A', 2026, 'standard', '2026-01-02 03:04:05')
+            """,
+            (legacy_group_key,),
+        )
+        connection.commit()
+
+    show_media_item_for_user(initialized_settings, user_id=1, item_id=first)
+
+    assert _scope_truth(initialized_settings, item_id=first)["personal_key_at"] is None
+    second_truth = _scope_truth(initialized_settings, item_id=second)
+    assert second_truth["personal_key_at"] == "2026-01-02 03:04:05"
+    with get_connection(initialized_settings) as connection:
+        legacy = connection.execute(
+            """
+            SELECT 1
+            FROM user_hidden_movie_keys
+            WHERE user_id = 1 AND movie_key = ?
+            """,
+            (legacy_group_key,),
+        ).fetchone()
+    assert legacy is None
+
+
+def test_legacy_transitional_key_migrates_once_and_orphan_is_retained(
+    initialized_settings,
+) -> None:
+    item_id = _insert_media_item(initialized_settings, suffix="legacy-migration")
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                id, title, year, original_filename, file_path,
+                COALESCE(source_kind, 'local') AS source_kind,
+                library_source_id, external_media_id, cloud_resource_key,
+                hidden_copy_identity
+            FROM media_items
+            WHERE id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+        legacy_keys = _legacy_hidden_keys_for_row(row)
+        transitional_key = legacy_keys[-1]
+        connection.execute(
+            """
+            INSERT INTO user_hidden_movie_keys (
+                user_id, movie_key, display_title, year, edition_identity, hidden_at
+            ) VALUES (1, ?, 'Scope Movie', 2026, 'standard', '2026-02-03 04:05:06')
+            """,
+            (transitional_key,),
+        )
+        orphan_key = "orphan|1999|standard"
+        connection.execute(
+            """
+            INSERT INTO user_hidden_movie_keys (
+                user_id, movie_key, display_title, year, edition_identity, hidden_at
+            ) VALUES (1, ?, 'Orphan', 1999, 'standard', '2026-02-03 04:05:07')
+            """,
+            (orphan_key,),
+        )
+        first = migrate_legacy_hidden_movie_keys(connection)
+        second = migrate_legacy_hidden_movie_keys(connection)
+        copy_identity = resolve_hidden_copy_identity(connection, media_item_id=item_id)
+        migrated = connection.execute(
+            """
+            SELECT hidden_at
+            FROM user_hidden_movie_keys
+            WHERE user_id = 1 AND movie_key = ?
+            """,
+            (copy_identity,),
+        ).fetchone()
+        orphan = connection.execute(
+            """
+            SELECT hidden_at
+            FROM user_hidden_movie_keys
+            WHERE user_id = 1 AND movie_key = ?
+            """,
+            (orphan_key,),
+        ).fetchone()
+        connection.commit()
+
+    assert first["user_legacy_keys_migrated"] == 1
+    assert first["user_legacy_keys_retained"] == 1
+    assert second["user_legacy_keys_migrated"] == 0
+    assert second["user_legacy_keys_retained"] == 1
+    assert migrated["hidden_at"] == "2026-02-03 04:05:06"
+    assert orphan["hidden_at"] == "2026-02-03 04:05:07"
 
 
 @pytest.mark.parametrize(

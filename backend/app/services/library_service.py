@@ -34,7 +34,7 @@ from .library_movie_identity_service import (
     QUALITY_TIER_VALUES,
     _apply_duplicate_filter,
     _dedupe_rows,
-    _row_hidden_movie_key,
+    _row_matches_hidden_keys,
 )
 from .library_presentation_service import (
     _normalize_cloud_title_and_year,
@@ -487,6 +487,7 @@ def _base_query() -> str:
             m.title,
             m.original_filename,
             m.file_path,
+            m.hidden_copy_identity,
             COALESCE(m.source_kind, 'local') AS source_kind,
             m.library_source_id,
             m.series_folder_key,
@@ -1271,10 +1272,12 @@ def get_media_item_detail(
         ).fetchone()
         hidden_movie_key_records = _load_hidden_movie_keys(connection, user_id=user_id)
         globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
-    movie_key = _row_hidden_movie_key(row)
-    hidden_for_user = hidden_row is not None or (movie_key in hidden_movie_key_records if movie_key else False)
+    hidden_for_user = hidden_row is not None or _row_matches_hidden_keys(
+        row,
+        set(hidden_movie_key_records),
+    )
     hidden_globally = global_hidden_row is not None or (
-        movie_key in globally_hidden_movie_key_records if movie_key else False
+        _row_matches_hidden_keys(row, set(globally_hidden_movie_key_records))
     )
     if hidden_globally and not allow_globally_hidden:
         return None
@@ -1474,9 +1477,8 @@ def get_media_item_poster_path(
         globally_hidden_movie_key_records = _load_globally_hidden_movie_keys(connection)
     if row is None:
         return None
-    movie_key = _row_hidden_movie_key(row)
     hidden_globally = global_hidden_row is not None or (
-        movie_key in globally_hidden_movie_key_records if movie_key else False
+        _row_matches_hidden_keys(row, set(globally_hidden_movie_key_records))
     )
     if hidden_globally and not allow_globally_hidden:
         return None

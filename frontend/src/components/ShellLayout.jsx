@@ -21,6 +21,7 @@ import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQu
 import { classifyLibrarySpaPath } from "../lib/canonicalSpaPath.js";
 import {
   canAccessAssistant,
+  classifyPrimaryNavigationRoute,
   resolveAssistantNavigationTarget,
 } from "../lib/assistantAccess.js";
 
@@ -57,37 +58,30 @@ export function ShellLayout({ children }) {
   const [floatingNavPreviewIndex, setFloatingNavPreviewIndex] = useState(null);
   const [floatingNavIndicatorFrame, setFloatingNavIndicatorFrame] = useState({ left: 0, width: 0 });
   const assistantNavigationTarget = resolveAssistantNavigationTarget(user);
+  const activeNavigationKey = classifyPrimaryNavigationRoute(location.pathname, user);
   const navigation = [
     {
       to: "/library",
       label: "Library",
-      isActive: (pathname) => classifyLibrarySpaPath(pathname).kind !== "other",
+      key: "library",
     },
     {
       to: "/settings",
       label: "Settings",
-      isActive: (pathname) => pathname === "/settings",
+      key: "settings",
     },
     ...(canAccessAssistant(user) ? [{
       to: assistantNavigationTarget,
       label: "Assistant",
+      key: "assistant",
       state: user?.role === "admin"
         ? undefined
-        : { fromPath: `${location.pathname}${location.search}${location.hash}` },
-      isActive: (pathname) => (
-        pathname === "/assistant"
-        || pathname === "/admin/assistant"
-        || pathname.startsWith("/admin/assistant/")
-      ),
+        : { fromPath: location.pathname },
     }] : []),
     ...(user?.role === "admin" ? [{
       to: "/admin",
       label: "Admin",
-      isActive: (pathname) => (
-        (pathname === "/admin" || pathname.startsWith("/admin/"))
-        && pathname !== "/admin/assistant"
-        && !pathname.startsWith("/admin/assistant/")
-      ),
+      key: "admin",
     }] : []),
   ];
   const {
@@ -106,9 +100,8 @@ export function ShellLayout({ children }) {
   const desktopPosterContextMenuEnabled = isDesktopClientPlatform(detectClientPlatform());
   const mobileSelectionGuardEnabled = clientDeviceClass === "phone" || clientDeviceClass === "tablet";
   const floatingNavDragEnabled = clientDeviceClass !== "phone" && clientDeviceClass !== "tablet";
-  const floatingActiveIndex = Math.max(
-    0,
-    navigation.findIndex((item) => item.isActive(location.pathname)),
+  const floatingActiveIndex = navigation.findIndex(
+    (item) => item.key === activeNavigationKey,
   );
   const floatingVisualIndex =
     floatingNavDragging && floatingNavPreviewIndex !== null
@@ -527,14 +520,16 @@ export function ShellLayout({ children }) {
           aria-label="Primary navigation and account controls"
         >
           <nav className="floating-island__nav" aria-label="Primary" ref={floatingNavRef}>
-            <span
-              aria-hidden="true"
-              className={[
-                "floating-island__nav-indicator",
-                floatingNavDragging ? "floating-island__nav-indicator--dragging" : "",
-              ].filter(Boolean).join(" ")}
-              style={floatingIndicatorStyle}
-            />
+            {floatingActiveIndex >= 0 ? (
+              <span
+                aria-hidden="true"
+                className={[
+                  "floating-island__nav-indicator",
+                  floatingNavDragging ? "floating-island__nav-indicator--dragging" : "",
+                ].filter(Boolean).join(" ")}
+                style={floatingIndicatorStyle}
+              />
+            ) : null}
             {navigation.map((item, index) => {
               const isCurrent = index === floatingActiveIndex;
               const isVisuallyActive = index === floatingVisualIndex;

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -15,13 +16,17 @@ from backend.app.auth import ensure_admin_user
 from backend.app.config import get_settings, refresh_settings
 from backend.app.db import get_connection, utcnow_iso
 from backend.app.db import init_db
+from backend.app.db_hidden_movie_keys import (
+    _legacy_hidden_keys_for_row,
+    resolve_hidden_copy_identity,
+)
 from backend.app.media_scan import scan_media_library
 from backend.app.security import _hash_password_pbkdf2
 from backend.app.services import cloud_source_sync_service
 from backend.app.services.desktop_playback_service import resolve_same_host_request
 from backend.app.services.google_drive_service import build_google_drive_provider_auth_required_detail
 from backend.app.services.local_library_source_service import ensure_current_shared_local_source_binding
-from backend.app.services.library_movie_identity_service import _row_hidden_movie_key
+from backend.app.services.library_hidden_service import hide_media_item_for_user
 from backend.tests.conftest import (
     DummyAdminEventHub,
     DummyMobilePlaybackManager,
@@ -725,6 +730,12 @@ def test_local_file_rename_updates_title_truth_after_rescan(
     assert before.json()["total_items"] == 1
     before_item = before.json()["items"][0]
     before_id = int(before_item["id"])
+    with get_connection(initialized_settings) as connection:
+        before_identity = resolve_hidden_copy_identity(
+            connection,
+            media_item_id=before_id,
+        )
+        connection.commit()
     assert before_item["title"] == "Movie Alpha"
     assert before_item["year"] == 2014
     now = utcnow_iso()
@@ -761,20 +772,125 @@ def test_local_file_rename_updates_title_truth_after_rescan(
     with get_connection(initialized_settings) as connection:
         rows = connection.execute(
             """
-            SELECT id, title, original_filename, year
+            SELECT id, title, original_filename, year, hidden_copy_identity
             FROM media_items
             ORDER BY id ASC
             """
         ).fetchall()
 
-    assert [tuple(row) for row in rows] == [
-        (
-            before_id,
-            "Movie.Bravo.1080p.BluRay.x264",
-            "Movie.Bravo.1080p.BluRay.x264.mkv",
-            2014,
-        ),
-    ]
+    assert len(rows) == 1
+    assert tuple(rows[0]) == (
+        before_id,
+        "Movie.Bravo.1080p.BluRay.x264",
+        "Movie.Bravo.1080p.BluRay.x264.mkv",
+        2014,
+        before_identity,
+    )
+
+
+def test_local_hidden_copy_survives_scanner_delete_and_same_path_recreation(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    media_root = Path(initialized_settings.media_root)
+    movie_path = media_root / "Recreated.Movie.2026.1080p.mkv"
+    movie_path.write_bytes(b"recreated-copy")
+    scan_media_library(initialized_settings, reason="manual")
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT id FROM media_items WHERE file_path = ?",
+            (str(movie_path.resolve()),),
+        ).fetchone()
+        assert row is not None
+        original_id = int(row["id"])
+        original_identity = resolve_hidden_copy_identity(connection, media_item_id=original_id)
+        connection.commit()
+    hide_media_item_for_user(initialized_settings, user_id=1, item_id=original_id)
+    assert client.get("/api/library").json()["total_items"] == 0
+
+    movie_path.unlink()
+    scan_media_library(initialized_settings, reason="manual")
+    movie_path.write_bytes(b"recreated-copy")
+    scan_media_library(initialized_settings, reason="manual")
+
+    with get_connection(initialized_settings) as connection:
+        recreated = connection.execute(
+            "SELECT id, hidden_copy_identity FROM media_items WHERE file_path = ?",
+            (str(movie_path.resolve()),),
+        ).fetchone()
+    assert recreated is not None
+    assert int(recreated["id"]) != original_id
+    assert recreated["hidden_copy_identity"] == original_identity
+    assert client.get("/api/library").json()["total_items"] == 0
+
+
+def test_ambiguous_identical_local_renames_do_not_reuse_or_merge_hidden_identity(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    media_root = Path(initialized_settings.media_root)
+    first_path = media_root / "First.Copy.2026.mkv"
+    second_path = media_root / "Second.Copy.2026.mkv"
+    for path in (first_path, second_path):
+        path.write_bytes(b"same-content")
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+    scan_media_library(initialized_settings, reason="manual")
+    with get_connection(initialized_settings) as connection:
+        original_rows = connection.execute(
+            """
+            SELECT id, hidden_copy_identity
+            FROM media_items
+            ORDER BY id
+            """
+        ).fetchall()
+    assert len(original_rows) == 2
+    original_ids = {int(row["id"]) for row in original_rows}
+    original_identities = {str(row["hidden_copy_identity"]) for row in original_rows}
+    hide_media_item_for_user(
+        initialized_settings,
+        user_id=1,
+        item_id=min(original_ids),
+    )
+
+    first_directory = media_root / "renamed-a"
+    second_directory = media_root / "renamed-b"
+    first_directory.mkdir()
+    second_directory.mkdir()
+    first_path.rename(first_directory / "Ambiguous.Copy.2026.mkv")
+    second_path.rename(second_directory / "Ambiguous.Copy.2026.mkv")
+    scan_media_library(initialized_settings, reason="manual")
+
+    with get_connection(initialized_settings) as connection:
+        current_rows = connection.execute(
+            """
+            SELECT id, hidden_copy_identity
+            FROM media_items
+            ORDER BY id
+            """
+        ).fetchall()
+    assert len(current_rows) == 2
+    assert original_ids.isdisjoint({int(row["id"]) for row in current_rows})
+    current_identities = {str(row["hidden_copy_identity"]) for row in current_rows}
+    assert len(current_identities) == 2
+    assert original_identities.isdisjoint(current_identities)
+    settings_response = client.patch(
+        "/api/user-settings",
+        json={"hide_duplicate_movies": False},
+    )
+    assert settings_response.status_code == 200
+    assert client.get("/api/library").json()["total_items"] == 2
 
 
 def test_local_rename_collision_does_not_get_swallowed_by_duplicate_filter(
@@ -875,6 +991,12 @@ def test_renamed_movie_and_renamed_poster_rematch_after_rescan(
     assert before.json()["total_items"] == 1
     before_item = before.json()["items"][0]
     before_item_id = int(before_item["id"])
+    with get_connection(initialized_settings) as connection:
+        before_identity = resolve_hidden_copy_identity(
+            connection,
+            media_item_id=before_item_id,
+        )
+        connection.commit()
     before_poster_url = before_item["poster_url"]
     assert before_item["title"] == "The Godfather"
     assert before_poster_url is not None
@@ -903,7 +1025,7 @@ def test_renamed_movie_and_renamed_poster_rematch_after_rescan(
     assert poster_response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
 
 
-def test_manual_rescan_heals_stale_hidden_movie_keys_for_recreated_local_rows(
+def test_manual_rescan_migrates_supported_legacy_hidden_keys_without_losing_intent(
     client,
     admin_credentials,
     initialized_settings,
@@ -927,7 +1049,11 @@ def test_manual_rescan_heals_stale_hidden_movie_keys_for_recreated_local_rows(
     with get_connection(initialized_settings) as connection:
         row = connection.execute(
             """
-            SELECT id, title, year, original_filename
+            SELECT
+                id, title, year, original_filename, file_path,
+                COALESCE(source_kind, 'local') AS source_kind,
+                library_source_id, external_media_id, cloud_resource_key,
+                hidden_copy_identity
             FROM media_items
             WHERE original_filename = ?
             LIMIT 1
@@ -935,8 +1061,9 @@ def test_manual_rescan_heals_stale_hidden_movie_keys_for_recreated_local_rows(
             (movie_filename,),
         ).fetchone()
         assert row is not None
-        movie_key = _row_hidden_movie_key(row)
-        assert movie_key is not None
+        copy_identity = resolve_hidden_copy_identity(connection, media_row=row)
+        assert copy_identity is not None
+        legacy_movie_key = _legacy_hidden_keys_for_row(row)[0]
         connection.execute(
             """
             INSERT OR REPLACE INTO global_hidden_movie_keys (
@@ -948,7 +1075,7 @@ def test_manual_rescan_heals_stale_hidden_movie_keys_for_recreated_local_rows(
                 hidden_at
             ) VALUES (?, ?, ?, 'standard', 1, '2026-03-28 00:01:05')
             """,
-            (movie_key, "Harry Potter and the Philosopher's Stone", 2001),
+            (legacy_movie_key, "Harry Potter and the Philosopher's Stone", 2001),
         )
         connection.execute(
             """
@@ -961,7 +1088,7 @@ def test_manual_rescan_heals_stale_hidden_movie_keys_for_recreated_local_rows(
                 hidden_at
             ) VALUES (1, ?, ?, ?, 'standard', '2026-03-28 00:01:05')
             """,
-            (movie_key, "Harry Potter and the Philosopher's Stone", 2001),
+            (legacy_movie_key, "Harry Potter and the Philosopher's Stone", 2001),
         )
         connection.commit()
 
@@ -972,25 +1099,41 @@ def test_manual_rescan_heals_stale_hidden_movie_keys_for_recreated_local_rows(
     repair_result = scan_media_library(initialized_settings, reason="manual")
     assert repair_result["hidden_movie_keys_pruned"] == 2
 
-    healed_response = client.get("/api/library")
-    assert healed_response.status_code == 200
-    assert healed_response.json()["total_items"] == 1
-    item = healed_response.json()["items"][0]
-    assert item["title"] == "Harry Potter and the Philosopher's Stone"
-    assert item["poster_url"] is not None
-    assert client.get(item["poster_url"]).content == b"poster-bytes"
+    migrated_response = client.get("/api/library")
+    assert migrated_response.status_code == 200
+    assert migrated_response.json()["total_items"] == 0
 
     with get_connection(initialized_settings) as connection:
-        hidden_rows = connection.execute(
+        legacy_global_rows = connection.execute(
             "SELECT COUNT(*) AS count FROM global_hidden_movie_keys WHERE movie_key = ?",
-            (movie_key,),
+            (legacy_movie_key,),
         ).fetchone()
-        assert int(hidden_rows["count"]) == 0
-        user_hidden_rows = connection.execute(
+        assert int(legacy_global_rows["count"]) == 0
+        legacy_user_rows = connection.execute(
             "SELECT COUNT(*) AS count FROM user_hidden_movie_keys WHERE movie_key = ? AND user_id = 1",
-            (movie_key,),
+            (legacy_movie_key,),
         ).fetchone()
-        assert int(user_hidden_rows["count"]) == 0
+        assert int(legacy_user_rows["count"]) == 0
+        migrated_global = connection.execute(
+            """
+            SELECT hidden_at
+            FROM global_hidden_movie_keys
+            WHERE movie_key = ?
+            """,
+            (copy_identity,),
+        ).fetchone()
+        assert migrated_global is not None
+        assert migrated_global["hidden_at"] == "2026-03-28 00:01:05"
+        migrated_user = connection.execute(
+            """
+            SELECT hidden_at
+            FROM user_hidden_movie_keys
+            WHERE movie_key = ? AND user_id = 1
+            """,
+            (copy_identity,),
+        ).fetchone()
+        assert migrated_user is not None
+        assert migrated_user["hidden_at"] == "2026-03-28 00:01:05"
 
 
 def test_poster_reference_location_switch_refreshes_poster_without_media_rescan(
@@ -1339,6 +1482,12 @@ def test_cloud_rename_updates_one_row_in_place_without_duplicate_visibility(
     assert before_item["title"] == "The Intouchables"
     assert before_item["poster_url"] is not None
     assert client.get(before_item["poster_url"]).content == b"cloud-poster-before"
+    with get_connection(initialized_settings) as connection:
+        before_identity = connection.execute(
+            "SELECT hidden_copy_identity FROM media_items WHERE id = ?",
+            (before_item_id,),
+        ).fetchone()["hidden_copy_identity"]
+    assert before_identity
 
     renamed_poster_path = poster_dir / "Untouchables (2011).jpg"
     before_poster_path.rename(renamed_poster_path)
@@ -1365,7 +1514,9 @@ def test_cloud_rename_updates_one_row_in_place_without_duplicate_visibility(
     with get_connection(initialized_settings) as connection:
         rows = connection.execute(
             """
-            SELECT id, title, original_filename, file_path, external_media_id, year
+            SELECT
+                id, title, original_filename, file_path,
+                external_media_id, year, hidden_copy_identity
             FROM media_items
             WHERE COALESCE(source_kind, 'local') = 'cloud'
             ORDER BY id ASC
@@ -1380,6 +1531,7 @@ def test_cloud_rename_updates_one_row_in_place_without_duplicate_visibility(
             "gdrive://folder-123/file-1/Untouchables (2011).mp4",
             "file-1",
             2011,
+            before_identity,
         ),
     ]
 
