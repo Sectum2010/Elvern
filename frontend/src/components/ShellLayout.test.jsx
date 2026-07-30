@@ -136,7 +136,7 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
 
   test.each([
     ["/library", true],
-    ["/library/42", true],
+    ["/library/42", false],
     ["/settings", false],
     ["/admin", false],
     ["/admin/assistant", false],
@@ -242,7 +242,7 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
     expect(document.querySelector(".floating-island__link--current")).toBeNull();
   });
 
-  test("Floating Library uses the remembered source/search return target from Detail", async () => {
+  test("Detail does not render the desktop Library Island even with a remembered return target", () => {
     window.sessionStorage.setItem("elvern:library-return-target", JSON.stringify({
       listPath: "/library?category=movies&q=phase&source=cloud",
       anchorItemId: 42,
@@ -258,14 +258,11 @@ describe("ShellLayout fixed island and mobile selection guard", () => {
       children: <LocationProbe />,
     });
 
-    screen.getByRole("tab", { name: "Movies" }).click();
-
-    await waitFor(() => expect(screen.getByTestId("shell-location")).toHaveTextContent(
-      "/library?category=movies&q=phase&source=cloud",
-    ));
+    expect(screen.queryByTestId("desktop-library-island")).not.toBeInTheDocument();
+    expect(screen.getByTestId("shell-location")).toHaveTextContent("/library/42");
     expect(JSON.parse(
       window.sessionStorage.getItem("elvern:library-return-target"),
-    ).pendingRestore).toBe(true);
+    ).pendingRestore).toBe(false);
   });
 
   test("a trailing-slash Library root does not render a duplicate Elvern header", () => {

@@ -414,19 +414,86 @@ describe("LibraryPage category switching", () => {
     });
   });
 
-  test("real desktop renders only the compact indexed and Rescan cluster", async () => {
+  test("real desktop removes the Private Media card and puts index controls on the first section row", async () => {
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "linux";
     renderLibrary("/library", libraryPayload({
       total_items: 27,
     }));
 
-    expect(await screen.findByText("27 indexed")).toBeInTheDocument();
+    const indexed = await screen.findByText("27 indexed");
+    const firstSectionHeader = indexed.closest(".section-header");
+
+    expect(screen.queryByText("Private Media Library")).not.toBeInTheDocument();
+    expect(firstSectionHeader).not.toBeNull();
+    expect(within(firstSectionHeader).getByRole("heading", { name: "Other Movies" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Rescan" })).toBeInTheDocument();
     expect(screen.queryByRole("searchbox", { name: "Search library" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Arrange library" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Search library" })).not.toBeInTheDocument();
     expect(screen.queryByText("Rescan library")).not.toBeInTheDocument();
+  });
+
+  test("desktop index controls follow Continue watching or the next real first row", async () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "windows";
+    const active = libraryItem({
+      id: 21,
+      title: "In progress",
+      progress_seconds: 120,
+      progress_duration_seconds: 1200,
+    });
+    const recent = libraryItem({ id: 22, title: "New arrival" });
+
+    renderLibrary("/library", libraryPayload({
+      items: [active, recent],
+      continue_watching: [active],
+      recently_added: [recent],
+      total_items: 2,
+    }));
+
+    let controls = await screen.findByTestId("library-index-controls");
+    expect(within(controls.closest(".section-header")).getByRole(
+      "heading",
+      { name: "Continue watching" },
+    )).toBeInTheDocument();
+
+    cleanup();
+    queryClient.clear();
+    renderLibrary("/library", libraryPayload({
+      items: [recent],
+      continue_watching: [],
+      recently_added: [recent],
+      total_items: 1,
+    }));
+
+    controls = await screen.findByTestId("library-index-controls");
+    expect(within(controls.closest(".section-header")).getByRole(
+      "heading",
+      { name: "Recently added" },
+    )).toBeInTheDocument();
+  });
+
+  test("desktop index controls use the first Series Rail when it is the first row", async () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "mac";
+    const seriesItem = libraryItem({ id: 31, title: "Saga chapter" });
+    renderLibrary("/library", libraryPayload({
+      items: [seriesItem],
+      series_rails: [{
+        key: "saga",
+        title: "Saga",
+        film_count: 1,
+        items: [seriesItem],
+      }],
+      total_items: 1,
+    }));
+
+    const controls = await screen.findByTestId("library-index-controls");
+    expect(within(controls.closest(".section-header")).getByRole(
+      "heading",
+      { name: "Saga" },
+    )).toBeInTheDocument();
   });
 
   test("real desktop indexed cluster shows the authoritative scan pending state", async () => {

@@ -40,9 +40,6 @@ import {
 } from "../lib/libraryNavigation.js";
 
 
-export const LIBRARY_SEARCH_DEBOUNCE_MS = 300;
-
-
 function joinPathAndSearch(pathname, search, hash = "") {
   return `${pathname}${search || ""}${hash || ""}`;
 }
@@ -100,6 +97,157 @@ export function resolveDesktopLibraryIslandView({
 }
 
 
+function DesktopLibrarySourceControl({ onChange, value }) {
+  const controlRef = useRef(null);
+  const draggingRef = useRef(false);
+  const ignoreNextClickRef = useRef(false);
+  const ignoreClickTimerRef = useRef(0);
+  const dragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
+  const [dragging, setDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState(0);
+  const [dragPreviewValue, setDragPreviewValue] = useState(null);
+
+  useEffect(() => () => {
+    window.clearTimeout(ignoreClickTimerRef.current);
+  }, []);
+
+  function getValueFromPoint(clientX, clientY, { allowOutside = false } = {}) {
+    const rect = controlRef.current?.getBoundingClientRect();
+    if (!rect || !LIBRARY_SOURCE_OPTIONS.length) {
+      return allowOutside ? value : null;
+    }
+    const outside = clientX < rect.left
+      || clientX > rect.right
+      || clientY < rect.top
+      || clientY > rect.bottom;
+    if (outside && !allowOutside) {
+      return null;
+    }
+    const ratio = Math.max(0, Math.min(0.999, (clientX - rect.left) / (rect.width || 1)));
+    const index = Math.max(
+      0,
+      Math.min(LIBRARY_SOURCE_OPTIONS.length - 1, Math.floor(ratio * LIBRARY_SOURCE_OPTIONS.length)),
+    );
+    return LIBRARY_SOURCE_OPTIONS[index]?.key || value;
+  }
+
+  function resetDrag() {
+    draggingRef.current = false;
+    setDragging(false);
+    setDragOffset(0);
+    setDragPreviewValue(null);
+  }
+
+  function handleActivePointerDown(event) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const sourceButtons = controlRef.current?.querySelectorAll("button");
+    const firstButtonRect = sourceButtons?.[0]?.getBoundingClientRect();
+    const lastButtonRect = sourceButtons?.[sourceButtons.length - 1]?.getBoundingClientRect();
+    const buttonRect = event.currentTarget.getBoundingClientRect();
+    dragBoundsRef.current = {
+      clientX: event.clientX,
+      min: firstButtonRect ? firstButtonRect.left - buttonRect.left : 0,
+      max: lastButtonRect ? lastButtonRect.right - buttonRect.right : 0,
+    };
+    draggingRef.current = true;
+    ignoreNextClickRef.current = true;
+    setDragOffset(0);
+    setDragPreviewValue(value);
+    setDragging(true);
+  }
+
+  function handleActivePointerMove(event) {
+    if (!draggingRef.current) {
+      return;
+    }
+    const bounds = dragBoundsRef.current;
+    const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
+    setDragOffset(nextOffset);
+    setDragPreviewValue(getValueFromPoint(event.clientX, event.clientY, { allowOutside: true }));
+  }
+
+  function handleActivePointerUp(event) {
+    if (!draggingRef.current) {
+      return;
+    }
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    const nextValue = getValueFromPoint(event.clientX, event.clientY);
+    resetDrag();
+    if (nextValue) {
+      onChange(nextValue);
+    }
+    window.clearTimeout(ignoreClickTimerRef.current);
+    ignoreClickTimerRef.current = window.setTimeout(() => {
+      ignoreNextClickRef.current = false;
+    }, 120);
+  }
+
+  function handleActivePointerCancel(event) {
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    ignoreNextClickRef.current = false;
+    resetDrag();
+  }
+
+  const selectedIndex = Math.max(
+    0,
+    LIBRARY_SOURCE_OPTIONS.findIndex((option) => option.key === value),
+  );
+  const controlStyle = {
+    "--desktop-source-count": LIBRARY_SOURCE_OPTIONS.length,
+    "--desktop-source-index": selectedIndex,
+    "--desktop-source-drag-x": dragging ? `${dragOffset}px` : "0px",
+  };
+
+  return (
+    <div
+      aria-label="Library source"
+      className={[
+        "desktop-library-island__segments",
+        dragging ? "desktop-library-island__segments--dragging" : "",
+      ].filter(Boolean).join(" ")}
+      ref={controlRef}
+      role="radiogroup"
+      style={controlStyle}
+    >
+      <span aria-hidden="true" className="desktop-library-island__segments-indicator" />
+      {LIBRARY_SOURCE_OPTIONS.map((option) => {
+        const selected = value === option.key;
+        const visuallySelected = dragging
+          ? dragPreviewValue === option.key
+          : selected;
+        return (
+          <button
+            aria-checked={selected}
+            className={[
+              visuallySelected ? "is-active" : "",
+              selected && dragging ? "is-dragging" : "",
+            ].filter(Boolean).join(" ")}
+            key={option.key}
+            onClick={(event) => {
+              if (ignoreNextClickRef.current) {
+                event.preventDefault();
+                ignoreNextClickRef.current = false;
+                return;
+              }
+              onChange(option.key);
+            }}
+            onPointerCancel={selected ? handleActivePointerCancel : undefined}
+            onPointerDown={selected ? handleActivePointerDown : undefined}
+            onPointerMove={selected ? handleActivePointerMove : undefined}
+            onPointerUp={selected ? handleActivePointerUp : undefined}
+            role="radio"
+            type="button"
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+
 function DesktopLibraryArrangePanel({
   availableGenres,
   direction,
@@ -149,19 +297,10 @@ function DesktopLibraryArrangePanel({
       <div className="desktop-library-island__arrange-body">
         <section className="desktop-library-island__group">
           <h3>Source</h3>
-          <div className="desktop-library-island__segments">
-            {LIBRARY_SOURCE_OPTIONS.map((option) => (
-              <button
-                aria-pressed={draft.source === option.key}
-                className={draft.source === option.key ? "is-active" : ""}
-                key={option.key}
-                onClick={() => onUpdate({ source: option.key })}
-                type="button"
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <DesktopLibrarySourceControl
+            onChange={(source) => onUpdate({ source })}
+            value={draft.source}
+          />
         </section>
 
         <section className="desktop-library-island__group">
@@ -186,13 +325,13 @@ function DesktopLibraryArrangePanel({
                 {genre}
               </button>
             ))}
-            {hiddenGenreCount > 0 && !showAllGenres ? (
+            {hiddenGenreCount > 0 ? (
               <button
                 className="desktop-library-island__more"
-                onClick={() => setShowAllGenres(true)}
+                onClick={() => setShowAllGenres((current) => !current)}
                 type="button"
               >
-                + {hiddenGenreCount} more
+                {showAllGenres ? "Collapse" : `+ ${hiddenGenreCount} more`}
               </button>
             ) : null}
           </div>
@@ -295,10 +434,12 @@ function DesktopLibraryAvatarMenu({
         <span aria-hidden="true" className="desktop-library-island__avatar desktop-library-island__avatar--header">
           {initial}
         </span>
-        <strong>{user?.username}</strong>
-        {user?.role === "admin" ? (
-          <Crown aria-label="Administrator" className="desktop-library-island__crown" />
-        ) : null}
+        <span className="desktop-library-island__identity">
+          <strong>{user?.username}</strong>
+          {user?.role === "admin" ? (
+            <Crown aria-label="Administrator" className="desktop-library-island__crown" />
+          ) : null}
+        </span>
       </div>
       <div className="desktop-library-island__menu-separator" />
       <div className="desktop-library-island__menu-items">
@@ -340,7 +481,6 @@ export function DesktopLibraryIsland({
   const panelRef = useRef(null);
   const menuRef = useRef(null);
   const searchInputRef = useRef(null);
-  const searchTimerRef = useRef(0);
   const closingRef = useRef(false);
   const [openPanel, setOpenPanel] = useState("");
   const [draftArrange, setDraftArrange] = useState(DEFAULT_LIBRARY_ARRANGE);
@@ -364,13 +504,8 @@ export function DesktopLibraryIsland({
   const direction = position === "bottom" ? "up" : "down";
 
   useEffect(() => {
-    window.clearTimeout(searchTimerRef.current);
     setSearchDraft(committedQuery);
-  }, [committedQuery, view.pathname, view.search]);
-
-  useEffect(() => () => {
-    window.clearTimeout(searchTimerRef.current);
-  }, []);
+  }, [committedQuery]);
 
   function navigateToView({
     arrange = committedArrange,
@@ -424,24 +559,21 @@ export function DesktopLibraryIsland({
       return;
     }
     closingRef.current = true;
-    window.clearTimeout(searchTimerRef.current);
-    const nextQuery = String(searchDraft || "").trim();
     const normalizedDraft = normalizeLibraryArrange(draftArrange, libraryState?.availableGenres);
     const changed = !libraryArrangeEquals(normalizedDraft, committedArrange)
-      || category !== committedCategory
-      || nextQuery !== committedQuery;
+      || category !== committedCategory;
     setOpenPanel("");
     if (navigateAfter) {
       const listSearch = buildLibraryViewSearch({
         currentSearch: view.search,
         category,
         arrange: normalizedDraft,
-        query: nextQuery,
+        query: committedQuery,
       });
       libraryState?.prepareExit?.(`/library${listSearch}${view.hash || ""}`);
       navigate(navigateAfter.to, { state: navigateAfter.state });
     } else if (changed) {
-      navigateToView({ arrange: normalizedDraft, category, query: nextQuery });
+      navigateToView({ arrange: normalizedDraft, category });
     }
     if (returnFocus) {
       window.setTimeout(() => arrangeButtonRef.current?.focus({ preventScroll: true }), 0);
@@ -452,7 +584,6 @@ export function DesktopLibraryIsland({
   }
 
   function openArrange() {
-    window.clearTimeout(searchTimerRef.current);
     if (openPanel === "arrange") {
       commitArrangeDraftAndClose();
       return;
@@ -462,7 +593,6 @@ export function DesktopLibraryIsland({
   }
 
   function toggleAvatar() {
-    window.clearTimeout(searchTimerRef.current);
     if (openPanel === "arrange") {
       commitArrangeDraftAndClose({ returnFocus: false });
       setOpenPanel("avatar");
@@ -472,8 +602,6 @@ export function DesktopLibraryIsland({
   }
 
   function handleCategory(category) {
-    window.clearTimeout(searchTimerRef.current);
-    const nextQuery = String(searchDraft || "").trim();
     if (openPanel === "arrange") {
       commitArrangeDraftAndClose({ category, returnFocus: false });
       return;
@@ -481,28 +609,20 @@ export function DesktopLibraryIsland({
     if (
       view.fromDetail
       && category === committedCategory
-      && nextQuery === committedQuery
     ) {
       navigateToView({ restore: true });
       return;
     }
     if (
       category !== committedCategory
-      || nextQuery !== committedQuery
       || view.fromDetail
     ) {
-      navigateToView({ category, query: nextQuery });
+      navigateToView({ category });
     }
   }
 
-  function commitSearch(value, { immediate = false } = {}) {
-    window.clearTimeout(searchTimerRef.current);
-    const run = () => navigateToView({ query: String(value || "").trim(), replace: true });
-    if (immediate) {
-      run();
-      return;
-    }
-    searchTimerRef.current = window.setTimeout(run, LIBRARY_SEARCH_DEBOUNCE_MS);
+  function commitSearch(value) {
+    navigateToView({ query: String(value || "").trim(), replace: true });
   }
 
   function handleSearchFocus() {
@@ -514,7 +634,6 @@ export function DesktopLibraryIsland({
   }
 
   function handleAvatarAction(entry) {
-    window.clearTimeout(searchTimerRef.current);
     if (entry.key === "logout") {
       closePanel({ returnFocus: false });
       onLogout();
@@ -527,7 +646,7 @@ export function DesktopLibraryIsland({
       currentSearch: view.search,
       category: committedCategory,
       arrange: committedArrange,
-      query: String(searchDraft || "").trim(),
+      query: committedQuery,
     });
     libraryState?.prepareExit?.(`/library${listSearch}${view.hash || ""}`);
     closePanel({ returnFocus: false });
@@ -577,10 +696,10 @@ export function DesktopLibraryIsland({
       const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
       const safeWidth = Math.max(0, viewportWidth - 24);
       const compressed = Math.max(0, 1180 - safeWidth);
-      const gap = Math.max(8, 16 - Math.ceil(compressed / 80));
-      const tabGap = Math.max(10, 20 - Math.ceil(compressed / 55));
-      const collapsed = Math.max(80, Math.min(110, 110 - Math.ceil(compressed / 7)));
-      const expanded = Math.max(collapsed, Math.min(210, safeWidth - 590));
+      const gap = Math.max(10, 20 - Math.ceil(compressed / 120));
+      const tabGap = Math.max(12, 25 - Math.ceil(compressed / 90));
+      const collapsed = Math.max(88, Math.min(138, 138 - Math.ceil(compressed / 14)));
+      const expanded = Math.max(collapsed, Math.min(250, safeWidth - 650));
       island.style.setProperty("--desktop-island-gap", `${gap}px`);
       island.style.setProperty("--desktop-island-tab-gap", `${tabGap}px`);
       island.style.setProperty("--desktop-island-search-collapsed-width", `${collapsed}px`);
@@ -665,19 +784,14 @@ export function DesktopLibraryIsland({
           <input
             aria-label="Search library"
             autoComplete="off"
-            onChange={(event) => {
-              const value = event.target.value;
-              setSearchDraft(value);
-              commitSearch(value);
-            }}
+            onChange={(event) => setSearchDraft(event.target.value)}
             onFocus={handleSearchFocus}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.isComposing) {
                 event.preventDefault();
-                commitSearch(searchDraft, { immediate: true });
+                commitSearch(searchDraft);
               } else if (event.key === "Escape" && !event.isComposing) {
                 event.preventDefault();
-                window.clearTimeout(searchTimerRef.current);
                 setSearchDraft(committedQuery);
                 searchInputRef.current?.blur();
               }

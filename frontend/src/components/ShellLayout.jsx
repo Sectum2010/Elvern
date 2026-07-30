@@ -111,7 +111,7 @@ function ShellLayoutContent({ children }) {
   const desktopLibraryClient = clientDeviceClass === "desktop"
     && isDesktopClientPlatform(clientPlatform);
   const showDesktopLibraryIsland = desktopLibraryClient
-    && (libraryPath.kind === "root" || libraryPath.kind === "detail");
+    && libraryPath.kind === "root";
   const protectedDesktopLibraryState = (
     libraryState?.userId === String(user?.id ?? "")
     && libraryState?.role === String(user?.role ?? "").trim().toLowerCase()

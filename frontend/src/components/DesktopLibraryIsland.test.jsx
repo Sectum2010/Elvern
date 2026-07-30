@@ -1,5 +1,4 @@
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -13,9 +12,10 @@ import {
 } from "react-router-dom";
 import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 import { rememberLibraryReturnTarget, readLibraryReturnTarget } from "../lib/libraryNavigation.js";
-import { DesktopLibraryIsland, LIBRARY_SEARCH_DEBOUNCE_MS } from "./DesktopLibraryIsland.jsx";
+import { DesktopLibraryIsland } from "./DesktopLibraryIsland.jsx";
 
 
 function LocationProbe({ onLocation }) {
@@ -67,6 +67,7 @@ function renderIsland({
 describe("DesktopLibraryIsland", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
+    vi.stubGlobal("PointerEvent", MouseEvent);
     vi.stubGlobal("ResizeObserver", class {
       observe() {}
       disconnect() {}
@@ -110,7 +111,7 @@ describe("DesktopLibraryIsland", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
     const panel = screen.getByRole("dialog", { name: "Arrange library" });
-    fireEvent.click(within(panel).getByRole("button", { name: "Local" }));
+    fireEvent.click(within(panel).getByRole("radio", { name: "Local" }));
     fireEvent.click(within(panel).getByRole("button", { name: "Action" }));
     fireEvent.click(within(panel).getByRole("button", { name: "Drama" }));
     fireEvent.click(within(panel).getByRole("button", { name: "Diamond" }));
@@ -153,7 +154,7 @@ describe("DesktopLibraryIsland", () => {
     const locations = [];
     renderIsland({ onLocation: (location) => locations.push(location) });
     fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Cloud" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Cloud" }));
 
     closePanel();
 
@@ -166,7 +167,7 @@ describe("DesktopLibraryIsland", () => {
   test("Arrange and Avatar are mutually exclusive and preserve the pending draft", () => {
     renderIsland();
     fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Cloud" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Cloud" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Account: viewer" }));
 
@@ -177,28 +178,140 @@ describe("DesktopLibraryIsland", () => {
     );
   });
 
-  test("search waits for the real debounce and replaces the current URL", () => {
-    vi.useFakeTimers();
+  test("search remains a local draft until Enter and then replaces the current URL", () => {
     renderIsland({
       initialEntry: "/library?category=anime&source=cloud&genre=Action",
     });
     const search = screen.getByRole("searchbox", { name: "Search library" });
 
     fireEvent.change(search, { target: { value: "akira" } });
-    act(() => vi.advanceTimersByTime(LIBRARY_SEARCH_DEBOUNCE_MS - 1));
     expect(screen.getByTestId("location")).not.toHaveTextContent("q=akira");
+    expect(search).toHaveValue("akira");
 
-    act(() => vi.advanceTimersByTime(1));
+    fireEvent.keyDown(search, { key: "Enter" });
     expect(screen.getByTestId("location")).toHaveTextContent(
       "/library?category=anime&source=cloud&genre=Action&q=akira|REPLACE",
     );
+  });
+
+  test("unsubmitted search survives view changes without being applied", () => {
+    const prepareExit = vi.fn();
+    renderIsland({ libraryState: { prepareExit } });
+    const search = screen.getByRole("searchbox", { name: "Search library" });
+
+    fireEvent.change(search, { target: { value: "draft only" } });
+    fireEvent.click(screen.getByRole("tab", { name: "Anime" }));
+
+    expect(search).toHaveValue("draft only");
+    expect(screen.getByTestId("location")).toHaveTextContent("/library?category=anime");
+    expect(screen.getByTestId("location")).not.toHaveTextContent("q=draft");
+
+    fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Cloud" }));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+    expect(search).toHaveValue("draft only");
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/library?category=anime&source=cloud",
+    );
+    expect(screen.getByTestId("location")).not.toHaveTextContent("q=draft");
+
+    fireEvent.click(screen.getByRole("button", { name: "Account: viewer" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+    expect(prepareExit).toHaveBeenCalledWith("/library?category=anime&source=cloud");
+  });
+
+  test("Escape restores the committed search without navigating", () => {
+    renderIsland({ initialEntry: "/library?category=movies&q=matrix" });
+    const search = screen.getByRole("searchbox", { name: "Search library" });
+
+    fireEvent.change(search, { target: { value: "unsubmitted" } });
+    fireEvent.keyDown(search, { key: "Escape" });
+
+    expect(search).toHaveValue("matrix");
+    expect(search).not.toHaveFocus();
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/library?category=movies&q=matrix",
+    );
+  });
+
+  test("source drag is clamped to the track and outside release reverts", () => {
+    renderIsland();
+    fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
+    const sourceControl = screen.getByRole("radiogroup", { name: "Library source" });
+    const all = within(sourceControl).getByRole("radio", { name: "All" });
+    const local = within(sourceControl).getByRole("radio", { name: "Local" });
+    const cloud = within(sourceControl).getByRole("radio", { name: "Cloud" });
+    const rect = (left, right) => ({
+      bottom: 40,
+      height: 40,
+      left,
+      right,
+      top: 0,
+      width: right - left,
+      x: left,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(sourceControl, "getBoundingClientRect").mockReturnValue(rect(0, 300));
+    vi.spyOn(all, "getBoundingClientRect").mockReturnValue(rect(0, 100));
+    vi.spyOn(local, "getBoundingClientRect").mockReturnValue(rect(100, 200));
+    vi.spyOn(cloud, "getBoundingClientRect").mockReturnValue(rect(200, 300));
+
+    fireEvent.pointerDown(all, { clientX: 50, clientY: 20, pointerId: 1 });
+    fireEvent.pointerMove(all, { clientX: 1000, clientY: 20, pointerId: 1 });
+
+    expect(sourceControl.style.getPropertyValue("--desktop-source-drag-x")).toBe("200px");
+    expect(cloud).toHaveClass("is-active");
+
+    fireEvent.pointerUp(all, { clientX: 1000, clientY: 20, pointerId: 1 });
+    expect(all).toHaveAttribute("aria-checked", "true");
+    expect(cloud).toHaveAttribute("aria-checked", "false");
+
+    fireEvent.pointerDown(all, { clientX: 50, clientY: 20, pointerId: 2 });
+    fireEvent.pointerMove(all, { clientX: 250, clientY: 20, pointerId: 2 });
+    fireEvent.pointerCancel(all, { clientX: 250, clientY: 20, pointerId: 2 });
+    expect(sourceControl.style.getPropertyValue("--desktop-source-drag-x")).toBe("0px");
+    expect(all).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.pointerDown(all, { clientX: 50, clientY: 20, pointerId: 3 });
+    fireEvent.pointerMove(all, { clientX: 250, clientY: 20, pointerId: 3 });
+    fireEvent.pointerUp(all, { clientX: 250, clientY: 20, pointerId: 3 });
+    expect(cloud).toHaveAttribute("aria-checked", "true");
+  });
+
+  test("expanded genres provide an adjacent Collapse action", () => {
+    renderIsland({
+      libraryState: {
+        availableGenres: [
+          "Action",
+          "Adventure",
+          "Animation",
+          "Comedy",
+          "Crime",
+          "Documentary",
+          "Drama",
+          "Family",
+          "Fantasy",
+          "Horror",
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "+ 2 more" }));
+    expect(screen.getByRole("button", { name: "Collapse" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Horror" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    expect(screen.queryByRole("button", { name: "Horror" })).not.toBeInTheDocument();
   });
 
   test("category and changed Arrange draft commit in one navigation", () => {
     const locations = [];
     renderIsland({ onLocation: (location) => locations.push(location) });
     fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Cloud" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Cloud" }));
 
     fireEvent.click(screen.getByRole("tab", { name: "Anime" }));
 
@@ -279,6 +392,9 @@ describe("DesktopLibraryIsland", () => {
       "Sign out",
     ]);
     expect(within(menu).getByLabelText("Administrator")).toBeInTheDocument();
+    expect(within(menu).getByLabelText("Administrator").parentElement).toHaveClass(
+      "desktop-library-island__identity",
+    );
 
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Settings" }));
     expect(screen.getByTestId("location")).toHaveTextContent("/settings");
@@ -323,5 +439,25 @@ describe("DesktopLibraryIsland", () => {
     expect(screen.getByRole("searchbox", { name: "Search library" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Arrange library" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Account: viewer" })).toBeInTheDocument();
+  });
+
+  test("desktop Island CSS keeps a stable substrate and immediate selection feedback", () => {
+    const styles = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
+
+    expect(styles).toMatch(
+      /\.desktop-library-island\s*\{[^}]*background:\s*rgba\(10,\s*14,\s*22,\s*0\.84\);/s,
+    );
+    expect(styles).toMatch(
+      /\.desktop-library-island__chips button\.is-active:hover,[\s\S]*?background:\s*#e8ecf2;/,
+    );
+    expect(styles).toMatch(
+      /\.desktop-library-island__menu-items \.desktop-library-island__sign-out:hover,[\s\S]*?color:\s*#ffd0d0;/,
+    );
+    expect(styles).toMatch(
+      /\.desktop-library-island__sort-list button:hover,[\s\S]*?background:\s*rgba\(255,\s*255,\s*255,\s*0\.09\);/,
+    );
+    expect(styles).toMatch(
+      /\.desktop-library-island__arrange-footer button:hover,[\s\S]*?color:\s*#fff;/,
+    );
   });
 });

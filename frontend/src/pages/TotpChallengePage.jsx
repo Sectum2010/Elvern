@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import { prepareAuthViewportExit, useAuthViewportRedirectReady } from "../lib/authViewportNavigation.js";
+import {
+  detectClientDeviceClass,
+  detectClientPlatform,
+  isDesktopClientPlatform,
+} from "../lib/platformDetection.js";
 
 
 export function TotpChallengePage() {
   const navigate = useNavigate();
   const { user, refreshAuth } = useAuth();
+  const codeInputRef = useRef(null);
   const [code, setCode] = useState("");
   const [useRecovery, setUseRecovery] = useState(false);
   const [pending, setPending] = useState(false);
@@ -17,6 +23,9 @@ export function TotpChallengePage() {
 
   const challengeToken = sessionStorage.getItem("elvern_totp_challenge") || "";
   const expiresAt = Number(sessionStorage.getItem("elvern_totp_expires") || 0);
+  const clientPlatform = detectClientPlatform();
+  const desktopClient = detectClientDeviceClass() === "desktop"
+    && isDesktopClientPlatform(clientPlatform);
   const remainingSeconds = Math.max(0, Math.floor((expiresAt - now) / 1000));
   const countdown = useMemo(() => {
     const minutes = Math.floor(remainingSeconds / 60);
@@ -28,6 +37,12 @@ export function TotpChallengePage() {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (desktopClient && challengeToken) {
+      codeInputRef.current?.focus({ preventScroll: true });
+    }
+  }, [challengeToken, desktopClient]);
 
   if (authRedirectReady) {
     return <Navigate to="/library" replace />;
@@ -69,6 +84,7 @@ export function TotpChallengePage() {
               maxLength={useRecovery ? 24 : 6}
               onChange={(event) => setCode(event.target.value)}
               placeholder={useRecovery ? "elvn-xxxx-xxxx-xxxx" : "000000"}
+              ref={codeInputRef}
               required
               type="text"
               value={code}

@@ -280,18 +280,18 @@ body {
 
 /* Desktop Library Floating Island: scoped away from phone/tablet navigation. */
 .app-shell--desktop-library-island-top .page-shell {
-  padding-top: max(76px, env(safe-area-inset-top));
+  padding-top: max(89px, env(safe-area-inset-top));
 }
 
 .app-shell--desktop-library-island-bottom .page-shell {
-  padding-bottom: max(88px, env(safe-area-inset-bottom));
+  padding-bottom: max(101px, env(safe-area-inset-bottom));
 }
 
 .desktop-library-island-wrap {
-  --desktop-island-gap: 16px;
-  --desktop-island-tab-gap: 20px;
-  --desktop-island-search-collapsed-width: 110px;
-  --desktop-island-search-expanded-width: 210px;
+  --desktop-island-gap: 20px;
+  --desktop-island-tab-gap: 25px;
+  --desktop-island-search-collapsed-width: 138px;
+  --desktop-island-search-expanded-width: 250px;
   position: fixed;
   left: 50%;
   z-index: 120;
@@ -313,13 +313,13 @@ body {
   gap: var(--desktop-island-gap);
   width: max-content;
   max-width: calc(100vw - 24px);
-  min-height: 50px;
-  padding: 8px 10px 8px 18px;
+  min-height: 63px;
+  padding: 10px 14px 10px 23px;
   overflow-x: auto;
   overflow-y: hidden;
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 999px;
-  background: rgba(10, 14, 22, 0.62);
+  background: rgba(10, 14, 22, 0.84);
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(26px);
   -webkit-backdrop-filter: blur(26px);
@@ -333,8 +333,9 @@ body {
 
 .desktop-library-island__brand {
   flex: none;
+  margin-right: 10px;
   color: #fff;
-  font-size: 14.5px;
+  font-size: 16px;
   font-weight: 700;
   cursor: default;
   user-select: none;
@@ -353,7 +354,7 @@ body {
   background: transparent;
   color: rgba(255, 255, 255, 0.55);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
 }
@@ -372,24 +373,24 @@ body {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 8px;
-  width: calc(var(--desktop-island-search-collapsed-width) + 42px);
-  height: 32px;
-  margin-left: 14px;
-  padding: 0 13px;
+  gap: 10px;
+  width: calc(var(--desktop-island-search-collapsed-width) + 48px);
+  height: 40px;
+  margin-left: 28px;
+  padding: 0 16px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.1);
   transition: width 0.25s ease, background-color 0.15s ease;
 }
 
 .desktop-library-island__search:focus-within {
-  width: calc(var(--desktop-island-search-expanded-width) + 42px);
+  width: calc(var(--desktop-island-search-expanded-width) + 48px);
   background: rgba(255, 255, 255, 0.14);
 }
 
 .desktop-library-island__search svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
   flex: none;
   color: rgba(255, 255, 255, 0.58);
 }
@@ -403,7 +404,7 @@ body {
   background: transparent;
   color: #fff;
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .desktop-library-island__search:focus-within input {
@@ -422,9 +423,9 @@ body {
 .desktop-library-island__avatar {
   position: relative;
   display: grid;
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
   padding: 0;
   place-items: center;
   border-radius: 50%;
@@ -445,8 +446,8 @@ body {
 }
 
 .desktop-library-island__icon-button svg {
-  width: 15px;
-  height: 15px;
+  width: 18px;
+  height: 18px;
 }
 
 .desktop-library-island__badge {
@@ -469,7 +470,7 @@ body {
   border: 2px solid rgba(255, 255, 255, 0.3);
   background: linear-gradient(135deg, #88b3d7, #4a6d8c);
   color: #0e141b;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 700;
 }
 
@@ -499,7 +500,7 @@ body {
 }
 
 .desktop-library-island__arrange {
-  right: 42px;
+  right: 52px;
   display: flex;
   width: min(392px, calc(100vw - 24px));
   max-height: var(--desktop-island-popover-max-height);
@@ -531,11 +532,44 @@ body {
 }
 
 .desktop-library-island__segments {
+  --desktop-source-count: 3;
+  --desktop-source-index: 0;
+  --desktop-source-drag-x: 0px;
+  position: relative;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(var(--desktop-source-count), 1fr);
   padding: 3px;
+  overflow: hidden;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.07);
+  isolation: isolate;
+  touch-action: pan-y;
+}
+
+.desktop-library-island__segments-indicator {
+  position: absolute;
+  z-index: 0;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / var(--desktop-source-count));
+  border-radius: 8px;
+  background: #e8ecf2;
+  transform: translateX(
+    calc(
+      (var(--desktop-source-index) * 100%)
+      + var(--desktop-source-drag-x)
+    )
+  );
+  transition: transform 150ms ease;
+}
+
+.desktop-library-island__segments--dragging {
+  cursor: grabbing;
+}
+
+.desktop-library-island__segments--dragging .desktop-library-island__segments-indicator {
+  transition: none;
 }
 
 .desktop-library-island__segments button,
@@ -548,14 +582,26 @@ body {
 }
 
 .desktop-library-island__segments button {
+  position: relative;
+  z-index: 1;
   padding: 5px 0;
   border-radius: 8px;
   background: transparent;
   color: rgba(255, 255, 255, 0.62);
 }
 
-.desktop-library-island__segments button.is-active,
-.desktop-library-island__chips button.is-active {
+.desktop-library-island__segments button.is-active {
+  color: #0e141b;
+  font-weight: 600;
+}
+
+.desktop-library-island__segments button.is-dragging {
+  cursor: grabbing;
+}
+
+.desktop-library-island__chips button.is-active,
+.desktop-library-island__chips button.is-active:hover,
+.desktop-library-island__chips button.is-active:focus-visible {
   background: #e8ecf2;
   color: #0e141b;
   font-weight: 600;
@@ -614,6 +660,12 @@ body {
   border-top: 0;
 }
 
+.desktop-library-island__sort-list button:hover,
+.desktop-library-island__sort-list button:focus-visible {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+
 .desktop-library-island__sort-list button.is-active {
   background: rgba(136, 179, 215, 0.14);
   color: #fff;
@@ -651,6 +703,11 @@ body {
   cursor: pointer;
 }
 
+.desktop-library-island__arrange-footer button:hover,
+.desktop-library-island__arrange-footer button:focus-visible {
+  color: #fff;
+}
+
 .desktop-library-island__arrange-footer .desktop-library-island__done {
   height: 30px;
   padding: 0 20px;
@@ -661,7 +718,9 @@ body {
 }
 
 .desktop-library-island__avatar-menu {
-  width: 224px;
+  width: max-content;
+  min-width: 224px;
+  max-width: min(320px, calc(100vw - 24px));
   border-radius: 16px;
   background: #111722;
 }
@@ -676,22 +735,33 @@ body {
 .desktop-library-island__avatar--header {
   width: 36px;
   height: 36px;
+  min-width: 36px;
+  flex: 0 0 36px;
   border: 0;
   font-size: 14px;
 }
 
-.desktop-library-island__avatar-header strong {
+.desktop-library-island__identity {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 244px;
+  align-items: center;
+  gap: 5px;
+}
+
+.desktop-library-island__identity strong {
   min-width: 0;
   overflow: hidden;
   color: #fff;
   font-size: 13.5px;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-library-island__crown {
   width: 16px;
   height: 16px;
-  margin-left: auto;
+  flex: none;
   color: #b9c0ca;
 }
 
@@ -737,32 +807,39 @@ body {
   color: #f0a3a3;
 }
 
-.library-desktop-hero--island-controls {
-  min-height: 54px;
+.desktop-library-island__menu-items .desktop-library-island__sign-out:hover,
+.desktop-library-island__menu-items .desktop-library-island__sign-out:focus-visible {
+  color: #ffd0d0;
 }
 
-.library-desktop-hero__index-cluster {
+.library-desktop-section-index-cluster {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 12px;
+  margin-left: auto;
 }
 
-.library-desktop-hero__index-cluster > span {
+.library-desktop-section-index-cluster > span {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: 14px;
 }
 
-.library-desktop-hero__rescan {
-  min-height: 28px;
-  padding: 0 12px;
+.library-desktop-section-index-cluster__rescan {
+  min-height: 36px;
+  padding: 0 16px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 999px;
   background: rgba(10, 14, 22, 0.4);
   color: rgba(255, 255, 255, 0.68);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 13px;
   font-weight: 600;
+}
+
+.library-sorted-index-row {
+  justify-content: flex-end;
+  min-height: 36px;
 }
 
 .admin-nav-card__back {

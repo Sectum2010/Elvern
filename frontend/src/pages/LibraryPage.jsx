@@ -1653,6 +1653,38 @@ export function LibraryPage() {
 
   const isSearching = activeLibraryQuery.length > 0;
   const isFlatSortedView = activeLibraryArrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort;
+  const showRecentlyAddedSection = !settings.hide_recently_added
+    && library.recently_added.length > 0;
+  const desktopIndexControlsTarget = !desktopLibraryClient
+    ? ""
+    : isSearching
+      ? "search"
+      : isFlatSortedView
+        ? "sorted"
+        : showContinueWatchingSection
+          ? "continue"
+          : packedSeriesRailRows.length > 0
+            ? "series"
+            : showRecentlyAddedSection
+              ? "recently-added"
+              : "other";
+  const desktopIndexControls = desktopLibraryClient ? (
+    <div
+      aria-label="Library index controls"
+      className="library-desktop-section-index-cluster"
+      data-testid="library-index-controls"
+    >
+      <span>{library.total_items} indexed</span>
+      <RefreshSweepButton
+        className="library-desktop-section-index-cluster__rescan"
+        disabled={rescanPending || Boolean(library.scan_in_progress)}
+        onClick={handleRescan}
+        type="button"
+      >
+        {rescanPending || library.scan_in_progress ? "Scanning…" : "Rescan"}
+      </RefreshSweepButton>
+    </div>
+  ) : null;
 
   return (
     <section
@@ -1662,64 +1694,50 @@ export function LibraryPage() {
       data-library-device={libraryDevice}
       ref={librarySectionRef}
     >
-      <div
-        className={[
-          "topbar",
-          "library-desktop-hero",
-          desktopLibraryClient ? "library-desktop-hero--island-controls" : "",
-        ].filter(Boolean).join(" ")}
-        aria-label="Library overview"
-        ref={libraryHeroRef}
-      >
-        <p className="eyebrow library-desktop-hero__eyebrow">Private Media Library</p>
-        {desktopLibraryClient ? (
-          <div className="library-desktop-hero__index-cluster">
-            <span>{library.total_items} indexed</span>
+      {!desktopLibraryClient ? (
+        <div
+          className="topbar library-desktop-hero"
+          aria-label="Library overview"
+          ref={libraryHeroRef}
+        >
+          <p className="eyebrow library-desktop-hero__eyebrow">Private Media Library</p>
+          <div className="library-desktop-hero__row">
+            <div className="library-desktop-hero__brand">
+              <Link className="brand" to="/library">
+                Elvern
+              </Link>
+              <span className="status-pill">{library.total_items} indexed</span>
+            </div>
+            {!compactSearchOnly ? <StaticLibrarySearch
+              formClassName="library-desktop-hero__search"
+              ref={desktopSearchInputRef}
+              search={committedSearch}
+            /> : null}
             <RefreshSweepButton
-              className="library-desktop-hero__rescan"
-              disabled={rescanPending || Boolean(library.scan_in_progress)}
+              className="ghost-button"
+              disabled={rescanPending}
               onClick={handleRescan}
               type="button"
             >
-              {rescanPending || library.scan_in_progress ? "Scanning…" : "Rescan"}
+              {rescanPending ? "Starting scan..." : "Rescan library"}
             </RefreshSweepButton>
           </div>
-        ) : <div className="library-desktop-hero__row">
-          <div className="library-desktop-hero__brand">
-            <Link className="brand" to="/library">
-              Elvern
-            </Link>
-            <span className="status-pill">{library.total_items} indexed</span>
+          <div className="library-desktop-hero__category-row">
+            <LibraryCategorySwitch
+              activeCategory={activeLibraryCategory}
+              dragEnabled={categorySwitchDragEnabled}
+              onChange={handleCategoryChange}
+            />
+            <LibraryArrangeControl
+              arrange={activeLibraryArrange}
+              availableGenres={library.available_genres || []}
+              panelMode={arrangePanelMode}
+              panelSize={arrangePanelSize}
+              onChange={handleArrangeChange}
+            />
           </div>
-          {!compactSearchOnly ? <StaticLibrarySearch
-            formClassName="library-desktop-hero__search"
-            ref={desktopSearchInputRef}
-            search={committedSearch}
-          /> : null}
-          <RefreshSweepButton
-            className="ghost-button"
-            disabled={rescanPending}
-            onClick={handleRescan}
-            type="button"
-          >
-            {rescanPending ? "Starting scan..." : "Rescan library"}
-          </RefreshSweepButton>
-        </div>}
-        {!desktopLibraryClient ? <div className="library-desktop-hero__category-row">
-          <LibraryCategorySwitch
-            activeCategory={activeLibraryCategory}
-            dragEnabled={categorySwitchDragEnabled}
-            onChange={handleCategoryChange}
-          />
-          <LibraryArrangeControl
-            arrange={activeLibraryArrange}
-            availableGenres={library.available_genres || []}
-            panelMode={arrangePanelMode}
-            panelSize={arrangePanelSize}
-            onChange={handleArrangeChange}
-          />
-        </div> : null}
-      </div>
+        </div>
+      ) : null}
 
       {maintenanceModeActive ? (
         <p className="library-maintenance-warning-line">Maintenance mode is still turned on</p>
@@ -1792,6 +1810,7 @@ export function LibraryPage() {
           <div className="content-stack">
             <div className="section-header section-header--compact">
               <h2>Search results</h2>
+              {desktopIndexControlsTarget === "search" ? desktopIndexControls : null}
             </div>
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
@@ -1813,6 +1832,14 @@ export function LibraryPage() {
       {!loading && !libraryUnavailable && !isSearching && isFlatSortedView ? (
         library.items.length > 0 ? (
           <div className="content-stack">
+            {desktopIndexControlsTarget === "sorted" ? (
+              <div
+                aria-label="Library summary"
+                className="section-header section-header--compact library-sorted-index-row"
+              >
+                {desktopIndexControls}
+              </div>
+            ) : null}
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={library.items}
@@ -1836,6 +1863,7 @@ export function LibraryPage() {
             <section className="content-section">
               <div className="section-header section-header--compact">
                 <h2>Continue watching</h2>
+                {desktopIndexControlsTarget === "continue" ? desktopIndexControls : null}
               </div>
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
@@ -1848,7 +1876,7 @@ export function LibraryPage() {
             </section>
           ) : null}
 
-          {packedSeriesRailRows.map((row) => (
+          {packedSeriesRailRows.map((row, rowIndex) => (
             <div
               className={[
                 "series-rail-pack-row",
@@ -1856,7 +1884,7 @@ export function LibraryPage() {
               ].filter(Boolean).join(" ")}
               key={row.key}
             >
-              {row.blocks.map((block) => (
+              {row.blocks.map((block, blockIndex) => (
                 <div
                   className="series-rail-pack-block"
                   key={block.key}
@@ -1866,6 +1894,13 @@ export function LibraryPage() {
                     activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                     desktopSlots={block.slots < 6 ? block.slots : null}
                     enableTouchReleaseAssist
+                    headerActions={
+                      desktopIndexControlsTarget === "series"
+                      && rowIndex === 0
+                      && blockIndex === row.blocks.length - 1
+                        ? desktopIndexControls
+                        : null
+                    }
                     rail={block.rail}
                     posterDisplayWidth={settings.poster_card_display_max_width}
                     protectedIdentity={protectedLibraryIdentity}
@@ -1877,10 +1912,11 @@ export function LibraryPage() {
             </div>
           ))}
 
-          {!settings.hide_recently_added && library.recently_added.length > 0 ? (
+          {showRecentlyAddedSection ? (
             <section className="content-section">
               <div className="section-header section-header--compact">
                 <h2>Recently added</h2>
+                {desktopIndexControlsTarget === "recently-added" ? desktopIndexControls : null}
               </div>
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
@@ -1896,6 +1932,7 @@ export function LibraryPage() {
           <section className="content-section">
             <div className="section-header section-header--compact">
               <h2>{activeLibraryCategoryConfig.otherHeading}</h2>
+              {desktopIndexControlsTarget === "other" ? desktopIndexControls : null}
             </div>
             {visibleLibraryGridItems.length > 0 ? (
             <MediaGrid

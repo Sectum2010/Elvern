@@ -39,6 +39,7 @@ export function SeriesRail({
   desktopSlots = null,
   enableTouchReleaseAssist = false,
   activeBrowserPlaybackItemId = null,
+  headerActions = null,
   posterDisplayWidth = "1400",
   protectedIdentity = null,
   smartPosterLoadingEnabled = false,
@@ -472,6 +473,7 @@ export function SeriesRail({
           <h2>{rail.title}</h2>
           <p className="series-rail__count">{rail.film_count} films</p>
         </div>
+        {headerActions}
       </div>
       <div
         ref={viewportRef}
