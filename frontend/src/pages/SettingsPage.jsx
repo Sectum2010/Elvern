@@ -57,7 +57,6 @@ const SETTINGS_RESOURCE_KEYS = Object.freeze([
 
 const SETTINGS_SECTIONS = [
   { key: "preferences", label: "Preferences", icon: "preferences" },
-  { key: "display", label: "Display", icon: "display" },
   { key: "libraries", label: "Libraries", icon: "libraries" },
   { key: "install", label: "Install", icon: "install" },
   { key: "advanced", label: "Advanced", icon: "advanced" },
@@ -82,13 +81,15 @@ function settingsResourcesForSection(section, role) {
     return [
       "hidden",
       "cloud",
-      ...(role === "admin" ? ["ageGroups", "googleSetup"] : []),
+      ...(role === "admin" ? ["ageGroups"] : []),
     ];
   }
   if (section === "advanced") {
     return [
       "totp",
-      ...(role === "admin" ? ["mediaReference", "posterReference"] : []),
+      ...(role === "admin"
+        ? ["googleSetup", "cloud", "mediaReference", "posterReference"]
+        : []),
     ];
   }
   return [];
@@ -1095,7 +1096,10 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const userSettingsQuery = useUserSettingsQuery(user);
   const settingsIdentity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
-  const settingsSectionResolution = resolveSettingsSection({ search: location.search });
+  const settingsSectionResolution = resolveSettingsSection({
+    search: location.search,
+    hash: location.hash,
+  });
   const settingsHydratedIdentityRef = useRef("");
   const previousSettingsIdentityRef = useRef(settingsIdentity);
   const mountedRef = useRef(true);
@@ -1109,6 +1113,7 @@ export function SettingsPage() {
   const pendingHiddenExpiryTimerRef = useRef(null);
   const pendingReconcileHandlerRef = useRef(null);
   const hiddenHashRestoreKeyRef = useRef("");
+  const oauthHashRestoreKeyRef = useRef("");
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
@@ -1284,6 +1289,10 @@ export function SettingsPage() {
   const hiddenLoading = resourceStatus.hidden.loading;
   const ageGroupsLoading = resourceStatus.ageGroups.loading;
   const activeResourceKeys = settingsResourcesForSection(activeSettingsSection, user?.role);
+  const settingsClientDeviceClass = detectClientDeviceClass();
+  const settingsClientPlatform = detectClientPlatform();
+  const showDesktopFloatingIslandSettings = settingsClientDeviceClass === "desktop"
+    && ["windows", "mac", "linux"].includes(settingsClientPlatform);
   const activeResourceErrors = Object.entries(resourceStatus)
     .filter(([key]) => activeResourceKeys.includes(key))
     .filter(([, status]) => status.error)
@@ -1353,6 +1362,7 @@ export function SettingsPage() {
     pendingHiddenReconciliationRef.current = null;
     settingsHydratedIdentityRef.current = "";
     hiddenHashRestoreKeyRef.current = "";
+    oauthHashRestoreKeyRef.current = "";
     setPendingHiddenReconciliation(null);
     setResourceStatus(createSettingsResourceStatus());
     setSettings({
@@ -1968,7 +1978,10 @@ export function SettingsPage() {
   }, [user?.role]);
 
   useLayoutEffect(() => {
-    const resolution = resolveSettingsSection({ search: location.search });
+    const resolution = resolveSettingsSection({
+      search: location.search,
+      hash: location.hash,
+    });
     applySettingsSectionStorageMigration(resolution);
     writePersistedSettingsSection(resolution.section);
     if (activeSettingsSection !== resolution.section) {
@@ -2061,6 +2074,95 @@ export function SettingsPage() {
     resourceStatus.hidden.error,
     resourceStatus.hidden.loaded,
     settingsIdentity,
+  ]);
+
+  useLayoutEffect(() => {
+    const googleSetupReady = resourceStatus.googleSetup.loaded || resourceStatus.googleSetup.error;
+    const cloudReady = resourceStatus.cloud.loaded || resourceStatus.cloud.error;
+    if (
+      activeSettingsSection !== "advanced"
+      || user?.role !== "admin"
+      || location.hash !== "#google-drive-oauth-setup"
+      || !googleSetupReady
+      || !cloudReady
+    ) {
+      return undefined;
+    }
+    const restoreKey = [
+      settingsIdentity,
+      location.key,
+      location.pathname,
+      location.search,
+      location.hash,
+    ].join("|");
+    if (oauthHashRestoreKeyRef.current === restoreKey) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let frameId = 0;
+    let correctionCount = 0;
+    const cancelRestore = () => {
+      cancelled = true;
+      oauthHashRestoreKeyRef.current = restoreKey;
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+    const cancelEvents = ["wheel", "touchstart", "pointerdown", "keydown"];
+    cancelEvents.forEach((eventName) => {
+      window.addEventListener(eventName, cancelRestore, { capture: true, passive: true });
+    });
+
+    const correctTarget = () => {
+      if (cancelled) {
+        return;
+      }
+      const target = document.getElementById("google-drive-oauth-setup");
+      if (!target) {
+        return;
+      }
+      if (correctionCount === 0) {
+        target.scrollIntoView?.({ block: "start" });
+      } else {
+        const top = target.getBoundingClientRect().top;
+        const scrollMarginTop = Number.parseFloat(
+          window.getComputedStyle(target).scrollMarginTop,
+        ) || 0;
+        const correction = top - scrollMarginTop;
+        if (Math.abs(correction) > 8) {
+          window.scrollBy?.({ top: correction, behavior: "auto" });
+        }
+      }
+      correctionCount += 1;
+      if (correctionCount < 2) {
+        frameId = window.requestAnimationFrame(correctTarget);
+      } else {
+        oauthHashRestoreKeyRef.current = restoreKey;
+      }
+    };
+    frameId = window.requestAnimationFrame(correctTarget);
+
+    return () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+      cancelEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, cancelRestore, { capture: true });
+      });
+    };
+  }, [
+    activeSettingsSection,
+    location.hash,
+    location.key,
+    location.pathname,
+    location.search,
+    resourceStatus.cloud.error,
+    resourceStatus.cloud.loaded,
+    resourceStatus.googleSetup.error,
+    resourceStatus.googleSetup.loaded,
+    settingsIdentity,
+    user?.role,
   ]);
 
   useEffect(() => {
@@ -3353,30 +3455,12 @@ export function SettingsPage() {
       {activeSettingsSection === "preferences" ? (
       <div
         aria-labelledby="settings-tab-preferences"
-        className="settings-grid"
+        className="settings-grid settings-grid--preferences settings-grid--compact-columns"
         id="settings-panel-preferences"
         role="tabpanel"
       >
-        <section className="settings-card">
-          <h2>Your account</h2>
-          <StatusRow label="Username" value={user?.username || "Unknown"} />
-          <StatusRow label="Session" value={user?.session_id ? `#${user.session_id}` : "Active"} />
-          <p className="page-subnote">
-            Password changes are admin-managed. Contact an admin if you need a password reset.
-          </p>
-        </section>
-      </div>
-      ) : null}
-
-      {activeSettingsSection === "display" ? (
-      <div
-        aria-labelledby="settings-tab-display"
-        className="settings-grid settings-grid--display settings-grid--compact-columns"
-        id="settings-panel-display"
-        role="tabpanel"
-      >
         <div className="settings-grid__column">
-          <section className="settings-card settings-display-card">
+          <section className="settings-card settings-display-card settings-preferences-poster-card">
             <div className="settings-inline-header">
               <div>
                 <h2>Poster appearance</h2>
@@ -3386,36 +3470,19 @@ export function SettingsPage() {
             {loading ? (
               <p className="page-subnote">Loading display preferences...</p>
             ) : (
-              <div className="settings-card-stack">
-                <SettingsSegmentedControl
-                  ariaLabel="Poster appearance"
-                  disabled={saving}
-                  onChange={handlePosterCardAppearanceChange}
-                  options={POSTER_CARD_APPEARANCE_OPTIONS}
-                  value={normalizePosterCardAppearance(settings.poster_card_appearance)}
-                />
-                <label className="settings-field">
-                  <span>
-                    <strong>Poster display quality</strong>
-                    <small>Maximum poster width used for library card images.</small>
-                  </span>
-                  <select
-                    className="admin-select"
-                    disabled={saving}
-                    onChange={handlePosterDisplayWidthChange}
-                    value={normalizePosterDisplayWidth(settings.poster_card_display_max_width)}
-                  >
-                    {POSTER_DISPLAY_WIDTH_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+              <SettingsSegmentedControl
+                ariaLabel="Poster appearance"
+                disabled={saving}
+                onChange={handlePosterCardAppearanceChange}
+                options={POSTER_CARD_APPEARANCE_OPTIONS}
+                value={normalizePosterCardAppearance(settings.poster_card_appearance)}
+              />
             )}
           </section>
 
-          <section className="settings-card settings-display-interface-card">
-            <h2>Interface</h2>
+          {showDesktopFloatingIslandSettings ? (
+          <section className="settings-card settings-display-interface-card settings-preferences-floating-card">
+            <h2>Floating Island Position</h2>
             {loading ? (
               <p className="page-subnote">Loading interface preferences...</p>
             ) : (
@@ -3433,10 +3500,46 @@ export function SettingsPage() {
               </div>
             )}
           </section>
+          ) : null}
+
+          <section className="settings-card settings-display-library-card settings-preferences-library-card">
+            <h2>Library</h2>
+            {loading ? (
+              <p className="page-subnote">Loading your library preferences...</p>
+            ) : (
+              <div className="settings-card-stack">
+                <label className="settings-toggle">
+                  <span>
+                    <strong>Hide Recently added</strong>
+                    <small>Remove the Recently added section from your Library view.</small>
+                  </span>
+                  <input
+                    checked={settings.hide_recently_added}
+                    disabled={saving}
+                    onChange={handleRecentlyAddedToggle}
+                    type="checkbox"
+                  />
+                </label>
+                <div className="settings-preferences-library-divider" />
+                <label className="settings-toggle">
+                  <span>
+                    <strong>Hide duplicate copies</strong>
+                    <small>Show only the highest-quality copy for the same title, year, and edition.</small>
+                  </span>
+                  <input
+                    checked={settings.hide_duplicate_movies}
+                    disabled={saving}
+                    onChange={handleDuplicateToggle}
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+            )}
+          </section>
         </div>
 
         <div className="settings-grid__column">
-          <section className="settings-card settings-background-card">
+          <section className="settings-card settings-background-card settings-preferences-background-card">
             <div className="settings-inline-header">
               <div>
                 <h2>Background</h2>
@@ -3589,25 +3692,6 @@ export function SettingsPage() {
             )}
           </section>
 
-          <section className="settings-card settings-display-library-card">
-            <h2>Library</h2>
-            {loading ? (
-              <p className="page-subnote">Loading your library preferences...</p>
-            ) : (
-              <label className="settings-toggle">
-                <span>
-                  <strong>Hide Recently added</strong>
-                  <small>Remove the Recently added section from your Library view.</small>
-                </span>
-                <input
-                  checked={settings.hide_recently_added}
-                  disabled={saving}
-                  onChange={handleRecentlyAddedToggle}
-                  type="checkbox"
-                />
-              </label>
-            )}
-          </section>
         </div>
       </div>
       ) : null}
@@ -3629,26 +3713,6 @@ export function SettingsPage() {
         id="settings-panel-libraries"
         role="tabpanel"
       >
-        <section className="settings-card">
-          <h2>Library</h2>
-          {loading ? (
-            <p className="page-subnote">Loading your library preferences...</p>
-          ) : (
-            <label className="settings-toggle">
-              <span>
-                <strong>Hide duplicate copies</strong>
-                <small>Show only the highest-quality copy for the same title, year, and edition.</small>
-              </span>
-              <input
-                checked={settings.hide_duplicate_movies}
-                disabled={saving}
-                onChange={handleDuplicateToggle}
-                type="checkbox"
-              />
-            </label>
-          )}
-        </section>
-
         {user?.role === "admin" ? (
           <section className="settings-card settings-card--wide settings-age-groups-card">
             <div
@@ -3713,9 +3777,7 @@ export function SettingsPage() {
         >
           {!cloudLibraries.google.enabled ? (
             <p className="page-subnote">
-              {user?.role === "admin"
-                ? "Finish Google Drive Setup below to enable your personal cloud libraries."
-                : "Google Drive integration is not configured on this server yet."}
+              Google Drive OAuth must be configured in Advanced before cloud libraries can connect.
             </p>
           ) : (
             <div className="cloud-libraries-stack">
@@ -4101,8 +4163,62 @@ export function SettingsPage() {
           </section>
         ) : null}
         </div>
+      </div>
+      ) : null}
+
+      {activeSettingsSection === "advanced" ? (
+      <div
+        aria-labelledby="settings-tab-advanced"
+        className="settings-grid"
+        id="settings-panel-advanced"
+        role="tabpanel"
+      >
+        <section className="settings-card settings-card--wide">
+          <h2>Poster display quality</h2>
+          {loading ? (
+            <p className="page-subnote">Loading poster display quality...</p>
+          ) : (
+            <label className="settings-field">
+              <span>
+                <strong>Maximum poster width</strong>
+                <small>Maximum poster width used for library card images.</small>
+              </span>
+              <select
+                className="admin-select"
+                disabled={saving}
+                onChange={handlePosterDisplayWidthChange}
+                value={normalizePosterDisplayWidth(settings.poster_card_display_max_width)}
+              >
+                {POSTER_DISPLAY_WIDTH_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </section>
+
+        {totpStatus?.setup_available && !totpStatus?.enabled ? (
+          <SettingsAccordionSection
+            description="Your admin has enabled two-factor setup for this account. You can finish setup here whenever you're ready."
+            isOpen={openSections.totpSetup}
+            onToggle={() => toggleSection("totpSetup")}
+            title="Two-factor authentication"
+          >
+            <div className="desktop-playback-notes">
+              <p className="page-subnote">
+                Setup was skipped during login, but it remains available because 2FA is enabled for your account.
+              </p>
+              <div className="player-actions">
+                <button className="primary-button" onClick={() => navigate("/setup/totp")} type="button">
+                  Set up 2FA
+                </button>
+              </div>
+            </div>
+          </SettingsAccordionSection>
+        ) : null}
 
         {user?.role === "admin" ? (
+          <div className="settings-grid__full-row" id="google-drive-oauth-setup">
           <SettingsAccordionSection
             badge={googleSetupBadgeLabel}
             description="Configure a real HTTPS Google OAuth origin for this Elvern server here. Once saved, your My Libraries and Shared Libraries sections can connect to Google Drive without editing env files manually."
@@ -4252,35 +4368,7 @@ export function SettingsPage() {
               </form>
             </div>
           </SettingsAccordionSection>
-        ) : null}
-      </div>
-      ) : null}
-
-      {activeSettingsSection === "advanced" ? (
-      <div
-        aria-labelledby="settings-tab-advanced"
-        className="settings-grid"
-        id="settings-panel-advanced"
-        role="tabpanel"
-      >
-        {totpStatus?.setup_available && !totpStatus?.enabled ? (
-          <SettingsAccordionSection
-            description="Your admin has enabled two-factor setup for this account. You can finish setup here whenever you're ready."
-            isOpen={openSections.totpSetup}
-            onToggle={() => toggleSection("totpSetup")}
-            title="Two-factor authentication"
-          >
-            <div className="desktop-playback-notes">
-              <p className="page-subnote">
-                Setup was skipped during login, but it remains available because 2FA is enabled for your account.
-              </p>
-              <div className="player-actions">
-                <button className="primary-button" onClick={() => navigate("/setup/totp")} type="button">
-                  Set up 2FA
-                </button>
-              </div>
-            </div>
-          </SettingsAccordionSection>
+          </div>
         ) : null}
 
         {user?.role === "admin" ? (

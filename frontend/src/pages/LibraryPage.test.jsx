@@ -200,7 +200,7 @@ function summaryV2Payload(v1Payload = emptyLibraryPayload) {
         : (
             v1Payload.arrange?.quality && v1Payload.arrange.quality !== "all"
               ? v1Payload.arrange.quality
-              : null
+              : "all"
           ),
       sort: v1Payload.arrange?.sort || "smart",
     },
@@ -414,7 +414,7 @@ describe("LibraryPage category switching", () => {
     });
   });
 
-  test("real desktop removes the Private Media card and puts index controls on the first section row", async () => {
+  test("real desktop removes the Private Media card and keeps one Library-level index row", async () => {
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "linux";
     renderLibrary("/library", libraryPayload({
@@ -422,11 +422,12 @@ describe("LibraryPage category switching", () => {
     }));
 
     const indexed = await screen.findByText("27 indexed");
-    const firstSectionHeader = indexed.closest(".section-header");
+    const indexRow = indexed.closest(".library-desktop-index-row");
 
     expect(screen.queryByText("Private Media Library")).not.toBeInTheDocument();
-    expect(firstSectionHeader).not.toBeNull();
-    expect(within(firstSectionHeader).getByRole("heading", { name: "Other Movies" })).toBeInTheDocument();
+    expect(indexRow).not.toBeNull();
+    expect(indexRow?.closest(".content-section")).toBeNull();
+    expect(screen.getAllByTestId("library-index-controls")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Rescan" })).toBeInTheDocument();
     expect(screen.queryByRole("searchbox", { name: "Search library" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Arrange library" })).not.toBeInTheDocument();
@@ -434,7 +435,7 @@ describe("LibraryPage category switching", () => {
     expect(screen.queryByText("Rescan library")).not.toBeInTheDocument();
   });
 
-  test("desktop index controls follow Continue watching or the next real first row", async () => {
+  test("desktop index controls remain outside dynamic content sections", async () => {
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "windows";
     const active = libraryItem({
@@ -452,11 +453,11 @@ describe("LibraryPage category switching", () => {
       total_items: 2,
     }));
 
-    let controls = await screen.findByTestId("library-index-controls");
-    expect(within(controls.closest(".section-header")).getByRole(
-      "heading",
-      { name: "Continue watching" },
-    )).toBeInTheDocument();
+    await screen.findByText("2 indexed");
+    let controls = screen.getByTestId("library-index-controls");
+    expect(controls.closest(".library-desktop-index-row")).not.toBeNull();
+    expect(controls.closest(".content-section")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Continue watching" })).toBeInTheDocument();
 
     cleanup();
     queryClient.clear();
@@ -467,14 +468,14 @@ describe("LibraryPage category switching", () => {
       total_items: 1,
     }));
 
-    controls = await screen.findByTestId("library-index-controls");
-    expect(within(controls.closest(".section-header")).getByRole(
-      "heading",
-      { name: "Recently added" },
-    )).toBeInTheDocument();
+    await screen.findByText("1 indexed");
+    controls = screen.getByTestId("library-index-controls");
+    expect(controls.closest(".library-desktop-index-row")).not.toBeNull();
+    expect(controls.closest(".content-section")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Recently added" })).toBeInTheDocument();
   });
 
-  test("desktop index controls use the first Series Rail when it is the first row", async () => {
+  test("desktop index controls remain stable above a Series Rail", async () => {
     mockPlatformState.deviceClass = "desktop";
     mockPlatformState.platform = "mac";
     const seriesItem = libraryItem({ id: 31, title: "Saga chapter" });
@@ -489,11 +490,24 @@ describe("LibraryPage category switching", () => {
       total_items: 1,
     }));
 
-    const controls = await screen.findByTestId("library-index-controls");
-    expect(within(controls.closest(".section-header")).getByRole(
-      "heading",
-      { name: "Saga" },
-    )).toBeInTheDocument();
+    await screen.findByText("1 indexed");
+    const controls = screen.getByTestId("library-index-controls");
+    expect(controls.closest(".library-desktop-index-row")).not.toBeNull();
+    expect(controls.closest(".series-rail")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Saga" })).toBeInTheDocument();
+  });
+
+  test("desktop index controls stay visible for an empty search result", async () => {
+    mockPlatformState.deviceClass = "desktop";
+    mockPlatformState.platform = "linux";
+    renderLibrary("/library?q=missing", libraryPayload({
+      items: [],
+      total_items: 0,
+    }));
+
+    expect(await screen.findByText("No matches yet")).toBeInTheDocument();
+    expect(screen.getByText("0 indexed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeInTheDocument();
   });
 
   test("real desktop indexed cluster shows the authoritative scan pending state", async () => {
@@ -742,7 +756,6 @@ describe("LibraryPage category switching", () => {
 
     const input = screen.getAllByRole("searchbox", { name: "Search library" })[0];
     fireEvent.change(input, { target: { value: "" } });
-    fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => {
       expect(apiRequest).toHaveBeenCalledWith(

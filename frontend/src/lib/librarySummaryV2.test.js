@@ -49,7 +49,7 @@ function v2Payload() {
       genres: [],
       qualities: [],
       genre: null,
-      quality: null,
+      quality: "all",
       sort: "smart",
     },
     items_by_id: { "1": item(1), "2": item(2) },
@@ -193,6 +193,75 @@ describe("library summary v2 contract", () => {
     });
 
     expect(result).toEqual({ matches: true, mismatchCount: 0, mismatches: [] });
+  });
+
+  test.each([
+    {
+      label: "one quality",
+      genres: [],
+      qualities: ["gold"],
+      expectedGenre: null,
+      expectedQuality: "gold",
+    },
+    {
+      label: "multiple qualities",
+      genres: [],
+      qualities: ["diamond", "gold"],
+      expectedGenre: null,
+      expectedQuality: null,
+    },
+    {
+      label: "one genre",
+      genres: ["Action"],
+      qualities: [],
+      expectedGenre: "Action",
+      expectedQuality: "all",
+    },
+    {
+      label: "multiple genres and qualities",
+      genres: ["Action", "Drama"],
+      qualities: ["diamond", "gold"],
+      expectedGenre: null,
+      expectedQuality: null,
+    },
+  ])("shadow view parity handles $label", ({
+    genres,
+    qualities,
+    expectedGenre,
+    expectedQuality,
+  }) => {
+    const v1 = v1Payload();
+    const v2 = v2Payload();
+    v1.arrange = {
+      ...v1.arrange,
+      genres,
+      qualities,
+      genre: expectedGenre,
+      quality: expectedQuality,
+    };
+    v2.view = {
+      ...v2.view,
+      genres,
+      qualities,
+      genre: expectedGenre,
+      quality: expectedQuality,
+    };
+
+    expect(compareLibraryV1AndV2(v1, v2, {
+      viewIdentity: { category: "movies" },
+    })).toEqual({ matches: true, mismatchCount: 0, mismatches: [] });
+  });
+
+  test("shadow reports a true view mismatch", () => {
+    const v2 = v2Payload();
+    v2.view.quality = "gold";
+
+    const result = compareLibraryV1AndV2(v1Payload(), v2, {
+      viewIdentity: { category: "movies" },
+    });
+
+    expect(result.matches).toBe(false);
+    expect(result.mismatches).toContainEqual({ category: "view" });
   });
 
   test("shadow uses the v1 server rank even when v1 raw metadata is redacted", () => {

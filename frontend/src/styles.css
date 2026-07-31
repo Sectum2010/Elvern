@@ -534,7 +534,6 @@ body {
 .desktop-library-island__segments {
   --desktop-source-count: 3;
   --desktop-source-index: 0;
-  --desktop-source-drag-x: 0px;
   position: relative;
   display: grid;
   grid-template-columns: repeat(var(--desktop-source-count), 1fr);
@@ -556,20 +555,9 @@ body {
   border-radius: 8px;
   background: #e8ecf2;
   transform: translateX(
-    calc(
-      (var(--desktop-source-index) * 100%)
-      + var(--desktop-source-drag-x)
-    )
+    calc(var(--desktop-source-index) * 100%)
   );
   transition: transform 150ms ease;
-}
-
-.desktop-library-island__segments--dragging {
-  cursor: grabbing;
-}
-
-.desktop-library-island__segments--dragging .desktop-library-island__segments-indicator {
-  transition: none;
 }
 
 .desktop-library-island__segments button,
@@ -593,10 +581,6 @@ body {
 .desktop-library-island__segments button.is-active {
   color: #0e141b;
   font-weight: 600;
-}
-
-.desktop-library-island__segments button.is-dragging {
-  cursor: grabbing;
 }
 
 .desktop-library-island__chips button.is-active,
@@ -837,9 +821,11 @@ body {
   font-weight: 600;
 }
 
-.library-sorted-index-row {
+.library-desktop-index-row {
+  display: flex;
   justify-content: flex-end;
   min-height: 36px;
+  margin-top: 1rem;
 }
 
 .admin-nav-card__back {
@@ -5318,10 +5304,6 @@ html[data-device-shell="iphone"] .app-shell--library-root .series-rail__viewport
   cursor: pointer;
 }
 
-.settings-grid--display {
-  align-items: start;
-}
-
 .settings-background-stack {
   margin-top: 0.55rem;
   gap: 1.1rem;
@@ -7150,6 +7132,17 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
   min-width: 0;
 }
 
+.settings-grid__full-row {
+  display: grid;
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.settings-preferences-library-divider {
+  height: 1px;
+  background: rgba(152, 176, 201, 0.16);
+}
+
 .settings-hidden-list-target {
   display: grid;
   grid-column: 1 / -1;
@@ -7216,6 +7209,33 @@ html[data-device-shell="iphone"] .detail-info-modal__header {
 @media (min-width: 520px) and (max-width: 859px) {
   .media-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 859px) {
+  .settings-grid--preferences {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .settings-grid--preferences > .settings-grid__column {
+    display: contents;
+  }
+
+  .settings-preferences-poster-card {
+    order: 1;
+  }
+
+  .settings-preferences-background-card {
+    order: 2;
+  }
+
+  .settings-preferences-floating-card {
+    order: 3;
+  }
+
+  .settings-preferences-library-card {
+    order: 4;
   }
 }
 

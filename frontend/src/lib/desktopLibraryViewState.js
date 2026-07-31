@@ -72,6 +72,8 @@ export const DEFAULT_LIBRARY_ARRANGE = Object.freeze({
   qualities: Object.freeze([]),
   sort: "smart",
 });
+export const MAX_LIBRARY_GENRE_FILTERS = 64;
+export const MAX_LIBRARY_GENRE_LABEL_LENGTH = 128;
 
 const CATEGORY_KEYS = new Set(LIBRARY_CATEGORY_OPTIONS.map((option) => option.key));
 const SOURCE_KEYS = new Set(LIBRARY_SOURCE_OPTIONS.map((option) => option.key));
@@ -81,29 +83,54 @@ const SORT_KEYS = new Set(
 );
 
 function normalizeGenreValue(value) {
-  return String(value ?? "").trim().replace(/\s+/g, " ");
+  return String(value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export function normalizeLibraryGenreKey(value) {
+  return normalizeGenreValue(value).toLowerCase();
+}
+
+function compareCanonicalGenreValues(left, right) {
+  const leftKey = normalizeLibraryGenreKey(left);
+  const rightKey = normalizeLibraryGenreKey(right);
+  if (leftKey < rightKey) return -1;
+  if (leftKey > rightKey) return 1;
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 export function normalizeLibraryGenres(values = [], availableGenres = []) {
-  const canonicalByKey = new Map(
-    (availableGenres || [])
-      .map((value) => normalizeGenreValue(value))
-      .filter(Boolean)
-      .map((value) => [value.toLocaleLowerCase(), value]),
-  );
-  const normalizedByKey = new Map();
-  const candidates = Array.isArray(values) ? values : [values];
-  candidates.forEach((candidate) => {
-    const normalized = normalizeGenreValue(candidate);
-    if (!normalized) {
+  const canonicalByKey = new Map();
+  (availableGenres || []).forEach((value) => {
+    const normalized = normalizeGenreValue(value);
+    if (!normalized || normalized.length > MAX_LIBRARY_GENRE_LABEL_LENGTH) {
       return;
     }
-    const key = normalized.toLocaleLowerCase();
-    normalizedByKey.set(key, canonicalByKey.get(key) || normalized);
+    const key = normalizeLibraryGenreKey(normalized);
+    if (!canonicalByKey.has(key)) {
+      canonicalByKey.set(key, normalized);
+    }
   });
-  return [...normalizedByKey.values()].sort((left, right) => (
-    left.localeCompare(right, undefined, { sensitivity: "base" })
-  ));
+  const normalizedByKey = new Map();
+  const candidates = Array.isArray(values) ? values : [values];
+  for (const candidate of candidates) {
+    const normalized = normalizeGenreValue(candidate);
+    if (!normalized || normalized.length > MAX_LIBRARY_GENRE_LABEL_LENGTH) {
+      continue;
+    }
+    const key = normalizeLibraryGenreKey(normalized);
+    if (!normalizedByKey.has(key)) {
+      normalizedByKey.set(key, canonicalByKey.get(key) || normalized);
+    }
+    if (normalizedByKey.size >= MAX_LIBRARY_GENRE_FILTERS) {
+      break;
+    }
+  }
+  return [...normalizedByKey.values()].sort(compareCanonicalGenreValues);
 }
 
 export function normalizeLibraryQualities(values = []) {
@@ -230,7 +257,7 @@ export function libraryArrangeEquals(left, right) {
     const normalized = normalizeLibraryArrange(value);
     return {
       ...normalized,
-      genres: normalized.genres.map((genre) => genre.toLocaleLowerCase()),
+      genres: normalized.genres.map(normalizeLibraryGenreKey),
     };
   };
   return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right));

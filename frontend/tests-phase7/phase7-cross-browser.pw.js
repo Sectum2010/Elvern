@@ -1005,7 +1005,103 @@ test("@settings-navigation legacy Hidden hash and Install routes replace canonic
   await page.goto("install?from=legacy#helper");
   await expect(page).toHaveURL(`${baseURL}settings?from=legacy&section=install#helper`);
   await expect(page.getByText("Elvern VLC Opener", { exact: true })).toBeVisible();
+
+  await page.goto("settings?other=1&section=display#poster");
+  await expect(page).toHaveURL(`${baseURL}settings?other=1&section=preferences#poster`);
+  await expect(page.getByRole("tab", { name: "Preferences" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], { role: "admin" });
+  await page.goto("settings?other=1&section=libraries#google-drive-oauth-setup");
+  await expect(page).toHaveURL(
+    `${baseURL}settings?other=1&section=advanced#google-drive-oauth-setup`,
+  );
+  await expect(page.getByText("Google Drive OAuth Setup", { exact: true })).toBeVisible();
 });
+
+
+test("@settings-navigation Preferences and Advanced use the approved desktop information architecture", async ({
+  page,
+}) => {
+  await page.goto("settings?section=preferences");
+  await expect(page.getByRole("tab")).toHaveText([
+    "Preferences",
+    "Libraries",
+    "Install",
+    "Advanced",
+  ]);
+  await expect(page.getByRole("tab", { name: "Display" })).toHaveCount(0);
+  await expect(page.getByText("Your account", { exact: true })).toHaveCount(0);
+
+  const posterHeading = page.getByRole("heading", { name: "Poster appearance" });
+  const floatingHeading = page.getByRole("heading", { name: "Floating Island Position" });
+  const libraryHeading = page.getByRole("heading", { name: "Library" });
+  const backgroundHeading = page.getByRole("heading", { name: "Background" });
+  await expect(posterHeading).toBeVisible();
+  await expect(floatingHeading).toBeVisible();
+  await expect(libraryHeading).toBeVisible();
+  await expect(backgroundHeading).toBeVisible();
+
+  const posterCard = posterHeading.locator("xpath=ancestor::section[1]");
+  const libraryCard = libraryHeading.locator("xpath=ancestor::section[1]");
+  await expect(posterCard.getByRole("combobox")).toHaveCount(0);
+  await expect(libraryCard.getByRole("checkbox", { name: /Hide Recently added/ })).toBeVisible();
+  await expect(libraryCard.getByRole("checkbox", { name: /Hide duplicate copies/ })).toBeVisible();
+  const posterBox = await posterHeading.boundingBox();
+  const floatingBox = await floatingHeading.boundingBox();
+  const libraryBox = await libraryHeading.boundingBox();
+  const backgroundBox = await backgroundHeading.boundingBox();
+  expect(floatingBox.x).toBe(posterBox.x);
+  expect(libraryBox.x).toBe(posterBox.x);
+  expect(backgroundBox.x).toBeGreaterThan(posterBox.x);
+
+  await page.getByRole("tab", { name: "Advanced" }).click();
+  await expect(page.getByRole("heading", { name: "Poster display quality" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: /Maximum poster width/ })).toBeVisible();
+  await expect(page.getByText("Google Drive OAuth Setup", { exact: true })).toHaveCount(0);
+});
+
+
+for (const deviceCase of [
+  {
+    label: "phone",
+    platform: "iPhone",
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1",
+    viewport: { width: 390, height: 844 },
+  },
+  {
+    label: "tablet",
+    platform: "MacIntel",
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15",
+    viewport: { width: 820, height: 1180 },
+  },
+]) {
+  test(`@settings-navigation ${deviceCase.label} Preferences hides position and preserves card order`, async ({
+    page,
+  }) => {
+    await page.addInitScript(({ platform, userAgent }) => {
+      Object.defineProperty(navigator, "platform", { configurable: true, get: () => platform });
+      Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => userAgent });
+      Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, get: () => 5 });
+    }, {
+      platform: deviceCase.platform,
+      userAgent: deviceCase.userAgent,
+    });
+    await page.setViewportSize(deviceCase.viewport);
+    await page.goto("settings?section=preferences");
+
+    await expect(page.getByRole("heading", { name: "Floating Island Position" })).toHaveCount(0);
+    const posterBox = await page.getByRole("heading", { name: "Poster appearance" }).boundingBox();
+    const backgroundBox = await page.getByRole("heading", { name: "Background" }).boundingBox();
+    const libraryBox = await page.getByRole("heading", { name: "Library" }).boundingBox();
+    expect(backgroundBox.y).toBeGreaterThan(posterBox.y);
+    expect(libraryBox.y).toBeGreaterThan(backgroundBox.y);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+}
 
 
 test("@settings-navigation desktop Settings and Admin use their dock Back to Library control", async ({
@@ -1074,7 +1170,7 @@ for (const returnCase of [
     await card.locator(".media-card__poster-link").click();
     await expect(page).toHaveURL(/\/library\/\d+$/);
 
-    await page.getByRole("tab", { name: "Movies" }).click();
+    await page.getByRole("link", { name: "Back to library" }).click();
     await expect(page).toHaveURL(expectedListUrl);
     await expect(page.locator(".media-card").filter({ hasText: returnCase.title }).first())
       .toBeVisible();
@@ -1106,7 +1202,10 @@ test("canonical Root Local and Cloud use the production v2 route", async ({ page
 });
 
 
-test("desktop Island search debounces once and survives Detail return", async ({ page, baseURL }) => {
+test("desktop Island search is Enter-only, clears immediately, and survives Detail return", async ({
+  page,
+  baseURL,
+}) => {
   const requests = [];
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, requests);
@@ -1118,6 +1217,7 @@ test("desktop Island search debounces once and survives Detail return", async ({
   await page.waitForTimeout(200);
   expect(requests.filter((request) => request.startsWith("/api/library/search")).length).toBe(0);
 
+  await search.press("Enter");
   await expect(page).toHaveURL(`${baseURL}library?category=movies&q=Beta`);
   await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
   expect(requests.filter((request) => {
@@ -1136,6 +1236,22 @@ test("desktop Island search debounces once and survives Detail return", async ({
   await expect(page).toHaveURL(`${baseURL}library?category=movies&q=Beta`);
   await expect(page.getByRole("searchbox", { name: "Search library" }).first()).toHaveValue("Beta");
   await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
+
+  const returnedSearch = page.getByRole("searchbox", { name: "Search library" }).first();
+  await returnedSearch.fill("");
+  await expect(page).toHaveURL(`${baseURL}library?category=movies`);
+  await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
+  await expect(page.getByText("2 indexed", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("library-index-controls")).toHaveCount(1);
+
+  await returnedSearch.fill("NoSuchTitle");
+  await page.waitForTimeout(200);
+  await expect(page).toHaveURL(`${baseURL}library?category=movies`);
+  await returnedSearch.press("Enter");
+  await expect(page).toHaveURL(`${baseURL}library?category=movies&q=NoSuchTitle`);
+  await expect(page.getByText("0 indexed", { exact: true })).toBeVisible();
+  await expect(page.getByText("No matches yet", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("library-index-controls")).toHaveCount(1);
 });
 
 
@@ -1411,11 +1527,13 @@ test("Desktop Floating Island stays usable at desktop and narrow laptop widths",
     expect(requests.filter((request) => request.startsWith("/api/library/search"))).toHaveLength(
       searchRequestCount,
     );
+    await search.press("Enter");
     await expect(page).toHaveURL(/library\?category=movies&q=Beta$/);
     await expect(page.getByText("Phase Seven Beta", { exact: true })).toBeVisible();
     expect(requests.filter((request) => request.startsWith("/api/library/search"))).toHaveLength(
       searchRequestCount + 1,
     );
+    expect((await island.boundingBox()).height).toBeGreaterThanOrEqual(63);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({
       path: testInfo.outputPath(`library-root-${viewport.width}x${viewport.height}.png`),
@@ -1480,7 +1598,7 @@ test("Arrange keeps multi-filters draft-only and commits one canonical request",
   ).length;
   await page.getByRole("button", { name: "Arrange library" }).click();
   const panel = page.getByRole("dialog", { name: "Arrange library" });
-  await panel.getByRole("button", { name: "Cloud" }).click();
+  await panel.getByRole("radio", { name: "Cloud" }).click();
   await panel.getByRole("button", { name: "Action" }).click();
   await panel.getByRole("button", { name: "Drama" }).click();
   await panel.getByRole("button", { name: "Diamond" }).click();
@@ -1500,7 +1618,7 @@ test("Arrange keeps multi-filters draft-only and commits one canonical request",
 
   await page.getByRole("button", { name: "Arrange library" }).click();
   await panel.getByRole("button", { name: "Reset" }).click();
-  await panel.getByRole("button", { name: "Local" }).click();
+  await panel.getByRole("radio", { name: "Local" }).click();
   expect(requests.filter(
     (request) => request.startsWith("/api/library/v2/summary"),
   )).toHaveLength(summaryRequestCount + 1);
@@ -1528,6 +1646,11 @@ test("Legacy Local and Cloud redirects preserve source through formal search", a
       (request) => request.startsWith("/api/library/search"),
     ).length;
     await search.fill(query);
+    await page.waitForTimeout(200);
+    expect(requests.filter(
+      (request) => request.startsWith("/api/library/search"),
+    )).toHaveLength(searchCount);
+    await search.press("Enter");
     await expect(page).toHaveURL(
       `${baseURL}library?source=${source}&category=movies&q=${query}`,
     );

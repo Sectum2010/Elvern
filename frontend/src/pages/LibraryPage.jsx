@@ -1655,19 +1655,6 @@ export function LibraryPage() {
   const isFlatSortedView = activeLibraryArrange.sort !== DEFAULT_LIBRARY_ARRANGE.sort;
   const showRecentlyAddedSection = !settings.hide_recently_added
     && library.recently_added.length > 0;
-  const desktopIndexControlsTarget = !desktopLibraryClient
-    ? ""
-    : isSearching
-      ? "search"
-      : isFlatSortedView
-        ? "sorted"
-        : showContinueWatchingSection
-          ? "continue"
-          : packedSeriesRailRows.length > 0
-            ? "series"
-            : showRecentlyAddedSection
-              ? "recently-added"
-              : "other";
   const desktopIndexControls = desktopLibraryClient ? (
     <div
       aria-label="Library index controls"
@@ -1793,6 +1780,12 @@ export function LibraryPage() {
         </button>
       ) : null}
 
+      {desktopLibraryClient ? (
+        <div className="library-desktop-index-row">
+          {desktopIndexControls}
+        </div>
+      ) : null}
+
       {loading ? <LoadingView label="Loading library..." /> : null}
 
       {libraryUnavailable ? (
@@ -1810,7 +1803,6 @@ export function LibraryPage() {
           <div className="content-stack">
             <div className="section-header section-header--compact">
               <h2>Search results</h2>
-              {desktopIndexControlsTarget === "search" ? desktopIndexControls : null}
             </div>
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
@@ -1832,14 +1824,6 @@ export function LibraryPage() {
       {!loading && !libraryUnavailable && !isSearching && isFlatSortedView ? (
         library.items.length > 0 ? (
           <div className="content-stack">
-            {desktopIndexControlsTarget === "sorted" ? (
-              <div
-                aria-label="Library summary"
-                className="section-header section-header--compact library-sorted-index-row"
-              >
-                {desktopIndexControls}
-              </div>
-            ) : null}
             <MediaGrid
               activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
               items={library.items}
@@ -1863,7 +1847,6 @@ export function LibraryPage() {
             <section className="content-section">
               <div className="section-header section-header--compact">
                 <h2>Continue watching</h2>
-                {desktopIndexControlsTarget === "continue" ? desktopIndexControls : null}
               </div>
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
@@ -1876,7 +1859,7 @@ export function LibraryPage() {
             </section>
           ) : null}
 
-          {packedSeriesRailRows.map((row, rowIndex) => (
+          {packedSeriesRailRows.map((row) => (
             <div
               className={[
                 "series-rail-pack-row",
@@ -1884,7 +1867,7 @@ export function LibraryPage() {
               ].filter(Boolean).join(" ")}
               key={row.key}
             >
-              {row.blocks.map((block, blockIndex) => (
+              {row.blocks.map((block) => (
                 <div
                   className="series-rail-pack-block"
                   key={block.key}
@@ -1894,13 +1877,6 @@ export function LibraryPage() {
                     activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
                     desktopSlots={block.slots < 6 ? block.slots : null}
                     enableTouchReleaseAssist
-                    headerActions={
-                      desktopIndexControlsTarget === "series"
-                      && rowIndex === 0
-                      && blockIndex === row.blocks.length - 1
-                        ? desktopIndexControls
-                        : null
-                    }
                     rail={block.rail}
                     posterDisplayWidth={settings.poster_card_display_max_width}
                     protectedIdentity={protectedLibraryIdentity}
@@ -1916,7 +1892,6 @@ export function LibraryPage() {
             <section className="content-section">
               <div className="section-header section-header--compact">
                 <h2>Recently added</h2>
-                {desktopIndexControlsTarget === "recently-added" ? desktopIndexControls : null}
               </div>
               <MediaGrid
                 activeBrowserPlaybackItemId={activeBrowserPlaybackItemId}
@@ -1932,7 +1907,6 @@ export function LibraryPage() {
           <section className="content-section">
             <div className="section-header section-header--compact">
               <h2>{activeLibraryCategoryConfig.otherHeading}</h2>
-              {desktopIndexControlsTarget === "other" ? desktopIndexControls : null}
             </div>
             {visibleLibraryGridItems.length > 0 ? (
             <MediaGrid

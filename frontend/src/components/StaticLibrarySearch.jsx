@@ -24,7 +24,13 @@ export const StaticLibrarySearch = forwardRef(function StaticLibrarySearch({
           aria-label={label}
           disabled={search.isSourceLocked("static")}
           inputMode="search"
-          onChange={(event) => search.updateDraft("static", event.target.value)}
+          onChange={(event) => {
+            const nextValue = event.target.value;
+            search.updateDraft("static", nextValue);
+            if (!String(nextValue).trim() && search.committedQuery) {
+              search.clear("static");
+            }
+          }}
           onKeyDown={(event) => {
             if (shouldCommitLibrarySearchKey(event)) {
               event.preventDefault();

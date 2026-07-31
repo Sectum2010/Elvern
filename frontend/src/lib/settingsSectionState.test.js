@@ -40,7 +40,7 @@ describe("Settings section state", () => {
     expect(storage.setItem).toHaveBeenCalledWith(SETTINGS_ACTIVE_SECTION_STORAGE_KEY, "libraries");
   });
 
-  test("uses a valid URL section before storage", () => {
+  test("migrates the legacy Display URL to Preferences", () => {
     const storage = {
       getItem: vi.fn(() => "advanced"),
       setItem: vi.fn(),
@@ -50,8 +50,18 @@ describe("Settings section state", () => {
       search: "?section=display",
       storage,
     })).toMatchObject({
-      section: "display",
-      shouldReplace: false,
+      section: "preferences",
+      shouldReplace: true,
+    });
+  });
+
+  test("moves the legacy Libraries OAuth deep link to Advanced", () => {
+    expect(resolveSettingsSection({
+      search: "?keep=1&section=libraries",
+      hash: "#google-drive-oauth-setup",
+    })).toMatchObject({
+      section: "advanced",
+      shouldReplace: true,
     });
   });
 

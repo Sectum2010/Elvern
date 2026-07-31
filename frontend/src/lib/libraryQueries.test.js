@@ -50,6 +50,14 @@ describe("library query identity", () => {
     });
   });
 
+  test("uses the same canonical Unicode genres for URL views and query identity", () => {
+    expect(normalizeLibraryQueryIdentity({
+      userId: 42,
+      role: "user",
+      genres: ["Ｓｃｉ－Ｆｉ", "Action", "action", "Éclair"],
+    }).genres).toEqual(["action", "sci-fi", "éclair"]);
+  });
+
   test("keeps users, roles, searches, and view filters in distinct exact keys", () => {
     const base = {
       userId: 1,

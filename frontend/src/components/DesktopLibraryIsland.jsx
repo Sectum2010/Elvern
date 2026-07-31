@@ -28,6 +28,7 @@ import {
   libraryArrangeEquals,
   librarySortDirectionLabel,
   normalizeLibraryArrange,
+  normalizeLibraryGenreKey,
   normalizeLibraryGenres,
   resolveLibraryArrangeFromSearch,
   resolveLibraryCategoryFromSearch,
@@ -38,6 +39,7 @@ import {
   markLibraryReturnPending,
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation.js";
+import { shouldCommitLibrarySearchKey } from "../lib/useCommittedLibrarySearch.js";
 
 
 function joinPathAndSearch(pathname, search, hash = "") {
@@ -99,95 +101,6 @@ export function resolveDesktopLibraryIslandView({
 
 function DesktopLibrarySourceControl({ onChange, value }) {
   const controlRef = useRef(null);
-  const draggingRef = useRef(false);
-  const ignoreNextClickRef = useRef(false);
-  const ignoreClickTimerRef = useRef(0);
-  const dragBoundsRef = useRef({ clientX: 0, min: 0, max: 0 });
-  const [dragging, setDragging] = useState(false);
-  const [dragOffset, setDragOffset] = useState(0);
-  const [dragPreviewValue, setDragPreviewValue] = useState(null);
-
-  useEffect(() => () => {
-    window.clearTimeout(ignoreClickTimerRef.current);
-  }, []);
-
-  function getValueFromPoint(clientX, clientY, { allowOutside = false } = {}) {
-    const rect = controlRef.current?.getBoundingClientRect();
-    if (!rect || !LIBRARY_SOURCE_OPTIONS.length) {
-      return allowOutside ? value : null;
-    }
-    const outside = clientX < rect.left
-      || clientX > rect.right
-      || clientY < rect.top
-      || clientY > rect.bottom;
-    if (outside && !allowOutside) {
-      return null;
-    }
-    const ratio = Math.max(0, Math.min(0.999, (clientX - rect.left) / (rect.width || 1)));
-    const index = Math.max(
-      0,
-      Math.min(LIBRARY_SOURCE_OPTIONS.length - 1, Math.floor(ratio * LIBRARY_SOURCE_OPTIONS.length)),
-    );
-    return LIBRARY_SOURCE_OPTIONS[index]?.key || value;
-  }
-
-  function resetDrag() {
-    draggingRef.current = false;
-    setDragging(false);
-    setDragOffset(0);
-    setDragPreviewValue(null);
-  }
-
-  function handleActivePointerDown(event) {
-    event.preventDefault();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    const sourceButtons = controlRef.current?.querySelectorAll("button");
-    const firstButtonRect = sourceButtons?.[0]?.getBoundingClientRect();
-    const lastButtonRect = sourceButtons?.[sourceButtons.length - 1]?.getBoundingClientRect();
-    const buttonRect = event.currentTarget.getBoundingClientRect();
-    dragBoundsRef.current = {
-      clientX: event.clientX,
-      min: firstButtonRect ? firstButtonRect.left - buttonRect.left : 0,
-      max: lastButtonRect ? lastButtonRect.right - buttonRect.right : 0,
-    };
-    draggingRef.current = true;
-    ignoreNextClickRef.current = true;
-    setDragOffset(0);
-    setDragPreviewValue(value);
-    setDragging(true);
-  }
-
-  function handleActivePointerMove(event) {
-    if (!draggingRef.current) {
-      return;
-    }
-    const bounds = dragBoundsRef.current;
-    const nextOffset = Math.max(bounds.min, Math.min(bounds.max, event.clientX - bounds.clientX));
-    setDragOffset(nextOffset);
-    setDragPreviewValue(getValueFromPoint(event.clientX, event.clientY, { allowOutside: true }));
-  }
-
-  function handleActivePointerUp(event) {
-    if (!draggingRef.current) {
-      return;
-    }
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-    const nextValue = getValueFromPoint(event.clientX, event.clientY);
-    resetDrag();
-    if (nextValue) {
-      onChange(nextValue);
-    }
-    window.clearTimeout(ignoreClickTimerRef.current);
-    ignoreClickTimerRef.current = window.setTimeout(() => {
-      ignoreNextClickRef.current = false;
-    }, 120);
-  }
-
-  function handleActivePointerCancel(event) {
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-    ignoreNextClickRef.current = false;
-    resetDrag();
-  }
 
   const selectedIndex = Math.max(
     0,
@@ -196,16 +109,28 @@ function DesktopLibrarySourceControl({ onChange, value }) {
   const controlStyle = {
     "--desktop-source-count": LIBRARY_SOURCE_OPTIONS.length,
     "--desktop-source-index": selectedIndex,
-    "--desktop-source-drag-x": dragging ? `${dragOffset}px` : "0px",
   };
+
+  function handleKeyDown(event, index) {
+    const lastIndex = LIBRARY_SOURCE_OPTIONS.length - 1;
+    let nextIndex = null;
+    if (event.key === "ArrowRight") nextIndex = index === lastIndex ? 0 : index + 1;
+    if (event.key === "ArrowLeft") nextIndex = index === 0 ? lastIndex : index - 1;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = lastIndex;
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    const next = LIBRARY_SOURCE_OPTIONS[nextIndex];
+    controlRef.current?.querySelector(`[data-library-source="${next.key}"]`)?.focus();
+    onChange(next.key);
+  }
 
   return (
     <div
       aria-label="Library source"
-      className={[
-        "desktop-library-island__segments",
-        dragging ? "desktop-library-island__segments--dragging" : "",
-      ].filter(Boolean).join(" ")}
+      className="desktop-library-island__segments"
       ref={controlRef}
       role="radiogroup"
       style={controlStyle}
@@ -213,30 +138,16 @@ function DesktopLibrarySourceControl({ onChange, value }) {
       <span aria-hidden="true" className="desktop-library-island__segments-indicator" />
       {LIBRARY_SOURCE_OPTIONS.map((option) => {
         const selected = value === option.key;
-        const visuallySelected = dragging
-          ? dragPreviewValue === option.key
-          : selected;
         return (
           <button
             aria-checked={selected}
-            className={[
-              visuallySelected ? "is-active" : "",
-              selected && dragging ? "is-dragging" : "",
-            ].filter(Boolean).join(" ")}
+            className={selected ? "is-active" : ""}
+            data-library-source={option.key}
             key={option.key}
-            onClick={(event) => {
-              if (ignoreNextClickRef.current) {
-                event.preventDefault();
-                ignoreNextClickRef.current = false;
-                return;
-              }
-              onChange(option.key);
-            }}
-            onPointerCancel={selected ? handleActivePointerCancel : undefined}
-            onPointerDown={selected ? handleActivePointerDown : undefined}
-            onPointerMove={selected ? handleActivePointerMove : undefined}
-            onPointerUp={selected ? handleActivePointerUp : undefined}
+            onClick={() => onChange(option.key)}
+            onKeyDown={(event) => handleKeyDown(event, LIBRARY_SOURCE_OPTIONS.indexOf(option))}
             role="radio"
+            tabIndex={selected ? 0 : -1}
             type="button"
           >
             {option.label}
@@ -258,7 +169,7 @@ function DesktopLibraryArrangePanel({
   panelRef,
 }) {
   const [showAllGenres, setShowAllGenres] = useState(false);
-  const selectedGenreKeys = new Set(draft.genres.map((genre) => genre.toLocaleLowerCase()));
+  const selectedGenreKeys = new Set(draft.genres.map(normalizeLibraryGenreKey));
   const visibleGenres = normalizeLibraryGenres([
     ...draft.genres,
     ...availableGenres,
@@ -268,9 +179,9 @@ function DesktopLibraryArrangePanel({
   const hiddenGenreCount = Math.max(0, visibleGenres.length - collapsedGenres.length);
 
   function toggleGenre(genre) {
-    const key = genre.toLocaleLowerCase();
+    const key = normalizeLibraryGenreKey(genre);
     const next = selectedGenreKeys.has(key)
-      ? draft.genres.filter((value) => value.toLocaleLowerCase() !== key)
+      ? draft.genres.filter((value) => normalizeLibraryGenreKey(value) !== key)
       : [...draft.genres, genre];
     onUpdate({ genres: normalizeLibraryGenres(next, visibleGenres) });
   }
@@ -316,8 +227,8 @@ function DesktopLibraryArrangePanel({
             </button>
             {displayedGenres.map((genre) => (
               <button
-                aria-pressed={selectedGenreKeys.has(genre.toLocaleLowerCase())}
-                className={selectedGenreKeys.has(genre.toLocaleLowerCase()) ? "is-active" : ""}
+                aria-pressed={selectedGenreKeys.has(normalizeLibraryGenreKey(genre))}
+                className={selectedGenreKeys.has(normalizeLibraryGenreKey(genre)) ? "is-active" : ""}
                 key={genre}
                 onClick={() => toggleGenre(genre)}
                 type="button"
@@ -481,6 +392,8 @@ export function DesktopLibraryIsland({
   const panelRef = useRef(null);
   const menuRef = useRef(null);
   const searchInputRef = useRef(null);
+  const searchCompositionRef = useRef(false);
+  const searchFocusedRef = useRef(false);
   const closingRef = useRef(false);
   const [openPanel, setOpenPanel] = useState("");
   const [draftArrange, setDraftArrange] = useState(DEFAULT_LIBRARY_ARRANGE);
@@ -506,6 +419,12 @@ export function DesktopLibraryIsland({
   useEffect(() => {
     setSearchDraft(committedQuery);
   }, [committedQuery]);
+
+  function discardSearchDraft() {
+    if (searchDraft !== committedQuery) {
+      setSearchDraft(committedQuery);
+    }
+  }
 
   function navigateToView({
     arrange = committedArrange,
@@ -584,6 +503,7 @@ export function DesktopLibraryIsland({
   }
 
   function openArrange() {
+    discardSearchDraft();
     if (openPanel === "arrange") {
       commitArrangeDraftAndClose();
       return;
@@ -593,6 +513,7 @@ export function DesktopLibraryIsland({
   }
 
   function toggleAvatar() {
+    discardSearchDraft();
     if (openPanel === "arrange") {
       commitArrangeDraftAndClose({ returnFocus: false });
       setOpenPanel("avatar");
@@ -602,6 +523,7 @@ export function DesktopLibraryIsland({
   }
 
   function handleCategory(category) {
+    discardSearchDraft();
     if (openPanel === "arrange") {
       commitArrangeDraftAndClose({ category, returnFocus: false });
       return;
@@ -784,13 +706,52 @@ export function DesktopLibraryIsland({
           <input
             aria-label="Search library"
             autoComplete="off"
-            onChange={(event) => setSearchDraft(event.target.value)}
-            onFocus={handleSearchFocus}
+            onBlur={() => {
+              searchFocusedRef.current = false;
+              if (!searchCompositionRef.current) {
+                setSearchDraft(committedQuery);
+              }
+            }}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              setSearchDraft(nextValue);
+              if (
+                !searchCompositionRef.current
+                && !String(nextValue).trim()
+                && committedQuery
+              ) {
+                commitSearch("");
+              }
+            }}
+            onCompositionEnd={(event) => {
+              searchCompositionRef.current = false;
+              const nextValue = event.currentTarget.value;
+              if (!String(nextValue).trim() && committedQuery) {
+                setSearchDraft(nextValue);
+                commitSearch("");
+              } else if (searchFocusedRef.current) {
+                setSearchDraft(nextValue);
+              } else {
+                setSearchDraft(committedQuery);
+              }
+            }}
+            onCompositionStart={() => {
+              searchCompositionRef.current = true;
+            }}
+            onFocus={() => {
+              searchFocusedRef.current = true;
+              handleSearchFocus();
+            }}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.isComposing) {
+              if (shouldCommitLibrarySearchKey(event) && !searchCompositionRef.current) {
                 event.preventDefault();
                 commitSearch(searchDraft);
-              } else if (event.key === "Escape" && !event.isComposing) {
+              } else if (
+                event.key === "Escape"
+                && !event.isComposing
+                && !event.nativeEvent?.isComposing
+                && !searchCompositionRef.current
+              ) {
                 event.preventDefault();
                 setSearchDraft(committedQuery);
                 searchInputRef.current?.blur();

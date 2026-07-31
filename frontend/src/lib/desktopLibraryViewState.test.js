@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   DEFAULT_LIBRARY_ARRANGE,
+  MAX_LIBRARY_GENRE_FILTERS,
   applyLibraryArrangeParams,
   buildLegacySourceRedirectLocation,
   buildLibraryRequestPath,
@@ -9,6 +10,7 @@ import {
   countLibraryArrangeFilters,
   libraryArrangeEquals,
   normalizeLibraryArrange,
+  normalizeLibraryGenres,
   resolveLibraryArrangeFromSearch,
   toggleLibrarySort,
 } from "./desktopLibraryViewState.js";
@@ -25,6 +27,33 @@ describe("desktop Library view state", () => {
       qualities: ["diamond", "wood"],
       sort: "smart",
     });
+  });
+
+  test("normalizes Unicode genres deterministically without locale-sensitive sorting", () => {
+    const first = normalizeLibraryGenres(
+      [" sci-fi ", "Ａｃｔｉｏｎ", "action", "Éclair", "eclair", "SCI-FI"],
+      ["Action", "Sci-Fi", "Éclair", "Eclair"],
+    );
+    const second = normalizeLibraryGenres(
+      ["eclair", "SCI-FI", "action", "Éclair", "sci-fi"],
+      ["Action", "Sci-Fi", "Éclair", "Eclair"],
+    );
+
+    expect(first).toEqual(["Action", "Eclair", "Sci-Fi", "Éclair"]);
+    expect(second).toEqual(first);
+  });
+
+  test("caps malicious repeated genre params and ignores empty or overlong labels", () => {
+    const candidates = [
+      "",
+      " ",
+      ...Array.from({ length: MAX_LIBRARY_GENRE_FILTERS + 20 }, (_, index) => `Genre ${index}`),
+      "x".repeat(129),
+    ];
+    const normalized = normalizeLibraryGenres(candidates);
+
+    expect(normalized).toHaveLength(MAX_LIBRARY_GENRE_FILTERS);
+    expect(normalized.every((genre) => genre.length <= 128)).toBe(true);
   });
 
   test("writes one repeated parameter per selected value in canonical order", () => {

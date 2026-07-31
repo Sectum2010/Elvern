@@ -402,7 +402,6 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
       <SettingsPage />
     </MemoryRouter>,
   );
-  fireEvent.click(screen.getByRole("tab", { name: "Display" }));
   await screen.findByRole("heading", { name: "Background" });
   await waitFor(() => {
     expect(screen.queryByText("Loading display preferences...")).not.toBeInTheDocument();
@@ -433,7 +432,6 @@ describe("SettingsPage section navigation and consolidation", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Preferences",
-      "Display",
       "Libraries",
       "Install",
       "Advanced",
@@ -494,6 +492,99 @@ describe("SettingsPage section navigation and consolidation", () => {
     expect(screen.queryByRole("tab", { name: "Hidden" })).not.toBeInTheDocument();
   });
 
+  test("canonicalizes legacy Display while preserving query, hash, state, and replace history", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={[{
+        pathname: "/settings",
+        search: "?other=1&section=display",
+        hash: "#poster",
+        state: { marker: "preserved" },
+      }]}>
+        <LocationProbe />
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent(
+      "/settings?other=1&section=preferences#poster|REPLACE|preserved",
+    ));
+    expect(screen.getByRole("tab", { name: "Preferences" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("tab", { name: "Display" })).not.toBeInTheDocument();
+  });
+
+  test("moves only the legacy Libraries OAuth deep link to Advanced", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={[{
+        pathname: "/settings",
+        search: "?other=1&section=libraries",
+        hash: "#google-drive-oauth-setup",
+        state: { marker: "preserved" },
+      }]}>
+        <LocationProbe />
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent(
+      "/settings?other=1&section=advanced#google-drive-oauth-setup|REPLACE|preserved",
+    ));
+    expect(await screen.findByText("Google Drive OAuth Setup")).toBeInTheDocument();
+  });
+
+  test("OAuth deep-link positioning waits for Advanced resources and runs once", async () => {
+    mockAuthState.role = "admin";
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      mockApi();
+      render(
+        <MemoryRouter
+          initialEntries={["/settings?section=advanced#google-drive-oauth-setup"]}
+        >
+          <SettingsPage />
+        </MemoryRouter>,
+      );
+
+      await screen.findByText("Google Drive OAuth Setup");
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalScrollIntoView) {
+        Element.prototype.scrollIntoView = originalScrollIntoView;
+      } else {
+        delete Element.prototype.scrollIntoView;
+      }
+    }
+  });
+
+  test("keeps provider callbacks in Libraries instead of treating them as OAuth setup links", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={[{
+        pathname: "/settings",
+        search: "?googleDriveStatus=connected&section=libraries",
+        hash: "#my-libraries",
+        state: { marker: "preserved" },
+      }]}>
+        <LocationProbe />
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("My Libraries")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-location")).toHaveTextContent(
+      "/settings?section=libraries#my-libraries|REPLACE|preserved",
+    );
+    expect(screen.getByRole("tab", { name: "Libraries" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Google Drive connected.")).toBeInTheDocument();
+  });
+
   test("section changes replace history while preserving query, hash, and state", async () => {
     mockApi();
     render(
@@ -525,17 +616,17 @@ describe("SettingsPage section navigation and consolidation", () => {
     );
 
     const preferences = screen.getByRole("tab", { name: "Preferences" });
-    const display = screen.getByRole("tab", { name: "Display" });
+    const libraries = screen.getByRole("tab", { name: "Libraries" });
     const advanced = screen.getByRole("tab", { name: "Advanced" });
     expect(preferences).toHaveAttribute("tabindex", "0");
-    expect(display).toHaveAttribute("tabindex", "-1");
+    expect(libraries).toHaveAttribute("tabindex", "-1");
 
     fireEvent.keyDown(preferences, { key: "ArrowRight" });
-    await waitFor(() => expect(display).toHaveAttribute("aria-selected", "true"));
-    expect(display).toHaveFocus();
-    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "settings-tab-display");
+    await waitFor(() => expect(libraries).toHaveAttribute("aria-selected", "true"));
+    expect(libraries).toHaveFocus();
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "settings-tab-libraries");
 
-    fireEvent.keyDown(display, { key: "End" });
+    fireEvent.keyDown(libraries, { key: "End" });
     await waitFor(() => expect(advanced).toHaveAttribute("aria-selected", "true"));
     expect(advanced).toHaveFocus();
     expect(screen.getByTestId("settings-location")).toHaveTextContent(
@@ -581,7 +672,7 @@ describe("SettingsPage section navigation and consolidation", () => {
     expect(screen.getByText("Complete install panel")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "Libraries" }));
-    await screen.findByRole("heading", { name: "Library" });
+    await screen.findByText("My Libraries");
     await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
       "/api/user-hidden-items",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -595,15 +686,13 @@ describe("SettingsPage section navigation and consolidation", () => {
     });
   });
 
-  test("Preferences and Display do not load Libraries or Advanced resources", async () => {
+  test("Preferences does not load Libraries or Advanced resources", async () => {
     mockApi();
     render(
       <MemoryRouter initialEntries={["/settings?section=preferences"]}>
         <SettingsPage />
       </MemoryRouter>,
     );
-    await screen.findByText("Your account");
-    fireEvent.click(screen.getByRole("tab", { name: "Display" }));
     await screen.findByRole("heading", { name: "Background" });
 
     const ancillaryPaths = new Set([
@@ -617,6 +706,60 @@ describe("SettingsPage section navigation and consolidation", () => {
       "/api/auth/totp/status",
     ]);
     expect(apiRequest.mock.calls.some(([requestPath]) => ancillaryPaths.has(requestPath))).toBe(false);
+  });
+
+  test("direct Advanced loads only its role-appropriate ancillary resources", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=advanced"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Google Drive OAuth Setup");
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/admin/google-drive-setup",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/cloud-libraries",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/admin/media-library-reference",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/api/admin/poster-reference-location",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    });
+    expect(apiRequest.mock.calls.some(([path]) => path === "/api/user-hidden-items")).toBe(false);
+    expect(apiRequest.mock.calls.some(([path]) => path === "/api/library/age-groups")).toBe(false);
+  });
+
+  test("standard-user Advanced loads TOTP but no admin resources", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings?section=advanced"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Poster display quality" });
+    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
+      "/api/auth/totp/status",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    const adminPaths = new Set([
+      "/api/admin/google-drive-setup",
+      "/api/cloud-libraries",
+      "/api/admin/media-library-reference",
+      "/api/admin/poster-reference-location",
+    ]);
+    expect(apiRequest.mock.calls.some(([path]) => adminPaths.has(path))).toBe(false);
   });
 
   test("StrictMode delayed Libraries data commits on the second setup", async () => {
@@ -862,10 +1005,12 @@ describe("SettingsPage section navigation and consolidation", () => {
     const shared = await screen.findByText("Shared Libraries");
     const personal = screen.getByText("Hidden for me");
     const global = screen.getByText("Hidden for everyone");
-    const google = screen.getByText("Google Drive OAuth Setup");
     expect(shared.compareDocumentPosition(personal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(personal.compareDocumentPosition(global) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(global.compareDocumentPosition(google) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText("Google Drive OAuth Setup")).not.toBeInTheDocument();
+    expect(apiRequest.mock.calls.some(
+      ([path]) => path === "/api/admin/google-drive-setup",
+    )).toBe(false);
     expect(personal.closest("section")).not.toBe(global.closest("section"));
   });
 
@@ -982,7 +1127,7 @@ describe("SettingsPage section navigation and consolidation", () => {
     });
     const renderTree = () => (
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+        <MemoryRouter initialEntries={["/settings?section=advanced"]}>
           <SettingsPage />
         </MemoryRouter>
       </QueryClientProvider>
@@ -1022,7 +1167,7 @@ describe("SettingsPage section navigation and consolidation", () => {
     });
 
     render(
-      <MemoryRouter initialEntries={["/settings?section=libraries"]}>
+      <MemoryRouter initialEntries={["/settings?section=preferences"]}>
         <SettingsPage />
       </MemoryRouter>,
     );
@@ -1653,8 +1798,8 @@ describe("SettingsPage Hidden scope transfer", () => {
   });
 });
 
-describe("SettingsPage Display background controls", () => {
-  test("display top row keeps poster controls beside the background card on wide layouts", () => {
+describe("SettingsPage Preferences controls", () => {
+  test("Preferences keeps the approved desktop columns and narrow-screen card order", () => {
     const source = fs.readFileSync(settingsPagePath, "utf8");
     const styles = fs.readFileSync(stylesPath, "utf8");
 
@@ -1663,14 +1808,18 @@ describe("SettingsPage Display background controls", () => {
     expect(source).toContain("settings-card settings-display-interface-card");
     expect(source).toContain("settings-card settings-display-library-card");
     expect(source).toContain("settings-grid--compact-columns");
+    expect(source).toContain("settings-grid--preferences");
     expect(source).toContain("settings-grid__column");
     expect(source).toContain("{ value: \"clean\", label: \"Clean\" }");
     expect(source).not.toContain("settings-card settings-card--wide settings-display-card");
     expect(source).not.toContain("Customize your Elvern background for this account.");
     expect(source).not.toContain("Gradient start color");
     expect(source).not.toContain("Remove photo");
-    expect(styles).toMatch(/\.settings-grid--display\s*\{[^}]*align-items:\s*start;/s);
+    expect(styles).not.toContain(".settings-grid--display");
     expect(styles).toMatch(/\.settings-grid__column\s*\{[^}]*align-content:\s*start;/s);
+    expect(styles).toMatch(/\.settings-preferences-poster-card\s*\{[^}]*order:\s*1;/s);
+    expect(styles).toMatch(/\.settings-preferences-background-card\s*\{[^}]*order:\s*2;/s);
+    expect(styles).toMatch(/\.settings-preferences-library-card\s*\{[^}]*order:\s*4;/s);
     expect(styles).not.toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
     expect(styles).not.toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
     expect(styles).toMatch(/data-elvern-background-preset="basic"\]\s*\{[^}]*#202832/s);
@@ -1714,11 +1863,29 @@ describe("SettingsPage Display background controls", () => {
     expect(screen.queryByText("Floating library search")).not.toBeInTheDocument();
   });
 
+  test("Preferences keeps one Library card and moves poster width out of Poster appearance", async () => {
+    await renderDisplaySettings();
+
+    const panel = screen.getByRole("tabpanel", { name: "Preferences" });
+    const libraryHeading = within(panel).getByRole("heading", { name: "Library" });
+    const libraryCard = libraryHeading.closest("section");
+    expect(within(libraryCard).getByRole("checkbox", { name: /Hide Recently added/ }))
+      .toBeInTheDocument();
+    expect(within(libraryCard).getByRole("checkbox", { name: /Hide duplicate copies/ }))
+      .toBeInTheDocument();
+    expect(libraryCard.querySelector(".settings-preferences-library-divider")).not.toBeNull();
+    expect(within(panel).queryByRole("combobox", { name: /Maximum poster width/ }))
+      .not.toBeInTheDocument();
+    expect(within(panel).queryByText("Your account")).not.toBeInTheDocument();
+  });
+
   test("phone hides the desktop-only dynamic search setting", async () => {
     mockPlatformState.deviceClass = "phone";
     await renderDisplaySettings();
 
     expect(screen.queryByText("Dynamic search button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Floating Island Position" }))
+      .not.toBeInTheDocument();
   });
 
   test("desktop interface exposes the floating island position control", async () => {
@@ -1853,7 +2020,7 @@ describe("SettingsPage Display background controls", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Library" });
+    await screen.findByText("My Libraries");
     expect(screen.queryByRole("heading", { name: "Age Groups" })).not.toBeInTheDocument();
   });
 
@@ -1992,8 +2159,10 @@ describe("SettingsPage Display background controls", () => {
 
   test("poster width PATCH updates the shared user settings cache immediately", async () => {
     await renderDisplaySettings();
+    fireEvent.click(screen.getByRole("tab", { name: "Advanced" }));
+    await screen.findByRole("heading", { name: "Poster display quality" });
 
-    fireEvent.change(screen.getByRole("combobox", { name: /Poster display quality/i }), {
+    fireEvent.change(screen.getByRole("combobox", { name: /Maximum poster width/i }), {
       target: { value: "800" },
     });
 

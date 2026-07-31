@@ -381,7 +381,9 @@ export function compareLibraryV1AndV2(v1Payload, v2Payload, { viewIdentity = {} 
     genres: v1Genres,
     qualities: v1Qualities,
     genre: v1Genres.length === 1 ? v1Genres[0] : null,
-    quality: v1Qualities.length === 1 ? v1Qualities[0] : null,
+    quality: v1Qualities.length === 0
+      ? "all"
+      : (v1Qualities.length === 1 ? v1Qualities[0] : null),
     sort: String(v1Payload?.arrange?.sort || "smart"),
   };
   if (!sameValue(expectedView, validated.view)) record("view");

@@ -1095,3 +1095,49 @@ def test_library_arrange_invalid_params_return_400(
 
     assert response.status_code == 400
     assert message in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("path", "extra_params"),
+    [
+        ("/api/library", []),
+        ("/api/library/search", [("q", "probe")]),
+        ("/api/library/v2/summary", []),
+    ],
+)
+def test_library_genre_filter_limits_are_consistent_across_endpoints(
+    client,
+    initialized_settings,
+    admin_credentials,
+    path: str,
+    extra_params: list[tuple[str, str]],
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    allowed = [("genre", f"Custom Genre {index}") for index in range(64)]
+
+    assert client.get(path, params=[*extra_params, *allowed]).status_code == 200
+
+    duplicate_case = [
+        *allowed,
+        ("genre", "custom genre 0"),
+        ("genre", "CUSTOM GENRE 0"),
+    ]
+    assert client.get(path, params=[*extra_params, *duplicate_case]).status_code == 200
+
+    too_many = [*allowed, ("genre", "One Genre Too Many")]
+    too_many_response = client.get(path, params=[*extra_params, *too_many])
+    assert too_many_response.status_code == 400
+    assert too_many_response.json()["detail"] == (
+        "A maximum of 64 unique library genre filters is allowed."
+    )
+
+    long_value = "SensitiveGenreValue" + ("x" * 120)
+    long_response = client.get(
+        path,
+        params=[*extra_params, ("genre", long_value)],
+    )
+    assert long_response.status_code == 400
+    assert long_response.json()["detail"] == (
+        "Library genre filters must be 128 characters or shorter."
+    )
+    assert long_value not in long_response.text

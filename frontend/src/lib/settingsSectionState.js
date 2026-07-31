@@ -1,13 +1,13 @@
 export const SETTINGS_ACTIVE_SECTION_STORAGE_KEY = "elvern:settings-active-section";
 export const SETTINGS_SECTION_KEYS = Object.freeze([
   "preferences",
-  "display",
   "libraries",
   "install",
   "advanced",
 ]);
 
 const SETTINGS_SECTION_ALIASES = Object.freeze({
+  display: "preferences",
   hidden: "libraries",
 });
 
@@ -56,7 +56,7 @@ export function readPersistedSettingsSection(storage = defaultStorage()) {
 }
 
 
-export function resolveSettingsSection({ search = "", storage = defaultStorage() } = {}) {
+export function resolveSettingsSection({ search = "", hash = "", storage = defaultStorage() } = {}) {
   let storedValue = null;
   try {
     storedValue = storage?.getItem?.(SETTINGS_ACTIVE_SECTION_STORAGE_KEY) ?? null;
@@ -67,6 +67,17 @@ export function resolveSettingsSection({ search = "", storage = defaultStorage()
   const needsStorageMigration = storedValue !== null && storedValue !== storedCanonical;
   const storageMigrationTarget = storedCanonical;
   const params = new URLSearchParams(search);
+  if (
+    params.get("section") === "libraries"
+    && String(hash || "") === "#google-drive-oauth-setup"
+  ) {
+    return {
+      section: "advanced",
+      shouldReplace: true,
+      needsStorageMigration,
+      storageMigrationTarget,
+    };
+  }
   if (!params.has("section")) {
     return {
       section: storedCanonical || "preferences",

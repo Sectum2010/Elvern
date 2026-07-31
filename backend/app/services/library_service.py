@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import time
+import unicodedata
 
 from .library_home_curation_service import (
     _build_series_rail_plans,
@@ -71,6 +72,8 @@ LIBRARY_CATEGORY_VALUES = ("movies", "tv", "anime", "cartoon")
 LIBRARY_CATEGORY_VALUE_SET = set(LIBRARY_CATEGORY_VALUES)
 LIBRARY_SOURCE_FILTER_VALUES = ("all", "local", "cloud")
 LIBRARY_QUALITY_FILTER_VALUES = ("all", *QUALITY_TIER_VALUES)
+MAX_LIBRARY_GENRE_FILTERS = 64
+MAX_LIBRARY_GENRE_LABEL_LENGTH = 128
 LIBRARY_SORT_VALUES = (
     "smart",
     "az",
@@ -153,9 +156,16 @@ def normalize_library_genre_filters(
     candidates = genre if isinstance(genre, (list, tuple)) else [genre]
     selected: dict[str, str] = {}
     for candidate in candidates:
-        normalized = " ".join(str(candidate or "").strip().split())
-        if normalized:
-            selected.setdefault(normalized.casefold(), normalized)
+        normalized = " ".join(
+            unicodedata.normalize("NFKC", str(candidate or "")).strip().split()
+        )
+        if not normalized:
+            continue
+        if len(normalized) > MAX_LIBRARY_GENRE_LABEL_LENGTH:
+            raise ValueError("Library genre filters must be 128 characters or shorter.")
+        selected.setdefault(normalized.casefold(), normalized)
+        if len(selected) > MAX_LIBRARY_GENRE_FILTERS:
+            raise ValueError("A maximum of 64 unique library genre filters is allowed.")
     return sorted(selected.values(), key=str.casefold)
 
 

@@ -194,7 +194,7 @@ describe("DesktopLibraryIsland", () => {
     );
   });
 
-  test("unsubmitted search survives view changes without being applied", () => {
+  test("view actions discard an unsubmitted search and use the committed query", () => {
     const prepareExit = vi.fn();
     renderIsland({ libraryState: { prepareExit } });
     const search = screen.getByRole("searchbox", { name: "Search library" });
@@ -202,7 +202,7 @@ describe("DesktopLibraryIsland", () => {
     fireEvent.change(search, { target: { value: "draft only" } });
     fireEvent.click(screen.getByRole("tab", { name: "Anime" }));
 
-    expect(search).toHaveValue("draft only");
+    expect(search).toHaveValue("");
     expect(screen.getByTestId("location")).toHaveTextContent("/library?category=anime");
     expect(screen.getByTestId("location")).not.toHaveTextContent("q=draft");
 
@@ -210,7 +210,7 @@ describe("DesktopLibraryIsland", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Cloud" }));
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
 
-    expect(search).toHaveValue("draft only");
+    expect(search).toHaveValue("");
     expect(screen.getByTestId("location")).toHaveTextContent(
       "/library?category=anime&source=cloud",
     );
@@ -235,49 +235,102 @@ describe("DesktopLibraryIsland", () => {
     );
   });
 
-  test("source drag is clamped to the track and outside release reverts", () => {
+  test("source is click-only with roving keyboard radio behavior", () => {
     renderIsland();
     fireEvent.click(screen.getByRole("button", { name: "Arrange library" }));
     const sourceControl = screen.getByRole("radiogroup", { name: "Library source" });
     const all = within(sourceControl).getByRole("radio", { name: "All" });
     const local = within(sourceControl).getByRole("radio", { name: "Local" });
     const cloud = within(sourceControl).getByRole("radio", { name: "Cloud" });
-    const rect = (left, right) => ({
-      bottom: 40,
-      height: 40,
-      left,
-      right,
-      top: 0,
-      width: right - left,
-      x: left,
-      y: 0,
-      toJSON: () => ({}),
-    });
-    vi.spyOn(sourceControl, "getBoundingClientRect").mockReturnValue(rect(0, 300));
-    vi.spyOn(all, "getBoundingClientRect").mockReturnValue(rect(0, 100));
-    vi.spyOn(local, "getBoundingClientRect").mockReturnValue(rect(100, 200));
-    vi.spyOn(cloud, "getBoundingClientRect").mockReturnValue(rect(200, 300));
 
-    fireEvent.pointerDown(all, { clientX: 50, clientY: 20, pointerId: 1 });
-    fireEvent.pointerMove(all, { clientX: 1000, clientY: 20, pointerId: 1 });
+    expect(all).toHaveAttribute("tabindex", "0");
+    expect(local).toHaveAttribute("tabindex", "-1");
+    expect(all).not.toHaveAttribute("onpointerdown");
 
-    expect(sourceControl.style.getPropertyValue("--desktop-source-drag-x")).toBe("200px");
-    expect(cloud).toHaveClass("is-active");
+    all.focus();
+    fireEvent.keyDown(all, { key: "ArrowRight" });
+    expect(local).toHaveFocus();
+    expect(local).toHaveAttribute("aria-checked", "true");
 
-    fireEvent.pointerUp(all, { clientX: 1000, clientY: 20, pointerId: 1 });
-    expect(all).toHaveAttribute("aria-checked", "true");
-    expect(cloud).toHaveAttribute("aria-checked", "false");
-
-    fireEvent.pointerDown(all, { clientX: 50, clientY: 20, pointerId: 2 });
-    fireEvent.pointerMove(all, { clientX: 250, clientY: 20, pointerId: 2 });
-    fireEvent.pointerCancel(all, { clientX: 250, clientY: 20, pointerId: 2 });
-    expect(sourceControl.style.getPropertyValue("--desktop-source-drag-x")).toBe("0px");
-    expect(all).toHaveAttribute("aria-checked", "true");
-
-    fireEvent.pointerDown(all, { clientX: 50, clientY: 20, pointerId: 3 });
-    fireEvent.pointerMove(all, { clientX: 250, clientY: 20, pointerId: 3 });
-    fireEvent.pointerUp(all, { clientX: 250, clientY: 20, pointerId: 3 });
+    fireEvent.keyDown(local, { key: "End" });
+    expect(cloud).toHaveFocus();
     expect(cloud).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.keyDown(cloud, { key: "Home" });
+    expect(all).toHaveFocus();
+    expect(all).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(cloud);
+    expect(cloud).toHaveAttribute("aria-checked", "true");
+  });
+
+  test("clearing a committed query navigates immediately but clearing a local draft does not", () => {
+    const locations = [];
+    renderIsland({
+      initialEntry: "/library?category=movies&q=matrix",
+      onLocation: (location) => locations.push(location),
+    });
+    const search = screen.getByRole("searchbox", { name: "Search library" });
+
+    fireEvent.change(search, { target: { value: "   " } });
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/library?category=movies|REPLACE",
+    );
+
+    fireEvent.change(search, { target: { value: "draft" } });
+    fireEvent.change(search, { target: { value: "" } });
+    expect(locations.filter((entry) => entry.navigationType === "REPLACE")).toHaveLength(1);
+  });
+
+  test("blur restores the committed query without applying a draft", () => {
+    renderIsland({ initialEntry: "/library?category=movies&q=matrix" });
+    const search = screen.getByRole("searchbox", { name: "Search library" });
+
+    fireEvent.focus(search);
+    fireEvent.change(search, { target: { value: "draft" } });
+    fireEvent.blur(search);
+
+    expect(search).toHaveValue("matrix");
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/library?category=movies&q=matrix",
+    );
+  });
+
+  test("IME composition never commits or clears an intermediate value", () => {
+    renderIsland({ initialEntry: "/library?category=movies&q=matrix" });
+    const search = screen.getByRole("searchbox", { name: "Search library" });
+
+    fireEvent.compositionStart(search);
+    fireEvent.change(search, { target: { value: "" } });
+    fireEvent.keyDown(search, {
+      key: "Enter",
+      keyCode: 229,
+      isComposing: true,
+    });
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/library?category=movies&q=matrix",
+    );
+
+    fireEvent.compositionEnd(search, { data: "" });
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/library?category=movies|REPLACE",
+    );
+  });
+
+  test("IME completion after blur restores the committed query", () => {
+    renderIsland({ initialEntry: "/library?category=movies&q=matrix" });
+    const search = screen.getByRole("searchbox", { name: "Search library" });
+
+    search.focus();
+    fireEvent.compositionStart(search);
+    fireEvent.change(search, { target: { value: "日本語" } });
+    fireEvent.blur(search);
+    fireEvent.compositionEnd(search, { data: "日本語" });
+
+    expect(search).toHaveValue("matrix");
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/library?category=movies&q=matrix",
+    );
   });
 
   test("expanded genres provide an adjacent Collapse action", () => {

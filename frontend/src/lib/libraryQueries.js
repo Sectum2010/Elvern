@@ -1,5 +1,6 @@
 import { queryClient } from "./queryClient";
 import {
+  normalizeLibraryGenreKey,
   normalizeLibraryGenres,
   normalizeLibraryQualities,
 } from "./desktopLibraryViewState.js";
@@ -38,7 +39,7 @@ export function normalizeLibraryQueryIdentity({
     source: normalizeString(source, "all").toLowerCase(),
     genres: normalizeLibraryGenres(
       Array.isArray(genres) ? genres : (genre ? [genre] : []),
-    ).map((value) => value.toLocaleLowerCase()),
+    ).map(normalizeLibraryGenreKey),
     qualities: normalizeLibraryQualities(
       Array.isArray(qualities)
         ? qualities
