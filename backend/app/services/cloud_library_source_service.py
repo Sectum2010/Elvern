@@ -15,6 +15,7 @@ from .google_drive_service import (
     fetch_drive_resource_metadata,
     google_drive_enabled,
 )
+from .cloud_provider_auth_service import _hash_google_account_subject
 
 
 def _parse_cloud_source_error_detail(value: object) -> dict[str, object] | None:
@@ -458,6 +459,9 @@ def add_google_drive_library_source_record(
                 owner_user_id,
                 provider,
                 google_drive_account_id,
+                expected_google_account_subject_hash,
+                expected_google_account_email,
+                expected_google_account_name,
                 resource_type,
                 resource_id,
                 display_name,
@@ -466,12 +470,15 @@ def add_google_drive_library_source_record(
                 updated_at,
                 last_synced_at,
                 last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 user.id,
                 provider,
                 int(account_row["id"]),
+                _hash_google_account_subject(settings, str(account_row["google_account_id"])),
+                account_row.get("email"),
+                account_row.get("display_name"),
                 metadata["resource_type"],
                 metadata["resource_id"],
                 metadata["display_name"],

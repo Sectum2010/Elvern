@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import {
   apiRequest,
   isAbortError,
@@ -933,13 +934,18 @@ export function InstallSettingsPanel({ presentation = "default" }) {
     return (
       <article className="meridian-card meridian-helper-card">
         <div className="meridian-helper-card__header">
-          <span aria-hidden="true" className="meridian-icon-tile meridian-icon-tile--play">▶</span>
+          <span aria-hidden="true" className="meridian-icon-tile meridian-icon-tile--play">
+            <svg viewBox="0 0 24 24">
+              <circle cx="12" cy="12" fill="none" r="8.4" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M10 8.6v6.8L15.5 12z" fill="currentColor" />
+            </svg>
+          </span>
           <span className="meridian-row-copy">
             <strong>Elvern VLC Opener</strong>
             <small>{requiredSection.description || "Open media in VLC through the verified Elvern desktop handoff."}</small>
           </span>
           <span className="meridian-status-pill meridian-status-pill--neutral">Detected platform: {platformLabel(platform)}</span>
-          <span className={`meridian-status-pill meridian-status-pill--${status?.vlc_detection_state === "installed" ? "success" : "neutral"}`}>
+          <span className={`meridian-status-pill meridian-status-pill--with-dot meridian-status-pill--${status?.vlc_detection_state === "installed" ? "success" : "neutral"}`}>
             {loading ? "Checking" : helperStatusCopy(status)}
           </span>
         </div>
@@ -962,12 +968,11 @@ export function InstallSettingsPanel({ presentation = "default" }) {
         </div>
         <p className="meridian-helper-card__notes">
           {desktopHelperTestCopy(platform, status)}<br />
-          {desktopVlc?.copy}<br />
-          Last checked: {formatLastChecked(status?.vlc_detection_checked_at)}
+          {desktopVlc?.copy} · Last checked: {formatLastChecked(status?.vlc_detection_checked_at)}
         </p>
         {desktopVerifyFeedback ? <p aria-live="polite" className="meridian-inline-feedback" role="status">{desktopVerifyFeedback}</p> : null}
         <details className="meridian-details">
-          <summary>Details</summary>
+          <summary><ChevronDown aria-hidden="true" size={13} />Diagnostics</summary>
           <dl>
             <div><dt>Package version</dt><dd>{requiredSection.recommendedRelease?.version || "Unavailable"}</dd></div>
             <div><dt>Last seen helper version</dt><dd>{status?.last_seen_helper_version || "Unknown"}</dd></div>
@@ -975,9 +980,15 @@ export function InstallSettingsPanel({ presentation = "default" }) {
             <div><dt>Reported architecture</dt><dd>{status?.last_seen_helper_arch || "Unknown"}</dd></div>
             <div><dt>Package target</dt><dd>{requiredSection.recommendedRelease?.package_target || "Unavailable"}</dd></div>
             <div><dt>Runtime</dt><dd>{status?.runtime_included ? "Included" : "Not reported"}</dd></div>
+            <div><dt>Package binding</dt><dd>{requiredSection.recommendedRelease?.package_binding || "Legacy unverified"}</dd></div>
             <div><dt>Device ID</dt><dd>{status?.device_id || deviceId || "Unknown"}</dd></div>
           </dl>
         </details>
+        {platform === "linux" && status?.same_host ? (
+          <p className="meridian-helper-card__grounded-copy">
+            Linux same-host playback does not require the desktop helper. Open in VLC launches installed VLC directly on the Elvern host; browser playback remains a fallback only.
+          </p>
+        ) : null}
       </article>
     );
   }

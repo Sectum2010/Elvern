@@ -15,7 +15,11 @@ from .cloud_library_source_service import (
 from .cloud_provider_auth_service import (
     build_google_connect_callback_redirect as _build_google_connect_callback_redirect_impl,
     build_google_drive_connect_response as _build_google_drive_connect_response_impl,
+    cancel_google_account_candidate as _cancel_google_account_candidate_impl,
+    cancel_google_drive_connect as _cancel_google_drive_connect_impl,
     complete_google_drive_connect as _complete_google_drive_connect_impl,
+    confirm_google_account_candidate as _confirm_google_account_candidate_impl,
+    get_google_account_candidate_payload as _get_google_account_candidate_payload_impl,
     get_google_drive_account_access_token as _get_google_drive_account_access_token_impl,
     get_google_drive_account_access_token_by_account_id as _get_google_drive_account_access_token_by_account_id_impl,
     resolve_google_connect_state as _resolve_google_connect_state_impl,
@@ -65,12 +69,65 @@ def build_google_drive_connect_response(
     settings: Settings,
     *,
     user_id: int,
+    auth_session_id: int,
+    operation_id: str,
     return_path: str | None = None,
 ) -> dict[str, str]:
     return _build_google_drive_connect_response_impl(
         settings,
         user_id=user_id,
+        auth_session_id=auth_session_id,
+        operation_id=operation_id,
         return_path=return_path,
+    )
+
+
+def cancel_google_drive_connect(settings: Settings, *, state_token: str) -> None:
+    _cancel_google_drive_connect_impl(settings, state_token=state_token)
+
+
+def get_google_account_candidate_payload(
+    settings: Settings,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id: str,
+) -> dict[str, object]:
+    return _get_google_account_candidate_payload_impl(
+        settings,
+        user_id=user_id,
+        auth_session_id=auth_session_id,
+        operation_id=operation_id,
+    )
+
+
+def cancel_google_account_candidate(
+    settings: Settings,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id: str,
+) -> None:
+    _cancel_google_account_candidate_impl(
+        settings,
+        user_id=user_id,
+        auth_session_id=auth_session_id,
+        operation_id=operation_id,
+    )
+
+
+def confirm_google_account_candidate(
+    settings: Settings,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id: str,
+) -> dict[str, object]:
+    return _confirm_google_account_candidate_impl(
+        settings,
+        user_id=user_id,
+        auth_session_id=auth_session_id,
+        operation_id=operation_id,
     )
 
 

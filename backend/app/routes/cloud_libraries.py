@@ -9,6 +9,9 @@ from ..schemas import (
     CloudLibrarySourceCreateRequest,
     CloudLibrarySourceMoveRequest,
     CloudLibrarySourceSummary,
+    GoogleDriveAccountCandidateRequest,
+    GoogleDriveAccountCandidateResponse,
+    GoogleDriveAccountReplacementResponse,
     GoogleDriveConnectRequest,
     GoogleDriveConnectResponse,
     MessageResponse,
@@ -18,8 +21,12 @@ from ..services.cloud_library_service import (
     add_google_drive_library_source,
     build_google_connect_callback_redirect,
     build_google_drive_connect_response,
+    cancel_google_account_candidate,
+    cancel_google_drive_connect,
     complete_google_drive_connect,
+    confirm_google_account_candidate,
     get_cloud_libraries_payload,
+    get_google_account_candidate_payload,
     get_google_drive_provider_auth_status_payload,
     hide_shared_library_source_for_user,
     move_google_drive_library_source,
@@ -29,6 +36,12 @@ from ..services.cloud_library_service import (
 
 
 router = APIRouter(prefix="/api/cloud-libraries", tags=["cloud-libraries"])
+
+
+def _require_auth_session_id(user) -> int:
+    if user.session_id is None:
+        raise HTTPException(status_code=401, detail="Session is no longer active.")
+    return int(user.session_id)
 
 
 @router.get("", response_model=CloudLibrariesResponse)
@@ -52,9 +65,56 @@ def cloud_libraries_google_connect(
     response_payload = build_google_drive_connect_response(
         request.app.state.settings,
         user_id=user.id,
+        auth_session_id=_require_auth_session_id(user),
+        operation_id=payload.operation_id if payload else "",
         return_path=payload.return_path if payload else None,
     )
     return GoogleDriveConnectResponse(**response_payload)
+
+
+@router.post("/google/account-candidate/status", response_model=GoogleDriveAccountCandidateResponse)
+def read_google_account_candidate(
+    payload: GoogleDriveAccountCandidateRequest,
+    request: Request,
+    user=CurrentUser,
+) -> GoogleDriveAccountCandidateResponse:
+    result = get_google_account_candidate_payload(
+        request.app.state.settings,
+        user_id=user.id,
+        auth_session_id=_require_auth_session_id(user),
+        operation_id=payload.operation_id,
+    )
+    return GoogleDriveAccountCandidateResponse(**result)
+
+
+@router.post("/google/account-candidate/cancel", response_model=MessageResponse)
+def cancel_google_account_replacement(
+    payload: GoogleDriveAccountCandidateRequest,
+    request: Request,
+    user=CurrentUser,
+) -> MessageResponse:
+    cancel_google_account_candidate(
+        request.app.state.settings,
+        user_id=user.id,
+        auth_session_id=_require_auth_session_id(user),
+        operation_id=payload.operation_id,
+    )
+    return MessageResponse(message="Google Drive account replacement cancelled.")
+
+
+@router.post("/google/account-candidate/replace", response_model=GoogleDriveAccountReplacementResponse)
+def confirm_google_account_replacement(
+    payload: GoogleDriveAccountCandidateRequest,
+    request: Request,
+    user=CurrentUser,
+) -> GoogleDriveAccountReplacementResponse:
+    result = confirm_google_account_candidate(
+        request.app.state.settings,
+        user_id=user.id,
+        auth_session_id=_require_auth_session_id(user),
+        operation_id=payload.operation_id,
+    )
+    return GoogleDriveAccountReplacementResponse(**result)
 
 
 @router.get("/google/callback")
@@ -66,22 +126,30 @@ def cloud_libraries_google_callback(
 ):
     state_context = resolve_google_connect_state(state)
     if error:
+        cancel_google_drive_connect(request.app.state.settings, state_token=state)
         redirect_target = build_google_connect_callback_redirect(
             request.app.state.settings,
             success=False,
             message="Google Drive sign-in was cancelled or denied.",
             return_path=state_context.get("return_path"),
+            status_value="cancelled",
         )
         return RedirectResponse(redirect_target, status_code=303)
     if not code:
         raise HTTPException(status_code=400, detail="Google Drive callback code is missing.")
     try:
         result = complete_google_drive_connect(request.app.state.settings, state_token=state, code=code)
+        result_status = str(result.get("status") or "connected")
         redirect_target = build_google_connect_callback_redirect(
             request.app.state.settings,
-            success=True,
-            message="Google Drive connected.",
+            success=result_status == "connected",
+            message=(
+                "Choose whether to replace the Google Drive account."
+                if result_status == "account_mismatch"
+                else "Google Drive connected."
+            ),
             return_path=str(result.get("return_path") or "") or None,
+            status_value=result_status,
         )
     except HTTPException as exc:
         error_message = exc.detail

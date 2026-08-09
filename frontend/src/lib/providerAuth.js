@@ -2,7 +2,8 @@ import { apiRequest } from "./api.js";
 
 
 const PROVIDER_AUTH_INTENT_KEY = "elvern:provider-auth-intent";
-const PROVIDER_AUTH_INTENT_MAX_AGE_MS = 30 * 60 * 1000;
+export const PROVIDER_AUTH_INTENT_MAX_AGE_MS = 15 * 60 * 1000;
+export const GOOGLE_DRIVE_SETTINGS_RETURN_PATH = "/settings/cloud-sharing";
 export const PROVIDER_AUTH_ADMIN_NOTICE_MESSAGE = "Your cloud provider token has expired. Contact an admin to stream cloud-stored movies.";
 export const PROVIDER_RECONNECT_CANCELLED_MESSAGE = "Reconnect was not completed.";
 export const PROVIDER_RECONNECT_PENDING_RESET_MS = 10000;
@@ -96,20 +97,7 @@ export function shouldShowProviderAuthActionModal({ itemSourceKind, requirement 
 
 
 export function buildProviderAuthReturnPath(currentLocation) {
-  if (typeof currentLocation === "string") {
-    try {
-      currentLocation = new URL(currentLocation, "http://elvern.local");
-    } catch {
-      return "/";
-    }
-  }
-  const pathname = currentLocation?.pathname || "/";
-  const searchParams = new URLSearchParams(currentLocation?.search || "");
-  searchParams.delete("googleDriveStatus");
-  searchParams.delete("googleDriveMessage");
-  const search = searchParams.toString();
-  const hash = currentLocation?.hash || "";
-  return `${pathname}${search ? `?${search}` : ""}${hash}`;
+  return GOOGLE_DRIVE_SETTINGS_RETURN_PATH;
 }
 
 
@@ -139,6 +127,23 @@ export function shouldResetProviderReconnectPending({
 }
 
 
+export function getProviderAuthIdentity(user) {
+  if (!user) {
+    return "";
+  }
+  return `${String(user.id ?? "")}:${String(user.role || "").trim().toLowerCase()}`;
+}
+
+
+export function createProviderAuthOperationId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const entropy = `${Date.now()}-${Math.random()}-${Math.random()}`;
+  return btoa(entropy).replace(/[^A-Za-z0-9_-]/g, "").padEnd(24, "0").slice(0, 96);
+}
+
+
 export function saveProviderAuthIntent(intent) {
   if (typeof window === "undefined" || !intent || typeof intent !== "object") {
     return;
@@ -157,7 +162,7 @@ export function saveProviderAuthIntent(intent) {
 }
 
 
-export function readProviderAuthIntent() {
+export function readProviderAuthIntent({ identity = "" } = {}) {
   if (typeof window === "undefined") {
     return null;
   }
@@ -171,6 +176,11 @@ export function readProviderAuthIntent() {
       return null;
     }
     if (Date.now() - Number(payload.savedAt || 0) > PROVIDER_AUTH_INTENT_MAX_AGE_MS) {
+      clearProviderAuthIntent();
+      return null;
+    }
+    if (identity && payload.identity !== identity) {
+      clearProviderAuthIntent();
       return null;
     }
     return payload;
@@ -197,10 +207,11 @@ export function shouldGuardGoogleDriveAction({ itemSourceKind, reconnectRequired
 }
 
 
-export async function startGoogleDriveReconnect({ returnPath } = {}) {
-  const requestData = returnPath
-    ? { return_path: returnPath }
-    : undefined;
+export async function startGoogleDriveReconnect({ operationId, returnPath } = {}) {
+  const requestData = {
+    operation_id: operationId,
+    return_path: returnPath || GOOGLE_DRIVE_SETTINGS_RETURN_PATH,
+  };
   const payload = await apiRequest("/api/cloud-libraries/google/connect", {
     method: "POST",
     data: requestData,

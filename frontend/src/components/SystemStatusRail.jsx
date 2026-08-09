@@ -42,8 +42,8 @@ function helperVlcValue(helper) {
 function googleDriveValue(cloudLibraries) {
   const google = cloudLibraries?.google;
   if (!google) return "Unavailable";
-  if (google.connected) return "Connected";
   if (google.reconnect_required) return "Needs attention";
+  if (google.connected) return "Connected";
   return google.enabled ? "Not connected" : "Disabled";
 }
 
@@ -53,6 +53,14 @@ function formatCallback(helper) {
   if (!helper.last_seen_helper_at) return "Never";
   const candidate = new Date(helper.last_seen_helper_at);
   return Number.isNaN(candidate.getTime()) ? "Never" : candidate.toLocaleString();
+}
+
+function statusTone(label, value) {
+  if (label === "Hidden titles") return "hidden";
+  if (value === "Connected" || value === "Configured" || value === "Ready" || value === "Detected" || value === "Not required") return "success";
+  if (/attention|reconnect|stale/i.test(value)) return "warning";
+  if (/error|not found|failed/i.test(value)) return "danger";
+  return "neutral";
 }
 
 export function buildSystemStatusRailRows({ payloads, platform, deviceId }) {
@@ -178,7 +186,7 @@ export function SystemStatusRail() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [setStatusRailOpen, statusRailOpen]);
 
-  if (user?.role !== "admin" || !statusRailOpen) return null;
+  if (user?.role !== "admin") return null;
 
   const rows = buildSystemStatusRailRows({ payloads, platform, deviceId });
   const resourceForLabel = {
@@ -193,31 +201,35 @@ export function SystemStatusRail() {
     Island: "userSettings",
   };
   return (
-    <aside aria-label="System status" className="control-center-status-rail">
-      <header className="control-center-status-rail__header">
-        <span>SYSTEM STATUS</span>
-        {loading ? <i aria-label="Refreshing system status" className="control-center-status-rail__loading" /> : null}
-      </header>
-      <dl className="control-center-status-rail__list">
-        {rows.map(([label, value]) => (
-          <div key={label}>
-            <dt>{label}</dt>
-            <dd title={value}>
-              <i
-                aria-label={staleResources.includes(resourceForLabel[label]) ? "Last known value" : undefined}
-                className={staleResources.includes(resourceForLabel[label]) ? "is-stale" : ""}
-              />
-              {value}
-            </dd>
-          </div>
-        ))}
-      </dl>
-      <div className="control-center-status-rail__device">
-        <span>DEVICE</span>
-        <dl>
-          <div><dt>Device ID</dt><dd title={deviceId || "Unavailable"}>{deviceId || "Unavailable"}</dd></div>
-          <div><dt>Last callback</dt><dd>{formatCallback(payloads.desktopHelper)}</dd></div>
+    <aside aria-hidden={!statusRailOpen} aria-label="System status" className="control-center-status-rail">
+      <div className="control-center-status-rail__inner">
+        <header className="control-center-status-rail__header">
+          <span>SYSTEM STATUS</span>
+        </header>
+        <dl className="control-center-status-rail__list">
+          {rows.map(([label, value]) => {
+            const stale = staleResources.includes(resourceForLabel[label]);
+            return (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd title={value}>
+                  <i
+                    aria-label={stale ? "Last known value" : undefined}
+                    className={stale ? "is-stale" : `is-${statusTone(label, value)}`}
+                  />
+                  {value}
+                </dd>
+              </div>
+            );
+          })}
         </dl>
+        <div className="control-center-status-rail__device">
+          <span>DEVICE</span>
+          <dl>
+            <div><dt>Device ID</dt><dd title={deviceId || "Unavailable"}>{deviceId || "Unavailable"}</dd></div>
+            <div><dt>Last callback</dt><dd>{formatCallback(payloads.desktopHelper)}</dd></div>
+          </dl>
+        </div>
       </div>
     </aside>
   );

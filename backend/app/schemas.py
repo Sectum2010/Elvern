@@ -831,6 +831,25 @@ class GoogleDriveConnectResponse(BaseModel):
 
 class GoogleDriveConnectRequest(BaseModel):
     return_path: str | None = None
+    operation_id: str = Field(min_length=24, max_length=160, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class GoogleDriveAccountCandidateRequest(BaseModel):
+    operation_id: str = Field(min_length=24, max_length=160, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class GoogleDriveAccountCandidateResponse(BaseModel):
+    status: Literal["account_mismatch"] = "account_mismatch"
+    current_account_label: str
+    candidate_account_label: str
+    expires_at: str
+
+
+class GoogleDriveAccountReplacementResponse(BaseModel):
+    status: Literal["connected"] = "connected"
+    migrated_source_count: int = 0
+    failed_source_count: int = 0
+    account_label: str
 
 
 class CloudLibrarySourceCreateRequest(BaseModel):

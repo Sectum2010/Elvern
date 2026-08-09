@@ -196,7 +196,7 @@ describe("AdminPage exposure mode planner guards", () => {
     const source = readAdminPage();
     const handlerStart = source.indexOf("async function handleOpenExposurePlanner()");
     const handlerEnd = source.indexOf("function handleCloseExposurePlanner()", handlerStart);
-    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalStart = source.indexOf("const legacyExposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
 
     expect(source).toContain("const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false)");
@@ -226,7 +226,7 @@ describe("AdminPage exposure mode planner guards", () => {
 
   test("planner modal includes modes, providers, Maintenance Mode actions, prepare actions, and no activation route", () => {
     const source = readAdminPage();
-    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalStart = source.indexOf("const legacyExposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
     const modalSource = source.slice(modalStart, modalEnd);
 
@@ -242,7 +242,7 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(source).toContain("const EXPOSURE_MODE_SEGMENTS = [");
     expect(source).toContain("{ value: \"private\", label: \"Private\" }");
     expect(source).toContain("{ value: \"public_custom_domain\", label: \"Public domain\" }");
-    expect(source).toContain("{ value: \"public_direct_ip\", label: \"Direct IP\", badge: \"Not recommended\" }");
+    expect(source).toContain("{ value: \"public_direct_ip\", label: \"Direct IP ⚠\" }");
     expect(modalSource).toContain("className=\"exposure-mode-segmented\"");
     expect(modalSource).toContain("options={EXPOSURE_MODE_SEGMENTS}");
     expect(source).toContain("Public Mode - Direct IP (Not recommended)");
@@ -314,7 +314,7 @@ describe("AdminPage exposure mode planner guards", () => {
 
   test("planner modal includes prepared switch verification without activation controls", () => {
     const source = readAdminPage();
-    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalStart = source.indexOf("const legacyExposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
     const modalSource = source.slice(modalStart, modalEnd);
 
@@ -343,7 +343,7 @@ describe("AdminPage exposure mode planner guards", () => {
 
   test("planner modal includes finalized profile controls without release actions", () => {
     const source = readAdminPage();
-    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalStart = source.indexOf("const legacyExposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
     const modalSource = source.slice(modalStart, modalEnd);
 
@@ -365,7 +365,7 @@ describe("AdminPage exposure mode planner guards", () => {
 
   test("planner modal renders validation details and grouped planning notes", () => {
     const source = readAdminPage();
-    const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
+    const modalStart = source.indexOf("const legacyExposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
     const modalSource = source.slice(modalStart, modalEnd);
 
@@ -447,5 +447,24 @@ describe("AdminPage desktop Control Center contracts", () => {
     expect(source).toContain("requestEntry.user_id");
     expect(source).toContain("Open user actions");
     expect(source).toContain("openUserActionsModal(requestUser)");
+  });
+
+  test("desktop Meridian exposure planner presents four phases through the existing handlers", () => {
+    const source = readAdminPage();
+    const componentStart = source.indexOf("function MeridianExposurePlannerModal({ model })");
+    const componentEnd = source.indexOf("function exposurePayloadFromDraft", componentStart);
+    const componentSource = source.slice(componentStart, componentEnd);
+
+    expect(componentStart).toBeGreaterThan(0);
+    expect(source).toContain('const MERIDIAN_EXPOSURE_PHASES = ["1 · Draft", "2 · Prepare", "3 · Verify", "4 · Finalize"]');
+    expect(componentSource).toContain('role="tablist"');
+    expect(componentSource).toContain('role="tab"');
+    expect(componentSource).toContain("model.onValidate");
+    expect(componentSource).toContain("model.onSaveDraft");
+    expect(componentSource).toContain("model.onPrepare");
+    expect(componentSource).toContain("model.onVerify");
+    expect(componentSource).toContain("model.onFinalize");
+    expect(source).toContain("desktopControlCenter ? (");
+    expect(source).toContain(": legacyExposurePlannerModal;");
   });
 });

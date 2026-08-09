@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
+from backend.app.auth import create_session, get_user_by_session_token
 from backend.app.db import ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME, get_connection, init_db, utcnow_iso
+from backend.app.models import AuthenticatedUser
 from backend.app.security import TOKEN_HASH_PREFIX
-from backend.app.services import cloud_provider_auth_service, cloud_source_sync_service
+from backend.app.services import cloud_provider_auth_service
 from backend.app.services.app_settings_service import update_google_drive_setup
 
 
@@ -24,6 +26,19 @@ def _state_from_authorization_url(authorization_url: str) -> str:
     return parse_qs(parsed.query)["state"][0]
 
 
+def _oauth_session_id(settings, *, user_id: int = 1) -> int:
+    token = create_session(
+        settings,
+        AuthenticatedUser(id=user_id, username=f"user-{user_id}", role="admin"),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    session_user = get_user_by_session_token(settings, token)
+    assert session_user is not None
+    assert session_user.session_id is not None
+    return session_user.session_id
+
+
 def test_google_oauth_state_is_hmac_stored_and_callback_uses_hmac_lookup(
     initialized_settings,
     monkeypatch,
@@ -33,6 +48,8 @@ def test_google_oauth_state_is_hmac_stored_and_callback_uses_hmac_lookup(
     response = cloud_provider_auth_service.build_google_drive_connect_response(
         initialized_settings,
         user_id=1,
+        auth_session_id=_oauth_session_id(initialized_settings),
+        operation_id="oauth-operation-0000000000000001",
         return_path="/settings?tab=cloud",
     )
     state_payload = _state_from_authorization_url(response["authorization_url"])
@@ -76,7 +93,7 @@ def test_google_oauth_state_is_hmac_stored_and_callback_uses_hmac_lookup(
     )
 
     assert result["user_id"] == 1
-    assert result["return_path"] == "/settings?tab=cloud"
+    assert result["return_path"] == "/settings/cloud-sharing"
     with get_connection(initialized_settings) as connection:
         assert (
             connection.execute(
@@ -122,7 +139,7 @@ def test_account_short_token_hmac_migration_deletes_legacy_plaintext_google_oaut
     assert marker_count == 1
 
 
-def test_google_reconnect_rebinds_only_the_owners_orphaned_google_sources(
+def test_google_first_connect_does_not_claim_identity_unknown_orphaned_sources(
     initialized_settings,
     monkeypatch,
 ) -> None:
@@ -155,6 +172,8 @@ def test_google_reconnect_rebinds_only_the_owners_orphaned_google_sources(
     response = cloud_provider_auth_service.build_google_drive_connect_response(
         initialized_settings,
         user_id=1,
+        auth_session_id=_oauth_session_id(initialized_settings),
+        operation_id="oauth-operation-0000000000000002",
     )
     state_payload = _state_from_authorization_url(response["authorization_url"])
     monkeypatch.setattr(
@@ -186,9 +205,6 @@ def test_google_reconnect_rebinds_only_the_owners_orphaned_google_sources(
         account_id = int(connection.execute(
             "SELECT id FROM google_drive_accounts WHERE user_id = 1",
         ).fetchone()["id"])
-        owner_source_id = int(connection.execute(
-            "SELECT id FROM library_sources WHERE resource_id = 'owner-google'",
-        ).fetchone()["id"])
         sources = {
             row["resource_id"]: dict(row)
             for row in connection.execute(
@@ -200,8 +216,8 @@ def test_google_reconnect_rebinds_only_the_owners_orphaned_google_sources(
             )
         }
 
-    assert sources["owner-google"]["google_drive_account_id"] == account_id
-    assert sources["owner-google"]["last_error"] is None
+    assert sources["owner-google"]["google_drive_account_id"] is None
+    assert sources["owner-google"]["last_error"] == "stale owner error"
     assert sources["other-google"]["google_drive_account_id"] is None
     assert sources["other-google"]["last_error"] == "stale other error"
     assert sources["owner-local"]["google_drive_account_id"] is None
@@ -210,33 +226,3 @@ def test_google_reconnect_rebinds_only_the_owners_orphaned_google_sources(
         initialized_settings,
         google_account_id=account_id,
     ) == "reconnected-access-token"
-
-    monkeypatch.setattr(
-        cloud_source_sync_service,
-        "fetch_drive_resource_metadata",
-        lambda *args, **kwargs: {
-            "resource_id": "owner-google",
-            "display_name": "Owner Google",
-        },
-    )
-    monkeypatch.setattr(
-        cloud_source_sync_service,
-        "list_drive_media_files",
-        lambda *args, **kwargs: [],
-    )
-    assert cloud_source_sync_service._sync_google_drive_library_source(
-        initialized_settings,
-        source_id=owner_source_id,
-        raise_on_error=True,
-        provider="google_drive",
-        get_access_token_by_account_id=(
-            cloud_provider_auth_service.get_google_drive_account_access_token_by_account_id
-        ),
-    ) == 0
-    with get_connection(initialized_settings) as connection:
-        synced_source = connection.execute(
-            "SELECT last_synced_at, last_error FROM library_sources WHERE id = ?",
-            (owner_source_id,),
-        ).fetchone()
-    assert synced_source["last_synced_at"] is not None
-    assert synced_source["last_error"] is None

@@ -87,7 +87,7 @@ const EXPOSURE_PROVIDER_LABELS = {
 const EXPOSURE_MODE_SEGMENTS = [
   { value: "private", label: "Private" },
   { value: "public_custom_domain", label: "Public domain" },
-  { value: "public_direct_ip", label: "Direct IP", badge: "Not recommended" },
+  { value: "public_direct_ip", label: "Direct IP ⚠" },
 ];
 const EXPOSURE_MAINTENANCE_SEGMENTS = [
   { value: "off", label: "Off" },
@@ -300,6 +300,226 @@ function ExposureVerificationCheckGroup({ title, checks, emptyText }) {
       ) : (
         <p className="page-subnote">{emptyText}</p>
       )}
+    </div>
+  );
+}
+
+
+const MERIDIAN_EXPOSURE_PHASES = ["1 · Draft", "2 · Prepare", "3 · Verify", "4 · Finalize"];
+
+
+function MeridianExposurePlannerModal({ model }) {
+  const [phase, setPhase] = useState(0);
+  const [manualPlanOpen, setManualPlanOpen] = useState(false);
+  const phaseForms = [model.draft, model.prepareForm, model.verifyForm, model.finalizeForm];
+  const phaseSetters = [model.setDraft, model.setPrepareForm, model.setVerifyForm, model.setFinalizeForm];
+  const currentForm = phaseForms[phase];
+  const setCurrentForm = phaseSetters[phase];
+  const acknowledgementCopy = [
+    "This pending draft does not take effect until a later activation phase.",
+    EXPOSURE_PREPARE_ACKNOWLEDGEMENT,
+    EXPOSURE_VERIFY_ACKNOWLEDGEMENT,
+    EXPOSURE_FINALIZE_ACKNOWLEDGEMENT,
+  ][phase];
+  const originLabel = model.draft.selectedMode === "private"
+    ? "PRIVATE ORIGIN — optional tailnet, LAN, or private DNS address"
+    : model.draft.selectedMode === "public_custom_domain"
+      ? "PUBLIC ORIGIN — the https domain users will browse to"
+      : "DIRECT IP — not recommended; bypasses the URL prefix";
+  const originValue = model.draft.selectedMode === "private" ? model.draft.privateOrigin : model.draft.publicOrigin;
+  const setOrigin = (value) => model.setDraft((current) => (
+    current.selectedMode === "private"
+      ? { ...current, privateOrigin: value }
+      : { ...current, publicOrigin: value }
+  ));
+  const chips = [
+    ["Exposure", model.modeStatus],
+    ["Validation", model.validationStatusLabel],
+    ["Draft", model.pendingDraft ? "Saved" : "None"],
+    ["Prepared", model.preparedSwitchStatus],
+    ["Maintenance", model.maintenanceLockStatus],
+  ];
+  const currentRows = [
+    ["Current request origin", formatExposureValue(model.active.current_request_origin)],
+    ["public_app_origin", formatExposureValue(model.active.public_app_origin)],
+    ["backend_origin", formatExposureValue(model.active.backend_origin)],
+    ["Private-network flag", model.active.private_network_only ? "Enabled" : "Disabled"],
+    ["Trusted proxy CIDRs", formatExposureValue(model.active.trusted_proxy_cidrs)],
+    ["Cookie secure", formatExposureValue(model.active.cookie_secure)],
+    ["URL prefix present", formatExposureValue(model.active.url_prefix_present)],
+  ];
+  const prepareRows = [
+    ["Pending draft", model.pendingDraft ? "Saved" : "Missing"],
+    ["Maintenance Mode", model.maintenanceLockStatus === "On" ? "On" : "Will be enabled automatically on prepare"],
+    ["URL prefix rotation", "Manual only"],
+    ["Env writing", "Manual only"],
+    ["Runtime effect", "None yet"],
+    ["Prepared by / at", model.preparedSwitch ? `${formatExposureValue(model.preparedSwitch.prepared_by_username)} · ${formatExposureValue(model.preparedSwitch.prepared_at)}` : "Not set"],
+  ];
+  const verifyRows = [
+    ["Prepared status", model.preparedSwitchStatusDetail],
+    ["Expected origin", formatExposureValue(model.expectedOrigin)],
+    ["Verification status", model.verificationStatusLabel],
+    ["Maintenance Mode", model.maintenanceLockStatus],
+  ];
+  const finalizeRows = [
+    ["Verified mode", model.finalizeProfileLabel],
+    ["Origin", formatExposureValue(model.finalizeOrigin)],
+    ["Takes effect", "No runtime settings are changed by this record"],
+    ["Maintenance Mode", "Remains under admin control"],
+  ];
+  const verificationBoxes = [
+    ["Current access", model.currentAccessChecks],
+    ["Runtime settings", model.runtimeSettingChecks],
+    ["Safety state", model.safetyStateChecks],
+    ["Warnings", model.warningChecks],
+  ];
+  const feedback = [model.feedback, model.prepareFeedback, model.verifyFeedback, model.finalizeFeedback][phase];
+  const primaryActions = [
+    ["Validate plan", model.onValidate],
+    ["Prepare manual switch", model.onPrepare],
+    ["Verify prepared switch", model.onVerify],
+    ["Finalize verified profile", model.onFinalize],
+  ];
+
+  return (
+    <div
+      aria-labelledby="admin-exposure-planner-modal-title"
+      aria-modal="true"
+      className="browser-resume-modal exposure-planner-modal-shell meridian-exposure-modal-shell"
+      role="dialog"
+    >
+      <button
+        aria-label="Close exposure mode manager"
+        className="browser-resume-modal__backdrop exposure-planner-modal__backdrop"
+        disabled={model.pending}
+        onClick={model.onClose}
+        type="button"
+      />
+      <div className="meridian-exposure-modal">
+        <header className="meridian-exposure-modal__header">
+          <span>
+            <small>SECURITY</small>
+            <h2 id="admin-exposure-planner-modal-title">Manage Exposure Mode</h2>
+            <p>Plan private or public exposure without changing the running server.</p>
+          </span>
+          <span className="meridian-exposure-modal__header-actions">
+            <span className="meridian-exposure-modal__draft-pill">Draft only</span>
+            <button aria-label="Close exposure mode manager" disabled={model.pending} onClick={model.onClose} type="button">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </span>
+        </header>
+        <p className="meridian-exposure-modal__warning">
+          Draft only — validation and pending drafts do not change runtime behavior, write env files, rotate the URL prefix, or disable users. Prepare only creates a manual plan and enables Maintenance Mode.
+        </p>
+        <div className="meridian-exposure-modal__chips">
+          {chips.map(([label, value]) => <span key={label}>{label}<strong>{value}</strong></span>)}
+        </div>
+        <div aria-label="Exposure planning phases" className="meridian-exposure-modal__steps" role="tablist">
+          {MERIDIAN_EXPOSURE_PHASES.map((label, index) => (
+            <button
+              aria-selected={phase === index}
+              className={index <= phase ? "is-complete" : ""}
+              key={label}
+              onClick={() => setPhase(index)}
+              role="tab"
+              type="button"
+            >
+              <i aria-hidden="true" />
+              <span>{label}</span>
+            </button>
+          ))}
+        </div>
+        <div className="meridian-exposure-modal__body">
+          {phase === 0 ? (
+            <div className="meridian-exposure-modal__phase">
+              <small className="meridian-exposure-modal__label">DESIRED MODE — THIS SELECTOR DOES NOT SWITCH RUNTIME EXPOSURE</small>
+              <ExposureSegmentedControl
+                ariaLabel="Desired exposure mode"
+                className="meridian-exposure-modal__mode"
+                onChange={(selectedMode) => model.setDraft((current) => ({ ...current, selectedMode }))}
+                options={EXPOSURE_MODE_SEGMENTS}
+                value={model.draft.selectedMode}
+              />
+              <label className="meridian-exposure-modal__origin">
+                <span>{originLabel}</span>
+                <input onChange={(event) => setOrigin(event.target.value)} value={originValue} />
+              </label>
+              {model.draft.selectedMode !== "private" ? (
+                <label className="meridian-exposure-modal__origin">
+                  <span>REVERSE PROXY PROVIDER</span>
+                  <select onChange={(event) => model.setDraft((current) => ({ ...current, reverseProxyProvider: event.target.value }))} value={model.draft.reverseProxyProvider}>
+                    {Object.entries(EXPOSURE_PROVIDER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  </select>
+                </label>
+              ) : null}
+              <div className="meridian-exposure-modal__rows">
+                {currentRows.map(([label, value]) => <span key={label}><small>{label}</small><strong>{value}</strong></span>)}
+              </div>
+              {model.feedback?.tone === "success" ? <InlineFeedback feedback={model.feedback} /> : null}
+            </div>
+          ) : null}
+          {phase === 1 ? (
+            <div className="meridian-exposure-modal__phase">
+              <div className="meridian-exposure-modal__rows meridian-exposure-modal__rows--single">
+                {prepareRows.map(([label, value]) => <span key={label}><small>{label}</small><strong>{value}</strong></span>)}
+              </div>
+              <button className="meridian-exposure-modal__disclosure" onClick={() => setManualPlanOpen((open) => !open)} type="button">
+                <svg aria-hidden="true" className={manualPlanOpen ? "is-open" : ""} viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+                Manual plan &amp; notes
+              </button>
+              {manualPlanOpen ? <div className="meridian-exposure-modal__notes">{model.manualPlanLines.map((line) => <p key={line}>· {line}</p>)}</div> : null}
+            </div>
+          ) : null}
+          {phase === 2 ? (
+            <div className="meridian-exposure-modal__phase">
+              <div className="meridian-exposure-modal__rows meridian-exposure-modal__rows--single">
+                {verifyRows.map(([label, value]) => <span key={label}><small>{label}</small><strong>{value}</strong></span>)}
+              </div>
+              <p className="meridian-exposure-modal__body-copy">Run this only after manually applying env/proxy/DNS changes, manually restarting Elvern, and returning through the intended target address. Maintenance Mode remains under admin control.</p>
+              <div className="meridian-exposure-modal__verification">
+                {verificationBoxes.map(([label, checks]) => (
+                  <span key={label}><strong>{label}</strong><small>{checks.length > 0 ? `${checks.length} check(s) recorded.` : "No checks have run yet."}</small></span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {phase === 3 ? (
+            <div className="meridian-exposure-modal__phase">
+              <div className="meridian-exposure-modal__rows meridian-exposure-modal__rows--single">
+                {finalizeRows.map(([label, value]) => <span key={label}><small>{label}</small><strong>{value}</strong></span>)}
+              </div>
+              <p className="meridian-exposure-modal__body-copy">Maintenance Mode remains on until an admin turns it off.</p>
+            </div>
+          ) : null}
+        </div>
+        <footer className="meridian-exposure-modal__footer">
+          <label className="meridian-exposure-modal__ack">
+            <input
+              checked={Boolean(currentForm.acknowledgement)}
+              onChange={(event) => setCurrentForm((current) => ({ ...current, acknowledgement: event.target.checked }))}
+              type="checkbox"
+            />
+            <span>{acknowledgementCopy}</span>
+          </label>
+          <div className="meridian-exposure-modal__footer-actions">
+            <NonLoginSecretInput
+              autoComplete="new-password"
+              onChange={(event) => setCurrentForm((current) => ({ ...current, currentAdminPassword: event.target.value }))}
+              placeholder="Current admin password"
+              value={currentForm.currentAdminPassword}
+            />
+            {phase === 0 ? <button className="meridian-pill-button" disabled={model.pending} onClick={model.onSaveDraft} type="button">Save pending draft</button> : null}
+            {phase === 0 ? <button className="meridian-pill-button" disabled={model.pending || !model.pendingDraft} onClick={model.onClearDraft} type="button">Clear pending draft</button> : null}
+            {phase === 1 ? <button className="meridian-pill-button" disabled={model.pending || !model.preparedSwitch} onClick={model.onClearPrepared} type="button">Clear prepared switch</button> : null}
+            <button className="meridian-pill-button meridian-pill-button--primary" disabled={model.pending} onClick={primaryActions[phase][1]} type="button">
+              {model.pending ? "Working…" : primaryActions[phase][0]}
+            </button>
+          </div>
+          <InlineFeedback feedback={feedback} />
+        </footer>
+      </div>
     </div>
   );
 }
@@ -3415,7 +3635,7 @@ export function AdminPage() {
             {showAllUsers ? "Show fewer" : `Show all ${usersPayload.length}`}
           </button>
         ) : null}
-        <div
+        {!desktopControlCenter ? <div
           className={[
             "admin-list__row admin-user-row admin-create-user-row",
             createUserExpanded ? "admin-create-user-row--expanded" : "",
@@ -3524,10 +3744,107 @@ export function AdminPage() {
               </form>
             ) : null}
           </div>
-        </div>
+        </div> : null}
       </div>
     </section>
   );
+
+  const desktopCreateUserCard = desktopControlCenter ? (
+    <section className={`meridian-card meridian-create-user-card${createUserExpanded ? " meridian-create-user-card--expanded" : ""}`}>
+      <div className="meridian-create-user-card__header">
+        <button
+          aria-expanded={createUserExpanded}
+          aria-label="Create user"
+          className="meridian-create-user-card__trigger"
+          onClick={toggleCreateUserForm}
+          type="button"
+        >
+          <span aria-hidden="true" className="meridian-create-user-card__icon">+</span>
+          <span>Create user</span>
+        </button>
+        {createUserExpanded ? (
+          <div className="meridian-create-user-card__ages" aria-label="Age credential">
+            {[18, 16, 13].map((age) => (
+              <button
+                aria-pressed={createUserForm.ageCredential === age}
+                className={createUserForm.ageCredential === age ? "is-active" : ""}
+                key={age}
+                onClick={() => setCreateUserForm((current) => ({ ...current, ageCredential: age }))}
+                type="button"
+              >
+                {formatAgeCredential(age)}
+              </button>
+            ))}
+            <button
+              aria-expanded={showAllCreateUserAges}
+              onClick={() => setShowAllCreateUserAges((current) => !current)}
+              type="button"
+            >
+              More
+            </button>
+          </div>
+        ) : null}
+      </div>
+      {createUserExpanded ? (
+        <form className="meridian-create-user-card__form" onSubmit={handleCreateUser}>
+          <label>
+            <span>USERNAME</span>
+            <input
+              autoComplete="off"
+              name="admin-create-user-username"
+              onChange={(event) => setCreateUserForm((current) => ({ ...current, username: event.target.value }))}
+              required
+              type="text"
+              value={createUserForm.username}
+            />
+          </label>
+          <label>
+            <span>PASSWORD</span>
+            <NonLoginSecretInput
+              autoComplete="new-password"
+              onChange={(event) => setCreateUserForm((current) => ({ ...current, password: event.target.value }))}
+              purpose="admin-create-user-secret"
+              required
+              value={createUserForm.password}
+            />
+          </label>
+          <label>
+            <span>ROLE</span>
+            <select
+              className="admin-select"
+              onChange={(event) => setCreateUserForm((current) => ({ ...current, role: event.target.value }))}
+              value={createUserForm.role}
+            >
+              <option value="standard_user">Standard user</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+          {showAllCreateUserAges ? (
+            <label>
+              <span>ALL AGE CREDENTIALS</span>
+              <select
+                className="admin-select"
+                onChange={(event) => setCreateUserForm((current) => ({ ...current, ageCredential: Number(event.target.value) }))}
+                value={createUserForm.ageCredential}
+              >
+                {AGE_CREDENTIAL_OPTIONS.map((age) => (
+                  <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <div className="meridian-create-user-card__actions">
+            <button className="meridian-pill-button meridian-pill-button--primary" disabled={createPending} type="submit">
+              {createPending ? "Creating..." : "Create user"}
+            </button>
+            <button className="meridian-pill-button" disabled={createPending} onClick={closeCreateUserForm} type="button">
+              Close
+            </button>
+          </div>
+        </form>
+      ) : null}
+    </section>
+  ) : null;
 
   const userActionsModal = selectedUserActionsEntry ? (
     <div
@@ -4317,7 +4634,7 @@ export function AdminPage() {
           <div className="meridian-posture-card__header">
             <span>
               <strong>Security posture</strong>
-              <small>Current server-authoritative exposure and account state.</small>
+              <small>Compact account and exposure posture.</small>
             </span>
             <button className="meridian-pill-button meridian-pill-button--primary" onClick={handleOpenExposurePlanner} type="button">
               Manage Exposure Mode
@@ -4342,11 +4659,11 @@ export function AdminPage() {
           </dl>
         </section>
       </div>
-      <section className="meridian-card meridian-maintenance-card">
+	      <section className={`meridian-card meridian-maintenance-card${exposureMaintenanceTargetMatchesCurrent ? " meridian-maintenance-card--matched" : ""}`}>
         <div className="meridian-maintenance-card__header">
           <span className="meridian-row-copy">
             <strong>Maintenance Mode</strong>
-            <small>Enabling logs out non-admin users and blocks non-admin logins without disabling accounts.</small>
+            <small>Standalone server mode. Enabling logs out non-admin users and blocks non-admin logins without disabling accounts.</small>
           </span>
           <ExposureSegmentedControl
             ariaLabel="Maintenance Mode target"
@@ -4392,7 +4709,7 @@ export function AdminPage() {
     </div>
   ) : null;
   const adminSecurityKpis = desktopControlCenter ? (
-    <div className="control-center-admin-kpis" aria-label="Security summary">
+    <div className="control-center-admin-kpis meridian-admin-kpis" aria-label="Security summary">
       {[
         ["Users", statusPayload?.total_users ?? usersPayload.length],
         ["Active sessions", sessionsPayload.length],
@@ -4552,9 +4869,11 @@ export function AdminPage() {
             </p>
           </div>
         </div>
-        <StatusRow label="Current prefix" value={urlPrefixStatus?.prefix ? `/${urlPrefixStatus.prefix}/` : "Unknown"} />
-        <StatusRow label="Generated" value={urlPrefixStatus?.generated_at ? `${formatDate(urlPrefixStatus.generated_at)} (${urlPrefixStatus.days_old} days ago)` : "Manual override"} />
-        <StatusRow label="Manual rotations" value={String(urlPrefixStatus?.rotated_count ?? 0)} />
+        <div className="meridian-admin-summary-values">
+          <StatusRow label="Current prefix" value={urlPrefixStatus?.prefix ? `/${urlPrefixStatus.prefix}/` : "Unknown"} />
+          <StatusRow label="Generated" value={urlPrefixStatus?.generated_at ? `${formatDate(urlPrefixStatus.generated_at)} (${urlPrefixStatus.days_old} days ago)` : "Manual override"} />
+          <StatusRow label="Manual rotations" value={String(urlPrefixStatus?.rotated_count ?? 0)} />
+        </div>
         <div className="admin-list__actions admin-url-prefix-actions">
           <button
             className="primary-button"
@@ -4599,8 +4918,10 @@ export function AdminPage() {
             )}
           </div>
         </div>
-        <StatusRow label="Status" value={totpStatus?.enabled ? `Enabled${totpStatus.enabled_at ? ` since ${formatDate(totpStatus.enabled_at)}` : ""}` : "Not enabled"} />
-        <StatusRow label="Recovery codes remaining" value={String(totpStatus?.recovery_codes_remaining ?? 0)} />
+        <div className="meridian-admin-summary-values">
+          <StatusRow label="Status" value={totpStatus?.enabled ? `Enabled${totpStatus.enabled_at ? ` since ${formatDate(totpStatus.enabled_at)}` : ""}` : "Not enabled"} />
+          <StatusRow label="Recovery codes remaining" value={String(totpStatus?.recovery_codes_remaining ?? 0)} />
+        </div>
         {totpStatus?.enabled ? (
           <button className="ghost-button ghost-button--danger" onClick={() => openOwnTotpModal("disable")} type="button">
             Disable 2FA
@@ -4652,7 +4973,7 @@ export function AdminPage() {
         </div>
       </section> : null}
 
-      {!desktopControlCenter || desktopAdminTab === "users-invites" ? <section className="settings-card meridian-card settings-card--wide control-center-admin-password-help">
+      {!desktopControlCenter || desktopAdminTab === "users-invites" ? <section className={`settings-card meridian-card settings-card--wide control-center-admin-password-help${passwordHelpRequests.length === 0 ? " control-center-admin-password-help--empty" : ""}`}>
         <div className="settings-inline-header">
           <div>
             <h2>Password help requests</h2>
@@ -5183,7 +5504,7 @@ export function AdminPage() {
     </div>
   );
 
-  const exposurePlannerModal = exposurePlannerOpen ? (
+  const legacyExposurePlannerModal = exposurePlannerOpen ? (
     <div
       aria-labelledby="admin-exposure-planner-modal-title"
       aria-modal="true"
@@ -5844,6 +6165,60 @@ export function AdminPage() {
     </div>
   ) : null;
 
+  const exposurePlannerModal = exposurePlannerOpen && desktopControlCenter ? (
+    <MeridianExposurePlannerModal
+      model={{
+        active: exposureActive,
+        currentAccessChecks: exposureCurrentAccessChecks,
+        draft: exposureDraft,
+        expectedOrigin: exposureExpectedOrigin,
+        feedback: exposureFeedback,
+        finalizeFeedback: exposureFinalizeFeedback,
+        finalizeForm: exposureFinalizeForm,
+        finalizeOrigin: exposureFinalizeOrigin,
+        finalizeProfileLabel: exposureFinalizeProfileLabel,
+        maintenanceLockStatus: exposureMaintenanceLockStatus,
+        manualPlanLines: exposurePreparedManualSteps.length > 0
+          ? exposurePreparedManualSteps
+          : exposureManualSteps.length > 0
+            ? exposureManualSteps
+            : [
+                "Confirm bind host, firewall, and Tailscale/LAN access for private users.",
+                "Keep public DNS and public reverse-proxy routes disabled for private mode.",
+                "Do not write env files from this planner; apply changes manually in a later activation phase.",
+                "Env Suggestions, Reverse Proxy Notes, and Activation Notes ship with the prepared plan.",
+              ],
+        modeStatus: exposureModeStatus,
+        onClearDraft: handleClearExposureDraft,
+        onClearPrepared: handleClearExposurePreparedSwitch,
+        onClose: handleCloseExposurePlanner,
+        onFinalize: handleFinalizeExposureProfile,
+        onPrepare: handlePrepareExposureManualSwitch,
+        onSaveDraft: handleSaveExposureDraft,
+        onValidate: handleValidateExposurePlan,
+        onVerify: handleVerifyExposurePreparedSwitch,
+        pending: exposurePending,
+        pendingDraft: exposurePendingDraft,
+        prepareFeedback: exposurePrepareFeedback,
+        preparedSwitch: exposurePreparedSwitch,
+        preparedSwitchStatus: exposurePreparedSwitchStatus,
+        preparedSwitchStatusDetail: exposurePreparedSwitchStatusDetail,
+        prepareForm: exposurePrepareForm,
+        runtimeSettingChecks: exposureRuntimeSettingChecks,
+        safetyStateChecks: exposureSafetyStateChecks,
+        setDraft: setExposureDraft,
+        setFinalizeForm: setExposureFinalizeForm,
+        setPrepareForm: setExposurePrepareForm,
+        setVerifyForm: setExposureVerifyForm,
+        validationStatusLabel: exposureValidationStatusLabel,
+        verificationStatusLabel: exposureVerificationStatusLabel,
+        verifyFeedback: exposureVerifyFeedback,
+        verifyForm: exposureVerifyForm,
+        warningChecks: exposureWarningChecks,
+      }}
+    />
+  ) : legacyExposurePlannerModal;
+
   const adminConfirmModalConfig = adminConfirmModal.type === "invite-delete"
     ? {
         title: "Delete invite code?",
@@ -6017,9 +6392,11 @@ export function AdminPage() {
 
           {activeSection === "logs" ? logsSection : null}
 
-          {activeSection === "recovery" ? <div className={desktopControlCenter ? "meridian-legacy-flow" : undefined}>{recoverySection}</div> : null}
+	          {activeSection === "recovery" ? <div className={desktopControlCenter ? "meridian-legacy-flow" : undefined}>{recoverySection}</div> : null}
 
-	          {activeSection === "panel" ? (
+	          {activeSection === "panel" ? desktopCreateUserCard : null}
+
+		          {activeSection === "panel" ? (
 		              <section className={`settings-card${desktopControlCenter ? " meridian-card meridian-invite-card" : ""}`}>
 	                <div className="settings-inline-header admin-invite-code-header">
 	                  <button
@@ -6031,10 +6408,9 @@ export function AdminPage() {
 	                  >
 	                    <div>
 		                      <h2>{desktopControlCenter ? "Inviting New Users" : "Generate invite code"}</h2>
-	                      <p className="page-subnote">
-	                        Codes expire after 30 minutes and can be used once. Invite codes are shown only when generated.
-	                        Copy them now; they cannot be revealed again after this page is closed.
-	                      </p>
+		                      <p className="page-subnote">
+		                        Codes expire after 30 minutes and can only be used once. They cannot be revealed again after this page is closed.
+		                      </p>
 	                    </div>
 	                  </button>
 	                  <button

@@ -818,6 +818,64 @@ describe("SettingsPage section navigation and consolidation", () => {
     view.unmount();
   });
 
+  test("Hidden stays idle for 60 seconds without issuing another GET", async () => {
+    mockApi(defaultSettings, {
+      hiddenItems: [{
+        id: 85,
+        title: "Idle Hidden Copy",
+        year: 2026,
+        edition_label: null,
+        poster_url: null,
+        hidden_at: "2026-07-24T00:00:00+00:00",
+      }],
+    });
+    render(
+      <MemoryRouter initialEntries={["/settings/hidden-titles"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Idle Hidden Copy")).toBeInTheDocument();
+    const initialReads = apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/user-hidden-items",
+    ).length;
+
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(apiRequest.mock.calls.filter(
+        ([requestPath]) => requestPath === "/api/user-hidden-items",
+      )).toHaveLength(initialReads);
+      expect(screen.getByText("Idle Hidden Copy")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Hidden first-load failure stays inline and Retry performs one authoritative reload", async () => {
+    mockApi();
+    const originalImplementation = apiRequest.getMockImplementation();
+    let hiddenReads = 0;
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/user-hidden-items") {
+        hiddenReads += 1;
+        if (hiddenReads === 1) {
+          return Promise.reject(new Error("Hidden titles unavailable."));
+        }
+      }
+      return originalImplementation(requestPath, options);
+    });
+    render(
+      <MemoryRouter initialEntries={["/settings/hidden-titles"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Hidden titles unavailable.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(hiddenReads).toBe(2));
+    expect(await screen.findByText("You have no hidden movies right now.")).toBeInTheDocument();
+  });
+
   test("connectivity recovery retries only the failed Libraries resource", async () => {
     mockApi(defaultSettings, {
       cloudNetworkFailures: 1,

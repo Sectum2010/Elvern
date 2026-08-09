@@ -88,6 +88,39 @@ describe("SystemStatusRail", () => {
     expect(sessionState.setStatusRailOpen).toHaveBeenCalledWith(false);
   });
 
+  test("stays mounted while closed and performs zero protected status requests", async () => {
+    sessionState.statusRailOpen = false;
+    const { container } = render(<SystemStatusRail />);
+
+    const rail = container.querySelector(".control-center-status-rail");
+    expect(rail).toBeInTheDocument();
+    expect(rail).toHaveAttribute("aria-hidden", "true");
+    await waitFor(() => expect(apiRequest).not.toHaveBeenCalled());
+  });
+
+  test("uses real tone classes and keeps the complete device identifier", async () => {
+    const { container } = render(<SystemStatusRail />);
+    expect(await screen.findByText("92")).toBeInTheDocument();
+
+    expect(screen.getByText("Connected").closest("dd").querySelector("i")).toHaveClass("is-success");
+    expect(screen.getByText("3").closest("dd").querySelector("i")).toHaveClass("is-hidden");
+    expect(container.querySelector(".control-center-status-rail__device"))
+      .toHaveTextContent("device-test");
+  });
+
+  test("reconnect-required Google state takes priority over a stale connected flag", () => {
+    const rows = Object.fromEntries(buildSystemStatusRailRows({
+      platform: "linux",
+      deviceId: "device-test",
+      payloads: {
+        cloudLibraries: {
+          google: { enabled: true, connected: true, reconnect_required: true },
+        },
+      },
+    }));
+    expect(rows["Google Drive"]).toBe("Needs attention");
+  });
+
   test("does not request protected status for a standard user", async () => {
     authState.user = { id: 2, role: "standard" };
     const { container } = render(<SystemStatusRail />);

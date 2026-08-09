@@ -1,5 +1,4 @@
 import {
-  ArrowLeft,
   Cloud,
   Database,
   EyeOff,
@@ -7,13 +6,9 @@ import {
   Gauge,
   Library,
   MonitorPlay,
-  Moon,
   Palette,
-  PanelRightOpen,
   RotateCcw,
-  Settings,
   Shield,
-  Sun,
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -65,6 +60,26 @@ function roleLabel(role) {
 function hostnameLabel() {
   if (typeof window === "undefined") return "Elvern host";
   return window.location.hostname || "Elvern host";
+}
+
+function BackIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14.5 5L7.5 12l7 7" /></svg>;
+}
+
+function MixedThemeIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4" /><path d="M12 3.6a8.4 8.4 0 010 16.8z" fill="currentColor" /></svg>;
+}
+
+function LightThemeIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 3v2.4M12 18.6V21M21 12h-2.4M5.4 12H3M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7M18.4 18.4l-1.7-1.7M7.3 7.3L5.6 5.6" /></svg>;
+}
+
+function DarkThemeIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19.5 13.5A7.5 7.5 0 0110.5 4.5a7.5 7.5 0 109 9z" /></svg>;
+}
+
+function StatusPanelIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><rect height="14" rx="2" width="17" x="3.5" y="5" /><path d="M14.5 5v14" /></svg>;
 }
 
 export function DesktopControlCenterLayout() {
@@ -133,7 +148,7 @@ export function DesktopControlCenterLayout() {
     setTheme(theme === "light" ? "mixed" : theme === "mixed" ? "dark" : "light");
   }
 
-  const ThemeIcon = theme === "light" ? Sun : theme === "mixed" ? Settings : Moon;
+  const ThemeIcon = theme === "light" ? LightThemeIcon : theme === "dark" ? DarkThemeIcon : MixedThemeIcon;
   const avatar = String(user?.username || "E").trim().charAt(0).toUpperCase() || "E";
   const switchTransform = `rotateX(${tilt.x.toFixed(1)}deg) rotateY(${(switchRotation + tilt.y).toFixed(1)}deg)`;
 
@@ -147,7 +162,7 @@ export function DesktopControlCenterLayout() {
     >
       <aside className="meridian-sidebar">
         <button className="meridian-sidebar__back" onClick={returnToLibrary} type="button">
-          <ArrowLeft aria-hidden="true" size={15} />
+          <BackIcon />
           <span>Library</span>
         </button>
 
@@ -225,7 +240,7 @@ export function DesktopControlCenterLayout() {
           title="System status"
           type="button"
         >
-          <PanelRightOpen aria-hidden="true" size={17} />
+          <StatusPanelIcon />
         </button>
       ) : null}
 

@@ -1,7 +1,8 @@
 import { chromium, expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 
@@ -13,6 +14,51 @@ const PUBLIC_PROBES = [
 const LOCAL_FAULT_ORIGINS = new Set();
 const NETWORK_GUARD_STATE = new WeakMap();
 const MERIDIAN_DEMO_PATH = process.env.ELVERN_MERIDIAN_DEMO_PATH || "";
+
+
+function asDataUrl(mimeType, contents) {
+  return `data:${mimeType};base64,${Buffer.from(contents).toString("base64")}`;
+}
+
+
+async function installLocalMeridianDemoRuntime(context) {
+  const reactUrl = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
+  const reactDomUrl = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
+  await context.addInitScript(({ resources }) => {
+    window.__resources = { ...(window.__resources || {}), ...resources };
+  }, {
+    resources: {
+      [reactUrl]: asDataUrl(
+        "text/javascript",
+        readFileSync(resolve(process.cwd(), "node_modules/react/umd/react.production.min.js")),
+      ),
+      [reactDomUrl]: asDataUrl(
+        "text/javascript",
+        readFileSync(resolve(process.cwd(), "node_modules/react-dom/umd/react-dom.production.min.js")),
+      ),
+    },
+  });
+  const fontFaces = [
+    ["Sora", "sora-latin-variable.woff2"],
+    ["Archivo", "archivo-latin-variable.woff2"],
+    ["Space Grotesk", "space-grotesk-latin-variable.woff2"],
+  ].map(([family, filename]) => {
+    const font = readFileSync(resolve(process.cwd(), "src/assets/fonts/control-center", filename));
+    return `@font-face{font-family:'${family}';font-style:normal;font-weight:100 900;font-display:block;src:url(${asDataUrl("font/woff2", font)}) format('woff2')}`;
+  }).join("\n");
+  await context.route("https://fonts.googleapis.com/**", (route) => route.fulfill({
+    status: 200,
+    contentType: "text/css",
+    body: fontFaces,
+  }));
+}
+
+
+function requireMeridianDemoPath() {
+  if (!MERIDIAN_DEMO_PATH || !existsSync(MERIDIAN_DEMO_PATH)) {
+    throw new Error("ELVERN_MERIDIAN_DEMO_PATH must point to the private local Meridian demo.");
+  }
+}
 
 
 async function captureControlCenterVisual(page, testInfo, name) {
@@ -63,6 +109,7 @@ async function comparePngPixels(page, reference, actual) {
     const actualPixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
     let changedPixels = 0;
     let channelDeltaTotal = 0;
+    const diffPixels = context.createImageData(canvas.width, canvas.height);
     for (let index = 0; index < referencePixels.length; index += 4) {
       const delta = (
         Math.abs(referencePixels[index] - actualPixels[index])
@@ -70,8 +117,26 @@ async function comparePngPixels(page, reference, actual) {
         + Math.abs(referencePixels[index + 2] - actualPixels[index + 2])
       ) / 3;
       channelDeltaTotal += delta;
-      if (delta > 32) changedPixels += 1;
+      if (delta > 32) {
+        changedPixels += 1;
+        diffPixels.data[index] = 220;
+        diffPixels.data[index + 1] = 52;
+        diffPixels.data[index + 2] = 68;
+        diffPixels.data[index + 3] = 255;
+      } else {
+        const referenceLuminance = Math.round((
+          referencePixels[index]
+          + referencePixels[index + 1]
+          + referencePixels[index + 2]
+        ) / 3);
+        const muted = Math.round(referenceLuminance * 0.18);
+        diffPixels.data[index] = muted;
+        diffPixels.data[index + 1] = muted;
+        diffPixels.data[index + 2] = muted;
+        diffPixels.data[index + 3] = 255;
+      }
     }
+    context.putImageData(diffPixels, 0, 0);
     const pixelCount = referencePixels.length / 4;
     return {
       dimensions_match: true,
@@ -79,11 +144,351 @@ async function comparePngPixels(page, reference, actual) {
       height: canvas.height,
       changed_pixel_ratio: changedPixels / pixelCount,
       mean_channel_delta: channelDeltaTotal / pixelCount,
+      diff_base64: canvas.toDataURL("image/png").split(",")[1],
     };
   }, {
     referenceBase64: reference.toString("base64"),
     actualBase64: actual.toString("base64"),
   });
+}
+
+
+const MERIDIAN_STYLE_PROPERTIES = [
+  "fontFamily",
+  "fontSize",
+  "lineHeight",
+  "fontWeight",
+  "color",
+  "backgroundColor",
+  "borderTopColor",
+  "borderTopWidth",
+  "borderRadius",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "rowGap",
+  "columnGap",
+  "transitionDuration",
+  "transitionTimingFunction",
+];
+
+
+function geometryDelta(reference, actual) {
+  if (!reference || !actual) return null;
+  return Object.fromEntries(["x", "y", "width", "height"].map((key) => [
+    key,
+    Math.abs(Number(reference[key]) - Number(actual[key])),
+  ]));
+}
+
+
+function styleDifferences(reference, actual) {
+  if (!reference || !actual) return null;
+  return Object.fromEntries(MERIDIAN_STYLE_PROPERTIES.flatMap((property) => (
+    reference[property] === actual[property]
+      ? []
+      : [[property, { reference: reference[property], actual: actual[property] }]]
+  )));
+}
+
+
+async function collectMeridianEvidence(page, rootSelector, kind, stateName = "") {
+  return page.evaluate(({ selector, pageKind, properties, state }) => {
+    const root = Array.from(document.querySelectorAll(selector)).filter((element) => {
+      const rect = element.getBoundingClientRect();
+      const computed = getComputedStyle(element);
+      return rect.width > 0
+        && rect.height > 0
+        && computed.display !== "none"
+        && computed.visibility !== "hidden";
+    }).at(-1);
+    if (!root) throw new Error(`Missing Meridian ${pageKind} root ${selector}`);
+    const rootRect = root.getBoundingClientRect();
+    const box = (element) => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        x: Number((rect.x - rootRect.x).toFixed(3)),
+        y: Number((rect.y - rootRect.y).toFixed(3)),
+        width: Number(rect.width.toFixed(3)),
+        height: Number(rect.height.toFixed(3)),
+      };
+    };
+    const styles = (element) => {
+      if (!element) return null;
+      const computed = getComputedStyle(element);
+      return Object.fromEntries(properties.map((property) => [property, computed[property]]));
+    };
+    const findDemoCard = () => Array.from(root.querySelectorAll("div")).find((element) => {
+      const computed = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return computed.borderRadius === "14px" && computed.borderTopWidth === "1px" && rect.width > 500;
+    }) || null;
+    const findDemoControl = () => Array.from(root.querySelectorAll("div")).find((element) => {
+      const computed = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return computed.cursor === "pointer" && rect.width >= 50 && rect.height >= 25 && rect.height <= 45;
+    }) || null;
+    const findDemoRail = () => Array.from(root.querySelectorAll("div")).find((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width >= 295
+        && rect.width <= 305
+        && rect.height >= rootRect.height - 10
+        && rect.left >= rootRect.right - 310
+        && rect.left < rootRect.right - 1;
+    }) || null;
+    const productionRail = root.querySelector(".control-center-status-rail");
+    const visibleProductionRail = productionRail?.getBoundingClientRect().width > 1
+      ? productionRail
+      : null;
+    const productionCardSelector = state.startsWith("admin-overview")
+      || state.startsWith("admin-exposure")
+      || state.startsWith("admin-system-status")
+      || state.startsWith("admin-mixed-theme")
+      || state.startsWith("admin-dark-theme")
+      ? ".meridian-posture-card"
+      : ".meridian-card";
+    const visibleCardLandmarks = pageKind === "demo"
+      ? Array.from(root.querySelectorAll("div")).filter((element) => {
+        const computed = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return computed.borderRadius === "14px"
+          && computed.borderTopWidth === "1px"
+          && rect.width >= 300
+          && rect.height > 30;
+      })
+      : Array.from(root.querySelectorAll(".meridian-card")).filter((element) => {
+        const rect = element.getBoundingClientRect();
+        const computed = getComputedStyle(element);
+        return rect.width >= 300
+          && rect.height > 30
+          && computed.display !== "none"
+          && computed.visibility !== "hidden";
+      });
+    const demoSidebar = root.children[0] || null;
+    const demoWorkspace = root.children[1] || null;
+    const demoContent = demoWorkspace?.firstElementChild || null;
+    const nodes = pageKind === "demo" ? {
+      root,
+      sidebar: demoSidebar,
+      workspace: demoWorkspace,
+      content: demoContent,
+      heading: demoContent?.children[0] || null,
+      card: findDemoCard(),
+      control: findDemoControl(),
+      rail: findDemoRail(),
+    } : {
+      root,
+      sidebar: root.querySelector(".meridian-sidebar"),
+      workspace: root.querySelector(".meridian-workspace"),
+      content: root.querySelector(".meridian-workspace__inner"),
+      heading: root.querySelector(".meridian-page-header h1"),
+      card: root.querySelector(productionCardSelector),
+      control: root.querySelector(".meridian-sidebar__back"),
+      rail: visibleProductionRail,
+    };
+    return {
+      geometry: Object.fromEntries(Object.entries(nodes).map(([name, element]) => [name, box(element)])),
+      computed_styles: Object.fromEntries(Object.entries(nodes).map(([name, element]) => [name, styles(element)])),
+      card_landmarks: visibleCardLandmarks.map((element) => ({
+        box: box(element),
+        text: String(element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120),
+      })),
+      layout_landmarks: pageKind === "production"
+        ? [
+          ".meridian-content",
+          ".meridian-admin-view",
+          ".meridian-admin-stack",
+          ".meridian-overview",
+        ].map((layoutSelector) => ({
+          box: box(root.querySelector(layoutSelector)),
+          selector: layoutSelector,
+        }))
+        : Array.from(demoContent?.children || []).map((element, index) => ({
+          box: box(element),
+          selector: `demo-content-child-${index}`,
+        })),
+    };
+  }, {
+    selector: rootSelector,
+    pageKind: kind,
+    properties: MERIDIAN_STYLE_PROPERTIES,
+    state: stateName,
+  });
+}
+
+
+async function normalizeMeridianDemoFixture(page) {
+  await page.evaluate(() => {
+    const visibleRoot = Array.from(document.querySelectorAll("[data-mer]")).filter((element) => {
+      const rect = element.getBoundingClientRect();
+      const computed = getComputedStyle(element);
+      return rect.width > 0
+        && rect.height > 0
+        && computed.display !== "none"
+        && computed.visibility !== "hidden";
+    }).at(-1);
+    if (!visibleRoot) throw new Error("Missing visible Meridian demo root for fixture normalization.");
+    const exactNames = new Map([
+      ["admin", "demo-admin"],
+      ["caleb", "demo-caleb"],
+      ["helen", "demo-helen"],
+      ["matthew", "demo-matthew"],
+      ["hollender", "demo-hollender"],
+      ["jazz", "demo-jazz"],
+      ["codex1", "demo-codex1"],
+      ["codex2", "demo-codex2"],
+      ["codex3", "demo-codex3"],
+      ["codex4", "demo-codex4"],
+      ["codex5", "demo-codex5"],
+      ["codex6", "demo-codex6"],
+      ["quinn", "demo-quinn"],
+      ["renee", "demo-renee"],
+      ["AD", "DA"],
+      ["CA", "DC"],
+      ["HE", "DH"],
+      ["MA", "DM"],
+      ["HO", "DH"],
+      ["JA", "DJ"],
+    ]);
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const trimmed = node.nodeValue.trim();
+      if (exactNames.has(trimmed)) {
+        node.nodeValue = node.nodeValue.replace(trimmed, exactNames.get(trimmed));
+      }
+      if (
+        node.parentElement?.tagName === "B"
+        && node.parentElement.parentElement?.textContent.includes("Connected as")
+      ) {
+        node.nodeValue = "demo@example.test";
+      }
+      node.nodeValue = node.nodeValue
+        .replace(/\b[a-z0-9-]+\.tail[a-z0-9-]+\.ts\.net\b/gi, "elvern-test.example")
+        .replace(/Elvern\s+\xb7\s+[^\s]+/g, "Elvern \xb7 elvern-test.example")
+        .replace(/Connected as [^\xb7.]+(?=\s*\xb7)/g, "Connected as demo@example.test")
+        .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}…[0-9a-f]{8}\b/gi, "00000000-0000-4000-8000-000000000001")
+        .replace(/\/home\/[^/\s]+\/Videos\/Elvern Posters\/Movie Posters/g, "/srv/elvern-test/posters")
+        .replace(/\/home\/[^/\s]+\/Videos\/Posters/g, "/srv/elvern-test/posters")
+        .replace(/\/home\/[^/\s]+\/Videos/g, "/srv/elvern-test/media")
+        .replaceAll("127.0.0.1", "192.0.2.10")
+        .replace(/\b100\.(?:\d{1,3}\.){2}\d{1,3}\b/g, "192.0.2.20")
+        .replace(/(^| · )admin(?= · |$)/g, "$1demo-admin")
+        .replace(/(^| · )caleb(?= · |$)/g, "$1demo-caleb")
+        .replace(/(^| · )helen(?= · |$)/g, "$1demo-helen")
+        .replace(/(^| · )matthew(?= · |$)/g, "$1demo-matthew");
+    }
+    for (const field of visibleRoot.querySelectorAll("input, textarea")) {
+      const normalized = String(field.value || "")
+        .replace(/https:\/\/[a-z0-9-]+\.tail[a-z0-9-]+\.ts\.net/gi, "https://elvern-test.example")
+        .replace(/\b\d+-[a-z0-9]+\.apps\.googleusercontent\.com\b/gi, "demo-client.apps.googleusercontent.com")
+        .replace(/\/home\/[^/\s]+\/Videos\/Elvern Posters\/Movie Posters/g, "/srv/elvern-test/posters")
+        .replace(/\/home\/[^/\s]+\/Videos\/Posters/g, "/srv/elvern-test/posters")
+        .replace(/\/home\/[^/\s]+\/Videos/g, "/srv/elvern-test/media");
+      if (normalized !== field.value) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+          "value",
+        );
+        descriptor?.set?.call(field, normalized);
+      }
+    }
+    for (const [label, value] of [["USERS", "8"], ["TITLES INDEXED", "110"]]) {
+      const labelNode = Array.from(visibleRoot.querySelectorAll("div")).find((element) => (
+        element.children.length === 0 && element.textContent.trim() === label
+      ));
+      if (labelNode?.parentElement?.children[1]) {
+        labelNode.parentElement.children[1].textContent = value;
+      }
+    }
+    const showAllUsers = Array.from(visibleRoot.querySelectorAll("div")).find((element) => (
+      element.children.length === 0 && element.textContent.trim() === "Show all 14 users"
+    ));
+    if (showAllUsers) showAllUsers.textContent = "Show all 8 users";
+    for (const [from, to] of [
+      ["/dvmnbcbw/", "/elvern-test/"],
+      ["May 9, 2026, 11:22 AM (83 days ago)", "May 9, 2026, 4:22 AM (83 days ago)"],
+    ]) {
+      const target = Array.from(visibleRoot.querySelectorAll("div")).find((element) => (
+        element.children.length === 0 && element.textContent.trim() === from
+      ));
+      if (target) target.textContent = to;
+    }
+  });
+}
+
+
+async function normalizeMeridianProductionFixture(page) {
+  await page.evaluate(() => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      walker.currentNode.nodeValue = walker.currentNode.nodeValue
+        .replaceAll("127.0.0.1", "elvern-test.example")
+        .replaceAll("phase7-browser", "demo-admin");
+    }
+  });
+}
+
+
+async function writeMeridianParityArtifacts({
+  actual,
+  comparison,
+  demoEvidence,
+  name,
+  productionEvidence,
+  reference,
+  testInfo,
+}) {
+  const outputRoot = process.env.ELVERN_CONTROL_CENTER_SCREENSHOT_DIR
+    || resolve(process.cwd(), "../tmp/meridian-parity");
+  const outputDirectory = resolve(outputRoot, name);
+  mkdirSync(outputDirectory, { recursive: true });
+  const geometryReport = {
+    state: name,
+    reference: demoEvidence.geometry,
+    actual: productionEvidence.geometry,
+    reference_card_landmarks: demoEvidence.card_landmarks,
+    actual_card_landmarks: productionEvidence.card_landmarks,
+    reference_layout_landmarks: demoEvidence.layout_landmarks,
+    actual_layout_landmarks: productionEvidence.layout_landmarks,
+    delta: Object.fromEntries(Object.keys(demoEvidence.geometry).map((key) => [
+      key,
+      geometryDelta(demoEvidence.geometry[key], productionEvidence.geometry[key]),
+    ])),
+  };
+  const computedStyleReport = {
+    state: name,
+    properties: MERIDIAN_STYLE_PROPERTIES,
+    reference: demoEvidence.computed_styles,
+    actual: productionEvidence.computed_styles,
+    differences: Object.fromEntries(Object.keys(demoEvidence.computed_styles).map((key) => [
+      key,
+      styleDifferences(demoEvidence.computed_styles[key], productionEvidence.computed_styles[key]),
+    ])),
+  };
+  const diff = Buffer.from(comparison.diff_base64 || "", "base64");
+  writeFileSync(resolve(outputDirectory, "demo-reference.png"), reference);
+  writeFileSync(resolve(outputDirectory, "production-actual.png"), actual);
+  writeFileSync(resolve(outputDirectory, "pixel-diff.png"), diff);
+  writeFileSync(resolve(outputDirectory, "geometry-report.json"), `${JSON.stringify(geometryReport, null, 2)}\n`, "utf8");
+  writeFileSync(resolve(outputDirectory, "computed-style-report.json"), `${JSON.stringify(computedStyleReport, null, 2)}\n`, "utf8");
+  writeFileSync(
+    resolve(outputDirectory, "pixel-report.json"),
+    `${JSON.stringify({ ...comparison, diff_base64: undefined }, null, 2)}\n`,
+    "utf8",
+  );
+  for (const [attachmentName, body, contentType] of [
+    [`${name}-demo-reference`, reference, "image/png"],
+    [`${name}-production-actual`, actual, "image/png"],
+    [`${name}-pixel-diff`, diff, "image/png"],
+    [`${name}-geometry-report`, Buffer.from(JSON.stringify(geometryReport, null, 2)), "application/json"],
+    [`${name}-computed-style-report`, Buffer.from(JSON.stringify(computedStyleReport, null, 2)), "application/json"],
+  ]) {
+    await testInfo.attach(attachmentName, { body, contentType });
+  }
+  return { computedStyleReport, geometryReport, outputDirectory };
 }
 
 
@@ -293,7 +698,7 @@ function v1SearchPayload(query) {
 
 function desktopHelperStatus(state = {}) {
   return {
-    device_id: "phase7-desktop",
+    device_id: state.desktopHelperDeviceId || "phase7-desktop",
     platform: "linux",
     helper_required: false,
     state: "helper_not_required",
@@ -307,6 +712,250 @@ function desktopHelperStatus(state = {}) {
     latest_releases: [],
     notes: [],
     ...(state.desktopHelperStatus || {}),
+  };
+}
+
+
+const MERIDIAN_SAFE_USER_NAMES = [
+  "demo-admin",
+  "demo-caleb",
+  "demo-helen",
+  "demo-matthew",
+  "demo-hollender",
+  "demo-jazz",
+  "demo-codex1",
+  "demo-codex2",
+  "demo-codex3",
+  "demo-codex4",
+  "demo-codex5",
+  "demo-codex6",
+  "demo-quinn",
+  "demo-renee",
+];
+
+
+function meridianSafeUsers() {
+  return MERIDIAN_SAFE_USER_NAMES.map((username, index) => {
+    const disabled = index >= 6 && index <= 11;
+    const active = index === 0;
+    return {
+      id: index + 1,
+      username,
+      display_name: username,
+      role: index === 0 ? "admin" : "standard_user",
+      enabled: !disabled,
+      active_sessions: active ? 1 : 0,
+      last_login_at: `2026-07-${String(30 - (index % 8)).padStart(2, "0")}T${String(16 - (index % 6)).padStart(2, "0")}:25:00Z`,
+      last_seen_at: active || index < 5 ? `2026-07-${String(31 - (index % 3)).padStart(2, "0")}T23:42:00Z` : null,
+      last_activity_at: active || index < 5 ? `2026-07-${String(31 - (index % 3)).padStart(2, "0")}T23:42:00Z` : null,
+      age_credential: 18,
+      age_credential_display: "18+",
+      status_label: active ? "Active now" : disabled ? "Disabled" : "Offline",
+      status_color: active ? "#177A52" : disabled ? "#D64545" : "rgba(25,28,31,.3)",
+      totp_enabled: index === 0,
+      totp_enabled_at: index === 0 ? "2026-05-09T19:36:00Z" : null,
+      totp_setup_prompt_enabled: false,
+      assistant_beta_enabled: false,
+    };
+  });
+}
+
+
+function meridianSafeAuditEvents() {
+  const baseEvents = [
+    ["auth.login", "2026-07-30T23:25:00Z", "demo-admin"],
+    ["auth.login", "2026-07-30T23:20:00Z", "demo-admin"],
+    ["auth.logout", "2026-07-30T22:54:00Z", "demo-helen"],
+    ["auth.login", "2026-07-30T22:53:00Z", "demo-helen"],
+    ["auth.logout", "2026-07-30T07:38:00Z", "demo-admin"],
+    ["admin.library.rescan", "2026-07-30T07:10:00Z", "demo-admin"],
+    ["auth.login", "2026-07-30T04:34:00Z", "demo-admin"],
+    ["auth.logout", "2026-07-30T00:47:00Z", "demo-admin"],
+    ["auth.logout", "2026-07-29T19:08:00Z", "demo-caleb"],
+    ["auth.login", "2026-07-29T19:06:00Z", "demo-caleb"],
+  ];
+  return Array.from({ length: 100 }, (_, index) => {
+    const [action, createdAt, username] = baseEvents[index % baseEvents.length];
+    return ({
+    id: index + 1,
+    action,
+    created_at: createdAt,
+    outcome: "success",
+    username,
+    ip_address: "192.0.2.10",
+    target_type: null,
+    target_id: null,
+    media_item_id: null,
+    details: {},
+    });
+  });
+}
+
+
+function meridianSafeExposureStatus() {
+  return {
+    active: {
+      current_request_origin: "http://elvern-test.example",
+      public_app_origin: "https://elvern-test.example",
+      backend_origin: "http://192.0.2.20:8000",
+      private_network_only: true,
+      trusted_proxy_cidrs: ["192.0.2.10/8", "::1/128"],
+      cookie_secure: false,
+      url_prefix_present: true,
+      maintenance_mode: { enabled: false },
+      multiuser_enabled: true,
+    },
+    validation: { status: "ready", checks: [], errors: [], warnings: [] },
+    plan: { env_suggestions: [], manual_steps: [], reverse_proxy_notes: [], activation_notes: [] },
+    pending_draft: null,
+    prepared_switch: null,
+    finalized_profile: null,
+  };
+}
+
+
+function meridianSafeFixtureState(overrides = {}) {
+  return {
+    role: "admin",
+    userId: 1,
+    username: "demo-admin",
+    displayName: "demo-admin",
+    posterAppearance: "modern",
+    desktopHelperDeviceId: "00000000-0000-4000-8000-000000000001",
+    desktopHelperStatus: {
+      vlc_detection_state: "detection_unavailable",
+      vlc_detection_path: null,
+      vlc_detection_checked_at: "2026-08-01T04:00:00Z",
+    },
+    providerAuthStatus: {
+      provider_auth_required: false,
+      reconnect_required: false,
+      providers: {
+        google: {
+          connected: true,
+          account_email: "demo@example.test",
+          account_display_name: "demo@example.test",
+        },
+      },
+    },
+    cloudLibraries: {
+      google: {
+        enabled: true,
+        connected: true,
+        account_email: "demo@example.test",
+        account_display_name: "demo@example.test",
+      },
+      my_libraries: [],
+      shared_libraries: [{
+        id: 1,
+        name: "Movies",
+        item_count: 106,
+        source_type: "folder",
+        shared_by_admin: true,
+        last_synced_at: "2026-07-30T00:10:00Z",
+        hidden_for_user: false,
+      }],
+    },
+    hiddenItems: [],
+    globalHiddenItems: [
+      "rileys first date-rmxtras",
+      "our dads the filmmakers-rmxtras",
+      "salt flats symphony-rmxtras",
+      "harbor lights extended cut",
+      "the last lighthouse keeper",
+      "moths of the silver valley",
+      "a winter in kodiak",
+      "the cartographers dinner",
+      "paper planes over prague",
+      "midnight at the fun palace",
+      "the orchard sessions",
+    ].map((title, index) => ({
+      id: 101 + index,
+      title,
+      year: null,
+      hidden_at: `2026-07-${String(30 - index).padStart(2, "0")}T00:00:00Z`,
+    })),
+    googleDriveSetup: {
+      configuration_state: "ready",
+      configuration_label: "OAuth Ready",
+      connected: true,
+      account_email: "demo@example.test",
+      account_name: "demo@example.test",
+      https_origin: "https://elvern-test.example",
+      client_id: "demo-client.apps.googleusercontent.com",
+      client_id_configured: true,
+      client_secret_configured: true,
+      https_origin_configured: true,
+      missing_fields: [],
+      instructions: [],
+    },
+    mediaLibraryReference: {
+      configured_value: "/srv/elvern-test/media",
+      effective_value: "/srv/elvern-test/media",
+      default_value: "/srv/elvern-test/media",
+      configured_locations: ["/srv/elvern-test/media"],
+      effective_locations: ["/srv/elvern-test/media"],
+      category_summary: {
+        movies: [{ name: "…/Elvern Media Root/Movies -M" }],
+        tv: [{ name: "…/Elvern Media Root/TV Shows -TV" }],
+        cartoon: [{ name: "…/Elvern Media Root/Cartoon -C" }],
+        anime: [{ name: "…/Elvern Media Root/Anime -AN" }],
+      },
+      validation_rules: [
+        "Leave blank to use the default library reference location: /srv/elvern-test/media",
+        "Choose one or more parent folders where Elvern should look for media folders.",
+        "Use one absolute Linux directory path or local file:// URI per line.",
+        "System folders and Elvern data folders are not accepted — use a media folder such as /home/<user>/Videos, /mnt/media, or /srv/media.",
+        "Elvern auto-discovers folders marked with -M, -TV, -AN, -C, -L, -S, and -X.",
+        "Poster reference location stays manually configured below.",
+      ],
+    },
+    posterReferenceLocation: {
+      configured_value: "/srv/elvern-test/posters",
+      effective_value: "/srv/elvern-test/posters",
+      default_value: "/srv/elvern-test/posters",
+      validation_rules: [
+        "Leave blank to use the default Linux poster directory: /srv/elvern-test/posters",
+        "Accepted: absolute Linux directory paths such as /srv/media/Posters",
+        "Accepted: file:// URIs that resolve to an absolute local directory, such as file:///srv/media/Posters",
+        "Rejected: relative paths, Windows paths, UNC/network authorities, and http/https URLs",
+      ],
+    },
+    systemStatus: {
+      total_media_items: 110,
+      total_users: 8,
+      scan: { running: false },
+      last_scan: null,
+      library: { total_items: 110 },
+      security: { multiuser_enabled: true, session_ttl_hours: 8760 },
+    },
+    adminUsers: meridianSafeUsers().slice(0, 8),
+    adminSessions: [{
+      id: 1339,
+      user_id: 1,
+      username: "demo-admin",
+      ip_address: "192.0.2.10",
+      last_seen_at: "2026-08-01T06:46:00Z",
+      last_activity_at: "2026-08-01T06:46:00Z",
+      user_agent: "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    }],
+    adminAuditEvents: meridianSafeAuditEvents(),
+    adminUrlPrefix: {
+      prefix: "elvern-test",
+      generated_at: "2026-05-09T11:22:00Z",
+      days_old: 83,
+      rotated_count: 0,
+      rotation_reminder_due: false,
+    },
+    totpStatus: {
+      enabled: true,
+      enabled_at: "2026-05-09T19:36:00Z",
+      setup_available: true,
+      recovery_codes_remaining: 10,
+    },
+    adminInviteCodes: [],
+    exposureStatus: meridianSafeExposureStatus(),
+    ...overrides,
   };
 }
 
@@ -340,6 +989,19 @@ async function installFixture(page, requests, state = {}) {
     requests.push(`${path}${url.search}`);
     state.pathRequestCounts ||= {};
     state.pathRequestCounts[path] = Number(state.pathRequestCounts[path] || 0) + 1;
+    if (
+      state.holdSettingsResources
+      && [
+        "/api/admin/google-drive-setup",
+        "/api/admin/media-library-reference",
+        "/api/admin/poster-reference-location",
+      ].includes(path)
+    ) {
+      await new Promise((resolve) => {
+        state.settingsResourceReleases ||= [];
+        state.settingsResourceReleases.push(resolve);
+      });
+    }
     if (path.startsWith("/api/posters/")) {
       state.posterRequestCounts ||= {};
       state.posterRequestCounts[path] = Number(state.posterRequestCounts[path] || 0) + 1;
@@ -383,13 +1045,13 @@ async function installFixture(page, requests, state = {}) {
         hide_recently_added: true,
         floating_library_search_enabled: state.floatingSearchEnabled !== false,
         desktop_floating_island_position: state.desktopIslandPosition || "top",
-        poster_card_appearance: "classic",
+        poster_card_appearance: state.posterAppearance || "classic",
         poster_card_display_max_width: "1400",
       };
     } else if (path === "/api/provider-auth/status") {
-      payload = { provider_auth_required: false, reconnect_required: false };
+      payload = state.providerAuthStatus || { provider_auth_required: false, reconnect_required: false };
     } else if (path === "/api/cloud-libraries") {
-      payload = {
+      payload = state.cloudLibraries || {
         google: { enabled: false, connected: false },
         my_libraries: [],
         shared_libraries: [],
@@ -400,11 +1062,11 @@ async function installFixture(page, requests, state = {}) {
       }
       payload = { items: state.hiddenItems || [] };
     } else if (path === "/api/admin/global-hidden-items") {
-      payload = { items: [] };
+      payload = { items: state.globalHiddenItems || [] };
     } else if (path === "/api/library/age-groups") {
       payload = { total: 0, items: [] };
     } else if (path === "/api/admin/google-drive-setup") {
-      payload = {
+      payload = state.googleDriveSetup || {
         configuration_state: "not_configured",
         configuration_label: "Not configured",
         connected: false,
@@ -412,9 +1074,9 @@ async function installFixture(page, requests, state = {}) {
         instructions: [],
       };
     } else if (path === "/api/auth/totp/status") {
-      payload = { enabled: false, setup_available: false };
+      payload = state.totpStatus || { enabled: false, setup_available: false };
     } else if (path === "/api/admin/media-library-reference") {
-      payload = {
+      payload = state.mediaLibraryReference || {
         configured_value: "Configured",
         effective_value: "Configured",
         default_value: "Configured",
@@ -424,7 +1086,7 @@ async function installFixture(page, requests, state = {}) {
         validation_rules: [],
       };
     } else if (path === "/api/admin/poster-reference-location") {
-      payload = {
+      payload = state.posterReferenceLocation || {
         configured_value: null,
         effective_value: "",
         default_value: "",
@@ -443,7 +1105,7 @@ async function installFixture(page, requests, state = {}) {
     } else if (/^\/api\/admin\/assistant\/requests\/\d+$/.test(path)) {
       payload = { request: null };
     } else if (path === "/api/system/status") {
-      payload = {
+      payload = state.systemStatus || {
         total_media_items: 0,
         total_users: 1,
         scan: { running: false },
@@ -455,17 +1117,19 @@ async function installFixture(page, requests, state = {}) {
         },
       };
     } else if (path === "/api/admin/users") {
-      payload = { users: [] };
+      payload = { users: state.adminUsers || [] };
     } else if (path === "/api/admin/sessions") {
-      payload = { sessions: [] };
+      payload = { sessions: state.adminSessions || [] };
     } else if (path === "/api/admin/audit") {
-      payload = { events: [] };
+      payload = { events: state.adminAuditEvents || [] };
     } else if (path === "/api/admin/url-prefix") {
-      payload = {};
+      payload = state.adminUrlPrefix || {};
     } else if (path === "/api/admin/playback-workers") {
       payload = { workers: [] };
     } else if (path === "/api/admin/invite-codes") {
-      payload = { invite_codes: [] };
+      payload = { invite_codes: state.adminInviteCodes || [] };
+    } else if (path === "/api/admin/exposure/status") {
+      payload = state.exposureStatus || meridianSafeExposureStatus();
     } else if (path === "/api/library/v2/summary") {
       payload = v2Summary(url.searchParams.get("source") || "all", state);
     } else if (path === "/api/library/search") {
@@ -1241,52 +1905,93 @@ test("@settings-navigation admin Control Center shares state, status, and real r
 });
 
 
-test("@settings-navigation @control-center-visual production Control Center stays within the Meridian demo pixel budget", async ({
+test("@settings-navigation @control-center-visual production Control Center matches the Meridian primary shell contract", async ({
   page,
 }, testInfo) => {
-  test.skip(
-    !MERIDIAN_DEMO_PATH || !existsSync(MERIDIAN_DEMO_PATH),
-    "Set ELVERN_MERIDIAN_DEMO_PATH to the private local Meridian demo for parity validation.",
-  );
+  requireMeridianDemoPath();
 
   const demoBrowser = await chromium.launch({ headless: true });
   let referenceScreenshot;
   let referenceAdminScreenshot;
+  let appearanceDemoEvidence;
+  let adminDemoEvidence;
   try {
-    const demoContext = await demoBrowser.newContext({ viewport: { width: 1400, height: 920 } });
+    const demoContext = await demoBrowser.newContext({
+      viewport: { width: 1360, height: 880 },
+      deviceScaleFactor: 1,
+      locale: "en-US",
+      timezoneId: "America/Los_Angeles",
+      reducedMotion: "no-preference",
+    });
+    await installLocalMeridianDemoRuntime(demoContext);
     const demoPage = await demoContext.newPage();
     await demoPage.goto(pathToFileURL(MERIDIAN_DEMO_PATH).href, { waitUntil: "load" });
-    const demoRoot = demoPage.locator("[data-mer]");
+    const demoRoot = demoPage.locator("[data-mer]:visible").last();
     await expect(demoRoot).toBeVisible({ timeout: 30_000 });
     await demoPage.evaluate(() => document.fonts?.ready);
+    await normalizeMeridianDemoFixture(demoPage);
     referenceScreenshot = await demoRoot.screenshot({ animations: "disabled" });
+    appearanceDemoEvidence = await collectMeridianEvidence(demoPage, "[data-mer]", "demo");
     await demoPage.getByText("Admin Panel", { exact: true }).first().click();
     await expect(demoPage.getByText("Overview", { exact: true }).first()).toBeVisible();
     await demoPage.waitForTimeout(600);
+    await normalizeMeridianDemoFixture(demoPage);
     referenceAdminScreenshot = await demoRoot.screenshot({ animations: "disabled" });
+    adminDemoEvidence = await collectMeridianEvidence(demoPage, "[data-mer]", "demo");
     await demoContext.close();
   } finally {
     await demoBrowser.close();
   }
 
   await page.unrouteAll({ behavior: "wait" });
-  await installFixture(page, [], { role: "admin" });
+  await installFixture(page, [], meridianSafeFixtureState());
   await page.setViewportSize({ width: 1360, height: 880 });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto("settings/appearance");
   const productionRoot = page.locator(".meridian-control-center");
   await expect(productionRoot).toBeVisible();
   await page.evaluate(() => document.fonts?.ready);
+  await normalizeMeridianProductionFixture(page);
   const productionScreenshot = await productionRoot.screenshot({ animations: "disabled" });
   const comparison = await comparePngPixels(page, referenceScreenshot, productionScreenshot);
+  const appearanceProductionEvidence = await collectMeridianEvidence(
+    page,
+    ".meridian-control-center",
+    "production",
+  );
+  const appearanceArtifacts = await writeMeridianParityArtifacts({
+    actual: productionScreenshot,
+    comparison,
+    demoEvidence: appearanceDemoEvidence,
+    name: "settings-appearance-primary-shell",
+    productionEvidence: appearanceProductionEvidence,
+    reference: referenceScreenshot,
+    testInfo,
+  });
 
   await page.goto("admin/overview");
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await normalizeMeridianProductionFixture(page);
   const productionAdminScreenshot = await productionRoot.screenshot({ animations: "disabled" });
   const adminComparison = await comparePngPixels(
     page,
     referenceAdminScreenshot,
     productionAdminScreenshot,
   );
+  const adminProductionEvidence = await collectMeridianEvidence(
+    page,
+    ".meridian-control-center",
+    "production",
+  );
+  const adminArtifacts = await writeMeridianParityArtifacts({
+    actual: productionAdminScreenshot,
+    comparison: adminComparison,
+    demoEvidence: adminDemoEvidence,
+    name: "admin-overview-primary-shell",
+    productionEvidence: adminProductionEvidence,
+    reference: referenceAdminScreenshot,
+    testInfo,
+  });
 
   await testInfo.attach("meridian-demo-appearance", {
     body: referenceScreenshot,
@@ -1332,35 +2037,59 @@ test("@settings-navigation @control-center-visual production Control Center stay
   }
 
   expect(comparison.dimensions_match).toBe(true);
-  expect(comparison.changed_pixel_ratio).toBeLessThan(0.28);
-  expect(comparison.mean_channel_delta).toBeLessThan(35);
+  expect(comparison.changed_pixel_ratio).toBeLessThan(0.08);
+  expect(comparison.mean_channel_delta).toBeLessThan(12);
   expect(adminComparison.dimensions_match).toBe(true);
-  expect(adminComparison.changed_pixel_ratio).toBeLessThan(0.35);
-  expect(adminComparison.mean_channel_delta).toBeLessThan(45);
+  expect(adminComparison.changed_pixel_ratio).toBeLessThan(0.08);
+  expect(adminComparison.mean_channel_delta).toBeLessThan(12);
+  for (const artifacts of [appearanceArtifacts, adminArtifacts]) {
+    for (const key of ["root", "sidebar", "workspace"]) {
+      const delta = artifacts.geometryReport.delta[key];
+      expect(delta, `${key} geometry evidence`).not.toBeNull();
+      expect(Math.max(delta.x, delta.y, delta.width, delta.height), `${key} geometry`).toBeLessThanOrEqual(1);
+    }
+    for (const key of ["root", "sidebar"]) {
+      const differences = artifacts.computedStyleReport.differences[key] || {};
+      expect(differences.fontFamily, `${key} font family`).toBeUndefined();
+      expect(differences.fontSize, `${key} font size`).toBeUndefined();
+      expect(differences.lineHeight, `${key} line height`).toBeUndefined();
+      expect(differences.backgroundColor, `${key} background`).toBeUndefined();
+    }
+  }
 });
 
 
-test("@settings-navigation @control-center-visual Meridian page and theme matrix stays within the demo pixel budget", async ({
+test("@settings-navigation @control-center-visual Meridian dedicated parity matrix emits strict evidence", async ({
+  browserName,
   page,
 }, testInfo) => {
-  test.skip(
-    !MERIDIAN_DEMO_PATH || !existsSync(MERIDIAN_DEMO_PATH),
-    "Set ELVERN_MERIDIAN_DEMO_PATH to the private local Meridian demo for parity validation.",
-  );
+  test.skip(browserName !== "chromium", "Meridian pixel parity uses one fixed Chromium executable for both reference and production.");
+  test.setTimeout(90_000);
+  requireMeridianDemoPath();
 
   const demoBrowser = await chromium.launch({ headless: true });
-  const demoContext = await demoBrowser.newContext({ viewport: { width: 1400, height: 920 } });
+  const demoContext = await demoBrowser.newContext({
+    viewport: { width: 1360, height: 880 },
+    deviceScaleFactor: 1,
+    locale: "en-US",
+    timezoneId: "America/Los_Angeles",
+    reducedMotion: "no-preference",
+  });
+  await installLocalMeridianDemoRuntime(demoContext);
   const demoPage = await demoContext.newPage();
   const reports = [];
+  const parityFailures = [];
   try {
     await demoPage.goto(pathToFileURL(MERIDIAN_DEMO_PATH).href, { waitUntil: "load" });
-    const demoRoot = demoPage.locator("[data-mer]");
+    const demoRoot = demoPage.locator("[data-mer]:visible").last();
     const productionRoot = page.locator(".meridian-control-center");
     await expect(demoRoot).toBeVisible({ timeout: 30_000 });
 
     await page.unrouteAll({ behavior: "wait" });
-    await installFixture(page, [], { role: "admin" });
+    const fixtureState = meridianSafeFixtureState({ holdSettingsResources: true });
+    await installFixture(page, [], fixtureState);
     await page.setViewportSize({ width: 1360, height: 880 });
+    await page.emulateMedia({ reducedMotion: "no-preference" });
 
     const clickDemoNav = async (label) => {
       const clicked = await demoPage.getByText(label, { exact: true }).evaluateAll((nodes) => {
@@ -1372,7 +2101,7 @@ test("@settings-navigation @control-center-visual Meridian page and theme matrix
         return Boolean(target);
       });
       expect(clicked, `Meridian demo navigation item ${label}`).toBe(true);
-      await demoPage.waitForTimeout(150);
+      await demoPage.waitForTimeout(700);
     };
     const clickDemoControl = async (label) => {
       const clicked = await demoPage.getByText(label, { exact: true }).evaluateAll((nodes) => {
@@ -1383,18 +2112,123 @@ test("@settings-navigation @control-center-visual Meridian page and theme matrix
       expect(clicked, `Meridian demo control ${label}`).toBe(true);
       await demoPage.waitForTimeout(150);
     };
-    const compareState = async (name, { changed = 0.32, delta = 42 } = {}) => {
+    const scrollControlsIntoView = async (label) => {
+      const demoTarget = demoPage.getByText(label, { exact: true }).last();
+      const productionTarget = page.getByText(label, { exact: true }).last();
+      await Promise.all([
+        demoTarget.evaluate((node) => node.scrollIntoView({ block: "center" })),
+        productionTarget.evaluate((node) => node.scrollIntoView({ block: "center" })),
+      ]);
+      await Promise.all([demoPage.waitForTimeout(150), page.waitForTimeout(150)]);
+    };
+    const recordParityFailure = (condition, message) => {
+      if (!condition) parityFailures.push(message);
+    };
+    const showDemoResourceSkeletons = async () => demoPage.evaluate(() => {
+      const labels = [
+        "Google Drive OAuth",
+        "Library reference locations",
+        "Poster reference location",
+      ];
+      const cards = labels.map((label) => {
+        const labelNode = Array.from(document.querySelectorAll("div")).find((node) => node.textContent?.trim() === label);
+        let card = labelNode;
+        while (card) {
+          const style = getComputedStyle(card);
+          const rect = card.getBoundingClientRect();
+          if (style.borderRadius === "14px" && style.borderTopWidth === "1px" && rect.width > 500) return card;
+          card = card.parentElement;
+        }
+        return null;
+      });
+      if (cards.some((card) => !card)) throw new Error("Could not derive all Server resource cards from the Meridian demo.");
+      cards.forEach((card) => {
+        const height = card.getBoundingClientRect().height;
+        card.replaceChildren(...["58%", "100%", "76%"].map((width) => {
+          const line = document.createElement("i");
+          Object.assign(line.style, {
+            display: "block",
+            width,
+            height: "38px",
+            borderRadius: "9px",
+            background: getComputedStyle(card).getPropertyValue("--mer-surface") || "rgba(20,22,26,.08)",
+          });
+          return line;
+        }));
+        Object.assign(card.style, {
+          boxSizing: "border-box",
+          display: "grid",
+          alignContent: "start",
+          gap: "12px",
+          minHeight: `${height}px`,
+        });
+      });
+    });
+    const compareState = async (name) => {
       await Promise.all([
         demoPage.evaluate(() => document.fonts?.ready),
         page.evaluate(() => document.fonts?.ready),
       ]);
+      await normalizeMeridianDemoFixture(demoPage);
+      await normalizeMeridianProductionFixture(page);
       const reference = await demoRoot.screenshot({ animations: "disabled" });
       const actual = await productionRoot.screenshot({ animations: "disabled" });
       const comparison = await comparePngPixels(page, reference, actual);
-      reports.push({ name, ...comparison });
-      expect(comparison.dimensions_match, `${name} dimensions`).toBe(true);
-      expect(comparison.changed_pixel_ratio, `${name} changed pixel ratio`).toBeLessThan(changed);
-      expect(comparison.mean_channel_delta, `${name} mean channel delta`).toBeLessThan(delta);
+      const demoEvidence = await collectMeridianEvidence(demoPage, "[data-mer]", "demo", name);
+      const productionEvidence = await collectMeridianEvidence(
+        page,
+        ".meridian-control-center",
+        "production",
+        name,
+      );
+      const artifacts = await writeMeridianParityArtifacts({
+        actual,
+        comparison,
+        demoEvidence,
+        name,
+        productionEvidence,
+        reference,
+        testInfo,
+      });
+      reports.push({
+        name,
+        ...comparison,
+        diff_base64: undefined,
+        artifact_path: artifacts.outputDirectory,
+      });
+      recordParityFailure(comparison.dimensions_match, `${name}: dimensions differ`);
+      recordParityFailure(
+        comparison.changed_pixel_ratio < 0.08,
+        `${name}: changed pixel ratio ${comparison.changed_pixel_ratio} is not below 0.08`,
+      );
+      recordParityFailure(
+        comparison.mean_channel_delta < 12,
+        `${name}: mean channel delta ${comparison.mean_channel_delta} is not below 12`,
+      );
+      for (const key of ["root", "sidebar", "workspace", "content", "heading", "card", "control", "rail"]) {
+        const delta = artifacts.geometryReport.delta[key];
+        const referenceGeometry = artifacts.geometryReport.reference[key];
+        const actualGeometry = artifacts.geometryReport.actual[key];
+        recordParityFailure(
+          Boolean(referenceGeometry) === Boolean(actualGeometry),
+          `${name}: ${key} geometry presence differs`,
+        );
+        if (delta) {
+          recordParityFailure(
+            Math.max(delta.x, delta.y, delta.width, delta.height) <= 1,
+            `${name}: ${key} geometry delta is ${JSON.stringify(delta)}`,
+          );
+        }
+      }
+      for (const key of ["root", "sidebar", "workspace", "content", "heading", "card", "control", "rail"]) {
+        const differences = artifacts.computedStyleReport.differences[key] || {};
+        for (const property of MERIDIAN_STYLE_PROPERTIES) {
+          recordParityFailure(
+            differences[property] === undefined,
+            `${name}: ${key} ${property} differs (${JSON.stringify(differences[property])})`,
+          );
+        }
+      }
     };
 
     await page.goto("settings/appearance");
@@ -1409,15 +2243,84 @@ test("@settings-navigation @control-center-visual Meridian page and theme matrix
     for (const settingsCase of [
       ["Library", "settings/library"],
       ["Cloud & Sharing", "settings/cloud-sharing"],
-      ["Hidden titles", "settings/hidden-titles"],
-      ["Playback & Apps", "settings/playback-apps"],
-      ["Server & Storage", "settings/server-storage"],
     ]) {
       await clickDemoNav(settingsCase[0]);
       await page.goto(settingsCase[1]);
       await expect(page.getByRole("heading", { name: settingsCase[0], exact: true })).toBeVisible();
-      await compareState(`settings-${settingsCase[1].split("/").at(-1)}`, { changed: 0.38, delta: 50 });
+      await compareState(`settings-${settingsCase[1].split("/").at(-1)}`);
     }
+
+    await clickDemoNav("Hidden titles");
+    await page.goto("settings/hidden-titles");
+    await clickDemoControl("For me (0)");
+    await compareState("settings-hidden-empty");
+    await clickDemoControl("For everyone (11)");
+    await page.getByRole("radio", { name: "For everyone (11)" }).click();
+    await compareState("settings-hidden-nonempty");
+
+    await clickDemoNav("Playback & Apps");
+    await page.goto("settings/playback-apps");
+    await compareState("settings-playback-collapsed");
+    await clickDemoControl("Diagnostics");
+    await page.getByText("Diagnostics", { exact: true }).click();
+    await compareState("settings-playback-diagnostics");
+
+    await clickDemoNav("Server & Storage");
+    await page.goto("settings/server-storage");
+    await expect(page.getByLabel("Loading Google Drive OAuth setup")).toBeVisible();
+    await expect(page.getByLabel("Loading library reference locations")).toBeVisible();
+    await expect(page.getByLabel("Loading poster reference location")).toBeVisible();
+    await showDemoResourceSkeletons();
+    await compareState("settings-server-initial-skeleton");
+    fixtureState.holdSettingsResources = false;
+    for (const release of fixtureState.settingsResourceReleases || []) release();
+    await expect(page.getByText("Google Drive OAuth Setup", { exact: true })).toBeVisible();
+    await demoPage.reload({ waitUntil: "load" });
+    await clickDemoNav("Server & Storage");
+    await compareState("settings-server-oauth-step-1");
+    for (const [label, stepNumber] of [["2 · Credentials", 2], ["3 · Register", 3], ["4 · Connect", 4]]) {
+      await clickDemoControl(label);
+      await page.getByRole("button", { name: label }).click();
+      await compareState(`settings-server-oauth-step-${stepNumber}`);
+    }
+    await scrollControlsIntoView("Path rules");
+    await compareState("settings-server-path-rules-closed");
+    await clickDemoControl("Path rules");
+    await page.getByRole("button", { name: /Path rules/ }).click();
+    await compareState("settings-server-path-rules-open");
+    await scrollControlsIntoView("Accepted paths");
+    await compareState("settings-server-accepted-paths-closed");
+    await clickDemoControl("Accepted paths");
+    await page.getByRole("button", { name: "Accepted paths" }).click();
+    await compareState("settings-server-accepted-paths-open");
+
+    await clickDemoNav("Library");
+    await page.goto("settings/library");
+    await demoRoot.click({ position: { x: 1322, y: 38 } });
+    await page.getByRole("button", { name: "System status" }).click();
+    await expect(page.getByRole("complementary", { name: "System status" })).toBeVisible();
+    await demoPage.waitForTimeout(500);
+    await compareState("settings-system-status");
+    await demoRoot.click({ position: { x: 1018, y: 38 } });
+    await page.getByRole("button", { name: "System status" }).click();
+    await demoPage.waitForTimeout(500);
+
+    await clickDemoNav("Appearance");
+    await page.goto("settings/appearance");
+    await clickDemoControl("Presets");
+    await page.getByRole("radio", { name: "Presets", exact: true }).click();
+    await clickDemoControl("Aurora");
+    await page.getByRole("radio", { name: "Aurora" }).click();
+    await expect(page.getByRole("status")).toHaveText("Background preset saved.");
+    await compareState("settings-toast-light");
+    await page.getByRole("button", { name: /Theme:/ }).click();
+    await demoRoot.click({ position: { x: 1320, y: 840 } });
+    await compareState("settings-toast-mixed");
+    await page.getByRole("button", { name: /Theme:/ }).click();
+    await demoRoot.click({ position: { x: 1320, y: 840 } });
+    await compareState("settings-toast-dark");
+    await page.getByRole("button", { name: /Theme:/ }).click();
+    await demoRoot.click({ position: { x: 1320, y: 840 } });
 
     await demoPage.getByText("Admin Panel", { exact: true }).first().click();
     await demoPage.waitForTimeout(700);
@@ -1430,8 +2333,26 @@ test("@settings-navigation @control-center-visual Meridian page and theme matrix
       if (adminCase[0] !== "Overview") await clickDemoNav(adminCase[0]);
       await page.goto(adminCase[1]);
       await expect(page.getByRole("heading", { name: adminCase[0], exact: true })).toBeVisible();
-      await compareState(`admin-${adminCase[1].split("/").at(-1)}`, { changed: 0.4, delta: 55 });
+      await compareState(`admin-${adminCase[1].split("/").at(-1)}`);
     }
+
+    await clickDemoNav("Overview");
+    await page.goto("admin/overview");
+    const demoExposureButton = demoPage.getByText("Manage Exposure Mode", { exact: true }).last();
+    await demoExposureButton.scrollIntoViewIfNeeded();
+    await demoExposureButton.click();
+    await demoPage.waitForTimeout(150);
+    await page.getByRole("button", { name: "Manage Exposure Mode" }).click();
+    await expect(page.getByRole("dialog", { name: "Manage Exposure Mode" })).toBeVisible();
+    await compareState("admin-exposure-phase-1");
+    for (const [label, phaseNumber] of [["2 · Prepare", 2], ["3 · Verify", 3], ["4 · Finalize", 4]]) {
+      await clickDemoControl(label);
+      await page.getByRole("tab", { name: label }).click();
+      await compareState(`admin-exposure-phase-${phaseNumber}`);
+    }
+    await demoRoot.click({ position: { x: 1080, y: 250 } });
+    await expect(demoPage.getByText("Finalize verified profile", { exact: true })).toBeHidden();
+    await page.getByRole("button", { name: "Close exposure mode manager" }).last().click();
 
     await clickDemoNav("Overview");
     await page.goto("admin/overview");
@@ -1439,16 +2360,16 @@ test("@settings-navigation @control-center-visual Meridian page and theme matrix
     await page.getByRole("button", { name: "System status" }).click();
     await expect(page.getByRole("complementary", { name: "System status" })).toBeVisible();
     await demoPage.waitForTimeout(500);
-    await compareState("admin-system-status", { changed: 0.42, delta: 58 });
+    await compareState("admin-system-status");
 
     await page.getByRole("button", { name: /Theme:/ }).click();
     await demoRoot.click({ position: { x: 1320, y: 840 } });
     await demoPage.waitForTimeout(500);
-    await compareState("admin-mixed-theme", { changed: 0.42, delta: 58 });
+    await compareState("admin-mixed-theme");
     await page.getByRole("button", { name: /Theme:/ }).click();
     await demoRoot.click({ position: { x: 1320, y: 840 } });
     await demoPage.waitForTimeout(500);
-    await compareState("admin-dark-theme", { changed: 0.42, delta: 58 });
+    await compareState("admin-dark-theme");
 
     await testInfo.attach("meridian-page-theme-matrix-report", {
       body: Buffer.from(JSON.stringify(reports, null, 2)),
@@ -1463,6 +2384,7 @@ test("@settings-navigation @control-center-visual Meridian page and theme matrix
         "utf8",
       );
     }
+    expect(parityFailures, parityFailures.join("\n")).toEqual([]);
   } finally {
     await demoContext.close();
     await demoBrowser.close();

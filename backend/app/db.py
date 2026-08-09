@@ -401,9 +401,32 @@ TABLE_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS google_oauth_states (
         state_token TEXT PRIMARY KEY,
         user_id INTEGER NOT NULL,
+        auth_session_id INTEGER,
+        operation_id_hash TEXT,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS google_oauth_account_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        auth_session_id INTEGER NOT NULL,
+        operation_id_hash TEXT NOT NULL,
+        google_account_id TEXT NOT NULL,
+        email TEXT,
+        display_name TEXT,
+        refresh_token TEXT NOT NULL,
+        access_token TEXT NOT NULL,
+        access_token_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        cancelled_at TEXT,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE
     )
     """,
     """
@@ -415,6 +438,9 @@ TABLE_STATEMENTS = (
         resource_type TEXT NOT NULL,
         resource_id TEXT NOT NULL,
         display_name TEXT NOT NULL,
+        expected_google_account_subject_hash TEXT,
+        expected_google_account_email TEXT,
+        expected_google_account_name TEXT,
         local_path TEXT,
         is_shared INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
@@ -1214,6 +1240,11 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "client_devices", "helper_vlc_detection_path", "TEXT")
     _ensure_column(connection, "client_devices", "helper_vlc_detection_checked_at", "TEXT")
     _ensure_column(connection, "library_sources", "local_path", "TEXT")
+    _ensure_column(connection, "library_sources", "expected_google_account_subject_hash", "TEXT")
+    _ensure_column(connection, "library_sources", "expected_google_account_email", "TEXT")
+    _ensure_column(connection, "library_sources", "expected_google_account_name", "TEXT")
+    _ensure_column(connection, "google_oauth_states", "auth_session_id", "INTEGER")
+    _ensure_column(connection, "google_oauth_states", "operation_id_hash", "TEXT")
     _ensure_column(connection, "assistant_change_records", "request_id", "INTEGER")
     _ensure_column(connection, "password_help_requests", "requester_ip_address", "TEXT")
     _ensure_column(connection, "password_help_requests", "requester_user_agent", "TEXT")

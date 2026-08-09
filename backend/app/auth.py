@@ -661,6 +661,14 @@ def destroy_session(settings: Settings, token: str | None) -> None:
             now=now,
             reason="auth_session_logout",
         )
+        connection.execute(
+            "DELETE FROM google_oauth_states WHERE auth_session_id = ?",
+            (int(row["id"]),),
+        )
+        connection.execute(
+            "DELETE FROM google_oauth_account_candidates WHERE auth_session_id = ?",
+            (int(row["id"]),),
+        )
         connection.commit()
     log_security_event(
         settings,
@@ -945,6 +953,16 @@ def _revoke_session_ids(
         revoke_desktop_sql,
         (now, *session_ids),
     )
+    delete_google_states_sql = f"""
+        DELETE FROM google_oauth_states
+        WHERE auth_session_id IN ({placeholders})
+        """  # nosec B608 - placeholders generated from trusted session_ids length
+    connection.execute(delete_google_states_sql, tuple(session_ids))
+    delete_google_candidates_sql = f"""
+        DELETE FROM google_oauth_account_candidates
+        WHERE auth_session_id IN ({placeholders})
+        """  # nosec B608 - placeholders generated from trusted session_ids length
+    connection.execute(delete_google_candidates_sql, tuple(session_ids))
 
 
 def cleanup_expired_sessions(connection, *, now_iso: str | None = None) -> None:

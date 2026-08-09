@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { useOptionalProviderAuth } from "../auth/ProviderAuthContext";
 import {
   ApiResponseError,
   apiRequest,
@@ -11,7 +12,6 @@ import {
   formatGoogleConnectionHealthLabel,
   formatGoogleDriveSetupLabel,
 } from "../lib/cloudSyncStatus";
-import { startGoogleDriveReconnect } from "../lib/providerAuth";
 import { invalidateLibraryQueries } from "../lib/libraryQueries";
 import {
   BACKGROUND_PRESETS,
@@ -1131,6 +1131,14 @@ function BackgroundResetConfirmModal({ open, pending, onCancel, onConfirm }) {
 
 export function SettingsPage() {
   const { user } = useAuth();
+  const {
+    providerAuthControllerAvailable,
+    providerAuthReconnectPending,
+    providerAuthTransaction,
+    startProviderReconnect,
+    cancelAccountReplacement,
+    confirmAccountReplacement,
+  } = useOptionalProviderAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const userSettingsQuery = useUserSettingsQuery(user);
@@ -1152,12 +1160,18 @@ export function SettingsPage() {
   const resourceRequestTokenRef = useRef(0);
   const hiddenReadOperationRef = useRef(null);
   const hiddenReadOperationTokenRef = useRef(0);
+  const hiddenMutationKeysRef = useRef(new Set());
   const pendingHiddenReconciliationRef = useRef(null);
   const pendingHiddenReconciliationTokenRef = useRef(0);
   const pendingHiddenExpiryTimerRef = useRef(null);
   const pendingReconcileHandlerRef = useRef(null);
   const hiddenHashRestoreKeyRef = useRef("");
   const oauthHashRestoreKeyRef = useRef("");
+  const handledProviderAuthTransactionRef = useRef(null);
+  const toastTimerRef = useRef(0);
+  const googleSetupDraftDirtyRef = useRef(false);
+  const sharedReferenceDraftDirtyRef = useRef(false);
+  const posterReferenceDraftDirtyRef = useRef(false);
   const [settings, setSettings] = useState({
     hide_duplicate_movies: true,
     hide_recently_added: false,
@@ -1397,8 +1411,13 @@ export function SettingsPage() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = 0;
+      }
       hiddenReadOperationRef.current?.controller?.abort();
       hiddenReadOperationRef.current = null;
+      hiddenMutationKeysRef.current.clear();
       clearPendingHiddenExpiryTimer();
       for (const request of resourceRequestsRef.current.values()) {
         request.controller?.abort();
@@ -1407,6 +1426,30 @@ export function SettingsPage() {
       pendingHiddenReconciliationRef.current = null;
     };
   }, [clearPendingHiddenExpiryTimer]);
+
+  useEffect(() => {
+    if (!showDesktopControlCenter) {
+      return undefined;
+    }
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = 0;
+    }
+    if (!mutationError && !message) {
+      return undefined;
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = 0;
+      setMutationError("");
+      setMessage("");
+    }, 2400);
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = 0;
+      }
+    };
+  }, [message, mutationError, showDesktopControlCenter]);
 
   useLayoutEffect(() => {
     if (previousSettingsIdentityRef.current === settingsIdentity) {
@@ -1418,12 +1461,16 @@ export function SettingsPage() {
     }
     hiddenReadOperationRef.current?.controller?.abort();
     hiddenReadOperationRef.current = null;
+    hiddenMutationKeysRef.current.clear();
     clearPendingHiddenExpiryTimer();
     resourceRequestsRef.current.clear();
     pendingHiddenReconciliationRef.current = null;
     settingsHydratedIdentityRef.current = "";
     hiddenHashRestoreKeyRef.current = "";
     oauthHashRestoreKeyRef.current = "";
+    googleSetupDraftDirtyRef.current = false;
+    sharedReferenceDraftDirtyRef.current = false;
+    posterReferenceDraftDirtyRef.current = false;
     setPendingHiddenReconciliation(null);
     setResourceStatus(createSettingsResourceStatus());
     setSettings({
@@ -1868,17 +1915,23 @@ export function SettingsPage() {
       } else if (resourceKey === "googleSetup") {
         const safePayload = sanitizeGoogleDriveSetupPayload(payload);
         setGoogleDriveSetup(safePayload);
-        setGoogleDriveSetupDraft({
-          https_origin: safePayload.https_origin || "",
-          client_id: safePayload.client_id || "",
-          client_secret: "",
-        });
+        if (!googleSetupDraftDirtyRef.current) {
+          setGoogleDriveSetupDraft({
+            https_origin: safePayload.https_origin || "",
+            client_id: safePayload.client_id || "",
+            client_secret: "",
+          });
+        }
       } else if (resourceKey === "mediaReference") {
         setSharedMediaLibraryReference(payload);
-        setSharedMediaLibraryReferenceInput(payload.configured_value || payload.default_value || "");
+        if (!sharedReferenceDraftDirtyRef.current) {
+          setSharedMediaLibraryReferenceInput(payload.configured_value || payload.default_value || "");
+        }
       } else if (resourceKey === "posterReference") {
         setPosterReference(payload);
-        setPosterReferenceInput(payload.configured_value || payload.default_value || "");
+        if (!posterReferenceDraftDirtyRef.current) {
+          setPosterReferenceInput(payload.configured_value || payload.default_value || "");
+        }
       } else if (resourceKey === "totp") {
         setTotpStatus(payload);
       }
@@ -1886,14 +1939,14 @@ export function SettingsPage() {
         ...current,
         controller: null,
         loaded: true,
-        loading: true,
+        loading: false,
         transient: false,
         failureId: 0,
         incidentId: 0,
       });
       setResourceStatus((status) => ({
         ...status,
-        [resourceKey]: { loading: true, loaded: true, error: "" },
+        [resourceKey]: { loading: false, loaded: true, error: "" },
       }));
     } catch (requestError) {
       if (
@@ -1909,7 +1962,7 @@ export function SettingsPage() {
       const failedRequest = {
         ...requestState,
         controller: null,
-        loading: true,
+        loading: false,
         transient,
         loaded: Boolean(existing?.loaded),
         failureId: Number(requestError.failureId) || 0,
@@ -1919,7 +1972,7 @@ export function SettingsPage() {
       setResourceStatus((status) => ({
         ...status,
         [resourceKey]: {
-          loading: true,
+          loading: false,
           loaded: Boolean(existing?.loaded),
           error: messageText,
         },
@@ -2271,39 +2324,63 @@ export function SettingsPage() {
   ]);
 
   useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const statusValue = params.get("googleDriveStatus");
-    const statusMessage = params.get("googleDriveMessage");
-    if (!statusValue && !statusMessage) {
+    if (providerAuthControllerAvailable) {
       return;
     }
-    if (statusValue === "connected") {
-      setMessage(statusMessage || "Google Drive connected.");
+    const params = new URLSearchParams(location.search);
+    if (!params.has("googleDriveStatus") && !params.has("googleDriveMessage")) {
+      return;
+    }
+    const callbackStatus = params.get("googleDriveStatus");
+    const callbackMessage = params.get("googleDriveMessage")?.trim();
+    if (callbackStatus === "connected") {
+      setMessage(callbackMessage || "Google Drive connected.");
+      setError("");
+    } else if (callbackStatus) {
+      setError(callbackMessage || "Reconnect was not completed.");
+      setMessage("");
+    }
+    params.delete("googleDriveStatus");
+    params.delete("googleDriveMessage");
+    const nextSearch = params.toString();
+    navigate(
+      `${location.pathname}${nextSearch ? `?${nextSearch}` : ""}${location.hash || ""}`,
+      { replace: true, state: location.state },
+    );
+  }, [
+    location.hash,
+    location.pathname,
+    location.search,
+    location.state,
+    navigate,
+    providerAuthControllerAvailable,
+  ]);
+
+  useEffect(() => {
+    if (
+      !providerAuthTransaction
+      || handledProviderAuthTransactionRef.current === providerAuthTransaction
+    ) {
+      return;
+    }
+    const transactionState = providerAuthTransaction.state;
+    if (!["connected", "cancelled_or_incomplete", "error"].includes(transactionState)) {
+      return;
+    }
+    handledProviderAuthTransactionRef.current = providerAuthTransaction;
+    if (transactionState === "connected") {
+      setMessage(providerAuthTransaction.message || "Google Drive connected.");
       setError("");
       void invalidateLibraryQueries();
       void loadSettingsResource("cloud", { force: true });
       if (user?.role === "admin") {
         void loadSettingsResource("googleSetup", { force: true });
       }
-    } else if (statusMessage) {
-      setError(statusMessage);
-      setMessage("");
+      return;
     }
-    const nextParams = new URLSearchParams(location.search);
-    nextParams.delete("googleDriveStatus");
-    nextParams.delete("googleDriveMessage");
-    const nextSearch = nextParams.toString();
-    const nextUrl = `${location.pathname}${nextSearch ? `?${nextSearch}` : ""}${location.hash || ""}`;
-    navigate(nextUrl, { replace: true, state: location.state });
-  }, [
-    loadSettingsResource,
-    location.hash,
-    location.pathname,
-    location.search,
-    location.state,
-    navigate,
-    user?.role,
-  ]);
+    setError(providerAuthTransaction.message || "Reconnect was not completed.");
+    setMessage("");
+  }, [loadSettingsResource, providerAuthTransaction, user?.role]);
 
   function applyUserSettingsPayload(payload) {
     const resolvedSettings = resolveUserSettings(payload);
@@ -2633,6 +2710,11 @@ export function SettingsPage() {
   }
 
   async function handleShowAgain(itemId) {
+    const mutationKey = `personal-restore:${itemId}`;
+    if (hiddenMutationKeysRef.current.has(mutationKey)) {
+      return;
+    }
+    hiddenMutationKeysRef.current.add(mutationKey);
     setRestoringItemId(itemId);
     setError("");
     setMessage("");
@@ -2646,11 +2728,17 @@ export function SettingsPage() {
     } catch (requestError) {
       setError(requestError.message || "Failed to restore hidden movie");
     } finally {
+      hiddenMutationKeysRef.current.delete(mutationKey);
       setRestoringItemId(null);
     }
   }
 
   async function handleShowForEveryone(itemId) {
+    const mutationKey = `global-restore:${itemId}`;
+    if (hiddenMutationKeysRef.current.has(mutationKey)) {
+      return;
+    }
+    hiddenMutationKeysRef.current.add(mutationKey);
     setRestoringGlobalItemId(itemId);
     setError("");
     setMessage("");
@@ -2664,14 +2752,20 @@ export function SettingsPage() {
     } catch (requestError) {
       setError(requestError.message || "Failed to restore globally hidden movie");
     } finally {
+      hiddenMutationKeysRef.current.delete(mutationKey);
       setRestoringGlobalItemId(null);
     }
   }
 
   async function handleHideUniversally(hiddenItem) {
-    if (pendingHiddenReconciliationRef.current?.itemId === hiddenItem.id) {
+    const mutationKey = `move-global:${hiddenItem.id}`;
+    if (
+      hiddenMutationKeysRef.current.has(mutationKey)
+      || pendingHiddenReconciliationRef.current?.itemId === hiddenItem.id
+    ) {
       return;
     }
+    hiddenMutationKeysRef.current.add(mutationKey);
     setMovingToGlobalItemId(hiddenItem.id);
     setError("");
     setMessage("");
@@ -2733,14 +2827,20 @@ export function SettingsPage() {
       }
       setError(requestError.message || "Failed to hide this movie for everyone");
     } finally {
+      hiddenMutationKeysRef.current.delete(mutationKey);
       setMovingToGlobalItemId(null);
     }
   }
 
   async function handleHideForMe(hiddenItem) {
-    if (pendingHiddenReconciliationRef.current?.itemId === hiddenItem.id) {
+    const mutationKey = `move-personal:${hiddenItem.id}`;
+    if (
+      hiddenMutationKeysRef.current.has(mutationKey)
+      || pendingHiddenReconciliationRef.current?.itemId === hiddenItem.id
+    ) {
       return;
     }
+    hiddenMutationKeysRef.current.add(mutationKey);
     setMovingToPersonalItemId(hiddenItem.id);
     setError("");
     setMessage("");
@@ -2802,6 +2902,7 @@ export function SettingsPage() {
       }
       setError(requestError.message || "Failed to hide this movie only for your account");
     } finally {
+      hiddenMutationKeysRef.current.delete(mutationKey);
       setMovingToPersonalItemId(null);
     }
   }
@@ -2823,6 +2924,7 @@ export function SettingsPage() {
         data: { value: posterReferenceInput.trim() },
       });
       setPosterReference(payload);
+      posterReferenceDraftDirtyRef.current = false;
       setPosterReferenceInput(payload.configured_value || payload.default_value || "");
       setMessage("Poster reference location saved.");
       void invalidateLibraryQueries();
@@ -2844,6 +2946,7 @@ export function SettingsPage() {
         data: { value: sharedMediaLibraryReferenceInput },
       });
       setSharedMediaLibraryReference(payload);
+      sharedReferenceDraftDirtyRef.current = false;
       setSharedMediaLibraryReferenceInput(payload.configured_value || payload.default_value || "");
       setMessage("Library reference locations saved.");
       void invalidateLibraryQueries();
@@ -2938,8 +3041,10 @@ export function SettingsPage() {
       });
       if (payload?.status === "selected" && payload?.selected_path) {
         if (target === "poster-reference") {
+          posterReferenceDraftDirtyRef.current = true;
           setPosterReferenceInput(payload.selected_path);
         } else {
+          sharedReferenceDraftDirtyRef.current = true;
           setSharedMediaLibraryReferenceInput((current) =>
             appendUniqueReferenceLocation(current, payload.selected_path));
         }
@@ -2989,8 +3094,10 @@ export function SettingsPage() {
       return;
     }
     if (directoryPicker.target === "poster-reference") {
+      posterReferenceDraftDirtyRef.current = true;
       setPosterReferenceInput(directoryPicker.current_path);
     } else {
+      sharedReferenceDraftDirtyRef.current = true;
       setSharedMediaLibraryReferenceInput((current) =>
         appendUniqueReferenceLocation(current, directoryPicker.current_path));
     }
@@ -3268,6 +3375,7 @@ export function SettingsPage() {
           resource: "googleDriveSetup",
         }, payload);
       }
+      googleSetupDraftDirtyRef.current = false;
       setGoogleDriveSetupDraft({
         https_origin: payload.https_origin || "",
         client_id: payload.client_id || "",
@@ -3312,6 +3420,7 @@ export function SettingsPage() {
           resource: "googleDriveSetup",
         }, payload);
       }
+      googleSetupDraftDirtyRef.current = false;
       setGoogleDriveSetupDraft({
         https_origin: payload.https_origin || "",
         client_id: payload.client_id || "",
@@ -3330,12 +3439,12 @@ export function SettingsPage() {
     }
   }
 
-  async function handleCopyGoogleDriveCallback() {
-    if (!googleDriveSetup.redirect_uri || typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+  async function handleCopyGoogleDriveCallback(redirectUri = googleDriveSetup.redirect_uri) {
+    if (!redirectUri || typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(googleDriveSetup.redirect_uri);
+      await navigator.clipboard.writeText(redirectUri);
       setMessage("Google Drive redirect URI copied.");
       setError("");
     } catch {
@@ -3345,14 +3454,30 @@ export function SettingsPage() {
   }
 
   async function handleGoogleDriveConnect() {
-    setCloudBusyKey("google-connect");
     setError("");
     setMessage("");
     try {
-      await startGoogleDriveReconnect();
+      await startProviderReconnect({ allowWithoutRequirement: true });
     } catch (requestError) {
       setError(requestError.message || "Failed to start Google Drive sign-in");
-      setCloudBusyKey("");
+    }
+  }
+
+  async function handleGoogleAccountReplacementCancel() {
+    try {
+      await cancelAccountReplacement();
+      setMessage("Google Drive account replacement cancelled.");
+      setError("");
+    } catch (requestError) {
+      setError(requestError.message || "Failed to cancel Google Drive account replacement.");
+    }
+  }
+
+  async function handleGoogleAccountReplacementConfirm() {
+    try {
+      await confirmAccountReplacement();
+    } catch (requestError) {
+      setError(requestError.message || "Failed to replace the Google Drive account.");
     }
   }
 
@@ -3555,9 +3680,24 @@ export function SettingsPage() {
 
   if (showDesktopControlCenter) {
     const meridianModel = {
-      error: userSettingsLoadError || error,
+      error,
       message,
-      resourceErrors: activeResourceErrors,
+      resourceErrors: [
+        ...(userSettingsLoadError ? [{ key: "userSettings", message: userSettingsLoadError }] : []),
+        ...activeResourceErrors.filter(({ key }) => ![
+          "hidden",
+          "googleSetup",
+          "mediaReference",
+          "posterReference",
+        ].includes(key)),
+      ],
+      onRetryResource(resourceKey) {
+        if (resourceKey === "userSettings") {
+          void userSettingsQuery.refetch();
+          return;
+        }
+        void loadSettingsResource(resourceKey, { force: true });
+      },
       appearance: {
         backgroundDraft,
         backgroundError,
@@ -3605,11 +3745,15 @@ export function SettingsPage() {
         username: user?.username,
         cloudLibraries,
         cloudBusyKey,
+        reconnectPending: providerAuthReconnectPending,
+        authTransaction: providerAuthTransaction,
         myLibraryDraft,
         sharedLibraryDraft,
         setMyLibraryDraft,
         setSharedLibraryDraft,
         onGoogleConnect: handleGoogleDriveConnect,
+        onAccountReplacementCancel: handleGoogleAccountReplacementCancel,
+        onAccountReplacementConfirm: handleGoogleAccountReplacementConfirm,
         onAddCloudSource: handleAddCloudSource,
         onMoveCloudSource: handleMoveCloudSource,
         onSharedVisibilityToggle: handleSharedLibraryVisibilityToggle,
@@ -3620,6 +3764,12 @@ export function SettingsPage() {
         hiddenItems,
         globalHiddenItems,
         hiddenLoading,
+        hiddenStatus: resourceStatus.hidden,
+        pendingReconciliationItemId: pendingHiddenReconciliation?.itemId || null,
+        restoringItemId,
+        restoringGlobalItemId,
+        movingToGlobalItemId,
+        movingToPersonalItemId,
         hiddenExpanded: hiddenListsExpanded,
         onHiddenExpandedChange(scope, expanded) {
           setHiddenListsExpanded((current) => ({
@@ -3631,12 +3781,21 @@ export function SettingsPage() {
         onShowForEveryone: handleShowForEveryone,
         onHideForEveryone: handleHideUniversally,
         onHideForMe: handleHideForMe,
+        onRetry: () => loadSettingsResource("hidden", { force: true }),
       },
       playbackPanel: <InstallSettingsPanel presentation="meridian" />,
       server: {
+        resourceStatus: {
+          googleSetup: resourceStatus.googleSetup,
+          mediaReference: resourceStatus.mediaReference,
+          posterReference: resourceStatus.posterReference,
+        },
         googleSetup: googleDriveSetup,
         googleSetupDraft: googleDriveSetupDraft,
-        setGoogleSetupDraft: setGoogleDriveSetupDraft,
+        setGoogleSetupDraft(updater) {
+          googleSetupDraftDirtyRef.current = true;
+          setGoogleDriveSetupDraft(updater);
+        },
         googleSetupSaving: googleDriveSetupSaving,
         googleSetupBadgeLabel,
         googleConnectionHealth: formatGoogleConnectionHealthLabel(cloudLibraries.google),
@@ -3646,7 +3805,10 @@ export function SettingsPage() {
         secretInput: (
           <NonLoginSecretInput
             disabled={googleDriveSetupSaving}
-            onChange={(event) => setGoogleDriveSetupDraft((current) => ({ ...current, client_secret: event.target.value }))}
+            onChange={(event) => {
+              googleSetupDraftDirtyRef.current = true;
+              setGoogleDriveSetupDraft((current) => ({ ...current, client_secret: event.target.value }));
+            }}
             placeholder={googleDriveSetup.client_secret_configured ? "Leave blank to keep the saved secret" : "Enter the Google OAuth client secret"}
             purpose="google-oauth-client-secret"
             value={googleDriveSetupDraft.client_secret}
@@ -3655,14 +3817,23 @@ export function SettingsPage() {
         sharedReference: sharedMediaLibraryReference,
         sharedReferenceInput: sharedMediaLibraryReferenceInput,
         sharedReferenceSaving: sharedMediaLibraryReferenceSaving,
-        setSharedReferenceInput: setSharedMediaLibraryReferenceInput,
+        setSharedReferenceInput(value) {
+          sharedReferenceDraftDirtyRef.current = true;
+          setSharedMediaLibraryReferenceInput(value);
+        },
         onSharedReferenceSave: handleSharedMediaLibraryReferenceSave,
         posterReference,
         posterReferenceInput,
         posterReferenceSaving,
-        setPosterReferenceInput,
+        setPosterReferenceInput(value) {
+          posterReferenceDraftDirtyRef.current = true;
+          setPosterReferenceInput(value);
+        },
         onPosterReferenceSave: handlePosterReferenceSave,
         onOpenDirectoryPicker: handleOpenDirectoryPicker,
+        onRetryGoogleSetup: () => loadSettingsResource("googleSetup", { force: true }),
+        onRetryMediaReference: () => loadSettingsResource("mediaReference", { force: true }),
+        onRetryPosterReference: () => loadSettingsResource("posterReference", { force: true }),
       },
     };
     return (

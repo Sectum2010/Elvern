@@ -58,18 +58,50 @@ function StatusPill({ children, tone = "neutral" }) {
   return <span className={`meridian-status-pill meridian-status-pill--${tone}`}>{children}</span>;
 }
 
-function SettingsFeedback({ error, message, resourceErrors = [] }) {
-  const text = error || message || resourceErrors[0]?.message || "";
+function SettingsFeedback({ error, message }) {
+  const text = error || message || "";
   if (!text) return null;
   return (
     <div
       aria-live="polite"
-      className={`meridian-toast${error || resourceErrors.length ? " meridian-toast--error" : ""}`}
+      className={`meridian-toast${error ? " meridian-toast--error" : ""}`}
       role={error ? "alert" : "status"}
     >
       {text}
     </div>
   );
+}
+
+function SettingsResourceErrors({ errors = [], onRetry }) {
+  if (!errors.length) return null;
+  return (
+    <div className="meridian-resource-errors">
+      {errors.map((resourceError) => (
+        <div className="meridian-resource-error" key={resourceError.key} role="alert">
+          <span>{resourceError.message}</span>
+          <PillButton onClick={() => onRetry?.(resourceError.key)}>Retry</PillButton>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+function getCloudConnectionPresentation(google) {
+  if (!google?.enabled) {
+    return { label: "Not configured", message: "Google Drive OAuth is not configured.", tone: "neutral" };
+  }
+  if (google.reconnect_required) {
+    return { label: "Reconnect required", message: "Reconnect Google Drive to continue cloud access.", tone: "warning" };
+  }
+  if (google.connection_status === "error") {
+    return { label: "Error", message: google.status_message || "Google Drive could not be reached.", tone: "danger" };
+  }
+  if (google.connected) {
+    const accountLabel = google.account_name || google.account_email || "Google account";
+    return { label: "Connected", message: `Connected as ${accountLabel}.`, tone: "success" };
+  }
+  return { label: "Not connected", message: "Connect Google Drive to add cloud libraries.", tone: "neutral" };
 }
 
 function AppearancePanel({ model }) {
@@ -224,10 +256,10 @@ function LibraryPanel({ model }) {
         <div className="meridian-divider" />
         <ToggleRow checked={model.settings.hide_duplicate_movies} description="Show only the highest-quality copy for the same title, year, and edition." disabled={model.saving} label="Hide duplicate copies" onChange={model.onDuplicateToggle} />
       </MeridianCard>
-      <MeridianCard>
+      <MeridianCard className={model.isAdmin && !model.ageBuckets.length ? "meridian-age-card meridian-age-card--empty" : "meridian-age-card"}>
         <div className="meridian-card-header">
           <span className="meridian-row-copy"><strong>Age restrictions</strong><small>Review automatic movie age groups and explicit manual links.</small></span>
-          {model.isAdmin ? <PillButton className="meridian-pill-button--primary" disabled={model.ageGroupsLoading} onClick={model.onRefreshAgeGroups}><RefreshCw aria-hidden="true" className={model.ageGroupsLoading ? "is-spinning" : ""} size={14} />{model.ageGroupsLoading ? "Refreshing…" : "Refresh"}</PillButton> : null}
+          {model.isAdmin ? <PillButton className="meridian-age-refresh" disabled={model.ageGroupsLoading} onClick={model.onRefreshAgeGroups}><RefreshCw aria-hidden="true" className={model.ageGroupsLoading ? "is-spinning" : ""} size={14} />{model.ageGroupsLoading ? "Refreshing…" : "Refresh"}</PillButton> : null}
         </div>
         {model.isAdmin && model.ageBuckets.length ? (
           <div className="meridian-age-list">
@@ -251,7 +283,14 @@ function CloudPanel({ model }) {
   const [destination, setDestination] = useState("personal");
   const draft = destination === "shared" ? model.sharedLibraryDraft : model.myLibraryDraft;
   const setDraft = destination === "shared" ? model.setSharedLibraryDraft : model.setMyLibraryDraft;
-  const connected = Boolean(model.cloudLibraries.google?.connected);
+  const google = model.cloudLibraries.google || {};
+  const connection = getCloudConnectionPresentation(google);
+  const connected = Boolean(google.connected && !google.reconnect_required);
+  const operationPending = Boolean(model.reconnectPending);
+  const addDisabled = !connected
+    || operationPending
+    || model.cloudBusyKey.startsWith("add-")
+    || !String(draft.resource_id || "").trim();
   const sources = [
     ...(model.cloudLibraries.my_libraries || []).map((source) => ({ ...source, meridianScope: "Personal" })),
     ...(model.cloudLibraries.shared_libraries || []).map((source) => ({ ...source, meridianScope: "Everyone" })),
@@ -262,17 +301,33 @@ function CloudPanel({ model }) {
         <span className="meridian-icon-tile"><Cloud aria-hidden="true" size={19} /></span>
         <span className="meridian-row-copy">
           <strong>Google Drive</strong>
-          <small>{model.cloudLibraries.google?.status_message || (connected ? `Connected as ${model.cloudLibraries.google.account_name || model.cloudLibraries.google.account_email || "Google account"}` : "Connect Google Drive to add cloud libraries.")}</small>
+          <small>{connection.message}</small>
         </span>
-        <StatusPill tone={connected ? "success" : "neutral"}>{connected ? "Connected" : model.cloudLibraries.google?.reconnect_required ? "Reconnect required" : "Not connected"}</StatusPill>
-        <PillButton disabled={model.cloudBusyKey === "google-connect"} onClick={model.onGoogleConnect}>{model.cloudBusyKey === "google-connect" ? "Connecting…" : connected || model.cloudLibraries.google?.reconnect_required ? "Reconnect" : "Connect"}</PillButton>
+        <StatusPill tone={connection.tone}>{connection.label}</StatusPill>
+        <PillButton disabled={operationPending} onClick={model.onGoogleConnect}>{operationPending ? "Connecting…" : connected || google.reconnect_required ? "Reconnect" : "Connect"}</PillButton>
       </MeridianCard>
-      <MeridianCard>
+      {model.authTransaction?.state === "account_mismatch" ? (
+        <MeridianCard aria-labelledby="google-account-mismatch-title" className="meridian-account-mismatch" role="alertdialog">
+          <span className="meridian-row-copy">
+            <strong id="google-account-mismatch-title">Use a different Google account?</strong>
+            <small>
+              Existing cloud sources belong to {model.authTransaction.candidate?.current_account_label || "the previous Google account"}.
+              {" "}Replace it with {model.authTransaction.candidate?.candidate_account_label || "the newly selected account"} only after Elvern verifies each source.
+            </small>
+          </span>
+          {model.authTransaction.message ? <p className="meridian-inline-error">{model.authTransaction.message}</p> : null}
+          <div className="meridian-actions">
+            <PillButton disabled={operationPending} onClick={model.onAccountReplacementCancel}>Cancel</PillButton>
+            <PillButton className="meridian-pill-button--primary" disabled={operationPending} onClick={model.onAccountReplacementConfirm}>{operationPending ? "Verifying…" : "Replace account"}</PillButton>
+          </div>
+        </MeridianCard>
+      ) : null}
+      <MeridianCard className="meridian-cloud-add-card">
         <div className="meridian-row-copy"><strong>Add a cloud library</strong><small>Personal libraries appear only in your Library; shared libraries appear for every user.</small></div>
         <div className="meridian-cloud-form">
           <label><span>DESTINATION</span><Segmented ariaLabel="Cloud library destination" onChange={setDestination} options={model.isAdmin ? [{ value: "personal", label: "Personal" }, { value: "shared", label: "Everyone" }] : [{ value: "personal", label: "Personal" }]} value={destination} /></label>
           <label><span>RESOURCE TYPE</span><Segmented ariaLabel="Cloud resource type" onChange={(value) => setDraft((current) => ({ ...current, resource_type: value }))} options={[{ value: "folder", label: "Folder" }, { value: "shared_drive", label: "Shared drive" }]} value={draft.resource_type} /></label>
-          <label className="meridian-cloud-form__id"><span>GOOGLE DRIVE RESOURCE ID</span><span><input disabled={!connected} onChange={(event) => setDraft((current) => ({ ...current, resource_id: event.target.value }))} placeholder="Paste the folder or shared drive ID" value={draft.resource_id} /><button disabled={!connected || model.cloudBusyKey.startsWith("add-")} onClick={() => model.onAddCloudSource(destination)} type="button">Add</button></span></label>
+          <label className="meridian-cloud-form__id"><span>GOOGLE DRIVE RESOURCE ID</span><span><input disabled={!connected || operationPending} onChange={(event) => setDraft((current) => ({ ...current, resource_id: event.target.value }))} placeholder="Paste the folder or shared drive ID" value={draft.resource_id} /><button disabled={addDisabled} onClick={() => model.onAddCloudSource(destination)} type="button">Add</button></span></label>
         </div>
       </MeridianCard>
       <MeridianCard>
@@ -288,7 +343,7 @@ function CloudPanel({ model }) {
               {source.meridianScope === "Everyone" ? <PillButton disabled={model.cloudBusyKey === `shared-visibility-${source.id}`} onClick={() => model.onSharedVisibilityToggle(source)}>{model.cloudBusyKey === `shared-visibility-${source.id}` ? (source.hidden_for_user ? "Showing…" : "Hiding…") : source.hidden_for_user ? "Show in Library" : "Hide for me"}</PillButton> : null}
             </article>
           ))}
-          {!sources.length ? <p className="meridian-muted-copy">No personal cloud libraries added yet.</p> : null}
+          {!(model.cloudLibraries.my_libraries || []).length ? <p className="meridian-muted-copy">No personal cloud libraries added yet.</p> : null}
         </div>
       </MeridianCard>
     </div>
@@ -301,12 +356,17 @@ function HiddenPanel({ model }) {
   const items = personal ? model.hiddenItems : model.globalHiddenItems;
   const expanded = personal ? model.hiddenExpanded.personal : model.hiddenExpanded.global;
   const visible = expanded ? items : items.slice(0, 4);
+  const status = model.hiddenStatus || { error: "", loaded: false, loading: false };
+  const initialLoading = status.loading && !status.loaded;
+  const refreshingWithData = status.loading && status.loaded;
   return (
     <div className="meridian-panel-stack">
       <Segmented ariaLabel="Hidden title scope" onChange={setScope} options={model.isAdmin ? [{ value: "personal", label: `For me (${model.hiddenItems.length})` }, { value: "global", label: `For everyone (${model.globalHiddenItems.length})` }] : [{ value: "personal", label: `For me (${model.hiddenItems.length})` }]} value={scope} />
       <MeridianCard className="meridian-hidden-card" id="hidden-list">
-        {model.hiddenLoading ? <p className="meridian-muted-copy">Loading hidden titles…</p> : null}
-        {!model.hiddenLoading && !items.length ? <div className="meridian-empty-state"><strong>You have no hidden movies right now.</strong><span>These items stay out of your library until you restore them or change their hidden scope.</span></div> : null}
+        {initialLoading ? <div aria-label="Loading hidden titles" className="meridian-hidden-skeleton"><i /><i /><i /></div> : null}
+        {refreshingWithData ? <span className="meridian-resource-refresh" role="status">Refreshing…</span> : null}
+        {status.error ? <div className="meridian-resource-error" role="alert"><span>{status.error}</span><PillButton onClick={model.onRetry}>Retry</PillButton></div> : null}
+        {status.loaded && !items.length ? <div className="meridian-empty-state"><strong>You have no hidden movies right now.</strong><span>These items stay out of your library until you restore them or change their hidden scope.</span></div> : null}
         {visible.map((item) => (
           <article className="meridian-hidden-row" key={item.id}>
             <span className="meridian-hidden-row__initial">{String(item.title || "E").trim().charAt(0).toUpperCase() || "E"}</span>
@@ -314,9 +374,15 @@ function HiddenPanel({ model }) {
               <strong>{item.title}</strong>
               {item.year || item.edition_label ? <small>{[item.year, item.edition_label].filter(Boolean).join(" · ")}</small> : null}
             </span>
-            <PillButton className="meridian-pill-button--primary" onClick={() => (personal ? model.onShowAgain(item.id) : model.onShowForEveryone(item.id))}>Show again</PillButton>
-            {personal && model.isAdmin ? <PillButton onClick={() => model.onHideForEveryone(item)}>Hide for everyone</PillButton> : null}
-            {!personal ? <PillButton onClick={() => model.onHideForMe(item)}>Hide for me</PillButton> : null}
+            <PillButton
+              className="meridian-pill-button--primary"
+              disabled={(personal ? model.restoringItemId : model.restoringGlobalItemId) === item.id || model.pendingReconciliationItemId === item.id}
+              onClick={() => (personal ? model.onShowAgain(item.id) : model.onShowForEveryone(item.id))}
+            >
+              {(personal ? model.restoringItemId : model.restoringGlobalItemId) === item.id ? "Restoring…" : "Show again"}
+            </PillButton>
+            {personal && model.isAdmin ? <PillButton disabled={model.movingToGlobalItemId === item.id || model.pendingReconciliationItemId === item.id} onClick={() => model.onHideForEveryone(item)}>{model.movingToGlobalItemId === item.id ? "Hiding…" : "Hide for everyone"}</PillButton> : null}
+            {!personal ? <PillButton disabled={model.movingToPersonalItemId === item.id || model.pendingReconciliationItemId === item.id} onClick={() => model.onHideForMe(item)}>{model.movingToPersonalItemId === item.id ? "Hiding…" : "Hide for me"}</PillButton> : null}
           </article>
         ))}
         {items.length > 4 ? (
@@ -330,35 +396,95 @@ function HiddenPanel({ model }) {
   );
 }
 
+function ResourceCardState({ label, onRetry, status, variant }) {
+  if (status?.error && !status.loaded) {
+    return (
+      <MeridianCard className="meridian-resource-state">
+        <div className="meridian-resource-error" role="alert"><span>{status.error}</span><PillButton onClick={onRetry}>Retry</PillButton></div>
+      </MeridianCard>
+    );
+  }
+  return (
+    <MeridianCard
+      aria-label={`Loading ${label}`}
+      className={`meridian-resource-skeleton meridian-resource-skeleton--${variant}`}
+    >
+      <i /><i /><i />
+    </MeridianCard>
+  );
+}
+
+function deriveGoogleRegistrationValues(draft) {
+  const candidate = String(draft?.https_origin || "").trim().replace(/\/+$/, "");
+  try {
+    const parsed = new URL(candidate);
+    const rawIpAddress = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(parsed.hostname)
+      || parsed.hostname.includes(":");
+    if (
+      parsed.protocol !== "https:"
+      || parsed.pathname !== "/"
+      || parsed.search
+      || parsed.hash
+      || parsed.username
+      || parsed.password
+      || rawIpAddress
+    ) {
+      return { origin: "", redirectUri: "" };
+    }
+    const origin = parsed.origin;
+    return { origin, redirectUri: `${origin}/api/cloud-libraries/google/callback` };
+  } catch {
+    return { origin: "", redirectUri: "" };
+  }
+}
+
 function ServerPanel({ model }) {
   const [step, setStep] = useState(0);
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [posterRulesOpen, setPosterRulesOpen] = useState(false);
   const steps = ["1 · Origin", "2 · Credentials", "3 · Register", "4 · Connect"];
+  const registration = deriveGoogleRegistrationValues(model.googleSetupDraft);
+  const originReady = Boolean(registration.origin);
+  const credentialsReady = Boolean(
+    String(model.googleSetupDraft.client_id || "").trim()
+    && (String(model.googleSetupDraft.client_secret || "").trim() || model.googleSetup.client_secret_configured),
+  );
+  const maxAccessibleStep = !originReady ? 0 : !credentialsReady ? 1 : 3;
   const categoryRows = [
-    ["Movies", model.sharedReference.category_summary?.movies || []],
-    ["TV", model.sharedReference.category_summary?.tv || []],
-    ["Cartoon", model.sharedReference.category_summary?.cartoon || []],
-    ["Anime", model.sharedReference.category_summary?.anime || []],
+    ["Movies stored under", model.sharedReference.category_summary?.movies || []],
+    ["TV stored under", model.sharedReference.category_summary?.tv || []],
+    ["Cartoon stored under", model.sharedReference.category_summary?.cartoon || []],
+    ["Anime stored under", model.sharedReference.category_summary?.anime || []],
   ];
+  const readyStatus = { error: "", loaded: true, loading: false };
+  const googleStatus = model.resourceStatus?.googleSetup || readyStatus;
+  const mediaStatus = model.resourceStatus?.mediaReference || readyStatus;
+  const posterStatus = model.resourceStatus?.posterReference || readyStatus;
+  const canContinue = step === 0 ? originReady : step === 1 ? credentialsReady : true;
   return (
     <div className="meridian-panel-stack">
-      <MeridianCard id="google-drive-oauth-setup">
+      {!googleStatus.loaded ? <ResourceCardState label="Google Drive OAuth setup" onRetry={model.onRetryGoogleSetup} status={googleStatus} variant="oauth" /> : <MeridianCard className="meridian-oauth-card" id="google-drive-oauth-setup">
         <div className="meridian-card-header"><span className="meridian-row-copy"><strong>Google Drive OAuth Setup</strong><small>Configure the secure OAuth connection used by cloud libraries.</small></span><StatusPill tone={model.googleSetup.configuration_state === "ready" ? "success" : "neutral"}>{model.googleSetupBadgeLabel}</StatusPill></div>
+        {googleStatus.error ? <div className="meridian-resource-error" role="alert"><span>{googleStatus.error}</span><PillButton onClick={model.onRetryGoogleSetup}>Retry</PillButton></div> : null}
         <div className="meridian-stepper">
-          {steps.map((label, index) => <button className={index === step ? "is-active" : index < step ? "is-complete" : ""} key={label} onClick={() => setStep(index)} type="button"><i /><span>{label}</span></button>)}
+          {steps.map((label, index) => <button className={index === step ? "is-active" : index < step ? "is-complete" : ""} disabled={index > maxAccessibleStep} key={label} onClick={() => setStep(index)} type="button"><i /><span>{label}</span></button>)}
         </div>
         <form className="meridian-oauth-form" onSubmit={model.onGoogleSetupSave}>
-          {step === 0 ? <label><span>HTTPS APP ORIGIN</span><input onChange={(event) => model.setGoogleSetupDraft((current) => ({ ...current, https_origin: event.target.value }))} placeholder="https://elvern.example.com" value={model.googleSetupDraft.https_origin} /></label> : null}
+          <div className="meridian-oauth-step-content">
+          {step === 0 ? <label><span>HTTPS APP ORIGIN</span><input onChange={(event) => model.setGoogleSetupDraft((current) => ({ ...current, https_origin: event.target.value }))} placeholder="https://elvern.example.com" value={model.googleSetupDraft.https_origin} /><small>Use the private HTTPS hostname users actually browse to, not a raw HTTP IP address.</small></label> : null}
           {step === 1 ? <><label><span>GOOGLE OAUTH CLIENT ID</span><input onChange={(event) => model.setGoogleSetupDraft((current) => ({ ...current, client_id: event.target.value }))} value={model.googleSetupDraft.client_id} /></label><label><span>GOOGLE OAUTH CLIENT SECRET</span>{model.secretInput}</label></> : null}
-          {step === 2 ? <div className="meridian-register-values"><span>AUTHORIZED JAVASCRIPT ORIGIN<strong>{model.googleSetup.javascript_origin || "Set an HTTPS origin first."}</strong></span><span>AUTHORIZED REDIRECT URI<strong>{model.googleSetup.redirect_uri || "Available after the origin is configured."}</strong><PillButton disabled={!model.googleSetup.redirect_uri} onClick={model.onCopyGoogleCallback}><Copy aria-hidden="true" size={14} />Copy</PillButton></span></div> : null}
+          {step === 2 ? <div className="meridian-register-values"><span>AUTHORIZED JAVASCRIPT ORIGIN<strong>{registration.origin || "Set an HTTPS origin first."}</strong></span><span>AUTHORIZED REDIRECT URI<strong>{registration.redirectUri || "Available after the origin is configured."}</strong><PillButton disabled={!registration.redirectUri} onClick={() => model.onCopyGoogleCallback(registration.redirectUri)}><Copy aria-hidden="true" size={14} />Copy</PillButton></span></div> : null}
           {step === 3 ? <div className="meridian-oauth-status-grid">{[["OAuth setup", model.googleSetupBadgeLabel], ["Account health", model.googleConnectionHealth], ["Source health", model.sourceHealth], ["HTTPS origin", model.googleSetup.missing_fields?.includes("https_origin") ? "Missing" : "Configured"], ["Client ID", model.googleSetup.missing_fields?.includes("client_id") ? "Missing" : "Configured"], ["Client Secret", model.googleSetup.missing_fields?.includes("client_secret") ? "Missing" : "Configured"]].map(([key, value]) => <span key={key}><small>{key}</small><strong>{value}</strong></span>)}</div> : null}
-          <div className="meridian-step-actions"><PillButton disabled={step === 0} onClick={() => setStep((current) => Math.max(0, current - 1))}>Back</PillButton>{step < 3 ? <PillButton className="meridian-pill-button--primary" onClick={() => setStep((current) => Math.min(3, current + 1))}>Continue</PillButton> : <button className="meridian-pill-button meridian-pill-button--primary" disabled={model.googleSetupSaving} type="submit">{model.googleSetupSaving ? "Saving…" : "Save Google Drive Setup"}</button>}</div>
+          </div>
+          <div className="meridian-step-actions"><PillButton disabled={step === 0} onClick={() => setStep((current) => Math.max(0, current - 1))}>Back</PillButton>{step < 3 ? <PillButton className="meridian-pill-button--primary" disabled={!canContinue} onClick={() => setStep((current) => Math.min(3, current + 1))}>Continue</PillButton> : <button className="meridian-pill-button meridian-pill-button--primary" disabled={model.googleSetupSaving} type="submit">{model.googleSetupSaving ? "Saving…" : "Save Google Drive Setup"}</button>}</div>
         </form>
-      </MeridianCard>
+      </MeridianCard>}
 
-      <MeridianCard>
-        <div className="meridian-card-header"><span className="meridian-row-copy"><strong>Library reference locations</strong><small>Parent folders where Elvern scans for media folders.</small></span><PillButton onClick={() => model.onOpenDirectoryPicker("shared-library")}><FolderOpen aria-hidden="true" size={14} />Browse</PillButton></div>
+      {!mediaStatus.loaded ? <ResourceCardState label="library reference locations" onRetry={model.onRetryMediaReference} status={mediaStatus} variant="media-reference" /> : <MeridianCard className="meridian-reference-card">
+        <div className="meridian-card-header"><span className="meridian-row-copy"><strong>Library reference locations</strong><small>Parent folders where Elvern scans for media. Poster folder is configured separately below.</small></span><button aria-label="Browse library reference directories" className="meridian-folder-button" onClick={() => model.onOpenDirectoryPicker("shared-library")} type="button"><FolderOpen aria-hidden="true" size={16} /></button></div>
+        {mediaStatus.error ? <div className="meridian-resource-error" role="alert"><span>{mediaStatus.error}</span><PillButton onClick={model.onRetryMediaReference}>Retry</PillButton></div> : null}
         <textarea className="meridian-path-input" onChange={(event) => model.setSharedReferenceInput(event.target.value)} rows="3" value={model.sharedReferenceInput} />
-        <div className="meridian-path-summary"><span>Active locations<strong>{model.sharedReference.effective_value || "Unknown"}</strong></span><span>Default location<strong>{model.sharedReference.default_value || "Unknown"}</strong></span></div>
+        <div className="meridian-path-summary"><span>ACTIVE<strong>{model.sharedReference.effective_value || "None configured"}</strong></span><span>DEFAULT<strong>{model.sharedReference.default_value || "None configured"}</strong></span></div>
         <div className="meridian-reference-categories">
           {categoryRows.map(([label, entries]) => (
             <div key={label}>
@@ -367,23 +493,20 @@ function ServerPanel({ model }) {
             </div>
           ))}
         </div>
-        <div className="meridian-path-rules">
-          <span className="meridian-row-copy"><strong>Path rules</strong><small>{model.sharedReference.validation_rules?.[0] || "Choose parent folders where Elvern should look for media."}</small></span>
-          <div className="meridian-chip-row" aria-label="Supported media folder suffixes">
-            {["-M", "-TV", "-AN", "-C", "-L", "-S", "-X"].map((suffix) => <span className="meridian-chip" key={suffix}>{suffix}</span>)}
-          </div>
-          {(model.sharedReference.validation_rules || []).slice(1).map((rule) => <small className="meridian-rule-copy" key={rule}>{rule}</small>)}
-        </div>
+        <button aria-expanded={rulesOpen} className="meridian-rules-toggle" onClick={() => setRulesOpen((current) => !current)} type="button"><ChevronDown aria-hidden="true" className={rulesOpen ? "is-expanded" : ""} size={13} /><strong>Path rules</strong><span className="meridian-chip-row" aria-label="Supported media folder suffixes">{["-M", "-TV", "-AN", "-C", "-L", "-S", "-X"].map((suffix) => <span className="meridian-chip" key={suffix}>{suffix}</span>)}</span></button>
+        {rulesOpen ? <div className="meridian-path-rules">{(model.sharedReference.validation_rules || []).map((rule) => <small className="meridian-rule-copy" key={rule}>· {rule}</small>)}</div> : null}
         <div className="meridian-actions"><button className="meridian-pill-button meridian-pill-button--primary" disabled={model.sharedReferenceSaving} onClick={model.onSharedReferenceSave} type="button">{model.sharedReferenceSaving ? "Saving…" : "Save reference locations"}</button></div>
-      </MeridianCard>
+      </MeridianCard>}
 
-      <MeridianCard>
-        <div className="meridian-card-header"><span className="meridian-row-copy"><strong>Poster reference location</strong><small>Global poster directory used for every user.</small></span><PillButton onClick={() => model.onOpenDirectoryPicker("poster-reference")}><FolderOpen aria-hidden="true" size={14} />Browse</PillButton></div>
+      {!posterStatus.loaded ? <ResourceCardState label="poster reference location" onRetry={model.onRetryPosterReference} status={posterStatus} variant="poster-reference" /> : <MeridianCard className="meridian-reference-card">
+        <div className="meridian-card-header"><span className="meridian-row-copy"><strong>Poster reference location</strong><small>Global admin-only poster directory for every user. Leave at the Linux default unless Elvern must scan a different mounted folder.</small></span><button aria-label="Browse poster directories" className="meridian-folder-button" onClick={() => model.onOpenDirectoryPicker("poster-reference")} type="button"><FolderOpen aria-hidden="true" size={16} /></button></div>
+        {posterStatus.error ? <div className="meridian-resource-error" role="alert"><span>{posterStatus.error}</span><PillButton onClick={model.onRetryPosterReference}>Retry</PillButton></div> : null}
         <input className="meridian-path-input" onChange={(event) => model.setPosterReferenceInput(event.target.value)} value={model.posterReferenceInput} />
-        <div className="meridian-path-summary"><span>Current path<strong>{model.posterReference.effective_value || "Unknown"}</strong></span><span>Default path<strong>{model.posterReference.default_value || "Unknown"}</strong></span></div>
-        {(model.posterReference.validation_rules || []).length ? <div className="meridian-path-rules"><span className="meridian-row-copy"><strong>Accepted paths</strong><small>{model.posterReference.validation_rules.join(" ")}</small></span></div> : null}
+        <div className="meridian-path-summary"><span>CURRENT<strong>{model.posterReference.effective_value || "None configured"}</strong></span><span>DEFAULT<strong>{model.posterReference.default_value || "None configured"}</strong></span></div>
+        <button aria-expanded={posterRulesOpen} className="meridian-rules-toggle" onClick={() => setPosterRulesOpen((current) => !current)} type="button"><ChevronDown aria-hidden="true" className={posterRulesOpen ? "is-expanded" : ""} size={13} /><strong>Accepted paths</strong></button>
+        {posterRulesOpen ? <div className="meridian-path-rules">{(model.posterReference.validation_rules || []).map((rule) => <small className="meridian-rule-copy" key={rule}>· {rule}</small>)}</div> : null}
         <div className="meridian-actions"><button className="meridian-pill-button meridian-pill-button--primary" disabled={model.posterReferenceSaving} onClick={model.onPosterReferenceSave} type="button">{model.posterReferenceSaving ? "Saving…" : "Save poster location"}</button></div>
-      </MeridianCard>
+      </MeridianCard>}
     </div>
   );
 }
@@ -391,6 +514,7 @@ function ServerPanel({ model }) {
 export function MeridianSettingsView({ model, tab }) {
   return (
     <div className="meridian-settings-view">
+      <SettingsResourceErrors errors={model.resourceErrors} onRetry={model.onRetryResource} />
       {tab === "appearance" ? <AppearancePanel model={model.appearance} /> : null}
       {tab === "library" ? <LibraryPanel model={model.library} /> : null}
       {tab === "cloud-sharing" ? <CloudPanel model={model.cloud} /> : null}

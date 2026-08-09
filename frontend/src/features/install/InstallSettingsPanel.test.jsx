@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ApiNetworkError, apiRequest } from "../../lib/api";
@@ -227,6 +227,71 @@ describe("desktop helper install page", () => {
     await waitFor(() => expect(apiRequest).toHaveBeenCalledTimes(2));
 
     await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+  });
+
+  test("an idle Playback & Apps panel performs only its initial status request for 60 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<InstallSettingsPanel presentation="meridian" />);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiRequest).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(apiRequest).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Meridian Diagnostics keeps the exact eight-row contract and custom play icon", async () => {
+    const rendered = render(<InstallSettingsPanel presentation="meridian" />);
+    await screen.findByText("Helper not verified");
+
+    const details = screen.getByText("Diagnostics").closest("details");
+    fireEvent.click(within(details).getByText("Diagnostics"));
+    expect(within(details).getAllByRole("term").map((node) => node.textContent)).toEqual([
+      "Package version",
+      "Last seen helper version",
+      "Last callback",
+      "Reported architecture",
+      "Package target",
+      "Runtime",
+      "Package binding",
+      "Device ID",
+    ]);
+    expect(rendered.container.querySelector(".meridian-icon-tile--play path"))
+      .toHaveAttribute("d", "M10 8.6v6.8L15.5 12z");
+    expect(within(details).getByText("Diagnostics").querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  test("Meridian same-host Linux includes the grounded playback explanation", async () => {
+    platformState.value = "linux";
+    apiRequest.mockResolvedValueOnce(status({
+      platform: "linux",
+      helper_required: false,
+      state: "helper_not_required",
+      same_host: true,
+      latest_releases: [],
+    }));
+
+    render(<InstallSettingsPanel presentation="meridian" />);
+
+    expect(await screen.findByText(/Linux same-host playback does not require the desktop helper/)).toBeInTheDocument();
+  });
+
+  test("Diagnostics remains open when a passive page-resume status refresh completes", async () => {
+    apiRequest
+      .mockResolvedValueOnce(status())
+      .mockResolvedValueOnce(status({ state: "up_to_date" }));
+    render(<InstallSettingsPanel presentation="meridian" />);
+    const details = (await screen.findByText("Diagnostics")).closest("details");
+    fireEvent.click(within(details).getByText("Diagnostics"));
+    expect(details).toHaveAttribute("open");
+
+    fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
+    await screen.findByText("Ready");
+    expect(details).toHaveAttribute("open");
     expect(apiRequest).toHaveBeenCalledTimes(2);
   });
 

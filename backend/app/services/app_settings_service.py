@@ -442,17 +442,31 @@ def disconnect_google_drive_account(
 ) -> dict[str, object]:
     with get_connection(settings) as connection:
         account_row = connection.execute(
-            "SELECT id FROM google_drive_accounts WHERE user_id = ? LIMIT 1",
+            """
+            SELECT id, google_account_id, email, display_name
+            FROM google_drive_accounts
+            WHERE user_id = ?
+            LIMIT 1
+            """,
             (user_id,),
         ).fetchone()
         if account_row is not None:
+            from .cloud_provider_auth_service import _hash_google_account_subject
+
             connection.execute(
                 """
                 UPDATE library_sources
-                SET last_error = ?, updated_at = ?
+                SET expected_google_account_subject_hash = ?,
+                    expected_google_account_email = ?,
+                    expected_google_account_name = ?,
+                    last_error = ?,
+                    updated_at = ?
                 WHERE google_drive_account_id = ?
                 """,
                 (
+                    _hash_google_account_subject(settings, str(account_row["google_account_id"])),
+                    account_row["email"],
+                    account_row["display_name"],
                     "Google Drive account disconnected. Reconnect to refresh this source.",
                     utcnow_iso(),
                     int(account_row["id"]),
@@ -463,6 +477,7 @@ def disconnect_google_drive_account(
                 (int(account_row["id"]),),
             )
         connection.execute("DELETE FROM google_oauth_states WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM google_oauth_account_candidates WHERE user_id = ?", (user_id,))
         connection.commit()
         return get_google_drive_setup_payload(settings, user_id=user_id, connection=connection)
 

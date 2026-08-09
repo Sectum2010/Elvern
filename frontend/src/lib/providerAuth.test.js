@@ -195,12 +195,12 @@ test("reconnect-capable provider auth keeps modal behavior", () => {
 });
 
 
-test("provider reconnect return path preserves page while dropping callback params", () => {
+test("provider reconnect return path is fixed to the Cloud settings route", () => {
   const returnPath = buildProviderAuthReturnPath(
     "https://example.test/library/70?googleDriveStatus=error&googleDriveMessage=nope&view=cloud#player",
   );
 
-  assert.equal(returnPath, "/library/70?view=cloud#player");
+  assert.equal(returnPath, "/settings/cloud-sharing");
 });
 
 
